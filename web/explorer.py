@@ -30,7 +30,7 @@ import time
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, BinaryIO, Dict, List, Optional, Tuple
 
 from web.config import runtime_config
 from web.hostkeys import (  # noqa: F401 - _load_persistent_host_keys re-exported
@@ -1626,6 +1626,14 @@ class _LocalExplorerBackend:
             file_handle.seek(start)
             return file_handle.read(max_bytes)
 
+    def open_file_stream(self, file_path: str) -> BinaryIO:
+        """Open one file for sequential reads; the caller owns closing it.
+
+        The download route streams through this instead of buffering the whole
+        body, so a 100 MB file costs one chunk of memory rather than 100 MB.
+        """
+        return open(file_path, "rb")
+
     # -- bounded, atomic in-place write (in-app editor) -----------------------
     def replace_file(self, file_path: str, content_bytes: bytes) -> None:
         """Atomically replace an existing file with complete encoded contents.
@@ -1884,6 +1892,16 @@ class _SftpExplorerBackend:
         with self.sftp.open(file_path, "rb") as file_handle:
             file_handle.seek(start)
             return file_handle.read(max_bytes)
+
+    def open_file_stream(self, file_path: str) -> BinaryIO:
+        """Open one remote file for sequential reads; the caller owns closing it.
+
+        Deliberately no ``prefetch()``: paramiko's read-ahead buffers the
+        pending window in memory, which is the cost this streaming path exists
+        to avoid. ``SFTPFile.read`` already splits a large request into
+        max-packet reads, so a chunked reader costs no extra round trips.
+        """
+        return self.sftp.open(file_path, "rb")
 
     # -- bounded, atomic in-place write (in-app editor) -----------------------
     def replace_file(self, file_path: str, content_bytes: bytes) -> None:

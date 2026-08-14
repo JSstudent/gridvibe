@@ -1,3 +1,4 @@
+import ast
 import base64
 import errno
 import io
@@ -29,6 +30,7 @@ from web import paths as web_paths
 from web import runtime_state as web_runtime_state
 from web import saved_sessions as web_saved_sessions
 from web import selfupdate
+from web import state_files as web_state_files
 from web import terminal_io as web_terminal_io
 from web import voice as web_voice
 from web import workspaces as web_workspaces
@@ -16393,6 +16395,211 @@ class ExplorerDownloadTestCase(unittest.TestCase):
         run_git.assert_not_called()
         response.close()
 
+    # -- Stage 5.5: the body streams; it is not buffered ------------------
+
+    def _spy_on_the_download_handle(self):
+        """Record every read size and the close, without changing the bytes."""
+        opened = []
+        real_open = web_explorer._LocalExplorerBackend.open_file_stream
+
+        class _Spy:
+            def __init__(self, handle):
+                self.handle = handle
+                self.reads = []
+                self.closed = False
+
+            def read(self, size):
+                self.reads.append(size)
+                return self.handle.read(size)
+
+            def close(self):
+                self.closed = True
+                self.handle.close()
+
+        def spy(backend, file_path):
+            wrapper = _Spy(real_open(backend, file_path))
+            opened.append(wrapper)
+            return wrapper
+
+        patcher = patch.object(
+            web_explorer._LocalExplorerBackend, "open_file_stream", spy
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return opened
+
+    def test_download_streams_the_body_in_bounded_chunks(self):
+        payload = os.urandom(api.EXPLORER_DOWNLOAD_CHUNK_BYTES * 3 + 17)
+        (self.root / "big.bin").write_bytes(payload)
+        session_id = self._create_local_explorer_session()
+        opened = self._spy_on_the_download_handle()
+
+        response = self.client.get(f"/api/explorer/{session_id}/download?path=big.bin")
+        body = response.get_data()
+        response.close()
+
+        self.assertEqual(body, payload)
+        self.assertEqual(len(opened), 1)
+        # No single read asks for the whole file: that is the 100 MB buffer the
+        # old `read_file_prefix` + `io.BytesIO` path allocated (audit §8.2).
+        self.assertGreater(len(opened[0].reads), 3)
+        self.assertLessEqual(max(opened[0].reads), api.EXPLORER_DOWNLOAD_CHUNK_BYTES)
+        self.assertEqual(response.headers["Content-Length"], str(len(payload)))
+
+    def test_download_closes_the_handle_once_the_body_is_sent(self):
+        (self.root / "small.txt").write_text("done", encoding="utf-8")
+        session_id = self._create_local_explorer_session()
+        opened = self._spy_on_the_download_handle()
+
+        response = self.client.get(f"/api/explorer/{session_id}/download?path=small.txt")
+        self.assertEqual(response.get_data(), b"done")
+        response.close()
+
+        self.assertTrue(opened[0].closed)
+
+    def test_download_closes_the_handle_when_the_client_leaves_mid_file(self):
+        # The hold handed to the body generator (for a remote pane, a pooled
+        # SFTP channel) has to come back even when nobody reads the response.
+        payload = b"y" * (api.EXPLORER_DOWNLOAD_CHUNK_BYTES * 2)
+        (self.root / "abandoned.bin").write_bytes(payload)
+        session_id = self._create_local_explorer_session()
+        opened = self._spy_on_the_download_handle()
+
+        with api.app.test_request_context(
+            f"/api/explorer/{session_id}/download?path=abandoned.bin"
+        ):
+            response = api.download_explorer_file(session_id)
+            stream = response.iter_encoded()
+            self.assertTrue(next(stream))
+            self.assertFalse(opened[0].closed)
+            response.close()
+
+        self.assertTrue(opened[0].closed)
+
+    def test_download_never_opens_a_handle_for_a_file_over_the_cap(self):
+        (self.root / "big.log").write_bytes(b"x" * 64)
+        session_id = self._create_local_explorer_session()
+        opened = self._spy_on_the_download_handle()
+
+        with patch.object(api, "EXPLORER_DOWNLOAD_MAX_BYTES", 16):
+            response = self.client.get(
+                f"/api/explorer/{session_id}/download?path=big.log"
+            )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(opened, [])
+
+    def test_download_sends_the_size_it_stated_when_the_file_grows_underneath_it(self):
+        # The reader carries its own ceiling, so a file that grows between the
+        # `stat` and the read cannot escape the cap or outrun Content-Length.
+        (self.root / "growing.log").write_bytes(b"z" * 64)
+        session_id = self._create_local_explorer_session()
+        real_stat = web_explorer._LocalExplorerBackend.stat_file
+
+        def shrinking_stat(backend, file_path):
+            _size, modified = real_stat(backend, file_path)
+            return 10, modified
+
+        with patch.object(
+            web_explorer._LocalExplorerBackend, "stat_file", shrinking_stat
+        ):
+            response = self.client.get(
+                f"/api/explorer/{session_id}/download?path=growing.log"
+            )
+            body = response.get_data()
+            response.close()
+
+        self.assertEqual(body, b"z" * 10)
+        self.assertEqual(response.headers["Content-Length"], "10")
+
+    def test_download_still_answers_a_byte_range(self):
+        # The `send_file` path this replaced advertised `Accept-Ranges: bytes`,
+        # and a browser uses it to resume a paused download of exactly the
+        # large files this route now streams. Streaming must not drop it.
+        payload = bytes(range(256)) * 4
+        (self.root / "ranged.bin").write_bytes(payload)
+        session_id = self._create_local_explorer_session()
+
+        response = self.client.get(
+            f"/api/explorer/{session_id}/download?path=ranged.bin",
+            headers={"Range": "bytes=300-399"},
+        )
+        body = response.get_data()
+        response.close()
+
+        self.assertEqual(response.status_code, 206)
+        self.assertEqual(body, payload[300:400])
+        self.assertEqual(response.headers["Content-Range"], f"bytes 300-399/{len(payload)}")
+        self.assertEqual(response.headers["Content-Length"], "100")
+        self.assertEqual(response.headers["Accept-Ranges"], "bytes")
+
+    def test_download_refuses_an_unsatisfiable_range(self):
+        (self.root / "short.bin").write_bytes(b"12345")
+        session_id = self._create_local_explorer_session()
+        opened = self._spy_on_the_download_handle()
+
+        response = self.client.get(
+            f"/api/explorer/{session_id}/download?path=short.bin",
+            headers={"Range": "bytes=99-120"},
+        )
+
+        self.assertEqual(response.status_code, 416)
+        self.assertEqual(response.headers["Content-Range"], "bytes */5")
+        # The refusal unwinds the hold with everything else: nothing streams.
+        self.assertTrue(all(handle.closed for handle in opened))
+
+    def test_download_keeps_the_no_cache_and_attachment_headers(self):
+        (self.root / "fresh.txt").write_text("live bytes", encoding="utf-8")
+        session_id = self._create_local_explorer_session()
+
+        response = self.client.get(f"/api/explorer/{session_id}/download?path=fresh.txt")
+        response.get_data()
+        response.close()
+
+        self.assertEqual(response.headers["Cache-Control"], "no-cache")
+        self.assertEqual(response.headers["Content-Type"], "application/octet-stream")
+        self.assertIn("attachment", response.headers["Content-Disposition"])
+        self.assertIn("fresh.txt", response.headers["Content-Disposition"])
+
+    def test_remote_download_returns_the_pooled_sftp_channel_after_streaming(self):
+        # The body generator owns the backend hold for a remote pane, so the
+        # pooled transport is only released once the stream ends — but it must
+        # be released, and exactly once (guardrail 3: no per-request handshake).
+        api._evict_all_pooled_ssh_clients()
+        self.addCleanup(api._evict_all_pooled_ssh_clients)
+        group = api.session_manager.create_group(
+            name="SSH", connection_mode="ssh", layout="single", terminal_count=1
+        )
+        session = api.session_manager.create_session(
+            group_id=group.group_id,
+            host="example.com",
+            directory="/srv/app",
+            username="ubuntu",
+            mode="ssh",
+            startup_mode="explorer",
+            explorer_root_directory="/srv/app",
+        )
+        payload = b"remote bytes" * 32
+        fake_sftp = FakeSftp(
+            {
+                "/srv/app": {"type": "directory"},
+                "/srv/app/report.bin": {"type": "file", "content": payload},
+            }
+        )
+
+        with patch.object(
+            web_explorer, "_open_ssh_sftp", return_value=(MagicMock(), fake_sftp)
+        ):
+            response = self.client.get(
+                f"/api/explorer/{session.session_id}/download?path=report.bin"
+            )
+            self.assertFalse(fake_sftp.closed)
+            body = response.get_data()
+            response.close()
+
+        self.assertEqual(body, payload)
+        self.assertTrue(fake_sftp.closed)
+
     def test_file_viewer_ships_download_button(self):
         # Explorer viewer moved to explorer-viewer.js (2026-07-23 split).
         terminals_js = self._static("js/explorer-viewer.js")
@@ -18253,3 +18460,214 @@ class SettingsLauncherConfigTestCase(unittest.TestCase):
             terminals_js.index("function buildActiveWorkspaceSessionConfig(")
         ]
         self.assertIn("agent_auto_mode:", entry)
+
+
+class ConfigDurabilityTestCase(unittest.TestCase):
+    """Audit 2026-08-14 §4.3 / Stage 5.1 — `config.json` is a durable store.
+
+    It is the third caller of `web/state_files.py` and must get the same four
+    mechanics the other two have: a cross-process sidecar lock, a unique
+    same-directory temp that is fsynced before `os.replace`, a `<file>.bak`
+    taken on every commit, and quarantine of a corrupt file instead of
+    laundering it into defaults the next save would make permanent.
+    """
+
+    def setUp(self):
+        self.temp_dir = TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        self.dir = Path(self.temp_dir.name)
+        self.path = self.dir / "config.json"
+        # An empty defaults file keeps the merge out of the way of these tests.
+        self.defaults = self.dir / "default_config.json"
+        self.defaults.write_text("{}", encoding="utf-8")
+        patcher = patch.object(web_config, "DEFAULT_CONFIG_PATH", str(self.defaults))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _load(self):
+        return web_config.load_config(str(self.path))
+
+    def _save(self, payload):
+        web_config.save_config(payload, str(self.path))
+
+    def _sidecars(self, suffix):
+        return sorted(p.name for p in self.dir.iterdir() if suffix in p.name)
+
+    # -- the .bak the recovery path reads ---------------------------------
+
+    def test_every_commit_leaves_the_previous_revision_as_a_backup(self):
+        self._save({"appearance": {"theme": "light"}})
+        self._save({"appearance": {"theme": "dark"}})
+
+        self.assertEqual(self._load()["appearance"]["theme"], "dark")
+        backup = json.loads((self.dir / "config.json.bak").read_text(encoding="utf-8"))
+        self.assertEqual(backup["appearance"]["theme"], "light")
+
+    def test_the_cross_process_lock_sidecar_is_taken_for_the_whole_replace(self):
+        self._save({"terminal": {"font_size": 12}})
+
+        self.assertTrue((self.dir / "config.json.lock").exists())
+
+    # -- a failed write is "not saved", not a half-written file ------------
+
+    def test_a_failed_replace_raises_and_leaves_the_previous_file_intact(self):
+        self._save({"appearance": {"theme": "light"}})
+
+        with patch.object(web_state_files.os, "replace", side_effect=OSError("disk full")):
+            with self.assertRaises(web_config.ConfigPersistenceError):
+                self._save({"appearance": {"theme": "dark"}})
+
+        self.assertEqual(self._load()["appearance"]["theme"], "light")
+        self.assertEqual(self._sidecars(".tmp"), [])
+
+    def test_the_persistence_error_is_the_shared_state_file_failure(self):
+        # Shared middleware catches the base for any store; a caller that only
+        # cares about the config catches this subclass.
+        self.assertTrue(
+            issubclass(
+                web_config.ConfigPersistenceError,
+                web_state_files.StateFilePersistenceError,
+            )
+        )
+
+    def test_app_config_route_reports_a_failed_write_as_not_saved(self):
+        api.app.config["TESTING"] = True
+        client = api.app.test_client()
+
+        with patch.object(
+            api, "save_config", side_effect=web_config.ConfigPersistenceError("disk full")
+        ), patch.object(api, "_refresh_runtime_config") as refresh, patch.object(
+            api, "_broadcast_app_config_update"
+        ) as broadcast:
+            response = client.post("/api/app-config", json={"appearance": {"theme": "dark"}})
+
+        self.assertEqual(response.status_code, 500)
+        self.assertEqual(response.get_json()["code"], "config_write_failed")
+        # Nothing reached disk, so nothing may be refreshed or announced.
+        refresh.assert_not_called()
+        broadcast.assert_not_called()
+
+    # -- corrupt content: quarantine, then recover -------------------------
+
+    def test_a_corrupt_config_is_recovered_from_the_last_good_backup(self):
+        self._save({"appearance": {"theme": "light"}})
+        self._save({"appearance": {"theme": "dark"}})
+        self.path.write_text('{"appearance": {"theme": "dark"}\n', encoding="utf-8")
+
+        with self.assertLogs(web_config.logger, level="WARNING"):
+            loaded = self._load()
+
+        self.assertEqual(loaded["appearance"]["theme"], "light")
+
+    def test_a_corrupt_config_is_quarantined_so_the_next_save_cannot_bury_it(self):
+        self._save({"appearance": {"theme": "light"}})
+        corrupt = '{"appearance": {"theme": "dark"}\n'
+        self.path.write_text(corrupt, encoding="utf-8")
+
+        with self.assertLogs(web_config.logger, level="WARNING"):
+            self._load()
+
+        quarantined = [p for p in self.dir.iterdir() if ".corrupt-" in p.name]
+        self.assertEqual(len(quarantined), 1, self._sidecars(""))
+        self.assertEqual(quarantined[0].read_text(encoding="utf-8"), corrupt)
+        self.assertFalse(self.path.exists())
+
+    def test_a_file_that_merely_cannot_be_opened_is_never_quarantined(self):
+        # The bytes may be perfectly good and only momentarily unreadable (a
+        # permission or antivirus hold); moving it aside would discard settings
+        # this process simply could not see.
+        self._save({"appearance": {"theme": "light"}})
+        self._save({"appearance": {"theme": "dark"}})
+
+        with patch.object(web_config, "_load_json_file", side_effect=OSError("locked")):
+            with self.assertLogs(web_config.logger, level="WARNING"):
+                loaded = self._load()
+
+        # The backup still answers, but the primary is left exactly where it is.
+        self.assertEqual(loaded["appearance"]["theme"], "light")
+        self.assertTrue(self.path.exists())
+        self.assertEqual(
+            json.loads(self.path.read_text(encoding="utf-8"))["appearance"]["theme"],
+            "dark",
+        )
+        self.assertEqual([p for p in self.dir.iterdir() if ".corrupt-" in p.name], [])
+
+    def test_defaults_are_still_the_answer_when_there_is_no_usable_backup(self):
+        self.defaults.write_text(
+            json.dumps({"appearance": {"theme": "system"}}), encoding="utf-8"
+        )
+        self.path.write_text('{"appearance": {"theme": "dark"}\n', encoding="utf-8")
+
+        with self.assertLogs(web_config.logger, level="WARNING") as logs:
+            loaded = self._load()
+
+        self.assertEqual(loaded["appearance"]["theme"], "system")
+        self.assertTrue(
+            any("using default configuration" in message for message in logs.output),
+            logs.output,
+        )
+
+
+class WorkspacesImportHygieneTestCase(unittest.TestCase):
+    """Audit 2026-08-14 §4.2 / Stage 5.2 — deferred imports stay peer imports.
+
+    `web/workspaces.py` defers its intra-app imports because `sessions/manager.py`
+    imports this module at import time. That is a real constraint; a stdlib
+    import hidden inside a function is not, and one (`import os`) had already
+    grown there unnoticed. Anything a reader cannot see in the header must at
+    least be a peer module.
+    """
+
+    def _module_source(self):
+        return Path(web_workspaces.__file__).read_text(encoding="utf-8")
+
+    def _deferred_import_targets(self):
+        tree = ast.parse(self._module_source())
+        module_level = {id(node) for node in tree.body}
+        targets = []
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.Import, ast.ImportFrom)):
+                continue
+            if id(node) in module_level:
+                continue
+            if isinstance(node, ast.ImportFrom):
+                targets.append((node.lineno, node.module or ""))
+            else:
+                targets.extend((node.lineno, alias.name) for alias in node.names)
+        return targets
+
+    def test_no_stdlib_import_hides_inside_a_function(self):
+        stray = [
+            (lineno, name)
+            for lineno, name in self._deferred_import_targets()
+            if not name.startswith(("web.", "sessions."))
+        ]
+        self.assertEqual(stray, [], f"deferred non-peer imports: {stray}")
+
+    def test_os_is_imported_at_module_level(self):
+        tree = ast.parse(self._module_source())
+        module_level = [
+            alias.name
+            for node in tree.body
+            if isinstance(node, ast.Import)
+            for alias in node.names
+        ]
+        self.assertIn("os", module_level)
+
+    def test_the_deferred_peers_are_the_documented_set(self):
+        peers = {name for _lineno, name in self._deferred_import_targets()}
+        self.assertEqual(
+            peers,
+            {
+                # Genuinely cycle-breaking: each of these reaches back here.
+                "sessions.manager",
+                "web.app",
+                "web.runtime_state",
+                "web.terminal_io",
+                # Deferred for late binding rather than for a cycle (docstring).
+                "web.agents",
+                "web.config",
+                "web.explorer",
+                "web.saved_sessions",
+            },
+        )

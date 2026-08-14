@@ -47,6 +47,9 @@ runtime_state.json.corrupt-*
 saved_sessions.json.lock
 saved_sessions.json.bak
 saved_sessions.json.corrupt-*
+config.json.lock
+config.json.bak
+config.json.corrupt-*
 .*.json.*.tmp
 ..encryption_key.*.tmp
 gridvibe.log

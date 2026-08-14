@@ -239,6 +239,16 @@ Not raised higher because GridVibe binds to `127.0.0.1`, is single-user by
 design, and the consequence is a duplicate label rather than lost state. Worth
 recording so the next reader does not assume the function is a mutex.
 
+> **Resolution (2026-08-14, Stage 5).** Accepted as-is, and the recording moved
+> to where it will actually be read. The finding's own reasoning is unchanged —
+> serialising this would mean holding a lock across the check *and* the
+> create/rename in every caller, for a race that costs a duplicate label on a
+> loopback-bound single-user app. What was missing is that nothing in the code
+> said so, which is exactly how a future caller comes to treat a `None` return
+> as an exclusive claim. `workspace_label_conflict()`'s docstring now states
+> plainly that it is a check and not a mutex, why the race is accepted, and
+> what must not be built on it. No behaviour changed.
+
 ---
 
 ## 2. Logging (guardrail 9)
@@ -465,6 +475,44 @@ at the centre of a cycle with four peers, which is the shape `api.py` had before
 its split. The two candidates that would break the most cycles are the
 close-action matrix and the launch/restore path.
 
+> **Resolution (2026-08-14, Stage 5.2).** The trivial half is closed and the map
+> is produced. `import os` is in the module header; 24 function-level imports
+> remain, and **the audit's characterisation of them was wrong.**
+>
+> "Every one a deferred import to break a module cycle" holds for **14 of 24**.
+> Tracing each target's transitive closure: `web.runtime_state` (7 sites) and
+> `web.terminal_io` (4) import `web.workspaces` directly, `sessions.manager` (1)
+> is the root of the cycle, and `web.app` (2) reaches it through
+> `sessions.manager`. The remaining **ten are not cycle-breaking at all** —
+> `web.saved_sessions` (7 sites), `web.agents`, `web.config` and `web.explorer`
+> (1 each) all close leaf-ward through `web.paths` / `web.state_files` /
+> `web.session_presentation` and never lead back here. They could be hoisted
+> today with no import error.
+>
+> They were **not** hoisted, and that is the real finding. A module-level
+> `from web.saved_sessions import load_saved_sessions` binds the function object
+> once at import; the deferred form resolves the name per call, which is what
+> lets the callers' tests patch it. Hoisting the ten would be a silent,
+> suite-wide change to what `patch.object` reaches — the opposite of the
+> low-risk cleanup this item was filed as. So the reason is recorded rather than
+> removed: the module docstring now names the fourteen, names the ten, and says
+> which reason applies to which.
+>
+> What is enforced instead is the rule that would have caught the `import os`:
+> **a deferred import must be an intra-app peer.** `WorkspacesImportHygieneTestCase`
+> in `tests/test_api.py` parses the module and fails on any function-level
+> import outside `web.*`/`sessions.*`, asserts `os` is in the header, and pins
+> the deferred-peer set to the eight the docstring documents — so a ninth peer,
+> or a stray stdlib import, fails rather than lands. Guardrail 6 in
+> `CLAUDE.md`/`AGENTS.md` carries the rule itself.
+>
+> **5.3 (extracting the close-action matrix) is deliberately not done here.**
+> It is the structural half of this finding and remains open, unchanged: the
+> four-way cycle is real and `workspaces.py` is still 1,628 lines. It was left
+> out because it is a Stage-4-scale move against the file whose behavioural
+> cover is the 6,177-line `test_multi_workspace.py`, and bundling it with three
+> unrelated closures would have made none of them separately reviewable.
+
 ### 4.3 — `config.json` is a third durable store that bypasses `web/state_files.py` `LOW`
 
 `web/state_files.py` was written to unify four mechanics — cross-process lock,
@@ -494,6 +542,46 @@ Lowest severity of the three architecture findings because `config.json` is
 reconstructible from `default_config.json` and App Settings, and losing it costs
 preferences rather than work. But it is a documented shared primitive with a
 known third caller that does not use it.
+
+> **Resolution (2026-08-14, Stage 5.1).** Closed. `web/config.py` now imports
+> `web/state_files.py` and gets all four mechanics, with one deliberate
+> deviation the finding did not anticipate.
+>
+> `save_config()` is six lines: hold the in-process `_config_lock` (callers
+> already hold it across their own read-modify-write, and it is an `RLock`, so
+> the nesting is free), take `_CrossProcessConfigLock` over the sidecar, and
+> call `write_json_atomically`, which brings the `os.fsync`, the `.bak` and the
+> unique-temp cleanup with it. A failed write now raises `ConfigPersistenceError`
+> — a `StateFilePersistenceError` subclass, so shared middleware catches the
+> base and a config-only caller catches the subclass, matching
+> `SavedSessionsPersistenceError` exactly. `POST /api/app-config` catches it and
+> answers a retryable `500` instead of echoing the settings back as saved;
+> before, an `OSError` from the write escaped as a Flask HTML 500 and
+> `_refresh_runtime_config()` had already been skipped by the raise anyway —
+> now that is stated rather than incidental, and the broadcast is suppressed
+> with it.
+>
+> `load_config()` gained `_recover_config()`: read `<file>.bak`, and quarantine
+> the primary first so the next save cannot bury the evidence. The finding named
+> the laundering case precisely — a truncated file silently becomes "defaults",
+> and the first App Settings save afterwards makes that permanent.
+>
+> **The deviation: an `OSError` is not quarantined.** `SavedSessionStore._read_locked`
+> quarantines on `(OSError, ValueError)` alike, and copying that shape here
+> would have been wrong. `load_config()` runs on every `runtime_config.refresh()`,
+> and an `OSError` there usually means the bytes are fine and momentarily
+> unreadable — an antivirus or permission hold. Moving the file aside would
+> discard settings this process merely could not see, on a file that is read far
+> more often than the other two. Corrupt *content* (`ValueError`, which
+> `json.JSONDecodeError` subclasses) is quarantined; an unreadable *handle*
+> still recovers from `.bak` but leaves the primary exactly where it is.
+>
+> `.gitignore` gained `config.json.{lock,bak,corrupt-*}` (`config*.json` did not
+> cover them; `.*.json.*.tmp` already covered the scratch file).
+> `ConfigDurabilityTestCase` in `tests/test_api.py` — 9 tests — covers the
+> backup chain, the lock sidecar, a failed replace leaving the previous revision
+> intact with no temp behind, the route's not-saved answer, backup recovery,
+> quarantine content and both halves of the `OSError`/`ValueError` split.
 
 ---
 
@@ -740,6 +828,54 @@ then `send_file`. Correctly root-confined and correctly capped; unchanged.
 Streaming would remove the ceiling concern. See §1.2 for the half of this that
 did get worse.
 
+> **Resolution (2026-08-14, Stage 5.5).** Closed. Both explorer backends gained
+> `open_file_stream()` and the route hands the handle to a generator instead of
+> an `io.BytesIO`, in 64 KiB chunks (`EXPLORER_DOWNLOAD_CHUNK_BYTES`).
+>
+> **The whole difficulty is lifetime, not chunking.** `_explorer_backend()` is a
+> context manager that, for a remote pane, holds a pooled SFTP channel — and a
+> streamed body outlives the view function. The route therefore builds a
+> `contextlib.ExitStack`, does everything that can refuse inside it (resolve,
+> root confinement, `stat`, the 100 MB cap, opening the handle), and only on the
+> success path calls `pop_all()` to hand the hold to the generator, which
+> releases it in a `with`. Every refusal and every raise unwinds the stack on
+> the way out, and the WSGI server closes the iterable both when the response
+> completes and when a client disconnects mid-file — so no path leaks a pool
+> entry. Nothing about the refusals moved: they still run before a byte is
+> committed, so an over-cap file is still a JSON `400`, never a truncated
+> stream.
+>
+> **One thing the finding did not name:** with the read deferred, the cap can no
+> longer be enforced by measuring what was read. A file that grows between the
+> `stat` and the read would have escaped it. The reader carries its own ceiling
+> (`min(size, MAX)`), which is also what `Content-Length` states, so the
+> response is a consistent prefix as of the `stat` and cannot outrun its own
+> header.
+>
+> **The second thing the plan did not name: `send_file` was doing more than
+> sending bytes.** Measured against the old call rather than assumed, it
+> advertised `Accept-Ranges: bytes`, answered a `Range` request with a real
+> `206`, and set `Cache-Control: no-cache`. Dropping range support while
+> *improving* large-file handling would have been backwards — a resume is
+> exactly what a paused 90 MB download needs — so the route answers ranges by
+> seeking the handle (both backends' handles seek), returns `416` with
+> `Content-Range: bytes */<size>` for an unsatisfiable one, and keeps
+> `no-cache` because the bytes are a live file.
+>
+> No `prefetch()` on the SFTP handle: paramiko's read-ahead buffers the pending
+> window in memory, which is the cost this change exists to avoid, and
+> `SFTPFile.read` already splits a large request into max-packet reads — so
+> chunking costs no extra round trips.
+>
+> Nine new tests in `ExplorerDownloadTestCase`: bounded chunk sizes with the
+> body byte-exact, the handle closed after a completed body, the handle closed
+> when the client abandons the response mid-file, no handle opened at all for an
+> over-cap file, the stated size honoured when the file changes underneath, a
+> remote pane returning its pooled SFTP channel only after the stream ends, a
+> satisfied byte range, an unsatisfiable one that streams nothing, and the
+> attachment/`no-cache` headers. The five existing download tests passed
+> untouched.
+
 ---
 
 ## 9. What went right
@@ -794,6 +930,9 @@ Recorded so it does not get re-litigated:
 ---
 
 ## 10. Guardrail scorecard
+
+**This table is the baseline — it describes the tree at `ece482f`, before any
+stage ran.** For where each guardrail stands after Stages 1–5, see §12.
 
 | # | Guardrail | Status | Notes |
 |---|---|---|---|
@@ -1032,7 +1171,45 @@ scope contract as the existing split, and the tab functions currently close over
 behaviour, and needing to edit a behavioural test is the signal that it was not
 a pure move.
 
-### Stage 5 — Structural follow-ups (schedule, do not rush)
+### Stage 5 — Structural follow-ups (schedule, do not rush) — **DONE 2026-08-14 (5.1, 5.2, 5.5); 5.3/5.4/5.6 open by decision**
+
+> **Resolution (2026-08-14, Stage 5).** Three of the six landed; see the
+> **Resolution** blocks under §4.3 (5.1), §4.2 (5.2) and §8.2 (5.5), plus §1.3,
+> which was the last finding in the document with no action of any kind against
+> it and is now recorded where a caller will read it. Corrections and decisions:
+>
+> * **5.2's premise was wrong.** Only 14 of the 24 function-level imports break
+>   a cycle; ten are leaf-ward and could be hoisted. They stay deferred for
+>   **late binding** — a module-level import would bind the function object once
+>   and silently escape the callers' `patch.object`. The map §4.2 asked for
+>   exists now, in the module docstring, with a test pinning the peer set.
+> * **5.1 deviates from the other two stores on purpose.** An `OSError` on read
+>   is not quarantined; only corrupt content is. `load_config()` runs on every
+>   `runtime_config.refresh()`, and moving a file aside because it was
+>   momentarily locked would discard settings rather than preserve them.
+> * **5.5's hard part is lifetime, not chunking**, and it introduced a rule the
+>   finding did not state: with the read deferred, the cap has to be carried by
+>   the reader, because a file can grow between the `stat` and the read.
+> * **5.3 (extract the close-action matrix) stays open.** It is a Stage-4-scale
+>   move against the module whose behavioural cover is the 6,177-line
+>   `test_multi_workspace.py`; bundling it with three unrelated closures would
+>   have made none of them separately reviewable. The finding it serves (§4.2's
+>   structural half) is unchanged and still valid.
+> * **5.4 is a backlog by design, not a stage.** Its own rule is "module by
+>   module, as each module is next touched" — converting 296 assertions in one
+>   pass is the opposite of that, and Stage 4 already showed why: ten of them
+>   were the *evidence* that a move changed no behaviour, and rewriting them in
+>   the same commit would have destroyed it. The count is now spread over
+>   `test_api.py` and `explorer-tabs.js`; the restored Stage-2 rule is what
+>   shrinks it.
+> * **5.6 stays conditional**, for the third audit running and on unchanged
+>   reasoning: a node ceiling with no measurement behind it risks a visibly
+>   missing tint, and the cost has still never been observed.
+>
+> Suite: **1,668 tests, OK** (8 skipped), up from 1,647; `ruff` clean;
+> `git diff --check` clean. Guardrails 2, 3, 4, 6, 7, 8 and 9 in `CLAUDE.md`
+> and `AGENTS.md` now carry the rules this audit produced, so they survive
+> without the document.
 
 | # | Action | Effort | Value |
 |---|---|---|---|
@@ -1057,3 +1234,50 @@ a pure move.
 - **Resolving the `docs/r&d/` duplication** (prior §7.2) — deferred by decision
   twice, and §7.1's consequence is now fixed at the citation end. Recorded only
   because §7.4 is the same problem starting again one directory up.
+
+---
+
+## 12. Closing ledger — every finding, and where it ended
+
+Written after Stage 5 so the document is self-checking: if a row below says
+"closed" and the behaviour is not there, this file is wrong, not the code.
+
+| Finding | Severity | Disposition |
+|---|---|---|
+| §1.1 self-update `git fetch` unbounded, no `GIT_TERMINAL_PROMPT=0` | MEDIUM | **Closed**, Stage 1.1 — bounds + env, and the runner owns its `Popen` and kills the process group, because `subprocess.run(timeout=)` did not enforce the bound on Windows (268.8 s → 30.2 s, measured) |
+| §1.2 browser-mode download reported success unconditionally, ×N under multi-select | MEDIUM | **Closed**, Stage 3.1 — status observed before anything is claimed; one report per batch |
+| §1.3 `workspace_label_conflict()` is check-then-act | LOW | **Accepted**, Stage 5 — race unchanged and deliberately so; the docstring now says it is a check and not a mutex |
+| §2.1 84 % of every log line is paramiko | MEDIUM | **Closed**, Stage 1.2 — muted outside `--debug`; guide + test |
+| §3.1–3.3 three definition-only symbols | LOW ×3 | **Closed**, Stage 1.3 — deleted |
+| §4.1 `explorer-viewer.js` +1,029, extraction trigger deleted | MEDIUM | **Closed**, Stage 4 — `explorer-tabs.js`, verified byte-exact; the trigger is restored *with a condition* and advanced to `explorer-diff.js` |
+| §4.2 `web/workspaces.py` deferred imports | LOW | **Half closed**, Stage 5.2 — `import os` hoisted, the map produced (14 cycle-breaking, 10 late-binding), the rule tested. **The structural half (5.3) is open** |
+| §4.3 `config.json` bypasses `state_files.py` | LOW | **Closed**, Stage 5.1 — third store on the shared primitive |
+| §5.1 narrowed source-text-assertion rule reverted | MEDIUM (doc) | **Closed**, Stage 2.2 — restored with the earned third clause. The ~296-assertion backlog is **open by design** (5.4) |
+| §6.1 rendered `+`/`-` glyph buttons | LOW | **Closed**, Stage 3.2 — five sites, not four; shared `UI_PLUS_ICON`/`UI_MINUS_ICON` |
+| §7.1 `CLAUDE.md`/`AGENTS.md` cite a nonexistent audit | MEDIUM | **Closed**, Stage 2.1 — citation removed rather than repointed; audits are never cited, the guardrail list is the contract |
+| §7.2 repo-layout tree missing files | LOW | **Closed**, Stage 2.4 — nine added, not the five listed |
+| §7.3 `/find` missing from the read-only contract | LOW | **Closed**, Stage 2.5 |
+| §7.4 tracked proposals in `docs/` | LOW | **Closed**, Stage 2.6 — no change needed; the convention already existed and now holds |
+| §8.1 occurrence tint walks the whole source DOM | LOW | **Open by decision** (5.6), third audit running — still never observed, and a ceiling without a measurement risks a missing tint |
+| §8.2 download buffers up to 100 MB | LOW | **Closed**, Stage 5.5 — streamed in bounded chunks, hold released in a `finally`, cap carried by the reader |
+
+**Three items remain open, all three by explicit decision, and each names its
+own trigger:** 5.3 (extract from `workspaces.py` — before it becomes what
+`api.py` was), 5.4 (convert legacy assertions as each module is next touched),
+5.6 (add a node ceiling *if the cost is ever observed*). Nothing is open because
+it was forgotten.
+
+**Guardrails after Stages 1–5**, against §10's baseline: 4 (correctness), 5
+(dead code), 8 (interaction) and 9 (logging) move DRIFT → PASS; 7 (styling)
+moves PASS (minor) → PASS; 6 (architecture) stays **DRIFT** with two of its
+three findings closed and 5.3 outstanding, which is the honest reading. 1, 2, 3
+and 10 were PASS and remain so, with 2 and 3 now carrying stronger rules than
+they did (`state_files.py` for every durable file; streamed file bodies).
+
+**The 2026-08-04 lesson held.** That audit's prose-only remediations were
+reverted within ten days while its tested ones survived, and this document's
+§4.1/§5.1 are the record of it. Every rule Stages 1–5 produced is now either in
+the Regression Guardrails list in `CLAUDE.md` **and** `AGENTS.md` — which is the
+only cited guardrail contract — or backed by a test that fails when the rule is
+broken, and usually both. Nothing in this file needs to be read for the rules to
+survive it.
