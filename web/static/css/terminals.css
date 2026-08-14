@@ -3203,15 +3203,27 @@
             outline: none;
         }
 
+        /* Stroke icons, not `+`/`−` text: a glyph centred itself off
+           `font-size`, so the flex centring and the explicit icon box below are
+           what replace it. Same treatment as .explorer-git-revert-btn beside
+           them, so the three row controls sit on one baseline. */
         .explorer-git-stage-btn,
         .explorer-git-unstage-btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
             width: 22px;
             height: 22px;
-            font-size: .95rem;
-            font-weight: 700;
             border-color: var(--explorer-open-folder-border);
             background: var(--explorer-open-folder-bg);
             color: var(--explorer-open-folder-text);
+        }
+
+        .explorer-git-stage-btn svg,
+        .explorer-git-unstage-btn svg {
+            display: block;
+            width: 13px;
+            height: 13px;
         }
 
         .explorer-git-stage-btn:hover,
@@ -3253,6 +3265,9 @@
         }
 
         .explorer-zoom-btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
             width: 28px;
             height: 28px;
             border: 1px solid var(--explorer-btn-border);
@@ -3260,10 +3275,17 @@
             background: var(--explorer-btn-bg);
             color: var(--explorer-btn-text);
             cursor: pointer;
-            font-size: .82rem;
-            font-weight: 700;
             line-height: 1;
             flex: 0 0 auto;
+        }
+
+        /* Sized to match the download/appearance/line-wrap icons sharing the
+           editor header, so the zoom pair reads as part of that toolbar rather
+           than as a text control wedged into it. */
+        .explorer-zoom-btn svg {
+            display: block;
+            width: 14px;
+            height: 14px;
         }
 
         .explorer-zoom-btn:not(:disabled):hover {

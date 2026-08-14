@@ -189,6 +189,42 @@ status is observable and the existing error toast can carry it. That does buffer
 the body client-side; capping the fetch path at a threshold and falling back to
 the anchor above it keeps large downloads streaming. Pairs naturally with §8.2.
 
+> **Resolution (2026-08-14, Stage 3.1).** Fixed as proposed, with one addition
+> the finding implied but did not state, and one correction to the plan's
+> verification step.
+>
+> `downloadExplorerFile()` now fetches first and reports one outcome through one
+> door. A non-2xx answer reads the API's JSON `error` when there is one and
+> falls back to the status code when there is not, and returns
+> `{ok, cancelled, fileName, error}` so the caller can see it too. The threshold
+> is `EXPLORER_DOWNLOAD_BUFFER_MAX_BYTES = 25 MiB`, checked against
+> `Content-Length` **after** the status is known: over it, the response is
+> `abort()`ed unread and the plain anchor re-requests the URL so the browser
+> streams it, which costs the outcome for large files only and never the
+> memory. Object URLs are released on a deferred timer, because revoking in the
+> same task can race the browser's read of the URL the click just queued.
+>
+> **The addition: one report per batch, not N.** Making each transfer
+> observable would otherwise have turned nine silent successes into nine loud
+> failures, which is the same guardrail-8 problem wearing a different colour.
+> `downloadExplorerFiles()` passes `quiet: true`, collects the results and calls
+> `reportExplorerDownloadBatch()` once — "Downloaded 7 of 9 files — 2 failed:
+> …". Cancelled native saves are the user's answer and leave both the numerator
+> and the denominator. This is the same one-confirmation/one-report rule the
+> other multi-entry actions follow.
+>
+> **The correction: the test does not belong in `tests/test_explorer_fs_batch.py`.**
+> That harness loads `explorer-selection.js` + `explorer-fs.js`, and both
+> download functions live in `explorer-viewer.js`. The new
+> `tests/test_explorer_download.py` runs the real `explorer-viewer.js` in Node
+> against a stubbed page, following `test_explorer_save_refresh.py`: 12 tests
+> covering the served/404/non-JSON-error/oversized/toolbar single-file paths,
+> the object-URL release, the nine-stale-row batch (one error naming "0 of 9",
+> zero anchors), a partial batch, a whole batch, a batch of one reading exactly
+> like the single-entry action, and the native bridge still being reached first
+> with a cancelled dialog staying silent. One statement-shaped assertion in
+> `test_api.py` was converted rather than re-pinned to the new spelling.
+
 ### 1.3 — `workspace_label_conflict()` is check-then-act across two stores `LOW`
 
 **`web/workspaces.py:69-130`**
@@ -548,6 +584,32 @@ toolbar of SVG icons. `EXPLORER_GIT_REVERT_ICON` and its neighbours in
 `terminal-icons.js` are the pattern to copy, and the six sites fixed in August
 are the worked example.
 
+> **Resolution (2026-08-14, Stage 3.2).** Fixed — and the table above is one
+> row short. **There were five, not four:** the Git row's unstage `−`
+> (`explorer-viewer.js:1062`) is the twin of the stage `+` directly above it in
+> the same `renderExplorerGitFileRows()` branch, present at `ece482f` and
+> missed by this audit's own sweep as well as the previous one. Converting the
+> `+` and leaving the `−` beside it would have been a worse state than either.
+>
+> **The icons are not new.** `terminal-icons.js` already carries
+> `UI_PLUS_ICON` / `UI_MINUS_ICON`, used by the search panel's expand/collapse
+> and the browser pane's new-tab button — the constants that replaced the
+> *previous* round of glyph buttons. Drawing explorer-local plus/minus icons
+> beside them would have been three pluses in one product; all five sites use
+> the shared pair, so `explorer-viewer.js` gained no icon constants at all.
+>
+> Both containers needed the correction the six-glyph fix needed:
+> `.explorer-git-stage-btn` / `.explorer-git-unstage-btn` and
+> `.explorer-zoom-btn` gained `display: inline-flex` + centring and an explicit
+> `svg` box (13 px on the Git rows, matching `.explorer-git-revert-btn` beside
+> them; 14 px in the editor header, matching the download/appearance/line-wrap
+> icons beside those), and both dropped the now-meaningless `font-size` /
+> `font-weight` that sized the glyph. `test_compact_action_controls_use_shared_svg_icons`
+> in `test_api.py` — the test that guards the earlier sweep — was extended to
+> cover all five `aria-label` hooks, to assert no `>+</button>` / `>-</button>`
+> / `>−</button>` survives in `explorer-viewer.js`, and to require the two CSS
+> `svg` sizing rules, so a sixth incomplete sweep fails rather than lands.
+
 ---
 
 ## 7. Documentation drift
@@ -815,7 +877,24 @@ consequence of skipping it last time. **Every prose remediation from the
 ones that were, held.** Doing 2.1–2.3 without doing Stage 5 leaves the same
 failure mode in place.
 
-### Stage 3 — Close the two visible user-facing gaps
+### Stage 3 — Close the two visible user-facing gaps — **DONE 2026-08-14**
+
+> **Resolution (2026-08-14, Stage 3).** Both landed; see the **Resolution**
+> blocks under §1.2 and §6.1. Three corrections to the plan below:
+>
+> * **3.1 needed a batch rule, not just a status check.** Making one transfer
+>   observable turns nine silent successes into nine loud failures unless the
+>   batch reports once, so `reportExplorerDownloadBatch()` came with it.
+> * **3.1's test does not go in `tests/test_explorer_fs_batch.py`.** That
+>   harness loads `explorer-fs.js`; both download functions are in
+>   `explorer-viewer.js`. New file: `tests/test_explorer_download.py`, 12 tests,
+>   running the real viewer in Node against a stubbed page.
+> * **3.2 was five sites, not four.** The Git row's unstage `−` (`:1062`) sits
+>   in the same branch as the stage `+` and was missed by both sweeps. All five
+>   use the *existing* shared `UI_PLUS_ICON` / `UI_MINUS_ICON`; no new icon
+>   constants were added.
+>
+> Suite: **1,647 tests, OK** (8 skipped); `ruff` clean.
 
 | # | Action | File | Notes |
 |---|---|---|---|

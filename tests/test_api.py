@@ -1277,6 +1277,31 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertNotIn(">×</button>", browser)
         self.assertNotIn(">+</button>", browser)
 
+        # The Git sidebar's stage/unstage pair and the editor's zoom pair were
+        # the last `+`/`−` text buttons in the explorer: they took their weight
+        # from the page font and sat beside SVG neighbours on the same row.
+        # They share the same two icons rather than growing explorer-local ones.
+        viewer = self._static("js/explorer-viewer.js")
+        for hook, icon in (
+            ('aria-label="Stage changes"', "UI_PLUS_ICON"),
+            ('aria-label="Unstage changes"', "UI_MINUS_ICON"),
+            ('aria-label="Stage all changes"', "UI_PLUS_ICON"),
+            ('aria-label="Decrease editor font size"', "UI_MINUS_ICON"),
+            ('aria-label="Increase editor font size"', "UI_PLUS_ICON"),
+        ):
+            button = viewer[viewer.index(hook):]
+            self.assertEqual(button[:button.index("</button>")].count("${" + icon + "}"), 1)
+        for glyph in (">+</button>", ">-</button>", ">−</button>"):
+            self.assertNotIn(glyph, viewer)
+        # An SVG does not centre itself by font-size the way the glyph did, so
+        # each container has to say how big its icon is and centre it.
+        terminals_css = self._static("css/terminals.css")
+        for selector in (
+            ".explorer-git-stage-btn svg,",
+            ".explorer-zoom-btn svg {",
+        ):
+            self.assertIn(selector, terminals_css)
+
         # These are search-language labels, not stand-ins for graphical actions.
         self.assertIn('title="Match case">Aa</button>', search)
         self.assertIn('title="Match whole word">ab</button>', search)
@@ -16364,12 +16389,11 @@ class ExplorerDownloadTestCase(unittest.TestCase):
         )
         self.assertIn("row.dataset.explorerDownloadPath", viewer_js)
         # With several rows selected the entry downloads each of them as its
-        # own capped, root-confined read — there is no archive endpoint.
+        # own capped, root-confined read — there is no archive endpoint. What
+        # each request does, and that N of them report once, is executed in
+        # tests/test_explorer_download.py rather than pattern-matched here.
         self.assertIn("async function downloadExplorerFiles(index, targets)", viewer_js)
-        self.assertIn(
-            "await downloadExplorerFile(index, { path: entry.path });",
-            viewer_js,
-        )
+        self.assertNotIn("/download/archive", viewer_js)
         # Offered next to the copy entries, and only for file rows.
         self.assertLess(
             viewer_js.index("label: 'Copy relative path'"),

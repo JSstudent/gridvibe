@@ -1055,11 +1055,19 @@
             const pathAction = commitHash
                 ? `data-explorer-git-open-commit-diff="${escHtml(path)}" data-explorer-git-commit="${escHtml(commitHash)}"`
                 : `data-explorer-git-open-file="${escHtml(path)}" data-explorer-git-diff-mode="${escHtml(diffMode)}"`;
+            /* Stage/unstage draw their plus and minus with the shared
+               UI_PLUS_ICON / UI_MINUS_ICON — the same pair the search panel's
+               expand/collapse and the browser pane's new tab already use —
+               rather than the `+`/`−` text they used to carry beside the SVG
+               revert and open-folder buttons on the same row. A glyph centres
+               itself by `font-size` and an SVG does not, so both buttons (and
+               the editor's zoom pair, which made the same move) carry flex
+               centring and an explicit icon box in terminals.css. */
             let actionButton = '';
             if (action === 'stage') {
-                actionButton = `<button type="button" class="explorer-search-btn explorer-git-stage-btn" data-explorer-git-stage="${escHtml(path)}" title="Stage changes" aria-label="Stage changes">+</button>`;
+                actionButton = `<button type="button" class="explorer-search-btn explorer-git-stage-btn" data-explorer-git-stage="${escHtml(path)}" title="Stage changes" aria-label="Stage changes">${UI_PLUS_ICON}</button>`;
             } else if (action === 'unstage') {
-                actionButton = `<button type="button" class="explorer-search-btn explorer-git-unstage-btn" data-explorer-git-unstage="${escHtml(path)}" title="Unstage changes" aria-label="Unstage changes">−</button>`;
+                actionButton = `<button type="button" class="explorer-search-btn explorer-git-unstage-btn" data-explorer-git-unstage="${escHtml(path)}" title="Unstage changes" aria-label="Unstage changes">${UI_MINUS_ICON}</button>`;
             }
             const discardLabel = status === 'untracked'
                 ? 'Delete untracked file'
@@ -1702,7 +1710,7 @@
                     <span>Changes</span>
                     <span class="explorer-git-section-actions">
                         <button type="button" class="explorer-search-btn explorer-git-revert-btn explorer-git-discard-all-btn" data-explorer-git-discard-all ${(busy || !discardable.length) ? 'disabled' : ''} title="Discard all changes" aria-label="Discard all changes">${EXPLORER_GIT_REVERT_ICON}</button>
-                        <button type="button" class="explorer-search-btn explorer-git-stage-btn explorer-git-stage-all-btn" data-explorer-git-stage-all ${(busy || !unstaged.length) ? 'disabled' : ''} title="Stage all changes" aria-label="Stage all changes">+</button>
+                        <button type="button" class="explorer-search-btn explorer-git-stage-btn explorer-git-stage-all-btn" data-explorer-git-stage-all ${(busy || !unstaged.length) ? 'disabled' : ''} title="Stage all changes" aria-label="Stage all changes">${UI_PLUS_ICON}</button>
                     </span>
                 </div>
                 <div class="explorer-diff-commit-files explorer-git-change-list">
@@ -6598,18 +6606,57 @@
             <path d="M5.4 13.5a7 7 0 1 0 1.7-6.4L5 10"/>
         </svg>
     `;
+
+    /* Bodies at or under this are read into memory so the *status* is
+       observable; anything larger is handed to the browser to stream, which
+       costs the outcome but never the machine's memory. The server caps a
+       download at 100 MB, so this only ever splits the top quarter of the
+       range off. */
+    const EXPLORER_DOWNLOAD_BUFFER_MAX_BYTES = 25 * 1024 * 1024;
+    /* An object URL has to outlive the click that consumes it; revoking in the
+       same task can race the browser's own read of it. */
+    const EXPLORER_DOWNLOAD_OBJECT_URL_TTL_MS = 60000;
+
+    function triggerExplorerDownloadAnchor(href, fileName) {
+        const link = document.createElement('a');
+        link.href = href;
+        link.download = fileName;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+    }
+
     /* `options.path` downloads a specific file instead of whatever the viewer
        has open — the context-menu entry point, so files GridVibe can't render
-       (and therefore never open in the editor) are still reachable. */
+       (and therefore never open in the editor) are still reachable.
+       `options.quiet` suppresses the per-file toast so a batch can report once
+       instead of N times; the outcome is returned either way as
+       `{ok, cancelled, fileName, error}`. */
     async function downloadExplorerFile(index, options = {}) {
+        const quiet = options.quiet === true;
+        /* One reporting door for both transports, so a failure can never leave
+           through a success-shaped one. A cancelled save is the user's answer,
+           not a failure, and says nothing. */
+        const report = (result) => {
+            if (!quiet && !result.cancelled) {
+                showTerminalToast(
+                    result.ok
+                        ? result.message
+                        : `Download failed: ${result.error || 'unknown error'}`,
+                    result.ok ? 'success' : 'error'
+                );
+            }
+            return result;
+        };
+
         const pane = terminals[index];
         const sessionId = sessionIds[index];
         if (!pane || !sessionId) {
-            return;
+            return { ok: false, cancelled: true, fileName: '' };
         }
         const explicitPath = String(options.path || '');
         if (!explicitPath && pane._explorerMode !== 'file') {
-            return;
+            return { ok: false, cancelled: true, fileName: '' };
         }
         const path = explicitPath || pane._explorerFilePath || '';
         const fileName = explicitPath
@@ -6619,7 +6666,7 @@
 
         /* WebView2 silently ignores programmatic <a download> clicks, so in the
            native window route the save through the pywebview bridge (native
-           Save dialog + server-side fetch). In the browser the anchor works. */
+           Save dialog + server-side fetch). */
         if (isPywebviewAvailable() && window.pywebview.api.save_download) {
             try {
                 const result = await window.pywebview.api.save_download(
@@ -6630,23 +6677,83 @@
                         : CURRENT_WORKSPACE_ID
                 );
                 if (result?.ok) {
-                    showTerminalToast(`Saved ${getDownloadBaseName(result.path) || fileName}`, 'success');
-                } else if (!result?.cancelled) {
-                    showTerminalToast(`Download failed: ${result?.error || 'unknown error'}`, 'error');
+                    return report({
+                        ok: true,
+                        fileName,
+                        message: `Saved ${getDownloadBaseName(result.path) || fileName}`
+                    });
                 }
+                if (result?.cancelled) {
+                    return report({ ok: false, cancelled: true, fileName });
+                }
+                return report({ ok: false, fileName, error: result?.error || 'unknown error' });
             } catch (error) {
-                showTerminalToast(`Download failed: ${error?.message || error}`, 'error');
+                return report({ ok: false, fileName, error: error?.message || String(error) });
             }
-            return;
         }
 
-        const link = document.createElement('a');
-        link.href = url;
-        link.download = fileName;
-        document.body.appendChild(link);
-        link.click();
-        link.remove();
-        showTerminalToast(`Downloading ${fileName}…`, 'success');
+        /* Browser mode. A programmatic <a download> click cannot observe the
+           response, so a stale row's 404, a 403, or the server's size refusal
+           all landed as a green success toast and no file — and once a
+           selection could download N rows at once, as N of them. Fetch first so
+           the status is real; only a body too large to hold goes to the anchor,
+           and by then the status is already known. */
+        const aborter = typeof AbortController === 'function' ? new AbortController() : null;
+        let response;
+        try {
+            response = await fetch(url, aborter ? { signal: aborter.signal } : undefined);
+        } catch (error) {
+            return report({ ok: false, fileName, error: error?.message || String(error) });
+        }
+        if (!response.ok) {
+            let reason = `HTTP ${response.status}`;
+            try {
+                const data = await response.json();
+                if (data?.error) {
+                    reason = data.error;
+                }
+            } catch (error) {
+                // A body that is not the API's JSON error says nothing the
+                // status code does not; keep the status.
+            }
+            return report({ ok: false, fileName, error: reason });
+        }
+        const declaredLength = Number(response.headers.get('Content-Length'));
+        if (Number.isFinite(declaredLength) && declaredLength > EXPLORER_DOWNLOAD_BUFFER_MAX_BYTES) {
+            // Drop this response unread — the anchor re-requests and streams it.
+            aborter?.abort();
+            triggerExplorerDownloadAnchor(url, fileName);
+            return report({ ok: true, fileName, message: `Downloading ${fileName}…` });
+        }
+        try {
+            const objectUrl = URL.createObjectURL(await response.blob());
+            triggerExplorerDownloadAnchor(objectUrl, fileName);
+            setTimeout(() => URL.revokeObjectURL(objectUrl), EXPLORER_DOWNLOAD_OBJECT_URL_TTL_MS);
+            return report({ ok: true, fileName, message: `Downloaded ${fileName}` });
+        } catch (error) {
+            return report({ ok: false, fileName, error: error?.message || String(error) });
+        }
+    }
+
+    /* One outcome for a whole batch, never one per file: nine stale rows used
+       to produce nine green toasts and nothing on disk. Cancelled saves are the
+       user's answer and drop out of both the count and the denominator. */
+    function reportExplorerDownloadBatch(results) {
+        const attempted = results.filter(result => result && !result.cancelled);
+        if (!attempted.length) {
+            return;
+        }
+        const failed = attempted.filter(result => !result.ok);
+        if (!failed.length) {
+            showTerminalToast(`Downloaded ${attempted.length} files`, 'success');
+            return;
+        }
+        const saved = attempted.length - failed.length;
+        showTerminalToast(
+            `Downloaded ${saved} of ${attempted.length} files — `
+            + `${failed.length} failed: ${failed[0].error || 'unknown error'}`,
+            'error'
+        );
     }
 
     /* Download several selected files as N sequential single-file downloads.
@@ -6680,14 +6787,16 @@
                 return;
             }
         }
+        const results = [];
         for (const entry of files) {
             // The pane can be closed or restarted mid-run; stop rather than
             // keep pulling files for a session that is gone.
             if (sessionIds[index] !== sessionId) {
-                return;
+                break;
             }
-            await downloadExplorerFile(index, { path: entry.path });
+            results.push(await downloadExplorerFile(index, { path: entry.path, quiet: true }));
         }
+        reportExplorerDownloadBatch(results);
     }
 
     function getDownloadBaseName(fullPath) {
@@ -8210,9 +8319,9 @@
                         </div>
                     ` : ''}
                     <div class="explorer-editor-zoom" aria-label="Editor font size controls">
-                        <button type="button" class="explorer-zoom-btn" data-explorer-zoom-decrease="${index}" title="Decrease font size" aria-label="Decrease editor font size">-</button>
+                        <button type="button" class="explorer-zoom-btn" data-explorer-zoom-decrease="${index}" title="Decrease font size" aria-label="Decrease editor font size">${UI_MINUS_ICON}</button>
                         <span class="explorer-zoom-value" data-explorer-zoom-value="${index}"></span>
-                        <button type="button" class="explorer-zoom-btn" data-explorer-zoom-increase="${index}" title="Increase font size" aria-label="Increase editor font size">+</button>
+                        <button type="button" class="explorer-zoom-btn" data-explorer-zoom-increase="${index}" title="Increase font size" aria-label="Increase editor font size">${UI_PLUS_ICON}</button>
                     </div>
                     ${explorerLineWrapControlHtml(index, initialFileView)}
                     <button type="button" class="explorer-md-appearance-btn" data-explorer-md-appearance="${index}" title="Appearance" aria-label="Viewer appearance" aria-haspopup="menu" aria-expanded="false">${EXPLORER_MD_APPEARANCE_ICON}</button>
