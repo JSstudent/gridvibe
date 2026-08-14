@@ -1,7 +1,8 @@
 # Highlighted Edit Mode for the Explorer Text Editor
 
-Status: Stages 0, 1 and 2 shipped 2026-08-13; Stage 3 not started. Drafted
-2026-08-13.
+Status: Stages 0, 1, 2 and 3 shipped 2026-08-13. Stage 3 shipped two of its
+three items; draft-relative change marks were split out and deferred (see
+Stage 4). Drafted 2026-08-13.
 
 Everything below describes the plan as drafted. Where the shipped code departs
 from it, the **Shipped** notes in the Staging section say so — read those
@@ -413,12 +414,140 @@ the renderers are asserted present by name, and the collapse decision is
 asserted not to consult `searchRanges`, which is what that test was actually
 protecting.
 
-### Stage 3 — optional, later
+### Stage 3 — find within the editor, and the occurrence tint
 
-Find-within-editor, the occurrence tint, and draft-relative change marks.
+The two things the reader lost that the overlay's rows can give back. The third
+item this stage was drafted with — draft-relative change marks — turned out to
+share nothing with them and to need a decision first; it is Stage 4 below.
+
+**Shipped, and the plan above named neither of the two things that shaped it.**
+The new surface is `web/static/js/explorer-edit-find.js` (the adapter) plus four
+pure rules added to `explorer-edit-highlight.js`, covered by
+`tests/test_explorer_edit_find.py`; `explorer-viewer.js` grew one delegation
+branch in `applyExplorerSearch()` and `terminals.js` is still untouched.
+
+*Hazard 1 has a fifth face, and it rules out reusing the read-only find's
+paint.* The obvious implementation is a one-liner: `renderExplorerSourceLines()`
+already takes search ranges as its third argument and the underlay already
+passes `[]`. But the mark that renders is `.explorer-search-match`, and it
+carries `padding: 0 1px`. In the read-only view that is decoration; under the
+overlay it is **glyph advance**. Every match would push the rest of its line 2px
+right in the underlay while the textarea above it stayed put, and with
+`wrap-lines` on it would move the wrap column outright — the same progressive
+desync down the file that Stage 1 exists to prevent, arriving through the one
+argument that looked free.
+
+So both the find and the tint paint through the **CSS Custom Highlight API**,
+which accepts colour properties and nothing else and therefore cannot change a
+metric even in principle. This is not a new mechanism: the read-only occurrence
+tint and the repository-search hit paint already use it, and for a closely
+related reason — the Source DOM must not be rewritten. Three consequences:
+
+- the underlay's HTML is never rebuilt for a find, so stepping between matches
+  costs no whole-document render and no tokenizing pass. The read-only path
+  re-renders the entire Source view on every step; the editor's does not;
+- the active match loses the `box-shadow` ring its `<mark>` counterpart draws,
+  since a highlight cannot set one. It carries "this one" on hue alone, which
+  is why `--gv-match-active-rgb` and `--gv-match-ink` are now tokens and the
+  legacy `#fb923c` / `#111827` literals in `terminals.css` were migrated onto
+  them;
+- a browser without the API paints nothing, which falls through to exactly the
+  disabled find edit mode has always had.
+
+*The find follows the overlay, not edit mode.* `setExplorerEditChromeDisabled()`
+used to disable the find controls unconditionally, because a bare textarea has
+nothing to mark. It now disables them only when the overlay stood down — the
+degraded path really does have no rows to paint on — so the availability rule
+is one thing (`explorerEditFindAvailable()`), not two.
+
+Two smaller departures worth recording:
+
+*The find's cached ranges gained a second key, and it lives on the edit state.*
+The read-only find caches ranges under `resultQuery` alone, which is sound
+there because the content is fixed while the file is open. Here every keystroke
+moves the haystack, so `findRefreshDecision()` keys on the query *and* the
+draft — and the draft marker is `state.findDraft` on `pane._explorerEdit`, not
+a new field on the pane's search state, so it dies with the editor. A second
+edit session must not trust the first one's marker, and teardown clears
+`resultQuery` outright so the read-only find this pane falls back to can never
+reuse ranges resolved against a draft that was cancelled.
+
+*The tint scans the draft string; the read-only tint walks text nodes.* It has
+to — a textarea's selection is not in the document's selection, so
+`window.getSelection()` reports nothing while editing and the read-only
+listener correctly clears its own registry. Scanning the string is also
+strictly better: a match that straddles two syntax spans is invisible to a node
+walk, and the reader's own selection is excluded by overlapping offsets rather
+than by node identity. The two registries are deliberately separate names so
+neither can wipe the other's paint, and for the same reason the three editor
+registries are rebuilt from a per-pane record on every repaint —
+`window.CSS.highlights` is page-global while a grid can hold several open
+editors at once, and one pane clearing another pane's find would be silent.
+
+The caret is deliberately **not** moved to the active match. Find is a way of
+looking around the buffer; silently relocating the insertion point of a buffer
+with unsaved changes — in a textarea that is not even focused while the find
+input is — would surface on the next keystroke as data loss.
+
+#### Follow-up: the tint had to be carried across the swap
+
+First cut shipped the tint working *within* each mode and dying at both edges
+of the transition. That is not a rough edge, it is the shape of the feature:
+the occurrence tint holds no state and is re-derived from whatever is selected
+every time, which is what makes it cheap — and means it dies with the surface
+holding that selection. Entering edit mode replaced the rows the reader's
+selection was anchored to; leaving destroyed the textarea whose selection had
+replaced it. A double-clicked word went dark on the way in and had to be picked
+again on the way back.
+
+Neither surface can hold the other's selection, so what crosses is a
+description of it — `{ line, column, needle }` — re-resolved by
+`carriedSelectionRange()` against whichever buffer is now there. Line and
+column alone would be a lie whenever the two buffers differ (a discarded draft,
+a CRLF file's normalized newlines), so the **text is the authority**: the
+recorded spot is taken only when the needle really is there, otherwise the
+needle is looked for on that row, and it is deliberately *not* searched for
+document-wide — a selection that silently reappears somewhere else is worse
+than one that does not come back, because the tint would then be anchored to a
+word the reader never picked. The tint itself is unchanged: it falls out of the
+restored selection exactly as it does from a fresh one.
+
+One ordering trap on the way out. With a find active,
+`renderExplorerSource()` is *not* the last thing to build those rows —
+`applyExplorerSearch()` rebuilds them again, after an await, to mark the
+matches. Restoring the selection synchronously put it on rows that were about
+to be replaced, which is precisely the disappearing act being fixed, so the
+restore chains off that call instead.
+
+#### Follow-up: the two find paints have to measure the same
+
+`.explorer-search-match` carried `padding: 0 1px`. Harmless where it lived, but
+it made the very same match visibly wider in the read-only view than in the
+editor, whose `::highlight()` cannot set a metric at all — and two renderings
+of one find that disagree on a word's width read as two different fonts. The
+padding is gone; `border-radius` stays, because a corner is not advance. The
+only remaining difference is the ring on the active match, which is a
+`box-shadow` the highlight API has no equivalent for.
+
+### Stage 4 — draft-relative change marks, deferred
+
+Split out of Stage 3, and not started. Two things have to be settled first, and
+neither is effort:
+
+1. **The baseline collides.** A gutter bar in the read-only view means "differs
+   from HEAD". A draft-relative mark would mean "differs from the file as I
+   opened it". Same gutter, same three colours, two different questions. The
+   overview column is stood down during an edit for precisely this reason —
+   `explorerOverviewGeometry()` says so — so reviving it means either a
+   visually distinct third mark kind or an honest composition of two baselines.
+2. **Nothing here diffs on the client.** `explorerDiffChangeBlocks()` parses a
+   unified diff the *server* produced. Draft-relative marks need a real
+   line-diff in JS, rerun inside the per-keystroke rAF budget on buffers up to
+   the viability bound.
 
 Each stage is independently shippable and independently revertable. Stage 1 is
-useful without Stage 2; Stage 2 does not alter Stage 1's geometry.
+useful without Stage 2; Stage 2 does not alter Stage 1's geometry; Stage 3 adds
+no geometry of its own, by construction.
 
 ## Out of Scope
 

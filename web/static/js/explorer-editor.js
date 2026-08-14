@@ -181,10 +181,18 @@
     }
 
     /* While editing, the non-editor file chrome is disabled so a stray click
-       cannot swap views, search, or download the old disk copy. Zoom, line
-       wrapping and the appearance menu stay live — like the wrap toggle they
-       only restyle the surface (CSS custom properties on panels that are not
-       rebuilt), and the Source font they set is the one being typed into. */
+       cannot swap views or download the old disk copy. Zoom, line wrapping and
+       the appearance menu stay live — like the wrap toggle they only restyle
+       the surface (CSS custom properties on panels that are not rebuilt), and
+       the Source font they set is the one being typed into.
+
+       Find is the one control whose availability depends on how edit mode
+       rendered. It used to be disabled unconditionally, because a bare
+       textarea has nothing to mark; with the highlight overlay up there are
+       real rows behind the caret and explorer-edit-find.js paints matches onto
+       them. So it follows the overlay: live when the rows exist, and still
+       disabled on the degraded path, where the panel is exactly the textarea
+       it always was. */
     function setExplorerEditChromeDisabled(index, disabled) {
         const list = document.getElementById(`explorer-list-${index}`);
         if (!list) {
@@ -194,21 +202,29 @@
         if (editor) {
             editor.classList.toggle('is-editing', Boolean(disabled));
         }
-        const selectors = [
+        const findLive = Boolean(disabled)
+            && Boolean(window.explorerEditFindAvailable?.(index));
+        const setDisabled = (selectors, value) => {
+            selectors.forEach(selector => {
+                list.querySelectorAll(selector).forEach(element => {
+                    element.disabled = value;
+                });
+            });
+        };
+        setDisabled([
             '[data-explorer-file-view]',
-            `[data-explorer-download="${index}"]`,
+            `[data-explorer-download="${index}"]`
+        ], Boolean(disabled));
+        setDisabled([
             `[data-explorer-search-input="${index}"]`,
             `[data-explorer-search-prev="${index}"]`,
             `[data-explorer-search-next="${index}"]`,
             `[data-explorer-search-clear="${index}"]`
-        ];
-        selectors.forEach(selector => {
-            list.querySelectorAll(selector).forEach(element => {
-                element.disabled = Boolean(disabled);
-            });
-        });
-        if (!disabled) {
-            // Let the search machinery re-derive prev/next button states.
+        ], Boolean(disabled) && !findLive);
+        if (!disabled || findLive) {
+            /* Let the search machinery re-derive prev/next and the counter —
+               and, entering edit mode with a query already in the box, carry
+               that find over onto the draft instead of dropping it. */
             applyExplorerSearch(index);
         }
     }
@@ -231,6 +247,12 @@
         if (!pane || !pane._explorerFileEditable || explorerEditState(pane) || pane._explorerMode !== 'file') {
             return;
         }
+        /* Read before anything replaces the rows it points at. A word the
+           reader had selected — and the occurrence tint hanging off it — is
+           anchored to those rows, so without carrying it across, clicking
+           Edit put the tint out and the word had to be picked again inside
+           the editor. */
+        const carriedSelection = window.explorerSourceSelectionCarry?.(index) || null;
         // Source only, diff split closed (2 in §5.2).
         setExplorerFileView(index, 'source');
         clearExplorerEditBar(index);
@@ -258,7 +280,9 @@
 
         const textarea = document.getElementById(`explorer-edit-textarea-${index}`);
         if (textarea) {
-            textarea.setSelectionRange(0, 0);
+            if (!window.restoreExplorerEditorSelection?.(index, carriedSelection)) {
+                textarea.setSelectionRange(0, 0);
+            }
             textarea.focus({ preventScroll: true });
             /* Inside the overlay's stack the Source view goes on scrolling
                both layers — it is never replaced and the content height does
@@ -268,6 +292,10 @@
             restoreExplorerEditViewport(
                 explorerEditScrollElement(index) || textarea, sourceViewport
             );
+            // The textarea now holds the carried selection, so the editor's
+            // tint has something to derive from immediately rather than on the
+            // reader's next click.
+            window.refreshExplorerEditOccurrenceTint?.();
         }
     }
 
@@ -384,6 +412,9 @@
             return;
         }
         const editViewport = captureScrollMetrics(explorerEditScrollElement(index));
+        // The same carry in the other direction, read before the textarea it
+        // describes is torn down.
+        const carriedSelection = window.explorerEditorSelectionCarry?.(index) || null;
         clearExplorerEditState(index);
         clearExplorerEditBar(index);
         renderExplorerSource(index);
@@ -393,7 +424,19 @@
         );
         setExplorerEditChromeDisabled(index, false);
         refreshExplorerEditControls(index);
-        applyExplorerSearch(index);
+        /* The selection has to go back on the rows that are finally standing,
+           and with a find active those are not the rows renderExplorerSource()
+           just built — applyExplorerSearch() rebuilds them again, after an
+           await, to mark the matches. Restoring before that would put the
+           selection on rows about to be replaced, which is precisely the
+           disappearing act this is here to stop. */
+        Promise.resolve(applyExplorerSearch(index)).catch(() => {}).then(() => {
+            if (window.restoreExplorerSourceSelection?.(index, carriedSelection)) {
+                // renderExplorerSource() already scheduled a pass, but it ran
+                // against a selection that did not exist yet.
+                scheduleExplorerOccurrenceHighlight();
+            }
+        });
         if (focusEditButton) {
             document.querySelector(`[data-explorer-edit="${index}"]`)?.focus();
         }

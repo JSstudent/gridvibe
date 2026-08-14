@@ -89,6 +89,15 @@
        inheritance chain, and only a root-level declaration is reliably
        visible to an unattached ::highlight() rule. */
     --gv-match-rgb: 250, 204, 21;
+    /* The one match a find is currently sitting on, in the same bare-channel
+       form and on :root for the same reason. It has to carry that "this one"
+       on hue alone inside the in-place editor, where the match is painted by
+       ::highlight() and box-shadow is not among the properties a highlight may
+       set — so it is a clearly separate hue, not a shade of the one above. */
+    --gv-match-active-rgb: 251, 146, 60;
+    /* Ink for text sitting on either match hue. Both are light enough that the
+       viewer's own foreground would not survive them, in either theme. */
+    --gv-match-ink: #111827;
     /* Change-marker hues (diff gutters, the source-view change marks). Kept
        opaque so both the gutter bars and the deletion wedge can use them
        directly; the green/red match the existing diff-cell bases. */

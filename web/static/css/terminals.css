@@ -4690,17 +4690,24 @@
         /* One source for the find-match hue (--gv-match-rgb in tokens.css):
            the search mark paints it solid, the occurrence tint below paints it
            translucent. Spelling the same colour two ways — hex here, rgba()
-           there — is what let this block drift the last time it was touched. */
+           there — is what let this block drift the last time it was touched.
+
+           No horizontal padding. It used to carry 1px either side, which was
+           harmless on its own but made the very same match visibly wider here
+           than the one the in-place editor paints — the editor's is a
+           ::highlight(), and a highlight cannot set a metric at all. Two
+           renderings of one find that do not agree on a word's width read as
+           two different fonts, so the padding goes and both are exactly the
+           glyphs. Border-radius stays: a corner is not advance. */
         .explorer-search-match {
             border-radius: 2px;
-            padding: 0 1px;
             background: rgb(var(--gv-match-rgb));
-            color: #111827;
+            color: var(--gv-match-ink);
         }
 
         .explorer-search-match.active {
-            background: #fb923c;
-            color: #111827;
+            background: rgb(var(--gv-match-active-rgb));
+            color: var(--gv-match-ink);
             box-shadow: 0 0 0 1px rgba(17, 24, 39, .3);
         }
 
@@ -4725,7 +4732,39 @@
            asked for. */
         ::highlight(explorer-search-hit) {
             background-color: rgb(var(--gv-match-rgb));
-            color: #111827;
+            color: var(--gv-match-ink);
+        }
+
+        /* ── Find and the occurrence tint inside the in-place editor ──
+           Same three signals as above, painted through the Custom Highlight
+           API instead of <mark> wrappers and a rebuilt DOM. That is not a
+           stylistic choice: the overlay's rows sit behind a transparent
+           textarea holding the same text, so anything that changes a glyph's
+           advance wraps the two layers at different columns and desynchronises
+           everything below it. A <mark> is an element and can grow a padding
+           or a border at any time — it carried one until this was written — so
+           the editor uses the one paint that is metric-free by construction.
+
+           The active match loses the ring its <mark> counterpart draws, since
+           box-shadow is not a property a highlight may set; --gv-match-active-
+           rgb carries "this one" on hue alone. That is the only remaining
+           visual difference between the two renderings of a find. */
+        ::highlight(explorer-edit-find) {
+            background-color: rgb(var(--gv-match-rgb));
+            color: var(--gv-match-ink);
+        }
+
+        ::highlight(explorer-edit-find-active) {
+            background-color: rgb(var(--gv-match-active-rgb));
+            color: var(--gv-match-ink);
+        }
+
+        ::highlight(explorer-edit-occurrence) {
+            background-color: rgba(var(--gv-match-rgb), .34);
+        }
+
+        .explorer-pane[data-explorer-theme="dark"] ::highlight(explorer-edit-occurrence) {
+            background-color: rgba(var(--gv-match-rgb), .24);
         }
 
         .explorer-pane[data-explorer-theme="dark"] .explorer-code-keyword {

@@ -5831,6 +5831,18 @@
             return;
         }
 
+        /* An open in-place editor owns the Source panel: the rows under the
+           caret are the highlight overlay's underlay, painted from the live
+           draft. A find there has to search that draft rather than the file on
+           disk, and paint without rewriting the rows — rewriting them is what
+           would move the caret's geometry out from under it.
+           explorer-edit-find.js owns both, using this same search state, so
+           the input, the counter and Enter/Shift+Enter are unchanged. Every
+           other view behaves exactly as it does with no editor open. */
+        if (pane._explorerEdit && typeof window.applyExplorerEditFind === 'function') {
+            return window.applyExplorerEditFind(index, { resetActive });
+        }
+
         const query = state.query || '';
         const view = activeExplorerFileView(index);
         let matchCount = 0;

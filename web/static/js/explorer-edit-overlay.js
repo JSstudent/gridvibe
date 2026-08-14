@@ -181,6 +181,10 @@ function paintExplorerEditUnderlay(index) {
     );
     underlay.innerHTML = explorerEditUnderlayHtml(draft, language);
     pane._explorerEditOverlayDraft = draft;
+    /* These rows are new nodes, so every range the find and the occurrence
+       tint had painted onto the old ones is now detached. explorer-edit-find.js
+       drops them and re-derives from the draft that is now on screen. */
+    window.repaintExplorerEditFind?.(index);
 }
 
 /* Called from the editor's existing `input` handler, which covers typing, Tab
@@ -228,5 +232,8 @@ function teardownExplorerEditOverlay(index) {
         pane._explorerEditOverlayFrame = 0;
         pane._explorerEditOverlayDraft = '';
     }
+    // The find's paint and its cached ranges were resolved against a draft
+    // that is about to stop existing.
+    window.clearExplorerEditFind?.(index);
     document.getElementById(`explorer-code-${index}`)?.classList.remove('editor-focused');
 }
