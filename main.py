@@ -69,7 +69,8 @@ def setup_logging(debug: bool = False):
     The file handler rotates at MAX_LOG_SIZE and keeps MAX_LOG_BACKUPS numbered copies
     (gridvibe.log.1 … .10), overwriting the oldest once the limit is reached.
     High-frequency polling requests to /api/sessions and /api/session-groups are
-    suppressed so they don't flood the log.
+    suppressed so they don't flood the log, and paramiko's per-channel INFO
+    chatter is muted to WARNING outside debug mode for the same reason.
     """
     level = logging.DEBUG if debug else logging.INFO
 
@@ -95,6 +96,14 @@ def setup_logging(debug: bool = False):
 
     # Suppress noisy polling GETs from werkzeug across all handlers
     logging.getLogger("werkzeug").addFilter(_SuppressPollLogs())
+
+    # paramiko logs two INFO lines per SFTP channel, and the explorer opens one
+    # channel per request by design (web/explorer.py pools the transport, not
+    # the channel) — left at INFO it is ~84% of the file and cuts first-party
+    # retention to a few hundred lines per rotation. Auth and transport
+    # failures still surface, because paramiko logs those at WARNING/ERROR.
+    # --debug restores the full stream for diagnosing an SSH problem.
+    logging.getLogger("paramiko").setLevel(level if debug else logging.WARNING)
 
     logging.getLogger(__name__).info(f"Log file: {log_file}")
 

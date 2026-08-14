@@ -435,10 +435,6 @@
         return GridVibeExplorerThemeStore.normalizeTheme(theme);
     }
 
-    function getExplorerThemeStore() {
-        return GridVibeExplorerThemeStore.readStore(localStorage);
-    }
-
     function hasExplorerThemeOverride(key = '') {
         return GridVibeExplorerThemeStore.hasOverride(localStorage, key);
     }

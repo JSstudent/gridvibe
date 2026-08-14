@@ -1,12 +1,22 @@
 """Self-update flow: fetch and fast-forward GridVibe's own git checkout."""
 
+import os
 import shutil
+import signal
 import subprocess
 from typing import Any, Dict, List
 
 from web.paths import BASE_DIR, install_kind
 
 SELF_UPDATE_REPO_DIR = BASE_DIR
+
+# Every git call here runs inside a request thread, so none of them may block
+# forever. Local commands only touch the checkout; `fetch` and `pull --ff-only`
+# both contact the remote and get the wider bound.
+SELF_UPDATE_LOCAL_TIMEOUT = 10.0
+SELF_UPDATE_NETWORK_TIMEOUT = 30.0
+# How long we are willing to wait for a killed command's pipes to drain.
+SELF_UPDATE_REAP_TIMEOUT = 5.0
 
 
 class AppUpdateError(RuntimeError):
@@ -17,26 +27,104 @@ class AppUpdateError(RuntimeError):
         self.status_code = status_code
 
 
-def _run_repo_git(args: List[str]) -> subprocess.CompletedProcess[str]:
+def _new_process_group() -> Dict[str, Any]:
+    """Popen kwargs that put git and its helpers in a group we can kill as one."""
+    if os.name == "nt":
+        return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+    return {"start_new_session": True}
+
+
+def _terminate_process_tree(process: "subprocess.Popen[str]") -> None:
+    """Kill a timed-out git command *and everything it spawned*.
+
+    Killing only the direct child is not enough, and the reason is easy to miss:
+    `git fetch` hands our stdout/stderr pipes to its own transport helpers, so a
+    surviving grandchild keeps the write end open. On Windows the reader threads
+    then block until that handle closes — `subprocess.run` reaps with an
+    unbounded `communicate()` after its kill, which turned a 30 s bound into a
+    measured 269 s wait against a remote that accepted the connection and went
+    quiet. The bound has to cover the helpers or it bounds nothing.
+    """
+    if os.name == "nt":
+        taskkill = shutil.which("taskkill")
+        if taskkill:
+            try:
+                subprocess.run(
+                    [taskkill, "/F", "/T", "/PID", str(process.pid)],
+                    capture_output=True,
+                    timeout=SELF_UPDATE_REAP_TIMEOUT,
+                    check=False,
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+    else:
+        try:
+            os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+        except OSError:
+            pass
+
+    # Backstop, and a no-op if the tree kill already landed.
+    try:
+        process.kill()
+    except OSError:
+        pass
+
+
+def _run_repo_git(
+    args: List[str],
+    *,
+    timeout: float = SELF_UPDATE_LOCAL_TIMEOUT,
+) -> subprocess.CompletedProcess[str]:
     """Run one git command inside GridVibe's own checkout (self-update only).
 
-    Positional-only usage keeps this distinct from the explorer runner
+    The single positional argument keeps this distinct from the explorer runner
     `_run_git_command(args, *, cwd=...)`, which requires an explicit cwd —
     mixing the two up previously caused a production TypeError.
+
+    Every call is bounded twice over: `GIT_TERMINAL_PROMPT=0` so a remote that
+    wants credentials fails instead of blocking on a prompt nobody can answer
+    (the server has no controlling terminal), and `timeout` so a stalled
+    transport cannot park the request thread forever. A timeout surfaces as an
+    `AppUpdateError`, which the launcher already reports.
     """
     git_path = shutil.which("git")
     if not git_path:
         raise AppUpdateError("Git is not installed or is not available on PATH.", 400)
 
+    env = os.environ.copy()
+    env["GIT_TERMINAL_PROMPT"] = "0"
+
+    command = [git_path, "-C", SELF_UPDATE_REPO_DIR, *args]
     try:
-        return subprocess.run(
-            [git_path, "-C", SELF_UPDATE_REPO_DIR, *args],
-            capture_output=True,
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            check=False,
+            env=env,
+            **_new_process_group(),
         )
     except OSError as exc:
         raise AppUpdateError(f"Failed to run git {' '.join(args)}: {exc}", 500) from exc
+
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        _terminate_process_tree(process)
+        try:
+            process.communicate(timeout=SELF_UPDATE_REAP_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            # An orphan we could not reach still holds the pipe. Leave it and
+            # return the thread rather than waiting on it — bounding our own
+            # wait is the entire point of this path.
+            pass
+        raise AppUpdateError(
+            f"git {' '.join(args)} timed out after {timeout:g}s. "
+            "The remote may be unreachable or waiting for credentials.",
+            500,
+        ) from exc
+
+    return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
 
 
 def _git_error_message(result: subprocess.CompletedProcess[str], fallback: str) -> str:
@@ -91,7 +179,9 @@ def perform_self_update() -> Dict[str, Any]:
 
     upstream = upstream_result.stdout.strip()
 
-    fetch_result = _run_repo_git(["fetch", "--all", "--prune"])
+    fetch_result = _run_repo_git(
+        ["fetch", "--all", "--prune"], timeout=SELF_UPDATE_NETWORK_TIMEOUT
+    )
     if fetch_result.returncode != 0:
         raise AppUpdateError(
             f"Git fetch failed: {_git_error_message(fetch_result, 'Unable to contact the remote repository.')}",
@@ -152,7 +242,9 @@ def perform_self_update() -> Dict[str, Any]:
 
     previous_commit = previous_commit_result.stdout.strip()
 
-    pull_result = _run_repo_git(["pull", "--ff-only"])
+    pull_result = _run_repo_git(
+        ["pull", "--ff-only"], timeout=SELF_UPDATE_NETWORK_TIMEOUT
+    )
     if pull_result.returncode != 0:
         raise AppUpdateError(
             f"Git pull failed: {_git_error_message(pull_result, 'The remote update could not be applied.')}",

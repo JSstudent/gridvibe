@@ -147,6 +147,31 @@ class FakeSshExecClient:
         self.closed = True
 
 
+class FakeGitProcess:
+    """Stands in for one `subprocess.Popen` inside the self-update git runner.
+
+    `stall` makes the first `communicate()` time out the way a remote that has
+    gone quiet does, so the timeout path can be exercised without a network.
+    """
+
+    def __init__(self, stdout="", returncode=0, stall=False):
+        self.stdout_text = stdout
+        self.returncode = returncode
+        self.stall = stall
+        self.pid = -1
+        self.communicate_timeouts = []
+        self.killed = False
+
+    def communicate(self, timeout=None):
+        self.communicate_timeouts.append(timeout)
+        if self.stall and len(self.communicate_timeouts) == 1:
+            raise subprocess.TimeoutExpired(cmd="git", timeout=timeout)
+        return self.stdout_text, ""
+
+    def kill(self):
+        self.killed = True
+
+
 class ApiRoutesTestCase(unittest.TestCase):
     def setUp(self):
         self.temp_dir = TemporaryDirectory()
@@ -4471,6 +4496,131 @@ class ApiRoutesTestCase(unittest.TestCase):
 
         self.assertEqual(context.exception.status_code, 409)
         self.assertIn("Local changes are present", str(context.exception))
+
+    def test_repo_git_never_waits_on_a_credential_prompt(self):
+        """A remote asking for credentials must fail, not block the request thread."""
+        with patch.object(
+            selfupdate.subprocess, "Popen", return_value=FakeGitProcess()
+        ) as popen:
+            result = selfupdate._run_repo_git(["status", "--porcelain"])
+
+        self.assertEqual(popen.call_args.kwargs["env"]["GIT_TERMINAL_PROMPT"], "0")
+        self.assertEqual(result.returncode, 0)
+
+    def test_repo_git_timeout_surfaces_as_an_update_error(self):
+        """A stalled transport reports through the launcher instead of hanging."""
+        process = FakeGitProcess(stall=True)
+        with patch.object(selfupdate.subprocess, "Popen", return_value=process):
+            with patch.object(selfupdate, "_terminate_process_tree") as terminate:
+                with self.assertRaises(api.AppUpdateError) as context:
+                    selfupdate._run_repo_git(["fetch", "--all", "--prune"], timeout=30)
+
+        self.assertEqual(context.exception.status_code, 500)
+        self.assertIn("timed out", str(context.exception))
+        # The whole tree, not just the direct child — its helpers hold the pipes.
+        terminate.assert_called_once_with(process)
+        # And the reap after the kill is bounded too, or it becomes the new hang.
+        self.assertEqual(
+            process.communicate_timeouts,
+            [30, selfupdate.SELF_UPDATE_REAP_TIMEOUT],
+        )
+
+    def test_repo_git_timeout_bounds_a_remote_that_goes_quiet(self):
+        """The bound has to cover git's helper processes, not only git itself.
+
+        A remote that accepts the connection and then says nothing is the case
+        that parked a worker thread. Killing the direct child is not enough:
+        the helpers it spawned inherit our stdout/stderr pipes, and the reap
+        after the kill waits for those handles to close — measured at 269 s
+        against a 30 s bound before the tree kill landed.
+        """
+        if shutil.which("git") is None:
+            self.skipTest("git executable is not available")
+
+        listener = socket.socket()
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(4)
+        port = listener.getsockname()[1]
+        accepted = []
+
+        def accept_and_stall():
+            while True:
+                try:
+                    accepted.append(listener.accept()[0])
+                except OSError:
+                    return
+
+        threading.Thread(target=accept_and_stall, daemon=True).start()
+        self.addCleanup(listener.close)
+        self.addCleanup(lambda: [conn.close() for conn in accepted])
+
+        with TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            repo.mkdir()
+            self._run_git(repo, "init")
+            self._run_git(repo, "config", "user.email", "gridvibe@example.invalid")
+            self._run_git(repo, "config", "user.name", "GridVibe Test")
+            (repo / "README.md").write_text("v1\n", encoding="utf-8")
+            self._run_git(repo, "add", ".")
+            self._run_git(repo, "commit", "-m", "initial")
+            self._run_git(
+                repo, "remote", "add", "origin", f"git://127.0.0.1:{port}/repo.git"
+            )
+
+            started = time.monotonic()
+            with patch.object(selfupdate, "SELF_UPDATE_REPO_DIR", str(repo)):
+                with self.assertRaises(api.AppUpdateError) as context:
+                    selfupdate._run_repo_git(["fetch", "--all", "--prune"], timeout=2)
+            elapsed = time.monotonic() - started
+
+        self.assertEqual(context.exception.status_code, 500)
+        self.assertIn("timed out", str(context.exception))
+        # Generous, because it only has to separate "bounded" from "waited for
+        # git to give up on its own", which is minutes away.
+        self.assertLess(elapsed, 20)
+
+    def test_self_update_bounds_every_git_call(self):
+        """Network commands get the wider bound; local ones the tighter default."""
+        stdouts = [
+            "true\n",
+            "main\n",
+            "",
+            "origin/main\n",
+            "",
+            "0\t2\n",
+            "abc123456789\n",
+            "Updating abc..def\n",
+            "def987654321\n",
+        ]
+        timeouts = {}
+
+        def fake_popen(command, **kwargs):
+            # command is [git, "-C", repo_dir, *args] — keep the git args only.
+            process = FakeGitProcess(stdout=stdouts.pop(0))
+            pending.append((tuple(command[3:]), process))
+            return process
+
+        pending = []
+        with patch.object(selfupdate.subprocess, "Popen", side_effect=fake_popen):
+            api.perform_self_update()
+
+        for args, process in pending:
+            timeouts[args] = process.communicate_timeouts[0]
+
+        self.assertEqual(len(timeouts), 8)
+        self.assertTrue(all(value for value in timeouts.values()))
+        self.assertEqual(
+            timeouts[("fetch", "--all", "--prune")],
+            selfupdate.SELF_UPDATE_NETWORK_TIMEOUT,
+        )
+        self.assertEqual(
+            timeouts[("pull", "--ff-only")],
+            selfupdate.SELF_UPDATE_NETWORK_TIMEOUT,
+        )
+        self.assertEqual(
+            timeouts[("status", "--porcelain")],
+            selfupdate.SELF_UPDATE_LOCAL_TIMEOUT,
+        )
 
     def test_app_update_fast_forwards_real_checkout(self):
         """POST /api/app-update happy path against a real temp git repo (finding 6.6)."""

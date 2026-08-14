@@ -131,6 +131,33 @@ for the five local commands) and an env with `GIT_TERMINAL_PROMPT=0`, catching
 `subprocess.TimeoutExpired` into the existing `AppUpdateError` path so the
 launcher banner reports it. Five lines, no behaviour change on the happy path.
 
+> **Resolution (2026-08-14, Stage 1.1).** Fixed, but **the five-line fix above
+> does not work on Windows** and the finding understated the problem.
+>
+> `GIT_TERMINAL_PROMPT=0` and the two bounds landed as described
+> (`SELF_UPDATE_NETWORK_TIMEOUT = 30` for `fetch` **and** `pull --ff-only` —
+> the audit filed `pull` under "local commands", but it contacts the remote
+> too — and `SELF_UPDATE_LOCAL_TIMEOUT = 10` for the rest). Measured against a
+> remote that accepts the connection and then goes quiet, that version reported
+> its 30 s timeout after **268.8 s**.
+>
+> `subprocess.run(timeout=…)` bounds the wait *before* the kill, then kills only
+> the direct child; on Windows it reaps with an unbounded `communicate()`
+> (`Lib/subprocess.py`, `if _mswindows:` branch). `git fetch` passes our
+> stdout/stderr pipes to its transport helpers, so a surviving helper keeps the
+> write end open and the reader threads block until git gives up on its own.
+> The bound was being enforced against the process we launched rather than
+> against the handles we read.
+>
+> `_run_repo_git` therefore drives `Popen` + `communicate(timeout=…)` itself and
+> kills the process **group** (`taskkill /F /T` on Windows, `killpg` elsewhere,
+> with the group established at spawn), then reaps under
+> `SELF_UPDATE_REAP_TIMEOUT = 5`. Same case now returns in **30.2 s** with no
+> orphan left running. Regression test:
+> `test_repo_git_timeout_bounds_a_remote_that_goes_quiet` in `tests/test_api.py`
+> stalls a local listener and asserts the whole call returns well inside the
+> minutes the old path took.
+
 ### 1.2 — Browser-mode download reports success unconditionally, and multi-select multiplied it `MEDIUM`
 
 **`web/static/js/explorer-viewer.js:6654-6660`**
@@ -230,6 +257,17 @@ Genuine SSH failures still surface — paramiko logs auth and transport errors a
 WARNING/ERROR. `docs/logging_guide.md` should gain the third-party-level section
 alongside its `_SuppressPollLogs` / `_StripAnsiFilter` entries.
 
+> **Resolution (2026-08-14, Stage 1.2).** Fixed as
+> `logging.getLogger("paramiko").setLevel(level if debug else logging.WARNING)`
+> in `setup_logging()`. The `debug` branch is the one deviation from the
+> proposed one-liner: `--debug` keeps the full paramiko stream, so diagnosing an
+> SSH problem is a flag rather than a code change. Verified by emitting the two
+> `paramiko.transport.sftp` INFO lines against a real file handler — 0 reach the
+> file, while a paramiko WARNING and a first-party INFO both do.
+> `docs/logging_guide.md` gained the **Third-Party Logger Levels** section, and
+> `tests/test_main.py::test_setup_logging_mutes_paramiko_chatter_outside_debug`
+> covers both directions.
+
 ---
 
 ## 3. Dead code (guardrail 5)
@@ -268,6 +306,10 @@ anywhere in the repo, tests included. Every consumer reaches the store through
 the module-level functions (`capture_workspace`, `clear_workspace`, …).
 
 All three are one-line deletions with no call-site churn.
+
+> **Resolution (2026-08-14, Stage 1.3).** All three deleted. Re-confirmed zero
+> references across JS, templates, Python, and tests before removing each one;
+> the suite is unchanged apart from growing by the Stage 1.1/1.2 tests.
 
 ---
 
@@ -697,7 +739,14 @@ Recorded so it does not get re-litigated:
 Five stages, ordered so each is independently shippable and the risk rises
 monotonically. Stages 1–2 are a single sitting.
 
-### Stage 1 — Stop the bleeding (≈ 20 lines, no behaviour change on any happy path)
+### Stage 1 — Stop the bleeding (≈ 20 lines, no behaviour change on any happy path) — **DONE 2026-08-14**
+
+All three landed; see the **Resolution** blocks under §1.1, §2.1 and §3.1–3.3.
+One correction to the plan below: 1.1 is not five lines. Bounding the wait
+without killing git's *helper* processes leaves the bound unenforced on Windows
+— measured at 268.8 s against a 30 s timeout — so the runner now owns its
+`Popen` and kills the process group. `pull --ff-only` is a network command and
+takes the 30 s bound, not the 10 s one.
 
 | # | Action | File | Why first |
 |---|---|---|---|

@@ -1175,11 +1175,6 @@ def _evict_excess_auto_slots(
 _default_store = RuntimeStateStore(lambda: RUNTIME_STATE_PATH)
 
 
-def get_runtime_state_store() -> RuntimeStateStore:
-    """Return the process-wide runtime-state store."""
-    return _default_store
-
-
 def capture_workspace(
     session_manager: Any,
     workspace_id: str = DEFAULT_WORKSPACE_ID,

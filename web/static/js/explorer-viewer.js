@@ -1133,17 +1133,6 @@
         };
     }
 
-    function explorerSelectionFor(index, surface) {
-        const scope = explorerSelectionScope(index, surface);
-        if (!scope.sessionId) {
-            return null;
-        }
-        return GridVibeExplorerSelection.scopedSelection(
-            explorerSelections.get(scope.sessionId) || null,
-            scope
-        );
-    }
-
     function storeExplorerSelection(index, selection) {
         const sessionId = sessionIds[index] || '';
         if (!sessionId) {
