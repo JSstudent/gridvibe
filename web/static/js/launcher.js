@@ -2584,9 +2584,15 @@
                 return;
             }
             if (!(await focusWorkspaceWindow(target.workspace_id))) {
-                await openWorkspaceWindow(target.workspace_id, {
+                const opened = await openWorkspaceWindow(target.workspace_id, {
                     groupId: target.active_group_id
                 });
+                if (!opened) {
+                    showGridVibeNotice(
+                        `The workspace tab could not be opened. ${WORKSPACE_TAB_BLOCKED_HINT}`,
+                        'warning'
+                    );
+                }
             }
         } catch (error) {
             console.error('[GridVibe Launcher] workspace return failed:', error);
@@ -2637,10 +2643,17 @@
             const targetGroupId = liveGroupIds.has(preferredGroupId)
                 ? preferredGroupId
                 : (data.sessions.find(session => session.group_id)?.group_id || '');
-            await openWorkspaceWindow(resolvedWorkspaceId, {
+            const opened = await openWorkspaceWindow(resolvedWorkspaceId, {
                 groupId: targetGroupId,
                 nativeZoomFactor
             });
+            if (!opened) {
+                showGridVibeNotice(
+                    `The workspace tab could not be opened. ${WORKSPACE_TAB_BLOCKED_HINT}`,
+                    'warning'
+                );
+                return;
+            }
             logLauncherWindowAction('opened workspace window', {
                 workspace_id: resolvedWorkspaceId,
                 requested_group_id: targetGroupId || 'all'
@@ -3049,10 +3062,17 @@
             openButton.className = 'ghost-btn';
             openButton.textContent = 'Open';
             openButton.addEventListener('click', async () => {
-                if (!(await focusWorkspaceWindow(workspace.workspace_id))) {
-                    await openWorkspaceWindow(workspace.workspace_id, {
-                        groupId: workspace.active_group_id
-                    });
+                if (await focusWorkspaceWindow(workspace.workspace_id)) {
+                    return;
+                }
+                const opened = await openWorkspaceWindow(workspace.workspace_id, {
+                    groupId: workspace.active_group_id
+                });
+                if (!opened) {
+                    showGridVibeNotice(
+                        `The workspace tab could not be opened. ${WORKSPACE_TAB_BLOCKED_HINT}`,
+                        'warning'
+                    );
                 }
             });
             /* Per-workspace Save (SGP-14): the same flush handshake as
@@ -3342,19 +3362,39 @@
             const result = await restoreSavedWorkspaces(workspaceIds);
             const restored = (result.workspaces || []).filter(entry => entry.restored);
             restoreStarted = restored.length > 0;
+            /* Every restored workspace gets its own open attempt — the loop
+               never stops at the first refusal, because in browser mode the
+               refusals are exactly what has to be counted: a browser grants
+               one pop-up per user gesture, so the second and later tabs of a
+               multi-workspace restore are blocked while this site is not
+               allowed pop-ups. The sessions are already live either way; what
+               is missing is the tab, and the Workspaces card below opens it
+               with one click each. */
+            let blocked = 0;
             for (const entry of restored) {
                 // Only workspaces whose relaunch actually started get a window.
-                await openWorkspaceWindow(entry.workspace_id, {
+                const opened = await openWorkspaceWindow(entry.workspace_id, {
                     groupId: entry.active_group_id,
                     nativeZoomFactor: entry.native_zoom_factor
                 });
+                if (!opened) {
+                    blocked += 1;
+                }
             }
             const failed = (result.workspaces || []).filter(entry => !entry.restored);
             if (restored.length) {
+                /* One outcome, one notice (guardrail 8) — the relaunch, what
+                   could not be restored, and what could not be opened all
+                   arrive as one sentence on the one banner. */
                 showGridVibeNotice(
                     `Relaunch started for ${restored.length} workspace${restored.length === 1 ? '' : 's'}.`
-                    + (failed.length ? ` ${failed.length} could not be restored.` : ''),
-                    failed.length ? 'warning' : 'success'
+                    + (failed.length ? ` ${failed.length} could not be restored.` : '')
+                    + (blocked
+                        ? ` Your browser blocked ${blocked} workspace tab${blocked === 1 ? '' : 's'}.`
+                            + ` ${WORKSPACE_TAB_BLOCKED_HINT}`
+                            + ' You can also open them from the Workspaces list.'
+                        : ''),
+                    (failed.length || blocked) ? 'warning' : 'success'
                 );
             } else {
                 showGridVibeNotice('The selected workspaces could not be restored.', 'error');

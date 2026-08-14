@@ -1322,7 +1322,19 @@
        instead of driving the workspace shortcuts. */
     async function switchToWorkspaceWindow(workspaceId, options = {}) {
         dropTerminalFocusForWindowSwitch();
-        return openWorkspaceWindow(workspaceId, options);
+        /* In browser mode a workspace is a tab this page asks the browser to
+           open, and the browser can refuse — one pop-up per user gesture, so a
+           switch that had to fetch first may come back empty-handed. Say so
+           here, once, for every switch path rather than leaving the user
+           looking at a window that did not change. */
+        const opened = await openWorkspaceWindow(workspaceId, options);
+        if (!opened) {
+            showTerminalToast(
+                `The workspace tab could not be opened. ${WORKSPACE_TAB_BLOCKED_HINT}`,
+                'error'
+            );
+        }
+        return opened;
     }
 
     /* The Move list always acts on the active session tab, which the heading

@@ -79,6 +79,8 @@ python webview_launcher.py         # auto: native window, browser fallback
 python webview_launcher.py --mode browser|native
 ```
 
+Browser mode is one browser window per run: the launcher opens in a **new window** of your default browser, and each workspace opens as a tab beside it. Browsers allow a page to open only one tab per click, so restoring several workspaces at once opens the first and reports the rest — allow pop-ups for GridVibe's address to have them all open automatically, or use **Open** in the launcher's Workspaces card.
+
 ## Agent CLIs
 
 Pick an agent per pane in the launcher. GridVibe checks whether the binary is on `PATH` **in the target environment** (the remote host for SSH, the chosen distro for WSL, Windows for PowerShell/cmd) and shows install guidance when it isn't.

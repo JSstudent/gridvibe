@@ -3028,9 +3028,142 @@ async function fetch(path, options) {
         # Every in-app switch path goes through the one wrapper (guardrail 6):
         # the only bare openWorkspaceWindow call left in this page is inside it.
         self.assertIn("async function switchToWorkspaceWindow(workspaceId, options = {})", terminals_js)
-        self.assertIn("dropTerminalFocusForWindowSwitch();\n        return openWorkspaceWindow(", terminals_js)
+        wrapper = terminals_js.split(
+            "async function switchToWorkspaceWindow(workspaceId, options = {})", 1
+        )[1][:800]
+        self.assertIn("dropTerminalFocusForWindowSwitch();", wrapper)
+        # …and it drops focus *before* handing the window over, never after.
+        self.assertLess(
+            wrapper.index("dropTerminalFocusForWindowSwitch();"),
+            wrapper.index("openWorkspaceWindow("),
+        )
         self.assertEqual(terminals_js.count("openWorkspaceWindow("), 1)
         self.assertEqual(terminals_js.count("switchToWorkspaceWindow("), 6)
+
+
+class RestoreOpensATabPerWorkspaceTestCase(unittest.TestCase):
+    """Restoring N workspaces asks for N tabs, and says so when it gets fewer.
+
+    In browser mode a workspace is a tab this page asks the browser to open,
+    and a browser grants exactly one pop-up per user gesture: the first
+    `window.open` consumes the activation and every later one in the same click
+    returns null. The loop must therefore attempt *every* restored workspace
+    (the sessions are live either way — only the tab is missing) and report the
+    refusals once, on the one banner, with the way to fix it.
+
+    The real `restoreSelectedWorkspaces` is sliced out of launcher.js and run,
+    so what is pinned is what it does, not how it is spelled.
+    """
+
+    def _run(self, opens):
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node is not installed")
+        static_js = Path(__file__).resolve().parent.parent / "web" / "static" / "js"
+        launcher_js = (static_js / "launcher.js").read_text(encoding="utf-8")
+        workspaces_js = (static_js / "workspaces.js").read_text(encoding="utf-8")
+        # The hint belongs to the shared module — every reporter uses that one
+        # wording (guardrail 6), so the test takes it from there too.
+        hint_start = workspaces_js.index("const WORKSPACE_TAB_BLOCKED_HINT")
+        hint = workspaces_js[hint_start:workspaces_js.index(";", hint_start) + 1]
+        script = (
+            """
+const OPENS = JSON.parse(process.argv[2]);
+"""
+            + hint
+            + """
+const notices = [];
+const openedIds = [];
+let workspaceRestoreInFlight = false;
+let restorableWorkspaceSummaries = [];
+let panelDismissed = false;
+const checkboxes = OPENS.map((_ok, index) => ({
+    checked: true,
+    disabled: false,
+    value: `workspace-${index}`
+}));
+const panel = {
+    classList: { add: () => {}, remove: () => {} },
+    querySelectorAll: () => checkboxes
+};
+const document = { querySelector: () => panel };
+function showGridVibeNotice(text, type) { notices.push({ text, type }); }
+function describeFailure(summary) { return summary; }
+async function restoreSavedWorkspaces(workspaceIds) {
+    return {
+        workspaces: workspaceIds.map(id => ({
+            workspace_id: id,
+            restored: true,
+            group_count: 1,
+            active_group_id: `${id}-group`,
+            groups: [{ started: true }]
+        }))
+    };
+}
+async function openWorkspaceWindow(workspaceId) {
+    openedIds.push(workspaceId);
+    return OPENS[openedIds.length - 1];
+}
+async function loadWorkspaceRestoreChooser() {}
+async function refreshWorkspaceDestinations() {}
+function dismissWorkspaceRestorePanel() { panelDismissed = true; }
+"""
+            + _js_function_source(launcher_js, "restoreSelectedWorkspaces")
+            + """
+restoreSelectedWorkspaces().then(() => {
+    process.stdout.write(JSON.stringify({ notices, openedIds, panelDismissed }));
+});
+"""
+        )
+        with TemporaryDirectory() as script_dir:
+            script_path = Path(script_dir) / "restore-tabs.js"
+            script_path.write_text(script, encoding="utf-8")
+            completed = subprocess.run(
+                [node, str(script_path), json.dumps(opens)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        if completed.returncode != 0:
+            self.fail(f"node harness failed:\n{completed.stderr}")
+        return json.loads(completed.stdout)
+
+    def test_every_restored_workspace_gets_its_own_tab_request(self):
+        result = self._run([True, True, True])
+
+        self.assertEqual(
+            result["openedIds"], ["workspace-0", "workspace-1", "workspace-2"]
+        )
+        self.assertEqual(len(result["notices"]), 1)
+        self.assertEqual(result["notices"][0]["type"], "success")
+        self.assertNotIn("pop-up", result["notices"][0]["text"])
+
+    def test_a_refused_tab_never_stops_the_ones_behind_it(self):
+        """The reported bug: only one workspace came back. The others were
+        restored server-side, so the loop must keep asking for their tabs."""
+        result = self._run([True, False, False])
+
+        self.assertEqual(
+            result["openedIds"], ["workspace-0", "workspace-1", "workspace-2"]
+        )
+
+    def test_blocked_tabs_are_reported_once_with_the_way_out(self):
+        result = self._run([True, False, False])
+
+        # One outcome, one notice (guardrail 8) — not one per blocked tab.
+        self.assertEqual(len(result["notices"]), 1)
+        notice = result["notices"][0]
+        self.assertEqual(notice["type"], "warning")
+        self.assertIn("blocked 2 workspace tabs", notice["text"])
+        self.assertIn("Allow pop-ups for this site", notice["text"])
+        # …and the per-workspace retry affordance is named, because the
+        # Workspaces card opens each one with a fresh click.
+        self.assertIn("Workspaces list", notice["text"])
+
+    def test_one_blocked_tab_is_reported_in_the_singular(self):
+        result = self._run([False])
+
+        self.assertIn("blocked 1 workspace tab.", result["notices"][0]["text"])
 
 
 class MultiWorkspaceRestoreTestCase(unittest.TestCase):

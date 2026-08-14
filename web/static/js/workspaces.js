@@ -489,9 +489,36 @@
                 console.error('[GridVibe Workspaces] open workspace window failed:', error);
             }
         }
-        window.open(workspaceUrl(resolvedWorkspaceId, groupId), workspaceWindowName(resolvedWorkspaceId));
+        /* Browser mode: one tab per workspace, beside the launcher tab, in the
+           window the app started in. The name is what makes a second open of
+           the same workspace reuse its tab instead of stacking another one.
+
+           A named `window.open` is still a pop-up as far as the browser is
+           concerned, and browsers grant exactly one per user gesture — the
+           first call consumes the activation and every later one in the same
+           click returns null (verified in Chrome; reserving blank tabs up
+           front does not get around it). So restoring N workspaces can only
+           open N tabs when the site is allowed pop-ups. Report the refusal
+           instead of pretending it opened: `false` here is what lets the
+           caller say so once, with the hint below. */
+        const opened = window.open(
+            workspaceUrl(resolvedWorkspaceId, groupId),
+            workspaceWindowName(resolvedWorkspaceId)
+        );
+        if (!opened) {
+            console.error('[GridVibe Workspaces] the browser blocked the workspace tab:', {
+                workspace_id: resolvedWorkspaceId
+            });
+            return false;
+        }
         return true;
     }
+
+    /* One wording for the one browser behaviour, shared by every caller that
+       reports it — the launcher has a single notification surface and a single
+       message per outcome (guardrail 8). */
+    const WORKSPACE_TAB_BLOCKED_HINT =
+        'Allow pop-ups for this site so GridVibe can open workspace tabs.';
 
     async function closeWorkspaceWindow(workspaceId) {
         const api = nativeWorkspaceApi();
