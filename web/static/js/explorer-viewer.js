@@ -4345,7 +4345,13 @@
         return candidates.find(view => view && exists(view)) || mode;
     }
 
-    function setExplorerFileView(index, mode) {
+    /* `scroll` is forwarded to the find that gets re-applied at the bottom.
+       A reader switching panels wants the view to land on the active match —
+       Preview and Diff are rebuilt from scratch and would otherwise open at the
+       top. Entering the in-place editor does not: it is pinning the view to
+       Source on its way to mounting the editor over it, and the position it is
+       about to carry into the textarea is the one the reader left. */
+    function setExplorerFileView(index, mode, { scroll = true } = {}) {
         const normalizedMode =
             mode === 'preview' ? 'preview'
             : mode === 'diff' ? 'diff'
@@ -4391,10 +4397,10 @@
             loadExplorerDiff(index);
             const state = pane ? ensureExplorerSearchState(pane, 'file') : null;
             if (state?.query) {
-                applyExplorerSearch(index);
+                applyExplorerSearch(index, { scroll });
             }
         } else {
-            applyExplorerSearch(index);
+            applyExplorerSearch(index, { scroll });
         }
     }
 
@@ -5798,24 +5804,35 @@
         }
     }
 
-    function scheduleExplorerSearch(index, { resetActive = false, delay = EXPLORER_SEARCH_DEBOUNCE_MS } = {}) {
+    function scheduleExplorerSearch(index, { resetActive = false, delay = EXPLORER_SEARCH_DEBOUNCE_MS, scroll = true } = {}) {
         const pane = terminals[index];
         if (!pane || !isExplorerSearchablePane(pane)) {
             return;
         }
         if (pane._explorerMode === 'directory') {
-            applyExplorerSearch(index, { resetActive });
+            applyExplorerSearch(index, { resetActive, scroll });
             return;
         }
 
         cancelExplorerSearch(index);
         pane._explorerSearchTimer = window.setTimeout(() => {
             pane._explorerSearchTimer = null;
-            applyExplorerSearch(index, { resetActive });
+            applyExplorerSearch(index, { resetActive, scroll });
         }, delay);
     }
 
-    async function applyExplorerSearch(index, { resetActive = false } = {}) {
+    /* `scroll` is what separates a find the reader is *navigating* from one
+       that is merely being repainted. Typing a query, stepping with
+       Enter/prev/next and seeding from Ctrl+F all move the view to the active
+       match — that is the point of them. Everything else here is a repaint: the
+       surface was rebuilt (entering or leaving the in-place editor, a keystroke
+       moving the draft under the overlay, a group re-attach, the post-save
+       in-place refresh) and the find is only being re-derived onto it. Those
+       callers pass `scroll: false`, because a repaint that yanks the view to
+       match 5 of 8 is exactly the "thrown across the file" jolt swapping modes
+       used to produce — and every one of them either preserves the reader's
+       scroll position or restores it explicitly right afterwards. */
+    async function applyExplorerSearch(index, { resetActive = false, scroll = true } = {}) {
         const pane = terminals[index];
         if (!pane || !isExplorerSearchablePane(pane)) {
             return;
@@ -5840,7 +5857,7 @@
            the input, the counter and Enter/Shift+Enter are unchanged. Every
            other view behaves exactly as it does with no editor open. */
         if (pane._explorerEdit && typeof window.applyExplorerEditFind === 'function') {
-            return window.applyExplorerEditFind(index, { resetActive });
+            return window.applyExplorerEditFind(index, { resetActive, scroll });
         }
 
         const query = state.query || '';
@@ -5935,7 +5952,7 @@
         state.matchCount = matchCount;
         state.matchCapped = capped;
         updateExplorerSearchControls(index, query, state.activeIndex || 0, matchCount, capped);
-        if (query && matchCount) {
+        if (query && matchCount && scroll) {
             scrollExplorerSearchMatch(index);
         }
     }
@@ -6026,10 +6043,13 @@
             state.query = seedQuery;
             state.activeIndex = 0;
             /* Open on the match the reader is already looking at instead of
-               snapping the Source view back to the file's first match. */
-            state.seekOffset = activeExplorerFileView(index) === 'source'
-                ? explorerSelectionContentOffset(pane)
-                : null;
+               snapping the Source view back to the file's first match. With an
+               editor open the spot comes from the textarea's own selection —
+               the document selection this otherwise reads is empty inside one. */
+            const editSeed = window.explorerEditSelectionSeed?.(index) || null;
+            state.seekOffset = activeExplorerFileView(index) !== 'source'
+                ? null
+                : (editSeed ? editSeed.offset : explorerSelectionContentOffset(pane));
             state.ranges = [];
             state.resultQuery = '';
             state.matchCapped = false;
@@ -8402,7 +8422,9 @@
         // editor chrome and refresh the Edit button's enabled state + revision.
         setExplorerEditChromeDisabled(index, false);
         refreshExplorerEditControls(index);
-        applyExplorerSearch(index);
+        // The captured position is restored on the next line; a find repainted
+        // onto the refreshed rows must not undo that from its own frame.
+        applyExplorerSearch(index, { scroll: false });
         restoreExplorerFileScroll(index, scrollState);
         renderExplorerTabStrip(index);
         return true;

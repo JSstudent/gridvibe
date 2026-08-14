@@ -529,6 +529,68 @@ padding is gone; `border-radius` stays, because a corner is not advance. The
 only remaining difference is the ring on the active match, which is a
 `box-shadow` the highlight API has no equivalent for.
 
+#### Follow-up: a repainted find is not a navigated find
+
+The three items above all landed, and the feature was still awkward to use. A
+find open at `5/8`, the reader scrolled somewhere else entirely, and then
+either transition — Source → Edit or Edit → Source — dropped them at match 5.
+Worse, with a find open every keystroke in the editor did it again, because
+`repaintExplorerEditFind()` reschedules the search on every underlay repaint.
+
+The cause is one conflation that predates all of this. `applyExplorerSearch()`
+ended with "if there are matches, scroll to the active one", and that is right
+for the reason the reader usually reaches it — typing a query, `Enter`,
+prev/next, a Ctrl+F seed. It is wrong for every path that reaches it because a
+*surface* changed and the find has to be re-derived onto it. Stage 3 multiplied
+those paths: the editor's find re-resolves on every keystroke by construction,
+and both edges of the swap re-apply the find as part of restoring chrome.
+
+So `scroll` is now an explicit option on `scheduleExplorerSearch()`,
+`applyExplorerSearch()`, `applyExplorerEditFind()` and — because pinning the
+view to Source is itself a repaint — `setExplorerFileView()`. It defaults to
+true, and exactly the repaint callers pass `false`:
+`setExplorerEditChromeDisabled()` (which covers entering, leaving, the
+post-save chrome reset and `resyncExplorerEditorOnAttach()`),
+`exitExplorerEditMode()`, `repaintExplorerEditFind()`, `enterExplorerEditMode()`
+via the view pin, and `updateExplorerFileInPlace()` — the last of which restores
+a captured scroll position on the very next line and had its own find undoing
+it from a later frame.
+
+Two ordering details fell out. `enterExplorerEditMode()` now captures the
+Source viewport *before* pinning the view, since the pin rebuilds the rows it
+was measuring. And `exitExplorerEditMode()` re-applies the captured viewport
+inside the `.then()` that already waits for `applyExplorerSearch()`, for the
+same reason the selection restore lives there: with a find active those rows
+are built after an await, so a restore that ran before them was undone.
+
+#### Follow-up: Ctrl+F reads the wrong selection while editing
+
+`explorerSelectionQuery()` in `terminals.js` seeds the find from
+`window.getSelection()`, which is empty inside a textarea — a textarea's
+selection is its own. Double-clicking a word in the editor and pressing Ctrl+F
+therefore reopened the previous query, while the identical gesture in the
+Source view looked the word up. Stage 3's own tint already had this problem and
+solved it (`selectionOccurrenceQuery`); the shortcut simply never learned.
+
+`explorerEditSelectionSeed()` in `explorer-edit-find.js` reuses that rule and
+returns the query plus the offset of the row it sits on, so the seeded find
+opens on the match under the reader exactly as `explorerSelectionContentOffset()`
+makes it in read-only mode. It returns `null` when the pane has no editor and an
+object — empty query included — when it does, so the two selection sources can
+never both answer for one pane. `terminals.js` gains four lines and
+`focusExplorerSearch()` one branch.
+
+#### Follow-up: the tint was set weaker on dark than on light
+
+Both occurrence registries took `.34` alpha with a dark-theme override at
+`.24`. That is backwards: a translucent wash separates less from near-black
+than from white, so the theme that needed more colour was given less, and the
+tint was easy to miss outright. Dark now takes `.38` for both the Source view's
+and the editor's tint, and the editor's `::selection` wash follows to `.42` on
+dark so the reader's own selection stays the stronger of the two — the tint
+hangs off that selection, and a selection reading weaker than its own echoes
+inverts the relationship. Light is unchanged.
+
 ### Stage 4 — draft-relative change marks, deferred
 
 Split out of Stage 3, and not started. Two things have to be settled first, and

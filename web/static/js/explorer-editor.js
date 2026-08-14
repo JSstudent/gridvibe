@@ -224,8 +224,16 @@
         if (!disabled || findLive) {
             /* Let the search machinery re-derive prev/next and the counter —
                and, entering edit mode with a query already in the box, carry
-               that find over onto the draft instead of dropping it. */
-            applyExplorerSearch(index);
+               that find over onto the draft instead of dropping it.
+
+               Carrying it over is all this does. Every caller here is a chrome
+               re-sync — entering or leaving the editor, a save's in-place
+               refresh, a group re-attach — and the reader's scroll position is
+               either untouched or restored by the caller, so the find must not
+               pull the view to its active match. Doing so is what made a swap
+               between Source and Edit land on match 5 of 8 instead of where
+               the reader was looking. */
+            applyExplorerSearch(index, { scroll: false });
         }
     }
 
@@ -253,12 +261,17 @@
            Edit put the tint out and the word had to be picked again inside
            the editor. */
         const carriedSelection = window.explorerSourceSelectionCarry?.(index) || null;
-        // Source only, diff split closed (2 in §5.2).
-        setExplorerFileView(index, 'source');
-        clearExplorerEditBar(index);
-
+        /* Read before the view switch too. Pinning the view to Source re-applies
+           the find onto freshly built rows, and reading the position after that
+           would capture whatever the rebuild left rather than where the reader
+           was — which is the position the editor is about to open on. */
         const sourcePanel = document.getElementById(`explorer-code-${index}`);
         const sourceViewport = captureScrollMetrics(sourcePanel);
+        // Source only, diff split closed (2 in §5.2). The find comes along
+        // without moving the view: see setExplorerFileView's `scroll`.
+        setExplorerFileView(index, 'source', { scroll: false });
+        clearExplorerEditBar(index);
+
         const normalized = explorerNormalizeEditNewlines(pane._explorerFileContent || '');
         pane._explorerEdit = {
             tabId: pane._explorerActiveTabId,
@@ -429,8 +442,18 @@
            just built — applyExplorerSearch() rebuilds them again, after an
            await, to mark the matches. Restoring before that would put the
            selection on rows about to be replaced, which is precisely the
-           disappearing act this is here to stop. */
-        Promise.resolve(applyExplorerSearch(index)).catch(() => {}).then(() => {
+           disappearing act this is here to stop.
+
+           Those late rows are also why the viewport is re-applied here. The
+           find is repainted, never navigated (`scroll: false`), so nothing
+           pulls the view to a match on the way out — but the rebuild itself
+           lands after the restore above, and the position the reader was
+           looking at has to outlive it. */
+        Promise.resolve(applyExplorerSearch(index, { scroll: false })).catch(() => {}).then(() => {
+            restoreExplorerEditViewport(
+                document.getElementById(`explorer-code-${index}`),
+                editViewport
+            );
             if (window.restoreExplorerSourceSelection?.(index, carriedSelection)) {
                 // renderExplorerSource() already scheduled a pass, but it ran
                 // against a selection that did not exist yet.

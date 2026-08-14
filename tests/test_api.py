@@ -1488,7 +1488,11 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("function cancelExplorerSearch(index)", html)
         self.assertIn("window.clearTimeout(pane._explorerSearchTimer);", html)
         self.assertIn("pane._explorerSearchToken.cancelled = true;", html)
-        self.assertIn("function scheduleExplorerSearch(index, { resetActive = false, delay = EXPLORER_SEARCH_DEBOUNCE_MS } = {})", html)
+        # The scheduler debounces by the bounded constant above; its remaining
+        # options (resetActive, scroll) are covered behaviourally elsewhere, so
+        # this pins the bound rather than the whole signature.
+        self.assertIn("function scheduleExplorerSearch(index, {", html)
+        self.assertIn("delay = EXPLORER_SEARCH_DEBOUNCE_MS", html)
         self.assertIn("scheduleExplorerSearch(index, { resetActive: true });", html)
         self.assertIn("capped: ranges.length >= maxMatches,", html)
         self.assertIn("count.title = capped ? `Showing first ${matchCount} matches` : '';", html)
@@ -12724,7 +12728,7 @@ class ExplorerGitWatchFrontendTestCase(unittest.TestCase):
         )
         resolve = viewer[
             viewer.index("function explorerResolveFileView(index, mode)"):
-            viewer.index("function setExplorerFileView(index, mode)")
+            viewer.index("function setExplorerFileView(")
         ]
         self.assertIn("data-explorer-file-panel=", resolve)
         self.assertIn("_explorerLastFileView", resolve)
@@ -12812,8 +12816,12 @@ class ExplorerSourceSelectionHighlightTestCase(unittest.TestCase):
         )
         # Only the Source view can seek — it is the only view a content offset
         # means anything in.
-        self.assertIn("state.seekOffset = activeExplorerFileView(index) === 'source'", viewer)
-        self.assertIn("? explorerSelectionContentOffset(pane)", viewer)
+        self.assertIn("activeExplorerFileView(index) !== 'source'", viewer)
+        self.assertIn("explorerSelectionContentOffset(pane)", viewer)
+        # A pane with an open in-place editor answers with its own textarea
+        # selection instead: the document selection read above is always empty
+        # inside a textarea. Behaviour covered in test_explorer_edit_find.py.
+        self.assertIn("window.explorerEditSelectionSeed?.(index)", viewer)
         resolve = viewer[
             viewer.index("function explorerResolveSearchActiveIndex(state, ranges)"):
             viewer.index("function explorerLineStartOffset(pane, line)")

@@ -201,7 +201,7 @@ function scrollExplorerEditFindMatch(index) {
    value, the match counter, Enter/Shift+Enter and Escape are the same controls
    doing the same things — only the haystack (the live draft, not the file on
    disk) and the paint (highlights, not <mark> wrappers) differ. */
-async function applyExplorerEditFind(index, { resetActive = false } = {}) {
+async function applyExplorerEditFind(index, { resetActive = false, scroll = true } = {}) {
     const pane = terminals[index];
     const editState = pane && pane._explorerEdit;
     const policy = explorerEditFindPolicy();
@@ -274,9 +274,49 @@ async function applyExplorerEditFind(index, { resetActive = false } = {}) {
     updateExplorerSearchControls(
         index, query, search.activeIndex, search.matchCount, search.matchCapped
     );
-    if (search.matchCount) {
+    if (search.matchCount && scroll) {
         scrollExplorerEditFindMatch(index);
     }
+}
+
+/* What Ctrl+F should look up in a pane with an open editor, and where in the
+   buffer to open on.
+
+   The read-only shortcut seeds itself from `window.getSelection()`, which is
+   empty inside a textarea — a textarea's selection is its own. So highlighting
+   a word in the editor and hitting Ctrl+F used to reopen the *previous* query
+   instead of looking up the word under the cursor, while the same gesture in
+   the Source view did the obvious thing. Same gesture, same result now.
+
+   `null` means "no editor here, read the document selection". An object always
+   answers for the editor — with an empty query when nothing usable is selected
+   — so the two sources never both speak for one pane.
+
+   The offset is the start of the row the selection sits on, matching the
+   read-only seed: the find then opens on the match the reader is already
+   looking at rather than snapping to the file's first one. */
+function explorerEditSelectionSeed(index) {
+    const pane = terminals[index];
+    const policy = explorerEditFindPolicy();
+    const textarea = document.getElementById(`explorer-edit-textarea-${index}`);
+    if (!pane || !pane._explorerEdit || !policy || !textarea) {
+        return null;
+    }
+    const selection = policy.selectionOccurrenceQuery({
+        value: textarea.value,
+        selectionStart: textarea.selectionStart,
+        selectionEnd: textarea.selectionEnd,
+        maxQueryLength: EXPLORER_OCCURRENCE_MAX_QUERY
+    });
+    if (!selection) {
+        return { query: '', offset: null };
+    }
+    return {
+        query: selection.query,
+        offset: selection.start > 0
+            ? textarea.value.lastIndexOf('\n', selection.start - 1) + 1
+            : 0
+    };
 }
 
 /* The pane index whose edit textarea currently holds focus, or -1. Only one
@@ -337,7 +377,12 @@ function refreshExplorerEditOccurrenceTint() {
    nodes every painted range pointed at, so all three registries are emptied
    for this pane; the tint is re-derived immediately (it is one scan of the
    draft) and the find is rescheduled through the same debounce the read-only
-   find uses, because it is a whole-buffer scan and the reader is mid-word. */
+   find uses, because it is a whole-buffer scan and the reader is mid-word.
+
+   Re-resolving a find is not navigating one, so this pass never moves the
+   view: the reader is typing, and being pulled back to the active match on
+   every keystroke would make the buffer impossible to edit. Enter, prev/next
+   and a freshly typed query still scroll — they are the reader asking. */
 function repaintExplorerEditFind(index) {
     const record = _explorerEditPaint.get(index);
     if (record) {
@@ -349,7 +394,7 @@ function repaintExplorerEditFind(index) {
     refreshExplorerEditOccurrenceTint();
     const pane = terminals[index];
     if (pane && pane._explorerEdit && ensureExplorerSearchState(pane).query) {
-        scheduleExplorerSearch(index);
+        scheduleExplorerSearch(index, { scroll: false });
     }
 }
 

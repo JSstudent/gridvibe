@@ -6699,6 +6699,15 @@
        explorer pane and is a single line — the useful case for seeding a find.
        Multi-line selections and selections in other panes are ignored. */
     function explorerSelectionQuery(index) {
+        /* A pane with an open in-place editor answers for itself: its selection
+           lives in a textarea, where the document selection read below reports
+           nothing. explorer-edit-find.js returns null when there is no editor,
+           and an object — empty query included — when there is, so exactly one
+           of the two speaks. */
+        const editSeed = window.explorerEditSelectionSeed?.(index);
+        if (editSeed) {
+            return editSeed.query;
+        }
         const selection = window.getSelection?.();
         if (!selection || selection.isCollapsed || !selection.rangeCount) {
             return '';

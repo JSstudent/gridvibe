@@ -3514,6 +3514,16 @@
             background: rgba(var(--gv-accent-rgb), .28);
         }
 
+        /* Follows the occurrence tint up on dark, for the reason the tint went
+           up: alpha buys less over near-black. It has to stay the stronger of
+           the two — the word the reader actually selected is the anchor the
+           tint hangs off, and a selection reading weaker than its own echoes
+           inverts that. */
+        .explorer-pane[data-explorer-theme="dark"]
+        .explorer-edit-stack > .explorer-source-editor::selection {
+            background: rgba(var(--gv-accent-rgb), .42);
+        }
+
         /* The stacked textarea is as tall as the whole document, so its own
            focus ring would be drawn around the buffer and never seen. The ring
            moves to the scroller — the box the user actually looks at — which
@@ -4721,8 +4731,15 @@
             background-color: rgba(var(--gv-match-rgb), .34);
         }
 
+        /* A translucent wash carries far less on a dark ground than on a light
+           one — the same alpha that reads as a clear tint over white barely
+           separates from near-black. The dark theme used to take .24, *below*
+           the light theme's .34, and the tint was reported as barely visible.
+           It goes above it instead, in both this rendering and the in-place
+           editor's below, so a double-clicked word reads the same in either
+           theme and in either mode. */
         .explorer-pane[data-explorer-theme="dark"] ::highlight(explorer-occurrence) {
-            background-color: rgba(var(--gv-match-rgb), .24);
+            background-color: rgba(var(--gv-match-rgb), .38);
         }
 
         /* The matched string of an opened repository-search hit, painted the
@@ -4764,7 +4781,7 @@
         }
 
         .explorer-pane[data-explorer-theme="dark"] ::highlight(explorer-edit-occurrence) {
-            background-color: rgba(var(--gv-match-rgb), .24);
+            background-color: rgba(var(--gv-match-rgb), .38);
         }
 
         .explorer-pane[data-explorer-theme="dark"] .explorer-code-keyword {

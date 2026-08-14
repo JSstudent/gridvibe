@@ -157,6 +157,14 @@ function openEditor(index, draft, { overlayDraft = draft, stacked = true } = {})
     return pane;
 }
 
+/* The match scroll is deferred to an animation frame so it measures a laid-out
+   range; nothing runs the stubbed frames on its own. */
+function runFrames() {
+    const queued = Array.from(frames.values());
+    frames.clear();
+    queued.forEach(callback => callback());
+}
+
 function painted(name) {
     const highlight = sandbox.window.CSS.highlights.get(name);
     return highlight ? highlight.ranges.map(range => range.id) : [];
@@ -329,6 +337,47 @@ const results = {};
             selection: [textarea.selectionStart, textarea.selectionEnd],
             occurrence: painted('explorer-edit-occurrence')
         };
+    }
+
+    // 9. Navigating a find moves the view to the active match; repainting one
+    //    never does. Entering and leaving edit mode both re-resolve the same
+    //    query onto a rebuilt surface, and so does every keystroke under an
+    //    open find — pulling the view to match 5 of 8 each time is what threw
+    //    the reader across the file on a swap between Source and Edit.
+    {
+        resetPaint();
+        openEditor(0, 'alpha\\nbeta alpha\\n');
+        const view = nodes['explorer-code-0'];
+        await find(0, 'alpha', { resetActive: true, scroll: false });
+        runFrames();
+        const repainted = view.scrollTop;
+        await find(0, 'alpha');
+        runFrames();
+        results.scroll = { repainted, navigated: view.scrollTop };
+    }
+
+    // 10. Ctrl+F over a word highlighted in the editor looks that word up, the
+    //     way it always has in the Source view. The document selection the
+    //     read-only seed reads is empty inside a textarea, so the editor
+    //     answers for its own pane — and answers even when it has nothing, so
+    //     the two sources never both speak.
+    {
+        resetPaint();
+        openEditor(0, 'alpha\\nbeta alpha\\n');
+        const textarea = {
+            id: 'explorer-edit-textarea-0',
+            value: 'alpha\\nbeta alpha\\n',
+            selectionStart: 11,
+            selectionEnd: 16
+        };
+        nodes['explorer-edit-textarea-0'] = textarea;
+        const selected = sandbox.explorerEditSelectionSeed(0);
+        textarea.selectionStart = 4;
+        textarea.selectionEnd = 4;
+        const collapsed = sandbox.explorerEditSelectionSeed(0);
+        sandbox.terminals[0]._explorerEdit = null;
+        const readOnly = sandbox.explorerEditSelectionSeed(0);
+        results.seed = { selected, collapsed, readOnly };
     }
 
     process.stdout.write(JSON.stringify(results));
@@ -827,6 +876,31 @@ class EditFindAdapterTestCase(unittest.TestCase):
         results = self.results["occurrenceBlurred"]
         self.assertEqual(results["refocused"]["occurrence"], ["2:9-14"])
         self.assertEqual(results["blurred"]["occurrence"], [])
+
+    def test_a_repainted_find_leaves_the_view_where_the_reader_left_it(self):
+        # Swapping between Source and Edit re-resolves the same query onto the
+        # other surface, and so does every keystroke while a find is open. None
+        # of those is the reader asking to go anywhere.
+        self.assertEqual(self.results["scroll"]["repainted"], 0)
+
+    def test_navigating_a_find_still_moves_the_view_to_its_match(self):
+        # Enter, prev/next and a freshly typed query are the reader asking.
+        self.assertNotEqual(self.results["scroll"]["navigated"], 0)
+
+    def test_ctrl_f_seeds_from_the_editors_own_selection(self):
+        seed = self.results["seed"]["selected"]
+        self.assertEqual(seed["query"], "alpha")
+        # And it opens on the match under the reader rather than the file's
+        # first one: the offset is the start of row 2, where the word sits.
+        self.assertEqual(seed["offset"], 6)
+
+    def test_an_editor_with_nothing_selected_still_answers(self):
+        # An empty query means "no seed", not "fall through to the document
+        # selection" — which is always empty inside a textarea anyway.
+        self.assertEqual(self.results["seed"]["collapsed"], {"query": "", "offset": None})
+
+    def test_a_pane_with_no_editor_leaves_the_seed_to_the_source_view(self):
+        self.assertIsNone(self.results["seed"]["readOnly"])
 
 
 if __name__ == "__main__":
