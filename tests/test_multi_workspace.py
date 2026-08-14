@@ -4305,6 +4305,77 @@ async function restoreSavedWorkspaces(workspaceIds) {
         # a snapshot id the browser tried to map itself.
         self.assertEqual(result["opened"], [["live-group-2", 1.25]])
 
+    def test_the_chooser_auto_opens_only_when_nothing_is_live(self):
+        """The restore offer is a cold-start offer in multi-workspace mode too.
+
+        Browser mode reaches the launcher by navigating, so this page's startup
+        re-runs on every Alt+W / launcher-button hop, while the native launcher
+        window is only focused and runs it once per app run. An unguarded
+        auto-open therefore meant a modal on every hop in one mode and not the
+        other — usually a chooser whose only row was the workspace just left,
+        already open and so un-restorable. The rows are still refreshed either
+        way, because "Reopen saved ..." reads the same list.
+        """
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node is not installed")
+        response = self.client.get("/static/js/launcher.js")
+        self.assertEqual(response.status_code, 200)
+        launcher_js = response.get_data(as_text=True)
+        response.close()
+        source = "\n".join(
+            _js_function_source(launcher_js, name)
+            for name in ("checkRestorableWorkspace", "hasLiveWorkspaceSessions")
+        )
+        script = source + """
+let restorableWorkspaceIsOffered = false;
+let liveWorkspaces = [];
+let liveWorkspacesThrow = false;
+const chooserCalls = [];
+
+function isMultiWorkspaceEnabled() { return true; }
+async function fetchLiveWorkspaces() {
+    if (liveWorkspacesThrow) { throw new Error('offline'); }
+    return liveWorkspaces;
+}
+async function loadWorkspaceRestoreChooser(options) { chooserCalls.push(options); }
+async function fetch() { throw new Error('single-workspace banner path'); }
+
+(async () => {
+    // Nothing live (a fresh start after a restart): the offer is made.
+    liveWorkspaces = [{ workspace_id: 'default', group_count: 0 }];
+    await checkRestorableWorkspace();
+
+    // A workspace with live sessions: hopping back to the launcher is silent.
+    liveWorkspaces = [
+        { workspace_id: 'default', group_count: 0 },
+        { workspace_id: 'bbbbbbbbbbbb', group_count: 2 }
+    ];
+    await checkRestorableWorkspace();
+
+    // Unknown is not "empty".
+    liveWorkspacesThrow = true;
+    await checkRestorableWorkspace();
+
+    process.stdout.write(JSON.stringify({ chooserCalls }));
+})();
+"""
+        with TemporaryDirectory() as script_dir:
+            script_path = Path(script_dir) / "chooser.js"
+            script_path.write_text(script, encoding="utf-8")
+            completed = subprocess.run(
+                [node, str(script_path)], capture_output=True, text=True, check=True
+            )
+        result = json.loads(completed.stdout)
+
+        # The chooser is loaded every time — only the auto-open differs, so the
+        # Workspaces card's saved entry never goes stale as the price of this.
+        self.assertEqual(len(result["chooserCalls"]), 3)
+        self.assertEqual(
+            [call["autoOpen"] for call in result["chooserCalls"]],
+            [True, False, False],
+        )
+
 
 class DuplicatePresetRestoreTestCase(unittest.TestCase):
     """MW-13: two retained slots referencing one preset get one honest answer.

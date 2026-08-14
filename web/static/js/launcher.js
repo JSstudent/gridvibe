@@ -2669,13 +2669,41 @@
        auth or fails into the error placeholder (which has a Retry button). */
     let restorableWorkspaceIsOffered = false;
 
+    /* The offer is a *cold-start* offer, and both halves of it say so: a restart
+       ends every live shell, so the app comes back empty and the snapshot is the
+       only way back. The single-workspace banner encodes that below by refusing
+       to offer while the slot reports live groups; the chooser asks the same
+       question across every workspace.
+
+       Without it the two run modes disagree, because they reach the launcher by
+       different routes. The native launcher window is *focused* (webview_launcher
+       `open_launcher_window` never reloads it), so an unguarded auto-open fires
+       once per app run. Browser mode has no such window — Alt+W and the session
+       line's launcher button navigate, which reloads this page and re-runs its
+       startup — so the same auto-open fired on every hop, usually onto a chooser
+       whose only row was the workspace the user had just left, already open and
+       therefore un-restorable. "Reopen saved …" in the Workspaces card stays the
+       deliberate way in. */
+    async function hasLiveWorkspaceSessions() {
+        try {
+            const workspaces = await fetchLiveWorkspaces();
+            return workspaces.some(workspace => Number(workspace.group_count || 0) > 0);
+        } catch (_error) {
+            /* Unknown is not "empty": failing open would restore the every-hop
+               dialog on exactly the loads that already went wrong. */
+            return true;
+        }
+    }
+
     async function checkRestorableWorkspace() {
         /* With N workspaces a single banner stops being coherent — dismissing
            "the banner" would hide every saved workspace at once. The chooser
            takes over; the banner remains the single-workspace fallback so the
            flag off keeps today's behaviour exactly. */
         if (isMultiWorkspaceEnabled()) {
-            await loadWorkspaceRestoreChooser({ autoOpen: true });
+            await loadWorkspaceRestoreChooser({
+                autoOpen: !(await hasLiveWorkspaceSessions())
+            });
             return;
         }
         const banner = document.getElementById('restoreWorkspaceBanner');
