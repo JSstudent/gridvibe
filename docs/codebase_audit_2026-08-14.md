@@ -434,6 +434,20 @@ This is not urgent — 8.7k is well short of the 13.5k that forced the original
 with no extraction, and the mechanism that was supposed to prevent that was
 removed between them.
 
+> **Resolution (2026-08-14, Stage 4).** Done. `web/static/js/explorer-tabs.js`
+> exists and `explorer-viewer.js` is **8,848 → 7,818 lines** — below where it
+> stood at the previous audit, as predicted. See the Stage 4 block in §11 for
+> what the move actually contained, what the plan got wrong about the scope
+> and the scope mechanics, and how byte-exactness was verified rather than
+> assumed.
+>
+> The restored guardrail-6 text in `CLAUDE.md`/`AGENTS.md` now records the cut
+> as landed and advances the trigger to its successor — *the next change to the
+> Diff view extracts `explorer-diff.js`* — carrying the same pure-move test
+> (`test_explorer_source_frame.py` and `test_explorer_overview.py` pass
+> untouched, or it was not a move). The rule keeps a condition rather than an
+> adjective, which is the §4.1/§5.1 lesson.
+
 ### 4.2 — `web/workspaces.py` breaks 25 import cycles at call time `LOW`
 
 `web/workspaces.py` (1,628 lines, +492) carries **25 function-level imports**,
@@ -904,7 +918,76 @@ failure mode in place.
 **Verify:** the batch-download behavioural test in `tests/test_explorer_fs_batch.py`
 gains the partial-failure case; `make check`.
 
-### Stage 4 — Extract from `explorer-viewer.js` (the first real cut)
+### Stage 4 — Extract from `explorer-viewer.js` (the first real cut) — **DONE 2026-08-14**
+
+> **Resolution (2026-08-14, Stage 4).** Landed as `web/static/js/explorer-tabs.js`.
+> `explorer-viewer.js` went **8,848 → 7,818 lines**; the new file is **1,067**
+> (1,029 moved lines, byte for byte, plus a header and two section markers —
+> the only new text in it). Both numbers land where the plan said they would.
+> Four corrections and one gotcha, in descending order of how much they
+> mattered.
+>
+> * **The plan's one warning about mechanics was wrong, and following it would
+>   have made this a refactor instead of a move.** The Verify note said the tab
+>   functions "close over `terminals`/`sessionIds`, so the extraction needs the
+>   same accessor treatment `explorer-selection.js` uses." They do not close
+>   over anything. `explorer-selection.js` needs accessors because it is a
+>   DOM-free module in its own IIFE with `module.exports` — a deliberately
+>   different contract. `explorer-viewer.js` is a **classic script whose
+>   top-level declarations are globals**, and so is `explorer-overview.js`,
+>   which is the right precedent: `terminals` and `sessionIds` are globals, not
+>   captured variables, and cross-file calls in both directions already existed
+>   before this change (`explorer-fs.js` and `terminals.js` were already calling
+>   `ensureExplorerTabState`, `explorerPreviewTab`, `explorerActiveTab` and
+>   `renderExplorerTabStrip`). **The move cost zero accessor plumbing and zero
+>   new globals** — one `<script>` tag directly after `explorer-viewer.js`, and
+>   nothing else.
+> * **It was five ranges, not "one band plus three stragglers", and 38
+>   functions, not 32.** The band's shape is as described — the two interlopers
+>   named in the plan (`explorerEnsureViewerShell`, `renderExplorerPathBreadcrumb`)
+>   do split it, and the three named stragglers did have to come along. What the
+>   inventory missed is that the **tab-persistence cluster is its own separated
+>   range**, cut off from the strip by the session-Markdown appearance pair, the
+>   viewer entry point and the whole Markdown link cluster. What moved:
+>   **13 functions + 3 constants** (tab model), **1** (`ensureExplorerTabLineWrap`),
+>   **2** (`explorerCaptureActiveTabView` / `explorerMatchingTabView`), **10**
+>   (strip, interactions, drag-reorder, promotion, reveal, empty state, the
+>   activate/close/render trio) and **12** (persist + restore).
+>   `renderExplorerViewerEmpty` is a judgement call the plan did not make: it
+>   is named for the viewer but its body is entirely tab state — it resets the
+>   Preview record, re-points the active tab id and repaints the strip — so it
+>   went with the domain rather than being left as an island between two moved
+>   regions.
+> * **Byte-exactness was verified mechanically, not inferred from a green
+>   suite.** The change to `explorer-viewer.js` is **1,034 deletions and zero
+>   insertions**, and the new file's body was diffed against the five source
+>   ranges concatenated in order from `HEAD` — identical, line for line,
+>   including the legacy four-space indentation, which was deliberately *not*
+>   normalised so the relocation stays reviewable. A suite that passes proves
+>   the tests still hold; only this proves nothing was rewritten on the way.
+> * **`test_explorer_source_frame.py` and `test_explorer_overview.py` passed
+>   untouched**, which was the plan's stated pure-move test. Two harness
+>   changes were still needed and neither is behavioural:
+>   `tests/test_explorer_editor_group_switch.py` evaluates the real viewer in
+>   Node and its Source render reaches the active tab's fold set, so it now
+>   evaluates the pair the page loads; and `test_api.py`'s `_page_html()` plus
+>   its two static-asset lists had to learn the new file. **Ten `test_api.py`
+>   assertions that slice the viewer by function offset were repointed at
+>   `explorer-tabs.js` rather than converted** to behavioural checks. That is a
+>   deliberate departure from the standing "convert when practical" rule and
+>   the reason is the move itself: those assertions are the evidence that
+>   behaviour did not change, and rewriting them in the same commit would have
+>   destroyed the evidence. They stay on the §5.4 backlog, now spread over two
+>   files instead of one.
+> * **A gotcha for anything line-based over this file:** `explorer-viewer.js`
+>   contains a literal `\x1e` (the explorer entries signature). Python's
+>   `str.splitlines()` treats it as a line break and no editor does, so a first
+>   extraction pass silently shifted every range by one line and dropped the
+>   closing brace of all five. Split on `\n`.
+>
+> No `CHANGELOG.md` entry: every extracted line is byte-identical and nothing
+> user-visible changed. Suite: **1,647 tests, OK** (8 skipped); `ruff` clean;
+> `node --check` clean on all 29 first-party JS files.
 
 Take the **tab strip**, not the Diff domain, despite Diff being larger.
 

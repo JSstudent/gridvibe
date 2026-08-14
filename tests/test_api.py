@@ -269,6 +269,7 @@ class ApiRoutesTestCase(unittest.TestCase):
             "js/terminal-icons.js",
             "js/voice-input.js",
             "js/explorer-viewer.js",
+            "js/explorer-tabs.js",
             "js/explorer-editor.js",
             "js/explorer-search.js",
             "js/explorer-fs.js",
@@ -2053,6 +2054,8 @@ class ApiRoutesTestCase(unittest.TestCase):
         """§5.6: every deliberate teardown consults the discard guard."""
         editor = self._static("js/explorer-editor.js")
         viewer = self._static("js/explorer-viewer.js")
+        # Tab switch/close teardown moved with the tab domain (explorer-tabs.js).
+        tabs = self._static("js/explorer-tabs.js")
         terminals_js = self._static("js/terminals.js")
 
         # Guard + group guard exist and use the in-page confirm shell only.
@@ -2063,11 +2066,11 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("await openGenericConfirmModal(", editor)
 
         # Tab / path / directory / refresh teardown in the viewer awaits it.
-        self.assertIn("confirmDiscardExplorerEdit(index, 'Switching tabs')", viewer)
+        self.assertIn("confirmDiscardExplorerEdit(index, 'Switching tabs')", tabs)
         self.assertIn("confirmDiscardExplorerEdit(index, 'Opening another file')", viewer)
         self.assertIn("confirmDiscardExplorerEdit(index, 'Leaving this file')", viewer)
         self.assertIn("confirmDiscardExplorerEdit(index, 'Refreshing')", viewer)
-        self.assertIn("&& !(await confirmDiscardExplorerEdit(index, 'Closing this tab'))", viewer)
+        self.assertIn("&& !(await confirmDiscardExplorerEdit(index, 'Closing this tab'))", tabs)
 
         # Pane close, group switch, and group close in terminals.js await it.
         self.assertIn("confirmDiscardExplorerEdit(index, 'Closing this pane')", terminals_js)
@@ -2080,9 +2083,9 @@ class ApiRoutesTestCase(unittest.TestCase):
 
         # Editor state is transient: never serialized into saved sessions or the
         # runtime snapshot (the tab-persist payload has no _explorerEdit).
-        persist_start = viewer.index("function persistExplorerTabsToSession(index)")
-        persist_end = viewer.index("\n    function ", persist_start + 1)
-        self.assertNotIn("_explorerEdit", viewer[persist_start:persist_end])
+        persist_start = tabs.index("function persistExplorerTabsToSession(index)")
+        persist_end = tabs.index("\n    function ", persist_start + 1)
+        self.assertNotIn("_explorerEdit", tabs[persist_start:persist_end])
 
     def test_terminals_page_explorer_editor_icons_and_styles_are_token_driven(self):
         """§6 + guardrail 7: stroke currentColor icons, token colors, class busy state."""
@@ -2107,18 +2110,21 @@ class ApiRoutesTestCase(unittest.TestCase):
     def test_terminals_page_explorer_tabs_show_unstaged_git_status(self):
         """Open tabs mirror only the worktree/unstaged status column."""
         viewer = self._static("js/explorer-viewer.js")
+        tabs = self._static("js/explorer-tabs.js")
         css = self._static("css/terminals.css")
-        helper = viewer[
-            viewer.index("function explorerTabUnstagedGit(git)"):
-            viewer.index("function syncExplorerTabGitFromRepo", viewer.index("function explorerTabUnstagedGit(git)"))
+        helper = tabs[
+            tabs.index("function explorerTabUnstagedGit(git)"):
+            tabs.index("function syncExplorerTabGitFromRepo", tabs.index("function explorerTabUnstagedGit(git)"))
         ]
         self.assertIn("const worktreeCode = git.worktree_status || ' ';", helper)
         self.assertIn("if (explorerGitCodeUnmodified(worktreeCode)) {", helper)
         self.assertIn("explorerGitStatusFromCode(worktreeCode)", helper)
+        # The file renderers stay in the viewer and still stamp the tab they
+        # rendered for; the sidebar sync and the badge itself live in the tabs.
         self.assertIn("assignedTab.git = data.git || null;", viewer)
         self.assertIn("renderedTab.git = data.git || null;", viewer)
         self.assertIn("syncExplorerTabGitFromRepo(index, data);", viewer)
-        self.assertIn("${gitBadge}", viewer)
+        self.assertIn("${gitBadge}", tabs)
         self.assertIn(".explorer-tab-main > .explorer-git-badge {", css)
 
     def test_terminals_page_explorer_diff_line_undo_is_revision_guarded(self):
@@ -2409,7 +2415,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         html = self._page_html(response)
         assign = html[
             html.index("function explorerAssignOpenTab(pane, path"):
-            html.index("function explorerEnsureViewerShell(index)")
+            html.index("function flashExplorerTab(index, id)")
         ]
         # The active-pinned-tab reuse branch is gone: a plain click can no
         # longer repurpose a pinned tab that happens to show the same path.
@@ -3145,9 +3151,10 @@ class ApiRoutesTestCase(unittest.TestCase):
         were already looking at, so the opener only touches the tab strip.
         """
         viewer = self._static("js/explorer-viewer.js")
-        opener = viewer[
-            viewer.index("function openExplorerFileInBackgroundTab(index, path,"):
-            viewer.index("function explorerEnsureViewerShell(index)")
+        tabs = self._static("js/explorer-tabs.js")
+        opener = tabs[
+            tabs.index("function openExplorerFileInBackgroundTab(index, path,"):
+            tabs.index("function ensureExplorerTabLineWrap(tab)")
         ]
         # No focus change, no viewer repaint, and no fetch — activateExplorerTab
         # loads the file lazily when the tab is first clicked.
@@ -3167,10 +3174,10 @@ class ApiRoutesTestCase(unittest.TestCase):
 
     def test_reopening_an_already_open_tab_flashes_it_instead_of_focusing(self):
         """Open-in-new-tab on a file that already has a tab answers without moving the viewer."""
-        viewer = self._static("js/explorer-viewer.js")
-        opener = viewer[
-            viewer.index("function openExplorerFileInBackgroundTab(index, path,"):
-            viewer.index("function explorerEnsureViewerShell(index)")
+        tabs = self._static("js/explorer-tabs.js")
+        opener = tabs[
+            tabs.index("function openExplorerFileInBackgroundTab(index, path,"):
+            tabs.index("function ensureExplorerTabLineWrap(tab)")
         ]
         # The already-open case is decided before the tab is ensured, then
         # flashed after the strip is rebuilt so the class lands on live DOM.
@@ -3181,9 +3188,9 @@ class ApiRoutesTestCase(unittest.TestCase):
         )
         # It still does not activate the tab — the flash replaces focus.
         self.assertNotIn("activateExplorerTab", opener)
-        flash = viewer[
-            viewer.index("function flashExplorerTab(index, id)"):
-            viewer.index("function openExplorerFileInBackgroundTab(index, path,")
+        flash = tabs[
+            tabs.index("function flashExplorerTab(index, id)"):
+            tabs.index("function openExplorerFileInBackgroundTab(index, path,")
         ]
         # A tab id is a file path, so it is matched by dataset rather than
         # interpolated into a CSS selector.
@@ -3205,10 +3212,10 @@ class ApiRoutesTestCase(unittest.TestCase):
 
     def test_preview_double_click_pins_in_the_background(self):
         """Double-clicking Preview bookmarks its file; the viewer does not jump."""
-        viewer = self._static("js/explorer-viewer.js")
-        promote = viewer[
-            viewer.index("function promoteExplorerPreviewTab(index)"):
-            viewer.index("function revealExplorerTabInTree(index, id)")
+        tabs = self._static("js/explorer-tabs.js")
+        promote = tabs[
+            tabs.index("function promoteExplorerPreviewTab(index)"):
+            tabs.index("function revealExplorerTabInTree(index, id)")
         ]
         # Focus is untouched: the non-focusing helper is used, the rendered-tab
         # stamp stays on Preview (whose DOM is still what the viewer shows),
@@ -3235,10 +3242,10 @@ class ApiRoutesTestCase(unittest.TestCase):
 
     def test_closing_the_active_tab_falls_back_to_preview(self):
         """Closing the tab you are reading lands on Preview, not the neighbour."""
-        viewer = self._static("js/explorer-viewer.js")
-        close = viewer[
-            viewer.index("async function closeExplorerTab(index, id)"):
-            viewer.index("const appliedExplorerMdSessions = new Set();")
+        tabs = self._static("js/explorer-tabs.js")
+        close = tabs[
+            tabs.index("async function closeExplorerTab(index, id)"):
+            tabs.index("function explorerPersistableTabView(tab)")
         ]
         # No positional neighbour lookup survives.
         self.assertNotIn("position - 1", close)
@@ -12729,8 +12736,9 @@ class ExplorerGitWatchFrontendTestCase(unittest.TestCase):
         self.assertIn("cache: 'no-store'", quiet_fn)
         self.assertIn("function applyExplorerGitRepoQuiet(index, data)", viewer)
         self.assertIn("_explorerGitRevision", viewer)
-        # Tab badges re-render only when the badge map actually changed.
-        self.assertIn("badgesChanged", viewer)
+        # Tab badges re-render only when the badge map actually changed — the
+        # sync itself moved with the tab domain (explorer-tabs.js).
+        self.assertIn("badgesChanged", self._static("js/explorer-tabs.js"))
         css = self._static("css/terminals.css")
         self.assertIn(".explorer-git-panel.git-refreshing", css)
 
@@ -12869,10 +12877,10 @@ class ExplorerGitWatchFrontendTestCase(unittest.TestCase):
         self.assertEqual(viewer.count("resetExplorerFsWatchBaseline(pane);"), 2)
 
     def test_promoted_preview_tab_keeps_its_git_badge(self):
-        viewer = self._static("js/explorer-viewer.js")
-        promote_fn = viewer[
-            viewer.index("function promoteExplorerPreviewTab(index)"):
-            viewer.index("function renderExplorerViewerEmpty(index)")
+        tabs = self._static("js/explorer-tabs.js")
+        promote_fn = tabs[
+            tabs.index("function promoteExplorerPreviewTab(index)"):
+            tabs.index("function renderExplorerViewerEmpty(index)")
         ]
         self.assertIn("pinnedTab.git = preview.git || null;", promote_fn)
 
@@ -12911,16 +12919,18 @@ class ExplorerGitWatchFrontendTestCase(unittest.TestCase):
 
     def test_pathless_tab_never_keeps_a_git_badge(self):
         viewer = self._static("js/explorer-viewer.js")
-        sync = viewer[
-            viewer.index("function syncExplorerTabGitFromRepo(index, repo)"):
-            viewer.index("function explorerAssignOpenTab(pane, path")
+        tabs = self._static("js/explorer-tabs.js")
+        sync = tabs[
+            tabs.index("function syncExplorerTabGitFromRepo(index, repo)"):
+            tabs.index("function explorerEnsurePinnedTab(pane, path)")
         ]
         # A Preview tab back on a directory listing shows no file, so it must
         # not keep the badge of the file it happened to show last.
         self.assertIn("const nextGit = path ? (changesByPath.get(path) || null) : null;", sync)
-        # Cleared eagerly too, so it does not wait for a Git sidebar sync.
+        # Cleared eagerly too, so it does not wait for a Git sidebar sync: the
+        # directory load clears it in the viewer, the empty viewer in the tabs.
         self.assertIn("previewTab.git = null;", viewer)
-        self.assertIn("preview.git = null;", viewer)
+        self.assertIn("preview.git = null;", tabs)
 
 
 class ExplorerSourceSelectionHighlightTestCase(unittest.TestCase):
@@ -14186,6 +14196,7 @@ class GuardrailAuditFixesTestCase(unittest.TestCase):
         "js/launcher.js",
         "js/terminals.js",
         "js/explorer-viewer.js",
+        "js/explorer-tabs.js",
         "js/explorer-editor.js",
         "js/explorer-search.js",
         "js/explorer-fs.js",
@@ -14321,6 +14332,19 @@ class ExtractedFrontendAssetsTestCase(unittest.TestCase):
             terminals_html.index("js/voice-input.js"),
             terminals_html.index("js/explorer-viewer.js"),
         )
+        # explorer-tabs.js is the tab domain lifted out of explorer-viewer.js;
+        # the two are one surface split across two files and load as a pair,
+        # ahead of every module that renders into a tab.
+        self.assertIn(f"/static/js/explorer-tabs.js?v={__version__}", terminals_html)
+        self.assertNotIn("js/explorer-tabs.js", launcher_html)
+        self.assertLess(
+            terminals_html.index("js/explorer-viewer.js"),
+            terminals_html.index("js/explorer-tabs.js"),
+        )
+        self.assertLess(
+            terminals_html.index("js/explorer-tabs.js"),
+            terminals_html.index("js/terminals.js"),
+        )
         # explorer-editor.js loads after explorer-viewer.js (reuses its render
         # hooks) and before terminals.js (which owns the shared boot).
         self.assertLess(
@@ -14379,6 +14403,7 @@ class ExtractedFrontendAssetsTestCase(unittest.TestCase):
             "js/terminal-icons.js",
             "js/voice-input.js",
             "js/explorer-viewer.js",
+            "js/explorer-tabs.js",
             "js/explorer-editor.js",
             "js/explorer-search.js",
             "js/explorer-fs.js",
