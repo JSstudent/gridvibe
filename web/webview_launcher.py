@@ -18,7 +18,7 @@ import sys
 import threading
 import time
 import webbrowser
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import urlopen
@@ -500,7 +500,11 @@ def _new_window_browser_command(url: str) -> list:
         executable = ""
     if not executable:
         return []
-    family = Path(executable).stem.lower()
+    # The executable came out of the Windows registry, so it is a Windows path
+    # by construction: parse it as one instead of letting `Path` pick the
+    # interpreter's flavour, which on POSIX leaves the backslashes in the stem
+    # and never matches a family.
+    family = PureWindowsPath(executable).stem.lower()
     flag = _BROWSER_NEW_WINDOW_FLAGS.get(family)
     if not flag:
         logger.debug("Default browser %s has no known new-window flag", family)
