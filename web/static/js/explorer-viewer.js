@@ -1,9 +1,13 @@
     /* ─────────────────────────────────────────────
        Explorer viewer — extracted from terminals.js by the move-only second
        phase of the terminals.js split.
-       File-type classifier, syntax highlight, Git diff, source/markdown
-       render, image/mermaid viewer, tabbed viewer, breadcrumb, per-tab
-       view/scroll state and saved-tab persistence.
+       File-type classifier, syntax highlight, Git diff, Git sidebar, Files
+       tree, source/markdown render, image/mermaid viewer, breadcrumb,
+       directory listing and per-panel scroll.
+       The tab strip itself — the tab records, the strip, its interactions,
+       the per-tab view snapshot and saved-tab persistence — moved to
+       explorer-tabs.js, which loads directly after this file and shares the
+       same global scope; the two are one surface split across two files.
        Loaded before terminals.js; all shared terminal state, the markdown
        preview key listener and generic helpers remain in terminals.js.
     ───────────────────────────────────────────── */
@@ -1055,11 +1059,19 @@
             const pathAction = commitHash
                 ? `data-explorer-git-open-commit-diff="${escHtml(path)}" data-explorer-git-commit="${escHtml(commitHash)}"`
                 : `data-explorer-git-open-file="${escHtml(path)}" data-explorer-git-diff-mode="${escHtml(diffMode)}"`;
+            /* Stage/unstage draw their plus and minus with the shared
+               UI_PLUS_ICON / UI_MINUS_ICON — the same pair the search panel's
+               expand/collapse and the browser pane's new tab already use —
+               rather than the `+`/`−` text they used to carry beside the SVG
+               revert and open-folder buttons on the same row. A glyph centres
+               itself by `font-size` and an SVG does not, so both buttons (and
+               the editor's zoom pair, which made the same move) carry flex
+               centring and an explicit icon box in terminals.css. */
             let actionButton = '';
             if (action === 'stage') {
-                actionButton = `<button type="button" class="explorer-search-btn explorer-git-stage-btn" data-explorer-git-stage="${escHtml(path)}" title="Stage changes" aria-label="Stage changes">+</button>`;
+                actionButton = `<button type="button" class="explorer-search-btn explorer-git-stage-btn" data-explorer-git-stage="${escHtml(path)}" title="Stage changes" aria-label="Stage changes">${UI_PLUS_ICON}</button>`;
             } else if (action === 'unstage') {
-                actionButton = `<button type="button" class="explorer-search-btn explorer-git-unstage-btn" data-explorer-git-unstage="${escHtml(path)}" title="Unstage changes" aria-label="Unstage changes">−</button>`;
+                actionButton = `<button type="button" class="explorer-search-btn explorer-git-unstage-btn" data-explorer-git-unstage="${escHtml(path)}" title="Unstage changes" aria-label="Unstage changes">${UI_MINUS_ICON}</button>`;
             }
             const discardLabel = status === 'untracked'
                 ? 'Delete untracked file'
@@ -1116,6 +1128,232 @@
         const nativeRel = usesBackslash ? rel.replace(/\//g, '\\') : rel.replace(/\\/g, '/');
         return `${trimmedBase}${separator}${nativeRel}`;
     }
+
+    /* ── Multi-entry selection: the DOM half ────────────────────────────────
+       The rules live in explorer-selection.js (DOM-free, Node-tested). This
+       side only reads rows out of the DOM, hands them to the model, and paints
+       the answer back. Selections are per session id and deliberately not
+       persisted — they are a pointer gesture, not pane state. */
+
+    const explorerSelections = new Map();
+
+    function explorerSelectionScope(index, surface) {
+        return {
+            sessionId: sessionIds[index] || '',
+            rootRevision: terminals[index]?._explorerRootRevision || '',
+            surface
+        };
+    }
+
+    function storeExplorerSelection(index, selection) {
+        const sessionId = sessionIds[index] || '';
+        if (!sessionId) {
+            return;
+        }
+        if (GridVibeExplorerSelection.isEmpty(selection)) {
+            explorerSelections.delete(sessionId);
+        } else {
+            explorerSelections.set(sessionId, selection);
+        }
+        refreshExplorerSelectionHighlight(index);
+    }
+
+    function clearExplorerSelection(sessionId) {
+        explorerSelections.delete(String(sessionId || ''));
+    }
+
+    /* Drop entries a completed mutation removed (deleted, or moved away),
+       including anything that was beneath a removed directory. */
+    function dropExplorerSelectionPaths(index, removedPaths) {
+        const sessionId = sessionIds[index] || '';
+        const selection = sessionId ? explorerSelections.get(sessionId) : null;
+        if (GridVibeExplorerSelection.isEmpty(selection)) {
+            return;
+        }
+        const next = GridVibeExplorerSelection.dropPaths(selection, removedPaths);
+        if (GridVibeExplorerSelection.isEmpty(next)) {
+            explorerSelections.delete(sessionId);
+        } else {
+            explorerSelections.set(sessionId, next);
+        }
+    }
+
+    function explorerRowEntry(row) {
+        return row ? {
+            path: row.dataset.explorerContextPath || '',
+            kind: row.dataset.explorerContextKind || '',
+            revision: row.dataset.explorerContextRevision || ''
+        } : null;
+    }
+
+    function explorerSurfaceContainer(index, surface) {
+        return surface === 'tree'
+            ? document.getElementById(`explorer-tree-panel-${index}`)
+            : document.getElementById(`explorer-viewer-${index}`);
+    }
+
+    /* Rows in render order — the ordering a shift+click range is taken over, so
+       it must be what the user actually sees (filtered, folded) rather than the
+       underlying entry list. */
+    function explorerOrderedRows(index, surface) {
+        const container = explorerSurfaceContainer(index, surface);
+        if (!container) {
+            return [];
+        }
+        return Array.from(container.querySelectorAll('[data-explorer-context-path]'))
+            .map(explorerRowEntry)
+            .filter(entry => entry && entry.path);
+    }
+
+    /* Paint the stored selection onto whatever rows exist right now. Called
+       after every render, so a reload, a filter keystroke, or a folded branch
+       re-applies it without the selection itself knowing about the DOM. */
+    function refreshExplorerSelectionHighlight(index) {
+        const card = document.getElementById(`tc-${index}`);
+        if (!card) {
+            return;
+        }
+        /* Styling only, no `aria-selected`: these rows are plain buttons and
+           divs, and that attribute is only valid on option/row/treeitem-style
+           roles. Claiming one would mean also owning the listbox/tree keyboard
+           model, which this does not implement — the menu names the count
+           instead ("Delete 3 files…"), so the action is never ambiguous. */
+        card.querySelectorAll('.explorer-selected').forEach(node => {
+            node.classList.remove('explorer-selected');
+        });
+        const sessionId = sessionIds[index] || '';
+        const selection = sessionId ? explorerSelections.get(sessionId) : null;
+        if (GridVibeExplorerSelection.isEmpty(selection)) {
+            return;
+        }
+        const scoped = GridVibeExplorerSelection.scopedSelection(
+            selection,
+            explorerSelectionScope(index, selection.surface)
+        );
+        if (!scoped) {
+            // The root revision moved on: drop it rather than paint stale rows.
+            explorerSelections.delete(sessionId);
+            return;
+        }
+        const container = explorerSurfaceContainer(index, scoped.surface);
+        if (!container) {
+            return;
+        }
+        const selected = new Set(GridVibeExplorerSelection.selectionPaths(scoped));
+        container.querySelectorAll('[data-explorer-context-path]').forEach(node => {
+            if (selected.has(node.dataset.explorerContextPath)) {
+                node.classList.add('explorer-selected');
+            }
+        });
+    }
+
+    /* Resolve a modifier click on a row. Returns true when the click was a
+       selection gesture and the row's normal open/navigate action must not
+       run. A plain click always returns false, so an explorer with nothing
+       selected behaves exactly as it did before multi-select existed. */
+    function handleExplorerRowSelectionClick(event, index, surface, row) {
+        const entry = explorerRowEntry(row);
+        if (!entry) {
+            return false;
+        }
+        const { selection, activate } = GridVibeExplorerSelection.applyPointerSelection(
+            explorerSelections.get(sessionIds[index] || '') || null,
+            Object.assign(explorerSelectionScope(index, surface), {
+                entry,
+                ctrlKey: event.ctrlKey,
+                metaKey: event.metaKey,
+                shiftKey: event.shiftKey
+            }),
+            explorerOrderedRows(index, surface)
+        );
+        storeExplorerSelection(index, selection);
+        return !activate;
+    }
+
+    /* Escape clears the selection.
+
+       Which pane it means comes from findExplorerShortcutTargetIndex() — the
+       same pointer-first resolver Ctrl+Shift+F and the explorer's other
+       shortcuts already use. Focus alone is not enough: most explorer controls
+       suppress mousedown focus so a toolbar click cannot steal a selection, and
+       clicking blank space in the listing leaves focus on nothing at all, so a
+       focus-scoped Escape stopped working the moment the user clicked anywhere
+       but a row. Pointer interaction is what the user actually means by "this
+       pane", and it survives all of that.
+
+       These are the dialogs and menus that close on Escape without marking the
+       event handled; the editor, the find bars and the context menu all
+       preventDefault, which the model reads separately. */
+    const EXPLORER_ESCAPE_CLAIM_SELECTOR = [
+        '.modal-shell.visible',
+        '.terminal-container.actions-open',
+        '.pane-shell-menu:not([hidden])',
+        '#sessionsMenuRoot.open',
+        '#workspaceMenuRoot.open',
+        '#workspaceContextMenu:not([hidden])'
+    ].join(', ');
+
+    function handleExplorerSelectionEscape(event) {
+        /* Cheap gate before any DOM work: this listener sees every keystroke in
+           the window, and the pane lookup and claim query below must not run
+           once per character typed into a terminal or the editor. The model
+           still owns the decision — this only says "not our key at all". */
+        if (event.key !== 'Escape' || typeof findExplorerShortcutTargetIndex !== 'function') {
+            return;
+        }
+        const index = findExplorerShortcutTargetIndex(event.target);
+        if (index === -1) {
+            return;
+        }
+        const sessionId = sessionIds[index] || '';
+        const target = event.target;
+        const decision = GridVibeExplorerSelection.shouldClearOnEscape({
+            key: event.key,
+            defaultPrevented: event.defaultPrevented,
+            claimedElsewhere: Boolean(
+                document.querySelector(EXPLORER_ESCAPE_CLAIM_SELECTOR)
+            ),
+            altKey: event.altKey,
+            ctrlKey: event.ctrlKey,
+            metaKey: event.metaKey,
+            shiftKey: event.shiftKey,
+            editableTarget: Boolean(
+                target?.isContentEditable
+                || target?.matches?.('input, textarea, select')
+            ),
+            hasSelection: !GridVibeExplorerSelection.isEmpty(
+                sessionId ? explorerSelections.get(sessionId) : null
+            )
+        });
+        if (!decision) {
+            return;
+        }
+        event.preventDefault();
+        storeExplorerSelection(index, null);
+        releaseExplorerRowFocus(index);
+    }
+
+    /* A row keeps DOM focus after a Ctrl+click, and `.explorer-row:focus-visible`
+       paints the same `--explorer-row-active` fill the selection does — which
+       Chrome turns on the moment a key is pressed. So clearing with Escape left
+       exactly one row still looking selected. Drop the focus, then re-assert the
+       pane as the active explorer so the *next* Escape still resolves here. */
+    function releaseExplorerRowFocus(index) {
+        const active = document.activeElement;
+        const card = document.getElementById(`tc-${index}`);
+        if (active?.blur && card?.contains(active) && active.closest('[data-explorer-context-path]')) {
+            active.blur();
+        }
+        if (typeof markActiveExplorerPane === 'function') {
+            markActiveExplorerPane(index);
+        }
+    }
+
+    function installExplorerSelectionEscape() {
+        document.addEventListener('keydown', handleExplorerSelectionEscape);
+    }
+
+    installExplorerSelectionEscape();
 
     let _explorerContextMenuInvoker = null;
 
@@ -1227,7 +1465,38 @@
         document.addEventListener('keydown', _explorerContextMenuKeydown, true);
     }
 
+    /* A commit row names a repository object, not a path under the explorer
+       root, so it takes its own branch: no selection, no filesystem entries,
+       and no path copies. The expanded file rows below a commit are siblings
+       of this button rather than children, so they still reach the entry
+       menu below. */
+    function handleExplorerCommitContextMenu(event, commitRow) {
+        event.preventDefault();
+        document.querySelectorAll('.explorer-context-target')
+            .forEach(node => node.classList.remove('explorer-context-target'));
+        commitRow.classList.add('explorer-context-target');
+        _explorerContextMenuInvoker = commitRow;
+        const items = window.GridVibeExplorerGitMenu.commitMenuItems({
+            hash: commitRow.dataset.explorerGitCommitToggle || '',
+            fullHash: commitRow.dataset.explorerGitCommitFull || '',
+            message: commitRow.dataset.explorerGitCommitMessage || ''
+        }, _copyText);
+        let x = event.clientX;
+        let y = event.clientY;
+        if (x <= 0 && y <= 0) {
+            const rect = commitRow.getBoundingClientRect();
+            x = rect.left + Math.min(24, rect.width);
+            y = rect.top + Math.min(rect.height, 24);
+        }
+        showExplorerContextMenu(x, y, items);
+    }
+
     function handleExplorerContextMenu(event, index) {
+        const commitRow = event.target.closest('[data-explorer-git-commit-toggle]');
+        if (commitRow) {
+            handleExplorerCommitContextMenu(event, commitRow);
+            return;
+        }
         const row = event.target.closest('[data-explorer-copy-path]');
         const pane = terminals[index];
         let blankContext = null;
@@ -1268,6 +1537,20 @@
             ? (row.dataset.explorerCopyPath || '')
             : blankContext.path;
         const absolutePath = explorerJoinRootPath(explorerRootDirectory(index), relativePath);
+        /* Right-clicking a row that is part of the live selection acts on the
+           whole selection; anything else collapses to that row alone, so a
+           forgotten selection elsewhere can never be swept into a delete the
+           user aimed at one file. The model owns that rule. */
+        const rowSurface = row?.dataset.explorerContextSurface || '';
+        const contextSurface = rowSurface === 'tree' ? 'tree' : 'preview';
+        const resolved = GridVibeExplorerSelection.resolveContextTargets(
+            explorerSelections.get(sessionIds[index] || '') || null,
+            Object.assign(explorerSelectionScope(index, contextSurface), {
+                entry: explorerRowEntry(row)
+            })
+        );
+        storeExplorerSelection(index, resolved.selection);
+        const selectedTargets = resolved.targets;
         let filesystemItems = [];
         if (typeof explorerFilesystemMenuItems === 'function') {
             if (row?.dataset.explorerContextKind) {
@@ -1275,30 +1558,55 @@
                     path: row.dataset.explorerContextPath || relativePath,
                     kind: row.dataset.explorerContextKind || '',
                     revision: row.dataset.explorerContextRevision || '',
-                    surface: row.dataset.explorerContextSurface || ''
-                });
+                    surface: rowSurface
+                }, selectedTargets);
             } else if (blankContext) {
                 filesystemItems = explorerFilesystemMenuItems(index, blankContext);
             }
         }
         const beforePath = filesystemItems.filter(item => item.placement !== 'after-path');
         const afterPath = filesystemItems.filter(item => item.placement === 'after-path');
-        const pathItems = [
-            { label: 'Copy path', action: () => _copyText(absolutePath || relativePath) },
-        ];
-        if (relativePath) {
+        /* With several rows selected the path entries copy the whole set, one
+           path per line — the same read the single-row entries perform. */
+        const multiTarget = selectedTargets.length > 1;
+        const targetRoot = explorerRootDirectory(index);
+        const pathItems = multiTarget
+            ? [{
+                label: `Copy ${selectedTargets.length} paths`,
+                action: () => _copyText(selectedTargets
+                    .map(entry => explorerJoinRootPath(targetRoot, entry.path) || entry.path)
+                    .join('\n'))
+            }, {
+                label: `Copy ${selectedTargets.length} relative paths`,
+                action: () => _copyText(selectedTargets.map(entry => entry.path).join('\n'))
+            }]
+            : [{ label: 'Copy path', action: () => _copyText(absolutePath || relativePath) }];
+        if (!multiTarget && relativePath) {
             pathItems.push({ label: 'Copy relative path', action: () => _copyText(relativePath) });
         }
         /* Downloading is a read, so it belongs with the copy entries. It is
            offered per row (not only for the open file) because a format the
            viewer can't render never reaches editor mode and its toolbar
-           download button. */
-        const downloadPath = row?.dataset.explorerDownloadPath || '';
-        if (downloadPath) {
+           download button. Folders have no download endpoint, so a mixed
+           selection offers only the files in it. */
+        const downloadTargets = multiTarget
+            ? selectedTargets.filter(entry => entry.kind === 'file')
+            : (row?.dataset.explorerDownloadPath
+                ? [{ path: row.dataset.explorerDownloadPath, kind: 'file' }]
+                : []);
+        if (downloadTargets.length === 1) {
             pathItems.push({
                 label: 'Download file',
-                title: `Download ${downloadPath}`,
-                action: () => downloadExplorerFile(index, { path: downloadPath })
+                title: `Download ${downloadTargets[0].path}`,
+                action: () => downloadExplorerFile(index, { path: downloadTargets[0].path })
+            });
+        } else if (downloadTargets.length > 1) {
+            pathItems.push({
+                label: `Download ${downloadTargets.length} files`,
+                title: downloadTargets.length === selectedTargets.length
+                    ? `Download the ${downloadTargets.length} selected files`
+                    : `Download the ${downloadTargets.length} files in the selection; folders are skipped`,
+                action: () => downloadExplorerFiles(index, downloadTargets)
             });
         }
         if (beforePath.length) {
@@ -1374,7 +1682,7 @@
                 const hash = commit.hash || '';
                 const expanded = hash && expandedCommits.has(`explorer:${hash}`);
                 return `
-                    <button type="button" class="explorer-diff-commit" data-explorer-git-commit-toggle="${escHtml(hash)}" ${hash ? '' : 'disabled'} title="${escHtml(commit.line || '')}" aria-expanded="${expanded ? 'true' : 'false'}">
+                    <button type="button" class="explorer-diff-commit" data-explorer-git-commit-toggle="${escHtml(hash)}" data-explorer-git-commit-full="${escHtml(commit.full_hash || '')}" data-explorer-git-commit-message="${escHtml(commit.message || '')}" ${hash ? '' : 'disabled'} title="${escHtml(commit.line || '')}" aria-expanded="${expanded ? 'true' : 'false'}">
                         <span class="explorer-diff-commit-graph">${explorerGitGraphHtml(commit.graph)}</span>
                         <span class="explorer-diff-commit-toggle" aria-hidden="true">${expanded ? UI_CHEVRON_DOWN_ICON : UI_CHEVRON_RIGHT_ICON}</span>
                         <span class="explorer-diff-commit-subject"><span class="explorer-diff-commit-hash">${escHtml(hash ? hash.slice(0, 7) : '')}</span> ${escHtml(commit.subject || commit.line || '')}</span>
@@ -1406,7 +1714,7 @@
                     <span>Changes</span>
                     <span class="explorer-git-section-actions">
                         <button type="button" class="explorer-search-btn explorer-git-revert-btn explorer-git-discard-all-btn" data-explorer-git-discard-all ${(busy || !discardable.length) ? 'disabled' : ''} title="Discard all changes" aria-label="Discard all changes">${EXPLORER_GIT_REVERT_ICON}</button>
-                        <button type="button" class="explorer-search-btn explorer-git-stage-btn explorer-git-stage-all-btn" data-explorer-git-stage-all ${(busy || !unstaged.length) ? 'disabled' : ''} title="Stage all changes" aria-label="Stage all changes">+</button>
+                        <button type="button" class="explorer-search-btn explorer-git-stage-btn explorer-git-stage-all-btn" data-explorer-git-stage-all ${(busy || !unstaged.length) ? 'disabled' : ''} title="Stage all changes" aria-label="Stage all changes">${UI_PLUS_ICON}</button>
                     </span>
                 </div>
                 <div class="explorer-diff-commit-files explorer-git-change-list">
@@ -1915,7 +2223,11 @@
         return pane;
     }
 
-    async function loadExplorerTreeChildren(index, path) {
+    /* `refresh` re-reads a directory the tree has already cached. The cached
+       rows stay on screen for the whole round trip — a re-read the reader did
+       not ask for must not blank the folder they are looking at — so the
+       loading placeholder is only rendered when there is nothing to show. */
+    async function loadExplorerTreeChildren(index, path, { refresh = false } = {}) {
         const pane = terminals[index];
         const sessionId = sessionIds[index];
         if (!pane || !sessionId) {
@@ -1924,8 +2236,9 @@
 
         ensureExplorerTreeState(pane);
         const key = String(path || '');
-        if (pane._explorerTreeChildren.has(key)) {
-            return pane._explorerTreeChildren.get(key);
+        const cached = pane._explorerTreeChildren.get(key);
+        if (cached && !refresh) {
+            return cached;
         }
         if (pane._explorerTreeLoading.has(key)) {
             return [];
@@ -1933,7 +2246,9 @@
 
         pane._explorerTreeLoading.add(key);
         pane._explorerTreeErrors.delete(key);
-        renderExplorerTreePanel(index);
+        if (!cached) {
+            renderExplorerTreePanel(index);
+        }
         try {
             const entriesUrl = `/api/explorer/${encodeURIComponent(sessionId)}/entries`;
             // Always send an explicit path (empty === the explorer root) so the tree stays
@@ -2066,13 +2381,14 @@
         if (error) {
             return `<div class="explorer-tree-error" ${indent}>${escHtml(error)}</div>`;
         }
-        if (pane._explorerTreeLoading.has(path)) {
-            return `<div class="explorer-tree-loading" ${indent}>Loading...</div>`;
-        }
 
         const entries = pane._explorerTreeChildren.get(path);
+        // A folder being re-read keeps showing what it has; only a folder with
+        // nothing cached yet is worth a placeholder.
         if (!entries) {
-            return '';
+            return pane._explorerTreeLoading.has(path)
+                ? `<div class="explorer-tree-loading" ${indent}>Loading...</div>`
+                : '';
         }
         if (!entries.length) {
             return `<div class="explorer-tree-empty" ${indent}>Empty folder.</div>`;
@@ -2140,13 +2456,28 @@
                 }
             });
         });
+        panel.querySelectorAll('.explorer-tree-main').forEach(button => {
+            button.addEventListener('mousedown', event => {
+                if (event.shiftKey) {
+                    event.preventDefault();
+                }
+            });
+        });
         panel.querySelectorAll('[data-explorer-tree-dir]').forEach(button => {
-            button.addEventListener('click', () => {
+            button.addEventListener('click', event => {
+                const row = button.closest('.explorer-tree-row');
+                if (handleExplorerRowSelectionClick(event, index, 'tree', row)) {
+                    return;
+                }
                 openExplorerTreeDirectory(index, button.dataset.explorerTreeDir || '');
             });
         });
         panel.querySelectorAll('[data-explorer-tree-file]').forEach(button => {
-            button.addEventListener('click', () => {
+            button.addEventListener('click', event => {
+                const row = button.closest('.explorer-tree-row');
+                if (handleExplorerRowSelectionClick(event, index, 'tree', row)) {
+                    return;
+                }
                 openExplorerFile(index, button.dataset.explorerTreeFile || '');
             });
         });
@@ -2168,6 +2499,7 @@
         if (typeof refreshExplorerFilesystemCutSource === 'function') {
             refreshExplorerFilesystemCutSource(index);
         }
+        refreshExplorerSelectionHighlight(index);
     }
 
     /* Fold arrow only: expand or collapse in place. It never touches the
@@ -2417,6 +2749,37 @@
         if (typeof explorerTreeSearchActive === 'function' && explorerTreeSearchActive(pane)) {
             await runExplorerTreeSearch(index);
         }
+    }
+
+    /* One file's row, re-read in place. Saving changes a file's *contents*, so
+       the set of paths the tree draws cannot have moved — only that one row
+       can (its Git badge turns a clean file modified, and its filesystem
+       revision is what the delete/move guards check). Running the full
+       reloadExplorerTree() for that dropped every cached directory, flashed a
+       near-empty panel, refetched one request per expanded folder and left the
+       reader scrolled back to the top of a tree they had navigated by hand.
+
+       So only the file's own directory is re-read, its rows stay on screen for
+       the round trip, every other folder keeps its cache and its expansion,
+       and the panel's scroll is put back afterwards — the rebuild that follows
+       the response resets it, the same way it resets on any tree render. A
+       file whose directory the tree has not loaded has no row to refresh. */
+    async function refreshExplorerTreeFileEntry(index, path) {
+        const pane = terminals[index];
+        const target = String(path || '');
+        if (!pane?._explorerTreeSidebarOpen || !target) {
+            return;
+        }
+        ensureExplorerTreeState(pane);
+        const cut = target.lastIndexOf('/');
+        const parent = cut === -1 ? '' : target.slice(0, cut);
+        if (!pane._explorerTreeChildren.has(parent)) {
+            return;
+        }
+        const panel = document.getElementById(`explorer-tree-panel-${index}`);
+        const viewport = captureScrollMetrics(panel);
+        await loadExplorerTreeChildren(index, parent, { refresh: true });
+        applyScrollMetrics(document.getElementById(`explorer-tree-panel-${index}`), viewport);
     }
 
     function ensureExplorerDiffExpandedCommits(pane) {
@@ -3983,7 +4346,13 @@
         return candidates.find(view => view && exists(view)) || mode;
     }
 
-    function setExplorerFileView(index, mode) {
+    /* `scroll` is forwarded to the find that gets re-applied at the bottom.
+       A reader switching panels wants the view to land on the active match —
+       Preview and Diff are rebuilt from scratch and would otherwise open at the
+       top. Entering the in-place editor does not: it is pinning the view to
+       Source on its way to mounting the editor over it, and the position it is
+       about to carry into the textarea is the one the reader left. */
+    function setExplorerFileView(index, mode, { scroll = true } = {}) {
         const normalizedMode =
             mode === 'preview' ? 'preview'
             : mode === 'diff' ? 'diff'
@@ -4029,10 +4398,10 @@
             loadExplorerDiff(index);
             const state = pane ? ensureExplorerSearchState(pane, 'file') : null;
             if (state?.query) {
-                applyExplorerSearch(index);
+                applyExplorerSearch(index, { scroll });
             }
         } else {
-            applyExplorerSearch(index);
+            applyExplorerSearch(index, { scroll });
         }
     }
 
@@ -4217,19 +4586,6 @@
         'jetbrains-mono': 'JetBrains Mono',
         'courier-new': 'Courier New',
     };
-
-    function ensureExplorerTabLineWrap(tab) {
-        if (!tab) {
-            return { source: true, preview: true, diff: true };
-        }
-        const current = tab.lineWrap && typeof tab.lineWrap === 'object' ? tab.lineWrap : {};
-        tab.lineWrap = {
-            source: current.source !== false,
-            preview: current.preview !== false,
-            diff: current.diff !== false,
-        };
-        return tab.lineWrap;
-    }
 
     function explorerLineWrapPreference(index, mode) {
         const pane = terminals[index];
@@ -4720,12 +5076,40 @@
         `;
     }
 
-    function renderExplorerSourceLines(content, language, searchRanges = [], collapsedLines = new Set(), highlightedLines) {
+    /* One gutter width for the whole document, published as a custom property
+       on the lines block. Each row is its own grid container, so the per-row
+       `minmax(42px, auto)` track this replaced sized every gutter from *that
+       row's own* number: under 1000 lines every number fit the 42px floor and
+       the columns agreed, but past it the four-digit rows started their code
+       column further right than their three-digit neighbours.
+
+       The width is arithmetic on the line count — no layout read, no observer,
+       nothing that needs the element to be in the document — so it is equally
+       safe to compute for a detached card. */
+    function explorerSourceGutterWidthCss(lineCount, foldable) {
+        const digits = String(Math.max(1, Number(lineCount) || 1)).length;
+        /* 9px of cell padding either side plus the 1px separator, and on a
+           foldable document the fold chevron (10px) and its 5px gap, which
+           share the cell with the number on every heading row. */
+        const fixed = 19 + (foldable ? 15 : 0);
+        return `max(42px, calc(${digits}ch + ${fixed}px))`;
+    }
+
+    /* `options.foldControls: false` renders the Markdown heading rows without
+       their fold <button>s — the in-place editor's underlay needs the rows for
+       their geometry and their colour, but a focusable control beneath a
+       covering textarea is an unclickable tab trap, and folding a buffer being
+       typed into is incoherent anyway. The gutter still reserves the chevron's
+       width, so the code column sits exactly where the read-only view put it
+       and entering edit mode moves no glyph. */
+    function renderExplorerSourceLines(content, language, searchRanges = [], collapsedLines = new Set(), highlightedLines, options = {}) {
         const normalizedLanguage = normalizeExplorerLanguage(language);
         const records = explorerSourceLineRecords(content);
         const languageClass = explorerLanguageClass(language);
         const codeClass = languageClass ? ` language-${languageClass}` : '';
-        const markdownHeadings = normalizedLanguage === 'markdown'
+        const markdownDocument = normalizedLanguage === 'markdown';
+        const foldControls = !options || options.foldControls !== false;
+        const markdownHeadings = markdownDocument
             ? explorerMarkdownHeadingLevels(records)
             : new Map();
         /* Folds survive a find: a search used to unfold the whole document so
@@ -4733,7 +5117,7 @@
            reader's fold state on every Ctrl+F. Only the sections a match
            actually lands in are opened now, by
            explorerRevealMarkdownSearchMatches() before this renders. */
-        const allowMarkdownCollapse = normalizedLanguage === 'markdown';
+        const allowMarkdownCollapse = markdownDocument && foldControls;
         // Whole-document Highlight.js pass (Phase 1); null for unsupported
         // languages, the log/markdown special renderers, oversized files, or any
         // Highlight.js failure, in which case each line uses the fallback lexer.
@@ -4766,7 +5150,7 @@
                 : lineHtml;
             rows.push(`
                 <div class="explorer-source-line" data-explorer-line="${record.number}">
-                    ${explorerSourceLineNumberHtml(record, headingLevel, collapsed)}
+                    ${explorerSourceLineNumberHtml(record, foldControls ? headingLevel : 0, collapsed)}
                     <code class="explorer-source-line-code${codeClass}">${contentHtml || '&nbsp;'}</code>
                 </div>
             `);
@@ -4776,7 +5160,11 @@
             }
         });
 
-        return `<div class="explorer-source-lines">${rows.join('')}</div>`;
+        // Width follows the document, not the controls: a Markdown underlay
+        // with its buttons suppressed still keeps the read-only gutter, so the
+        // code column does not shift under the caret on entering edit mode.
+        const gutterWidth = explorerSourceGutterWidthCss(records.length, markdownDocument);
+        return `<div class="explorer-source-lines" style="--explorer-source-gutter-width: ${gutterWidth};">${rows.join('')}</div>`;
     }
 
     /* A match hidden inside a collapsed Markdown section has no row to
@@ -5290,13 +5678,29 @@
             return;
         }
 
+        /* Shift+click would otherwise extend the browser's text selection
+           across the rows it spans, leaving the listing highlighted blue under
+           our own selection styling. */
+        viewer.querySelectorAll('.explorer-row').forEach(button => {
+            button.addEventListener('mousedown', event => {
+                if (event.shiftKey) {
+                    event.preventDefault();
+                }
+            });
+        });
         viewer.querySelectorAll('.explorer-row.directory').forEach(button => {
-            button.addEventListener('click', () => {
+            button.addEventListener('click', event => {
+                if (handleExplorerRowSelectionClick(event, index, 'preview', button)) {
+                    return;
+                }
                 loadExplorerPane(index, button.dataset.explorerPath || '');
             });
         });
         viewer.querySelectorAll('.explorer-row.file').forEach(button => {
-            button.addEventListener('click', () => {
+            button.addEventListener('click', event => {
+                if (handleExplorerRowSelectionClick(event, index, 'preview', button)) {
+                    return;
+                }
                 openExplorerFile(index, button.dataset.explorerPath || '');
             });
         });
@@ -5340,6 +5744,7 @@
         if (typeof refreshExplorerFilesystemCutSource === 'function') {
             refreshExplorerFilesystemCutSource(index);
         }
+        refreshExplorerSelectionHighlight(index);
     }
 
     function updateExplorerSearchControls(index, query, activeIndex, matchCount, capped = false) {
@@ -5387,24 +5792,35 @@
         }
     }
 
-    function scheduleExplorerSearch(index, { resetActive = false, delay = EXPLORER_SEARCH_DEBOUNCE_MS } = {}) {
+    function scheduleExplorerSearch(index, { resetActive = false, delay = EXPLORER_SEARCH_DEBOUNCE_MS, scroll = true } = {}) {
         const pane = terminals[index];
         if (!pane || !isExplorerSearchablePane(pane)) {
             return;
         }
         if (pane._explorerMode === 'directory') {
-            applyExplorerSearch(index, { resetActive });
+            applyExplorerSearch(index, { resetActive, scroll });
             return;
         }
 
         cancelExplorerSearch(index);
         pane._explorerSearchTimer = window.setTimeout(() => {
             pane._explorerSearchTimer = null;
-            applyExplorerSearch(index, { resetActive });
+            applyExplorerSearch(index, { resetActive, scroll });
         }, delay);
     }
 
-    async function applyExplorerSearch(index, { resetActive = false } = {}) {
+    /* `scroll` is what separates a find the reader is *navigating* from one
+       that is merely being repainted. Typing a query, stepping with
+       Enter/prev/next and seeding from Ctrl+F all move the view to the active
+       match — that is the point of them. Everything else here is a repaint: the
+       surface was rebuilt (entering or leaving the in-place editor, a keystroke
+       moving the draft under the overlay, a group re-attach, the post-save
+       in-place refresh) and the find is only being re-derived onto it. Those
+       callers pass `scroll: false`, because a repaint that yanks the view to
+       match 5 of 8 is exactly the "thrown across the file" jolt swapping modes
+       used to produce — and every one of them either preserves the reader's
+       scroll position or restores it explicitly right afterwards. */
+    async function applyExplorerSearch(index, { resetActive = false, scroll = true } = {}) {
         const pane = terminals[index];
         if (!pane || !isExplorerSearchablePane(pane)) {
             return;
@@ -5418,6 +5834,18 @@
         if (pane._explorerMode === 'directory') {
             renderExplorerDirectoryRows(index);
             return;
+        }
+
+        /* An open in-place editor owns the Source panel: the rows under the
+           caret are the highlight overlay's underlay, painted from the live
+           draft. A find there has to search that draft rather than the file on
+           disk, and paint without rewriting the rows — rewriting them is what
+           would move the caret's geometry out from under it.
+           explorer-edit-find.js owns both, using this same search state, so
+           the input, the counter and Enter/Shift+Enter are unchanged. Every
+           other view behaves exactly as it does with no editor open. */
+        if (pane._explorerEdit && typeof window.applyExplorerEditFind === 'function') {
+            return window.applyExplorerEditFind(index, { resetActive, scroll });
         }
 
         const query = state.query || '';
@@ -5512,7 +5940,7 @@
         state.matchCount = matchCount;
         state.matchCapped = capped;
         updateExplorerSearchControls(index, query, state.activeIndex || 0, matchCount, capped);
-        if (query && matchCount) {
+        if (query && matchCount && scroll) {
             scrollExplorerSearchMatch(index);
         }
     }
@@ -5603,10 +6031,13 @@
             state.query = seedQuery;
             state.activeIndex = 0;
             /* Open on the match the reader is already looking at instead of
-               snapping the Source view back to the file's first match. */
-            state.seekOffset = activeExplorerFileView(index) === 'source'
-                ? explorerSelectionContentOffset(pane)
-                : null;
+               snapping the Source view back to the file's first match. With an
+               editor open the spot comes from the textarea's own selection —
+               the document selection this otherwise reads is empty inside one. */
+            const editSeed = window.explorerEditSelectionSeed?.(index) || null;
+            state.seekOffset = activeExplorerFileView(index) !== 'source'
+                ? null
+                : (editSeed ? editSeed.offset : explorerSelectionContentOffset(pane));
             state.ranges = [];
             state.resultQuery = '';
             state.matchCapped = false;
@@ -5812,9 +6243,15 @@
             if (!view) {
                 return panel;
             }
-            // Edit mode moves Source scrolling into its full-height textarea.
-            // Capture that inner viewport so Save can restore the same location
-            // when the highlighted read-only Source panel is rebuilt.
+            /* The in-place editor's highlight overlay keeps that same view as
+               the scroller: its textarea is `overflow: hidden` and exactly as
+               tall as its own content, so both layers scroll together. Only
+               the bare fallback textarea — the overlay stood down — is a
+               scroller of its own, and its inner viewport is what Save needs
+               to restore onto the rebuilt read-only panel. */
+            if (view.querySelector('.explorer-edit-stack')) {
+                return view;
+            }
             const editor = view.querySelector('.explorer-source-editor');
             return editor || view;
         }
@@ -6021,76 +6458,6 @@
         return revisions;
     }
 
-    /* Snapshot the currently shown tab's view mode + scroll onto its tab
-       record. Must run while the tab's content is still in the DOM, i.e.
-       before the active tab id changes or a loading placeholder replaces the
-       viewer. The `_explorerRenderedTabId` guard records which tab the viewer
-       DOM actually belongs to — with Preview isolation two tabs can show the
-       same path, so a path match alone cannot prove the DOM is the active
-       tab's (it may be the Preview tab showing the same file in diff mode). */
-    function explorerCaptureActiveTabView(index) {
-        const pane = terminals[index];
-        if (!pane || (pane._explorerMode !== 'file' && pane._explorerMode !== 'directory')) {
-            return;
-        }
-        if (pane._explorerRenderedTabId !== pane._explorerActiveTabId) {
-            return;
-        }
-        const tab = explorerFindTab(pane, pane._explorerActiveTabId);
-        if (!tab) {
-            return;
-        }
-        const isFile = pane._explorerMode === 'file';
-        if (isFile) {
-            if (explorerNormalizeTabPath(tab.path) !== explorerNormalizeTabPath(pane._explorerFilePath)) {
-                return;
-            }
-        } else if (tab.path) {
-            return;
-        }
-        const scroll = captureExplorerFileScroll(index);
-        if (!scroll) {
-            return;
-        }
-        tab.view = {
-            mode: isFile ? (scroll.activeView || 'source') : 'preview',
-            revisions: explorerCurrentContentRevisions(pane),
-            diffCommit: isFile && scroll.activeView === 'diff'
-                ? String(pane._explorerDiffCommit || '')
-                : '',
-            diffMode: isFile && scroll.activeView === 'diff'
-                ? String(pane._explorerDiffMode || '')
-                : '',
-            scroll
-        };
-    }
-
-    /* Durable intent always returns; revision-bound scroll is filtered panel by
-       panel. A changed file keeps Diff/Preview selected without stale offsets. */
-    function explorerMatchingTabView(tab, revisions) {
-        const view = tab && tab.view;
-        if (!view) {
-            return null;
-        }
-        const current = typeof revisions === 'string'
-            ? { source: revisions, preview: revisions, diff: revisions, directory: revisions }
-            : (revisions || {});
-        if (view.persistedRecord) {
-            return window.GridVibeExplorerPersistence?.resolveRecord(
-                view.persistedRecord,
-                current
-            ) || null;
-        }
-        const same = Object.entries(view.revisions || {}).every(
-            ([panel, revision]) => !revision || current[panel] === revision
-        );
-        return {
-            ...view,
-            scroll: same ? view.scroll : { activeView: view.mode, panels: {}, sidebar: {} },
-            folds: same ? Array.from(tab.collapsedLines || []) : []
-        };
-    }
-
     /* Diff content loads asynchronously, after restoreExplorerFileScroll has
        already run; re-apply a stashed diff-panel scroll once it arrives. */
     function applyExplorerPendingDiffScroll(index) {
@@ -6160,18 +6527,57 @@
             <path d="M5.4 13.5a7 7 0 1 0 1.7-6.4L5 10"/>
         </svg>
     `;
+
+    /* Bodies at or under this are read into memory so the *status* is
+       observable; anything larger is handed to the browser to stream, which
+       costs the outcome but never the machine's memory. The server caps a
+       download at 100 MB, so this only ever splits the top quarter of the
+       range off. */
+    const EXPLORER_DOWNLOAD_BUFFER_MAX_BYTES = 25 * 1024 * 1024;
+    /* An object URL has to outlive the click that consumes it; revoking in the
+       same task can race the browser's own read of it. */
+    const EXPLORER_DOWNLOAD_OBJECT_URL_TTL_MS = 60000;
+
+    function triggerExplorerDownloadAnchor(href, fileName) {
+        const link = document.createElement('a');
+        link.href = href;
+        link.download = fileName;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+    }
+
     /* `options.path` downloads a specific file instead of whatever the viewer
        has open — the context-menu entry point, so files GridVibe can't render
-       (and therefore never open in the editor) are still reachable. */
+       (and therefore never open in the editor) are still reachable.
+       `options.quiet` suppresses the per-file toast so a batch can report once
+       instead of N times; the outcome is returned either way as
+       `{ok, cancelled, fileName, error}`. */
     async function downloadExplorerFile(index, options = {}) {
+        const quiet = options.quiet === true;
+        /* One reporting door for both transports, so a failure can never leave
+           through a success-shaped one. A cancelled save is the user's answer,
+           not a failure, and says nothing. */
+        const report = (result) => {
+            if (!quiet && !result.cancelled) {
+                showTerminalToast(
+                    result.ok
+                        ? result.message
+                        : `Download failed: ${result.error || 'unknown error'}`,
+                    result.ok ? 'success' : 'error'
+                );
+            }
+            return result;
+        };
+
         const pane = terminals[index];
         const sessionId = sessionIds[index];
         if (!pane || !sessionId) {
-            return;
+            return { ok: false, cancelled: true, fileName: '' };
         }
         const explicitPath = String(options.path || '');
         if (!explicitPath && pane._explorerMode !== 'file') {
-            return;
+            return { ok: false, cancelled: true, fileName: '' };
         }
         const path = explicitPath || pane._explorerFilePath || '';
         const fileName = explicitPath
@@ -6181,7 +6587,7 @@
 
         /* WebView2 silently ignores programmatic <a download> clicks, so in the
            native window route the save through the pywebview bridge (native
-           Save dialog + server-side fetch). In the browser the anchor works. */
+           Save dialog + server-side fetch). */
         if (isPywebviewAvailable() && window.pywebview.api.save_download) {
             try {
                 const result = await window.pywebview.api.save_download(
@@ -6192,23 +6598,126 @@
                         : CURRENT_WORKSPACE_ID
                 );
                 if (result?.ok) {
-                    showTerminalToast(`Saved ${getDownloadBaseName(result.path) || fileName}`, 'success');
-                } else if (!result?.cancelled) {
-                    showTerminalToast(`Download failed: ${result?.error || 'unknown error'}`, 'error');
+                    return report({
+                        ok: true,
+                        fileName,
+                        message: `Saved ${getDownloadBaseName(result.path) || fileName}`
+                    });
                 }
+                if (result?.cancelled) {
+                    return report({ ok: false, cancelled: true, fileName });
+                }
+                return report({ ok: false, fileName, error: result?.error || 'unknown error' });
             } catch (error) {
-                showTerminalToast(`Download failed: ${error?.message || error}`, 'error');
+                return report({ ok: false, fileName, error: error?.message || String(error) });
             }
-            return;
         }
 
-        const link = document.createElement('a');
-        link.href = url;
-        link.download = fileName;
-        document.body.appendChild(link);
-        link.click();
-        link.remove();
-        showTerminalToast(`Downloading ${fileName}…`, 'success');
+        /* Browser mode. A programmatic <a download> click cannot observe the
+           response, so a stale row's 404, a 403, or the server's size refusal
+           all landed as a green success toast and no file — and once a
+           selection could download N rows at once, as N of them. Fetch first so
+           the status is real; only a body too large to hold goes to the anchor,
+           and by then the status is already known. */
+        const aborter = typeof AbortController === 'function' ? new AbortController() : null;
+        let response;
+        try {
+            response = await fetch(url, aborter ? { signal: aborter.signal } : undefined);
+        } catch (error) {
+            return report({ ok: false, fileName, error: error?.message || String(error) });
+        }
+        if (!response.ok) {
+            let reason = `HTTP ${response.status}`;
+            try {
+                const data = await response.json();
+                if (data?.error) {
+                    reason = data.error;
+                }
+            } catch (error) {
+                // A body that is not the API's JSON error says nothing the
+                // status code does not; keep the status.
+            }
+            return report({ ok: false, fileName, error: reason });
+        }
+        const declaredLength = Number(response.headers.get('Content-Length'));
+        if (Number.isFinite(declaredLength) && declaredLength > EXPLORER_DOWNLOAD_BUFFER_MAX_BYTES) {
+            // Drop this response unread — the anchor re-requests and streams it.
+            aborter?.abort();
+            triggerExplorerDownloadAnchor(url, fileName);
+            return report({ ok: true, fileName, message: `Downloading ${fileName}…` });
+        }
+        try {
+            const objectUrl = URL.createObjectURL(await response.blob());
+            triggerExplorerDownloadAnchor(objectUrl, fileName);
+            setTimeout(() => URL.revokeObjectURL(objectUrl), EXPLORER_DOWNLOAD_OBJECT_URL_TTL_MS);
+            return report({ ok: true, fileName, message: `Downloaded ${fileName}` });
+        } catch (error) {
+            return report({ ok: false, fileName, error: error?.message || String(error) });
+        }
+    }
+
+    /* One outcome for a whole batch, never one per file: nine stale rows used
+       to produce nine green toasts and nothing on disk. Cancelled saves are the
+       user's answer and drop out of both the count and the denominator. */
+    function reportExplorerDownloadBatch(results) {
+        const attempted = results.filter(result => result && !result.cancelled);
+        if (!attempted.length) {
+            return;
+        }
+        const failed = attempted.filter(result => !result.ok);
+        if (!failed.length) {
+            showTerminalToast(`Downloaded ${attempted.length} files`, 'success');
+            return;
+        }
+        const saved = attempted.length - failed.length;
+        showTerminalToast(
+            `Downloaded ${saved} of ${attempted.length} files — `
+            + `${failed.length} failed: ${failed[0].error || 'unknown error'}`,
+            'error'
+        );
+    }
+
+    /* Download several selected files as N sequential single-file downloads.
+
+       There is no archive endpoint and this must not become one: each transfer
+       stays the existing root-confined, size-capped read. Sequential because in
+       the native window every file opens its own Save dialog through the
+       pywebview bridge, and firing those concurrently would stack modal dialogs
+       over each other. Past a threshold it asks first — N transfers (and in the
+       native window, N dialogs) is not what a mis-click should cost. */
+    async function downloadExplorerFiles(index, targets) {
+        const sessionId = sessionIds[index];
+        const files = (targets || []).filter(entry => entry && entry.path);
+        if (!sessionId || !files.length) {
+            return;
+        }
+        if (files.length === 1) {
+            await downloadExplorerFile(index, { path: files[0].path });
+            return;
+        }
+        const confirmCopy = GridVibeExplorerSelection.downloadConfirmCopy(files);
+        if (confirmCopy) {
+            const confirmed = await openGenericConfirmModal({
+                title: confirmCopy.title,
+                copy: GridVibeExplorerSelection.targetsCopyLine(files),
+                note: 'Each file downloads separately.',
+                confirmLabel: confirmCopy.confirmLabel,
+                owner: `explorer-download:${sessionId}`
+            });
+            if (!confirmed) {
+                return;
+            }
+        }
+        const results = [];
+        for (const entry of files) {
+            // The pane can be closed or restarted mid-run; stop rather than
+            // keep pulling files for a session that is gone.
+            if (sessionIds[index] !== sessionId) {
+                break;
+            }
+            results.push(await downloadExplorerFile(index, { path: entry.path, quiet: true }));
+        }
+        reportExplorerDownloadBatch(results);
     }
 
     function getDownloadBaseName(fullPath) {
@@ -6249,233 +6758,6 @@
         } catch (error) {
             showTerminalToast(`Could not open file manager: ${error?.message || error}`, 'error');
         }
-    }
-
-    /* ─────────────────────────────────────────────
-       Explorer tabbed viewer (ISSUE-2026-014)
-       The main pane is always a read-only viewer with a persistent tab strip:
-       one permanent dynamic "Preview" tab plus deduplicated pinned tabs keyed
-       by normalized path. The Files tree is the navigation surface.
-    ───────────────────────────────────────────── */
-    const EXPLORER_PREVIEW_TAB_ID = '__preview__';
-    const EXPLORER_MAX_PINNED_TABS = 12;
-    const EXPLORER_MAX_TAB_PATH_LENGTH = 4096;
-
-    function explorerBaseName(path) {
-        return String(path || '').replace(/\\/g, '/').split('/').filter(Boolean).pop() || '';
-    }
-
-    /* Normalize a path into a stable dedup key: forward slashes, no leading or
-       trailing slash, collapsed separators. Empty for unusable input. */
-    function explorerNormalizeTabPath(path) {
-        const value = String(path == null ? '' : path).replace(/\\/g, '/').trim();
-        if (!value || value.length > EXPLORER_MAX_TAB_PATH_LENGTH) {
-            return '';
-        }
-        return value.replace(/\/{2,}/g, '/').replace(/^\/+/, '').replace(/\/+$/, '');
-    }
-
-    function ensureExplorerTabState(pane) {
-        if (!Array.isArray(pane._explorerTabs) || !pane._explorerTabs.length) {
-            pane._explorerTabs = [{ id: EXPLORER_PREVIEW_TAB_ID, pinned: false, path: '', name: '' }];
-        }
-        if (!pane._explorerActiveTabId || !pane._explorerTabs.some(tab => tab.id === pane._explorerActiveTabId)) {
-            pane._explorerActiveTabId = EXPLORER_PREVIEW_TAB_ID;
-        }
-        return pane._explorerTabs;
-    }
-
-    function explorerPreviewTab(pane) {
-        ensureExplorerTabState(pane);
-        return pane._explorerTabs.find(tab => tab.id === EXPLORER_PREVIEW_TAB_ID) || pane._explorerTabs[0];
-    }
-
-    function explorerFindTab(pane, id) {
-        ensureExplorerTabState(pane);
-        return pane._explorerTabs.find(tab => tab.id === id) || null;
-    }
-
-    function explorerActiveTab(pane) {
-        ensureExplorerTabState(pane);
-        return explorerFindTab(pane, pane._explorerActiveTabId) || explorerPreviewTab(pane);
-    }
-
-    function explorerTabLabel(tab) {
-        if (!tab) {
-            return 'Preview';
-        }
-        if (tab.id === EXPLORER_PREVIEW_TAB_ID) {
-            return tab.path ? (explorerBaseName(tab.path) || 'Preview') : 'Preview';
-        }
-        return tab.name || explorerBaseName(tab.path) || 'File';
-    }
-
-    function explorerTabUnstagedGit(git) {
-        if (!git || typeof git !== 'object') {
-            return null;
-        }
-        const indexCode = git.index_status || ' ';
-        const worktreeCode = git.worktree_status || ' ';
-        if (git.status === 'untracked' || indexCode === '?' || worktreeCode === '?') {
-            return { ...git, status: 'untracked' };
-        }
-        if (git.status === 'conflicted' || indexCode === 'U' || worktreeCode === 'U') {
-            return { ...git, status: 'conflicted' };
-        }
-        if (explorerGitCodeUnmodified(worktreeCode)) {
-            return null;
-        }
-        const status = explorerGitStatusFromCode(worktreeCode);
-        return status === 'clean' ? null : { ...git, status };
-    }
-
-    function syncExplorerTabGitFromRepo(index, repo) {
-        const pane = terminals[index];
-        if (!pane || !repo || !Array.isArray(repo.changes)) {
-            return;
-        }
-        const changesByPath = new Map(repo.changes.map(change => [
-            explorerNormalizeTabPath(change.path),
-            change.git || null
-        ]));
-        let badgesChanged = false;
-        ensureExplorerTabState(pane).forEach(tab => {
-            const path = explorerNormalizeTabPath(tab.path);
-            // A tab showing no file (the Preview tab back on a directory
-            // listing) has no Git status to report — it must not keep the
-            // badge of the file it happened to show last.
-            const nextGit = path ? (changesByPath.get(path) || null) : null;
-            /* The tab strip is a second DOM rebuild the user did not ask
-               for; skip it when the badge map is unchanged (a quiet
-               background refresh must not repaint what did not change). */
-            if (JSON.stringify(nextGit) !== JSON.stringify(tab.git || null)) {
-                tab.git = nextGit;
-                badgesChanged = true;
-            }
-        });
-        if (badgesChanged) {
-            renderExplorerTabStrip(index);
-        }
-    }
-
-    /* Create (or reuse) the deduplicated pinned tab for a path without
-       deciding what the viewer shows — the caller owns focus. At the cap the
-       oldest pinned tab that is not the active one is evicted. */
-    function explorerEnsurePinnedTab(pane, path) {
-        ensureExplorerTabState(pane);
-        const key = explorerNormalizeTabPath(path);
-        if (!key) {
-            return null;
-        }
-        const name = explorerBaseName(path);
-        let pinnedTab = pane._explorerTabs.find(entry => entry.pinned && explorerNormalizeTabPath(entry.path) === key);
-        if (!pinnedTab) {
-            const pinnedCount = pane._explorerTabs.filter(entry => entry.pinned).length;
-            if (pinnedCount >= EXPLORER_MAX_PINNED_TABS) {
-                const oldest = pane._explorerTabs.findIndex(entry => entry.pinned && entry.id !== pane._explorerActiveTabId);
-                if (oldest !== -1) {
-                    pane._explorerTabs.splice(oldest, 1);
-                }
-            }
-            pinnedTab = { id: key, pinned: true, path, name };
-            pane._explorerTabs.push(pinnedTab);
-        } else {
-            pinnedTab.path = path;
-            pinnedTab.name = name;
-        }
-        return pinnedTab;
-    }
-
-    /* Choose (and if needed create) the tab a file should load into. A
-       Markdown link pins a deduplicated tab; an explicit `tab` re-renders
-       that tab; every other plain click (Files tree, Git sidebar) loads into
-       the permanent Preview tab — pinned tabs are never hijacked, even when
-       they already show the same path. */
-    function explorerAssignOpenTab(pane, path, { pinned = false, tab = '' } = {}) {
-        ensureExplorerTabState(pane);
-        const name = explorerBaseName(path);
-
-        if (tab) {
-            const existing = explorerFindTab(pane, tab);
-            if (existing) {
-                existing.path = path;
-                existing.name = name;
-                pane._explorerActiveTabId = existing.id;
-                return existing;
-            }
-        }
-
-        if (pinned) {
-            const pinnedTab = explorerEnsurePinnedTab(pane, path);
-            if (pinnedTab) {
-                pane._explorerActiveTabId = pinnedTab.id;
-                return pinnedTab;
-            }
-        }
-
-        const preview = explorerPreviewTab(pane);
-        preview.path = path;
-        preview.name = name;
-        pane._explorerActiveTabId = preview.id;
-        return preview;
-    }
-
-    /* Scroll a tab into view in the strip and pulse it. Clicking open-in-new-tab
-       on a file that already has a tab deliberately changes no focus, so without this
-       the click looks like it did nothing; the pulse points at the tab that
-       was already there. Mirrors focusExplorerTreeRow's locate flash. */
-    function flashExplorerTab(index, id) {
-        const strip = document.getElementById(`explorer-tabs-${index}`);
-        if (!strip || !id) {
-            return false;
-        }
-        // Matched by dataset rather than an attribute selector: a tab id is a
-        // file path, which is not safe to interpolate into a CSS selector.
-        const tabEl = Array.from(strip.querySelectorAll('[data-explorer-tab]'))
-            .find(entry => (entry.dataset.explorerTab || '') === id);
-        if (!tabEl) {
-            return false;
-        }
-        tabEl.scrollIntoView({ block: 'nearest', inline: 'nearest' });
-        tabEl.classList.add('explorer-tab-located');
-        window.setTimeout(() => tabEl.classList.remove('explorer-tab-located'), 1200);
-        return true;
-    }
-
-    /* The tree row's open-in-new-tab control opens a file in a *background*
-       tab: the tab joins the
-       strip while the viewer keeps showing whatever the user is reading, so
-       several files can be queued without losing the current one. Nothing is
-       fetched here — the tab carries only its path, and activateExplorerTab
-       loads it on first click exactly like a tab restored from a snapshot.
-       An already-open path is not re-focused either; it only flashes, so the
-       repeated click still answers without moving the viewer. */
-    function openExplorerFileInBackgroundTab(index, path, { git = null } = {}) {
-        const pane = terminals[index];
-        if (!pane || !isExplorerSession(pane._session) || !sessionIds[index]) {
-            return false;
-        }
-        const key = explorerNormalizeTabPath(path);
-        const alreadyOpen = Boolean(key) && ensureExplorerTabState(pane)
-            .some(tab => tab.pinned && explorerNormalizeTabPath(tab.path) === key);
-        const pinnedTab = explorerEnsurePinnedTab(pane, path);
-        if (!pinnedTab) {
-            return false;
-        }
-        /* Seed the Git badge from the tree row that opened the tab, so a
-           background tab is badged the same as one opened in the foreground
-           (renderExplorerFile sets it from the fetched file); a later sidebar
-           sync reconciles it. */
-        if (git && !pinnedTab.git) {
-            pinnedTab.git = git;
-        }
-        renderExplorerTabStrip(index);
-        persistExplorerTabsToSession(index);
-        // After the strip is rebuilt, so the flash lands on the live element.
-        if (alreadyOpen) {
-            flashExplorerTab(index, pinnedTab.id);
-        }
-        return true;
     }
 
     function explorerEnsureViewerShell(index) {
@@ -6540,391 +6822,6 @@
                 loadExplorerPane(index, button.dataset.explorerCrumb || '');
             });
         });
-    }
-
-    function renderExplorerTabStrip(index) {
-        const pane = terminals[index];
-        const strip = document.getElementById(`explorer-tabs-${index}`);
-        if (!pane || !strip) {
-            return;
-        }
-        const tabs = ensureExplorerTabState(pane);
-        const activeId = pane._explorerActiveTabId;
-        const dirtyEdit = pane._explorerEdit && pane._explorerEdit.dirty ? pane._explorerEdit : null;
-        strip.innerHTML = tabs.map(tab => {
-            const active = tab.id === activeId;
-            const isPreview = tab.id === EXPLORER_PREVIEW_TAB_ID;
-            const dirty = Boolean(dirtyEdit && dirtyEdit.tabId === tab.id);
-            const label = explorerTabLabel(tab);
-            const unstagedGit = explorerTabUnstagedGit(tab.git);
-            const gitLabel = explorerGitStatusLabel(unstagedGit);
-            const tabStates = [
-                dirty ? 'unsaved changes' : '',
-                unstagedGit ? `${unstagedGit.status} unstaged` : ''
-            ].filter(Boolean);
-            const icon = (!isPreview || tab.path) ? explorerFileTypeIconHtml(tab.path || label) : '';
-            const gitBadge = unstagedGit ? explorerGitBadgeHtml(unstagedGit) : '';
-            const closeButton = isPreview
-                ? ''
-                : `<button type="button" class="explorer-tab-close" data-explorer-tab-close="${escHtml(tab.id)}" title="Close tab" aria-label="Close ${escHtml(label)}">×</button>`;
-            /* A pinned tab joins the shared copy-path context menu (the tree
-               and Git rows carry the same hook). No context kind is exposed,
-               so the tab menu stays read-only — copy and download only, no
-               filesystem mutations. */
-            const copyPath = (!isPreview && tab.path)
-                ? ` data-explorer-copy-path="${escHtml(tab.path)}" data-explorer-download-path="${escHtml(tab.path)}"`
-                : '';
-            return `
-                <div class="explorer-tab${active ? ' active' : ''}${isPreview ? ' preview' : ''}${dirty ? ' is-dirty' : ''}" role="tab" aria-selected="${active ? 'true' : 'false'}"${tabStates.length ? ' aria-label="' + escHtml(`${label} (${tabStates.join(', ')})`) + '"' : ''} data-explorer-tab="${escHtml(tab.id)}"${copyPath}${isPreview ? '' : ' draggable="true"'} title="${escHtml(`${dirty ? '● ' : ''}${gitLabel ? `${gitLabel} ` : ''}${tab.path || label}`)}">
-                    <button type="button" class="explorer-tab-main" data-explorer-tab-open="${escHtml(tab.id)}">
-                        ${icon}
-                        <span class="explorer-tab-name">${escHtml(label)}</span>
-                        ${gitBadge}
-                    </button>
-                    ${closeButton}
-                </div>
-            `;
-        }).join('');
-
-        strip.querySelectorAll('[data-explorer-tab-open]').forEach(button => {
-            button.addEventListener('click', () => activateExplorerTab(index, button.dataset.explorerTabOpen || ''));
-        });
-        strip.querySelectorAll('[data-explorer-tab-close]').forEach(button => {
-            button.addEventListener('click', event => {
-                event.stopPropagation();
-                closeExplorerTab(index, button.dataset.explorerTabClose || '');
-            });
-        });
-        strip.querySelectorAll('[data-explorer-tab]').forEach(tabEl => {
-            wireExplorerTabStripInteractions(index, tabEl);
-        });
-    }
-
-    /* 2.g tab-strip affordances: middle-click closes a pinned tab (same
-       guard as the ×), pinned tabs drag-reorder among themselves (OD-6: the
-       permanent Preview tab keeps the first slot and is not draggable),
-       double-clicking the Preview tab pins its shown file as a background
-       tab in the same view mode, and double-clicking a pinned tab locates
-       its file in the Files tree. */
-    function wireExplorerTabStripInteractions(index, tabEl) {
-        const id = tabEl.dataset.explorerTab || '';
-        if (id === EXPLORER_PREVIEW_TAB_ID) {
-            tabEl.querySelector('.explorer-tab-main')?.addEventListener('dblclick', () => {
-                promoteExplorerPreviewTab(index);
-            });
-            return;
-        }
-        tabEl.querySelector('.explorer-tab-main')?.addEventListener('dblclick', () => {
-            revealExplorerTabInTree(index, id);
-        });
-        tabEl.addEventListener('mousedown', event => {
-            if (event.button === 1) {
-                event.preventDefault(); // suppress middle-click autoscroll
-            }
-        });
-        tabEl.addEventListener('auxclick', event => {
-            if (event.button === 1) {
-                event.preventDefault();
-                closeExplorerTab(index, id);
-            }
-        });
-        tabEl.addEventListener('dragstart', event => {
-            const pane = terminals[index];
-            if (pane) {
-                pane._explorerDraggedTabId = id;
-            }
-            event.dataTransfer.effectAllowed = 'move';
-            try {
-                event.dataTransfer.setData('text/plain', id);
-            } catch (_) {
-                /* setData can throw in some embedded WebViews; the drag
-                   still works off the pane-held id. */
-            }
-            tabEl.classList.add('dragging');
-        });
-        tabEl.addEventListener('dragend', () => {
-            const pane = terminals[index];
-            if (pane) {
-                pane._explorerDraggedTabId = '';
-            }
-            clearExplorerTabDragMarkers(index);
-        });
-        tabEl.addEventListener('dragover', event => {
-            const draggedId = terminals[index]?._explorerDraggedTabId || '';
-            if (!draggedId || draggedId === id) {
-                return;
-            }
-            event.preventDefault();
-            event.dataTransfer.dropEffect = 'move';
-            const rect = tabEl.getBoundingClientRect();
-            const before = event.clientX < rect.left + rect.width / 2;
-            tabEl.classList.toggle('drag-before', before);
-            tabEl.classList.toggle('drag-after', !before);
-        });
-        tabEl.addEventListener('dragleave', () => {
-            tabEl.classList.remove('drag-before', 'drag-after');
-        });
-        tabEl.addEventListener('drop', event => {
-            const draggedId = terminals[index]?._explorerDraggedTabId || '';
-            if (!draggedId || draggedId === id) {
-                return;
-            }
-            event.preventDefault();
-            const rect = tabEl.getBoundingClientRect();
-            const before = event.clientX < rect.left + rect.width / 2;
-            reorderExplorerPinnedTab(index, draggedId, id, before);
-        });
-    }
-
-    function clearExplorerTabDragMarkers(index) {
-        document.getElementById(`explorer-tabs-${index}`)
-            ?.querySelectorAll('.explorer-tab')
-            .forEach(el => el.classList.remove('dragging', 'drag-before', 'drag-after'));
-    }
-
-    /* 2.g (OD-6): move a pinned tab before/after another pinned tab. Only
-       pinned tabs reorder, and the insertion point is clamped behind the
-       permanent Preview tab so nothing can land ahead of it. The persisted
-       tab order (2.f) follows automatically because explorerSerializeTabs
-       reads the array in order. */
-    function reorderExplorerPinnedTab(index, draggedId, targetId, before) {
-        const pane = terminals[index];
-        if (!pane || !draggedId || draggedId === targetId) {
-            return;
-        }
-        ensureExplorerTabState(pane);
-        const tabs = pane._explorerTabs;
-        const from = tabs.findIndex(tab => tab.pinned && tab.id === draggedId);
-        if (from === -1 || !tabs.some(tab => tab.pinned && tab.id === targetId)) {
-            return;
-        }
-        const [dragged] = tabs.splice(from, 1);
-        let insertAt = tabs.findIndex(tab => tab.id === targetId) + (before ? 0 : 1);
-        const previewPosition = tabs.findIndex(tab => tab.id === EXPLORER_PREVIEW_TAB_ID);
-        insertAt = Math.max(insertAt, previewPosition + 1);
-        tabs.splice(insertAt, 0, dragged);
-        renderExplorerTabStrip(index);
-        persistExplorerTabsToSession(index);
-    }
-
-    /* 2.g: double-clicking the Preview tab keeps its transient file — the
-       shown file gains a pinned tab carrying the same view mode, scroll, and
-       zoom. Like the tree's open-in-new-tab control it opens in the
-       *background*: the viewer stays
-       on Preview showing the same file, so a double-click is a bookmark and
-       not a jump. Nothing is fetched — the new tab reloads lazily on its
-       first click, restoring the copied view state. An existing pinned tab
-       for the path is flashed, never clobbered or activated. */
-    function promoteExplorerPreviewTab(index) {
-        const pane = terminals[index];
-        if (!pane) {
-            return;
-        }
-        const preview = explorerPreviewTab(pane);
-        const path = preview.path || '';
-        if (
-            !path
-            || pane._explorerMode !== 'file'
-            || pane._explorerRenderedTabId !== EXPLORER_PREVIEW_TAB_ID
-        ) {
-            return; // Preview shows a directory or is still loading
-        }
-        const key = explorerNormalizeTabPath(path);
-        const existing = pane._explorerTabs.find(tab => tab.pinned && explorerNormalizeTabPath(tab.path) === key);
-        if (existing) {
-            flashExplorerTab(index, existing.id);
-            return;
-        }
-        // Fold the live mode + scroll into the Preview record, then copy the
-        // full per-tab state onto the new pinned tab. Focus is untouched, so
-        // the capture stores against the tab whose DOM is actually shown.
-        explorerCaptureActiveTabView(index);
-        const pinnedTab = explorerEnsurePinnedTab(pane, path);
-        if (!pinnedTab) {
-            return;
-        }
-        /* The promoted tab shows the file the Preview tab was already showing,
-           so it inherits that file's Git badge. Without this the new tab
-           renders unbadged (no `?` on a brand-new file, no `M` on a modified
-           one) until something else re-opens the file or the sidebar syncs. */
-        pinnedTab.git = preview.git || null;
-        if (preview.view) {
-            pinnedTab.view = { ...preview.view };
-        }
-        if (preview.fontSize) {
-            pinnedTab.fontSize = preview.fontSize;
-        }
-        if (preview.lineWrap) {
-            pinnedTab.lineWrap = { ...preview.lineWrap };
-        }
-        if (preview.preferredMode) {
-            pinnedTab.preferredMode = preview.preferredMode;
-        }
-        renderExplorerTabStrip(index);
-        persistExplorerTabsToSession(index);
-    }
-
-    /* 2.g: double-clicking a pinned tab locates its file in the Files tree —
-       the same ancestor expansion a tab switch performs, plus a scroll and a
-       brief flash so the row can be found again on the tab that is already
-       active. The Files sidebar opens when closed: the gesture is a request
-       to see the file in the tree, and there is nothing to point at
-       otherwise. Read-only — nothing about the file changes. */
-    async function revealExplorerTabInTree(index, id) {
-        const pane = terminals[index];
-        const tab = pane ? explorerFindTab(pane, id) : null;
-        const path = tab?.path || '';
-        if (!path) {
-            return;
-        }
-        if (!pane._explorerTreeSidebarOpen) {
-            // Awaited so the panel's own initial reveal cannot race the
-            // ancestor expansion below through the in-flight children guard.
-            await setExplorerTreeSidebarOpen(index, true);
-        }
-        await revealExplorerTreePath(index, path);
-        focusExplorerTreeRow(index, path);
-    }
-
-    function renderExplorerViewerEmpty(index) {
-        const pane = terminals[index];
-        const viewer = explorerEnsureViewerShell(index);
-        const list = document.getElementById(`explorer-list-${index}`);
-        if (!pane || !viewer) {
-            return;
-        }
-        list?.classList.remove('file-view');
-        clearExplorerDirectorySearchControls(index);
-        const preview = explorerPreviewTab(pane);
-        preview.path = '';
-        preview.name = '';
-        preview.git = null;
-        /* Absence means no directory has been loaded yet; an own dirPath of
-           '' means the explorer root is the Preview tab's directory. Keeping
-           those states distinct is what lets root-directory previews survive
-           a workspace restore. */
-        delete preview.dirPath;
-        pane._explorerActiveTabId = EXPLORER_PREVIEW_TAB_ID;
-        pane._explorerRenderedTabId = EXPLORER_PREVIEW_TAB_ID;
-        pane._explorerMode = 'viewer';
-        pane._explorerFilePath = '';
-        setExplorerFileWatchBaseline(pane, '');
-        viewer.innerHTML = '<div class="explorer-empty-viewer"><span>Select a file to view</span></div>';
-        renderExplorerTabStrip(index);
-    }
-
-    /* Render whatever the active tab should show: its file, the browsed
-       directory listing (Preview tab), or the empty state. */
-    function renderExplorerActiveTab(index) {
-        const pane = terminals[index];
-        if (!pane) {
-            return;
-        }
-        const tab = explorerActiveTab(pane);
-        if (tab.path) {
-            const diffTarget = explorerTabPersistedDiffTarget(tab);
-            openExplorerFile(index, tab.path, { tab: tab.id, ...diffTarget });
-            return;
-        }
-        if (
-            pane._explorerMode === 'directory'
-            && Array.isArray(pane._explorerEntries)
-            && (!tab.dirPath || tab.dirPath === pane._explorerPath)
-        ) {
-            /* The in-memory listing still belongs to this tab — render it
-               without a re-fetch and backfill the tab's own directory path. */
-            tab.dirPath = pane._explorerPath;
-            pane._explorerActiveTabId = EXPLORER_PREVIEW_TAB_ID;
-            pane._explorerRenderedTabId = EXPLORER_PREVIEW_TAB_ID;
-            renderExplorerDirectorySearchControls(index);
-            renderExplorerDirectoryRows(index);
-            const restoredView = explorerMatchingTabView(
-                tab,
-                explorerCurrentContentRevisions(pane)
-            );
-            if (restoredView) {
-                restoreExplorerFileScroll(index, restoredView.scroll);
-            }
-            renderExplorerTabStrip(index);
-            return;
-        }
-        if (
-            tab.id === EXPLORER_PREVIEW_TAB_ID
-            && Object.prototype.hasOwnProperty.call(tab, 'dirPath')
-        ) {
-            /* The viewer last rendered another tab, so the pane-global
-               directory state no longer describes the Preview tab — re-browse
-               the tab's own directory instead of falling through to empty. */
-            loadExplorerPane(index, tab.dirPath);
-            return;
-        }
-        renderExplorerViewerEmpty(index);
-    }
-
-    async function activateExplorerTab(index, id) {
-        const pane = terminals[index];
-        if (!pane) {
-            return;
-        }
-        const tab = explorerFindTab(pane, id);
-        if (!tab) {
-            return;
-        }
-        if (pane._explorerActiveTabId === tab.id && pane._explorerRenderedTabId === tab.id) {
-            // Already shown and its DOM is current: re-rendering would only
-            // re-fetch, and would race a Preview-tab double-click promotion.
-            return;
-        }
-        // Switching away from a dirty in-place edit needs confirmation first.
-        if (pane._explorerActiveTabId !== tab.id
-            && !(await confirmDiscardExplorerEdit(index, 'Switching tabs'))) {
-            return;
-        }
-        // Capture the outgoing tab's mode + scroll while its DOM is intact.
-        explorerCaptureActiveTabView(index);
-        pane._explorerActiveTabId = tab.id;
-        renderExplorerActiveTab(index);
-        renderExplorerTabStrip(index);
-        persistExplorerTabsToSession(index);
-    }
-
-    async function closeExplorerTab(index, id) {
-        const pane = terminals[index];
-        if (!pane || id === EXPLORER_PREVIEW_TAB_ID) {
-            return;
-        }
-        ensureExplorerTabState(pane);
-        const position = pane._explorerTabs.findIndex(tab => tab.id === id);
-        if (position === -1) {
-            return;
-        }
-        // Closing the tab that holds a dirty edit discards it — confirm first.
-        const edit = explorerEditState(pane);
-        if (edit && edit.tabId === id && edit.dirty
-            && !(await confirmDiscardExplorerEdit(index, 'Closing this tab'))) {
-            return;
-        }
-        const wasActive = pane._explorerActiveTabId === id;
-        pane._explorerTabs.splice(position, 1);
-        if (wasActive) {
-            /* Closing the tab you are reading falls back to Preview, not to
-               whichever pinned tab happened to sit beside it — the neighbour
-               is an accident of open order, so landing there means reading a
-               file you did not ask for and (because tabs load lazily) paying a
-               fetch for it. Preview is the pane's own navigation surface and
-               returns to the listing or file it was already holding.
-               Re-pointed and rendered here rather than through
-               activateExplorerTab: its already-shown guard would short-circuit
-               in the one state where the viewer holds Preview while a pinned
-               tab is active (a pinned tab whose file failed to open over a
-               directory listing), leaving the closed tab in the strip. The
-               outgoing tab's view is not captured — it is being discarded with
-               the tab, and its record is already gone. */
-            pane._explorerActiveTabId = EXPLORER_PREVIEW_TAB_ID;
-            renderExplorerActiveTab(index);
-        }
-        renderExplorerTabStrip(index);
-        persistExplorerTabsToSession(index);
     }
 
     /* Backward-compatible migration read for an older server/preset that has
@@ -7120,345 +7017,6 @@
                 }
             });
         });
-    }
-
-    /* ── Saved-session tab persistence (ISSUE-2026-015, per-tab views 2.f) ── */
-
-    /* Reduce a tab's live view snapshot to the persisted shape (OD-5, amended
-       per user feedback to include zoom): view mode, the primary panel's
-       scroll as a fraction of scroll height (OD-4), the content-identity hash
-       the restore-side skip rule compares, the tab's editor font size
-       (omitted at the default so unzoomed tabs persist nothing), and its
-       source/preview/diff line-wrap opt-outs (wrapping defaults on, so only an
-       explicit off persists — same reason). */
-    function explorerPersistableTabView(tab) {
-        if (!tab) {
-            return null;
-        }
-        const view = tab.view;
-        let record = view?.persistedRecord
-            ? window.GridVibeExplorerPersistence?.normalizeRecord(view.persistedRecord)
-            : null;
-        const fontSize = tab.fontSize ? clampExplorerEditorFontSize(tab.fontSize) : 0;
-        if (!record && view) {
-            record = window.GridVibeExplorerPersistence?.buildRecord({
-                mode: view.mode,
-                diffCommit: view.diffCommit,
-                diffMode: view.diffMode,
-                revisions: view.revisions,
-                scroll: view.scroll,
-                fontSize: fontSize || undefined,
-                wrap: ensureExplorerTabLineWrap(tab),
-                folds: Array.from(tab.collapsedLines || []),
-                foldRevision: tab.collapsedIdentity || view.revisions?.source || ''
-            }) || null;
-        }
-        if (!record) return null;
-        if (fontSize && fontSize !== EXPLORER_EDITOR_FONT_DEFAULT) record.font_size = fontSize;
-        else delete record.font_size;
-        record.wrap = { ...ensureExplorerTabLineWrap(tab) };
-        const folds = Array.from(tab.collapsedLines || [])
-            .filter(line => Number.isInteger(line) && line > 0)
-            .sort((left, right) => left - right)
-            .slice(0, 256);
-        if (folds.length) {
-            record.folds = folds;
-            const foldRevision = tab.collapsedIdentity || view?.revisions?.source || '';
-            if (foldRevision) record.fold_revision = foldRevision;
-        } else {
-            delete record.folds;
-            delete record.fold_revision;
-        }
-        return record;
-    }
-
-    /* Clamped editor font size from one persisted tab view record; 0 = unset. */
-    function explorerPersistedTabFontSize(raw) {
-        const fontSize = Number(raw && typeof raw === 'object' ? raw.font_size : 0);
-        if (!Number.isFinite(fontSize) || fontSize <= 0) {
-            return 0;
-        }
-        return clampExplorerEditorFontSize(fontSize);
-    }
-
-    /* Per-tab line-wrap flags from one persisted tab view record. Wrapping is
-       on by default, so only an explicit `false` turns it off — which also
-       means tabs saved before wrapping existed restore wrapped. */
-    function explorerPersistedTabLineWrap(raw) {
-        const view = raw && typeof raw === 'object' ? raw : {};
-        if (view.version === 2 && view.wrap && typeof view.wrap === 'object') {
-            return {
-                source: view.wrap.source !== false,
-                preview: view.wrap.preview !== false,
-                diff: view.wrap.diff !== false,
-            };
-        }
-        return {
-            source: view.wrap_source !== false,
-            preview: view.wrap_preview !== false,
-            diff: view.wrap_diff !== false,
-        };
-    }
-
-    function explorerPersistedMarkdownFolds(raw) {
-        if (!raw || typeof raw !== 'object' || !Array.isArray(raw.folds)) {
-            return new Set();
-        }
-        return new Set(raw.folds
-            .map(Number)
-            .filter(line => Number.isInteger(line) && line > 0)
-            .slice(0, 256));
-    }
-
-    function explorerPersistedMarkdownFoldIdentity(raw) {
-        if (!raw || typeof raw !== 'object') return '';
-        if (raw.version === 2 && typeof raw.fold_revision === 'string') {
-            return raw.fold_revision;
-        }
-        return typeof raw.fold_identity === 'string' ? raw.fold_identity : '';
-    }
-
-    /* Inflate one persisted tab view back into the in-memory `tab.view`
-       snapshot shape 2.e restores from (clamped fraction-based metrics). */
-    function explorerInflatePersistedTabView(raw) {
-        const record = window.GridVibeExplorerPersistence?.normalizeRecord(raw);
-        if (!record) return null;
-        return {
-            mode: record.intent.mode,
-            diffCommit: record.intent.diff_commit || '',
-            diffMode: record.intent.diff_mode || '',
-            persistedRecord: record,
-            revisions: {},
-            scroll: { activeView: record.intent.mode, panels: {}, sidebar: {} }
-        };
-    }
-
-    function explorerTabPersistedDiffTarget(tab) {
-        const view = tab && tab.view;
-        if (!view || view.mode !== 'diff') {
-            return {};
-        }
-        if (view.diffCommit) {
-            return { diffCommit: view.diffCommit };
-        }
-        if (view.diffMode) {
-            return { diffMode: view.diffMode };
-        }
-        return {};
-    }
-
-    function explorerSerializeTabs(pane) {
-        ensureExplorerTabState(pane);
-        const openTabs = [];
-        const tabViews = {};
-        const seen = new Set();
-        pane._explorerTabs.forEach(tab => {
-            if (!tab.pinned || openTabs.length >= EXPLORER_MAX_PINNED_TABS) {
-                return;
-            }
-            const key = explorerNormalizeTabPath(tab.path);
-            if (!key || seen.has(key)) {
-                return;
-            }
-            seen.add(key);
-            openTabs.push(tab.path);
-            const view = explorerPersistableTabView(tab);
-            if (view) {
-                tabViews[key] = view;
-            }
-        });
-        /* The Preview tab keeps its own separated path (shown file or browsed
-           directory) plus its zoom across saves — stored under the reserved
-           tab id, keyed as `path`/`dir` next to `font_size`. */
-        const preview = explorerPreviewTab(pane);
-        const previewRecord = explorerPersistableTabView(preview) || {};
-        const previewPath = explorerNormalizeTabPath(preview.path);
-        const previewDir = explorerNormalizeTabPath(preview.dirPath);
-        const hasPreviewDir = Object.prototype.hasOwnProperty.call(preview, 'dirPath');
-        if (previewPath) {
-            previewRecord.path = previewPath;
-        }
-        if (hasPreviewDir) {
-            previewRecord.dir = previewDir;
-        }
-        if (Object.keys(previewRecord).length) {
-            tabViews[EXPLORER_PREVIEW_TAB_ID] = previewRecord;
-        }
-        const active = explorerActiveTab(pane);
-        const activeTab = active && active.pinned ? explorerNormalizeTabPath(active.path) : '';
-        return {
-            open_tabs: openTabs,
-            active_tab: activeTab,
-            tab_views: tabViews
-        };
-    }
-
-    function persistExplorerTabsToSession(index) {
-        const pane = terminals[index];
-        if (!pane || !pane._session) {
-            return;
-        }
-        const serialized = explorerSerializeTabs(pane);
-        pane._session.explorer_open_tabs = serialized.open_tabs;
-        pane._session.explorer_active_tab = serialized.active_tab;
-        pane._session.explorer_tab_views = serialized.tab_views;
-        /* The one funnel every tab, view-mode, wrap, fold and zoom change
-           already passes through, so it is also where the group's ordered
-           presentation transaction is enqueued (terminals.js owns the queue). */
-        notePanePresentationChanged(index);
-    }
-
-    /* Restore fell through to nothing showable: browse a directory so the pane
-       ends up attached with a live breadcrumb instead of stranded on a bare
-       error message (the state that made the path bar inert until the user
-       clicked the tree). A saved directory that is itself gone falls back to
-       the root, which the session guarantees exists. */
-    async function restoreExplorerDirectoryFallback(index, dirPath) {
-        if (dirPath && await loadExplorerPane(index, dirPath)) {
-            return true;
-        }
-        const pane = terminals[index];
-        if (pane && dirPath) {
-            explorerPreviewTab(pane).dirPath = '';
-        }
-        return loadExplorerPane(index, '');
-    }
-
-    /* Paths persisted with a pane are relative to the root it was saved under.
-       Relaunching under a different root — an imported session whose directory
-       was edited, a moved repo — or deleting the file since makes them dangle,
-       so a restored tab that comes back not-found is dropped rather than left
-       pointing at a file this explorer does not have. */
-    function explorerRestoredPathIsGone(index) {
-        return terminals[index]?._explorerOpenErrorCode === 'not_found';
-    }
-
-    async function restoreExplorerPersistedTabs(index) {
-        const pane = terminals[index];
-        if (!pane || pane._explorerTabsRestored) {
-            return;
-        }
-        pane._explorerTabsRestored = true;
-        const session = pane._session || {};
-        const rawTabs = Array.isArray(session.explorer_open_tabs) ? session.explorer_open_tabs : [];
-        const rawViews = session.explorer_tab_views && typeof session.explorer_tab_views === 'object'
-            ? session.explorer_tab_views
-            : {};
-        ensureExplorerTabState(pane);
-        /* The Preview tab's view, zoom, shown file, and browsed directory
-           persist under its reserved id even when no pinned tabs were saved. */
-        const rawPreviewView = rawViews[EXPLORER_PREVIEW_TAB_ID];
-        const previewTab = explorerPreviewTab(pane);
-        const previewView = explorerInflatePersistedTabView(rawPreviewView);
-        if (previewView) {
-            previewTab.view = previewView;
-        }
-        const previewFont = explorerPersistedTabFontSize(rawPreviewView);
-        if (previewFont) {
-            previewTab.fontSize = previewFont;
-        }
-        previewTab.lineWrap = explorerPersistedTabLineWrap(rawPreviewView);
-        previewTab.collapsedLines = explorerPersistedMarkdownFolds(rawPreviewView);
-        previewTab.collapsedIdentity = explorerPersistedMarkdownFoldIdentity(rawPreviewView);
-        const savedPreviewPath = explorerNormalizeTabPath(
-            rawPreviewView && typeof rawPreviewView === 'object' ? rawPreviewView.path : ''
-        );
-        const savedPreviewDir = explorerNormalizeTabPath(
-            rawPreviewView && typeof rawPreviewView === 'object' ? rawPreviewView.dir : ''
-        );
-        const hasSavedPreviewDir = Boolean(
-            rawPreviewView
-            && typeof rawPreviewView === 'object'
-            && Object.prototype.hasOwnProperty.call(rawPreviewView, 'dir')
-        );
-        if (hasSavedPreviewDir) {
-            previewTab.dirPath = savedPreviewDir;
-        }
-        /* Reopen the Preview tab's own content only when no pinned tab was
-           saved as active — an active pinned tab wins the viewer, and the
-           seeded path/dirPath above brings the Preview content back whenever
-           the user returns to the tab. */
-        const restorePreviewContent = async () => {
-            if (savedPreviewPath) {
-                const opened = await openExplorerFile(index, savedPreviewPath, {
-                    tab: EXPLORER_PREVIEW_TAB_ID,
-                    ...explorerTabPersistedDiffTarget(previewTab)
-                });
-                if (opened) {
-                    return;
-                }
-                if (explorerRestoredPathIsGone(index)) {
-                    previewTab.path = '';
-                    previewTab.name = '';
-                    previewTab.git = null;
-                }
-                await restoreExplorerDirectoryFallback(index, savedPreviewDir);
-            } else if (hasSavedPreviewDir) {
-                await restoreExplorerDirectoryFallback(index, savedPreviewDir);
-            } else {
-                renderExplorerTabStrip(index);
-            }
-        };
-        if (savedPreviewPath) {
-            previewTab.path = savedPreviewPath;
-            previewTab.name = explorerBaseName(savedPreviewPath);
-        }
-        if (!rawTabs.length) {
-            await restorePreviewContent();
-            return;
-        }
-        const seen = new Set();
-        rawTabs.forEach(raw => {
-            const path = String(raw == null ? '' : raw);
-            const key = explorerNormalizeTabPath(path);
-            if (!key || seen.has(key)) {
-                return;
-            }
-            if (pane._explorerTabs.filter(tab => tab.pinned).length >= EXPLORER_MAX_PINNED_TABS) {
-                return;
-            }
-            seen.add(key);
-            const record = { id: key, pinned: true, path, name: explorerBaseName(path) };
-            /* 2.f: seed the persisted view mode + scroll fraction and zoom;
-               the OD-4 identity check decides on render whether mode/scroll
-               still apply (the zoom always does). */
-            const view = explorerInflatePersistedTabView(rawViews[key]);
-            if (view) {
-                record.view = view;
-            }
-            const fontSize = explorerPersistedTabFontSize(rawViews[key]);
-            if (fontSize) {
-                record.fontSize = fontSize;
-            }
-            record.lineWrap = explorerPersistedTabLineWrap(rawViews[key]);
-            record.collapsedLines = explorerPersistedMarkdownFolds(rawViews[key]);
-            record.collapsedIdentity = explorerPersistedMarkdownFoldIdentity(rawViews[key]);
-            pane._explorerTabs.push(record);
-        });
-        const activeKey = explorerNormalizeTabPath(session.explorer_active_tab || '');
-        const activeTab = activeKey
-            ? pane._explorerTabs.find(tab => tab.pinned && explorerNormalizeTabPath(tab.path) === activeKey)
-            : null;
-        if (!activeTab) {
-            await restorePreviewContent();
-            return;
-        }
-        /* Opened here rather than through activateExplorerTab so the restore
-           can see whether the file actually came back. */
-        pane._explorerActiveTabId = activeTab.id;
-        renderExplorerTabStrip(index);
-        const opened = await openExplorerFile(index, activeTab.path, {
-            tab: activeTab.id,
-            ...explorerTabPersistedDiffTarget(activeTab)
-        });
-        if (!opened) {
-            if (explorerRestoredPathIsGone(index)) {
-                pane._explorerTabs = pane._explorerTabs.filter(tab => tab.id !== activeTab.id);
-            }
-            pane._explorerActiveTabId = EXPLORER_PREVIEW_TAB_ID;
-            await restorePreviewContent();
-        }
-        persistExplorerTabsToSession(index);
     }
 
     /* Read-only inline image viewer (ISSUE-2026 image support). The backend
@@ -7731,9 +7289,9 @@
                         </div>
                     ` : ''}
                     <div class="explorer-editor-zoom" aria-label="Editor font size controls">
-                        <button type="button" class="explorer-zoom-btn" data-explorer-zoom-decrease="${index}" title="Decrease font size" aria-label="Decrease editor font size">-</button>
+                        <button type="button" class="explorer-zoom-btn" data-explorer-zoom-decrease="${index}" title="Decrease font size" aria-label="Decrease editor font size">${UI_MINUS_ICON}</button>
                         <span class="explorer-zoom-value" data-explorer-zoom-value="${index}"></span>
-                        <button type="button" class="explorer-zoom-btn" data-explorer-zoom-increase="${index}" title="Increase font size" aria-label="Increase editor font size">+</button>
+                        <button type="button" class="explorer-zoom-btn" data-explorer-zoom-increase="${index}" title="Increase font size" aria-label="Increase editor font size">${UI_PLUS_ICON}</button>
                     </div>
                     ${explorerLineWrapControlHtml(index, initialFileView)}
                     <button type="button" class="explorer-md-appearance-btn" data-explorer-md-appearance="${index}" title="Appearance" aria-label="Viewer appearance" aria-haspopup="menu" aria-expanded="false">${EXPLORER_MD_APPEARANCE_ICON}</button>
@@ -7932,7 +7490,9 @@
         // editor chrome and refresh the Edit button's enabled state + revision.
         setExplorerEditChromeDisabled(index, false);
         refreshExplorerEditControls(index);
-        applyExplorerSearch(index);
+        // The captured position is restored on the next line; a find repainted
+        // onto the refreshed rows must not undo that from its own frame.
+        applyExplorerSearch(index, { scroll: false });
         restoreExplorerFileScroll(index, scrollState);
         renderExplorerTabStrip(index);
         return true;

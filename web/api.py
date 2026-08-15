@@ -3,6 +3,7 @@ Web API for GridVibe frontend integration.
 Provides REST endpoints and WebSocket support for terminal sessions.
 """
 
+import contextlib
 import io
 import logging
 import os
@@ -77,6 +78,7 @@ from web.config import (
     TERMINAL_FONT_SIZE_MAX,
     TERMINAL_FONT_SIZE_MIN,
     WHISPER_MODEL_OPTIONS,
+    ConfigPersistenceError,
     _config_lock,
     _merge_dicts,
     _normalize_surface_mode,
@@ -882,7 +884,12 @@ def set_app_config():
     with _config_lock:
         current = load_config()
         current = _merge_dicts(current, _normalize_app_config_update(data))
-        save_config(current)
+        try:
+            save_config(current)
+        except ConfigPersistenceError as exc:
+            # Not stored: answer retryably instead of echoing the settings back
+            # as saved, and leave runtime_config on the values still on disk.
+            return jsonify({"error": str(exc), "code": "config_write_failed"}), 500
         _refresh_runtime_config()
     _broadcast_app_config_update(apply_scope)
     return jsonify(_public_app_config())
@@ -1333,14 +1340,33 @@ def get_explorer_file_state(session_id: str):
 
 
 # Downloading is a read, so it stays inside the explorer's read-only contract
-# (which covers filesystem *mutations*); the cap keeps one request from
-# buffering an arbitrarily large remote file in memory.
+# (which covers filesystem *mutations*); the cap keeps one request from serving
+# an arbitrarily large remote file.
 EXPLORER_DOWNLOAD_MAX_BYTES = 100 * 1024 * 1024
+
+# The body is streamed, not buffered, so a 100 MB download costs one chunk of
+# memory rather than 100 MB (audit 2026-08-14 §8.2 / Stage 5.5).
+EXPLORER_DOWNLOAD_CHUNK_BYTES = 64 * 1024
 
 
 @app.route('/api/explorer/<session_id>/download', methods=['GET'])
 def download_explorer_file(session_id: str):
-    """Send one explorer file as an attachment (read-only; binaries allowed)."""
+    """Stream one explorer file as an attachment (read-only; binaries allowed).
+
+    Resolution, the root confinement check, the `stat` and the size cap all run
+    *before* any byte of the response is committed, so a refusal is still a
+    JSON `400` with headers the client can read. Only the body is deferred: the
+    backend (and, for a remote session, its pooled SFTP channel) is handed to
+    the generator, which releases it in a `finally` — the WSGI server closes the
+    iterable on a completed response and on a client that disconnects mid-file,
+    so neither path leaks a pool entry.
+
+    Byte ranges are answered by seeking the handle, because the `send_file`
+    path this replaced advertised `Accept-Ranges: bytes` and a browser uses it
+    to resume a paused download — exactly the large files this route now
+    streams. `Cache-Control: no-cache` is kept for the same continuity reason:
+    the bytes are a live file and a re-download must not be served stale.
+    """
     session = session_manager.get_session(session_id)
     if session is None:
         return jsonify({"error": "Session not found"}), 404
@@ -1350,26 +1376,72 @@ def download_explorer_file(session_id: str):
         if _is_remote_explorer_session(session)
         else (OSError,)
     )
-    try:
-        with _explorer_backend(session) as backend:
+    with contextlib.ExitStack() as resources:
+        try:
+            backend = resources.enter_context(_explorer_backend(session))
             _root_path, file_path = backend.resolve_file(requested_path)
             size, _modified = backend.stat_file(file_path)
             if size is not None and size > EXPLORER_DOWNLOAD_MAX_BYTES:
                 return jsonify({"error": "File exceeds the 100 MB download limit"}), 400
-            raw_content = backend.read_file_prefix(file_path, EXPLORER_DOWNLOAD_MAX_BYTES + 1)
-            if len(raw_content) > EXPLORER_DOWNLOAD_MAX_BYTES:
-                return jsonify({"error": "File exceeds the 100 MB download limit"}), 400
             filename = backend.basename(file_path) or "download"
-    except ValueError as exc:
-        return jsonify({"error": str(exc)}), 400
-    except error_types as exc:
-        return jsonify({"error": str(exc)}), 500
-    return send_file(
-        io.BytesIO(raw_content),
-        as_attachment=True,
-        download_name=filename,
+            handle = resources.enter_context(
+                contextlib.closing(backend.open_file_stream(file_path))
+            )
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+        except error_types as exc:
+            return jsonify({"error": str(exc)}), 500
+
+        # A file that grew between the `stat` and the read must not escape the
+        # cap, so the reader carries its own ceiling rather than trusting the
+        # handle to stop.
+        ceiling = (
+            EXPLORER_DOWNLOAD_MAX_BYTES
+            if size is None
+            else min(int(size), EXPLORER_DOWNLOAD_MAX_BYTES)
+        )
+        start, length, partial = 0, ceiling, False
+        requested_range = request.range
+        if size is not None and requested_range is not None:
+            span = requested_range.range_for_length(ceiling)
+            if span is None:
+                response = jsonify({"error": "Requested range is not satisfiable"})
+                response.headers["Content-Range"] = f"bytes */{ceiling}"
+                return response, 416
+            start, stop = span
+            length, partial = stop - start, True
+
+        # Only a response that is actually going to be streamed takes the hold
+        # away from this block; every refusal and every raise above unwinds it.
+        held = resources.pop_all()
+
+    def _stream():
+        with held:
+            if start:
+                handle.seek(start)
+            remaining = length
+            while remaining > 0:
+                chunk = handle.read(min(EXPLORER_DOWNLOAD_CHUNK_BYTES, remaining))
+                if not chunk:
+                    return
+                remaining -= len(chunk)
+                yield chunk
+
+    response = app.response_class(
+        _stream(),
+        status=206 if partial else 200,
         mimetype="application/octet-stream",
     )
+    response.headers.set("Content-Disposition", "attachment", filename=filename)
+    response.headers["Cache-Control"] = "no-cache"
+    if size is not None:
+        response.headers["Accept-Ranges"] = "bytes"
+        response.headers["Content-Length"] = str(length)
+        if partial:
+            response.headers["Content-Range"] = (
+                f"bytes {start}-{start + length - 1}/{ceiling}"
+            )
+    return response
 
 
 # Inline image previews are a read, so they stay inside the explorer's

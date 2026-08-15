@@ -57,6 +57,19 @@ def _js_function_source(script, name):
     raise AssertionError(f"unbalanced braces in {name}")
 
 
+def _js_const_source(script, name):
+    """Return one top-level `const NAME = …;` line from `script`.
+
+    A helper extracted with `_js_function_source` still needs the module
+    constants it closes over. Taking them from the file rather than restating
+    them in the test keeps a harness from quietly disagreeing with the shipped
+    value — a storage key restated here would let both ends of a round trip
+    pass while the real pages wrote and read different keys.
+    """
+    start = script.index(f"const {name} = ")
+    return script[start:script.index("\n", start)].strip()
+
+
 def _workspace_events(socket_client):
     """Return the session_groups_updated payloads one socket received."""
     return [
@@ -2853,6 +2866,115 @@ async function fetch(path, options) {
             )
         return json.loads(completed.stdout)
 
+    def test_alt_w_in_the_launcher_returns_to_the_workspace_that_opened_it(self):
+        """The launcher's Alt+W walks back, and only to a window that exists.
+
+        The launcher is a window, not a workspace, so it cannot walk the cycle:
+        it walks back to the workspace that handed over. That record outlives
+        the handover (the launcher window may not exist yet when it is written)
+        and is therefore a hint, never an authority — the workspace behind it
+        can be closed while the launcher sits in front. Resolving it against the
+        live list is what stops the return key from "switching" onto a record
+        with no window and opening a blank one, exactly as the cycle does.
+        """
+        work = {"workspace_id": "aaaaaaaaaaaa", "group_count": 1}
+        other = {"workspace_id": "bbbbbbbbbbbb", "group_count": 2}
+        main = {"workspace_id": "default", "group_count": 1}
+        empty_default = {"workspace_id": "default", "group_count": 0}
+
+        returns = self._js_launcher_return(
+            [
+                # The ordinary trip: opened from a workspace still on screen.
+                ("aaaaaaaaaaaa", [work, other]),
+                ("default", [main, work]),
+                # The origin closed while the launcher was in front — the way
+                # back is the workspace that is still open, not a blank window.
+                ("aaaaaaaaaaaa", [other]),
+                ("aaaaaaaaaaaa", [{**work, "group_count": 0}, other]),
+                # A launcher opened first, at startup: no origin was ever
+                # recorded, so "back" is the one window there is.
+                (None, [other]),
+                (None, [empty_default, work]),
+                # Nowhere to go: records without windows are not destinations.
+                ("aaaaaaaaaaaa", []),
+                ("aaaaaaaaaaaa", [empty_default]),
+            ]
+        )
+
+        self.assertEqual(
+            returns,
+            [
+                "aaaaaaaaaaaa",
+                "default",
+                "bbbbbbbbbbbb",
+                "bbbbbbbbbbbb",
+                "bbbbbbbbbbbb",
+                "aaaaaaaaaaaa",
+                None,
+                None,
+            ],
+        )
+
+    def _js_launcher_return(self, cases):
+        """Round-trip the shipped origin record through the shipped resolver.
+
+        Both halves run for real against a stubbed localStorage — the record is
+        written by the workspace window and read by the launcher, so a test that
+        supplied the id directly could not catch the two ends disagreeing about
+        what is stored. The constants come from the file too, for the same
+        reason. Each case is (recorded origin or None, live workspace list).
+        """
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node is not installed")
+        workspaces_js = self._static("js/workspaces.js")
+        source = "\n".join(
+            [
+                _js_const_source(workspaces_js, name)
+                for name in (
+                    "WORKSPACE_DEFAULT_ID",
+                    "WORKSPACE_ID_PATTERN",
+                    "WORKSPACE_LAUNCHER_ORIGIN_STORAGE_KEY",
+                )
+            ]
+            + [
+                _js_function_source(workspaces_js, name)
+                for name in (
+                    "isUserVisibleWorkspace",
+                    "normalizeWorkspaceId",
+                    "rememberLauncherOriginWorkspace",
+                    "readLauncherOriginWorkspace",
+                    "launcherReturnWorkspace",
+                )
+            ]
+        )
+        script = (
+            "const store = new Map();\n"
+            "const localStorage = {\n"
+            "    getItem: key => (store.has(key) ? store.get(key) : null),\n"
+            "    setItem: (key, value) => store.set(key, String(value)),\n"
+            "    removeItem: key => store.delete(key)\n"
+            "};\n"
+            f"{source}\n"
+            "const out = JSON.parse(process.argv[2]).map(([origin, list]) => {\n"
+            "    store.clear();\n"
+            "    if (origin !== null) { rememberLauncherOriginWorkspace(origin); }\n"
+            "    const target = launcherReturnWorkspace(list, readLauncherOriginWorkspace());\n"
+            "    return target ? target.workspace_id : null;\n"
+            "});\n"
+            "process.stdout.write(JSON.stringify(out));\n"
+        )
+        with TemporaryDirectory() as script_dir:
+            script_path = Path(script_dir) / "launcher-return.js"
+            script_path.write_text(script, encoding="utf-8")
+            completed = subprocess.run(
+                [node, str(script_path), json.dumps(cases)],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+        return json.loads(completed.stdout)
+
     def test_alt_w_still_cycles_from_a_focused_terminal(self):
         terminals_js = self._static("js/terminals.js")
 
@@ -2906,9 +3028,142 @@ async function fetch(path, options) {
         # Every in-app switch path goes through the one wrapper (guardrail 6):
         # the only bare openWorkspaceWindow call left in this page is inside it.
         self.assertIn("async function switchToWorkspaceWindow(workspaceId, options = {})", terminals_js)
-        self.assertIn("dropTerminalFocusForWindowSwitch();\n        return openWorkspaceWindow(", terminals_js)
+        wrapper = terminals_js.split(
+            "async function switchToWorkspaceWindow(workspaceId, options = {})", 1
+        )[1][:800]
+        self.assertIn("dropTerminalFocusForWindowSwitch();", wrapper)
+        # …and it drops focus *before* handing the window over, never after.
+        self.assertLess(
+            wrapper.index("dropTerminalFocusForWindowSwitch();"),
+            wrapper.index("openWorkspaceWindow("),
+        )
         self.assertEqual(terminals_js.count("openWorkspaceWindow("), 1)
         self.assertEqual(terminals_js.count("switchToWorkspaceWindow("), 6)
+
+
+class RestoreOpensATabPerWorkspaceTestCase(unittest.TestCase):
+    """Restoring N workspaces asks for N tabs, and says so when it gets fewer.
+
+    In browser mode a workspace is a tab this page asks the browser to open,
+    and a browser grants exactly one pop-up per user gesture: the first
+    `window.open` consumes the activation and every later one in the same click
+    returns null. The loop must therefore attempt *every* restored workspace
+    (the sessions are live either way — only the tab is missing) and report the
+    refusals once, on the one banner, with the way to fix it.
+
+    The real `restoreSelectedWorkspaces` is sliced out of launcher.js and run,
+    so what is pinned is what it does, not how it is spelled.
+    """
+
+    def _run(self, opens):
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node is not installed")
+        static_js = Path(__file__).resolve().parent.parent / "web" / "static" / "js"
+        launcher_js = (static_js / "launcher.js").read_text(encoding="utf-8")
+        workspaces_js = (static_js / "workspaces.js").read_text(encoding="utf-8")
+        # The hint belongs to the shared module — every reporter uses that one
+        # wording (guardrail 6), so the test takes it from there too.
+        hint_start = workspaces_js.index("const WORKSPACE_TAB_BLOCKED_HINT")
+        hint = workspaces_js[hint_start:workspaces_js.index(";", hint_start) + 1]
+        script = (
+            """
+const OPENS = JSON.parse(process.argv[2]);
+"""
+            + hint
+            + """
+const notices = [];
+const openedIds = [];
+let workspaceRestoreInFlight = false;
+let restorableWorkspaceSummaries = [];
+let panelDismissed = false;
+const checkboxes = OPENS.map((_ok, index) => ({
+    checked: true,
+    disabled: false,
+    value: `workspace-${index}`
+}));
+const panel = {
+    classList: { add: () => {}, remove: () => {} },
+    querySelectorAll: () => checkboxes
+};
+const document = { querySelector: () => panel };
+function showGridVibeNotice(text, type) { notices.push({ text, type }); }
+function describeFailure(summary) { return summary; }
+async function restoreSavedWorkspaces(workspaceIds) {
+    return {
+        workspaces: workspaceIds.map(id => ({
+            workspace_id: id,
+            restored: true,
+            group_count: 1,
+            active_group_id: `${id}-group`,
+            groups: [{ started: true }]
+        }))
+    };
+}
+async function openWorkspaceWindow(workspaceId) {
+    openedIds.push(workspaceId);
+    return OPENS[openedIds.length - 1];
+}
+async function loadWorkspaceRestoreChooser() {}
+async function refreshWorkspaceDestinations() {}
+function dismissWorkspaceRestorePanel() { panelDismissed = true; }
+"""
+            + _js_function_source(launcher_js, "restoreSelectedWorkspaces")
+            + """
+restoreSelectedWorkspaces().then(() => {
+    process.stdout.write(JSON.stringify({ notices, openedIds, panelDismissed }));
+});
+"""
+        )
+        with TemporaryDirectory() as script_dir:
+            script_path = Path(script_dir) / "restore-tabs.js"
+            script_path.write_text(script, encoding="utf-8")
+            completed = subprocess.run(
+                [node, str(script_path), json.dumps(opens)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        if completed.returncode != 0:
+            self.fail(f"node harness failed:\n{completed.stderr}")
+        return json.loads(completed.stdout)
+
+    def test_every_restored_workspace_gets_its_own_tab_request(self):
+        result = self._run([True, True, True])
+
+        self.assertEqual(
+            result["openedIds"], ["workspace-0", "workspace-1", "workspace-2"]
+        )
+        self.assertEqual(len(result["notices"]), 1)
+        self.assertEqual(result["notices"][0]["type"], "success")
+        self.assertNotIn("pop-up", result["notices"][0]["text"])
+
+    def test_a_refused_tab_never_stops_the_ones_behind_it(self):
+        """The reported bug: only one workspace came back. The others were
+        restored server-side, so the loop must keep asking for their tabs."""
+        result = self._run([True, False, False])
+
+        self.assertEqual(
+            result["openedIds"], ["workspace-0", "workspace-1", "workspace-2"]
+        )
+
+    def test_blocked_tabs_are_reported_once_with_the_way_out(self):
+        result = self._run([True, False, False])
+
+        # One outcome, one notice (guardrail 8) — not one per blocked tab.
+        self.assertEqual(len(result["notices"]), 1)
+        notice = result["notices"][0]
+        self.assertEqual(notice["type"], "warning")
+        self.assertIn("blocked 2 workspace tabs", notice["text"])
+        self.assertIn("Allow pop-ups for this site", notice["text"])
+        # …and the per-workspace retry affordance is named, because the
+        # Workspaces card opens each one with a fresh click.
+        self.assertIn("Workspaces list", notice["text"])
+
+    def test_one_blocked_tab_is_reported_in_the_singular(self):
+        result = self._run([False])
+
+        self.assertIn("blocked 1 workspace tab.", result["notices"][0]["text"])
 
 
 class MultiWorkspaceRestoreTestCase(unittest.TestCase):
@@ -4182,6 +4437,77 @@ async function restoreSavedWorkspaces(workspaceIds) {
         # The window opens on the group and zoom the *server* resolved, not on
         # a snapshot id the browser tried to map itself.
         self.assertEqual(result["opened"], [["live-group-2", 1.25]])
+
+    def test_the_chooser_auto_opens_only_when_nothing_is_live(self):
+        """The restore offer is a cold-start offer in multi-workspace mode too.
+
+        Browser mode reaches the launcher by navigating, so this page's startup
+        re-runs on every Alt+W / launcher-button hop, while the native launcher
+        window is only focused and runs it once per app run. An unguarded
+        auto-open therefore meant a modal on every hop in one mode and not the
+        other — usually a chooser whose only row was the workspace just left,
+        already open and so un-restorable. The rows are still refreshed either
+        way, because "Reopen saved ..." reads the same list.
+        """
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node is not installed")
+        response = self.client.get("/static/js/launcher.js")
+        self.assertEqual(response.status_code, 200)
+        launcher_js = response.get_data(as_text=True)
+        response.close()
+        source = "\n".join(
+            _js_function_source(launcher_js, name)
+            for name in ("checkRestorableWorkspace", "hasLiveWorkspaceSessions")
+        )
+        script = source + """
+let restorableWorkspaceIsOffered = false;
+let liveWorkspaces = [];
+let liveWorkspacesThrow = false;
+const chooserCalls = [];
+
+function isMultiWorkspaceEnabled() { return true; }
+async function fetchLiveWorkspaces() {
+    if (liveWorkspacesThrow) { throw new Error('offline'); }
+    return liveWorkspaces;
+}
+async function loadWorkspaceRestoreChooser(options) { chooserCalls.push(options); }
+async function fetch() { throw new Error('single-workspace banner path'); }
+
+(async () => {
+    // Nothing live (a fresh start after a restart): the offer is made.
+    liveWorkspaces = [{ workspace_id: 'default', group_count: 0 }];
+    await checkRestorableWorkspace();
+
+    // A workspace with live sessions: hopping back to the launcher is silent.
+    liveWorkspaces = [
+        { workspace_id: 'default', group_count: 0 },
+        { workspace_id: 'bbbbbbbbbbbb', group_count: 2 }
+    ];
+    await checkRestorableWorkspace();
+
+    // Unknown is not "empty".
+    liveWorkspacesThrow = true;
+    await checkRestorableWorkspace();
+
+    process.stdout.write(JSON.stringify({ chooserCalls }));
+})();
+"""
+        with TemporaryDirectory() as script_dir:
+            script_path = Path(script_dir) / "chooser.js"
+            script_path.write_text(script, encoding="utf-8")
+            completed = subprocess.run(
+                [node, str(script_path)], capture_output=True, text=True, check=True
+            )
+        result = json.loads(completed.stdout)
+
+        # The chooser is loaded every time — only the auto-open differs, so the
+        # Workspaces card's saved entry never goes stale as the price of this.
+        self.assertEqual(len(result["chooserCalls"]), 3)
+        self.assertEqual(
+            [call["autoOpen"] for call in result["chooserCalls"]],
+            [True, False, False],
+        )
 
 
 class DuplicatePresetRestoreTestCase(unittest.TestCase):

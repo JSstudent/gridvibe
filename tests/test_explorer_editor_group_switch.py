@@ -23,6 +23,10 @@ from tempfile import TemporaryDirectory
 
 STATIC_JS = Path(__file__).resolve().parent.parent / "web" / "static" / "js"
 VIEWER_JS = STATIC_JS / "explorer-viewer.js"
+# The Source render reads the active tab's Markdown folds, and the tab records
+# live in explorer-tabs.js since the tab-domain split — the page loads the pair
+# together, so the harness evaluates the pair together.
+TABS_JS = STATIC_JS / "explorer-tabs.js"
 EDITOR_JS = STATIC_JS / "explorer-editor.js"
 
 NODE = shutil.which("node")
@@ -119,7 +123,7 @@ class RenderExplorerSourceEditGuardTestCase(NodeHarnessMixin, unittest.TestCase)
             """
             const fs = require('fs');
             const vm = require('vm');
-            const editing = process.argv[3] === 'true';
+            const editing = process.argv[4] === 'true';
 
             const code = makeElement('explorer-code-0');
             const nodes = { 'explorer-code-0': code };
@@ -127,7 +131,9 @@ class RenderExplorerSourceEditGuardTestCase(NodeHarnessMixin, unittest.TestCase)
             // Owned by explorer-overview.js; repaints marks onto fresh rows.
             sandbox.applyExplorerChangeMarks = () => {};
             vm.createContext(sandbox);
-            vm.runInContext(fs.readFileSync(process.argv[2], 'utf8'), sandbox);
+            [process.argv[2], process.argv[3]].forEach(path => {
+                vm.runInContext(fs.readFileSync(path, 'utf8'), sandbox);
+            });
 
             sandbox.terminals[0] = {
                 _explorerMode: 'file',
@@ -146,6 +152,7 @@ class RenderExplorerSourceEditGuardTestCase(NodeHarnessMixin, unittest.TestCase)
             process.stdout.write(JSON.stringify({ panel: code.innerHTML }));
             """,
             str(VIEWER_JS),
+            str(TABS_JS),
             "true" if editing else "false",
         )
 

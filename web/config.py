@@ -4,16 +4,30 @@ Extracted from web/api.py (deep-dive finding 6.2). `load_config`/`save_config`
 handle the two-file merge (config.json overriding default_config.json), and
 `RuntimeConfig` holds the settings that the rest of the app reads at runtime;
 call `runtime_config.refresh()` after persisting a config change.
+
+`config.json` is GridVibe's third durable JSON store, alongside
+`runtime_state.json` and `saved_sessions.json`, and it takes the same four
+mechanics from `web/state_files.py`: a cross-process sidecar lock over the
+complete replace, a unique same-directory temp file that is fsynced before
+`os.replace`, a `<file>.bak` taken on every commit, and quarantine of a corrupt
+file rather than laundering it into defaults that the next save would make
+permanent. Schema and merge policy stay here; only the mechanics are shared.
 """
 
 import json
 import logging
 import os
 import threading
-import uuid
 from typing import Any, Dict, Optional, Tuple
 
 from web.paths import BASE_DIR
+from web.state_files import (
+    CrossProcessFileLock,
+    StateFilePersistenceError,
+    quarantine_state_file,
+    read_backup_json,
+    write_json_atomically,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +36,25 @@ CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
 _config_lock = threading.RLock()
 
 HOST_KEY_POLICY_OPTIONS = ("auto-add", "known-hosts", "strict")
+
+#: Human label used in quarantine/recovery log lines for this store.
+_QUARANTINE_LABEL = "configuration"
+
+
+class ConfigPersistenceError(StateFilePersistenceError):
+    """Raised when an intended configuration change did not reach the disk.
+
+    A caller must treat this as "not saved" rather than echoing the new
+    settings back — the same contract the other two stores use, which is why it
+    subclasses the shared base.
+    """
+
+
+class _CrossProcessConfigLock(CrossProcessFileLock):
+    """Exclusive OS-level lock over one ``config.json``."""
+
+    error_type = ConfigPersistenceError
+    label = _QUARANTINE_LABEL
 
 # Bounds for launcher-editable terminal settings (ISSUE-2026-029). The App
 # Settings write path and RuntimeConfig.refresh() share these so a hand-edited
@@ -126,29 +159,51 @@ def load_config(config_path: Optional[str] = None) -> Dict[str, Any]:
                     exc,
                 )
                 logger.debug("Configuration load failure details", exc_info=True)
-                return default_config
+                loaded = _recover_config(target_path, exc)
+                if loaded is None:
+                    return default_config
             return _merge_dicts(default_config, loaded) if default_config else loaded
 
         return default_config
 
 
+def _recover_config(target_path: str, exc: Exception) -> Optional[Dict[str, Any]]:
+    """Return the last-good ``config.json`` after an unreadable primary, else None.
+
+    Corrupt *content* is quarantined first, so the evidence survives and the
+    next `save_config` cannot overwrite it — without that, a truncated file
+    silently becomes "defaults", and the first App Settings save afterwards
+    makes the loss permanent. An ``OSError`` is not quarantined: the bytes may
+    be perfectly good and only momentarily unreadable (a permission or
+    antivirus hold), and moving the file aside would discard settings this
+    process simply could not see.
+    """
+    if isinstance(exc, ValueError):  # json.JSONDecodeError
+        quarantine_state_file(target_path, f"unreadable: {exc}", label=_QUARANTINE_LABEL)
+    payload = read_backup_json(target_path, label=_QUARANTINE_LABEL)
+    if not isinstance(payload, dict):
+        return None
+    logger.warning("Recovered the configuration from the last-good backup")
+    return payload
+
+
 def save_config(config: Dict[str, Any], config_path: Optional[str] = None):
-    """Save configuration to file."""
+    """Save configuration to file, durably.
+
+    Raises `ConfigPersistenceError` when the intended revision did not reach
+    the disk. The in-process `_config_lock` orders threads (callers hold it
+    across their own read-modify-write); the sidecar lock orders whole
+    replaces across GridVibe processes, and the atomic writer takes the
+    `<file>.bak` `load_config` recovers from.
+    """
     target_path = config_path or CONFIG_PATH
-    target_dir = os.path.dirname(os.path.abspath(target_path)) or "."
-    temp_path = os.path.join(target_dir, f".{os.path.basename(target_path)}.{uuid.uuid4().hex}.tmp")
-    with _config_lock:
-        try:
-            with open(temp_path, 'w', encoding="utf-8") as f:
-                json.dump(config, f, indent=2)
-                f.write("\n")
-            os.replace(temp_path, target_path)
-        except Exception:
-            try:
-                os.remove(temp_path)
-            except OSError:
-                pass
-            raise
+    with _config_lock, _CrossProcessConfigLock(target_path):
+        write_json_atomically(
+            config,
+            target_path,
+            error_type=ConfigPersistenceError,
+            failure_message="Could not persist the configuration",
+        )
 
 
 def resolve_server_settings(

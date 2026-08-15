@@ -365,28 +365,59 @@
         noteWorkspacePresentationChanged();
     }
 
-    function applyTopbarVisibility(
-        visible,
-        { persist = false, refit = false, report = false } = {}
-    ) {
+    /* Hiding the bar took the Sessions… and Workspace… menus with it — the
+       only place Save Session and Save Workspace live — so a hidden bar is
+       revealed on demand by GridVibeTopbarPeek. It owns *when*; the page owns
+       what that looks like. Two body classes, two meanings:
+
+       - topbar-collapsed is the chevron's persisted choice, and stays the one
+         thing every topbar_visible read-back looks at;
+       - topbar-hidden is the derived "not in the flow" state, which fullscreen
+         also raises for its duration without ever touching the stored value.
+
+       topbar-peek is the transient overlay and is never persisted. */
+    const topbarPeek = window.GridVibeTopbarPeek.create({
+        getElement: id => document.getElementById(id),
+        setTimeout: (fn, ms) => window.setTimeout(fn, ms),
+        clearTimeout: handle => window.clearTimeout(handle),
+        onChange: ({ hidden, peeking, hiddenChanged }) => {
+            document.body.classList.toggle('topbar-hidden', hidden);
+            document.body.classList.toggle('topbar-peek', peeking);
+            /* Only a flow change resizes anything: the peek is an overlay, so
+               a pointer trip to the top edge costs no terminal refit. */
+            if (hiddenChanged && gridBuilt) {
+                refitAttachedTerminalsForSurfaceMode();
+            }
+        }
+    });
+
+    /* Kept in step with the two app menus, which must hold the peek open while
+       one of them is showing. */
+    function reportAppMenuState() {
+        topbarPeek.setMenuOpen(
+            Boolean(
+                document.getElementById('sessionsMenuRoot')?.classList.contains('open')
+                || document.getElementById('workspaceMenuRoot')?.classList.contains('open')
+            )
+        );
+    }
+
+    function applyTopbarVisibility(visible, { persist = false, report = false } = {}) {
         const shouldShow = Boolean(visible);
         document.body.classList.toggle('topbar-collapsed', !shouldShow);
         updateTopbarToggleButton(shouldShow);
+        topbarPeek.setCollapsed(!shouldShow);
         if (persist) {
             storeWorkspaceTopbarVisible(currentWorkspaceId, shouldShow);
         }
         if (report) {
             reportTopbarVisibility();
         }
-        if (refit) {
-            refitAttachedTerminalsForSurfaceMode();
-        }
     }
 
     function toggleTopbarVisibility() {
         applyTopbarVisibility(document.body.classList.contains('topbar-collapsed'), {
             persist: true,
-            refit: true,
             report: true
         });
     }
@@ -402,10 +433,6 @@
 
     function normalizeExplorerTheme(theme) {
         return GridVibeExplorerThemeStore.normalizeTheme(theme);
-    }
-
-    function getExplorerThemeStore() {
-        return GridVibeExplorerThemeStore.readStore(localStorage);
     }
 
     function hasExplorerThemeOverride(key = '') {
@@ -1230,6 +1257,7 @@
         const button = document.getElementById('sessionsMenuBtn');
         root?.classList.remove('open');
         button?.setAttribute('aria-expanded', 'false');
+        reportAppMenuState();
     }
 
     function toggleSessionsMenu(event) {
@@ -1247,6 +1275,7 @@
         if (shouldOpen) {
             closeWorkspaceMenu();
         }
+        reportAppMenuState();
     }
 
     function closeWorkspaceMenu() {
@@ -1254,6 +1283,7 @@
         const button = document.getElementById('workspaceMenuBtn');
         root?.classList.remove('open');
         button?.setAttribute('aria-expanded', 'false');
+        reportAppMenuState();
     }
 
     function toggleWorkspaceMenu(event) {
@@ -1272,6 +1302,7 @@
             closeSessionsMenu();
             refreshWorkspaceMenuLists();
         }
+        reportAppMenuState();
     }
 
     /* ─────────────────────────────────────────────
@@ -1291,7 +1322,19 @@
        instead of driving the workspace shortcuts. */
     async function switchToWorkspaceWindow(workspaceId, options = {}) {
         dropTerminalFocusForWindowSwitch();
-        return openWorkspaceWindow(workspaceId, options);
+        /* In browser mode a workspace is a tab this page asks the browser to
+           open, and the browser can refuse — one pop-up per user gesture, so a
+           switch that had to fetch first may come back empty-handed. Say so
+           here, once, for every switch path rather than leaving the user
+           looking at a window that did not change. */
+        const opened = await openWorkspaceWindow(workspaceId, options);
+        if (!opened) {
+            showTerminalToast(
+                `The workspace tab could not be opened. ${WORKSPACE_TAB_BLOCKED_HINT}`,
+                'error'
+            );
+        }
+        return opened;
     }
 
     /* The Move list always acts on the active session tab, which the heading
@@ -1668,7 +1711,13 @@
         });
     }
 
-    function closeCloseSessionConfirmModal(result = false) {
+    /* The three outcomes of the close prompt. Anything that is not an explicit
+       button press (Escape, the backdrop) keeps the session. */
+    const CLOSE_SESSION_CANCEL = 'cancel';
+    const CLOSE_SESSION_CLOSE = 'close';
+    const CLOSE_SESSION_SAVE_AND_CLOSE = 'save-and-close';
+
+    function closeCloseSessionConfirmModal(decision = CLOSE_SESSION_CANCEL) {
         const modal = document.getElementById('closeSessionConfirmModal');
         modal.classList.remove('visible');
         modal.setAttribute('aria-hidden', 'true');
@@ -1676,7 +1725,7 @@
         if (closeSessionConfirmResolver) {
             const resolver = closeSessionConfirmResolver;
             closeSessionConfirmResolver = null;
-            resolver(result);
+            resolver(decision);
         }
     }
 
@@ -1702,7 +1751,9 @@
 
     /* One misclick on a tab's × must not silently kill live terminals
        (sessions are memory-only), so closing a group with ≥1 connected
-       terminal asks first. Dead groups close without the dialog. */
+       terminal asks first, and offers to save the group as a preset on the
+       way out. Dead groups close without the dialog. Resolves to one of the
+       CLOSE_SESSION_* decisions. */
     async function confirmCloseSessionGroup(groupId) {
         let sessions = [];
         try {
@@ -1717,7 +1768,7 @@
 
         const connectedCount = sessions.filter(session => session.status === 'connected').length;
         if (sessions.length > 0 && connectedCount === 0) {
-            return true;
+            return CLOSE_SESSION_CLOSE;
         }
 
         return openCloseSessionConfirmModal(getGroupById(groupId), connectedCount, sessions.length);
@@ -1971,22 +2022,29 @@
 
     document.getElementById('closeSessionConfirmModal').addEventListener('click', event => {
         if (event.target.id === 'closeSessionConfirmModal') {
-            closeCloseSessionConfirmModal(false);
+            closeCloseSessionConfirmModal(CLOSE_SESSION_CANCEL);
         }
     });
 
     document.getElementById('closeSessionConfirmCancel').addEventListener('click', () => {
-        closeCloseSessionConfirmModal(false);
+        closeCloseSessionConfirmModal(CLOSE_SESSION_CANCEL);
+    });
+
+    document.getElementById('closeSessionConfirmSave').addEventListener('click', () => {
+        closeCloseSessionConfirmModal(CLOSE_SESSION_SAVE_AND_CLOSE);
     });
 
     document.getElementById('closeSessionConfirmAccept').addEventListener('click', () => {
-        closeCloseSessionConfirmModal(true);
+        closeCloseSessionConfirmModal(CLOSE_SESSION_CLOSE);
     });
 
     document.addEventListener('keydown', event => {
         if (event.key === 'Escape') {
             closeSessionsMenu();
             closeWorkspaceMenu();
+            /* After the menus, so a peek held open by one of them is released
+               by the same keypress that closed it. */
+            topbarPeek.dismiss();
             if (document.getElementById('savedSessionsModal').classList.contains('visible')) {
                 closeSavedSessionModal();
             }
@@ -1994,7 +2052,7 @@
                 closeSaveSessionAsModal();
             }
             if (document.getElementById('closeSessionConfirmModal').classList.contains('visible')) {
-                closeCloseSessionConfirmModal(false);
+                closeCloseSessionConfirmModal(CLOSE_SESSION_CANCEL);
             }
         }
     });
@@ -5325,6 +5383,14 @@
             : -1;
     }
 
+    /* Re-assert the pointer-driven mark by hand. A pane that clears its own
+       state by blurring a row (Escape over a multi-entry selection) would
+       otherwise leave the resolver below with nothing to answer from, and the
+       next press would land on a different pane — or on none. */
+    function markActiveExplorerPane(index) {
+        _activeExplorerIndex = isExplorerSession(terminals[index]?._session) ? index : -1;
+    }
+
     function findExplorerShortcutTargetIndex(target = document.activeElement) {
         /* Pointer interaction is the source of truth for explorer panes. Many
            explorer controls deliberately prevent mousedown focus so toolbar
@@ -6641,6 +6707,15 @@
        explorer pane and is a single line — the useful case for seeding a find.
        Multi-line selections and selections in other panes are ignored. */
     function explorerSelectionQuery(index) {
+        /* A pane with an open in-place editor answers for itself: its selection
+           lives in a textarea, where the document selection read below reports
+           nothing. explorer-edit-find.js returns null when there is no editor,
+           and an object — empty query included — when there is, so exactly one
+           of the two speaks. */
+        const editSeed = window.explorerEditSelectionSeed?.(index);
+        if (editSeed) {
+            return editSeed.query;
+        }
         const selection = window.getSelection?.();
         if (!selection || selection.isCollapsed || !selection.rangeCount) {
             return '';
@@ -7412,11 +7487,9 @@
         const previousActiveGroupId = activeGroupId;
         const previousGroupIds = knownGroupIds.slice();
         if (typeof data.topbar_visible === 'boolean') {
-            const currentTopbarVisible = !document.body.classList.contains('topbar-collapsed');
-            applyTopbarVisibility(data.topbar_visible, {
-                persist: true,
-                refit: gridBuilt && currentTopbarVisible !== data.topbar_visible
-            });
+            /* The refit rides on the flow actually changing, which the peek
+               controller reports; nothing to decide here. */
+            applyTopbarVisibility(data.topbar_visible, { persist: true });
         }
         setExplorerWorkspaceAppearance({
             preset: data.md_preset,
@@ -7459,12 +7532,20 @@
         return Boolean(window.pywebview && window.pywebview.api);
     }
 
+    /* The one funnel for "is this window fullscreen right now" — every
+       fullscreen transition already ends here, so the top bar's auto-hide is
+       wired once rather than at each of the four call sites. Fullscreen hides
+       the bar for its duration only: the stored topbar_visible is untouched,
+       so leaving fullscreen gives back whatever the chevron last said. */
     function updateFullscreenButton() {
+        const isBrowserFullscreen = Boolean(document.fullscreenElement);
+        const active = isPywebviewAvailable() ? nativeFullscreen : isBrowserFullscreen;
+        document.body.classList.toggle('chrome-fullscreen', active);
+        topbarPeek.setFullscreen(active);
+
         const button = document.getElementById('fullscreenBtn');
         if (!button) return;
 
-        const isBrowserFullscreen = Boolean(document.fullscreenElement);
-        const active = isPywebviewAvailable() ? nativeFullscreen : isBrowserFullscreen;
         const label = active ? 'Exit fullscreen' : 'Enter fullscreen';
         button.innerHTML = active ? FULLSCREEN_EXIT_ICON : FULLSCREEN_ENTER_ICON;
         button.title = label;
@@ -7587,6 +7668,12 @@
         if (event) {
             event.preventDefault();
         }
+
+        /* The single place a workspace window hands over to the launcher, so
+           the launcher's Alt+W return key learns where it came from here and
+           nowhere else — and re-learns it every time, so opening the launcher
+           again from a different workspace retargets the way back. */
+        rememberLauncherOriginWorkspace(currentWorkspaceId);
 
         if (window.pywebview?.api?.open_launcher_window) {
             try {
@@ -7729,8 +7816,18 @@
             return;
         }
 
-        if (!(await confirmCloseSessionGroup(groupId))) {
+        const decision = await confirmCloseSessionGroup(groupId);
+        if (decision === CLOSE_SESSION_CANCEL) {
             return;
+        }
+        /* A requested save that failed must not cost the terminals it was
+           meant to preserve — keep the session and leave the reason on the
+           session line, the same way an explicit Save Session reports it. */
+        if (decision === CLOSE_SESSION_SAVE_AND_CLOSE) {
+            const saved = await saveActiveWorkspaceSession(null, { groupId });
+            if (!saved?.ok) {
+                return;
+            }
         }
         // Past both confirmations, so this close is really happening: drop the
         // per-session/per-group entries that would otherwise outlive it.
@@ -8109,6 +8206,7 @@
        Boot
     ───────────────────────────────────────────── */
     initSurfaceMode();
+    topbarPeek.attach();
     applyTopbarVisibility(getStoredTopbarVisible());
     setupAppConfigUpdateListeners();
     updateFullscreenButton();

@@ -79,6 +79,8 @@ python webview_launcher.py         # auto: native window, browser fallback
 python webview_launcher.py --mode browser|native
 ```
 
+Browser mode is one browser window per run: the launcher opens in a **new window** of your default browser, and each workspace opens as a tab beside it. Browsers allow a page to open only one tab per click, so restoring several workspaces at once opens the first and reports the rest — allow pop-ups for GridVibe's address to have them all open automatically, or use **Open** in the launcher's Workspaces card.
+
 ## Agent CLIs
 
 Pick an agent per pane in the launcher. GridVibe checks whether the binary is on `PATH` **in the target environment** (the remote host for SSH, the chosen distro for WSL, Windows for PowerShell/cmd) and shows install guidance when it isn't.
@@ -116,7 +118,7 @@ Browser mode is the most reliable for microphone permissions. Settings apply liv
 | **Saved sessions** | Save a setup as a reusable preset, import one later, or choose **New Session** for a clean start. Stored SSH passwords are encrypted. |
 | **Save & restore** | GridVibe autosaves your workspace and also offers **Save Workspace**. After a restart, restore the same tabs, pane layouts, directories, commands, active group, and explorer presentation; passwords are never written to the workspace snapshot. Lowering `max_sessions` does not truncate wider stored presets or rewrite their split geometry; a group that no longer fits is refused with the number to raise the setting to, and the stored preset and snapshot are left untouched. A snapshot damaged outside GridVibe fails as a whole tab rather than restoring one pane short, so the restore chooser's counts always match what a restore starts; window chrome such as top-bar visibility and Markdown appearance falls back to its default instead. |
 | **Close & restart** | Voluntary close, manual restart, and update restart share one in-page choice: continue without saving, save every open workspace, or save every open session preset and then every workspace. GridVibe waits for each live workspace window to flush its current presentation; if a requested save fails, GridVibe stays open and leaves the same three choices available. |
-| **Multiple workspaces** | Optionally keep separate projects in separate windows, move tabs between them without restarting terminals, and switch with `Alt+W` / `Alt+Shift+W`. |
+| **Multiple workspaces** | Optionally keep separate projects in separate windows, move tabs between them without restarting terminals, and switch with `Alt+W` / `Alt+Shift+W` — including from the launcher, where `Alt+W` goes back to the workspace that opened it. |
 | **Updates** | **Check for updates** fast-forwards a Git clone, then uses the same save-or-restart choices as a manual restart. |
 
 Closing a workspace ends its terminals but keeps it available to restore. **Close and forget** removes both the live workspace and its snapshot, while closing only the window leaves its terminals running. Closing the last tab removes an empty workspace.
@@ -135,6 +137,7 @@ Swap any pane between a terminal and a file explorer with one button — same di
 | **Fold a level** | `Alt`-click a folder's fold arrow in the Files tree to fold or unfold **every folder beside it** at once. The new state mirrors the folder you clicked, so `Alt`-clicking any open top-level folder folds the whole tree in one go. Folding a level also forgets what was open inside it, so those folders reopen clean, and the tree scrolls to keep the folder you clicked in view instead of jumping once its rows disappear. |
 | **Restore fidelity** | Saved sessions and workspaces preserve the explorer root, ordered file tabs, Preview/Source/Diff intent, per-panel and directory scroll, wrapping, folds, sidebar width/scroll, Files-tree expansion, Git commit expansion, theme, and workspace-wide Markdown/source appearance. Content-relative scroll and folds restore only when their file, directory, or rendered Diff revision still matches; queries and fetched results are always refetched, never stored. |
 | **Manage files** | Create, copy, move, rename, and delete from the context menu. Every write stays inside the explorer root; collisions never overwrite existing files, and deletion requires confirmation. |
+| **Select several** | `Ctrl`-click rows to add or remove them, `Shift`-click for a range. Right-click inside the selection and Copy, Cut, Delete, Download, and Copy path act on all of it, with one confirmation and one result for the batch; right-click anywhere else drops back to that single row. A plain click still just opens the file. Rename stays single-entry. |
 
 Uploading, cross-root transfers, and Git checkout, pull, or merge are intentionally left to the terminal.
 
@@ -181,7 +184,9 @@ GridVibe does not proxy pages or bypass `X-Frame-Options`/CSP, so sites that blo
 | 🔍 | Repository search sidebar (`Ctrl+Shift+F`) |
 | 🖥️ | Reveal the current location in the system file manager (local panes only) |
 
-**Top bar:** theme · refresh all · max surface · broadcast typing · fullscreen · App Settings · chevron to hide the bar. Plus a `Workspace…` menu and a `Sessions…` menu.
+**Top bar:** theme · max surface · broadcast typing · fullscreen · App Settings · chevron to hide the bar. Plus a `Workspace…` menu and a `Sessions…` menu.
+
+**A hidden top bar comes back on hover.** Rest the pointer on the small handle at the top edge, centred — only that handle triggers it, so the rest of the edge is free — and the bar slides down over the workspace for as long as you are using it, so `Save Session` and `Save Workspace` stay reachable with the bar hidden. It stays while a menu is open and hides again shortly after you move away (or on `Esc`); clicking the handle reveals the bar and puts focus in it, which is the keyboard route in. Fullscreen hides the bar for its duration and reveals it the same way; leaving fullscreen gives back whatever the chevron last said. Nothing about the reveal is saved.
 
 **Session tab line:** the back-to-launcher button sits at the head of the tab line, ahead of the first tab, so it stays reachable with the top bar hidden.
 
@@ -189,7 +194,7 @@ GridVibe does not proxy pages or bypass `X-Frame-Options`/CSP, so sites that blo
 | --- | --- |
 | ``Alt+` `` | Open the launcher (the key left of `1`) |
 | `Alt+1`–`Alt+9` | Switch session group |
-| `Alt+W` / `Alt+Shift+W` | Next / previous workspace window (multiple workspaces only) — the window you land in pulses once |
+| `Alt+W` / `Alt+Shift+W` | Next / previous workspace window (multiple workspaces only) — the window you land in pulses once. In the launcher, `Alt+W` returns to the workspace that opened it, or to whichever workspace is still open if that one has closed |
 | `Ctrl+Shift+F` | Terminal scrollback search — or, on an explorer pane, toggle repository search |
 | `Ctrl+F` | Find in the open file |
 | `Ctrl+Shift+V` | Toggle Markdown rendered preview |

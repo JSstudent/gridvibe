@@ -1,3 +1,4 @@
+import ast
 import base64
 import errno
 import io
@@ -29,6 +30,7 @@ from web import paths as web_paths
 from web import runtime_state as web_runtime_state
 from web import saved_sessions as web_saved_sessions
 from web import selfupdate
+from web import state_files as web_state_files
 from web import terminal_io as web_terminal_io
 from web import voice as web_voice
 from web import workspaces as web_workspaces
@@ -147,6 +149,31 @@ class FakeSshExecClient:
         self.closed = True
 
 
+class FakeGitProcess:
+    """Stands in for one `subprocess.Popen` inside the self-update git runner.
+
+    `stall` makes the first `communicate()` time out the way a remote that has
+    gone quiet does, so the timeout path can be exercised without a network.
+    """
+
+    def __init__(self, stdout="", returncode=0, stall=False):
+        self.stdout_text = stdout
+        self.returncode = returncode
+        self.stall = stall
+        self.pid = -1
+        self.communicate_timeouts = []
+        self.killed = False
+
+    def communicate(self, timeout=None):
+        self.communicate_timeouts.append(timeout)
+        if self.stall and len(self.communicate_timeouts) == 1:
+            raise subprocess.TimeoutExpired(cmd="git", timeout=timeout)
+        return self.stdout_text, ""
+
+    def kill(self):
+        self.killed = True
+
+
 class ApiRoutesTestCase(unittest.TestCase):
     def setUp(self):
         self.temp_dir = TemporaryDirectory()
@@ -244,6 +271,7 @@ class ApiRoutesTestCase(unittest.TestCase):
             "js/terminal-icons.js",
             "js/voice-input.js",
             "js/explorer-viewer.js",
+            "js/explorer-tabs.js",
             "js/explorer-editor.js",
             "js/explorer-search.js",
             "js/explorer-fs.js",
@@ -865,7 +893,6 @@ class ApiRoutesTestCase(unittest.TestCase):
             "broadcast-icon",
             "app-settings-icon",
             "surface-mode-icon",
-            "refresh-all-icon",
             "fullscreen-icon",
             "vibe-flow-icon",
         ):
@@ -1253,6 +1280,31 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertNotIn(">×</button>", browser)
         self.assertNotIn(">+</button>", browser)
 
+        # The Git sidebar's stage/unstage pair and the editor's zoom pair were
+        # the last `+`/`−` text buttons in the explorer: they took their weight
+        # from the page font and sat beside SVG neighbours on the same row.
+        # They share the same two icons rather than growing explorer-local ones.
+        viewer = self._static("js/explorer-viewer.js")
+        for hook, icon in (
+            ('aria-label="Stage changes"', "UI_PLUS_ICON"),
+            ('aria-label="Unstage changes"', "UI_MINUS_ICON"),
+            ('aria-label="Stage all changes"', "UI_PLUS_ICON"),
+            ('aria-label="Decrease editor font size"', "UI_MINUS_ICON"),
+            ('aria-label="Increase editor font size"', "UI_PLUS_ICON"),
+        ):
+            button = viewer[viewer.index(hook):]
+            self.assertEqual(button[:button.index("</button>")].count("${" + icon + "}"), 1)
+        for glyph in (">+</button>", ">-</button>", ">−</button>"):
+            self.assertNotIn(glyph, viewer)
+        # An SVG does not centre itself by font-size the way the glyph did, so
+        # each container has to say how big its icon is and centre it.
+        terminals_css = self._static("css/terminals.css")
+        for selector in (
+            ".explorer-git-stage-btn svg,",
+            ".explorer-zoom-btn svg {",
+        ):
+            self.assertIn(selector, terminals_css)
+
         # These are search-language labels, not stand-ins for graphical actions.
         self.assertIn('title="Match case">Aa</button>', search)
         self.assertIn('title="Match whole word">ab</button>', search)
@@ -1406,8 +1458,12 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("white-space: pre-wrap;", html)
         self.assertIn("overflow-wrap: anywhere;", html)
         self.assertIn(".explorer-source-line-number", html)
-        self.assertIn("function renderExplorerSourceLines(content, language, searchRanges = [], collapsedLines = new Set(), highlightedLines)", html)
-        self.assertIn("function highlightExplorerCode(content, language, searchRanges = [])", html)
+        # Presence, not signature: what these two renderers actually produce is
+        # executed against the real modules in tests/test_explorer_edit_highlight.py
+        # and tests/test_explorer_source_frame.py, so pinning their parameter
+        # lists here only broke the page test whenever one gained an argument.
+        self.assertIn("function renderExplorerSourceLines(", html)
+        self.assertIn("function highlightExplorerCode(", html)
         self.assertIn("code.innerHTML = renderExplorerSourceLines(", html)
         self.assertIn("const EXPLORER_LANGUAGE_BY_EXTENSION = Object.freeze({", html)
         self.assertIn("'.py': 'python'", html)
@@ -1485,7 +1541,11 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("function cancelExplorerSearch(index)", html)
         self.assertIn("window.clearTimeout(pane._explorerSearchTimer);", html)
         self.assertIn("pane._explorerSearchToken.cancelled = true;", html)
-        self.assertIn("function scheduleExplorerSearch(index, { resetActive = false, delay = EXPLORER_SEARCH_DEBOUNCE_MS } = {})", html)
+        # The scheduler debounces by the bounded constant above; its remaining
+        # options (resetActive, scroll) are covered behaviourally elsewhere, so
+        # this pins the bound rather than the whole signature.
+        self.assertIn("function scheduleExplorerSearch(index, {", html)
+        self.assertIn("delay = EXPLORER_SEARCH_DEBOUNCE_MS", html)
         self.assertIn("scheduleExplorerSearch(index, { resetActive: true });", html)
         self.assertIn("capped: ranges.length >= maxMatches,", html)
         self.assertIn("count.title = capped ? `Showing first ${matchCount} matches` : '';", html)
@@ -1778,9 +1838,13 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("function toggleExplorerTreeSidebar(index)", html)
         self.assertIn("function toggleExplorerTreeDirectory(index, path)", html)
         self.assertIn("function renderExplorerTreePanel(index)", html)
-        self.assertIn("function loadExplorerTreeChildren(index, path)", html)
+        # Presence, not signature — pinning the parameter list only broke this
+        # page test when the loader gained its cached-directory refresh option.
+        self.assertIn("function loadExplorerTreeChildren(", html)
         self.assertIn("function revealExplorerTreePath(index, targetPath = '')", html)
         self.assertIn("function reloadExplorerTree(index)", html)
+        # A save re-reads one directory rather than dropping the whole tree.
+        self.assertIn("function refreshExplorerTreeFileEntry(index, path)", html)
         self.assertIn(
             'wireCardButton(card, `[data-explorer-tree-toggle="${i}"]`, () => toggleExplorerTreeSidebar(i));',
             html,
@@ -1939,21 +2003,26 @@ class ApiRoutesTestCase(unittest.TestCase):
         ]
         self.assertIn("const sourceViewport = captureScrollMetrics(sourcePanel);", enter)
         self.assertIn("textarea.focus({ preventScroll: true });", enter)
-        self.assertIn("restoreExplorerEditViewport(textarea, sourceViewport);", enter)
+        self.assertIn("restoreExplorerEditViewport(", enter)
         self.assertLess(
             enter.index("textarea.setSelectionRange(0, 0);"),
             enter.index("textarea.focus({ preventScroll: true });"),
         )
-        # Save captures the textarea (the real edit-mode scroller), allowing
-        # the highlighted Source view to return to the same location. The
-        # scroll target sees through the fixed source frame to the inner view.
+        # Both transfers address whichever element actually scrolls in edit
+        # mode — the Source view under the highlight overlay, the full-height
+        # textarea when the overlay stood down. The scroll target sees through
+        # the fixed source frame to the inner view either way.
+        self.assertIn("explorerEditScrollElement(index)", enter)
         self.assertIn("panel.querySelector('.explorer-source-view')", viewer)
         self.assertIn("view.querySelector('.explorer-source-editor')", viewer)
         exit_mode = editor[
             editor.index("function exitExplorerEditMode("):
             editor.index("async function cancelExplorerEdit(index)")
         ]
-        self.assertIn("const editViewport = captureScrollMetrics(textarea);", exit_mode)
+        self.assertIn(
+            "const editViewport = captureScrollMetrics(explorerEditScrollElement(index));",
+            exit_mode,
+        )
         self.assertIn("restoreExplorerEditViewport(", exit_mode)
 
     def test_terminals_page_explorer_editor_conflict_branches_on_code(self):
@@ -1987,6 +2056,8 @@ class ApiRoutesTestCase(unittest.TestCase):
         """§5.6: every deliberate teardown consults the discard guard."""
         editor = self._static("js/explorer-editor.js")
         viewer = self._static("js/explorer-viewer.js")
+        # Tab switch/close teardown moved with the tab domain (explorer-tabs.js).
+        tabs = self._static("js/explorer-tabs.js")
         terminals_js = self._static("js/terminals.js")
 
         # Guard + group guard exist and use the in-page confirm shell only.
@@ -1997,11 +2068,11 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("await openGenericConfirmModal(", editor)
 
         # Tab / path / directory / refresh teardown in the viewer awaits it.
-        self.assertIn("confirmDiscardExplorerEdit(index, 'Switching tabs')", viewer)
+        self.assertIn("confirmDiscardExplorerEdit(index, 'Switching tabs')", tabs)
         self.assertIn("confirmDiscardExplorerEdit(index, 'Opening another file')", viewer)
         self.assertIn("confirmDiscardExplorerEdit(index, 'Leaving this file')", viewer)
         self.assertIn("confirmDiscardExplorerEdit(index, 'Refreshing')", viewer)
-        self.assertIn("&& !(await confirmDiscardExplorerEdit(index, 'Closing this tab'))", viewer)
+        self.assertIn("&& !(await confirmDiscardExplorerEdit(index, 'Closing this tab'))", tabs)
 
         # Pane close, group switch, and group close in terminals.js await it.
         self.assertIn("confirmDiscardExplorerEdit(index, 'Closing this pane')", terminals_js)
@@ -2014,9 +2085,9 @@ class ApiRoutesTestCase(unittest.TestCase):
 
         # Editor state is transient: never serialized into saved sessions or the
         # runtime snapshot (the tab-persist payload has no _explorerEdit).
-        persist_start = viewer.index("function persistExplorerTabsToSession(index)")
-        persist_end = viewer.index("\n    function ", persist_start + 1)
-        self.assertNotIn("_explorerEdit", viewer[persist_start:persist_end])
+        persist_start = tabs.index("function persistExplorerTabsToSession(index)")
+        persist_end = tabs.index("\n    function ", persist_start + 1)
+        self.assertNotIn("_explorerEdit", tabs[persist_start:persist_end])
 
     def test_terminals_page_explorer_editor_icons_and_styles_are_token_driven(self):
         """§6 + guardrail 7: stroke currentColor icons, token colors, class busy state."""
@@ -2041,18 +2112,21 @@ class ApiRoutesTestCase(unittest.TestCase):
     def test_terminals_page_explorer_tabs_show_unstaged_git_status(self):
         """Open tabs mirror only the worktree/unstaged status column."""
         viewer = self._static("js/explorer-viewer.js")
+        tabs = self._static("js/explorer-tabs.js")
         css = self._static("css/terminals.css")
-        helper = viewer[
-            viewer.index("function explorerTabUnstagedGit(git)"):
-            viewer.index("function syncExplorerTabGitFromRepo", viewer.index("function explorerTabUnstagedGit(git)"))
+        helper = tabs[
+            tabs.index("function explorerTabUnstagedGit(git)"):
+            tabs.index("function syncExplorerTabGitFromRepo", tabs.index("function explorerTabUnstagedGit(git)"))
         ]
         self.assertIn("const worktreeCode = git.worktree_status || ' ';", helper)
         self.assertIn("if (explorerGitCodeUnmodified(worktreeCode)) {", helper)
         self.assertIn("explorerGitStatusFromCode(worktreeCode)", helper)
+        # The file renderers stay in the viewer and still stamp the tab they
+        # rendered for; the sidebar sync and the badge itself live in the tabs.
         self.assertIn("assignedTab.git = data.git || null;", viewer)
         self.assertIn("renderedTab.git = data.git || null;", viewer)
         self.assertIn("syncExplorerTabGitFromRepo(index, data);", viewer)
-        self.assertIn("${gitBadge}", viewer)
+        self.assertIn("${gitBadge}", tabs)
         self.assertIn(".explorer-tab-main > .explorer-git-badge {", css)
 
     def test_terminals_page_explorer_diff_line_undo_is_revision_guarded(self):
@@ -2343,7 +2417,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         html = self._page_html(response)
         assign = html[
             html.index("function explorerAssignOpenTab(pane, path"):
-            html.index("function explorerEnsureViewerShell(index)")
+            html.index("function flashExplorerTab(index, id)")
         ]
         # The active-pinned-tab reuse branch is gone: a plain click can no
         # longer repurpose a pinned tab that happens to show the same path.
@@ -3079,9 +3153,10 @@ class ApiRoutesTestCase(unittest.TestCase):
         were already looking at, so the opener only touches the tab strip.
         """
         viewer = self._static("js/explorer-viewer.js")
-        opener = viewer[
-            viewer.index("function openExplorerFileInBackgroundTab(index, path,"):
-            viewer.index("function explorerEnsureViewerShell(index)")
+        tabs = self._static("js/explorer-tabs.js")
+        opener = tabs[
+            tabs.index("function openExplorerFileInBackgroundTab(index, path,"):
+            tabs.index("function ensureExplorerTabLineWrap(tab)")
         ]
         # No focus change, no viewer repaint, and no fetch — activateExplorerTab
         # loads the file lazily when the tab is first clicked.
@@ -3101,10 +3176,10 @@ class ApiRoutesTestCase(unittest.TestCase):
 
     def test_reopening_an_already_open_tab_flashes_it_instead_of_focusing(self):
         """Open-in-new-tab on a file that already has a tab answers without moving the viewer."""
-        viewer = self._static("js/explorer-viewer.js")
-        opener = viewer[
-            viewer.index("function openExplorerFileInBackgroundTab(index, path,"):
-            viewer.index("function explorerEnsureViewerShell(index)")
+        tabs = self._static("js/explorer-tabs.js")
+        opener = tabs[
+            tabs.index("function openExplorerFileInBackgroundTab(index, path,"):
+            tabs.index("function ensureExplorerTabLineWrap(tab)")
         ]
         # The already-open case is decided before the tab is ensured, then
         # flashed after the strip is rebuilt so the class lands on live DOM.
@@ -3115,9 +3190,9 @@ class ApiRoutesTestCase(unittest.TestCase):
         )
         # It still does not activate the tab — the flash replaces focus.
         self.assertNotIn("activateExplorerTab", opener)
-        flash = viewer[
-            viewer.index("function flashExplorerTab(index, id)"):
-            viewer.index("function openExplorerFileInBackgroundTab(index, path,")
+        flash = tabs[
+            tabs.index("function flashExplorerTab(index, id)"):
+            tabs.index("function openExplorerFileInBackgroundTab(index, path,")
         ]
         # A tab id is a file path, so it is matched by dataset rather than
         # interpolated into a CSS selector.
@@ -3139,10 +3214,10 @@ class ApiRoutesTestCase(unittest.TestCase):
 
     def test_preview_double_click_pins_in_the_background(self):
         """Double-clicking Preview bookmarks its file; the viewer does not jump."""
-        viewer = self._static("js/explorer-viewer.js")
-        promote = viewer[
-            viewer.index("function promoteExplorerPreviewTab(index)"):
-            viewer.index("function revealExplorerTabInTree(index, id)")
+        tabs = self._static("js/explorer-tabs.js")
+        promote = tabs[
+            tabs.index("function promoteExplorerPreviewTab(index)"):
+            tabs.index("function revealExplorerTabInTree(index, id)")
         ]
         # Focus is untouched: the non-focusing helper is used, the rendered-tab
         # stamp stays on Preview (whose DOM is still what the viewer shows),
@@ -3169,10 +3244,10 @@ class ApiRoutesTestCase(unittest.TestCase):
 
     def test_closing_the_active_tab_falls_back_to_preview(self):
         """Closing the tab you are reading lands on Preview, not the neighbour."""
-        viewer = self._static("js/explorer-viewer.js")
-        close = viewer[
-            viewer.index("async function closeExplorerTab(index, id)"):
-            viewer.index("const appliedExplorerMdSessions = new Set();")
+        tabs = self._static("js/explorer-tabs.js")
+        close = tabs[
+            tabs.index("async function closeExplorerTab(index, id)"):
+            tabs.index("function explorerPersistableTabView(tab)")
         ]
         # No positional neighbour lookup survives.
         self.assertNotIn("position - 1", close)
@@ -3421,9 +3496,6 @@ class ApiRoutesTestCase(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         html = self._page_html(response)
-        self.assertIn('aria-label="Refresh all"', html)
-        self.assertIn('class="refresh-all-icon"', html)
-        self.assertNotIn(">Refresh all</button>", html)
         self.assertNotIn("Close Session</button>", html)
         self.assertIn("closeButton.className = 'session-tab-close';", html)
         self.assertIn("closeSessionGroup(group.group_id);", html)
@@ -4458,6 +4530,131 @@ class ApiRoutesTestCase(unittest.TestCase):
 
         self.assertEqual(context.exception.status_code, 409)
         self.assertIn("Local changes are present", str(context.exception))
+
+    def test_repo_git_never_waits_on_a_credential_prompt(self):
+        """A remote asking for credentials must fail, not block the request thread."""
+        with patch.object(
+            selfupdate.subprocess, "Popen", return_value=FakeGitProcess()
+        ) as popen:
+            result = selfupdate._run_repo_git(["status", "--porcelain"])
+
+        self.assertEqual(popen.call_args.kwargs["env"]["GIT_TERMINAL_PROMPT"], "0")
+        self.assertEqual(result.returncode, 0)
+
+    def test_repo_git_timeout_surfaces_as_an_update_error(self):
+        """A stalled transport reports through the launcher instead of hanging."""
+        process = FakeGitProcess(stall=True)
+        with patch.object(selfupdate.subprocess, "Popen", return_value=process):
+            with patch.object(selfupdate, "_terminate_process_tree") as terminate:
+                with self.assertRaises(api.AppUpdateError) as context:
+                    selfupdate._run_repo_git(["fetch", "--all", "--prune"], timeout=30)
+
+        self.assertEqual(context.exception.status_code, 500)
+        self.assertIn("timed out", str(context.exception))
+        # The whole tree, not just the direct child — its helpers hold the pipes.
+        terminate.assert_called_once_with(process)
+        # And the reap after the kill is bounded too, or it becomes the new hang.
+        self.assertEqual(
+            process.communicate_timeouts,
+            [30, selfupdate.SELF_UPDATE_REAP_TIMEOUT],
+        )
+
+    def test_repo_git_timeout_bounds_a_remote_that_goes_quiet(self):
+        """The bound has to cover git's helper processes, not only git itself.
+
+        A remote that accepts the connection and then says nothing is the case
+        that parked a worker thread. Killing the direct child is not enough:
+        the helpers it spawned inherit our stdout/stderr pipes, and the reap
+        after the kill waits for those handles to close — measured at 269 s
+        against a 30 s bound before the tree kill landed.
+        """
+        if shutil.which("git") is None:
+            self.skipTest("git executable is not available")
+
+        listener = socket.socket()
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(4)
+        port = listener.getsockname()[1]
+        accepted = []
+
+        def accept_and_stall():
+            while True:
+                try:
+                    accepted.append(listener.accept()[0])
+                except OSError:
+                    return
+
+        threading.Thread(target=accept_and_stall, daemon=True).start()
+        self.addCleanup(listener.close)
+        self.addCleanup(lambda: [conn.close() for conn in accepted])
+
+        with TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            repo.mkdir()
+            self._run_git(repo, "init")
+            self._run_git(repo, "config", "user.email", "gridvibe@example.invalid")
+            self._run_git(repo, "config", "user.name", "GridVibe Test")
+            (repo / "README.md").write_text("v1\n", encoding="utf-8")
+            self._run_git(repo, "add", ".")
+            self._run_git(repo, "commit", "-m", "initial")
+            self._run_git(
+                repo, "remote", "add", "origin", f"git://127.0.0.1:{port}/repo.git"
+            )
+
+            started = time.monotonic()
+            with patch.object(selfupdate, "SELF_UPDATE_REPO_DIR", str(repo)):
+                with self.assertRaises(api.AppUpdateError) as context:
+                    selfupdate._run_repo_git(["fetch", "--all", "--prune"], timeout=2)
+            elapsed = time.monotonic() - started
+
+        self.assertEqual(context.exception.status_code, 500)
+        self.assertIn("timed out", str(context.exception))
+        # Generous, because it only has to separate "bounded" from "waited for
+        # git to give up on its own", which is minutes away.
+        self.assertLess(elapsed, 20)
+
+    def test_self_update_bounds_every_git_call(self):
+        """Network commands get the wider bound; local ones the tighter default."""
+        stdouts = [
+            "true\n",
+            "main\n",
+            "",
+            "origin/main\n",
+            "",
+            "0\t2\n",
+            "abc123456789\n",
+            "Updating abc..def\n",
+            "def987654321\n",
+        ]
+        timeouts = {}
+
+        def fake_popen(command, **kwargs):
+            # command is [git, "-C", repo_dir, *args] — keep the git args only.
+            process = FakeGitProcess(stdout=stdouts.pop(0))
+            pending.append((tuple(command[3:]), process))
+            return process
+
+        pending = []
+        with patch.object(selfupdate.subprocess, "Popen", side_effect=fake_popen):
+            api.perform_self_update()
+
+        for args, process in pending:
+            timeouts[args] = process.communicate_timeouts[0]
+
+        self.assertEqual(len(timeouts), 8)
+        self.assertTrue(all(value for value in timeouts.values()))
+        self.assertEqual(
+            timeouts[("fetch", "--all", "--prune")],
+            selfupdate.SELF_UPDATE_NETWORK_TIMEOUT,
+        )
+        self.assertEqual(
+            timeouts[("pull", "--ff-only")],
+            selfupdate.SELF_UPDATE_NETWORK_TIMEOUT,
+        )
+        self.assertEqual(
+            timeouts[("status", "--porcelain")],
+            selfupdate.SELF_UPDATE_LOCAL_TIMEOUT,
+        )
 
     def test_app_update_fast_forwards_real_checkout(self):
         """POST /api/app-update happy path against a real temp git repo (finding 6.6)."""
@@ -6866,14 +7063,46 @@ class ApiRoutesTestCase(unittest.TestCase):
 
     def test_parse_git_graph_log_skips_connector_only_lines(self):
         commits = web_explorer._parse_git_graph_log(
-            b"* a1b2c3d initial\n"
+            b"* \x1fa1b2c3d4e5f60718293a4b5c6d7e8f9012345678\x1fa1b2c3d\x1f\x1finitial\n"
             b"|\\\n"
-            b"| * b2c3d4e branch work\n"
+            b"| * \x1fb2c3d4e5f60718293a4b5c6d7e8f90123456789a\x1fb2c3d4e\x1f\x1fbranch work\n"
             b"|/\n"
         )
 
         self.assertEqual([commit["hash"] for commit in commits], ["a1b2c3d", "b2c3d4e"])
         self.assertEqual([commit["subject"] for commit in commits], ["initial", "branch work"])
+        # The graph prefix stays attached to its own field, and the abbreviated
+        # hash the rows display keeps travelling beside the full object id the
+        # commit context menu copies.
+        self.assertEqual([commit["graph"] for commit in commits], ["*", "| *"])
+        self.assertEqual(
+            [commit["full_hash"] for commit in commits],
+            [
+                "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678",
+                "b2c3d4e5f60718293a4b5c6d7e8f90123456789a",
+            ],
+        )
+
+    def test_parse_git_graph_log_separates_decorations_from_the_message(self):
+        commits = web_explorer._parse_git_graph_log(
+            b"* \x1f" + b"a" * 40 + b"\x1faaaaaaa\x1fHEAD -> main, tag: v1.2\x1f(fix) ship it\n"
+        )
+
+        self.assertEqual(len(commits), 1)
+        # The row still reads the way `--oneline --decorate` rendered it...
+        self.assertEqual(commits[0]["subject"], "(HEAD -> main, tag: v1.2) (fix) ship it")
+        self.assertIn("(HEAD -> main, tag: v1.2)", commits[0]["line"])
+        # ...while the copyable message is the subject the author actually
+        # wrote, including a leading "(fix)" that is part of it.
+        self.assertEqual(commits[0]["message"], "(fix) ship it")
+
+    def test_parse_git_graph_log_keeps_a_subject_with_spacing(self):
+        commits = web_explorer._parse_git_graph_log(
+            b"* \x1f" + b"b" * 40 + b"\x1fbbbbbbb\x1f\x1ffix:  two  spaces and (parens)\n"
+        )
+
+        self.assertEqual(commits[0]["message"], "fix:  two  spaces and (parens)")
+        self.assertEqual(commits[0]["subject"], "fix:  two  spaces and (parens)")
 
     def test_explorer_git_diff_rejects_invalid_mode_and_outside_root(self):
         repo_dir = Path(self.temp_dir.name) / "repo"
@@ -12509,8 +12738,9 @@ class ExplorerGitWatchFrontendTestCase(unittest.TestCase):
         self.assertIn("cache: 'no-store'", quiet_fn)
         self.assertIn("function applyExplorerGitRepoQuiet(index, data)", viewer)
         self.assertIn("_explorerGitRevision", viewer)
-        # Tab badges re-render only when the badge map actually changed.
-        self.assertIn("badgesChanged", viewer)
+        # Tab badges re-render only when the badge map actually changed — the
+        # sync itself moved with the tab domain (explorer-tabs.js).
+        self.assertIn("badgesChanged", self._static("js/explorer-tabs.js"))
         css = self._static("css/terminals.css")
         self.assertIn(".explorer-git-panel.git-refreshing", css)
 
@@ -12649,10 +12879,10 @@ class ExplorerGitWatchFrontendTestCase(unittest.TestCase):
         self.assertEqual(viewer.count("resetExplorerFsWatchBaseline(pane);"), 2)
 
     def test_promoted_preview_tab_keeps_its_git_badge(self):
-        viewer = self._static("js/explorer-viewer.js")
-        promote_fn = viewer[
-            viewer.index("function promoteExplorerPreviewTab(index)"):
-            viewer.index("function renderExplorerViewerEmpty(index)")
+        tabs = self._static("js/explorer-tabs.js")
+        promote_fn = tabs[
+            tabs.index("function promoteExplorerPreviewTab(index)"):
+            tabs.index("function renderExplorerViewerEmpty(index)")
         ]
         self.assertIn("pinnedTab.git = preview.git || null;", promote_fn)
 
@@ -12683,7 +12913,7 @@ class ExplorerGitWatchFrontendTestCase(unittest.TestCase):
         )
         resolve = viewer[
             viewer.index("function explorerResolveFileView(index, mode)"):
-            viewer.index("function setExplorerFileView(index, mode)")
+            viewer.index("function setExplorerFileView(")
         ]
         self.assertIn("data-explorer-file-panel=", resolve)
         self.assertIn("_explorerLastFileView", resolve)
@@ -12691,16 +12921,18 @@ class ExplorerGitWatchFrontendTestCase(unittest.TestCase):
 
     def test_pathless_tab_never_keeps_a_git_badge(self):
         viewer = self._static("js/explorer-viewer.js")
-        sync = viewer[
-            viewer.index("function syncExplorerTabGitFromRepo(index, repo)"):
-            viewer.index("function explorerAssignOpenTab(pane, path")
+        tabs = self._static("js/explorer-tabs.js")
+        sync = tabs[
+            tabs.index("function syncExplorerTabGitFromRepo(index, repo)"):
+            tabs.index("function explorerEnsurePinnedTab(pane, path)")
         ]
         # A Preview tab back on a directory listing shows no file, so it must
         # not keep the badge of the file it happened to show last.
         self.assertIn("const nextGit = path ? (changesByPath.get(path) || null) : null;", sync)
-        # Cleared eagerly too, so it does not wait for a Git sidebar sync.
+        # Cleared eagerly too, so it does not wait for a Git sidebar sync: the
+        # directory load clears it in the viewer, the empty viewer in the tabs.
         self.assertIn("previewTab.git = null;", viewer)
-        self.assertIn("preview.git = null;", viewer)
+        self.assertIn("preview.git = null;", tabs)
 
 
 class ExplorerSourceSelectionHighlightTestCase(unittest.TestCase):
@@ -12771,8 +13003,12 @@ class ExplorerSourceSelectionHighlightTestCase(unittest.TestCase):
         )
         # Only the Source view can seek — it is the only view a content offset
         # means anything in.
-        self.assertIn("state.seekOffset = activeExplorerFileView(index) === 'source'", viewer)
-        self.assertIn("? explorerSelectionContentOffset(pane)", viewer)
+        self.assertIn("activeExplorerFileView(index) !== 'source'", viewer)
+        self.assertIn("explorerSelectionContentOffset(pane)", viewer)
+        # A pane with an open in-place editor answers with its own textarea
+        # selection instead: the document selection read above is always empty
+        # inside a textarea. Behaviour covered in test_explorer_edit_find.py.
+        self.assertIn("window.explorerEditSelectionSeed?.(index)", viewer)
         resolve = viewer[
             viewer.index("function explorerResolveSearchActiveIndex(state, ranges)"):
             viewer.index("function explorerLineStartOffset(pane, line)")
@@ -12840,8 +13076,18 @@ class ExplorerSourceSelectionHighlightTestCase(unittest.TestCase):
     def test_find_only_unfolds_the_markdown_sections_holding_matches(self):
         viewer = self._static("js/explorer-viewer.js")
         # A find used to disable Markdown collapse outright, unfolding the whole
-        # document; the fold state now survives it.
-        self.assertIn("const allowMarkdownCollapse = normalizedLanguage === 'markdown';", viewer)
+        # document; the fold state now survives it. Stated as "the collapse
+        # decision does not consult searchRanges" rather than as a snapshot of
+        # the expression, which broke whenever the decision gained an unrelated
+        # term (the editor underlay's fold opt-out).
+        renderer = viewer[
+            viewer.index("function renderExplorerSourceLines("):
+            viewer.index("function explorerRevealMarkdownSearchMatches")
+        ]
+        collapse_decision = next(
+            line for line in renderer.splitlines() if "const allowMarkdownCollapse" in line
+        )
+        self.assertNotIn("searchRanges", collapse_decision)
         self.assertNotIn(
             "normalizedLanguage === 'markdown' && !searchRanges.length", viewer
         )
@@ -13952,6 +14198,7 @@ class GuardrailAuditFixesTestCase(unittest.TestCase):
         "js/launcher.js",
         "js/terminals.js",
         "js/explorer-viewer.js",
+        "js/explorer-tabs.js",
         "js/explorer-editor.js",
         "js/explorer-search.js",
         "js/explorer-fs.js",
@@ -14087,6 +14334,19 @@ class ExtractedFrontendAssetsTestCase(unittest.TestCase):
             terminals_html.index("js/voice-input.js"),
             terminals_html.index("js/explorer-viewer.js"),
         )
+        # explorer-tabs.js is the tab domain lifted out of explorer-viewer.js;
+        # the two are one surface split across two files and load as a pair,
+        # ahead of every module that renders into a tab.
+        self.assertIn(f"/static/js/explorer-tabs.js?v={__version__}", terminals_html)
+        self.assertNotIn("js/explorer-tabs.js", launcher_html)
+        self.assertLess(
+            terminals_html.index("js/explorer-viewer.js"),
+            terminals_html.index("js/explorer-tabs.js"),
+        )
+        self.assertLess(
+            terminals_html.index("js/explorer-tabs.js"),
+            terminals_html.index("js/terminals.js"),
+        )
         # explorer-editor.js loads after explorer-viewer.js (reuses its render
         # hooks) and before terminals.js (which owns the shared boot).
         self.assertLess(
@@ -14145,6 +14405,7 @@ class ExtractedFrontendAssetsTestCase(unittest.TestCase):
             "js/terminal-icons.js",
             "js/voice-input.js",
             "js/explorer-viewer.js",
+            "js/explorer-tabs.js",
             "js/explorer-editor.js",
             "js/explorer-search.js",
             "js/explorer-fs.js",
@@ -15783,6 +16044,8 @@ class UxInteractionButtonsTestCase(unittest.TestCase):
         self.assertIn('id="closeSessionConfirmModal"', html)
         self.assertIn('id="closeSessionConfirmAccept"', html)
         self.assertIn('id="closeSessionConfirmCancel"', html)
+        # the third way out: keep the group as a preset, then close it
+        self.assertIn('id="closeSessionConfirmSave"', html)
 
     def test_close_session_group_gates_on_confirmation(self):
         terminals_js = self._static("js/terminals.js")
@@ -15799,8 +16062,28 @@ class UxInteractionButtonsTestCase(unittest.TestCase):
         self.assertIn("session.status === 'connected'", confirm_fn)
         self.assertIn("connectedCount === 0", confirm_fn)
         # Escape / backdrop / Cancel all resolve to "keep the session"
-        self.assertIn("closeCloseSessionConfirmModal(false)", terminals_js)
-        self.assertIn("closeCloseSessionConfirmModal(true)", terminals_js)
+        self.assertIn("closeCloseSessionConfirmModal(CLOSE_SESSION_CANCEL)", terminals_js)
+        self.assertIn("closeCloseSessionConfirmModal(CLOSE_SESSION_CLOSE)", terminals_js)
+        self.assertIn(
+            "closeCloseSessionConfirmModal(CLOSE_SESSION_SAVE_AND_CLOSE)", terminals_js
+        )
+
+    def test_save_and_close_saves_before_teardown_and_aborts_on_failure(self):
+        """A requested save that failed must not cost the terminals it was
+        meant to preserve, and the save has to run before the group is
+        torn down (a DELETE first would leave nothing to snapshot)."""
+        terminals_js = self._static("js/terminals.js")
+        close_fn = terminals_js[
+            terminals_js.index("async function closeSessionGroup"):
+            terminals_js.index("async function _closeWindowAfterLastSession")
+        ]
+        save_at = close_fn.index("saveActiveWorkspaceSession(null, { groupId })")
+        self.assertLess(close_fn.index("CLOSE_SESSION_SAVE_AND_CLOSE"), save_at)
+        # the teardown request comes after the save, and only if it succeeded
+        self.assertLess(save_at, close_fn.index("method: 'DELETE'"))
+        abort = close_fn[save_at:close_fn.index("method: 'DELETE'")]
+        self.assertIn("if (!saved?.ok) {", abort)
+        self.assertIn("return;", abort)
 
     # ── 8.2: launch CTA keeps its structure and gains a spinner ─────────────
 
@@ -16112,6 +16395,211 @@ class ExplorerDownloadTestCase(unittest.TestCase):
         run_git.assert_not_called()
         response.close()
 
+    # -- Stage 5.5: the body streams; it is not buffered ------------------
+
+    def _spy_on_the_download_handle(self):
+        """Record every read size and the close, without changing the bytes."""
+        opened = []
+        real_open = web_explorer._LocalExplorerBackend.open_file_stream
+
+        class _Spy:
+            def __init__(self, handle):
+                self.handle = handle
+                self.reads = []
+                self.closed = False
+
+            def read(self, size):
+                self.reads.append(size)
+                return self.handle.read(size)
+
+            def close(self):
+                self.closed = True
+                self.handle.close()
+
+        def spy(backend, file_path):
+            wrapper = _Spy(real_open(backend, file_path))
+            opened.append(wrapper)
+            return wrapper
+
+        patcher = patch.object(
+            web_explorer._LocalExplorerBackend, "open_file_stream", spy
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return opened
+
+    def test_download_streams_the_body_in_bounded_chunks(self):
+        payload = os.urandom(api.EXPLORER_DOWNLOAD_CHUNK_BYTES * 3 + 17)
+        (self.root / "big.bin").write_bytes(payload)
+        session_id = self._create_local_explorer_session()
+        opened = self._spy_on_the_download_handle()
+
+        response = self.client.get(f"/api/explorer/{session_id}/download?path=big.bin")
+        body = response.get_data()
+        response.close()
+
+        self.assertEqual(body, payload)
+        self.assertEqual(len(opened), 1)
+        # No single read asks for the whole file: that is the 100 MB buffer the
+        # old `read_file_prefix` + `io.BytesIO` path allocated (audit §8.2).
+        self.assertGreater(len(opened[0].reads), 3)
+        self.assertLessEqual(max(opened[0].reads), api.EXPLORER_DOWNLOAD_CHUNK_BYTES)
+        self.assertEqual(response.headers["Content-Length"], str(len(payload)))
+
+    def test_download_closes_the_handle_once_the_body_is_sent(self):
+        (self.root / "small.txt").write_text("done", encoding="utf-8")
+        session_id = self._create_local_explorer_session()
+        opened = self._spy_on_the_download_handle()
+
+        response = self.client.get(f"/api/explorer/{session_id}/download?path=small.txt")
+        self.assertEqual(response.get_data(), b"done")
+        response.close()
+
+        self.assertTrue(opened[0].closed)
+
+    def test_download_closes_the_handle_when_the_client_leaves_mid_file(self):
+        # The hold handed to the body generator (for a remote pane, a pooled
+        # SFTP channel) has to come back even when nobody reads the response.
+        payload = b"y" * (api.EXPLORER_DOWNLOAD_CHUNK_BYTES * 2)
+        (self.root / "abandoned.bin").write_bytes(payload)
+        session_id = self._create_local_explorer_session()
+        opened = self._spy_on_the_download_handle()
+
+        with api.app.test_request_context(
+            f"/api/explorer/{session_id}/download?path=abandoned.bin"
+        ):
+            response = api.download_explorer_file(session_id)
+            stream = response.iter_encoded()
+            self.assertTrue(next(stream))
+            self.assertFalse(opened[0].closed)
+            response.close()
+
+        self.assertTrue(opened[0].closed)
+
+    def test_download_never_opens_a_handle_for_a_file_over_the_cap(self):
+        (self.root / "big.log").write_bytes(b"x" * 64)
+        session_id = self._create_local_explorer_session()
+        opened = self._spy_on_the_download_handle()
+
+        with patch.object(api, "EXPLORER_DOWNLOAD_MAX_BYTES", 16):
+            response = self.client.get(
+                f"/api/explorer/{session_id}/download?path=big.log"
+            )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(opened, [])
+
+    def test_download_sends_the_size_it_stated_when_the_file_grows_underneath_it(self):
+        # The reader carries its own ceiling, so a file that grows between the
+        # `stat` and the read cannot escape the cap or outrun Content-Length.
+        (self.root / "growing.log").write_bytes(b"z" * 64)
+        session_id = self._create_local_explorer_session()
+        real_stat = web_explorer._LocalExplorerBackend.stat_file
+
+        def shrinking_stat(backend, file_path):
+            _size, modified = real_stat(backend, file_path)
+            return 10, modified
+
+        with patch.object(
+            web_explorer._LocalExplorerBackend, "stat_file", shrinking_stat
+        ):
+            response = self.client.get(
+                f"/api/explorer/{session_id}/download?path=growing.log"
+            )
+            body = response.get_data()
+            response.close()
+
+        self.assertEqual(body, b"z" * 10)
+        self.assertEqual(response.headers["Content-Length"], "10")
+
+    def test_download_still_answers_a_byte_range(self):
+        # The `send_file` path this replaced advertised `Accept-Ranges: bytes`,
+        # and a browser uses it to resume a paused download of exactly the
+        # large files this route now streams. Streaming must not drop it.
+        payload = bytes(range(256)) * 4
+        (self.root / "ranged.bin").write_bytes(payload)
+        session_id = self._create_local_explorer_session()
+
+        response = self.client.get(
+            f"/api/explorer/{session_id}/download?path=ranged.bin",
+            headers={"Range": "bytes=300-399"},
+        )
+        body = response.get_data()
+        response.close()
+
+        self.assertEqual(response.status_code, 206)
+        self.assertEqual(body, payload[300:400])
+        self.assertEqual(response.headers["Content-Range"], f"bytes 300-399/{len(payload)}")
+        self.assertEqual(response.headers["Content-Length"], "100")
+        self.assertEqual(response.headers["Accept-Ranges"], "bytes")
+
+    def test_download_refuses_an_unsatisfiable_range(self):
+        (self.root / "short.bin").write_bytes(b"12345")
+        session_id = self._create_local_explorer_session()
+        opened = self._spy_on_the_download_handle()
+
+        response = self.client.get(
+            f"/api/explorer/{session_id}/download?path=short.bin",
+            headers={"Range": "bytes=99-120"},
+        )
+
+        self.assertEqual(response.status_code, 416)
+        self.assertEqual(response.headers["Content-Range"], "bytes */5")
+        # The refusal unwinds the hold with everything else: nothing streams.
+        self.assertTrue(all(handle.closed for handle in opened))
+
+    def test_download_keeps_the_no_cache_and_attachment_headers(self):
+        (self.root / "fresh.txt").write_text("live bytes", encoding="utf-8")
+        session_id = self._create_local_explorer_session()
+
+        response = self.client.get(f"/api/explorer/{session_id}/download?path=fresh.txt")
+        response.get_data()
+        response.close()
+
+        self.assertEqual(response.headers["Cache-Control"], "no-cache")
+        self.assertEqual(response.headers["Content-Type"], "application/octet-stream")
+        self.assertIn("attachment", response.headers["Content-Disposition"])
+        self.assertIn("fresh.txt", response.headers["Content-Disposition"])
+
+    def test_remote_download_returns_the_pooled_sftp_channel_after_streaming(self):
+        # The body generator owns the backend hold for a remote pane, so the
+        # pooled transport is only released once the stream ends — but it must
+        # be released, and exactly once (guardrail 3: no per-request handshake).
+        api._evict_all_pooled_ssh_clients()
+        self.addCleanup(api._evict_all_pooled_ssh_clients)
+        group = api.session_manager.create_group(
+            name="SSH", connection_mode="ssh", layout="single", terminal_count=1
+        )
+        session = api.session_manager.create_session(
+            group_id=group.group_id,
+            host="example.com",
+            directory="/srv/app",
+            username="ubuntu",
+            mode="ssh",
+            startup_mode="explorer",
+            explorer_root_directory="/srv/app",
+        )
+        payload = b"remote bytes" * 32
+        fake_sftp = FakeSftp(
+            {
+                "/srv/app": {"type": "directory"},
+                "/srv/app/report.bin": {"type": "file", "content": payload},
+            }
+        )
+
+        with patch.object(
+            web_explorer, "_open_ssh_sftp", return_value=(MagicMock(), fake_sftp)
+        ):
+            response = self.client.get(
+                f"/api/explorer/{session.session_id}/download?path=report.bin"
+            )
+            self.assertFalse(fake_sftp.closed)
+            body = response.get_data()
+            response.close()
+
+        self.assertEqual(body, payload)
+        self.assertTrue(fake_sftp.closed)
+
     def test_file_viewer_ships_download_button(self):
         # Explorer viewer moved to explorer-viewer.js (2026-07-23 split).
         terminals_js = self._static("js/explorer-viewer.js")
@@ -16128,13 +16616,16 @@ class ExplorerDownloadTestCase(unittest.TestCase):
         viewer_js = self._static("js/explorer-viewer.js")
         self.assertIn("label: 'Download file'", viewer_js)
         self.assertIn(
-            "action: () => downloadExplorerFile(index, { path: downloadPath })",
+            "action: () => downloadExplorerFile(index, { path: downloadTargets[0].path })",
             viewer_js,
         )
-        self.assertIn(
-            "const downloadPath = row?.dataset.explorerDownloadPath || '';",
-            viewer_js,
-        )
+        self.assertIn("row.dataset.explorerDownloadPath", viewer_js)
+        # With several rows selected the entry downloads each of them as its
+        # own capped, root-confined read — there is no archive endpoint. What
+        # each request does, and that N of them report once, is executed in
+        # tests/test_explorer_download.py rather than pattern-matched here.
+        self.assertIn("async function downloadExplorerFiles(index, targets)", viewer_js)
+        self.assertNotIn("/download/archive", viewer_js)
         # Offered next to the copy entries, and only for file rows.
         self.assertLess(
             viewer_js.index("label: 'Copy relative path'"),
@@ -17969,3 +18460,214 @@ class SettingsLauncherConfigTestCase(unittest.TestCase):
             terminals_js.index("function buildActiveWorkspaceSessionConfig(")
         ]
         self.assertIn("agent_auto_mode:", entry)
+
+
+class ConfigDurabilityTestCase(unittest.TestCase):
+    """Audit 2026-08-14 §4.3 / Stage 5.1 — `config.json` is a durable store.
+
+    It is the third caller of `web/state_files.py` and must get the same four
+    mechanics the other two have: a cross-process sidecar lock, a unique
+    same-directory temp that is fsynced before `os.replace`, a `<file>.bak`
+    taken on every commit, and quarantine of a corrupt file instead of
+    laundering it into defaults the next save would make permanent.
+    """
+
+    def setUp(self):
+        self.temp_dir = TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        self.dir = Path(self.temp_dir.name)
+        self.path = self.dir / "config.json"
+        # An empty defaults file keeps the merge out of the way of these tests.
+        self.defaults = self.dir / "default_config.json"
+        self.defaults.write_text("{}", encoding="utf-8")
+        patcher = patch.object(web_config, "DEFAULT_CONFIG_PATH", str(self.defaults))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _load(self):
+        return web_config.load_config(str(self.path))
+
+    def _save(self, payload):
+        web_config.save_config(payload, str(self.path))
+
+    def _sidecars(self, suffix):
+        return sorted(p.name for p in self.dir.iterdir() if suffix in p.name)
+
+    # -- the .bak the recovery path reads ---------------------------------
+
+    def test_every_commit_leaves_the_previous_revision_as_a_backup(self):
+        self._save({"appearance": {"theme": "light"}})
+        self._save({"appearance": {"theme": "dark"}})
+
+        self.assertEqual(self._load()["appearance"]["theme"], "dark")
+        backup = json.loads((self.dir / "config.json.bak").read_text(encoding="utf-8"))
+        self.assertEqual(backup["appearance"]["theme"], "light")
+
+    def test_the_cross_process_lock_sidecar_is_taken_for_the_whole_replace(self):
+        self._save({"terminal": {"font_size": 12}})
+
+        self.assertTrue((self.dir / "config.json.lock").exists())
+
+    # -- a failed write is "not saved", not a half-written file ------------
+
+    def test_a_failed_replace_raises_and_leaves_the_previous_file_intact(self):
+        self._save({"appearance": {"theme": "light"}})
+
+        with patch.object(web_state_files.os, "replace", side_effect=OSError("disk full")):
+            with self.assertRaises(web_config.ConfigPersistenceError):
+                self._save({"appearance": {"theme": "dark"}})
+
+        self.assertEqual(self._load()["appearance"]["theme"], "light")
+        self.assertEqual(self._sidecars(".tmp"), [])
+
+    def test_the_persistence_error_is_the_shared_state_file_failure(self):
+        # Shared middleware catches the base for any store; a caller that only
+        # cares about the config catches this subclass.
+        self.assertTrue(
+            issubclass(
+                web_config.ConfigPersistenceError,
+                web_state_files.StateFilePersistenceError,
+            )
+        )
+
+    def test_app_config_route_reports_a_failed_write_as_not_saved(self):
+        api.app.config["TESTING"] = True
+        client = api.app.test_client()
+
+        with patch.object(
+            api, "save_config", side_effect=web_config.ConfigPersistenceError("disk full")
+        ), patch.object(api, "_refresh_runtime_config") as refresh, patch.object(
+            api, "_broadcast_app_config_update"
+        ) as broadcast:
+            response = client.post("/api/app-config", json={"appearance": {"theme": "dark"}})
+
+        self.assertEqual(response.status_code, 500)
+        self.assertEqual(response.get_json()["code"], "config_write_failed")
+        # Nothing reached disk, so nothing may be refreshed or announced.
+        refresh.assert_not_called()
+        broadcast.assert_not_called()
+
+    # -- corrupt content: quarantine, then recover -------------------------
+
+    def test_a_corrupt_config_is_recovered_from_the_last_good_backup(self):
+        self._save({"appearance": {"theme": "light"}})
+        self._save({"appearance": {"theme": "dark"}})
+        self.path.write_text('{"appearance": {"theme": "dark"}\n', encoding="utf-8")
+
+        with self.assertLogs(web_config.logger, level="WARNING"):
+            loaded = self._load()
+
+        self.assertEqual(loaded["appearance"]["theme"], "light")
+
+    def test_a_corrupt_config_is_quarantined_so_the_next_save_cannot_bury_it(self):
+        self._save({"appearance": {"theme": "light"}})
+        corrupt = '{"appearance": {"theme": "dark"}\n'
+        self.path.write_text(corrupt, encoding="utf-8")
+
+        with self.assertLogs(web_config.logger, level="WARNING"):
+            self._load()
+
+        quarantined = [p for p in self.dir.iterdir() if ".corrupt-" in p.name]
+        self.assertEqual(len(quarantined), 1, self._sidecars(""))
+        self.assertEqual(quarantined[0].read_text(encoding="utf-8"), corrupt)
+        self.assertFalse(self.path.exists())
+
+    def test_a_file_that_merely_cannot_be_opened_is_never_quarantined(self):
+        # The bytes may be perfectly good and only momentarily unreadable (a
+        # permission or antivirus hold); moving it aside would discard settings
+        # this process simply could not see.
+        self._save({"appearance": {"theme": "light"}})
+        self._save({"appearance": {"theme": "dark"}})
+
+        with patch.object(web_config, "_load_json_file", side_effect=OSError("locked")):
+            with self.assertLogs(web_config.logger, level="WARNING"):
+                loaded = self._load()
+
+        # The backup still answers, but the primary is left exactly where it is.
+        self.assertEqual(loaded["appearance"]["theme"], "light")
+        self.assertTrue(self.path.exists())
+        self.assertEqual(
+            json.loads(self.path.read_text(encoding="utf-8"))["appearance"]["theme"],
+            "dark",
+        )
+        self.assertEqual([p for p in self.dir.iterdir() if ".corrupt-" in p.name], [])
+
+    def test_defaults_are_still_the_answer_when_there_is_no_usable_backup(self):
+        self.defaults.write_text(
+            json.dumps({"appearance": {"theme": "system"}}), encoding="utf-8"
+        )
+        self.path.write_text('{"appearance": {"theme": "dark"}\n', encoding="utf-8")
+
+        with self.assertLogs(web_config.logger, level="WARNING") as logs:
+            loaded = self._load()
+
+        self.assertEqual(loaded["appearance"]["theme"], "system")
+        self.assertTrue(
+            any("using default configuration" in message for message in logs.output),
+            logs.output,
+        )
+
+
+class WorkspacesImportHygieneTestCase(unittest.TestCase):
+    """Audit 2026-08-14 §4.2 / Stage 5.2 — deferred imports stay peer imports.
+
+    `web/workspaces.py` defers its intra-app imports because `sessions/manager.py`
+    imports this module at import time. That is a real constraint; a stdlib
+    import hidden inside a function is not, and one (`import os`) had already
+    grown there unnoticed. Anything a reader cannot see in the header must at
+    least be a peer module.
+    """
+
+    def _module_source(self):
+        return Path(web_workspaces.__file__).read_text(encoding="utf-8")
+
+    def _deferred_import_targets(self):
+        tree = ast.parse(self._module_source())
+        module_level = {id(node) for node in tree.body}
+        targets = []
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.Import, ast.ImportFrom)):
+                continue
+            if id(node) in module_level:
+                continue
+            if isinstance(node, ast.ImportFrom):
+                targets.append((node.lineno, node.module or ""))
+            else:
+                targets.extend((node.lineno, alias.name) for alias in node.names)
+        return targets
+
+    def test_no_stdlib_import_hides_inside_a_function(self):
+        stray = [
+            (lineno, name)
+            for lineno, name in self._deferred_import_targets()
+            if not name.startswith(("web.", "sessions."))
+        ]
+        self.assertEqual(stray, [], f"deferred non-peer imports: {stray}")
+
+    def test_os_is_imported_at_module_level(self):
+        tree = ast.parse(self._module_source())
+        module_level = [
+            alias.name
+            for node in tree.body
+            if isinstance(node, ast.Import)
+            for alias in node.names
+        ]
+        self.assertIn("os", module_level)
+
+    def test_the_deferred_peers_are_the_documented_set(self):
+        peers = {name for _lineno, name in self._deferred_import_targets()}
+        self.assertEqual(
+            peers,
+            {
+                # Genuinely cycle-breaking: each of these reaches back here.
+                "sessions.manager",
+                "web.app",
+                "web.runtime_state",
+                "web.terminal_io",
+                # Deferred for late binding rather than for a cycle (docstring).
+                "web.agents",
+                "web.config",
+                "web.explorer",
+                "web.saved_sessions",
+            },
+        )

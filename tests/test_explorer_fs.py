@@ -1567,33 +1567,16 @@ class ExplorerFilesystemFrontendContractTestCase(unittest.TestCase):
             section = self.terminals[self.terminals.index(f"function {caller}") :]
             self.assertIn("cancelExplorerFilesystemUiForSession", section[:3000])
 
-    def test_create_move_and_rename_menu_contracts_are_wired(self):
-        menu = self.controller[
-            self.controller.index("function explorerFilesystemMenuItems") :
-            self.controller.index("function setExplorerFilesystemBusy")
-        ]
-        labels = (
-            "label: 'New file…'",
-            "label: 'New folder…'",
-            "label: 'Copy'",
-            "label: 'Cut'",
-            "label: 'Rename…'",
-            "label: 'Delete…'",
-        )
-        positions = [menu.index(label) for label in labels]
-        self.assertEqual(positions, sorted(positions))
-        self.assertIn("separatorBefore: true", menu)
-        self.assertIn("clipboardMode === 'cut'", menu)
-        self.assertIn('`${pasteVerb} "${clipboard.name}"', menu)
-        self.assertIn("moveWithinSameFolder", menu)
-        self.assertIn("moveIntoItself", menu)
-        # Rename and Delete share the after-path group, so Rename never sits
-        # among the copy-path items.
-        self.assertEqual(menu.count("placement: 'after-path'"), 2)
-        self.assertIn("mode: 'rename'", menu)
+    def test_create_move_and_rename_routes_are_wired(self):
+        # The menu's own shape — item order, labels, the after-path group, and
+        # when Paste is disabled — is executed in
+        # tests/test_explorer_fs_batch.py rather than pattern-matched here.
+        # What remains is that each action reaches its own bounded endpoint.
+        self.assertIn("mode: 'rename'", self.controller)
         self.assertIn("explorerFilesystemRequest(state.context, 'create'", self.controller)
-        self.assertIn("explorerFilesystemRequest(context, 'move'", self.controller)
         self.assertIn("explorerFilesystemRequest(state.context, 'rename'", self.controller)
+        for route in ("'paste'", "'move'", "'delete'"):
+            self.assertIn(f"route: {route}", self.controller)
         self.assertIn("clearExplorerFilesystemClipboard(context.sessionId)", self.controller)
 
     def test_name_dialog_is_shared_by_create_and_rename(self):
@@ -1641,13 +1624,25 @@ class ExplorerFilesystemFrontendContractTestCase(unittest.TestCase):
             self.assertIn(state_path, self.controller)
         self.assertIn("persistExplorerTabsToSession(context.index)", self.controller)
         self.assertIn("result.moved && result.source_path", self.controller)
-        self.assertIn("highlightExplorerFilesystemPath(context.index, createdPath)", self.controller)
+        # Created paths are recorded on the mutation plan and highlighted when
+        # it is applied, so a batch highlights every one of them; that a paste
+        # highlights each created path is executed in test_explorer_fs_batch.py.
+        self.assertIn("plan.created.push(createdPath)", self.controller)
+        self.assertIn("highlightExplorerFilesystemPath(context.index, path)", self.controller)
 
     def test_new_asset_loads_in_domain_order_and_uses_token_styles(self):
         self.assertLess(
             self.template.index("js/explorer-search.js"),
             self.template.index("js/explorer-fs.js"),
         )
+        # The DOM-free selection model is a dependency of both the viewer's
+        # click adapter and the controller's batch runners, so it loads ahead
+        # of both.
+        for dependent in ("js/explorer-viewer.js", "js/explorer-fs.js"):
+            self.assertLess(
+                self.template.index("js/explorer-selection.js"),
+                self.template.index(dependent),
+            )
         self.assertLess(
             self.template.index("js/explorer-fs.js"),
             self.template.index("js/terminals.js"),

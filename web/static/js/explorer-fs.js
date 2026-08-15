@@ -50,8 +50,9 @@
         ) {
             return;
         }
+        const cutPaths = new Set(clipboard.entries.map(entry => entry.path));
         card?.querySelectorAll('[data-explorer-context-path]').forEach(node => {
-            if (node.dataset.explorerContextPath === clipboard.path) {
+            if (cutPaths.has(node.dataset.explorerContextPath)) {
                 node.classList.add('explorer-fs-cut-source');
             }
         });
@@ -68,7 +69,17 @@
 
     function clearExplorerFilesystemClipboardForPath(sessionId, path) {
         const clipboard = explorerFilesystemClipboards.get(String(sessionId || ''));
-        if (clipboard && path && explorerFilesystemPathContains(path, clipboard.path)) {
+        if (!clipboard || !path) {
+            return;
+        }
+        // One removed entry invalidates the whole clipboard rather than
+        // shrinking it: the remaining entries still hold revisions captured
+        // before this mutation, and a partly-stale clipboard is the thing that
+        // would send one to a paste endpoint.
+        const affected = clipboard.entries.some(
+            entry => explorerFilesystemPathContains(path, entry.path)
+        );
+        if (affected) {
             clearExplorerFilesystemClipboard(sessionId);
         }
     }
@@ -137,42 +148,53 @@
         return explorerFilesystemParentPath(context.path);
     }
 
-    function setExplorerFilesystemClipboard(context, mode) {
-        if (!isExplorerFsActionContextCurrent(context) || !context.revision) {
+    function setExplorerFilesystemClipboard(context, mode, targets) {
+        // Ancestor pruning happens at capture time so the clipboard can never
+        // hold a pair that would fail each other's revision check on paste.
+        const entries = GridVibeExplorerSelection.topmostTargets(targets);
+        if (!isExplorerFsActionContextCurrent(context) || !entries.length) {
             return;
         }
         const clipboardMode = mode === 'cut' ? 'cut' : 'copy';
         explorerFilesystemClipboards.set(context.sessionId, {
             sessionId: context.sessionId,
             rootRevision: context.rootRevision,
-            path: context.path,
-            kind: context.kind,
-            name: explorerFilesystemBaseName(context.path),
-            revision: context.revision,
+            entries,
             mode: clipboardMode,
             copiedAt: Date.now()
         });
         refreshExplorerFilesystemCutSource(context.index);
         showTerminalToast(
-            `${clipboardMode === 'cut' ? 'Cut' : 'Copied'} ${explorerFilesystemBaseName(context.path)}`,
+            `${clipboardMode === 'cut' ? 'Cut' : 'Copied'} ${GridVibeExplorerSelection.targetsLabel(entries)}`,
             'success'
         );
     }
 
-    function copyExplorerFilesystemEntry(context) {
-        setExplorerFilesystemClipboard(context, 'copy');
+    function copyExplorerFilesystemEntry(context, targets) {
+        setExplorerFilesystemClipboard(context, 'copy', targets);
     }
 
-    function cutExplorerFilesystemEntry(context) {
-        setExplorerFilesystemClipboard(context, 'cut');
+    function cutExplorerFilesystemEntry(context, targets) {
+        setExplorerFilesystemClipboard(context, 'cut', targets);
     }
 
-    function explorerFilesystemMenuItems(index, rowContext) {
+    /* `targets` is what the click resolved to: the whole live selection when the
+       row is part of it, otherwise just that row. Omitting it keeps the
+       single-entry behaviour every existing caller relies on. */
+    function explorerFilesystemMenuItems(index, rowContext, targets = null) {
         const context = explorerFilesystemActionContext(index, rowContext);
         if (!context) {
             return [];
         }
         const entryActionable = Boolean(context.path && context.revision);
+        const resolvedTargets = GridVibeExplorerSelection.topmostTargets(
+            targets && targets.length
+                ? targets
+                : [{ path: context.path, kind: context.kind, revision: context.revision }]
+        );
+        const targetCount = resolvedTargets.length;
+        const multi = targetCount > 1;
+        const targetsLabel = GridVibeExplorerSelection.targetsLabel(resolvedTargets);
         const copyable = entryActionable
             && (context.kind === 'file' || context.kind === 'directory');
         let clipboard = explorerFilesystemClipboards.get(context.sessionId) || null;
@@ -183,31 +205,43 @@
         const destination = explorerFilesystemDestination(context);
         const destinationName = explorerFilesystemBaseName(destination);
         const clipboardMode = clipboard?.mode === 'cut' ? 'cut' : 'copy';
+        const clipboardLabel = clipboard
+            ? GridVibeExplorerSelection.targetsLabel(clipboard.entries)
+            : '';
+        // Every entry already sitting in the destination means the move is a
+        // no-op; a mixed clipboard still has work to do, so it stays enabled.
         const moveWithinSameFolder = Boolean(
             clipboard
             && clipboardMode === 'cut'
-            && explorerFilesystemParentPath(clipboard.path) === destination
+            && clipboard.entries.every(
+                entry => explorerFilesystemParentPath(entry.path) === destination
+            )
         );
+        // One folder swallowing the destination is enough to refuse: the batch
+        // would have to skip that entry, and "moved 2 of 3" is a worse answer
+        // than not offering the action.
         const moveIntoItself = Boolean(
             clipboard
             && clipboardMode === 'cut'
-            && clipboard.kind === 'directory'
-            && explorerFilesystemPathContains(clipboard.path, destination)
+            && clipboard.entries.some(entry => (
+                entry.kind === 'directory'
+                && explorerFilesystemPathContains(entry.path, destination)
+            ))
         );
         const pasteDisabled = !clipboard || moveWithinSameFolder || moveIntoItself;
         const pasteVerb = clipboardMode === 'cut' ? 'Move' : 'Paste';
         const pasteLabel = clipboard
             ? (
                 context.kind === 'file'
-                    ? `${pasteVerb} "${clipboard.name}" in containing folder`
-                    : `${pasteVerb} "${clipboard.name}" into "${destinationName || 'root'}"`
+                    ? `${pasteVerb} ${clipboardLabel} in containing folder`
+                    : `${pasteVerb} ${clipboardLabel} into "${destinationName || 'root'}"`
             )
             : 'Paste — nothing copied';
         let pasteTitle = clipboard
-            ? `${clipboardMode === 'cut' ? 'Move' : 'Copy'} ${clipboard.path} into ${destination || 'the explorer root'}`
+            ? `${clipboardMode === 'cut' ? 'Move' : 'Copy'} ${clipboardLabel} into ${destination || 'the explorer root'}`
             : 'Copy or cut a file or folder in this Explorer session first';
         if (moveWithinSameFolder) {
-            pasteTitle = `"${clipboard.name}" is already in this folder`;
+            pasteTitle = `${clipboardLabel} is already in this folder`;
         } else if (moveIntoItself) {
             pasteTitle = 'A folder cannot be moved into itself';
         }
@@ -231,13 +265,13 @@
         ];
         if (copyable) {
             items.push({
-                label: 'Copy',
+                label: multi ? `Copy ${targetsLabel}` : 'Copy',
                 separatorBefore: true,
-                action: () => copyExplorerFilesystemEntry(context)
+                action: () => copyExplorerFilesystemEntry(context, resolvedTargets)
             });
             items.push({
-                label: 'Cut',
-                action: () => cutExplorerFilesystemEntry(context)
+                label: multi ? `Cut ${targetsLabel}` : 'Cut',
+                action: () => cutExplorerFilesystemEntry(context, resolvedTargets)
             });
         }
         items.push({
@@ -248,17 +282,24 @@
             action: clipboard && !pasteDisabled
                 ? (
                     clipboardMode === 'cut'
-                        ? () => moveExplorerFilesystemEntry(context, clipboard, destination)
-                        : () => pasteExplorerFilesystemEntry(context, clipboard, destination)
+                        ? () => moveExplorerFilesystemEntries(context, clipboard, destination)
+                        : () => pasteExplorerFilesystemEntries(context, clipboard, destination)
                 )
                 : null
         });
         if (copyable) {
+            /* Rename takes one exact leaf in the entry's own parent, so it has
+               no meaning for a multi-entry target. It stays visible and
+               disabled rather than vanishing, so the menu does not reshuffle
+               under the pointer as the selection grows. */
             items.push({
                 label: 'Rename…',
-                title: `Rename ${context.path} in its own folder`,
+                title: multi
+                    ? 'Rename works on one entry at a time'
+                    : `Rename ${context.path} in its own folder`,
                 placement: 'after-path',
-                action: () => openExplorerNameDialog(context, {
+                disabled: multi,
+                action: multi ? null : () => openExplorerNameDialog(context, {
                     mode: 'rename',
                     entryKind: context.kind,
                     currentName: explorerFilesystemBaseName(context.path)
@@ -267,11 +308,13 @@
         }
         if (entryActionable) {
             items.push({
-                label: 'Delete…',
-                title: `Permanently delete ${context.path}`,
+                label: multi ? `Delete ${targetsLabel}…` : 'Delete…',
+                title: multi
+                    ? `Permanently delete ${targetCount} selected entries`
+                    : `Permanently delete ${context.path}`,
                 danger: true,
                 placement: 'after-path',
-                action: () => deleteExplorerFilesystemEntry(context)
+                action: () => deleteExplorerFilesystemEntries(context, resolvedTargets)
             });
         }
         return items;
@@ -716,10 +759,76 @@
         return `${destination}/${value.slice(source.length + 1)}`;
     }
 
-    async function refreshExplorerAfterFilesystemMutation(context, result) {
+    /* A batch is N atomic requests, so its reloads have to be recorded and run
+       once at the end rather than after each one.
+
+       That is a correctness requirement, not an optimisation: `loadExplorerPane`
+       re-reads the root revision through `updateExplorerFilesystemRootRevision`,
+       which drops the session's action token — reloading between two requests
+       would make `isExplorerFsActionContextCurrent` false and silently abandon
+       the rest of the batch. It also keeps a 20-entry delete to one directory
+       read, one tree read, and one Git invalidation instead of 20 of each.
+
+       Callers that pass no plan get today's behaviour unchanged: the plan is
+       created and applied inside the same call. */
+    function explorerFilesystemMutationPlan() {
+        return {
+            directoryReload: false,
+            // null means "reload wherever the pane already is".
+            directoryTarget: null,
+            breadcrumb: false,
+            tabStrip: false,
+            created: []
+        };
+    }
+
+    async function applyExplorerFilesystemMutationPlan(context, plan) {
         if (!isExplorerFsActionContextCurrent(context)) {
             return;
         }
+        const pane = context.paneRef;
+        if (plan.tabStrip) {
+            renderExplorerTabStrip(context.index);
+        }
+        if (plan.directoryReload) {
+            await loadExplorerPane(
+                context.index,
+                plan.directoryTarget,
+                { force: true, showLoading: false }
+            );
+        } else if (plan.breadcrumb && pane._explorerFilePath) {
+            renderExplorerPathBreadcrumb(
+                context.index,
+                pane._explorerFilePath,
+                {
+                    root: explorerRootDirectory(context.index),
+                    fallbackText: pane._explorerFileName || ''
+                }
+            );
+        }
+        if (pane._explorerTreeSidebarOpen) {
+            await reloadExplorerTree(context.index);
+        }
+        await invalidateExplorerFilesystemGit(context.index);
+        plan.created.forEach(path => {
+            highlightExplorerFilesystemPath(context.index, path);
+        });
+        refreshExplorerFilesystemCutSource(context.index);
+        refreshExplorerSelectionHighlight(context.index);
+    }
+
+    async function refreshExplorerAfterFilesystemMutation(context, result, plan = null) {
+        if (!isExplorerFsActionContextCurrent(context)) {
+            return;
+        }
+        const deferred = plan || explorerFilesystemMutationPlan();
+        reconcileExplorerAfterFilesystemMutation(context, result, deferred);
+        if (!plan) {
+            await applyExplorerFilesystemMutationPlan(context, deferred);
+        }
+    }
+
+    function reconcileExplorerAfterFilesystemMutation(context, result, plan) {
         const pane = context.paneRef;
         const moved = Boolean(result.moved && result.source_path && result.destination_path);
         const removedPath = result.deleted_path || (moved ? result.source_path : '');
@@ -771,7 +880,7 @@
             pane._explorerTreeChildren?.clear();
             pane._explorerTreeErrors?.clear();
             persistExplorerTabsToSession(context.index);
-            renderExplorerTabStrip(context.index);
+            plan.tabStrip = true;
 
             const refreshDirectory = (
                 pane._explorerMode === 'directory'
@@ -784,23 +893,12 @@
                 )
             );
             if (refreshDirectory) {
-                await loadExplorerPane(
-                    context.index,
-                    null,
-                    { force: true, showLoading: false }
-                );
+                plan.directoryReload = true;
             } else if (
                 pane._explorerMode === 'file'
                 && pane._explorerFilePath
             ) {
-                renderExplorerPathBreadcrumb(
-                    context.index,
-                    pane._explorerFilePath,
-                    {
-                        root: explorerRootDirectory(context.index),
-                        fallbackText: pane._explorerFileName || ''
-                    }
-                );
+                plan.breadcrumb = true;
             }
         } else if (removedPath) {
             const survivingParent = explorerFilesystemParentPath(removedPath);
@@ -828,204 +926,281 @@
             pane._explorerTreeChildren?.clear();
             pane._explorerTreeErrors?.clear();
             clearExplorerFilesystemClipboardForPath(context.sessionId, removedPath);
+            /* Across a batch the pane has not navigated yet, so "where the
+               listing will end up" is the plan's target once one is set — a
+               second removal that swallows that target has to retarget it
+               again, or the deferred load would open a directory this batch
+               just deleted. */
+            const pendingDirectory = plan.directoryTarget === null
+                ? (pane._explorerPath || '')
+                : plan.directoryTarget;
             if (
                 pane._explorerMode === 'directory'
-                && explorerFilesystemPathContains(removedPath, pane._explorerPath || '')
+                && explorerFilesystemPathContains(removedPath, pendingDirectory)
             ) {
-                await loadExplorerPane(
-                    context.index,
-                    survivingParent,
-                    { force: true, showLoading: false }
-                );
+                plan.directoryReload = true;
+                plan.directoryTarget = survivingParent;
             } else if (pane._explorerMode === 'directory') {
-                await loadExplorerPane(
-                    context.index,
-                    null,
-                    { force: true, showLoading: false }
-                );
+                plan.directoryReload = true;
             } else if (
                 pane._explorerFilePath
                 && explorerFilesystemPathContains(removedPath, pane._explorerFilePath)
             ) {
-                await loadExplorerPane(
-                    context.index,
-                    survivingParent,
-                    { force: true, showLoading: false }
-                );
+                plan.directoryReload = true;
+                plan.directoryTarget = survivingParent;
             }
-            renderExplorerTabStrip(context.index);
+            plan.tabStrip = true;
         } else if (createdPath) {
             const destinationParent = explorerFilesystemParentPath(createdPath);
             if (
                 pane._explorerMode === 'directory'
                 && (pane._explorerPath || '') === destinationParent
             ) {
-                await loadExplorerPane(
-                    context.index,
-                    null,
-                    { force: true, showLoading: false }
-                );
+                plan.directoryReload = true;
             }
         }
-        if (pane._explorerTreeSidebarOpen) {
-            await reloadExplorerTree(context.index);
+        if (removedPath) {
+            // An entry that no longer exists must leave the selection, or the
+            // next menu action would send its dead path and revision.
+            dropExplorerSelectionPaths(context.index, [removedPath]);
         }
-        await invalidateExplorerFilesystemGit(context.index);
         if (createdPath) {
-            highlightExplorerFilesystemPath(context.index, createdPath);
+            plan.created.push(createdPath);
         }
-        refreshExplorerFilesystemCutSource(context.index);
     }
 
-    async function pasteExplorerFilesystemEntry(context, clipboard, destination) {
-        if (!setExplorerFilesystemBusy(
+    /* Run one atomic request per entry under a single busy hold, recording each
+       success into a shared plan so the surfaces refresh once at the end.
+
+       Sequential rather than parallel: the mutation endpoints coordinate with
+       editor saves through ancestor-aware per-path claims, so overlapping
+       requests inside one root would contend for them, and a stable order makes
+       "3 of 5" reportable. The loop stops early if the pane, session, or root
+       revision changed under it — the same guard every single-entry action
+       already used, just checked per request. */
+    async function runExplorerFilesystemBatch(context, entries, buildRequest, plan) {
+        const results = [];
+        for (const entry of entries) {
+            if (!isExplorerFsActionContextCurrent(context)) {
+                break;
+            }
+            const { route, body } = buildRequest(entry);
+            const result = await explorerFilesystemRequest(context, route, body);
+            if (!result) {
+                break;
+            }
+            if (result.response?.ok) {
+                results.push({ ok: true, entry, data: result.data });
+                if (isExplorerFsActionContextCurrent(context)) {
+                    reconcileExplorerAfterFilesystemMutation(context, result.data, plan);
+                }
+            } else {
+                results.push({
+                    ok: false,
+                    entry,
+                    error: result.data?.error,
+                    mutated: result.data?.mutated,
+                    status: result.response?.status || 0,
+                    data: result.data
+                });
+            }
+        }
+        return results;
+    }
+
+    /* Report an N-request batch through the existing error bar — one message,
+       one surface — synthesising the `mutated` flag the bar uses to decide
+       between Retry and Refresh. A retry replays only the entries that failed. */
+    function reportExplorerFilesystemBatch(context, verb, results, retryEntries) {
+        const outcome = GridVibeExplorerSelection.batchOutcome(verb, results);
+        if (!isExplorerFsActionContextCurrent(context)) {
+            return outcome;
+        }
+        if (outcome.ok) {
+            showTerminalToast(outcome.toast, 'success');
+            return outcome;
+        }
+        showExplorerFilesystemError(
             context,
-            clipboard.kind === 'directory' ? 'Copying folder…' : 'Copying file…'
-        )) {
+            { error: outcome.message, mutated: !outcome.retryable },
+            outcome.retryable && typeof retryEntries === 'function'
+                ? retryEntries(results.filter(row => !row.ok).map(row => row.entry))
+                : null
+        );
+        return outcome;
+    }
+
+    async function pasteExplorerFilesystemEntries(context, clipboard, destination, only = null) {
+        const entries = only || clipboard.entries;
+        if (!entries.length) {
             return;
         }
-        clearExplorerFilesystemError(context.index);
-        try {
-            if (!isExplorerFsActionContextCurrent(context)) {
-                return;
-            }
-            const result = await explorerFilesystemRequest(context, 'paste', {
-                root_revision: context.rootRevision,
-                source_path: clipboard.path,
-                source_revision: clipboard.revision,
-                destination_directory: destination
-            });
-            if (!result || !isExplorerFsActionContextCurrent(context)) {
-                return;
-            }
-            if (!result.response?.ok) {
-                const status = result.response?.status || 0;
-                if (status === 404 || status === 409) {
-                    clearExplorerFilesystemClipboard(context.sessionId);
-                }
-                showExplorerFilesystemError(
-                    context,
-                    result.data,
-                    () => pasteExplorerFilesystemEntry(context, clipboard, destination)
-                );
-                return;
-            }
-            await refreshExplorerAfterFilesystemMutation(context, result.data);
-            if (isExplorerFsActionContextCurrent(context)) {
-                showTerminalToast(
-                    `Created ${explorerFilesystemBaseName(result.data.destination_path)}`,
-                    'success'
-                );
-            }
-        } finally {
-            clearExplorerFilesystemBusy(context);
-        }
-    }
-
-    async function moveExplorerFilesystemEntry(context, clipboard, destination) {
-        if (!setExplorerFilesystemBusy(
-            context,
-            clipboard.kind === 'directory' ? 'Moving folder…' : 'Moving file…'
-        )) {
-            return;
-        }
-        clearExplorerFilesystemError(context.index);
-        try {
-            if (!isExplorerFsActionContextCurrent(context)) {
-                return;
-            }
-            const result = await explorerFilesystemRequest(context, 'move', {
-                root_revision: context.rootRevision,
-                source_path: clipboard.path,
-                source_revision: clipboard.revision,
-                destination_directory: destination
-            });
-            if (!result || !isExplorerFsActionContextCurrent(context)) {
-                return;
-            }
-            if (!result.response?.ok) {
-                const status = result.response?.status || 0;
-                if (status === 404 || status === 409) {
-                    clearExplorerFilesystemClipboard(context.sessionId);
-                }
-                showExplorerFilesystemError(
-                    context,
-                    result.data,
-                    result.data?.mutated === false
-                        ? () => moveExplorerFilesystemEntry(
-                            context, clipboard, destination
-                        )
-                        : null
-                );
-                return;
-            }
-            clearExplorerFilesystemClipboard(context.sessionId);
-            await refreshExplorerAfterFilesystemMutation(context, result.data);
-            if (isExplorerFsActionContextCurrent(context)) {
-                showTerminalToast(`Moved ${clipboard.name}`, 'success');
-            }
-        } finally {
-            clearExplorerFilesystemBusy(context);
-        }
-    }
-
-    async function deleteExplorerFilesystemEntry(context) {
-        const label = context.kind === 'directory' ? 'Deleting folder…' : 'Deleting…';
+        const label = entries.length > 1
+            ? `Copying ${entries.length}…`
+            : (entries[0].kind === 'directory' ? 'Copying folder…' : 'Copying file…');
         if (!setExplorerFilesystemBusy(context, label)) {
             return;
         }
         clearExplorerFilesystemError(context.index);
+        const plan = explorerFilesystemMutationPlan();
+        try {
+            if (!isExplorerFsActionContextCurrent(context)) {
+                return;
+            }
+            const results = await runExplorerFilesystemBatch(
+                context,
+                entries,
+                entry => ({
+                    route: 'paste',
+                    body: {
+                        root_revision: context.rootRevision,
+                        source_path: entry.path,
+                        source_revision: entry.revision,
+                        destination_directory: destination
+                    }
+                }),
+                plan
+            );
+            // A source that vanished or changed invalidates the clipboard's
+            // captured revisions, exactly as it did for a single paste.
+            if (results.some(row => !row.ok && (row.status === 404 || row.status === 409))) {
+                clearExplorerFilesystemClipboard(context.sessionId);
+            }
+            await applyExplorerFilesystemMutationPlan(context, plan);
+            reportExplorerFilesystemBatch(
+                context,
+                'Copied',
+                results,
+                failed => () => pasteExplorerFilesystemEntries(
+                    context, clipboard, destination, failed
+                )
+            );
+        } finally {
+            clearExplorerFilesystemBusy(context);
+        }
+    }
+
+    async function moveExplorerFilesystemEntries(context, clipboard, destination, only = null) {
+        const entries = only || clipboard.entries;
+        if (!entries.length) {
+            return;
+        }
+        const label = entries.length > 1
+            ? `Moving ${entries.length}…`
+            : (entries[0].kind === 'directory' ? 'Moving folder…' : 'Moving file…');
+        if (!setExplorerFilesystemBusy(context, label)) {
+            return;
+        }
+        clearExplorerFilesystemError(context.index);
+        const plan = explorerFilesystemMutationPlan();
+        try {
+            if (!isExplorerFsActionContextCurrent(context)) {
+                return;
+            }
+            const results = await runExplorerFilesystemBatch(
+                context,
+                entries,
+                entry => ({
+                    route: 'move',
+                    body: {
+                        root_revision: context.rootRevision,
+                        source_path: entry.path,
+                        source_revision: entry.revision,
+                        destination_directory: destination
+                    }
+                }),
+                plan
+            );
+            const retryable = results.filter(row => !row.ok && row.mutated === false);
+            /* A cut is consumed by its move. The clipboard is kept only when
+               every failure left the filesystem untouched *and* nothing moved,
+               so the user can retry the same cut; any other outcome has
+               partially spent it and it must not be pasted again. */
+            const spent = results.some(row => row.ok)
+                || retryable.length !== results.filter(row => !row.ok).length;
+            if (spent) {
+                clearExplorerFilesystemClipboard(context.sessionId);
+            }
+            await applyExplorerFilesystemMutationPlan(context, plan);
+            reportExplorerFilesystemBatch(
+                context,
+                'Moved',
+                results,
+                failed => () => moveExplorerFilesystemEntries(
+                    context, clipboard, destination, failed
+                )
+            );
+        } finally {
+            clearExplorerFilesystemBusy(context);
+        }
+    }
+
+    async function deleteExplorerFilesystemEntries(context, targets) {
+        const entries = GridVibeExplorerSelection.topmostTargets(targets);
+        const confirmCopy = GridVibeExplorerSelection.deleteConfirmCopy(entries);
+        if (!entries.length || !confirmCopy) {
+            return;
+        }
+        const label = entries.length > 1
+            ? `Deleting ${entries.length}…`
+            : (entries[0].kind === 'directory' ? 'Deleting folder…' : 'Deleting…');
+        if (!setExplorerFilesystemBusy(context, label)) {
+            return;
+        }
+        clearExplorerFilesystemError(context.index);
+        const plan = explorerFilesystemMutationPlan();
         try {
             const edit = explorerEditState(context.paneRef);
+            const hitsOpenEdit = Boolean(edit?.dirty) && entries.some(
+                entry => explorerFilesystemPathContains(entry.path, edit.path || '')
+            );
             if (
-                edit?.dirty
-                && explorerFilesystemPathContains(context.path, edit.path || '')
-                && !(await confirmDiscardExplorerEdit(context.index, 'Deleting this folder'))
+                hitsOpenEdit
+                && !(await confirmDiscardExplorerEdit(
+                    context.index,
+                    entries.length > 1 ? 'Deleting these entries' : 'Deleting this folder'
+                ))
             ) {
                 return;
             }
             if (!isExplorerFsActionContextCurrent(context)) {
                 return;
             }
-            const name = explorerFilesystemBaseName(context.path);
             const owner = `explorer-fs:${context.sessionId}:${context.token}`;
             context.paneRef._explorerFsBusy.owner = owner;
+            // One confirmation for the whole batch, never one per entry.
             const confirmed = await openGenericConfirmModal({
-                title: context.kind === 'directory'
-                    ? `Permanently delete the folder "${name}" and all of its contents?`
-                    : `Permanently delete "${name}"?`,
-                copy: context.path,
+                title: confirmCopy.title,
+                copy: GridVibeExplorerSelection.targetsCopyLine(entries),
                 note: 'GridVibe cannot undo this action.',
-                confirmLabel: 'Delete',
+                confirmLabel: confirmCopy.confirmLabel,
                 danger: true,
                 owner
             });
             if (!confirmed || !isExplorerFsActionContextCurrent(context)) {
                 return;
             }
-            const result = await explorerFilesystemRequest(context, 'delete', {
-                root_revision: context.rootRevision,
-                path: context.path,
-                base_revision: context.revision,
-                recursive: context.kind === 'directory'
-            });
-            if (!result || !isExplorerFsActionContextCurrent(context)) {
-                return;
-            }
-            if (!result.response?.ok) {
-                showExplorerFilesystemError(
-                    context,
-                    result.data,
-                    result.data?.mutated === false
-                        ? () => deleteExplorerFilesystemEntry(context)
-                        : null
-                );
-                return;
-            }
-            await refreshExplorerAfterFilesystemMutation(context, result.data);
-            if (isExplorerFsActionContextCurrent(context)) {
-                showTerminalToast(`Deleted ${name}`, 'success');
-            }
+            const results = await runExplorerFilesystemBatch(
+                context,
+                entries,
+                entry => ({
+                    route: 'delete',
+                    body: {
+                        root_revision: context.rootRevision,
+                        path: entry.path,
+                        base_revision: entry.revision,
+                        recursive: entry.kind === 'directory'
+                    }
+                }),
+                plan
+            );
+            await applyExplorerFilesystemMutationPlan(context, plan);
+            reportExplorerFilesystemBatch(
+                context,
+                'Deleted',
+                results,
+                failed => () => deleteExplorerFilesystemEntries(context, failed)
+            );
         } finally {
             clearExplorerFilesystemBusy(context);
         }
@@ -1053,6 +1228,7 @@
             closeExplorerNameDialog();
         }
         clearExplorerFilesystemClipboard(key);
+        clearExplorerSelection(key);
         explorerFilesystemActionTokens.delete(key);
         if (explorerFilesystemMenuSessionId === key) {
             dismissExplorerContextMenu({ restoreFocus: false });

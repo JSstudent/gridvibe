@@ -10,6 +10,7 @@ import ctypes
 import json
 import logging
 import os
+import shlex
 import shutil
 import signal
 import subprocess
@@ -17,7 +18,7 @@ import sys
 import threading
 import time
 import webbrowser
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import urlopen
@@ -38,6 +39,11 @@ try:
     import webview
 except ImportError:  # pragma: no cover - optional dependency at runtime
     webview = None
+
+if sys.platform == "win32":
+    import winreg
+else:  # pragma: no cover - the registry lookup below is Windows-only
+    winreg = None
 
 logger = logging.getLogger(__name__)
 
@@ -437,9 +443,94 @@ def _ignore_linux_job_control_stop_signals():
         )
 
 
+# ── Browser mode is one browser window per app run ──
+# The launcher tab and a tab per workspace belong together, so starting GridVibe
+# must not drop the launcher into whatever window the user happens to have in
+# front. `webbrowser.open(url, new=1)` says "new window", but only the Unix
+# controllers honour it: on Windows the default controller is `os.startfile`,
+# which hands the URL to the shell and always lands in the frontmost window.
+# So the default browser's own new-window flag is used where the family is one
+# we recognise, and the plain open stays the fallback for everything else.
+_BROWSER_NEW_WINDOW_FLAGS = {
+    "brave": "--new-window",
+    "chrome": "--new-window",
+    "chromium": "--new-window",
+    "msedge": "--new-window",
+    "opera": "--new-window",
+    "vivaldi": "--new-window",
+    "firefox": "-new-window",
+    "librewolf": "-new-window",
+    "waterfox": "-new-window",
+    "zen": "-new-window",
+}
+
+
+def _windows_default_browser_executable() -> str:
+    """Resolve the executable Windows would run for an https:// URL."""
+    if winreg is None:  # pragma: no cover - non-Windows
+        return ""
+    try:
+        with winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            r"Software\Microsoft\Windows\Shell\Associations\UrlAssociations"
+            r"\https\UserChoice",
+        ) as key:
+            prog_id = str(winreg.QueryValueEx(key, "ProgId")[0] or "")
+        if not prog_id:
+            return ""
+        with winreg.OpenKey(
+            winreg.HKEY_CLASSES_ROOT, rf"{prog_id}\shell\open\command"
+        ) as key:
+            command = str(winreg.QueryValueEx(key, "")[0] or "")
+    except OSError:
+        logger.debug("Could not read the default browser from the registry", exc_info=True)
+        return ""
+    # The registry value is a full command line ('"C:\...\chrome.exe" -- "%1"').
+    parts = shlex.split(command, posix=False)
+    return parts[0].strip('"') if parts else ""
+
+
+def _new_window_browser_command(url: str) -> list:
+    """Build an argv that opens ``url`` in a new window, or ``[]`` if unknown."""
+    if sys.platform == "win32":
+        executable = _windows_default_browser_executable()
+    else:
+        # The Unix controllers already map new=1 onto the same flags, so there
+        # is nothing to add here; _open_browser_window() falls through to them.
+        executable = ""
+    if not executable:
+        return []
+    # The executable came out of the Windows registry, so it is a Windows path
+    # by construction: parse it as one instead of letting `Path` pick the
+    # interpreter's flavour, which on POSIX leaves the backslashes in the stem
+    # and never matches a family.
+    family = PureWindowsPath(executable).stem.lower()
+    flag = _BROWSER_NEW_WINDOW_FLAGS.get(family)
+    if not flag:
+        logger.debug("Default browser %s has no known new-window flag", family)
+        return []
+    return [executable, flag, url]
+
+
+def _open_browser_window(url: str) -> bool:
+    """Open ``url`` in a *new* browser window rather than a tab in an open one."""
+    command = _new_window_browser_command(url)
+    if command:
+        try:
+            # Deliberately never waited on: the browser outlives this call and
+            # owns no pipe of ours, so there is nothing to bound or reap.
+            subprocess.Popen(command, close_fds=True)
+            return True
+        except OSError:
+            logger.debug(
+                "Could not launch %s with its new-window flag", command[0], exc_info=True
+            )
+    return bool(webbrowser.open(url, new=1))
+
+
 def _open_browser_mode(base_url: str, server_thread: threading.Thread):
     logger.info("Opening GridVibe in the system browser at %s", base_url)
-    webbrowser.open(base_url)
+    _open_browser_window(base_url)
     try:
         server_thread.join()
     except KeyboardInterrupt:

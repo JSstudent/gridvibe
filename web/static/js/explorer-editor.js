@@ -42,6 +42,9 @@
             const capturedEpoch = state && state.voice ? state.voice.epoch : null;
             explorerEditorCancelVoiceSettle(state);
             pane._explorerEdit = null;
+            // Releases the overlay's queued frame and its focus ring. Every
+            // exit route already funnels through here.
+            window.teardownExplorerEditOverlay?.(index);
             if (capturedEpoch !== null) {
                 explorerEditorExpireOrphanedDictation(index, capturedEpoch);
                 Promise.resolve(_stopVoice(index)).catch(() => {});
@@ -178,10 +181,18 @@
     }
 
     /* While editing, the non-editor file chrome is disabled so a stray click
-       cannot swap views, search, or download the old disk copy. Zoom, line
-       wrapping and the appearance menu stay live — like the wrap toggle they
-       only restyle the surface (CSS custom properties on panels that are not
-       rebuilt), and the Source font they set is the one being typed into. */
+       cannot swap views or download the old disk copy. Zoom, line wrapping and
+       the appearance menu stay live — like the wrap toggle they only restyle
+       the surface (CSS custom properties on panels that are not rebuilt), and
+       the Source font they set is the one being typed into.
+
+       Find is the one control whose availability depends on how edit mode
+       rendered. It used to be disabled unconditionally, because a bare
+       textarea has nothing to mark; with the highlight overlay up there are
+       real rows behind the caret and explorer-edit-find.js paints matches onto
+       them. So it follows the overlay: live when the rows exist, and still
+       disabled on the degraded path, where the panel is exactly the textarea
+       it always was. */
     function setExplorerEditChromeDisabled(index, disabled) {
         const list = document.getElementById(`explorer-list-${index}`);
         if (!list) {
@@ -191,22 +202,38 @@
         if (editor) {
             editor.classList.toggle('is-editing', Boolean(disabled));
         }
-        const selectors = [
+        const findLive = Boolean(disabled)
+            && Boolean(window.explorerEditFindAvailable?.(index));
+        const setDisabled = (selectors, value) => {
+            selectors.forEach(selector => {
+                list.querySelectorAll(selector).forEach(element => {
+                    element.disabled = value;
+                });
+            });
+        };
+        setDisabled([
             '[data-explorer-file-view]',
-            `[data-explorer-download="${index}"]`,
+            `[data-explorer-download="${index}"]`
+        ], Boolean(disabled));
+        setDisabled([
             `[data-explorer-search-input="${index}"]`,
             `[data-explorer-search-prev="${index}"]`,
             `[data-explorer-search-next="${index}"]`,
             `[data-explorer-search-clear="${index}"]`
-        ];
-        selectors.forEach(selector => {
-            list.querySelectorAll(selector).forEach(element => {
-                element.disabled = Boolean(disabled);
-            });
-        });
-        if (!disabled) {
-            // Let the search machinery re-derive prev/next button states.
-            applyExplorerSearch(index);
+        ], Boolean(disabled) && !findLive);
+        if (!disabled || findLive) {
+            /* Let the search machinery re-derive prev/next and the counter —
+               and, entering edit mode with a query already in the box, carry
+               that find over onto the draft instead of dropping it.
+
+               Carrying it over is all this does. Every caller here is a chrome
+               re-sync — entering or leaving the editor, a save's in-place
+               refresh, a group re-attach — and the reader's scroll position is
+               either untouched or restored by the caller, so the find must not
+               pull the view to its active match. Doing so is what made a swap
+               between Source and Edit land on match 5 of 8 instead of where
+               the reader was looking. */
+            applyExplorerSearch(index, { scroll: false });
         }
     }
 
@@ -228,12 +255,23 @@
         if (!pane || !pane._explorerFileEditable || explorerEditState(pane) || pane._explorerMode !== 'file') {
             return;
         }
-        // Source only, diff split closed (2 in §5.2).
-        setExplorerFileView(index, 'source');
-        clearExplorerEditBar(index);
-
+        /* Read before anything replaces the rows it points at. A word the
+           reader had selected — and the occurrence tint hanging off it — is
+           anchored to those rows, so without carrying it across, clicking
+           Edit put the tint out and the word had to be picked again inside
+           the editor. */
+        const carriedSelection = window.explorerSourceSelectionCarry?.(index) || null;
+        /* Read before the view switch too. Pinning the view to Source re-applies
+           the find onto freshly built rows, and reading the position after that
+           would capture whatever the rebuild left rather than where the reader
+           was — which is the position the editor is about to open on. */
         const sourcePanel = document.getElementById(`explorer-code-${index}`);
         const sourceViewport = captureScrollMetrics(sourcePanel);
+        // Source only, diff split closed (2 in §5.2). The find comes along
+        // without moving the view: see setExplorerFileView's `scroll`.
+        setExplorerFileView(index, 'source', { scroll: false });
+        clearExplorerEditBar(index);
+
         const normalized = explorerNormalizeEditNewlines(pane._explorerFileContent || '');
         pane._explorerEdit = {
             tabId: pane._explorerActiveTabId,
@@ -255,10 +293,35 @@
 
         const textarea = document.getElementById(`explorer-edit-textarea-${index}`);
         if (textarea) {
-            textarea.setSelectionRange(0, 0);
+            if (!window.restoreExplorerEditorSelection?.(index, carriedSelection)) {
+                textarea.setSelectionRange(0, 0);
+            }
             textarea.focus({ preventScroll: true });
-            restoreExplorerEditViewport(textarea, sourceViewport);
+            /* Inside the overlay's stack the Source view goes on scrolling
+               both layers — it is never replaced and the content height does
+               not change, so the position survives on its own and this is a
+               cheap safety net. Without the overlay the full-height textarea
+               is the scroller, exactly as before, and the transfer is real. */
+            restoreExplorerEditViewport(
+                explorerEditScrollElement(index) || textarea, sourceViewport
+            );
+            // The textarea now holds the carried selection, so the editor's
+            // tint has something to derive from immediately rather than on the
+            // reader's next click.
+            window.refreshExplorerEditOccurrenceTint?.();
         }
+    }
+
+    /* The element that actually scrolls the Source panel while editing. The
+       overlay's textarea is `overflow: hidden` and exactly as tall as its own
+       content, so the scroller is the same `.explorer-source-view` as in
+       read-only mode; only the bare fallback textarea scrolls itself. */
+    function explorerEditScrollElement(index) {
+        const view = document.getElementById(`explorer-code-${index}`);
+        if (view && document.querySelector(`[data-explorer-edit-stack="${index}"]`)) {
+            return view;
+        }
+        return document.getElementById(`explorer-edit-textarea-${index}`) || view;
     }
 
     function renderExplorerEditTextarea(index) {
@@ -271,7 +334,16 @@
         // The editor honours the tab's Source line-wrap flag; `soft` never
         // rewrites the value, so the saved bytes are the same either way.
         const wrap = explorerLineWrapPreference(index, 'source') ? 'soft' : 'off';
-        code.innerHTML = `<textarea id="explorer-edit-textarea-${index}" class="explorer-source-editor" spellcheck="false" wrap="${wrap}" aria-label="Edit ${escHtml(pane._explorerFileName || 'file')}"></textarea>`;
+        const textareaHtml = `<textarea id="explorer-edit-textarea-${index}" class="explorer-source-editor" spellcheck="false" wrap="${wrap}" aria-label="Edit ${escHtml(pane._explorerFileName || 'file')}"></textarea>`;
+        /* explorer-edit-overlay.js paints the read-only rows behind the
+           textarea so the gutter survives and no glyph moves. It is an
+           enhancement — an oversized buffer, or the file failing to load at
+           all, leaves the panel holding exactly this bare textarea. */
+        if (typeof window.mountExplorerEditOverlay === 'function') {
+            window.mountExplorerEditOverlay(index, code, textareaHtml);
+        } else {
+            code.innerHTML = textareaHtml;
+        }
         const textarea = document.getElementById(`explorer-edit-textarea-${index}`);
         if (!textarea) {
             return;
@@ -296,6 +368,9 @@
             return;
         }
         state.draft = textarea.value;
+        // The overlay's rows are the draft's own geometry: a new line, or a
+        // line that now wraps, has to reach the layer behind the caret.
+        window.refreshExplorerEditOverlay?.(index);
         const dirty = state.draft !== state.originalContent;
         if (dirty !== state.dirty) {
             state.dirty = dirty;
@@ -349,8 +424,10 @@
         if (!pane) {
             return;
         }
-        const textarea = document.getElementById(`explorer-edit-textarea-${index}`);
-        const editViewport = captureScrollMetrics(textarea);
+        const editViewport = captureScrollMetrics(explorerEditScrollElement(index));
+        // The same carry in the other direction, read before the textarea it
+        // describes is torn down.
+        const carriedSelection = window.explorerEditorSelectionCarry?.(index) || null;
         clearExplorerEditState(index);
         clearExplorerEditBar(index);
         renderExplorerSource(index);
@@ -360,7 +437,29 @@
         );
         setExplorerEditChromeDisabled(index, false);
         refreshExplorerEditControls(index);
-        applyExplorerSearch(index);
+        /* The selection has to go back on the rows that are finally standing,
+           and with a find active those are not the rows renderExplorerSource()
+           just built — applyExplorerSearch() rebuilds them again, after an
+           await, to mark the matches. Restoring before that would put the
+           selection on rows about to be replaced, which is precisely the
+           disappearing act this is here to stop.
+
+           Those late rows are also why the viewport is re-applied here. The
+           find is repainted, never navigated (`scroll: false`), so nothing
+           pulls the view to a match on the way out — but the rebuild itself
+           lands after the restore above, and the position the reader was
+           looking at has to outlive it. */
+        Promise.resolve(applyExplorerSearch(index, { scroll: false })).catch(() => {}).then(() => {
+            restoreExplorerEditViewport(
+                document.getElementById(`explorer-code-${index}`),
+                editViewport
+            );
+            if (window.restoreExplorerSourceSelection?.(index, carriedSelection)) {
+                // renderExplorerSource() already scheduled a pass, but it ran
+                // against a selection that did not exist yet.
+                scheduleExplorerOccurrenceHighlight();
+            }
+        });
         if (focusEditButton) {
             document.querySelector(`[data-explorer-edit="${index}"]`)?.focus();
         }
@@ -445,9 +544,15 @@
         // Prefer the in-place refresh; fall back to a full render when the
         // available panels changed (a clean file commonly gains a Diff panel
         // after its first edit).
+        /* The fallback needs the captured position as much as the in-place
+           path does, and it is the *common* one on a first save: a clean file
+           gains a Diff panel the moment it differs from HEAD, which is exactly
+           the panel-set change that sends us here. Without it the whole point
+           of capturing a scroll position was lost — the file came back at the
+           top on the one save most likely to happen mid-document. */
         const applied = updateExplorerFileInPlace(index, data, scrollState);
         if (!applied) {
-            renderExplorerFile(index, data, { tab: pane._explorerActiveTabId });
+            renderExplorerFile(index, data, { tab: pane._explorerActiveTabId, scrollState });
         } else {
             setExplorerEditChromeDisabled(index, false);
             refreshExplorerEditControls(index);
@@ -458,9 +563,10 @@
             invalidateExplorerGitRepo(index);
             loadExplorerGitRepo(index);
         }
-        if (pane._explorerTreeSidebarOpen) {
-            reloadExplorerTree(index);
-        }
+        // A save cannot create, delete or rename a path, so the tree needs the
+        // saved file's own row re-read and nothing else — a full reload threw
+        // the reader's expansion and scroll away for a change it cannot show.
+        refreshExplorerTreeFileEntry(index, data.path || pane._explorerFilePath || '');
         showTerminalToast(`Saved ${data.name || pane._explorerFileName || 'file'}`, 'success');
     }
 

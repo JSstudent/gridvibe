@@ -598,7 +598,11 @@
 
     /* Text nodes of one rendered source row, with the offset each one starts
        at — the row is a run of syntax-highlighted <span>s, so a match can
-       straddle several of them. */
+       straddle several of them.
+
+       Shared with the in-place editor's find and occurrence tint
+       (explorer-edit-find.js), which address the overlay's rows by column
+       range and hit the same straddling problem. */
     function explorerSourceLineTextNodes(row) {
         const code = row?.querySelector('.explorer-source-line-code');
         if (!code) {

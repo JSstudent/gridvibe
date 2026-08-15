@@ -21,6 +21,7 @@ Logging is initialised in `setup_logging()` inside `main.py`.
 | `python main.py --debug` | `DEBUG` |
 
 The level applies to the root logger and therefore to every named logger in the application.
+One third-party logger is set explicitly on top of it — see **Third-Party Logger Levels** below.
 
 ---
 
@@ -74,6 +75,40 @@ _POLL_RE = re.compile(
 ```
 
 To stop suppressing a route, remove it from the alternation in `_POLL_RE`.
+
+---
+
+## Third-Party Logger Levels
+
+`_SuppressPollLogs` and `_StripAnsiFilter` shape what our *own* dependencies write per
+request. A library that logs at `INFO` per *operation* needs the blunter instrument, and
+`setup_logging` applies it to one logger:
+
+```python
+logging.getLogger("paramiko").setLevel(level if debug else logging.WARNING)
+```
+
+**Why paramiko.** The explorer pools the SSH *transport* per session and opens a fresh
+SFTP *channel* per request — deliberate, because paramiko's SFTP clients are not safe for
+concurrent use and a channel on a live transport is cheap (`web/explorer.py`). paramiko
+logs two `INFO` lines for every one of those channels:
+
+```
+INFO  paramiko.transport.sftp  [chan 2298] Opened sftp connection (server version 3)
+INFO  paramiko.transport.sftp  [chan 2298] sftp session closed.
+```
+
+Left at `INFO` that was **84 % of every line in the file**, so a full 2 MB rotation
+retained roughly 300 first-party lines and the whole 22 MB budget held a few hours of
+diagnostics. The pooling design is right; the chatter about it is what had to go.
+
+**What still gets through.** paramiko logs authentication and transport failures at
+`WARNING`/`ERROR`, so a genuine SSH problem is unaffected. `python main.py --debug`
+restores the full paramiko stream for diagnosing one.
+
+Before muting a new library, prefer a filter if only some of its records are noise — this
+is for the case where an entire level is per-operation bookkeeping. Keeping
+`logs/gridvibe.log` readable is a regression guardrail (`CLAUDE.md` §9).
 
 ---
 

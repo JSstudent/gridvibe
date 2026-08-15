@@ -65,6 +65,37 @@ class MainTestCase(unittest.TestCase):
                         root_logger.addHandler(handler)
                     root_logger.setLevel(original_level)
 
+    def test_setup_logging_mutes_paramiko_chatter_outside_debug(self):
+        """paramiko's per-SFTP-channel INFO lines must not crowd out first-party
+        log retention, but genuine WARNING/ERROR failures still get through and
+        --debug still gives the full stream (CLAUDE.md guardrail 9)."""
+        root_logger = logging.getLogger()
+        paramiko_logger = logging.getLogger("paramiko")
+        original_handlers = list(root_logger.handlers)
+        original_level = root_logger.level
+        original_paramiko_level = paramiko_logger.level
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with patch.object(main, "LOG_DIR", temp_dir):
+                try:
+                    main.setup_logging(debug=False)
+                    self.assertFalse(paramiko_logger.isEnabledFor(logging.INFO))
+                    self.assertTrue(paramiko_logger.isEnabledFor(logging.WARNING))
+                    self.assertTrue(paramiko_logger.isEnabledFor(logging.ERROR))
+
+                    for handler in root_logger.handlers:
+                        handler.close()
+                    main.setup_logging(debug=True)
+                    self.assertTrue(paramiko_logger.isEnabledFor(logging.INFO))
+                finally:
+                    for handler in root_logger.handlers:
+                        handler.close()
+                    root_logger.handlers.clear()
+                    for handler in original_handlers:
+                        root_logger.addHandler(handler)
+                    root_logger.setLevel(original_level)
+                    paramiko_logger.setLevel(original_paramiko_level)
+
 
 class ResolveServerSettingsTestCase(unittest.TestCase):
     """Deep-dive 4.7 — explicit CLI flags beat config.json values."""

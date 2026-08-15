@@ -2557,6 +2557,62 @@
         return false;
     }
 
+    /* ── Alt+W: back to the workspace that opened this launcher ──
+       In a session window Alt+W walks the workspaces. The launcher has no
+       workspace of its own to walk from, so the same keystroke walks back out
+       of it, to the window that handed over (goToSettings records which one)
+       or, if that workspace has since closed, to whichever one is still open.
+
+       Reuses the launcher's existing Open path — focus the window, open it if
+       the native host has none — so the arrival pulse and the group targeting
+       are the ones every other workspace switch already gets (guardrail 6).
+       The in-flight guard keeps a held key from queueing a burst of opens. */
+    let launcherWorkspaceReturnInFlight = false;
+
+    async function returnToLauncherOriginWorkspace() {
+        if (launcherWorkspaceReturnInFlight) {
+            return;
+        }
+        launcherWorkspaceReturnInFlight = true;
+        try {
+            const target = launcherReturnWorkspace(
+                await fetchLiveWorkspaces(),
+                readLauncherOriginWorkspace()
+            );
+            if (!target) {
+                showGridVibeNotice('No workspace is open to switch back to.', 'info');
+                return;
+            }
+            if (!(await focusWorkspaceWindow(target.workspace_id))) {
+                const opened = await openWorkspaceWindow(target.workspace_id, {
+                    groupId: target.active_group_id
+                });
+                if (!opened) {
+                    showGridVibeNotice(
+                        `The workspace tab could not be opened. ${WORKSPACE_TAB_BLOCKED_HINT}`,
+                        'warning'
+                    );
+                }
+            }
+        } catch (error) {
+            console.error('[GridVibe Launcher] workspace return failed:', error);
+            showGridVibeNotice(`Could not switch workspace: ${error.message}`, 'error');
+        } finally {
+            launcherWorkspaceReturnInFlight = false;
+        }
+    }
+
+    /* Unlike the session page, a focused text field does not block this
+       shortcut: the launcher is almost entirely form fields, and Alt+W means
+       nothing to any of them. The keybind capture field is the one control on
+       this page that is *supposed* to swallow arbitrary combinations. */
+    function isLauncherShortcutBlockingTarget(target) {
+        if (!(target instanceof Element)) {
+            return false;
+        }
+        return Boolean(target.closest('.voice-ptt-keybind')) || target.isContentEditable;
+    }
+
     async function openTerminalsIfActive(
         preferredGroupId = '',
         nativeZoomFactor = null,
@@ -2587,10 +2643,17 @@
             const targetGroupId = liveGroupIds.has(preferredGroupId)
                 ? preferredGroupId
                 : (data.sessions.find(session => session.group_id)?.group_id || '');
-            await openWorkspaceWindow(resolvedWorkspaceId, {
+            const opened = await openWorkspaceWindow(resolvedWorkspaceId, {
                 groupId: targetGroupId,
                 nativeZoomFactor
             });
+            if (!opened) {
+                showGridVibeNotice(
+                    `The workspace tab could not be opened. ${WORKSPACE_TAB_BLOCKED_HINT}`,
+                    'warning'
+                );
+                return;
+            }
             logLauncherWindowAction('opened workspace window', {
                 workspace_id: resolvedWorkspaceId,
                 requested_group_id: targetGroupId || 'all'
@@ -2619,13 +2682,41 @@
        auth or fails into the error placeholder (which has a Retry button). */
     let restorableWorkspaceIsOffered = false;
 
+    /* The offer is a *cold-start* offer, and both halves of it say so: a restart
+       ends every live shell, so the app comes back empty and the snapshot is the
+       only way back. The single-workspace banner encodes that below by refusing
+       to offer while the slot reports live groups; the chooser asks the same
+       question across every workspace.
+
+       Without it the two run modes disagree, because they reach the launcher by
+       different routes. The native launcher window is *focused* (webview_launcher
+       `open_launcher_window` never reloads it), so an unguarded auto-open fires
+       once per app run. Browser mode has no such window — Alt+W and the session
+       line's launcher button navigate, which reloads this page and re-runs its
+       startup — so the same auto-open fired on every hop, usually onto a chooser
+       whose only row was the workspace the user had just left, already open and
+       therefore un-restorable. "Reopen saved …" in the Workspaces card stays the
+       deliberate way in. */
+    async function hasLiveWorkspaceSessions() {
+        try {
+            const workspaces = await fetchLiveWorkspaces();
+            return workspaces.some(workspace => Number(workspace.group_count || 0) > 0);
+        } catch (_error) {
+            /* Unknown is not "empty": failing open would restore the every-hop
+               dialog on exactly the loads that already went wrong. */
+            return true;
+        }
+    }
+
     async function checkRestorableWorkspace() {
         /* With N workspaces a single banner stops being coherent — dismissing
            "the banner" would hide every saved workspace at once. The chooser
            takes over; the banner remains the single-workspace fallback so the
            flag off keeps today's behaviour exactly. */
         if (isMultiWorkspaceEnabled()) {
-            await loadWorkspaceRestoreChooser({ autoOpen: true });
+            await loadWorkspaceRestoreChooser({
+                autoOpen: !(await hasLiveWorkspaceSessions())
+            });
             return;
         }
         const banner = document.getElementById('restoreWorkspaceBanner');
@@ -2971,10 +3062,17 @@
             openButton.className = 'ghost-btn';
             openButton.textContent = 'Open';
             openButton.addEventListener('click', async () => {
-                if (!(await focusWorkspaceWindow(workspace.workspace_id))) {
-                    await openWorkspaceWindow(workspace.workspace_id, {
-                        groupId: workspace.active_group_id
-                    });
+                if (await focusWorkspaceWindow(workspace.workspace_id)) {
+                    return;
+                }
+                const opened = await openWorkspaceWindow(workspace.workspace_id, {
+                    groupId: workspace.active_group_id
+                });
+                if (!opened) {
+                    showGridVibeNotice(
+                        `The workspace tab could not be opened. ${WORKSPACE_TAB_BLOCKED_HINT}`,
+                        'warning'
+                    );
                 }
             });
             /* Per-workspace Save (SGP-14): the same flush handshake as
@@ -3264,19 +3362,39 @@
             const result = await restoreSavedWorkspaces(workspaceIds);
             const restored = (result.workspaces || []).filter(entry => entry.restored);
             restoreStarted = restored.length > 0;
+            /* Every restored workspace gets its own open attempt — the loop
+               never stops at the first refusal, because in browser mode the
+               refusals are exactly what has to be counted: a browser grants
+               one pop-up per user gesture, so the second and later tabs of a
+               multi-workspace restore are blocked while this site is not
+               allowed pop-ups. The sessions are already live either way; what
+               is missing is the tab, and the Workspaces card below opens it
+               with one click each. */
+            let blocked = 0;
             for (const entry of restored) {
                 // Only workspaces whose relaunch actually started get a window.
-                await openWorkspaceWindow(entry.workspace_id, {
+                const opened = await openWorkspaceWindow(entry.workspace_id, {
                     groupId: entry.active_group_id,
                     nativeZoomFactor: entry.native_zoom_factor
                 });
+                if (!opened) {
+                    blocked += 1;
+                }
             }
             const failed = (result.workspaces || []).filter(entry => !entry.restored);
             if (restored.length) {
+                /* One outcome, one notice (guardrail 8) — the relaunch, what
+                   could not be restored, and what could not be opened all
+                   arrive as one sentence on the one banner. */
                 showGridVibeNotice(
                     `Relaunch started for ${restored.length} workspace${restored.length === 1 ? '' : 's'}.`
-                    + (failed.length ? ` ${failed.length} could not be restored.` : ''),
-                    failed.length ? 'warning' : 'success'
+                    + (failed.length ? ` ${failed.length} could not be restored.` : '')
+                    + (blocked
+                        ? ` Your browser blocked ${blocked} workspace tab${blocked === 1 ? '' : 's'}.`
+                            + ` ${WORKSPACE_TAB_BLOCKED_HINT}`
+                            + ' You can also open them from the Workspaces list.'
+                        : ''),
+                    (failed.length || blocked) ? 'warning' : 'success'
                 );
             } else {
                 showGridVibeNotice('The selected workspaces could not be restored.', 'error');
@@ -3631,4 +3749,22 @@
         if (event.key === 'Escape' && isWorkspaceRestoreModalVisible() && !workspaceRestoreInFlight) {
             dismissWorkspaceRestorePanel();
         }
+    });
+
+    /* The launcher half of the Alt+W workspace switch. Shift is not read: there
+       is no cycle to run backwards from a window that is not a workspace, so
+       both directions mean the same thing here — go back. */
+    document.addEventListener('keydown', event => {
+        if (!event.altKey || event.ctrlKey || event.metaKey || event.repeat) {
+            return;
+        }
+        if (event.code !== 'KeyW' || isLauncherShortcutBlockingTarget(event.target)) {
+            return;
+        }
+        if (!isMultiWorkspaceEnabled()) {
+            return;
+        }
+
+        event.preventDefault();
+        returnToLauncherOriginWorkspace();
     });

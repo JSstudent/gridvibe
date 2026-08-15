@@ -957,11 +957,6 @@
             display: block;
             filter: drop-shadow(0 0 5px color-mix(in srgb, currentColor 32%, transparent));
         }
-        .refresh-all-icon {
-            width: 18px;
-            height: 18px;
-            display: block;
-        }
         /* Every topbar icon states its own size: an unsized inline SVG falls
            back to the 300x150 replaced-element default and only *looks* right
            while the button has room to squeeze it, which max surface mode (a
@@ -1628,8 +1623,99 @@
             padding: 5px 8px;
         }
 
-        body.topbar-collapsed .topbar {
+        /* The top bar leaves the layout for two independent reasons — the
+           chevron, which is persisted as topbar_visible and keeps its own
+           body.topbar-collapsed marker for that read-back, and fullscreen,
+           which auto-hides for its duration and must never write the setting.
+           body.topbar-hidden is the one derived state the layout keys on. */
+        body.topbar-hidden .topbar {
             display: none;
+        }
+
+        /* The reveal: the hidden bar comes back as an overlay rather than
+           rejoining the flow, so resting on the top edge to reach Sessions… or
+           Workspace… never resizes a single terminal. */
+        body.topbar-hidden.topbar-peek .topbar {
+            display: grid;
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            z-index: 4000;
+            box-shadow: var(--gv-dialog-shadow);
+            animation: topbar-peek-in .16s ease-out;
+        }
+
+        @keyframes topbar-peek-in {
+            from { transform: translateY(-100%); }
+            to   { transform: none; }
+        }
+
+        @media (prefers-reduced-motion: reduce) {
+            body.topbar-hidden.topbar-peek .topbar {
+                animation: none;
+            }
+        }
+
+        /* Fullscreen owns the bar's visibility for its duration, so the
+           chevron would toggle a stored value with nothing to show for it. */
+        body.chrome-fullscreen .topbar-toggle-btn {
+            display: none;
+        }
+
+        /* The reveal target: the handle's own footprint and nothing more. The
+           rest of the top edge stays inert, so passing along it — or reaching
+           for a pane's top corner — never summons the bar. Shrink-to-fit plus
+           symmetrical padding keeps the hit area tied to the handle's width,
+           with just enough forgiveness either side to be aimable. 4px tall so
+           it can never take a click meant for a session tab's top edge (the
+           tab strip starts 5px down even in surface-max). */
+        .topbar-peek-zone {
+            position: fixed;
+            top: 0;
+            left: 50%;
+            transform: translateX(-50%);
+            height: 4px;
+            padding: 0 12px;
+            display: flex;
+            justify-content: center;
+            align-items: flex-start;
+            z-index: 3900;
+            pointer-events: none;
+        }
+
+        body.topbar-hidden .topbar-peek-zone {
+            pointer-events: auto;
+        }
+
+        /* The one hint that a bar is still up there, and the keyboard route to
+           it. Invisible while the bar is in the flow — there is nothing to
+           reveal — and hidden again under a bar that is already revealed. */
+        .topbar-peek-handle {
+            width: 46px;
+            height: 3px;
+            padding: 0;
+            border: 0;
+            border-radius: 0 0 3px 3px;
+            background: var(--t-border);
+            opacity: 0;
+            cursor: pointer;
+            transition: opacity .18s, background .18s;
+        }
+
+        body.topbar-hidden .topbar-peek-handle {
+            opacity: .7;
+        }
+
+        body.topbar-hidden .topbar-peek-handle:hover,
+        body.topbar-hidden .topbar-peek-handle:focus-visible {
+            background: var(--t-accent);
+            opacity: 1;
+            outline: none;
+        }
+
+        body.topbar-peek .topbar-peek-handle {
+            opacity: 0;
         }
 
         body.surface-max .topbar-icon {
@@ -3117,15 +3203,27 @@
             outline: none;
         }
 
+        /* Stroke icons, not `+`/`−` text: a glyph centred itself off
+           `font-size`, so the flex centring and the explicit icon box below are
+           what replace it. Same treatment as .explorer-git-revert-btn beside
+           them, so the three row controls sit on one baseline. */
         .explorer-git-stage-btn,
         .explorer-git-unstage-btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
             width: 22px;
             height: 22px;
-            font-size: .95rem;
-            font-weight: 700;
             border-color: var(--explorer-open-folder-border);
             background: var(--explorer-open-folder-bg);
             color: var(--explorer-open-folder-text);
+        }
+
+        .explorer-git-stage-btn svg,
+        .explorer-git-unstage-btn svg {
+            display: block;
+            width: 13px;
+            height: 13px;
         }
 
         .explorer-git-stage-btn:hover,
@@ -3167,6 +3265,9 @@
         }
 
         .explorer-zoom-btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
             width: 28px;
             height: 28px;
             border: 1px solid var(--explorer-btn-border);
@@ -3174,10 +3275,17 @@
             background: var(--explorer-btn-bg);
             color: var(--explorer-btn-text);
             cursor: pointer;
-            font-size: .82rem;
-            font-weight: 700;
             line-height: 1;
             flex: 0 0 auto;
+        }
+
+        /* Sized to match the download/appearance/line-wrap icons sharing the
+           editor header, so the zoom pair reads as part of that toolbar rather
+           than as a text control wedged into it. */
+        .explorer-zoom-btn svg {
+            display: block;
+            width: 14px;
+            height: 14px;
         }
 
         .explorer-zoom-btn:not(:disabled):hover {
@@ -3359,6 +3467,94 @@
         }
 
         .explorer-source-editor:focus {
+            outline: 2px solid var(--t-accent);
+            outline-offset: -2px;
+        }
+
+        /* ── Highlight overlay: the read-only rows painted behind the editor ──
+           The stack is the underlay's own height, and the textarea covers it
+           absolutely with `overflow: hidden`, so the textarea never scrolls
+           and the surrounding .explorer-source-view scrolls both layers
+           together exactly as it does in read-only mode. That is what keeps
+           the caret following typing with no scroll-sync code.
+
+           Wrap-column parity is the whole game: the textarea's content box has
+           to be exactly the underlay's code column, so its left padding is the
+           shared gutter variable plus the code cell's own 14px, and the two
+           inherit the same font, line-height, tab-size and wrap rules from the
+           view. One pixel of drift and long lines break at different columns,
+           and the layers desynchronise progressively down the file. */
+        .explorer-edit-stack {
+            position: relative;
+            /* Unwrapped, the stack grows to the widest rendered line so the
+               covering textarea is that wide too; wrapped, it drops the floor
+               and both layers reflow inside the pane. Mirrors the same pair of
+               rules on .explorer-source-lines. */
+            min-width: max-content;
+            min-height: 100%;
+        }
+
+        .explorer-source-view.wrap-lines .explorer-edit-stack {
+            min-width: 0;
+        }
+
+        /* The visible layer, and never a hit target: the rows carry the gutter,
+           every line's rendered height, and — since the underlay is the
+           read-only renderer's own output — the syntax colours. The textarea
+           above holds the same text with `color: transparent`, so what the
+           reader sees is these rows and what they type into is the textarea.
+
+           Synthetic bold is the one thing that would break that: it widens
+           glyph advances, and a bolded token that measures wider here than in
+           the textarea wraps at a different column and desynchronises the two
+           layers down the rest of the file. Every source font offered has a
+           real 700 face, so switching synthesis off costs nothing when one is
+           there and drops to regular weight — metrics intact — when it is not.
+           Oblique synthesis is a skew and keeps advances, so it stays. */
+        .explorer-edit-underlay {
+            pointer-events: none;
+            user-select: none;
+            font-synthesis-weight: none;
+        }
+
+        .explorer-edit-stack > .explorer-source-editor {
+            position: absolute;
+            inset: 0;
+            height: auto;
+            min-height: 0;
+            overflow: hidden;
+            padding: 0 14px 0 calc(var(--explorer-source-gutter-width, 42px) + 14px);
+            color: transparent;
+            caret-color: var(--explorer-text);
+            background: transparent;
+        }
+
+        /* The selection rectangle is painted by the top layer, so an opaque
+           one would blank out the coloured text underneath it. A translucent
+           wash of the accent tints the rows instead of hiding them. */
+        .explorer-edit-stack > .explorer-source-editor::selection {
+            background: rgba(var(--gv-accent-rgb), .28);
+        }
+
+        /* Follows the occurrence tint up on dark, for the reason the tint went
+           up: alpha buys less over near-black. It has to stay the stronger of
+           the two — the word the reader actually selected is the anchor the
+           tint hangs off, and a selection reading weaker than its own echoes
+           inverts that. */
+        .explorer-pane[data-explorer-theme="dark"]
+        .explorer-edit-stack > .explorer-source-editor::selection {
+            background: rgba(var(--gv-accent-rgb), .42);
+        }
+
+        /* The stacked textarea is as tall as the whole document, so its own
+           focus ring would be drawn around the buffer and never seen. The ring
+           moves to the scroller — the box the user actually looks at — which
+           explorer-edit-overlay.js marks on focus. */
+        .explorer-edit-stack > .explorer-source-editor:focus {
+            outline: none;
+        }
+
+        .explorer-source-view.editor-focused {
             outline: 2px solid var(--t-accent);
             outline-offset: -2px;
         }
@@ -3687,9 +3883,15 @@
             min-width: 0;
         }
 
+        /* One gutter track for every row in the document, written once by
+           renderExplorerSourceLines() from the digit count of the last line
+           (plus the fold chevron on Markdown). Each row is its own grid
+           container, so the `minmax(42px, auto)` this replaced sized each
+           gutter from that row's own number and pushed the code column right
+           on the four-digit rows of any file past 999 lines. */
         .explorer-source-line {
             display: grid;
-            grid-template-columns: minmax(42px, auto) minmax(0, 1fr);
+            grid-template-columns: var(--explorer-source-gutter-width, 42px) minmax(0, 1fr);
             align-items: stretch;
             min-height: 1.45em;
         }
@@ -3873,9 +4075,13 @@
 
         /* Old (HEAD) lines stack above new (worktree) lines, tinted from the
            same two tokens the Diff panel's cells use. */
+        /* The peek is inserted among the source rows and shares their cell
+           geometry, so it reads the document's one gutter width too — sizing
+           its own would step away from the rows it sits between on any file
+           past 999 lines. */
         .explorer-change-peek-line {
             display: grid;
-            grid-template-columns: minmax(42px, auto) minmax(0, 1fr);
+            grid-template-columns: var(--explorer-source-gutter-width, 42px) minmax(0, 1fr);
             min-height: 1.45em;
         }
 
@@ -4516,17 +4722,24 @@
         /* One source for the find-match hue (--gv-match-rgb in tokens.css):
            the search mark paints it solid, the occurrence tint below paints it
            translucent. Spelling the same colour two ways — hex here, rgba()
-           there — is what let this block drift the last time it was touched. */
+           there — is what let this block drift the last time it was touched.
+
+           No horizontal padding. It used to carry 1px either side, which was
+           harmless on its own but made the very same match visibly wider here
+           than the one the in-place editor paints — the editor's is a
+           ::highlight(), and a highlight cannot set a metric at all. Two
+           renderings of one find that do not agree on a word's width read as
+           two different fonts, so the padding goes and both are exactly the
+           glyphs. Border-radius stays: a corner is not advance. */
         .explorer-search-match {
             border-radius: 2px;
-            padding: 0 1px;
             background: rgb(var(--gv-match-rgb));
-            color: #111827;
+            color: var(--gv-match-ink);
         }
 
         .explorer-search-match.active {
-            background: #fb923c;
-            color: #111827;
+            background: rgb(var(--gv-match-active-rgb));
+            color: var(--gv-match-ink);
             box-shadow: 0 0 0 1px rgba(17, 24, 39, .3);
         }
 
@@ -4540,8 +4753,15 @@
             background-color: rgba(var(--gv-match-rgb), .34);
         }
 
+        /* A translucent wash carries far less on a dark ground than on a light
+           one — the same alpha that reads as a clear tint over white barely
+           separates from near-black. The dark theme used to take .24, *below*
+           the light theme's .34, and the tint was reported as barely visible.
+           It goes above it instead, in both this rendering and the in-place
+           editor's below, so a double-clicked word reads the same in either
+           theme and in either mode. */
         .explorer-pane[data-explorer-theme="dark"] ::highlight(explorer-occurrence) {
-            background-color: rgba(var(--gv-match-rgb), .24);
+            background-color: rgba(var(--gv-match-rgb), .38);
         }
 
         /* The matched string of an opened repository-search hit, painted the
@@ -4551,7 +4771,39 @@
            asked for. */
         ::highlight(explorer-search-hit) {
             background-color: rgb(var(--gv-match-rgb));
-            color: #111827;
+            color: var(--gv-match-ink);
+        }
+
+        /* ── Find and the occurrence tint inside the in-place editor ──
+           Same three signals as above, painted through the Custom Highlight
+           API instead of <mark> wrappers and a rebuilt DOM. That is not a
+           stylistic choice: the overlay's rows sit behind a transparent
+           textarea holding the same text, so anything that changes a glyph's
+           advance wraps the two layers at different columns and desynchronises
+           everything below it. A <mark> is an element and can grow a padding
+           or a border at any time — it carried one until this was written — so
+           the editor uses the one paint that is metric-free by construction.
+
+           The active match loses the ring its <mark> counterpart draws, since
+           box-shadow is not a property a highlight may set; --gv-match-active-
+           rgb carries "this one" on hue alone. That is the only remaining
+           visual difference between the two renderings of a find. */
+        ::highlight(explorer-edit-find) {
+            background-color: rgb(var(--gv-match-rgb));
+            color: var(--gv-match-ink);
+        }
+
+        ::highlight(explorer-edit-find-active) {
+            background-color: rgb(var(--gv-match-active-rgb));
+            color: var(--gv-match-ink);
+        }
+
+        ::highlight(explorer-edit-occurrence) {
+            background-color: rgba(var(--gv-match-rgb), .34);
+        }
+
+        .explorer-pane[data-explorer-theme="dark"] ::highlight(explorer-edit-occurrence) {
+            background-color: rgba(var(--gv-match-rgb), .38);
         }
 
         .explorer-pane[data-explorer-theme="dark"] .explorer-code-keyword {
@@ -5477,6 +5729,17 @@
         }
         .explorer-fs-cut-source {
             opacity: .55;
+        }
+        /* Multi-entry selection. A filled tint rather than the outline the
+           context target uses, so the row a menu is open against stays
+           distinguishable from the rest of the selection under it. */
+        .explorer-selected {
+            background: var(--explorer-row-active);
+            box-shadow: inset 2px 0 0 var(--t-accent);
+        }
+        .explorer-row.explorer-selected,
+        .explorer-tree-row.explorer-selected {
+            border-radius: var(--gv-radius-s);
         }
         .terminal-container.explorer-fs-busy {
             cursor: progress;

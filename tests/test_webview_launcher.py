@@ -152,7 +152,7 @@ class WebviewLauncherTestCase(unittest.TestCase):
             webview_launcher,
             "configure_browser_shutdown",
         ) as configure_shutdown, patch.object(
-            webview_launcher.webbrowser, "open"
+            webview_launcher, "_open_browser_window"
         ) as browser_open:
             webview_launcher.main()
 
@@ -193,7 +193,7 @@ class WebviewLauncherTestCase(unittest.TestCase):
             webview_launcher,
             "configure_browser_shutdown",
         ) as configure_shutdown, patch.object(
-            webview_launcher.webbrowser, "open"
+            webview_launcher, "_open_browser_window"
         ) as browser_open:
             webview_launcher.main()
 
@@ -237,7 +237,7 @@ class WebviewLauncherTestCase(unittest.TestCase):
         ), patch.object(
             webview_launcher,
             "_set_linux_qtwebengine_env",
-        ), patch.object(webview_launcher.webbrowser, "open") as browser_open:
+        ), patch.object(webview_launcher, "_open_browser_window") as browser_open:
             webview_launcher.main()
 
         self.assertTrue(fake_thread.started)
@@ -274,7 +274,7 @@ class WebviewLauncherTestCase(unittest.TestCase):
         ), patch.object(
             webview_launcher.session_manager,
             "close_all_sessions",
-        ), patch.object(webview_launcher.webbrowser, "open") as browser_open, patch.object(
+        ), patch.object(webview_launcher, "_open_browser_window") as browser_open, patch.object(
             webview_launcher.os,
             "_exit",
             side_effect=SystemExit(1),
@@ -1078,7 +1078,7 @@ class TeardownNoSnapshotTestCase(unittest.TestCase):
     def test_keyboard_interrupt_closes_sessions_without_snapshotting(self):
         server_thread = Mock()
         server_thread.join.side_effect = KeyboardInterrupt
-        with patch.object(webview_launcher, "webbrowser"), patch.object(
+        with patch.object(webview_launcher, "_open_browser_window"), patch.object(
             webview_launcher.session_manager, "close_all_sessions"
         ) as close_all, patch(
             "web.runtime_state.capture_workspace"
@@ -1086,6 +1086,90 @@ class TeardownNoSnapshotTestCase(unittest.TestCase):
             webview_launcher._open_browser_mode("http://127.0.0.1:5050", server_thread)
         close_all.assert_called_once()
         capture.assert_not_called()
+
+
+class BrowserModeWindowTestCase(unittest.TestCase):
+    """Browser mode is one browser window per app run.
+
+    The launcher tab and the tab each workspace opens belong together, so
+    starting GridVibe must not drop the launcher into whatever window happens
+    to be in front. `webbrowser.open(url, new=1)` cannot express that on
+    Windows (the default controller is `os.startfile`), so the default
+    browser's own new-window flag is used when the family is recognised.
+    """
+
+    def test_a_known_default_browser_is_launched_with_its_new_window_flag(self):
+        with patch.object(webview_launcher.sys, "platform", "win32"), patch.object(
+            webview_launcher,
+            "_windows_default_browser_executable",
+            return_value=r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+        ), patch.object(webview_launcher.subprocess, "Popen") as popen, patch.object(
+            webview_launcher.webbrowser, "open"
+        ) as browser_open:
+            self.assertTrue(webview_launcher._open_browser_window("http://127.0.0.1:5050"))
+
+        browser_open.assert_not_called()
+        self.assertEqual(
+            popen.call_args.args[0],
+            [
+                r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+                "--new-window",
+                "http://127.0.0.1:5050",
+            ],
+        )
+
+    def test_firefox_gets_its_own_flag_spelling(self):
+        with patch.object(webview_launcher.sys, "platform", "win32"), patch.object(
+            webview_launcher,
+            "_windows_default_browser_executable",
+            return_value=r"C:\Program Files\Mozilla Firefox\firefox.exe",
+        ):
+            command = webview_launcher._new_window_browser_command("http://x/")
+
+        self.assertEqual(command[1], "-new-window")
+
+    def test_an_unknown_browser_falls_back_to_the_plain_open(self):
+        """Never guess a flag: an unrecognised browser gets the stdlib open,
+        which still asks for a new window everywhere it can honour it."""
+        with patch.object(webview_launcher.sys, "platform", "win32"), patch.object(
+            webview_launcher,
+            "_windows_default_browser_executable",
+            return_value=r"C:\Tools\SomeBrowser\somebrowser.exe",
+        ), patch.object(webview_launcher.subprocess, "Popen") as popen, patch.object(
+            webview_launcher.webbrowser, "open", return_value=True
+        ) as browser_open:
+            self.assertTrue(webview_launcher._open_browser_window("http://127.0.0.1:5050"))
+
+        popen.assert_not_called()
+        browser_open.assert_called_once_with("http://127.0.0.1:5050", new=1)
+
+    def test_a_browser_that_will_not_start_still_opens_the_app(self):
+        with patch.object(webview_launcher.sys, "platform", "win32"), patch.object(
+            webview_launcher,
+            "_windows_default_browser_executable",
+            return_value=r"C:\gone\chrome.exe",
+        ), patch.object(
+            webview_launcher.subprocess, "Popen", side_effect=OSError("gone")
+        ), patch.object(
+            webview_launcher.webbrowser, "open", return_value=True
+        ) as browser_open:
+            self.assertTrue(webview_launcher._open_browser_window("http://127.0.0.1:5050"))
+
+        browser_open.assert_called_once_with("http://127.0.0.1:5050", new=1)
+
+    def test_posix_leaves_the_new_window_request_to_the_stdlib_controller(self):
+        """The Unix controllers already map new=1 onto --new-window/-new-window,
+        so there is no second implementation of that table for them."""
+        with patch.object(webview_launcher.sys, "platform", "linux"):
+            self.assertEqual(webview_launcher._new_window_browser_command("http://x/"), [])
+
+    def test_browser_mode_opens_a_window_rather_than_a_bare_url(self):
+        server_thread = Mock()
+        with patch.object(webview_launcher, "_open_browser_window") as open_window:
+            webview_launcher._open_browser_mode("http://127.0.0.1:5050", server_thread)
+
+        open_window.assert_called_once_with("http://127.0.0.1:5050")
+        server_thread.join.assert_called_once()
 
 
 class SaveDownloadBridgeTestCase(unittest.TestCase):

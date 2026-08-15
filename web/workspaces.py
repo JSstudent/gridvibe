@@ -10,9 +10,24 @@ server-side restore) is the backend home for multi-workspace behaviour so
 module at import time, so every collaborator that leads back to the manager
 (``web.app``, ``web.terminal_io``, ``web.saved_sessions``) is imported lazily
 inside the functions that need it — the cycle only exists at import time.
+
+The 24 function-level imports were audited and every one targets an intra-app
+peer; **the standing rule is that nothing else may join them** — a stdlib or
+leaf-module import goes in this header, where a reader can see it. Fourteen are
+genuinely cycle-breaking, because their module reaches back here at import
+time: ``web.runtime_state`` (7 sites, imports this module directly),
+``web.terminal_io`` (4, likewise), ``web.app`` (2) and ``sessions.manager`` (1,
+the root of the cycle). The other ten — ``web.saved_sessions`` (7),
+``web.agents``, ``web.config`` and ``web.explorer`` (1 each) — are **not**:
+their transitive closure is leaf-ward (``config`` → ``paths``/``state_files``)
+and they could be hoisted. They stay deferred deliberately, because a
+module-level ``from web.saved_sessions import load_saved_sessions`` binds the
+function once at import and would silently escape the per-test patching this
+module's callers rely on. Late binding is the reason, not the cycle.
 """
 
 import logging
+import os
 import re
 import time
 import uuid
@@ -83,6 +98,13 @@ def workspace_label_conflict(
     label is not a name: it stays unconstrained, and positional labels already
     disambiguate unlabelled workspaces. Nothing is mutated either way — no
     auto-rename, no auto-forget; the choice belongs to the user.
+
+    **This is a check, not a mutex.** The two reads are not one snapshot and no
+    lock spans this call and the create/rename that follows it, so two
+    simultaneous creates of the same name can both pass. Accepted deliberately:
+    GridVibe binds to ``127.0.0.1`` and is single-user by design, and the
+    consequence is a duplicate label rather than lost state. Do not build
+    anything on this returning ``None`` as an exclusive claim.
     """
     normalized = normalize_workspace_label(label)
     if not normalized:
@@ -477,8 +499,6 @@ def _prepare_launch_sessions(
     connection_mode: str,
 ) -> List[Dict[str, Any]]:
     """Normalize each requested pane into its TerminalSession launch fields."""
-    import os
-
     from web.saved_sessions import (
         DEFAULT_BROWSER_URL,
         _normalize_browser_active_tab,
