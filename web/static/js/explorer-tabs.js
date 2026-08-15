@@ -978,6 +978,12 @@
         );
         if (hasSavedPreviewDir) {
             previewTab.dirPath = savedPreviewDir;
+        } else if (!savedPreviewPath) {
+            /* Nothing was persisted for the Preview tab, so it means the
+               explorer root. Recording that here is what lets a later switch
+               back to Preview — after a restored pinned tab won the viewer —
+               browse the root instead of falling through to the empty viewer. */
+            previewTab.dirPath = '';
         }
         /* Reopen the Preview tab's own content only when no pinned tab was
            saved as active — an active pinned tab wins the viewer, and the
@@ -1001,7 +1007,12 @@
             } else if (hasSavedPreviewDir) {
                 await restoreExplorerDirectoryFallback(index, savedPreviewDir);
             } else {
-                renderExplorerTabStrip(index);
+                /* Nothing persisted at all — a fresh launch or an imported
+                   preset. Browse the explorer root so the pane opens on its
+                   own listing with a live breadcrumb, instead of an empty
+                   viewer above an inert raw path the user had to fix by
+                   clicking into the tree and back out to the top. */
+                await restoreExplorerDirectoryFallback(index, '');
             }
         };
         if (savedPreviewPath) {
