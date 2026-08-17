@@ -145,14 +145,14 @@ slow execution.
 
 ### Server-side diff collection
 
-`_bounded_git_diff()` truncates `result.stdout` after Git finishes. However,
-the shared Git runner already supports `max_output_bytes`, and this option is
-not currently passed by `_bounded_git_diff()`.
-
-A very large diff may therefore be fully generated and captured in server
-memory even though the response returns only the first 256 KiB. The output
-should be bounded while it is being read, with one additional byte retained to
-detect truncation.
+**Resolved 2026-08-17 (commit `c21bf59`, ISSUE-2026-040).**
+`_bounded_git_diff()` now passes
+`max_output_bytes=EXPLORER_GIT_DIFF_MAX_BYTES + 1` to the shared Git runner,
+so the output is bounded while it is being read and the extra byte detects
+truncation. Every Git command's stdout and stderr is drained to a ceiling
+(10 MiB / 1 MiB by default) in bounded chunks, with the process group killed
+on overrun. See `docs/large_content_freeze_analysis.md` for the remaining,
+browser-side freeze causes.
 
 ### Eager Markdown work
 
@@ -524,7 +524,7 @@ Include at least:
 
 1. Add browser and server measurements.
 2. Add benchmark fixtures and acceptance checks.
-3. Bound Git diff stdout during collection.
+3. ~~Bound Git diff stdout during collection.~~ (done, commit `c21bf59`)
 4. Add a protective plain large-file mode.
 5. Add dynamic large-diff degradation.
 6. Make Markdown Preview lazy for large documents.

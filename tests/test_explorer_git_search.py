@@ -9,6 +9,10 @@ is case-insensitive over the text the row actually shows, every occurrence is
 counted (so the counter and the highlight agree), prev/next wrap around both
 ends instead of sticking, an empty query matches nothing, and the wrapped
 markup escapes the subject it highlights.
+
+Plus the one rule that is this find's own: it is folded away behind the Graph
+header's magnifier, and closing it drops the query rather than leaving marks
+painted under a control nobody can see.
 """
 
 import json
@@ -110,6 +114,77 @@ class ExplorerGitSearchPlanTestCase(ExplorerGitSearchHarness):
         )
 
         self.assertEqual(plan, [0, 1])
+
+
+class ExplorerGitSearchVisibilityTestCase(ExplorerGitSearchHarness):
+    def test_toggle_opens_a_closed_bar_and_closes_an_open_one(self):
+        opened = self._run_node(
+            "const shut = { open: false, query: '', activeIndex: 0 };"
+            "const open = git_search.nextVisibility(shut, 'toggle');"
+            "emit([open.open, git_search.nextVisibility(open, 'toggle').open]);"
+        )
+
+        self.assertEqual(opened, [True, False])
+
+    def test_closing_drops_the_query_and_the_active_index(self):
+        closed = self._run_node(
+            "emit(git_search.nextVisibility("
+            "  { open: true, query: 'opt', activeIndex: 3 }, 'close'));"
+        )
+
+        self.assertEqual(closed, {"open": False, "query": "", "activeIndex": 0})
+
+    def test_toggling_shut_drops_the_query_the_same_way(self):
+        closed = self._run_node(
+            "emit(git_search.nextVisibility("
+            "  { open: true, query: 'opt', activeIndex: 3 }, 'toggle'));"
+        )
+
+        self.assertEqual(closed, {"open": False, "query": "", "activeIndex": 0})
+
+    def test_opening_never_invents_a_query(self):
+        opened = self._run_node(
+            "emit(['toggle', 'open'].map(action =>"
+            "  git_search.nextVisibility({ open: false, query: '', activeIndex: 0 }, action)));"
+        )
+
+        self.assertEqual(
+            opened,
+            [
+                {"open": True, "query": "", "activeIndex": 0},
+                {"open": True, "query": "", "activeIndex": 0},
+            ],
+        )
+
+    def test_reopening_keeps_a_query_that_survived(self):
+        # Nothing in the page leaves a query behind a closed bar today, but the
+        # policy must not silently discard one if something ever does.
+        reopened = self._run_node(
+            "emit(git_search.nextVisibility("
+            "  { open: false, query: 'opt', activeIndex: 2 }, 'open'));"
+        )
+
+        self.assertEqual(reopened, {"open": True, "query": "opt", "activeIndex": 2})
+
+    def test_the_callers_state_is_never_mutated(self):
+        before = self._run_node(
+            "const state = { open: true, query: 'opt', activeIndex: 3 };"
+            "git_search.nextVisibility(state, 'close');"
+            "emit(state);"
+        )
+
+        self.assertEqual(before, {"open": True, "query": "opt", "activeIndex": 3})
+
+    def test_a_missing_or_junk_state_opens_shut(self):
+        states = self._run_node(
+            "emit([null, 'nonsense', undefined].map(state =>"
+            "  git_search.nextVisibility(state, 'toggle')));"
+        )
+
+        self.assertEqual(
+            states,
+            [{"open": True, "query": "", "activeIndex": 0}] * 3,
+        )
 
 
 class ExplorerGitSearchMarkupTestCase(ExplorerGitSearchHarness):

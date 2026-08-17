@@ -5,8 +5,12 @@
    matching substring in the loaded commit subjects is highlighted in place,
    a counter reads `current/total`, and Enter/Shift+Enter or the prev/next
    buttons step through the matches (wrapping around), with the active match
-   painted brighter and scrolled into view. Escape or the clear button drops
-   the query.
+   painted brighter and scrolled into view. The clear button drops the query.
+
+   Unlike the Source find it is folded away by default: the Graph section's
+   header carries a magnifier that reveals the bar, and the same button or
+   Escape puts it back (see nextVisibility). The section header is the one
+   place a sidebar this narrow has room for a permanent control.
 
    The haystack is the commit *subject* — the text the row actually shows —
    so every counted match has a visible highlight. Matching is
@@ -47,6 +51,24 @@
        full log line when the record carries no parsed subject. */
     function commitSubject(commit) {
         return text(commit && (commit.subject || commit.line));
+    }
+
+    /* The find bar is folded away behind the Graph section's magnifier until
+       it is asked for, so the state carries its own `open` flag beside the
+       query. Closing is not merely hiding: a hidden bar still painting <mark>s
+       over the commit rows would be a highlight with no visible control and no
+       counter behind it, so closing drops the query the same way the × does.
+       Opening never invents one — a reopened bar starts empty because that is
+       what closing left. Runtime-only and per pane, like the query itself.
+
+       `action` is 'toggle' (the button), 'open', or 'close' (Escape). Returns
+       a fresh state; the caller's object is never mutated. */
+    function nextVisibility(state, action) {
+        const current = state && typeof state === 'object' ? state : {};
+        const open = action === 'toggle' ? !current.open : action === 'open';
+        return open
+            ? { open: true, query: text(current.query), activeIndex: current.activeIndex || 0 }
+            : { open: false, query: '', activeIndex: 0 };
     }
 
     /* All case-insensitive occurrences of `query` in `subject`, as sorted,
@@ -126,6 +148,7 @@
 
     return {
         commitSubject,
+        nextVisibility,
         matchRanges,
         searchPlan,
         markedSubjectHtml,

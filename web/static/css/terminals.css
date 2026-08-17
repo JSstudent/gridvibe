@@ -4226,7 +4226,11 @@
            within its own section, because stepping through matches scrolls the
            panel: an input and a `3/17` counter that have scrolled off the top
            are controls the reader is using blind. It sticks only while the
-           Graph section is on screen, which is the only section it belongs to. */
+           Graph section is on screen, which is the only section it belongs to.
+
+           Folded away until the header's magnifier asks for it. `display: flex`
+           beats the `hidden` attribute's own `display: none`, so the hidden
+           state has to be restated here — without this the bar never hides. */
         .explorer-git-commit-search {
             position: sticky;
             top: 0;
@@ -4236,6 +4240,43 @@
             gap: 4px;
             padding: 2px 10px 6px;
             background: var(--explorer-bar-bg);
+        }
+
+        .explorer-git-commit-search[hidden] {
+            display: none;
+        }
+
+        /* The magnifier in the Graph header. Same 22px box as the Stage All /
+           Discard All controls in the sections above it, and it takes the same
+           accent while the bar it opened is on screen as the other explorer
+           toggles do. */
+        .explorer-git-commit-search-toggle {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 22px;
+            height: 22px;
+            border-color: var(--explorer-open-folder-border);
+            background: var(--explorer-open-folder-bg);
+            color: var(--explorer-open-folder-text);
+        }
+
+        .explorer-git-commit-search-toggle .explorer-btn-icon {
+            display: block;
+            width: 14px;
+            height: 14px;
+        }
+
+        .explorer-git-commit-search-toggle:hover,
+        .explorer-git-commit-search-toggle:focus-visible {
+            background: var(--explorer-open-folder-hover-bg);
+            outline: none;
+        }
+
+        .explorer-git-commit-search-toggle[aria-expanded="true"] {
+            border-color: var(--t-accent);
+            color: var(--t-accent);
+            background: var(--explorer-row-active);
         }
 
         .explorer-diff-sidebar-empty,

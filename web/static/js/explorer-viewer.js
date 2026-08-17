@@ -1661,13 +1661,20 @@
     /* ── Commit-message find (Graph section) ──
        The Source find's smaller twin: one query over the loaded commit
        subjects, the same counter, the same ↑/↓/× controls, the same
-       Enter/Shift+Enter/Escape keys, and the same <mark> paint. The matching
-       itself lives in the DOM-free explorer-git-search.js; what is here only
-       paints rows already on screen. State is per pane and runtime-only —
-       like the Source find's, it is never persisted. */
+       Enter/Shift+Enter keys, and the same <mark> paint. The matching itself
+       lives in the DOM-free explorer-git-search.js; what is here only paints
+       rows already on screen. State is per pane and runtime-only — like the
+       Source find's, it is never persisted.
+
+       The bar is folded away behind the Graph header's magnifier, so it costs
+       the sidebar nothing until it is asked for; the same button and Escape
+       close it again. It is always rendered and hidden by attribute rather
+       than added and removed, for the reason the panel paints instead of
+       re-rendering: revealing the bar must not take the caret out of the
+       commit-message textarea above it. */
     function ensureExplorerGitCommitSearchState(pane) {
         if (!pane._explorerGitCommitSearch) {
-            pane._explorerGitCommitSearch = { query: '', activeIndex: 0 };
+            pane._explorerGitCommitSearch = { query: '', activeIndex: 0, open: false };
         }
         return pane._explorerGitCommitSearch;
     }
@@ -1782,6 +1789,53 @@
         }
     }
 
+    /* Show or hide the bar for the state the pane already holds. Never moves
+       focus: a background re-render (explorer-git-watch.js) calls this too,
+       and a sidebar that grabs the caret every few seconds is worse than one
+       with no find at all. The toggle handler below focuses explicitly. */
+    function applyExplorerGitCommitSearchVisibility(index) {
+        const pane = terminals[index];
+        const panel = document.getElementById(`explorer-git-panel-${index}`);
+        if (!pane || !panel) {
+            return;
+        }
+        const state = ensureExplorerGitCommitSearchState(pane);
+        const bar = panel.querySelector('.explorer-git-commit-search');
+        if (bar) {
+            bar.hidden = !state.open;
+        }
+        const toggle = panel.querySelector('[data-explorer-git-commit-search-toggle]');
+        if (toggle) {
+            toggle.setAttribute('aria-expanded', state.open ? 'true' : 'false');
+        }
+        const input = panel.querySelector('[data-explorer-git-commit-search-input]');
+        if (input && input.value !== state.query) {
+            input.value = state.query;
+        }
+    }
+
+    /* `action` is 'toggle' (the magnifier) or 'close' (Escape). Closing drops
+       the query, so the marks it painted have to come off with it — hence the
+       repaint after the visibility change. */
+    function setExplorerGitCommitSearchOpen(index, action) {
+        const pane = terminals[index];
+        const policy = window.GridVibeExplorerGitSearch;
+        if (!pane || !policy) {
+            return;
+        }
+        pane._explorerGitCommitSearch = policy.nextVisibility(
+            ensureExplorerGitCommitSearchState(pane), action
+        );
+        applyExplorerGitCommitSearchVisibility(index);
+        paintExplorerGitCommitSearch(index);
+        const panel = document.getElementById(`explorer-git-panel-${index}`);
+        const open = pane._explorerGitCommitSearch.open;
+        const target = open
+            ? panel?.querySelector('[data-explorer-git-commit-search-input]')
+            : panel?.querySelector('[data-explorer-git-commit-search-toggle]');
+        target?.focus();
+    }
+
     function renderExplorerGitPanel(index) {
         const pane = terminals[index];
         const panel = document.getElementById(`explorer-git-panel-${index}`);
@@ -1886,8 +1940,13 @@
                 </div>
             </div>
             <div class="explorer-diff-sidebar-section">
-                <div class="explorer-diff-sidebar-title">Graph</div>
-                <div class="explorer-git-commit-search">
+                <div class="explorer-diff-sidebar-title explorer-git-section-title">
+                    <span>Graph</span>
+                    <span class="explorer-git-section-actions">
+                        <button type="button" class="explorer-search-btn explorer-git-commit-search-toggle" data-explorer-git-commit-search-toggle aria-expanded="${commitSearch.open ? 'true' : 'false'}" title="Search commit messages" aria-label="Search commit messages">${EXPLORER_GIT_SEARCH_ICON}</button>
+                    </span>
+                </div>
+                <div class="explorer-git-commit-search" ${commitSearch.open ? '' : 'hidden'}>
                     <input
                         type="search"
                         class="explorer-search-input"
@@ -1926,10 +1985,13 @@
                     stepExplorerGitCommitSearch(index, event.shiftKey ? -1 : 1);
                 } else if (event.key === 'Escape') {
                     event.preventDefault();
-                    clearExplorerGitCommitSearch(index);
+                    setExplorerGitCommitSearchOpen(index, 'close');
                 }
             });
         }
+        panel.querySelector('[data-explorer-git-commit-search-toggle]')?.addEventListener('click', () => {
+            setExplorerGitCommitSearchOpen(index, 'toggle');
+        });
         panel.querySelector('[data-explorer-git-commit-search-prev]')?.addEventListener('click', () => {
             stepExplorerGitCommitSearch(index, -1);
         });
@@ -6816,6 +6878,17 @@
             <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>
             <polyline points="15 3 21 3 21 9"/>
             <line x1="10" y1="14" x2="21" y2="3"/>
+        </svg>
+    `;
+
+    /* Reveals the Graph section's commit find. Sized like the stage/discard
+       icons beside it in the sections above, so the three section headers'
+       controls sit on one baseline. */
+    const EXPLORER_GIT_SEARCH_ICON = `
+        <svg class="explorer-btn-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"
+            fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="11" cy="11" r="6"/>
+            <line x1="15.5" y1="15.5" x2="20" y2="20"/>
         </svg>
     `;
 
