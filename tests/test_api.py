@@ -8267,6 +8267,63 @@ class ApiRoutesTestCase(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertEqual(web_explorer._explorer_code_language(path), expected_language)
 
+    def test_explorer_code_language_covers_dockerfile_and_makefile_variants(self):
+        """A conventional family varies the name, not the extension."""
+        cases = {
+            "deploy/docker/Dockerfile_chss": "dockerfile",
+            "Dockerfile.dev": "dockerfile",
+            "dockerfile-prod": "dockerfile",
+            "api.dockerfile": "dockerfile",
+            "Makefile.local": "makefile",
+            "build.mk": "makefile",
+            # A real extension still wins over the name it happens to start with.
+            "dockerfile_parser.py": "python",
+            "makefile_helpers.sh": "shell",
+        }
+        for path, expected_language in cases.items():
+            with self.subTest(path=path):
+                self.assertEqual(web_explorer._explorer_code_language(path), expected_language)
+
+    def test_explorer_preview_language_decides_unknown_names_by_content(self):
+        """An unrecognised name is not a refusal; a bounded content sniff decides."""
+        reads: list[tuple[str, int]] = []
+
+        class SamplingBackend:
+            def __init__(self, content: bytes):
+                self.content = content
+
+            def read_file_prefix(self, file_path: str, max_bytes: int) -> bytes:
+                reads.append((file_path, max_bytes))
+                return self.content[:max_bytes]
+
+        text_backend = SamplingBackend(b"All rights reserved.\n")
+        for path in ("LICENSE", "Jenkinsfile", "scripts/entrypoint", "main.tf"):
+            with self.subTest(path=path):
+                self.assertIsNone(web_explorer._explorer_code_language(path))
+                self.assertEqual(
+                    web_explorer._explorer_preview_language(text_backend, path),
+                    "text",
+                )
+
+        # Only a bounded sample is read to make that decision, never the file.
+        self.assertTrue(reads)
+        for _, max_bytes in reads:
+            self.assertEqual(max_bytes, web_explorer.EXPLORER_BINARY_SAMPLE_BYTES + 1)
+
+        with self.assertRaises(ValueError):
+            web_explorer._explorer_preview_language(
+                SamplingBackend(b"binary\x00payload"),
+                "archive.bin",
+            )
+
+        # A recognised name still answers from the map, with no read at all.
+        reads.clear()
+        self.assertEqual(
+            web_explorer._explorer_preview_language(text_backend, "Dockerfile_chss"),
+            "dockerfile",
+        )
+        self.assertEqual(reads, [])
+
     def test_explorer_file_rejects_path_outside_root(self):
         repo_dir = Path(self.temp_dir.name) / "repo"
         repo_dir.mkdir()
@@ -8610,10 +8667,10 @@ class ApiRoutesTestCase(unittest.TestCase):
 
     def test_explorer_go_workflow_files_are_editor_eligible(self):
         """Wave 2 / 2.b (OD-2): go.mod and peers resolve to a preview language."""
-        self.assertEqual(web_explorer._explorer_editor_language("go.mod"), "go")
-        self.assertEqual(web_explorer._explorer_editor_language("go.sum"), "text")
-        self.assertEqual(web_explorer._explorer_editor_language("go.work"), "go")
-        self.assertEqual(web_explorer._explorer_editor_language("go.work.sum"), "text")
+        self.assertEqual(web_explorer._explorer_code_language("go.mod"), "go")
+        self.assertEqual(web_explorer._explorer_code_language("go.sum"), "text")
+        self.assertEqual(web_explorer._explorer_code_language("go.work"), "go")
+        self.assertEqual(web_explorer._explorer_code_language("go.work.sum"), "text")
 
     def test_explorer_file_serves_go_mod(self):
         """Wave 2 / 2.b (OD-2): GET on go.mod no longer 400s and resolves to go."""
@@ -8655,10 +8712,11 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(payload["content"], body)
         self.assertEqual(payload["total_size"], len(body.encode("utf-8")))
 
-    def test_explorer_file_rejects_unsupported_editor_format(self):
+    def test_explorer_file_rejects_unknown_format_with_binary_content(self):
+        """An unrecognised name is decided by its content, and binary is refused."""
         repo_dir = Path(self.temp_dir.name) / "repo"
         repo_dir.mkdir()
-        (repo_dir / "archive.bin").write_bytes(b"plain bytes without nul")
+        (repo_dir / "archive.bin").write_bytes(b"binary\x00payload")
         session_id = self._create_explorer_session(repo_dir)
 
         file_response = self.client.get(
@@ -8667,9 +8725,37 @@ class ApiRoutesTestCase(unittest.TestCase):
         )
 
         self.assertEqual(file_response.status_code, 400)
-        self.assertIn("format is not supported", file_response.get_json()["error"])
+        self.assertIn("binary", file_response.get_json()["error"])
 
-    def test_explorer_file_rejects_unsupported_remote_editor_format(self):
+    def test_explorer_file_serves_unknown_extension_text_as_plain_text(self):
+        """Dockerfile_chss and peers open: the name is not an allowlist."""
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        (repo_dir / "Dockerfile_chss").write_text("FROM python:3.12\nRUN echo hi\n")
+        (repo_dir / "LICENSE").write_text("All rights reserved.\n")
+        session_id = self._create_explorer_session(repo_dir)
+
+        dockerfile_response = self.client.get(
+            f"/api/explorer/{session_id}/file",
+            query_string={"path": "Dockerfile_chss"},
+        )
+        licence_response = self.client.get(
+            f"/api/explorer/{session_id}/file",
+            query_string={"path": "LICENSE"},
+        )
+
+        self.assertEqual(dockerfile_response.status_code, 200)
+        dockerfile_payload = dockerfile_response.get_json()
+        self.assertEqual(dockerfile_payload["language"], "dockerfile")
+        self.assertIn("FROM python:3.12", dockerfile_payload["content"])
+        self.assertTrue(dockerfile_payload["editable"])
+
+        self.assertEqual(licence_response.status_code, 200)
+        licence_payload = licence_response.get_json()
+        self.assertEqual(licence_payload["language"], "text")
+        self.assertIn("All rights reserved.", licence_payload["content"])
+
+    def test_explorer_file_rejects_unknown_remote_format_with_binary_content(self):
         group = api.session_manager.create_group(
             name="SSH",
             connection_mode="ssh",
@@ -8688,7 +8774,11 @@ class ApiRoutesTestCase(unittest.TestCase):
         fake_sftp = FakeSftp(
             {
                 "/srv/app": {"type": "directory"},
-                "/srv/app/archive.bin": {"type": "file", "content": b"plain bytes"},
+                "/srv/app/archive.bin": {"type": "file", "content": b"binary\x00payload"},
+                "/srv/app/Dockerfile_chss": {
+                    "type": "file",
+                    "content": b"FROM python:3.12\n",
+                },
             }
         )
 
@@ -8697,9 +8787,15 @@ class ApiRoutesTestCase(unittest.TestCase):
                 f"/api/explorer/{session.session_id}/file",
                 query_string={"path": "archive.bin"},
             )
+            dockerfile_response = self.client.get(
+                f"/api/explorer/{session.session_id}/file",
+                query_string={"path": "Dockerfile_chss"},
+            )
 
         self.assertEqual(response.status_code, 400)
-        self.assertIn("format is not supported", response.get_json()["error"])
+        self.assertIn("binary", response.get_json()["error"])
+        self.assertEqual(dockerfile_response.status_code, 200)
+        self.assertEqual(dockerfile_response.get_json()["language"], "dockerfile")
 
     def test_create_sessions_uses_cmd_label_for_local_repo_cmd_panes(self):
         sessions_payload = {

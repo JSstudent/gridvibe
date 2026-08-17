@@ -58,6 +58,7 @@
         '.cpp': 'cpp',
         '.cs': 'csharp',
         '.css': 'css',
+        '.dockerfile': 'dockerfile',
         '.env': 'dotenv',
         '.example': 'config',
         '.go': 'go',
@@ -79,6 +80,7 @@
         '.lua': 'lua',
         '.md': 'markdown',
         '.markdown': 'markdown',
+        '.mk': 'makefile',
         '.php': 'php',
         '.ps1': 'powershell',
         '.py': 'python',
@@ -109,6 +111,17 @@
         'go.sum': 'text',
         'go.work': 'go',
         'go.work.sum': 'text',
+        'makefile': 'makefile'
+    });
+
+    /* Conventional families that vary the name rather than the extension
+       (Dockerfile_chss, Dockerfile.dev, Makefile.local, .env.local). Matched
+       only after the exact-name and extension maps have both missed, so
+       dockerfile_parser.py stays Python. Mirrors
+       CODE_PREVIEW_FILENAME_PREFIXES in web/explorer.py. */
+    const EXPLORER_LANGUAGE_BY_FILENAME_PREFIX = Object.freeze({
+        '.env.': 'dotenv',
+        'dockerfile': 'dockerfile',
         'makefile': 'makefile'
     });
 
@@ -286,10 +299,13 @@
         if (filename && EXPLORER_LANGUAGE_BY_FILENAME[filename]) {
             return EXPLORER_LANGUAGE_BY_FILENAME[filename];
         }
-        if (filename.startsWith('.env.')) {
-            return 'dotenv';
+        const byExtension = EXPLORER_LANGUAGE_BY_EXTENSION[explorerPathExtension(path)];
+        if (byExtension) {
+            return byExtension;
         }
-        return EXPLORER_LANGUAGE_BY_EXTENSION[explorerPathExtension(path)] || '';
+        const prefixMatch = Object.keys(EXPLORER_LANGUAGE_BY_FILENAME_PREFIX)
+            .find((prefix) => filename.startsWith(prefix));
+        return prefixMatch ? EXPLORER_LANGUAGE_BY_FILENAME_PREFIX[prefixMatch] : '';
     }
 
     function explorerLanguageClass(language) {

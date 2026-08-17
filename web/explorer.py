@@ -138,6 +138,7 @@ CODE_PREVIEW_LANGUAGES = {
     ".cpp": "cpp",
     ".cs": "csharp",
     ".css": "css",
+    ".dockerfile": "dockerfile",
     ".env": "dotenv",
     ".example": "config",
     ".go": "go",
@@ -154,6 +155,7 @@ CODE_PREVIEW_LANGUAGES = {
     ".kts": "kotlin",
     ".log": "log",
     ".lua": "lua",
+    ".mk": "makefile",
     ".php": "php",
     ".ps1": "powershell",
     ".py": "python",
@@ -185,6 +187,19 @@ CODE_PREVIEW_FILENAMES = {
     "go.work.sum": "text",
     "makefile": "makefile",
 }
+# Conventional families that vary the *name* rather than the extension:
+# ``Dockerfile_chss``, ``Dockerfile.dev``, ``Makefile.local``, ``.env.local``.
+# Matched on the lowercased basename, and only once the exact-name and
+# extension maps have both missed — so ``dockerfile_parser.py`` stays Python.
+CODE_PREVIEW_FILENAME_PREFIXES = {
+    ".env.": "dotenv",
+    "dockerfile": "dockerfile",
+    "makefile": "makefile",
+}
+# What an unrecognised name resolves to. The filename no longer decides whether
+# a file can be opened — the content does (see get_explorer_file_payload) — so
+# anything that reads as text is previewed and edited as plain text.
+EXPLORER_FALLBACK_LANGUAGE = "text"
 EXPLORER_BINARY_SAMPLE_BYTES = 4096
 EXPLORER_TEXT_CONTROL_BYTES = {7, 8, 9, 10, 12, 13, 27}
 MARKDOWN_ALLOWED_TAGS = {
@@ -266,24 +281,45 @@ def _is_tail_preview_file(path: str) -> bool:
 
 
 def _explorer_code_language(path: str) -> Optional[str]:
-    """Return the source language for code files shown in explorer previews."""
+    """Return the source language for code files shown in explorer previews.
+
+    ``None`` means "this name says nothing about the language" — not "refuse
+    this file". Callers that need a language for an open file resolve that
+    through :func:`_explorer_preview_language`.
+    """
     filename = os.path.basename(path).lower()
     if filename in CODE_PREVIEW_FILENAMES:
         return CODE_PREVIEW_FILENAMES[filename]
-    if filename.startswith(".env."):
-        return "dotenv"
     _, extension = os.path.splitext(path.lower())
     if extension in MARKDOWN_PREVIEW_EXTENSIONS:
         return "markdown"
-    return CODE_PREVIEW_LANGUAGES.get(extension)
+    if extension in CODE_PREVIEW_LANGUAGES:
+        return CODE_PREVIEW_LANGUAGES[extension]
+    for prefix, language in CODE_PREVIEW_FILENAME_PREFIXES.items():
+        if filename.startswith(prefix):
+            return language
+    return None
 
 
-def _explorer_editor_language(path: str) -> str:
-    """Return the editor language or reject unsupported explorer formats."""
-    language = _explorer_code_language(path)
-    if language is None:
-        raise ValueError("Explorer file format is not supported for editor preview")
-    return language
+def _explorer_preview_language(backend: Any, file_path: str) -> str:
+    """Return the preview/editor language for a file, refusing unknown binaries.
+
+    An unrecognised name is not a refusal: a filename allowlist cannot tell a
+    ``Dockerfile_chss`` or an extensionless script from a binary, so the content
+    decides instead and an unknown *text* file opens as plain text. The decision
+    reads a bounded sample rather than the whole file, so an unknown binary is
+    turned away without first paying for a 10 MiB read (over SFTP, on a remote
+    pane). The ``+ 1`` keeps the sample from being treated as a complete
+    document, so a multibyte character straddling the boundary is not misread as
+    binary.
+    """
+    language = _explorer_code_language(file_path)
+    if language is not None:
+        return language
+    sample = backend.read_file_prefix(file_path, EXPLORER_BINARY_SAMPLE_BYTES + 1)
+    if _explorer_content_looks_binary(sample):
+        raise ValueError("Explorer file appears to be binary")
+    return EXPLORER_FALLBACK_LANGUAGE
 
 
 # Extensions the read-only image viewer renders inline via an <img> tag. SVG is
@@ -3386,7 +3422,7 @@ def get_explorer_file_payload(backend: Any, requested_path: Any) -> Dict[str, An
             "git_context": None,
         }
 
-    code_language = _explorer_editor_language(file_path)
+    code_language = _explorer_preview_language(backend, file_path)
     preview = read_explorer_file_preview(
         backend,
         file_path,
@@ -3464,9 +3500,10 @@ def save_explorer_file_payload(
 ) -> Dict[str, Any]:
     """Validate and atomically replace one explorer file, returning the read payload.
 
-    Enforces the full save contract: root-confinement, the filename/language
-    gate, the 10 MiB read/write bounds, complete strict-UTF-8 + single
-    line-ending source, and the optimistic-concurrency revision check. The
+    Enforces the full save contract: root-confinement, the 10 MiB read/write
+    bounds, a content check that keeps binary out, complete strict-UTF-8 +
+    single line-ending source, and the optimistic-concurrency revision check.
+    Editability is decided by the file's *contents*, never by its name. The
     request is always a full-file replacement; a missing revision is a ``400``,
     never an overwrite escape hatch.
     """
@@ -3480,9 +3517,6 @@ def save_explorer_file_payload(
     root_path, file_path = backend.resolve_file(requested_path)
 
     with _explorer_save_claim(session_id, backend.fs_claim_key(file_path)):
-        # Filename/language gate (also raises for unsupported formats).
-        _explorer_editor_language(file_path)
-
         # Fully read the current file through the bounded read contract; a file
         # that no longer fits it can no longer be edited in place.
         raw_current = backend.read_file_prefix(file_path, EXPLORER_FILE_PREVIEW_MAX_BYTES + 1)

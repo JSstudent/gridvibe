@@ -1015,6 +1015,8 @@ Harden binary preview handling in both `web/api.py` and `templates/terminals.htm
 Resolution:
 Explorer file editor mode now only accepts known preview/source formats from the existing language and filename maps. Unsupported extensions are rejected before preview decoding, known formats are checked for NUL bytes, invalid UTF-8, and excessive control bytes, and SSH/local paths share the same validation. The frontend keeps the directory listing active on failed opens and prepends a non-blocking error notice instead of leaving the pane stuck on an opening message. Tests cover unsupported local and remote formats, non-NUL binary-like content, and the directory-preserving client path.
 
+The filename half of that resolution has since been replaced: an allowlist of names could not tell `Dockerfile_chss` or an extensionless script from a binary, and refused both. An unrecognised name is now decided by its *contents* — a bounded sample is sniffed before the full preview read, so an unknown binary is still refused early and cheaply (the responsiveness this issue was about), while an unknown text file opens as plain text. The NUL/UTF-8/control-byte checks, the shared local/SSH validation, and the directory-preserving client path are unchanged.
+
 ### Issue ID: ISSUE-2026-005
 - Title: Explorer file find blocks terminal UI on large previews
 - Priority: Medium

@@ -99,7 +99,6 @@ from web.explorer import (  # noqa: F401 - some names re-exported for backwards 
     _evict_pooled_ssh_client,
     _explorer_backend,
     _explorer_content_looks_binary,
-    _explorer_editor_language,
     _explorer_image_mimetype,
     _explorer_root_directory,
     _fs_root_revision,
@@ -1312,7 +1311,7 @@ def save_explorer_file(session_id: str):
 
     The single bounded exception to the explorer's read-only filesystem
     contract: writes are confined to the session root and guarded by the
-    filename/language gate, the 10 MiB read/write limit, complete strict-UTF-8
+    binary-content check, the 10 MiB read/write limit, complete strict-UTF-8
     single-line-ending source, and an optimistic-concurrency revision check
     (web/explorer.py). The app-level cross-origin write guard already covers
     this PUT.
