@@ -213,7 +213,7 @@ Test organization by behavior is intentional; a module does not need a same-name
 - The stalled-remote case reproduces only against an `https://` remote. Git speaks `git://` in-process, so that URL kills the direct child and proves nothing; `https://` forks `git-remote-https`, which is the helper that inherits our pipes. The call is made on a worker thread with a bounded join so an unbounded runner fails in 8 s instead of parking the suite for minutes, and socket cleanup is ordered to run before the checkout is removed so a failing run leaves no git process behind.
 - Symlink creation needs a privilege an ordinary Windows account lacks, which would have silently skipped read-side containment on GridVibe's most common platform. The directory-escape tests use a junction where a symlink is refused — no privilege needed, and `realpath` resolves it identically — so the escape is asserted rather than skipped. The file-symlink variant still skips there, which is honest: a junction is directories only.
 
-### Stage 1 — harden Git process execution
+### Stage 1 — harden Git process execution — **complete**
 
 1. ~~First close the self-update Windows cleanup gap found by verification.~~ *(Withdrawn — `_run_repo_git()` already bounds termination, pipe closure, and reap correctly. Reuse it as the reference pattern instead of changing it.)*
 2. Make explorer output limits a backend invariant rather than an opt-in caller feature. Define a safe global stdout/stderr ceiling and retain smaller per-operation limits where semantics require them.
@@ -223,6 +223,12 @@ Test organization by behavior is intentional; a module does not need a same-name
 6. Preserve `stdout_truncated`, Git exit status, UTF-8 replacement behavior, search truncation reporting, and the existing public response shapes.
 
 **Exit criteria:** huge stdout, huge stderr, a stalled explorer Git process with a surviving helper, and an SSH channel that never finishes all terminate within test bounds; normal local/remote status, graph, diff, search, mutation, and self-update tests still pass; every `expectedFailure` in `tests/test_git_process_bounds.py` is removed in the same change that makes it pass.
+
+**Met.** All twelve decorators came off in the same change; `tests/test_git_process_bounds.py` is 21 tests, none decorated. The gate is 1,719 tests, green, 9 skipped, 5 expected failures — the five that remain belong to Stages 2A/2B/3 in `tests/test_backend_concurrency_contract.py`. `ruff` clean. The shipped shape is recorded in `docs/testing_issues.md` under ISSUE-2026-040 (now closed); three decisions are worth carrying forward:
+
+- **The self-update pattern was moved, not copied.** `web/process_bounds.py` now owns `new_process_group()` and `terminate_process_tree()` and both runners import it, which is what item 4 meant by "reuse … instead of creating a weaker variant". The move added one rule: a child `poll()` reports as already reaped is not tree-killed, because a dead parent's pid cannot name its orphans and on POSIX is free to name a stranger.
+- **The remote `| head -c N` pipeline had to go, not grow.** Item 5's bounded drain replaces it rather than joining it: a pipeline reports *head's* exit status, so bounding the remote diff that way would have turned a failed remote command into an empty successful one. That is also why the Diff view could never opt into a cap before. `_remote_git_shell_command()` no longer takes `max_output_bytes`; the drain carries the whole bound.
+- **The diff's `byte_count` is now the bytes read, not the bytes Git would have produced.** `_bounded_git_diff()` asks for `EXPLORER_GIT_DIFF_MAX_BYTES + 1`, which drops its peak from the repository's diff size to 256 KiB; `truncated` distinguishes the two, and no frontend reads the field. Everything else item 6 lists — `stdout_truncated`, the exit status, UTF-8 replacement, search truncation reporting, response shapes — is unchanged, and no Diff-view frontend change was needed, so the `explorer-diff.js` trigger did not fire.
 
 ### Stage 2A — publish RuntimeConfig atomically
 

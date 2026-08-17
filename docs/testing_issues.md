@@ -33,37 +33,6 @@ Confirmed by code inspection. Nothing in GridVibe enables or disables mouse trac
 ### Proposed solution:
 Make the recovery explicit instead of incidental. In `web/static/js/terminals.js`, have both `clearTerminalDisplay()` and `refreshTerminalDisplay()` write an explicit mouse-tracking teardown into the pane after `term.reset()` — `\033[?1000l\033[?1002l\033[?1003l\033[?1005l\033[?1006l\033[?1015l` through `term.write()`, which changes only the client's mode state and sends nothing to the shell, so it stays inside the pane's existing behavior and touches no route. For `refreshTerminalDisplay()` the write must happen *after* the replayed buffer is applied, not before the `join_session` round trip, or the replay will overwrite it again; sequencing it against the async replay is the main implementation question. Consider whether the replay itself should be sanitized instead — filtering mode-setting sequences out of `_get_buffered_terminal_output()` is more invasive, risks corrupting a legitimately running TUI's state on rejoin, and should not be done without deciding what a rejoin to a *live* TUI is supposed to look like. A visible affordance is worth considering separately: a pane that is receiving mouse reports at a shell prompt could surface a one-click "Reset terminal modes" action rather than requiring the user to guess. Regression tests belong in `tests/test_api.py` alongside `test_terminals_page_clear_sends_shell_command_and_purges_replay_buffer`, asserting that both handlers emit the teardown sequence and that the refresh path emits it after the rejoin.
 
-### Issue ID: ISSUE-2026-040
-- Title: Explorer Git commands are unbounded in output, in stderr, and in process lifetime
-- Priority: High
-- Status: Open
-- Area: `web/explorer.py`, `web/explorer_search.py`, `tests/test_git_process_bounds.py`
-- Assignee: Unassigned
-- Tags: `explorer`, `git`, `performance`, `subprocess`, `tests`
-- Reported: 2026-08-17
-
-Description:
-`_run_git_command()` and `_run_remote_git_command()` treat every bound as something the *caller* opts into, so the ordinary explorer paths run without one. Four separate gaps, all in the same two functions:
-
-1. **Output is unbounded by default.** `max_output_bytes` is passed by exactly one caller (`explorer_search.py`, `SEARCH_GIT_MAX_OUTPUT_BYTES`). Status, the commit graph, commit-file listings, diff, and every mutation omit it, so a repository that produces a very large status or diff returns all of it into memory. `_bounded_git_diff()` shows the shape of the problem plainly: it slices to `EXPLORER_GIT_DIFF_MAX_BYTES` only *after* the complete output has already been captured, so the peak allocation is the repository's, not GridVibe's.
-2. **stderr is never bounded, on either path.** The bounded local branch caps stdout and accumulates stderr in an unlimited list; the remote `head -c` pipeline bounds stdout only.
-3. **Read commands do not suppress the credential prompt.** The env is built as `if write: GIT_TERMINAL_PROMPT=0 else: GIT_OPTIONAL_LOCKS=0` — mutually exclusive — so a read that consults a remote can block on a prompt nobody can answer. The remote shell prefix has the identical either/or.
-4. **The timeout path owns no process group.** The unbounded branch is `subprocess.run(timeout=...)`, which on Windows reaps with an unbounded `communicate()`; the bounded branch kills only the direct child and then calls `wait()` and `join()` with no bound at all. A surviving transport helper holding our pipes therefore outlasts the timeout.
-
-Items 3 and 4 are direct conflicts with Guardrail 4, which requires every `git` invocation to carry `GIT_TERMINAL_PROMPT=0` and to own a bounded process-group shutdown; items 1 and 2 are Guardrail 3. `web/selfupdate.py::_run_repo_git()` already implements the process-group pattern correctly and is the reference.
-
-Steps to reproduce:
-Run `python -m unittest tests.test_git_process_bounds`. The twelve `expectedFailure` cases are the defect; the six undecorated cases are the behaviour that already works and must survive the fix. For item 4 specifically, `ExplorerGitProcessTreeTestCase` points a repository at a TCP listener that accepts and then says nothing and calls the runner with a 2 s timeout: the call does not return within 8 s.
-
-Expected behavior:
-A ceiling belongs to the runner, not to the caller, so no call site can forget it: both streams bounded on both backends, `GIT_TERMINAL_PROMPT=0` on every invocation with `GIT_OPTIONAL_LOCKS=0` retained for reads, and a timeout that terminates the process group and reaps under a second bound. `stdout_truncated`, the Git exit status, UTF-8 replacement, search truncation reporting, and the existing response shapes are unchanged.
-
-Actual behavior / logs:
-Confirmed by the tests above against `web/explorer.py:1015-1123` (local) and `:1332-1386` (remote). The stalled-remote case reproduces only with an `https://` remote, not `git://`: git speaks `git://` in-process, while `https://` forks `git-remote-https`, which is the helper that inherits our pipes and survives a kill of the direct child.
-
-### Proposed solution:
-Publish a module-level `EXPLORER_GIT_MAX_OUTPUT_BYTES` on `web/explorer.py` and apply it in the runner, keeping smaller per-operation limits (search, diff) layered on top where semantics require them. Replace the local `subprocess.run()` and direct-kill paths with an owned `Popen` process group, concurrent bounded draining of both streams, group termination on timeout or truncation, and a second bounded reap — reusing the corrected `web/selfupdate.py` pattern rather than writing a weaker variant. Replace the remote whole-stream `read()` calls with a deadline-aware bounded channel drain for both streams, and make sure closing or timing out a channel cannot leave a pooled transport counted forever (see ISSUE-2026-043). Keep the shared local/remote backend abstraction intact (Guardrail 6); no frontend Diff change is needed, but if the work touches the Diff view then the `explorer-diff.js` extraction trigger in Guardrail 6 applies.
-
 ### Issue ID: ISSUE-2026-041
 - Title: RuntimeConfig publishes settings field by field, so a reader can serve two generations at once
 - Priority: Medium
@@ -143,6 +112,49 @@ The reaper closes the selected transport mid-open and drops the pool entry.
 Two-phase reservation: select the exact entry and increment its reservation count under the pool lock, run `open_sftp()` outside the lock, then commit last-used metadata by entry identity on success, or release the reservation / evict only the matching failed client on failure. Do **not** move `open_sftp()` under the pool lock — that is network work inside a shared lock, which Guardrails 2 and 3 forbid. Release must stay idempotent across the replacement and loser paths, and every SFTP channel must still be closed exactly once.
 
 ## Closed Issues
+
+### Issue ID: ISSUE-2026-040
+- Title: Explorer Git commands are unbounded in output, in stderr, and in process lifetime
+- Priority: High
+- Status: Closed
+- Area: `web/explorer.py`, `web/process_bounds.py`, `web/selfupdate.py`, `tests/test_git_process_bounds.py`, `tests/test_explorer_search.py`
+- Assignee: Unassigned
+- Tags: `explorer`, `git`, `performance`, `subprocess`, `tests`
+- Reported: 2026-08-17
+- Closed: 2026-08-17
+
+Description:
+`_run_git_command()` and `_run_remote_git_command()` treat every bound as something the *caller* opts into, so the ordinary explorer paths run without one. Four separate gaps, all in the same two functions:
+
+1. **Output is unbounded by default.** `max_output_bytes` is passed by exactly one caller (`explorer_search.py`, `SEARCH_GIT_MAX_OUTPUT_BYTES`). Status, the commit graph, commit-file listings, diff, and every mutation omit it, so a repository that produces a very large status or diff returns all of it into memory. `_bounded_git_diff()` shows the shape of the problem plainly: it slices to `EXPLORER_GIT_DIFF_MAX_BYTES` only *after* the complete output has already been captured, so the peak allocation is the repository's, not GridVibe's.
+2. **stderr is never bounded, on either path.** The bounded local branch caps stdout and accumulates stderr in an unlimited list; the remote `head -c` pipeline bounds stdout only.
+3. **Read commands do not suppress the credential prompt.** The env is built as `if write: GIT_TERMINAL_PROMPT=0 else: GIT_OPTIONAL_LOCKS=0` — mutually exclusive — so a read that consults a remote can block on a prompt nobody can answer. The remote shell prefix has the identical either/or.
+4. **The timeout path owns no process group.** The unbounded branch is `subprocess.run(timeout=...)`, which on Windows reaps with an unbounded `communicate()`; the bounded branch kills only the direct child and then calls `wait()` and `join()` with no bound at all. A surviving transport helper holding our pipes therefore outlasts the timeout.
+
+Items 3 and 4 are direct conflicts with Guardrail 4, which requires every `git` invocation to carry `GIT_TERMINAL_PROMPT=0` and to own a bounded process-group shutdown; items 1 and 2 are Guardrail 3. `web/selfupdate.py::_run_repo_git()` already implements the process-group pattern correctly and is the reference.
+
+Steps to reproduce:
+Run `python -m unittest tests.test_git_process_bounds`. Twelve of its cases carried `expectedFailure` and were the defect; the six undecorated ones were behaviour that already worked and had to survive the fix. All are undecorated now — the decorators came off in the change that made them pass. For item 4 specifically, `ExplorerGitProcessTreeTestCase` points a repository at a TCP listener that accepts and then says nothing and calls the runner with a 2 s timeout: the call does not return within 8 s.
+
+Expected behavior:
+A ceiling belongs to the runner, not to the caller, so no call site can forget it: both streams bounded on both backends, `GIT_TERMINAL_PROMPT=0` on every invocation with `GIT_OPTIONAL_LOCKS=0` retained for reads, and a timeout that terminates the process group and reaps under a second bound. `stdout_truncated`, the Git exit status, UTF-8 replacement, search truncation reporting, and the existing response shapes are unchanged.
+
+Actual behavior / logs:
+Confirmed by the tests above against `web/explorer.py:1015-1123` (local) and `:1332-1386` (remote). The stalled-remote case reproduces only with an `https://` remote, not `git://`: git speaks `git://` in-process, while `https://` forks `git-remote-https`, which is the helper that inherits our pipes and survives a kill of the direct child.
+
+Resolution:
+**The ceiling belongs to the runner.** `web/explorer.py` publishes `EXPLORER_GIT_MAX_OUTPUT_BYTES` (10 MiB, the same allowance the file preview already has) and `EXPLORER_GIT_MAX_STDERR_BYTES` (1 MiB — stderr is diagnostics, never a payload). `_git_output_limit()` lets a caller tighten that bound and nobody widen it, so search keeps its 8 MiB and the Diff view now asks for `EXPLORER_GIT_DIFF_MAX_BYTES + 1` — one byte past the cap is all it takes to tell "exactly at the limit" from "there was more", and it drops the diff's peak allocation from the repository's size to 256 KiB. `byte_count` is consequently the bytes read rather than the bytes Git would have produced; `truncated` says which of the two it is, and nothing in the frontend reads the field.
+
+**Both streams are drained to a ceiling rather than sliced after the fact.** `_drain_bounded_pipe()` stops at the limit and the first reader to hit one terminates the command, so the peak is ours. `stdout_truncated`, the forced `returncode 0` on truncation, UTF-8 replacement, and the search payload's truncation reporting are unchanged.
+
+**Every invocation sets `GIT_TERMINAL_PROMPT=0`**, local and remote, read and write; reads keep `GIT_OPTIONAL_LOCKS=0` alongside it, not instead of it.
+
+**The process group is shared, not re-typed.** `web/process_bounds.py` now owns `new_process_group()` and `terminate_process_tree()`; `web/selfupdate.py` (which wrote the pattern) and the explorer runner both import them, and a test pins that they are the same objects. One behaviour was added in the move: a child that `poll()` reports as already reaped is not tree-killed, because a dead parent's pid cannot name its orphans and on POSIX is free to name a stranger. The explorer runner spawns into that group, terminates it on timeout or truncation, and reaps under `PROCESS_REAP_TIMEOUT` with bounded thread joins; a pipe whose reader had to be abandoned is left to that daemon thread rather than closed underneath it.
+
+**The remote `| head -c N` pipeline is gone.** A pipeline reports *head's* exit status, not git's, which silently turned a failed remote command into an empty successful one — the reason the Diff view could never opt into a cap. `_run_remote_git_command()` bounds a deadline-aware channel drain instead, which caps the same bytes, keeps git's own status, and closes the channel when a drain stops early so nothing waits on `recv_exit_status()` for a command it is refusing to read. The SSH client pool counts clients, not exec channels, so closing one returns nothing to it.
+
+Plan followed:
+Publish a module-level `EXPLORER_GIT_MAX_OUTPUT_BYTES` on `web/explorer.py` and apply it in the runner, keeping smaller per-operation limits (search, diff) layered on top where semantics require them. Replace the local `subprocess.run()` and direct-kill paths with an owned `Popen` process group, concurrent bounded draining of both streams, group termination on timeout or truncation, and a second bounded reap — reusing the corrected `web/selfupdate.py` pattern rather than writing a weaker variant. Replace the remote whole-stream `read()` calls with a deadline-aware bounded channel drain for both streams, and make sure closing or timing out a channel cannot leave a pooled transport counted forever (see ISSUE-2026-043). Keep the shared local/remote backend abstraction intact (Guardrail 6); no frontend Diff change is needed, but if the work touches the Diff view then the `explorer-diff.js` extraction trigger in Guardrail 6 applies.
 
 ### Issue ID: ISSUE-2026-039
 - Title: Restored SSH workspaces fail to authenticate because the launch that created them references no saved session

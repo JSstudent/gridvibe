@@ -120,12 +120,28 @@ class _CountedChunk(str):
 
 
 class FakeSshStream:
+    """A paramiko-like channel file: `read(size)` consumes, `read()` drains.
+
+    The size argument is not decoration — the explorer's remote Git runner
+    drains both channels in bounded chunks (ISSUE-2026-040) rather than
+    calling `read()` whole, so a double that ignored it would answer the same
+    bytes on every chunk.
+    """
+
     def __init__(self, data=b"", returncode=0):
         self._data = data
-        self.channel = SimpleNamespace(recv_exit_status=lambda: returncode)
+        self._offset = 0
+        self.channel = SimpleNamespace(
+            recv_exit_status=lambda: returncode,
+            close=lambda: None,
+        )
 
-    def read(self):
-        return self._data
+    def read(self, size=-1):
+        if size is None or size < 0:
+            size = len(self._data) - self._offset
+        chunk = self._data[self._offset : self._offset + size]
+        self._offset += len(chunk)
+        return chunk
 
 
 class FakeSshExecClient:
@@ -4545,7 +4561,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         """A stalled transport reports through the launcher instead of hanging."""
         process = FakeGitProcess(stall=True)
         with patch.object(selfupdate.subprocess, "Popen", return_value=process):
-            with patch.object(selfupdate, "_terminate_process_tree") as terminate:
+            with patch.object(selfupdate, "terminate_process_tree") as terminate:
                 with self.assertRaises(api.AppUpdateError) as context:
                     selfupdate._run_repo_git(["fetch", "--all", "--prune"], timeout=30)
 

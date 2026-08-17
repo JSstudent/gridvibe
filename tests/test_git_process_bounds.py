@@ -1,29 +1,27 @@
 """ISSUE-2026-040: the explorer Git runner's output and process bounds.
 
-These tests are written **before** the fix, and every one of them asserts the
-*target* behaviour rather than today's defect: a suite that encoded the current
+These tests were written before the fix and every one of them asserts the
+*target* behaviour rather than the defect of the day: a suite that encoded the
 bug would have to be inverted later, which destroys its value as a stable
-contract and misleads anyone bisecting through it.
-
-Each pinned test therefore carries ``@unittest.expectedFailure`` until the fix
-lands. **Removing the decorator is part of that work, not a later cleanup** —
-an unexpected success fails the run, so a decorator left behind afterwards is
-loud rather than silent. Tests *without* the decorator are controls: behaviour
-that is already correct and that the rewrite must preserve. The approach
-mirrors `tests/test_session_persistence_contract.py`.
+contract and misleads anyone bisecting through it. Each pinned case carried
+``@unittest.expectedFailure`` until the fix landed and lost it in the same
+change, so nothing here is decorated any more — an unexpected success fails a
+run, which is what made a stale decorator loud. The approach mirrors
+`tests/test_session_persistence_contract.py`; a failure below is now a
+regression.
 
 What is pinned here (`web/explorer.py`, Guardrails 3 and 4):
 
 1. Every Git command — read *and* write, local *and* remote — sets
-   ``GIT_TERMINAL_PROMPT=0``. Today reads set only ``GIT_OPTIONAL_LOCKS=0``,
-   through an ``if write: ... else: ...`` that makes the two mutually
-   exclusive, so a read against a remote that wants credentials can park a
-   worker thread on a prompt nobody can answer.
-2. Output limits are a backend invariant, not an opt-in caller feature. Today
-   ``max_output_bytes`` is omitted by status, graph, commit-file, diff, and
-   every mutation path; only `explorer_search` passes it.
-3. Both streams are bounded. Today the bounded branch caps stdout and
-   accumulates stderr without any limit.
+   ``GIT_TERMINAL_PROMPT=0``. Reads previously set only
+   ``GIT_OPTIONAL_LOCKS=0``, through an ``if write: ... else: ...`` that made
+   the two mutually exclusive, so a read against a remote that wants
+   credentials could park a worker thread on a prompt nobody can answer.
+2. Output limits are a backend invariant, not an opt-in caller feature.
+   ``max_output_bytes`` was omitted by status, graph, commit-file, diff, and
+   every mutation path; only `explorer_search` passed it.
+3. Both streams are bounded. The bounded branch capped stdout and accumulated
+   stderr without any limit.
 4. The remote runner drains bounded rather than calling whole-stream
    ``stdout.read()``/``stderr.read()``.
 5. The timeout path owns a process **group** and reaps under a second bound,
@@ -31,8 +29,8 @@ What is pinned here (`web/explorer.py`, Guardrails 3 and 4):
 
 `_run_git_command` is exercised through the module attribute
 ``web.explorer.subprocess`` rather than by patching one entry point, because
-the fix is expected to replace ``subprocess.run()`` with an owned ``Popen``.
-The stub answers both shapes so these tests pin the contract and not the call.
+the fix replaced ``subprocess.run()`` with an owned ``Popen``. The stub answers
+both shapes so these tests pin the contract and not the call.
 """
 
 import os
@@ -48,6 +46,8 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from web import explorer as web_explorer
+from web import process_bounds
+from web import selfupdate as web_selfupdate
 
 #: The ceiling the fix must publish on `web.explorer` so every Git invocation
 #: is bounded by default. Named here so the fix cannot satisfy the tests with
@@ -236,13 +236,12 @@ class ExplorerGitEnvironmentTestCase(unittest.TestCase):
         self.assertEqual(len(stub.envs), 1)
         return stub.envs[0]
 
-    @unittest.expectedFailure
     def test_local_read_commands_suppress_the_credential_prompt(self):
         """A read can reach a remote too: `git status` consults the upstream ref.
 
-        Reads and writes take an `if write:` / `else:` today, so the prompt
-        guard and the lock guard are mutually exclusive and a read never gets
-        the one that stops it hanging.
+        Reads and writes took an `if write:` / `else:`, which made the prompt
+        guard and the lock guard mutually exclusive, so a read never got the
+        one that stops it hanging.
         """
         env = self._run(write=False)
         self.assertEqual(env.get("GIT_TERMINAL_PROMPT"), "0")
@@ -257,13 +256,11 @@ class ExplorerGitEnvironmentTestCase(unittest.TestCase):
         env = self._run(write=True)
         self.assertEqual(env.get("GIT_TERMINAL_PROMPT"), "0")
 
-    @unittest.expectedFailure
     def test_local_bounded_commands_suppress_the_credential_prompt(self):
         """The bounded branch is a second spawn path with the same duty."""
         env = self._run(write=False, max_output_bytes=4096)
         self.assertEqual(env.get("GIT_TERMINAL_PROMPT"), "0")
 
-    @unittest.expectedFailure
     def test_remote_read_commands_suppress_the_credential_prompt(self):
         """The remote shell prefix is one-or-the-other for the same reason."""
         command = web_explorer._remote_git_shell_command(
@@ -293,7 +290,6 @@ class ExplorerGitEnvironmentTestCase(unittest.TestCase):
 class ExplorerGitOutputBoundsTestCase(unittest.TestCase):
     """Guardrail 3 — a Git command cannot return unbounded output."""
 
-    @unittest.expectedFailure
     def test_the_module_publishes_a_default_output_ceiling(self):
         """The bound belongs to the runner, so no caller can forget it."""
         ceiling = getattr(web_explorer, GIT_OUTPUT_CEILING_ATTR)
@@ -301,12 +297,11 @@ class ExplorerGitOutputBoundsTestCase(unittest.TestCase):
         self.assertGreater(ceiling, 0)
         self.assertLess(ceiling, OVERSIZED_OUTPUT_BYTES)
 
-    @unittest.expectedFailure
     def test_unbounded_callers_still_get_bounded_stdout(self):
         """Status, graph, commit-file, diff, and every mutation take this path.
 
-        They call the runner without `max_output_bytes`, so today a repository
-        that produces a huge diff or status returns all of it into memory.
+        They call the runner without `max_output_bytes`, so a repository that
+        produced a huge diff or status used to return all of it into memory.
         """
         stub = _RecordingSubprocess(stdout_bytes=OVERSIZED_OUTPUT_BYTES)
         with patch.object(web_explorer, "subprocess", stub):
@@ -315,18 +310,16 @@ class ExplorerGitOutputBoundsTestCase(unittest.TestCase):
         self.assertLess(len(result.stdout), OVERSIZED_OUTPUT_BYTES)
         self.assertTrue(getattr(result, "stdout_truncated", False))
 
-    @unittest.expectedFailure
     def test_unbounded_callers_still_get_bounded_stderr(self):
-        """A failing command's stderr is output too, and is never capped today."""
+        """A failing command's stderr is output too, and was never capped."""
         stub = _RecordingSubprocess(stderr_bytes=OVERSIZED_OUTPUT_BYTES, returncode=1)
         with patch.object(web_explorer, "subprocess", stub):
             result = web_explorer._run_git_command(["status"], cwd=os.getcwd())
 
         self.assertLess(len(result.stderr), OVERSIZED_OUTPUT_BYTES)
 
-    @unittest.expectedFailure
     def test_bounded_callers_also_bound_stderr(self):
-        """`max_output_bytes` caps stdout only; `read_stderr` has no limit."""
+        """A caller-supplied stdout cap does not excuse stderr from having one."""
         stub = _RecordingSubprocess(stderr_bytes=OVERSIZED_OUTPUT_BYTES, returncode=1)
         with patch.object(web_explorer, "subprocess", stub):
             result = web_explorer._run_git_command(
@@ -337,14 +330,13 @@ class ExplorerGitOutputBoundsTestCase(unittest.TestCase):
 
         self.assertLess(len(result.stderr), OVERSIZED_OUTPUT_BYTES)
 
-    @unittest.expectedFailure
     def test_the_runner_stops_reading_instead_of_slicing_afterwards(self):
         """Guardrail 3: bound the read, do not buffer the whole stream first.
 
-        `_bounded_git_diff` is the live example — it slices to
-        `EXPLORER_GIT_DIFF_MAX_BYTES` only after the complete output has
-        already been captured, so the peak memory is the repository's, not
-        ours.
+        `_bounded_git_diff` was the live example — it sliced to
+        `EXPLORER_GIT_DIFF_MAX_BYTES` only after the complete output had
+        already been captured, so the peak memory was the repository's rather
+        than ours.
         """
         stub = _RecordingSubprocess(stdout_bytes=OVERSIZED_OUTPUT_BYTES)
         with patch.object(web_explorer, "subprocess", stub):
@@ -374,9 +366,8 @@ class ExplorerGitOutputBoundsTestCase(unittest.TestCase):
 class RemoteGitOutputBoundsTestCase(unittest.TestCase):
     """The SSH runner owes the same bounds as the local one (Guardrail 6)."""
 
-    @unittest.expectedFailure
     def test_remote_stdout_is_bounded_without_a_caller_supplied_cap(self):
-        """`stdout.read()` with no argument drains the whole channel today."""
+        """`stdout.read()` with no argument drained the whole channel."""
         client = _StubRemoteClient(stdout_bytes=OVERSIZED_OUTPUT_BYTES)
         result = web_explorer._run_remote_git_command(
             client,
@@ -386,9 +377,8 @@ class RemoteGitOutputBoundsTestCase(unittest.TestCase):
 
         self.assertLess(len(result.stdout), OVERSIZED_OUTPUT_BYTES)
 
-    @unittest.expectedFailure
     def test_remote_stderr_is_bounded(self):
-        """The `head -c` pipeline bounds stdout only; stderr bypasses it."""
+        """A stdout cap does not bound stderr; the drain has to do it too."""
         client = _StubRemoteClient(stderr_bytes=OVERSIZED_OUTPUT_BYTES, exit_status=1)
         result = web_explorer._run_remote_git_command(
             client,
@@ -399,7 +389,6 @@ class RemoteGitOutputBoundsTestCase(unittest.TestCase):
 
         self.assertLess(len(result.stderr), OVERSIZED_OUTPUT_BYTES)
 
-    @unittest.expectedFailure
     def test_remote_reads_are_bounded_at_the_channel_not_after(self):
         """A bounded drain reads a bounded amount, whatever the peer sends."""
         client = _StubRemoteClient(stdout_bytes=OVERSIZED_OUTPUT_BYTES)
@@ -458,16 +447,17 @@ class ExplorerGitProcessTreeTestCase(unittest.TestCase):
         self.addCleanup(listener.close)
         return listener.getsockname()[1]
 
-    @unittest.expectedFailure
     def test_a_stalled_remote_returns_the_worker_thread_within_the_bound(self):
-        """The explorer runner has no process-group ownership at all today.
+        """A surviving Git helper must not outlast the runner's timeout.
 
-        The unbounded branch is `subprocess.run(timeout=...)`, which on Windows
-        reaps with an unbounded `communicate()`; the bounded branch kills only
-        the direct child and then calls `wait()` and `join()` with no bound.
-        Either way a surviving transport helper holding our pipes outlasts the
-        timeout — the same defect `web/selfupdate.py::_run_repo_git` already
-        fixed with a process group, a tree kill, and a second bounded reap.
+        The explorer runner owned no process group at all. Its unbounded
+        branch was `subprocess.run(timeout=...)`, which on Windows reaps with
+        an unbounded `communicate()`; its bounded branch killed only the direct
+        child and then called `wait()` and `join()` with no bound. Either way a
+        surviving transport helper holding our pipes outlasted the timeout —
+        the same defect `web/selfupdate.py::_run_repo_git` had already fixed
+        with a process group, a tree kill, and a second bounded reap, and the
+        pattern both now share through `web/process_bounds.py`.
 
         Run on a worker thread with a bounded join so an unbounded runner fails
         this test in seconds rather than parking the suite for minutes.
@@ -524,6 +514,54 @@ class ExplorerGitProcessTreeTestCase(unittest.TestCase):
         )
         self.assertLess(outcome["finished"] - started, PROCESS_TREE_BOUND_SECONDS)
         self.assertIsInstance(outcome["error"], subprocess.TimeoutExpired)
+
+
+class SharedProcessBoundsTestCase(unittest.TestCase):
+    """`web/process_bounds.py` — one tree-kill implementation, two callers."""
+
+    def test_the_explorer_and_self_update_runners_share_one_implementation(self):
+        """Guardrail 6: the second caller reuses the pattern, never re-types it."""
+        self.assertIs(web_explorer.terminate_process_tree, process_bounds.terminate_process_tree)
+        self.assertIs(web_selfupdate.terminate_process_tree, process_bounds.terminate_process_tree)
+        self.assertIs(web_explorer.new_process_group, process_bounds.new_process_group)
+        self.assertIs(web_selfupdate.new_process_group, process_bounds.new_process_group)
+
+    def _terminate(self, exit_status):
+        """Run the tree kill against a fake child, whatever the platform.
+
+        `killpg`/`getpgid` are created rather than replaced because they do not
+        exist on Windows, and `taskkill` is answered because it is not on PATH
+        elsewhere — so both branches are observable from either host.
+        """
+        killed = []
+        process = SimpleNamespace(
+            pid=4321,
+            poll=lambda: exit_status,
+            kill=lambda: killed.append("kill"),
+        )
+        with patch.object(process_bounds.subprocess, "run") as run, \
+                patch.object(process_bounds.os, "killpg", create=True) as killpg, \
+                patch.object(process_bounds.os, "getpgid", create=True, return_value=4321), \
+                patch.object(process_bounds.shutil, "which", return_value="taskkill"):
+            process_bounds.terminate_process_tree(process)
+        return killed, (run.called or killpg.called)
+
+    def test_a_running_child_is_killed_as_a_whole_tree(self):
+        killed, tree_killed = self._terminate(None)
+        self.assertTrue(tree_killed, "the helpers were never signalled as a group")
+        self.assertEqual(killed, ["kill"])
+
+    def test_an_already_reaped_child_is_not_tree_killed(self):
+        """A dead parent's pid cannot name its orphans, and may name a stranger.
+
+        `poll()` reaps on POSIX, so the pid is free for reuse the moment it
+        returns a status; `killpg` on it would then signal an unrelated group.
+        The direct `kill()` stays because it goes through the `Popen` handle,
+        which knows the child is gone.
+        """
+        killed, tree_killed = self._terminate(0)
+        self.assertFalse(tree_killed)
+        self.assertEqual(killed, ["kill"])
 
 
 if __name__ == "__main__":

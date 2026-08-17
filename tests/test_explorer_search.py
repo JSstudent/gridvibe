@@ -11,13 +11,55 @@ import subprocess
 import tempfile
 import time
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from web import explorer_search
 from web.config import RuntimeConfig
-from web.explorer import ExplorerRouteError, _LocalExplorerBackend, _remote_git_shell_command
+from web.explorer import (
+    ExplorerRouteError,
+    _LocalExplorerBackend,
+    _remote_git_shell_command,
+    _run_remote_git_command,
+)
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+class _FixedRemoteStream:
+    """A paramiko-like channel file over a fixed byte string."""
+
+    def __init__(self, data: bytes, exit_status: int = 0):
+        self._data = data
+        self._offset = 0
+        self.closed = False
+        self.channel = SimpleNamespace(
+            recv_exit_status=lambda: exit_status,
+            close=self._close,
+        )
+
+    def _close(self) -> None:
+        self.closed = True
+
+    def read(self, size: int = -1) -> bytes:
+        if size is None or size < 0:
+            size = len(self._data) - self._offset
+        chunk = self._data[self._offset : self._offset + size]
+        self._offset += len(chunk)
+        return chunk
+
+
+class _FixedRemoteClient:
+    """Answers one `exec_command` with fixed stdout and an exit status."""
+
+    def __init__(self, stdout: bytes, *, stderr: bytes = b"", exit_status: int = 0):
+        self.commands = []
+        self.stdout = _FixedRemoteStream(stdout, exit_status)
+        self.stderr = _FixedRemoteStream(stderr, exit_status)
+
+    def exec_command(self, command, timeout=None):
+        self.commands.append((command, timeout))
+        return None, self.stdout, self.stderr
 
 
 def _options(**overrides):
@@ -80,13 +122,39 @@ class GitGrepArgsTestCase(unittest.TestCase):
         self.assertIn("-w", args)
         self.assertEqual(args[-2:], ["--", "web"])
 
-    def test_remote_git_grep_command_has_output_cap(self):
+    def test_remote_git_grep_output_is_capped_without_masking_the_exit_status(self):
+        """The cap moved from a `head -c` pipeline to the channel drain.
+
+        A pipeline reports *head's* exit status, so a remote `git grep` that
+        failed outright came back as an empty success. The bound now lives in
+        `_run_remote_git_command`'s drain, which caps the same bytes and still
+        surfaces git's own status (ISSUE-2026-040).
+        """
         command = _remote_git_shell_command(
             ["grep", "-F", "-e", "hello", "--", "."],
             "/srv/app",
+        )
+        self.assertNotIn("head -c", command)
+
+        client = _FixedRemoteClient(b"x" * 4096, exit_status=128)
+        result = _run_remote_git_command(
+            client,
+            ["grep", "-F", "-e", "hello", "--", "."],
+            cwd="/srv/app",
             max_output_bytes=1234,
         )
-        self.assertTrue(command.endswith("| head -c 1234"))
+        self.assertEqual(len(result.stdout), 1234)
+        self.assertTrue(result.stdout_truncated)
+
+        client = _FixedRemoteClient(b"no matches here\n", exit_status=1)
+        result = _run_remote_git_command(
+            client,
+            ["grep", "-F", "-e", "hello", "--", "."],
+            cwd="/srv/app",
+            max_output_bytes=1234,
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertFalse(result.stdout_truncated)
 
 
 class GitGrepZParserTestCase(unittest.TestCase):

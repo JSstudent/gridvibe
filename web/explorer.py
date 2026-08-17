@@ -37,6 +37,11 @@ from web.hostkeys import (  # noqa: F401 - _load_persistent_host_keys re-exporte
     _apply_host_key_policy,
     _load_persistent_host_keys,
 )
+from web.process_bounds import (
+    PROCESS_REAP_TIMEOUT,
+    new_process_group,
+    terminate_process_tree,
+)
 
 try:
     import paramiko
@@ -1011,6 +1016,62 @@ def _clean_git_path(path: str) -> str:
 GIT_READ_TIMEOUT = 2.0
 GIT_WRITE_TIMEOUT = 15.0
 
+# Every explorer Git command is bounded by default (ISSUE-2026-040). A ceiling
+# the caller opts into is a ceiling that is missing wherever a caller forgot,
+# and status, graph, commit-file, diff, and every mutation had forgotten it: a
+# repository, not GridVibe, decided how much memory one request could spend.
+# The same 10 MiB the file preview already allows. A caller may still ask for
+# a tighter bound (`explorer_search`'s 8 MiB, the diff view's 256 KiB); nobody
+# can ask for a wider one.
+EXPLORER_GIT_MAX_OUTPUT_BYTES = 10 * 1024 * 1024
+# stderr is diagnostics, never a payload, so it gets its own far smaller
+# ceiling: whatever a runaway command has to say, the first megabyte says it.
+EXPLORER_GIT_MAX_STDERR_BYTES = 1 * 1024 * 1024
+_GIT_STREAM_CHUNK_BYTES = 64 * 1024
+
+
+def _git_output_limit(max_output_bytes: Optional[int]) -> int:
+    """Return the effective stdout ceiling for one Git command."""
+    if max_output_bytes is None:
+        return EXPLORER_GIT_MAX_OUTPUT_BYTES
+    return max(1, min(int(max_output_bytes), EXPLORER_GIT_MAX_OUTPUT_BYTES))
+
+
+def _drain_bounded_pipe(pipe: Any, limit: int, chunks: List[bytes]) -> bool:
+    """Read at most `limit` bytes from a child pipe; return whether more existed.
+
+    Guardrail 3: the bound is on the *read*, not a slice taken afterwards, so
+    the peak memory is ours rather than the repository's. Stopping short leaves
+    the child blocked on a full pipe, which is why every caller pairs this with
+    a process-tree kill.
+    """
+    size = 0
+    try:
+        while True:
+            chunk = pipe.read(_GIT_STREAM_CHUNK_BYTES)
+            if not chunk:
+                return False
+            remaining = limit - size
+            if remaining > 0:
+                kept = chunk[:remaining]
+                chunks.append(kept)
+                size += len(kept)
+            if len(chunk) > max(0, remaining):
+                return True
+    except (OSError, ValueError):
+        # The pipe was closed underneath us during teardown.
+        return False
+
+
+def _close_pipe_if_idle(pipe: Any, reader: threading.Thread) -> None:
+    """Close a child pipe, unless the reader we gave up on still owns it."""
+    if pipe is None or reader.is_alive():
+        return
+    try:
+        pipe.close()
+    except (OSError, ValueError):
+        pass
+
 
 def _run_git_command(
     args: List[str],
@@ -1020,106 +1081,101 @@ def _run_git_command(
     write: bool = False,
     max_output_bytes: Optional[int] = None,
 ) -> subprocess.CompletedProcess:
-    """Run an explorer Git command with predictable process settings.
+    """Run an explorer Git command under output, time, and process bounds.
 
-    Reads run with GIT_OPTIONAL_LOCKS=0; writes run with GIT_TERMINAL_PROMPT=0
-    so they can never hang on an interactive credential prompt.
+    Every invocation is bounded, whatever the caller asked for. Reads keep
+    GIT_OPTIONAL_LOCKS=0, and reads *and* writes set GIT_TERMINAL_PROMPT=0: a
+    read consults the upstream ref too, and a server has no terminal on which
+    to answer a credential prompt (Guardrail 4). Both streams are drained to a
+    ceiling rather than sliced afterwards (Guardrail 3), and the child is
+    spawned into its own process group so the timeout covers git's transport
+    helpers and not only git itself — killing the direct child leaves a
+    grandchild holding our pipes, which is what made a 30 s bound take 269 s.
+
+    A command whose stdout hit the ceiling reports `stdout_truncated` and
+    returns 0: it was killed mid-stream, so its exit status describes our kill
+    rather than the repository, and the output it did produce is usable.
     """
     if timeout is None:
         timeout = GIT_WRITE_TIMEOUT if write else GIT_READ_TIMEOUT
     env = os.environ.copy()
-    if write:
-        env["GIT_TERMINAL_PROMPT"] = "0"
-    else:
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    if not write:
         env["GIT_OPTIONAL_LOCKS"] = "0"
-    command = ["git", *args]
-    if max_output_bytes is None:
-        return subprocess.run(
-            command,
-            cwd=cwd,
-            env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=timeout,
-            check=False,
-        )
 
-    output_limit = max(1, int(max_output_bytes))
+    command = ["git", *args]
+    stdout_limit = _git_output_limit(max_output_bytes)
     process = subprocess.Popen(
         command,
         cwd=cwd,
         env=env,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
+        **new_process_group(),
     )
+
     stdout_chunks: List[bytes] = []
     stderr_chunks: List[bytes] = []
-    stdout_size = 0
     stdout_truncated = threading.Event()
+    halted = threading.Event()
 
-    def read_stdout() -> None:
-        nonlocal stdout_size
-        assert process.stdout is not None
-        while True:
-            chunk = process.stdout.read(64 * 1024)
-            if not chunk:
-                break
-            remaining = output_limit - stdout_size
-            if remaining > 0:
-                kept = chunk[:remaining]
-                stdout_chunks.append(kept)
-                stdout_size += len(kept)
-            if len(chunk) > max(0, remaining):
-                stdout_truncated.set()
-                try:
-                    process.terminate()
-                except OSError:
-                    pass
+    def halt_child() -> None:
+        # The first reader to hit its ceiling ends the command; whatever is
+        # still queued is output we have already decided not to keep.
+        if halted.is_set():
+            return
+        halted.set()
+        terminate_process_tree(process)
 
-    def read_stderr() -> None:
-        assert process.stderr is not None
-        while True:
-            chunk = process.stderr.read(64 * 1024)
-            if not chunk:
-                break
-            stderr_chunks.append(chunk)
+    def drain_stdout() -> None:
+        if _drain_bounded_pipe(process.stdout, stdout_limit, stdout_chunks):
+            stdout_truncated.set()
+            halt_child()
 
-    stdout_thread = threading.Thread(target=read_stdout, daemon=True)
-    stderr_thread = threading.Thread(target=read_stderr, daemon=True)
+    def drain_stderr() -> None:
+        if _drain_bounded_pipe(process.stderr, EXPLORER_GIT_MAX_STDERR_BYTES, stderr_chunks):
+            halt_child()
 
-    def close_process_streams() -> None:
-        if process.stdout is not None:
-            process.stdout.close()
-        if process.stderr is not None:
-            process.stderr.close()
-
+    stdout_thread = threading.Thread(target=drain_stdout, daemon=True)
+    stderr_thread = threading.Thread(target=drain_stderr, daemon=True)
     stdout_thread.start()
     stderr_thread.start()
+
+    expired: Optional[subprocess.TimeoutExpired] = None
     try:
         process.wait(timeout=timeout)
     except subprocess.TimeoutExpired as exc:
-        process.kill()
-        process.wait()
-        stdout_thread.join()
-        stderr_thread.join()
-        close_process_streams()
+        expired = exc
+        terminate_process_tree(process)
+        try:
+            process.wait(timeout=PROCESS_REAP_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            # An orphan we could not reach still holds the pipe. Return the
+            # request thread rather than waiting on it — bounding our own wait
+            # is the entire point of this path.
+            pass
+
+    stdout_thread.join(PROCESS_REAP_TIMEOUT)
+    stderr_thread.join(PROCESS_REAP_TIMEOUT)
+    _close_pipe_if_idle(process.stdout, stdout_thread)
+    _close_pipe_if_idle(process.stderr, stderr_thread)
+
+    if expired is not None:
         raise subprocess.TimeoutExpired(
             command,
-            exc.timeout,
+            expired.timeout,
             output=b"".join(stdout_chunks),
             stderr=b"".join(stderr_chunks),
-        ) from exc
+        ) from expired
 
-    stdout_thread.join()
-    stderr_thread.join()
-    close_process_streams()
+    truncated = stdout_truncated.is_set()
     result = subprocess.CompletedProcess(
         args=command,
-        returncode=0 if stdout_truncated.is_set() else process.returncode,
+        returncode=0 if truncated else process.returncode,
         stdout=b"".join(stdout_chunks),
         stderr=b"".join(stderr_chunks),
     )
-    result.stdout_truncated = stdout_truncated.is_set()
+    result.stdout_truncated = truncated
     return result
 
 
@@ -1334,19 +1390,70 @@ def _remote_git_shell_command(
     cwd: str,
     *,
     write: bool = False,
-    max_output_bytes: Optional[int] = None,
 ) -> str:
     """Build a Git command for a remote POSIX-compatible SSH shell.
 
-    Reads run with GIT_OPTIONAL_LOCKS=0; writes run with GIT_TERMINAL_PROMPT=0
-    so they can never hang on an interactive credential prompt.
+    Every command sets GIT_TERMINAL_PROMPT=0 so it can never hang on an
+    interactive credential prompt; reads additionally set GIT_OPTIONAL_LOCKS=0.
+
+    Output bounds are *not* expressed here. A `| head -c N` pipeline reports
+    head's exit status instead of git's, which silently turns a failed remote
+    command into an empty successful one — the reason the diff view could never
+    opt into a cap. `_run_remote_git_command` bounds the channel drain instead,
+    which costs no exit status and closes the channel at the ceiling anyway
+    (ISSUE-2026-040).
     """
     quoted_args = " ".join(shlex.quote(part) for part in args)
-    env_prefix = "GIT_TERMINAL_PROMPT=0" if write else "GIT_OPTIONAL_LOCKS=0"
-    command = f"{env_prefix} git -C {shlex.quote(cwd)} {quoted_args}"
-    if max_output_bytes is not None:
-        command += f" | head -c {max(1, int(max_output_bytes))}"
-    return command
+    env_prefix = "GIT_TERMINAL_PROMPT=0" if write else "GIT_TERMINAL_PROMPT=0 GIT_OPTIONAL_LOCKS=0"
+    return f"{env_prefix} git -C {shlex.quote(cwd)} {quoted_args}"
+
+
+def _drain_remote_stream(stream: Any, limit: int, deadline: float) -> Tuple[bytes, bool]:
+    """Read at most `limit` bytes from an SSH channel file before `deadline`.
+
+    Returns the bytes read and whether the drain stopped early — because the
+    peer had more to send than the ceiling allows, or because the deadline
+    passed. Either way the caller is holding an incomplete stream and must
+    close the channel rather than block on an exit status that will not come.
+    """
+    chunks: List[bytes] = []
+    size = 0
+    while size < limit:
+        if time.monotonic() > deadline:
+            return b"".join(chunks), True
+        chunk = stream.read(min(_GIT_STREAM_CHUNK_BYTES, limit - size))
+        if isinstance(chunk, str):
+            chunk = chunk.encode("utf-8", errors="replace")
+        if not chunk:
+            return b"".join(chunks), False
+        chunks.append(chunk)
+        size += len(chunk)
+    # At the ceiling: one more byte separates "there was more" from "exact fit".
+    overflow = stream.read(1)
+    return b"".join(chunks), bool(overflow)
+
+
+def _close_remote_channel(stream: Any) -> None:
+    """Close an exec channel we stopped reading, so nothing waits on it."""
+    channel = getattr(stream, "channel", None)
+    close = getattr(channel, "close", None)
+    if close is None:
+        return
+    try:
+        close()
+    except OSError:
+        pass
+
+
+def _remote_exit_status(stream: Any) -> int:
+    """Return the remote command's exit status, or -1 if it never reported one."""
+    channel = getattr(stream, "channel", None)
+    if channel is None:
+        return 0
+    try:
+        return int(channel.recv_exit_status())
+    except (OSError, TypeError, ValueError):
+        return -1
 
 
 def _run_remote_git_command(
@@ -1358,31 +1465,41 @@ def _run_remote_git_command(
     write: bool = False,
     max_output_bytes: Optional[int] = None,
 ) -> Any:
-    """Run a Git command over SSH and return a subprocess-like result."""
+    """Run a Git command over SSH and return a subprocess-like result.
+
+    The SSH path owes the same bounds as the local one (Guardrail 6): both
+    streams are drained to a ceiling against a deadline instead of read whole,
+    and a drain that stopped early closes the channel — `recv_exit_status()`
+    waits for a command that cannot finish while we are refusing to read it.
+    """
     if timeout is None:
         timeout = REMOTE_GIT_WRITE_TIMEOUT if write else REMOTE_GIT_READ_TIMEOUT
-    command = _remote_git_shell_command(
-        args,
-        cwd,
-        write=write,
-        max_output_bytes=max_output_bytes,
-    )
+    command = _remote_git_shell_command(args, cwd, write=write)
     _stdin, stdout, stderr = client.exec_command(command, timeout=timeout)
-    stdout_data = stdout.read()
-    stderr_data = stderr.read()
-    if isinstance(stdout_data, str):
-        stdout_data = stdout_data.encode("utf-8", errors="replace")
-    if isinstance(stderr_data, str):
-        stderr_data = stderr_data.encode("utf-8", errors="replace")
+    deadline = time.monotonic() + float(timeout)
+    stdout_data, stdout_incomplete = _drain_remote_stream(
+        stdout, _git_output_limit(max_output_bytes), deadline
+    )
+    stderr_data, stderr_incomplete = _drain_remote_stream(
+        stderr, EXPLORER_GIT_MAX_STDERR_BYTES, deadline
+    )
+
+    truncated = stdout_incomplete or (
+        max_output_bytes is not None and len(stdout_data) >= max(1, int(max_output_bytes))
+    )
+    if stdout_incomplete or stderr_incomplete:
+        _close_remote_channel(stdout)
+
     result = subprocess.CompletedProcess(
         args=command,
-        returncode=stdout.channel.recv_exit_status(),
+        # Killed mid-stream, so the status describes our close, not the
+        # repository — the local runner reports a truncated command the
+        # same way.
+        returncode=0 if truncated else _remote_exit_status(stdout),
         stdout=stdout_data,
         stderr=stderr_data,
     )
-    result.stdout_truncated = (
-        max_output_bytes is not None and len(stdout_data) >= max(1, int(max_output_bytes))
-    )
+    result.stdout_truncated = truncated
     return result
 
 
@@ -2185,8 +2302,20 @@ def _append_deleted_git_entries(
 
 
 def _bounded_git_diff(backend: Any, repo_root: str, args: List[str]) -> Tuple[str, bool, int]:
-    """Run Git diff and return bounded UTF-8 text output."""
-    result = backend.run_git(args, cwd=repo_root, timeout=3.0)
+    """Run Git diff and return bounded UTF-8 text output.
+
+    The runner is asked for one byte past the diff ceiling, which is all it
+    takes to tell "exactly at the limit" from "there was more" — so the peak
+    is 256 KiB rather than however large the repository's diff happens to be.
+    `byte_count` is therefore the bytes we read, not the bytes Git would have
+    produced, and `truncated` says which of the two it is.
+    """
+    result = backend.run_git(
+        args,
+        cwd=repo_root,
+        timeout=3.0,
+        max_output_bytes=EXPLORER_GIT_DIFF_MAX_BYTES + 1,
+    )
     if result.returncode != 0:
         error = _decode_git_output(result.stderr) or "Git diff failed"
         raise ValueError(error)
