@@ -1,11 +1,12 @@
 """ISSUE-2026-041, -042, and -043: three backend concurrency defects.
 
 Companion to `tests/test_git_process_bounds.py`, written the same way: every
-test asserts the behaviour the fix must deliver, not today's defect, and
-carries ``@unittest.expectedFailure`` until that fix lands. **Removing the
-decorator is part of the fix** — an unexpected success fails the run, so a
-stale decorator is loud rather than silent. Tests without the decorator are
-controls: behaviour that is already correct and that the rewrite must preserve.
+test asserts the behaviour the fix must deliver, not the defect of the day.
+Each pinned case carried ``@unittest.expectedFailure`` until its fix landed and
+lost the decorator in the same change, so nothing here is decorated any more —
+an unexpected success fails the run, which is what made a stale decorator loud.
+The undecorated cases were controls: behaviour that already worked and that the
+rewrite had to preserve. A failure below is now a regression.
 
 Issue → test case:
 
@@ -17,28 +18,31 @@ All three are Guardrail 2 cases — "do check-then-act and multi-value snapshots
 of shared state inside a single lock hold" — approached from three different
 directions:
 
-1. `RuntimeConfig.refresh()` assigns ``app_config``, the section dictionaries,
-   and every derived attribute one at a time, and readers take no lock at all.
+1. `RuntimeConfig.refresh()` assigned ``app_config``, the section dictionaries,
+   and every derived attribute one at a time, and readers took no lock at all.
    A multi-field consumer such as ``_public_app_config()`` reads roughly
-   fifteen attributes independently, so it can serve half of one generation and
-   half of the next. A lock added only around ``refresh()`` would not fix a
-   reader that does not take it.
-2. `workspace_label_conflict()` documents itself as "a check, not a mutex", and
-   the create/rename/launch-into-new paths call it and *then* call a separately
-   locked manager mutation. Two concurrent requests can both pass. That was an
-   accepted local-single-user tradeoff, but it contradicts the stronger
-   contract `AGENTS.md` and `CLAUDE.md` now state: a non-empty label identifies
-   at most one workspace across live and saved state.
-3. `_acquire_ssh_sftp()` reads the pool entry under the lock but increments
-   ``in_use`` only after ``open_sftp()`` returns, so the idle reaper can close
-   the selected transport mid-open. There is no channel *leak* — release always
-   closes the channel and an unpooled client — but the request fails for no
-   reason the user did anything to cause. The fix is a two-phase reservation,
-   not moving network I/O under the pool lock, which Guardrails 2 and 3 forbid.
+   fifteen attributes independently, so it could serve half of one generation
+   and half of the next. A lock added only around ``refresh()`` would not have
+   fixed a reader that does not take it, which is why the fix is one immutable
+   generation plus a ``snapshot()`` every multi-field consumer reads once.
+2. `workspace_label_conflict()` documented itself as "a check, not a mutex",
+   and the create/rename/launch-into-new paths called it and *then* called a
+   separately locked manager mutation, so two concurrent requests could both
+   pass. That was an accepted local-single-user tradeoff, but it contradicted
+   the stronger contract `AGENTS.md` and `CLAUDE.md` state: a non-empty label
+   identifies at most one workspace across live and saved state. The claim now
+   holds a lock of its own across the verdict and the mutation.
+3. `_acquire_ssh_sftp()` read the pool entry under the lock but incremented
+   ``in_use`` only after ``open_sftp()`` returned, so the idle reaper could
+   close the selected transport mid-open. There was no channel *leak* — release
+   always closes the channel and an unpooled client — but the request failed
+   for no reason the user did anything to cause. The fix is a two-phase
+   reservation, not moving network I/O under the pool lock, which Guardrails 2
+   and 3 forbid.
 
 The pool case extends the technique `SshSftpPoolTestCase` in `tests/test_api.py`
 already uses for the *counted* window (`test_a_request_in_flight_past_the_idle_
-timeout_is_not_reaped`) to the window before the count exists.
+timeout_is_not_reaped`) to the window before the count existed.
 """
 
 import threading
