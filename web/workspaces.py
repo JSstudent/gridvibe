@@ -29,9 +29,11 @@ module's callers rely on. Late binding is the reason, not the cycle.
 import logging
 import os
 import re
+import threading
 import time
 import uuid
-from typing import Any, Dict, List, Optional, Set, Tuple
+from contextlib import nullcontext
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -99,12 +101,13 @@ def workspace_label_conflict(
     disambiguate unlabelled workspaces. Nothing is mutated either way — no
     auto-rename, no auto-forget; the choice belongs to the user.
 
-    **This is a check, not a mutex.** The two reads are not one snapshot and no
-    lock spans this call and the create/rename that follows it, so two
-    simultaneous creates of the same name can both pass. Accepted deliberately:
-    GridVibe binds to ``127.0.0.1`` and is single-user by design, and the
-    consequence is a duplicate label rather than lost state. Do not build
-    anything on this returning ``None`` as an exclusive claim.
+    **This is the check, not the claim.** On its own it is two reads and a
+    verdict, with nothing stopping a second request passing the same check
+    before the first commits; `_claim_workspace_label` below is what makes a
+    check and the create/rename that follows it one decision (ISSUE-2026-042).
+    A caller that only wants to *report* availability — the launcher's
+    destination picker — may call this directly and gets an advisory answer;
+    a caller that is about to mutate goes through the claim.
     """
     normalized = normalize_workspace_label(label)
     if not normalized:
@@ -347,7 +350,7 @@ def forget_emptied_default_workspace(closed_workspace_id: Any) -> bool:
     return forgotten
 
 
-# ==================== Destination resolution ====================
+# ==================== Request errors ====================
 
 
 class WorkspaceRequestError(ValueError):
@@ -357,6 +360,92 @@ class WorkspaceRequestError(ValueError):
         super().__init__(message)
         self.status = status
         self.payload = payload or {}
+
+
+# ==================== Label claims ====================
+
+#: The workspace-name namespace has one owner and one mutex. Every path that
+#: takes a name — create, rename, launch-into-new, move-into-new — serializes
+#: here so its check and its mutation are one decision (ISSUE-2026-042);
+#: before this they were two separately locked steps and two windows could
+#: both pass the check and both create "api work".
+#:
+#: Lock order is ``_label_namespace_lock`` → (``SessionManager.lock``,
+#: ``RuntimeStateStore`` + its cross-process file lock), never the reverse:
+#: the saved half of the namespace lives in ``runtime_state.json``, so the
+#: claim deliberately reads a durable file — and holding the *manager* lock
+#: across that read is exactly what Guardrail 2 forbids, which is why the
+#: claim has a lock of its own rather than widening one that already exists.
+#:
+#: The claim is **process-local**, and deliberately so: the live half of the
+#: namespace is this process's in-memory workspace table, which a second
+#: GridVibe process cannot see at all. Two processes sharing one install can
+#: still mint the same name; the supported shape is one process per install
+#: bound to ``127.0.0.1``, and the cost is a duplicate label, never lost state.
+_label_namespace_lock = threading.RLock()
+
+
+def _claim_workspace_label(
+    label: Any,
+    commit: Callable[[str], Any],
+    *,
+    exclude_workspace_id: Any = None,
+) -> Any:
+    """Resolve the namespace and run ``commit`` as one indivisible decision.
+
+    ``commit`` receives the normalized label and performs the live mutation;
+    it runs while the namespace is held, so nothing can take the name between
+    the verdict and the mutation. Raises `WorkspaceRequestError` with the
+    actionable ``409`` payload when the name is already someone else's.
+    """
+    normalized = normalize_workspace_label(label)
+    # An *empty* label is not a name: it claims nothing, so an unlabelled
+    # create neither waits on the namespace nor holds it up for one that does.
+    with _label_namespace_lock if normalized else nullcontext():
+        conflict = workspace_label_conflict(
+            normalized, exclude_workspace_id=exclude_workspace_id
+        )
+        if conflict is not None:
+            raise WorkspaceRequestError(conflict["error"], status=409, payload=conflict)
+        return commit(normalized)
+
+
+def create_labelled_workspace(label: Any, *, retain_when_empty: bool = False) -> Any:
+    """Create one live workspace, claiming its label in the same decision."""
+    return _claim_workspace_label(
+        label,
+        lambda claimed: _manager().create_workspace(
+            label=claimed, retain_when_empty=retain_when_empty
+        ),
+    )
+
+
+def rename_workspace_label(workspace_id: Any, label: Any) -> Any:
+    """Rename one live workspace, claiming the new label in the same decision.
+
+    A missing workspace is reported as missing *before* the namespace is
+    consulted, so renaming something that is already gone answers ``404``
+    rather than blaming whoever holds the name it asked for.
+    """
+    resolved_workspace_id = normalize_workspace_id(workspace_id)
+    session_manager = _manager()
+    if session_manager.get_workspace(resolved_workspace_id) is None:
+        raise WorkspaceRequestError("Workspace not found", status=404)
+
+    def commit(claimed: str) -> Any:
+        workspace = session_manager.rename_workspace(resolved_workspace_id, claimed)
+        if workspace is None:
+            # Closed while the claim was waiting: nothing was renamed, and the
+            # name it was going to take stays free.
+            raise WorkspaceRequestError("Workspace not found", status=404)
+        return workspace
+
+    return _claim_workspace_label(
+        label, commit, exclude_workspace_id=resolved_workspace_id
+    )
+
+
+# ==================== Destination resolution ====================
 
 
 def resolve_launch_destination(data: Dict[str, Any]) -> Tuple[str, str]:
@@ -378,13 +467,9 @@ def resolve_launch_destination(data: Dict[str, Any]) -> Tuple[str, str]:
         )
         # A new workspace takes a name in the shared namespace: refuse a label
         # already held by a live workspace or a saved slot rather than minting
-        # a rival to state the user already has (SGP-13).
-        conflict = workspace_label_conflict(label)
-        if conflict is not None:
-            raise WorkspaceRequestError(
-                conflict["error"], status=409, payload=conflict
-            )
-        workspace = session_manager.create_workspace(label=label)
+        # a rival to state the user already has (SGP-13). Claimed rather than
+        # merely checked, so two launches into one new name cannot both pass.
+        workspace = create_labelled_workspace(label)
         return workspace.workspace_id, workspace.workspace_id
 
     try:

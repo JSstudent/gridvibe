@@ -5,6 +5,11 @@ handle the two-file merge (config.json overriding default_config.json), and
 `RuntimeConfig` holds the settings that the rest of the app reads at runtime;
 call `runtime_config.refresh()` after persisting a config change.
 
+`RuntimeConfig` publishes one immutable generation at a time, so a refresh is
+a single reference swap rather than two dozen separate assignments; a consumer
+that reads more than one setting takes `runtime_config.snapshot()` once and
+reads the whole payload off that.
+
 `config.json` is GridVibe's third durable JSON store, alongside
 `runtime_state.json` and `saved_sessions.json`, and it takes the same four
 mechanics from `web/state_files.py`: a cross-process sidecar lock over the
@@ -18,6 +23,7 @@ import json
 import logging
 import os
 import threading
+from dataclasses import dataclass, fields, replace
 from typing import Any, Dict, Optional, Tuple
 
 from web.paths import BASE_DIR
@@ -245,151 +251,240 @@ def _clamped_int(value: Any, minimum: int, maximum: int, default: int) -> int:
     return max(minimum, min(maximum, parsed))
 
 
-class RuntimeConfig:
-    """Config-backed runtime settings shared across the app.
+@dataclass(frozen=True)
+class RuntimeConfigState:
+    """One complete, normalized generation of the config-backed settings.
 
-    One instance (`runtime_config` below) replaces the former web.api module
-    globals; tests patch attributes on that instance.
+    Frozen because publication is a reference swap (ISSUE-2026-041): a reader
+    that captured a generation keeps reading *that* generation even while the
+    next one is published, so a multi-field payload can never be half of one
+    config file and half of the next. The two dictionary fields are shared by
+    reference and are read-only by convention — nothing writes through them.
     """
 
-    def __init__(self):
-        self.app_config: Dict[str, Any] = {}
-        self.ssh_config: Dict[str, Any] = {}
-        self.ssh_host_key_policy = "auto-add"
-        self.max_sessions = 4
-        self.terminal_font_size = 14
-        self.terminal_font_family = "Consolas, Monaco, 'Courier New', monospace"
-        self.app_theme = "system"
-        self.app_surface_mode = "normal"
-        self.multi_workspace_enabled = False
-        self.workspace_autosave_interval_minutes = AUTOSAVE_INTERVAL_MINUTES_DEFAULT
-        self.explorer_search_max_files = EXPLORER_SEARCH_MAX_FILES_DEFAULT
-        self.explorer_search_max_matches = EXPLORER_SEARCH_MAX_MATCHES_DEFAULT
-        self.explorer_search_max_matches_per_file = EXPLORER_SEARCH_MAX_MATCHES_PER_FILE_DEFAULT
-        self.explorer_search_max_file_bytes = EXPLORER_SEARCH_MAX_FILE_BYTES_DEFAULT
-        self.explorer_search_timeout_seconds = EXPLORER_SEARCH_TIMEOUT_SECONDS_DEFAULT
-        self.voice_enabled = True
-        self.voice_engine = "vosk"
-        self.vosk_service_url = "ws://localhost:2700"
-        self.vosk_model = "vosk-model-en-us-0.22"
-        self.whisper_model = "base"
-        self.whisper_device = "cpu"
-        self.whisper_compute_type = "int8"
-        self.voice_language = "en-US"
-        self.vosk_startup_timeout_seconds = 180
-        self.refresh()
+    app_config: Dict[str, Any]
+    ssh_config: Dict[str, Any]
+    ssh_host_key_policy: str
+    max_sessions: int
+    terminal_font_size: int
+    terminal_font_family: str
+    app_theme: str
+    app_surface_mode: str
+    multi_workspace_enabled: bool
+    workspace_autosave_interval_minutes: int
+    explorer_search_max_files: int
+    explorer_search_max_matches: int
+    explorer_search_max_matches_per_file: int
+    explorer_search_max_file_bytes: int
+    explorer_search_timeout_seconds: int
+    voice_enabled: Any
+    voice_engine: str
+    vosk_service_url: Any
+    vosk_model: Any
+    whisper_model: str
+    whisper_device: Any
+    whisper_compute_type: Any
+    voice_language: Any
+    vosk_startup_timeout_seconds: int
 
-    def refresh(self):
-        """Reload the config-backed settings from disk."""
-        self.app_config = load_config()
-        self.ssh_config = self.app_config.get("ssh", {})
-        host_key_policy = str(self.ssh_config.get("host_key_policy", "auto-add")).strip().lower()
-        if host_key_policy not in HOST_KEY_POLICY_OPTIONS:
-            host_key_policy = "auto-add"
-        self.ssh_host_key_policy = host_key_policy
-        terminal_config = self.app_config.get("terminal", {})
-        try:
-            self.max_sessions = max(
-                MAX_SESSIONS_MIN,
-                min(MAX_SESSIONS_MAX, int(terminal_config.get("max_sessions", 4))),
-            )
-        except (ValueError, TypeError):
-            self.max_sessions = 4
-        try:
-            self.terminal_font_size = max(
-                TERMINAL_FONT_SIZE_MIN,
-                min(TERMINAL_FONT_SIZE_MAX, int(terminal_config.get("font_size", 14))),
-            )
-        except (ValueError, TypeError):
-            self.terminal_font_size = 14
-        self.terminal_font_family = str(
-            terminal_config.get("font_family", DEFAULT_TERMINAL_FONT_FAMILY)
-        ).strip() or DEFAULT_TERMINAL_FONT_FAMILY
-        appearance_config = self.app_config.get("appearance", {})
-        app_theme = str(appearance_config.get("theme", "system")).strip().lower()
-        if app_theme not in {"system", "light", "dark"}:
-            app_theme = "system"
-        self.app_theme = app_theme
 
-        workspace_config = self.app_config.get("workspace", {})
-        self.app_surface_mode = _normalize_surface_mode(workspace_config.get("surface_mode"))
-        multi_workspace_enabled = workspace_config.get("multi_workspace_enabled", False)
-        self.multi_workspace_enabled = (
-            multi_workspace_enabled
-            if isinstance(multi_workspace_enabled, bool)
-            else False
+#: Every published settings name, used to fold test-scoped attribute overrides
+#: into a captured generation (see `RuntimeConfig.snapshot`).
+_RUNTIME_CONFIG_FIELDS = frozenset(field.name for field in fields(RuntimeConfigState))
+
+
+def _build_runtime_state(app_config: Dict[str, Any]) -> RuntimeConfigState:
+    """Normalize one whole configuration into a publishable generation.
+
+    Pure: it reads the merged config mapping and returns a new state, never
+    touching the published one. That is what lets `RuntimeConfig.refresh()`
+    do all of its work off to the side and then publish in a single step.
+    """
+    ssh_config = app_config.get("ssh", {})
+    host_key_policy = str(ssh_config.get("host_key_policy", "auto-add")).strip().lower()
+    if host_key_policy not in HOST_KEY_POLICY_OPTIONS:
+        host_key_policy = "auto-add"
+
+    terminal_config = app_config.get("terminal", {})
+    try:
+        max_sessions = max(
+            MAX_SESSIONS_MIN,
+            min(MAX_SESSIONS_MAX, int(terminal_config.get("max_sessions", 4))),
         )
-        try:
-            self.workspace_autosave_interval_minutes = max(
-                AUTOSAVE_INTERVAL_MINUTES_MIN,
-                min(
-                    AUTOSAVE_INTERVAL_MINUTES_MAX,
-                    int(workspace_config.get(
-                        "autosave_interval_minutes", AUTOSAVE_INTERVAL_MINUTES_DEFAULT
-                    )),
-                ),
-            )
-        except (ValueError, TypeError):
-            self.workspace_autosave_interval_minutes = AUTOSAVE_INTERVAL_MINUTES_DEFAULT
+    except (ValueError, TypeError):
+        max_sessions = 4
+    try:
+        terminal_font_size = max(
+            TERMINAL_FONT_SIZE_MIN,
+            min(TERMINAL_FONT_SIZE_MAX, int(terminal_config.get("font_size", 14))),
+        )
+    except (ValueError, TypeError):
+        terminal_font_size = 14
+    terminal_font_family = str(
+        terminal_config.get("font_family", DEFAULT_TERMINAL_FONT_FAMILY)
+    ).strip() or DEFAULT_TERMINAL_FONT_FAMILY
 
-        search_config = self.app_config.get("explorer_search", {})
-        if not isinstance(search_config, dict):
-            search_config = {}
-        self.explorer_search_max_files = _clamped_int(
+    appearance_config = app_config.get("appearance", {})
+    app_theme = str(appearance_config.get("theme", "system")).strip().lower()
+    if app_theme not in {"system", "light", "dark"}:
+        app_theme = "system"
+
+    workspace_config = app_config.get("workspace", {})
+    multi_workspace_enabled = workspace_config.get("multi_workspace_enabled", False)
+    if not isinstance(multi_workspace_enabled, bool):
+        multi_workspace_enabled = False
+    try:
+        workspace_autosave_interval_minutes = max(
+            AUTOSAVE_INTERVAL_MINUTES_MIN,
+            min(
+                AUTOSAVE_INTERVAL_MINUTES_MAX,
+                int(workspace_config.get(
+                    "autosave_interval_minutes", AUTOSAVE_INTERVAL_MINUTES_DEFAULT
+                )),
+            ),
+        )
+    except (ValueError, TypeError):
+        workspace_autosave_interval_minutes = AUTOSAVE_INTERVAL_MINUTES_DEFAULT
+
+    search_config = app_config.get("explorer_search", {})
+    if not isinstance(search_config, dict):
+        search_config = {}
+
+    voice_config = app_config.get("voice_input", {})
+    voice_engine = str(voice_config.get("engine", "vosk")).strip().lower()
+    if voice_engine not in {"vosk", "whisper"}:
+        voice_engine = "vosk"
+    whisper_model = str(voice_config.get("whisper_model", "base")).strip() or "base"
+    if whisper_model not in WHISPER_MODEL_OPTIONS:
+        whisper_model = "base"
+    try:
+        vosk_startup_timeout_seconds = max(
+            30,
+            int(voice_config.get("vosk_startup_timeout_seconds", 180)),
+        )
+    except (ValueError, TypeError):
+        vosk_startup_timeout_seconds = 180
+
+    return RuntimeConfigState(
+        app_config=app_config,
+        ssh_config=ssh_config,
+        ssh_host_key_policy=host_key_policy,
+        max_sessions=max_sessions,
+        terminal_font_size=terminal_font_size,
+        terminal_font_family=terminal_font_family,
+        app_theme=app_theme,
+        app_surface_mode=_normalize_surface_mode(workspace_config.get("surface_mode")),
+        multi_workspace_enabled=multi_workspace_enabled,
+        workspace_autosave_interval_minutes=workspace_autosave_interval_minutes,
+        explorer_search_max_files=_clamped_int(
             search_config.get("max_files", EXPLORER_SEARCH_MAX_FILES_DEFAULT),
             EXPLORER_SEARCH_MAX_FILES_MIN,
             EXPLORER_SEARCH_MAX_FILES_MAX,
             EXPLORER_SEARCH_MAX_FILES_DEFAULT,
-        )
-        self.explorer_search_max_matches = _clamped_int(
+        ),
+        explorer_search_max_matches=_clamped_int(
             search_config.get("max_matches", EXPLORER_SEARCH_MAX_MATCHES_DEFAULT),
             EXPLORER_SEARCH_MAX_MATCHES_MIN,
             EXPLORER_SEARCH_MAX_MATCHES_MAX,
             EXPLORER_SEARCH_MAX_MATCHES_DEFAULT,
-        )
-        self.explorer_search_max_matches_per_file = _clamped_int(
+        ),
+        explorer_search_max_matches_per_file=_clamped_int(
             search_config.get(
                 "max_matches_per_file", EXPLORER_SEARCH_MAX_MATCHES_PER_FILE_DEFAULT
             ),
             EXPLORER_SEARCH_MAX_MATCHES_PER_FILE_MIN,
             EXPLORER_SEARCH_MAX_MATCHES_PER_FILE_MAX,
             EXPLORER_SEARCH_MAX_MATCHES_PER_FILE_DEFAULT,
-        )
-        self.explorer_search_max_file_bytes = _clamped_int(
+        ),
+        explorer_search_max_file_bytes=_clamped_int(
             search_config.get("max_file_bytes", EXPLORER_SEARCH_MAX_FILE_BYTES_DEFAULT),
             EXPLORER_SEARCH_MAX_FILE_BYTES_MIN,
             EXPLORER_SEARCH_MAX_FILE_BYTES_MAX,
             EXPLORER_SEARCH_MAX_FILE_BYTES_DEFAULT,
-        )
-        self.explorer_search_timeout_seconds = _clamped_int(
+        ),
+        explorer_search_timeout_seconds=_clamped_int(
             search_config.get("timeout_seconds", EXPLORER_SEARCH_TIMEOUT_SECONDS_DEFAULT),
             EXPLORER_SEARCH_TIMEOUT_SECONDS_MIN,
             EXPLORER_SEARCH_TIMEOUT_SECONDS_MAX,
             EXPLORER_SEARCH_TIMEOUT_SECONDS_DEFAULT,
-        )
+        ),
+        voice_enabled=voice_config.get("enabled", True),
+        voice_engine=voice_engine,
+        vosk_service_url=voice_config.get("vosk_service_url", "ws://localhost:2700"),
+        vosk_model=voice_config.get("vosk_model", "vosk-model-en-us-0.22"),
+        whisper_model=whisper_model,
+        whisper_device=voice_config.get("whisper_device", "cpu"),
+        whisper_compute_type=voice_config.get("whisper_compute_type", "int8"),
+        voice_language=voice_config.get("language", "en-US"),
+        vosk_startup_timeout_seconds=vosk_startup_timeout_seconds,
+    )
 
-        voice_config = self.app_config.get("voice_input", {})
-        self.voice_enabled = voice_config.get("enabled", True)
-        voice_engine = str(voice_config.get("engine", "vosk")).strip().lower()
-        if voice_engine not in {"vosk", "whisper"}:
-            voice_engine = "vosk"
-        self.voice_engine = voice_engine
-        self.vosk_service_url = voice_config.get("vosk_service_url", "ws://localhost:2700")
-        self.vosk_model = voice_config.get("vosk_model", "vosk-model-en-us-0.22")
-        whisper_model = str(voice_config.get("whisper_model", "base")).strip() or "base"
-        if whisper_model not in WHISPER_MODEL_OPTIONS:
-            whisper_model = "base"
-        self.whisper_model = whisper_model
-        self.whisper_device = voice_config.get("whisper_device", "cpu")
-        self.whisper_compute_type = voice_config.get("whisper_compute_type", "int8")
-        self.voice_language = voice_config.get("language", "en-US")
+
+class RuntimeConfig:
+    """Config-backed runtime settings shared across the app.
+
+    One instance (`runtime_config` below) replaces the former web.api module
+    globals. Every setting lives in one immutable `RuntimeConfigState`, and a
+    refresh publishes the next generation with a single reference swap
+    (ISSUE-2026-041) — settings used to be assigned field by field, so a
+    request that read a dozen of them could serve half of the old config and
+    half of the new. Reads are unlocked and stay that way; **a consumer that
+    reads more than one setting calls `snapshot()` once** and reads the fields
+    off that, because reading `runtime_config.a` and `runtime_config.b` is
+    still two reads however atomically each one is published.
+
+    Attribute reads are delegated to the published generation, so
+    ``runtime_config.max_sessions`` keeps working everywhere and a test's
+    scoped `patch.object(runtime_config, "voice_engine", ...)` still shadows
+    it — and `snapshot()` folds those shadows in, so a patched setting reaches
+    a snapshot reader exactly as it reaches a direct one. An override is an
+    *instance attribute*, which means it now outlives a refresh instead of
+    being overwritten by one: scope one with `patch.object`, which removes the
+    attribute again on exit, rather than assigning the old value back.
+    """
+
+    def __init__(self):
+        self.refresh()
+
+    def refresh(self):
+        """Reload the config-backed settings from disk and publish them.
+
+        The whole generation is normalized off to the side and installed in
+        one assignment, under `_config_lock` so two concurrent refreshes
+        cannot publish out of order and leave the staler one live.
+        """
+        with _config_lock:
+            self._state = _build_runtime_state(load_config())
+
+    def snapshot(self) -> RuntimeConfigState:
+        """Capture the whole current generation for a multi-field reader."""
+        state = self._state
+        overrides = {
+            name: value
+            for name, value in self.__dict__.items()
+            if name in _RUNTIME_CONFIG_FIELDS
+        }
+        return replace(state, **overrides) if overrides else state
+
+    def __getattr__(self, name: str) -> Any:
+        """Read one setting from the published generation.
+
+        Only reached when the instance has no attribute of its own, so a
+        test-scoped override wins before this and the published state is the
+        fallback rather than the other way round.
+        """
+        if name.startswith("_"):
+            raise AttributeError(name)
         try:
-            self.vosk_startup_timeout_seconds = max(
-                30,
-                int(voice_config.get("vosk_startup_timeout_seconds", 180)),
-            )
-        except (ValueError, TypeError):
-            self.vosk_startup_timeout_seconds = 180
+            state = self.__dict__["_state"]
+        except KeyError:  # pragma: no cover - only before the first refresh
+            raise AttributeError(name) from None
+        try:
+            return getattr(state, name)
+        except AttributeError:
+            raise AttributeError(
+                f"{type(self).__name__} has no runtime setting {name!r}"
+            ) from None
 
 
 runtime_config = RuntimeConfig()

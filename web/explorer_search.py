@@ -133,13 +133,14 @@ def parse_search_options(args: Any) -> SearchOptions:
 
 
 def search_limits_from_config() -> SearchLimits:
-    """Read the bounded-search limits from RuntimeConfig."""
+    """Read the bounded-search limits from one captured RuntimeConfig generation."""
+    settings = runtime_config.snapshot()
     return SearchLimits(
-        max_files=int(runtime_config.explorer_search_max_files),
-        max_matches=int(runtime_config.explorer_search_max_matches),
-        max_matches_per_file=int(runtime_config.explorer_search_max_matches_per_file),
-        max_file_bytes=int(runtime_config.explorer_search_max_file_bytes),
-        timeout_seconds=float(runtime_config.explorer_search_timeout_seconds),
+        max_files=int(settings.explorer_search_max_files),
+        max_matches=int(settings.explorer_search_max_matches),
+        max_matches_per_file=int(settings.explorer_search_max_matches_per_file),
+        max_file_bytes=int(settings.explorer_search_max_file_bytes),
+        timeout_seconds=float(settings.explorer_search_timeout_seconds),
     )
 
 

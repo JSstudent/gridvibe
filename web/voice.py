@@ -382,19 +382,23 @@ def _ensure_whisper_model():
             "numpy is not installed. Install it with: pip install numpy"
         )
 
+    # One captured generation for all three parameters: the cache key and the
+    # model that gets loaded under it must describe the same settings, or a
+    # refresh landing between them caches a model under the wrong key.
+    settings = runtime_config.snapshot()
     with _whisper_model_lock:
-        wanted_params = (runtime_config.whisper_model, runtime_config.whisper_device, runtime_config.whisper_compute_type)
+        wanted_params = (settings.whisper_model, settings.whisper_device, settings.whisper_compute_type)
         if _whisper_model_instance is None or _whisper_model_params != wanted_params:
             logger.info(
                 "Loading faster-whisper model %s on %s (%s)",
-                runtime_config.whisper_model,
-                runtime_config.whisper_device,
-                runtime_config.whisper_compute_type,
+                settings.whisper_model,
+                settings.whisper_device,
+                settings.whisper_compute_type,
             )
             _whisper_model_instance = WhisperModel(
-                runtime_config.whisper_model,
-                device=runtime_config.whisper_device,
-                compute_type=runtime_config.whisper_compute_type,
+                settings.whisper_model,
+                device=settings.whisper_device,
+                compute_type=settings.whisper_compute_type,
             )
             _whisper_model_params = wanted_params
         return _whisper_model_instance

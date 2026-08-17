@@ -33,58 +33,6 @@ Confirmed by code inspection. Nothing in GridVibe enables or disables mouse trac
 ### Proposed solution:
 Make the recovery explicit instead of incidental. In `web/static/js/terminals.js`, have both `clearTerminalDisplay()` and `refreshTerminalDisplay()` write an explicit mouse-tracking teardown into the pane after `term.reset()` — `\033[?1000l\033[?1002l\033[?1003l\033[?1005l\033[?1006l\033[?1015l` through `term.write()`, which changes only the client's mode state and sends nothing to the shell, so it stays inside the pane's existing behavior and touches no route. For `refreshTerminalDisplay()` the write must happen *after* the replayed buffer is applied, not before the `join_session` round trip, or the replay will overwrite it again; sequencing it against the async replay is the main implementation question. Consider whether the replay itself should be sanitized instead — filtering mode-setting sequences out of `_get_buffered_terminal_output()` is more invasive, risks corrupting a legitimately running TUI's state on rejoin, and should not be done without deciding what a rejoin to a *live* TUI is supposed to look like. A visible affordance is worth considering separately: a pane that is receiving mouse reports at a shell prompt could surface a one-click "Reset terminal modes" action rather than requiring the user to guess. Regression tests belong in `tests/test_api.py` alongside `test_terminals_page_clear_sends_shell_command_and_purges_replay_buffer`, asserting that both handlers emit the teardown sequence and that the refresh path emits it after the rejoin.
 
-### Issue ID: ISSUE-2026-041
-- Title: RuntimeConfig publishes settings field by field, so a reader can serve two generations at once
-- Priority: Medium
-- Status: Open
-- Area: `web/config.py`, `web/api.py`, `tests/test_backend_concurrency_contract.py`
-- Assignee: Unassigned
-- Tags: `config`, `concurrency`, `api`, `tests`
-- Reported: 2026-08-17
-
-Description:
-`RuntimeConfig.refresh()` assigns `app_config`, the section dictionaries, and every derived attribute one at a time, and readers take no lock at all. `_public_app_config()` reads roughly fifteen attributes independently, as do the `app_config_updated` broadcast and the other multi-field consumers, so a request that overlaps a refresh can be served half of one generation and half of the next — a response no config file ever described. This is the Guardrail 2 atomic-multi-value-snapshot rule.
-
-The durable side is *not* affected: the App Settings write path serializes load/merge/save/refresh under `_config_lock`, and `web/state_files.py` protects the file itself. The defect is purely in-memory publication, which is why adding a lock around `refresh()` alone would not fix it — every existing reader would still race exactly as before.
-
-Steps to reproduce:
-Run `python -m unittest tests.test_backend_concurrency_contract.RuntimeConfigPublicationTestCase`. The interleaving is forced rather than raced for: `refresh()` is paused immediately after it publishes one derived field and the payload is built from that state.
-
-Expected behavior:
-A reader observes one whole generation. Multi-field consumers capture one generation before building a payload.
-
-Actual behavior / logs:
-The payload comes back mixed — `{'theme': 'B', 'max_sessions': 'B', 'autosave': 'A', 'surface_mode': 'A', 'whisper_model': 'A'}`.
-
-### Proposed solution:
-Normalize the complete next configuration into an immutable state object off-lock, publish it with one reference swap, and give multi-field consumers a snapshot accessor (`runtime_config.snapshot()`) to read from. Existing direct-attribute reads and the suite's scoped attribute patching need a compatibility strategy or must be migrated in the same change. Keep persistence under `_config_lock` and `web/state_files.py` — do not introduce a second durable path.
-
-### Issue ID: ISSUE-2026-042
-- Title: A workspace label is checked for uniqueness but never claimed, so two concurrent creates both win
-- Priority: Medium
-- Status: Open
-- Area: `web/workspaces.py`, `web/api.py`, `tests/test_backend_concurrency_contract.py`
-- Assignee: Unassigned
-- Tags: `workspace`, `concurrency`, `api`, `tests`
-- Reported: 2026-08-17
-
-Description:
-`workspace_label_conflict()` documents itself as "a check, not a mutex": its two reads are not one snapshot, and no lock spans the call and the mutation that follows it. The create route, the rename route, and the launch-into-new path all check availability and then call a separately locked manager mutation, so two concurrent requests can both pass and produce duplicate non-empty labels.
-
-That was an accepted local-single-user tradeoff when it was written. It now contradicts the stronger contract stated in `AGENTS.md` and `CLAUDE.md` — a non-empty label identifies at most one workspace across live and saved state — and Guardrail 2's check-then-act rule.
-
-Steps to reproduce:
-Run `python -m unittest tests.test_backend_concurrency_contract.WorkspaceLabelClaimTestCase`. Two concurrent `POST /api/workspaces` with the same label both return `201`.
-
-Expected behavior:
-Exactly one non-empty claim succeeds; the loser gets the existing actionable `409` (`conflict: "workspace_label_taken"`, the conflicting kind, and the label). Empty labels stay unconstrained. Case- and whitespace-insensitive comparison and self-exclusion on rename are unchanged.
-
-Actual behavior / logs:
-`[201, 201]`, and two live workspaces share the label.
-
-### Proposed solution:
-Introduce one workspace-service owner for "check the live namespace and create/rename" under `SessionManager.lock`, and route direct create, rename, and launch-into-new through it. Snapshot saved-slot conflicts *outside* the manager lock — never do durable-file I/O inside a shared manager lock, and never hold it across Socket.IO work. Keep `POST /api/workspaces/validate-label` advisory and recheck at commit. The cross-process boundary needs an explicit decision: if uniqueness must hold across two concurrently running GridVibe processes, the claim has to participate in the runtime-state sidecar transaction and the lock order must be documented before implementation; if it is process-local for live state, state that boundary rather than implying it. Cover create/create, create/rename, rename/rename, and launch-into-new.
-
 ### Issue ID: ISSUE-2026-043
 - Title: A pooled SSH transport can be reaped while the request that selected it is still opening its channel
 - Priority: Low
@@ -112,6 +60,76 @@ The reaper closes the selected transport mid-open and drops the pool entry.
 Two-phase reservation: select the exact entry and increment its reservation count under the pool lock, run `open_sftp()` outside the lock, then commit last-used metadata by entry identity on success, or release the reservation / evict only the matching failed client on failure. Do **not** move `open_sftp()` under the pool lock — that is network work inside a shared lock, which Guardrails 2 and 3 forbid. Release must stay idempotent across the replacement and loser paths, and every SFTP channel must still be closed exactly once.
 
 ## Closed Issues
+
+### Issue ID: ISSUE-2026-042
+- Title: A workspace label is checked for uniqueness but never claimed, so two concurrent creates both win
+- Priority: Medium
+- Status: Closed
+- Area: `web/workspaces.py`, `web/api.py`, `tests/test_backend_concurrency_contract.py`
+- Assignee: Unassigned
+- Tags: `workspace`, `concurrency`, `api`, `tests`
+- Reported: 2026-08-17
+- Closed: 2026-08-17
+
+Description:
+`workspace_label_conflict()` documented itself as "a check, not a mutex": its two reads are not one snapshot, and no lock spanned the call and the mutation that followed it. The create route, the rename route, and the launch-into-new path all checked availability and then called a separately locked manager mutation, so two concurrent requests could both pass and produce duplicate non-empty labels.
+
+That was an accepted local-single-user tradeoff when it was written. It contradicted the stronger contract stated in `AGENTS.md` and `CLAUDE.md` — a non-empty label identifies at most one workspace across live and saved state — and Guardrail 2's check-then-act rule.
+
+Steps to reproduce:
+Run `python -m unittest tests.test_backend_concurrency_contract.WorkspaceLabelClaimTestCase`. Four of its seven cases were the defect and carried `expectedFailure`; two concurrent `POST /api/workspaces` with the same label both returned `201`.
+
+Expected behavior:
+Exactly one non-empty claim succeeds; the loser gets the existing actionable `409` (`conflict: "workspace_label_taken"`, the conflicting kind, and the label). Empty labels stay unconstrained. Case- and whitespace-insensitive comparison and self-exclusion on rename are unchanged.
+
+Actual behavior / logs:
+`[201, 201]`, and two live workspaces share the label.
+
+Resolution:
+**The namespace has a mutex of its own, and the check and the mutation happen inside it.** `_claim_workspace_label()` in `web/workspaces.py` holds `_label_namespace_lock` across the `workspace_label_conflict()` verdict *and* the live mutation that acts on it, and `create_labelled_workspace()` / `rename_workspace_label()` are the two owners every mutating path now goes through: `POST /api/workspaces`, `PATCH /api/workspaces/<id>`, and `resolve_launch_destination()` — which is launch-into-new *and* move-into-new. `workspace_label_conflict()` keeps its old signature and is still called directly by `POST /api/workspaces/validate-label`, which is advisory by design and rechecks at commit; its docstring now says it is the check rather than the claim.
+
+**A lock of its own, rather than widening one that already exists.** The saved half of the namespace lives in `runtime_state.json` behind a cross-process file lock, and Guardrail 2 forbids reading it under `SessionManager.lock`; the claim lock sits *above* both (`_label_namespace_lock` → manager lock / runtime-state lock, never the reverse) so the durable read stays outside the manager lock. A test pins that directly: while the claim is inside `list_restorable_workspaces()`, a second thread must still be able to take `SessionManager.lock`.
+
+**An empty label takes no lock at all.** It is not a name, so it claims nothing — an unlabelled create neither waits on the namespace nor holds it up for one that does, and concurrent empty-label creates all still succeed.
+
+**The claim is process-local, deliberately.** The live half of the namespace is this process's in-memory workspace table, which a second GridVibe process cannot see, so cross-process uniqueness is not achievable by locking and was not attempted. The supported shape is one process per install bound to `127.0.0.1`; the cost of two is a duplicate label, never lost state. That boundary is stated in the module and in the guardrail rather than implied.
+
+Plan followed:
+Introduce one workspace-service owner for "check the live namespace and create/rename", and route direct create, rename, and launch-into-new through it. Snapshot saved-slot conflicts *outside* the manager lock — never do durable-file I/O inside a shared manager lock, and never hold it across Socket.IO work. Keep `POST /api/workspaces/validate-label` advisory and recheck at commit. Decide the cross-process boundary explicitly and state it. Cover create/create, create/rename, rename/rename, and launch-into-new.
+
+### Issue ID: ISSUE-2026-041
+- Title: RuntimeConfig publishes settings field by field, so a reader can serve two generations at once
+- Priority: Medium
+- Status: Closed
+- Area: `web/config.py`, `web/api.py`, `web/voice.py`, `web/explorer_search.py`, `tests/test_backend_concurrency_contract.py`
+- Assignee: Unassigned
+- Tags: `config`, `concurrency`, `api`, `tests`
+- Reported: 2026-08-17
+- Closed: 2026-08-17
+
+Description:
+`RuntimeConfig.refresh()` assigned `app_config`, the section dictionaries, and every derived attribute one at a time, and readers took no lock at all. `_public_app_config()` reads roughly fifteen attributes independently, as do the `app_config_updated` broadcast and the other multi-field consumers, so a request that overlapped a refresh could be served half of one generation and half of the next — a response no config file ever described. This is the Guardrail 2 atomic-multi-value-snapshot rule.
+
+The durable side was *not* affected: the App Settings write path serializes load/merge/save/refresh under `_config_lock`, and `web/state_files.py` protects the file itself. The defect was purely in-memory publication, which is why adding a lock around `refresh()` alone would not have fixed it — every existing reader would still have raced exactly as before.
+
+Steps to reproduce:
+Run `python -m unittest tests.test_backend_concurrency_contract.RuntimeConfigPublicationTestCase`. The interleaving was forced rather than raced for: `refresh()` was paused immediately after it published one derived field and the payload was built from that state.
+
+Expected behavior:
+A reader observes one whole generation. Multi-field consumers capture one generation before building a payload.
+
+Actual behavior / logs:
+The payload came back mixed — `{'theme': 'B', 'max_sessions': 'B', 'autosave': 'A', 'surface_mode': 'A', 'whisper_model': 'A'}`.
+
+Resolution:
+**One immutable generation, published by one reference swap.** `_build_runtime_state()` normalizes a whole configuration into a frozen `RuntimeConfigState` without touching the published one, and `refresh()` installs it with a single assignment under `_config_lock` — held so two concurrent refreshes cannot publish out of order and leave the staler one live. A refresh caught mid-normalization has published nothing at all, which is what the second (undecorated) test pins.
+
+**A reader still has to read once.** `runtime_config.snapshot()` captures the generation, and every multi-field consumer takes it once and reads the payload off it: `_public_app_config()`, the `app_config_updated` broadcast, `_normalize_app_config_update()` (so a partial update's fallbacks all come from one config), `/api/voice-status`, both page renders, `search_limits_from_config()`, and the faster-whisper model cache, where the cache key and the model loaded under it must describe the same settings. Reading `runtime_config.a` then `runtime_config.b` is still two reads however atomically each is published, so the snapshot — not the swap — is what fixes the readers.
+
+**Direct reads and scoped test patching still work.** Attribute reads delegate to the published generation, so `runtime_config.max_sessions` is unchanged everywhere, and a `patch.object(runtime_config, ...)` override shadows it as an instance attribute; `snapshot()` folds those shadows into the captured generation, so a patched setting reaches a snapshot reader exactly as it reaches a direct one. The one behavioural change is that an override now *outlives* a refresh instead of being overwritten by one, so the single test that hand-rolled save/restore by assignment was migrated to `patch.object` in the same change — restoring by assigning the old value back would have frozen that field for every later test.
+
+Plan followed:
+Normalize the complete next configuration into an immutable state object off-lock, publish it with one reference swap, and give multi-field consumers a snapshot accessor to read from. Preserve existing direct-attribute reads and the suite's scoped attribute patching, or migrate them in the same change. Keep persistence under `_config_lock` and `web/state_files.py` — do not introduce a second durable path.
 
 ### Issue ID: ISSUE-2026-040
 - Title: Explorer Git commands are unbounded in output, in stderr, and in process lifetime

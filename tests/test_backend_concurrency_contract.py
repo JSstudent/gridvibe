@@ -50,6 +50,8 @@ import api
 from web import api as web_api
 from web import config as web_config
 from web import explorer as web_explorer
+from web import runtime_state as web_runtime_state
+from web import workspaces as web_workspaces
 
 #: The one-shot snapshot ISSUE-2026-041 must publish so a multi-field consumer
 #: can read a whole generation instead of racing attribute by attribute. Frozen
@@ -150,7 +152,6 @@ class RuntimeConfigPublicationTestCase(unittest.TestCase):
             {"A"},
         )
 
-    @unittest.expectedFailure
     def test_a_reader_during_a_refresh_never_sees_a_mixed_generation(self):
         """The defect, forced rather than raced for.
 
@@ -199,7 +200,55 @@ class RuntimeConfigPublicationTestCase(unittest.TestCase):
             f"the payload mixed two config generations: {generations}",
         )
 
-    @unittest.expectedFailure
+    def test_a_refresh_caught_mid_normalization_has_published_nothing(self):
+        """Publication is all-or-nothing, asserted where the work now happens.
+
+        The test above hooks attribute assignment, which is exactly what the
+        fix stops doing — so it can only prove the *settled* invariant. This
+        one pauses the refresh inside the normalization of the next generation
+        and reads a payload from underneath it: an in-flight refresh must still
+        be serving the whole previous generation, not a half-built one.
+        """
+        building = threading.Event()
+        may_finish = threading.Event()
+        real_build = web_config._build_runtime_state
+
+        def pausing_build(app_config):
+            state = real_build(app_config)
+            if app_config is GENERATION_B:
+                building.set()
+                may_finish.wait(BARRIER_TIMEOUT_SECONDS)
+            return state
+
+        def refresh_to_b():
+            with patch.object(web_config, "load_config", return_value=GENERATION_B):
+                self.runtime_config.refresh()
+
+        with patch.object(web_config, "_build_runtime_state", pausing_build):
+            writer = threading.Thread(target=refresh_to_b, daemon=True)
+            writer.start()
+            self.assertTrue(
+                building.wait(BARRIER_TIMEOUT_SECONDS),
+                "the refresh never reached the normalization step",
+            )
+            try:
+                during = self._payload_generations(web_api._public_app_config())
+            finally:
+                may_finish.set()
+                writer.join(BARRIER_TIMEOUT_SECONDS * 2)
+
+        self.assertFalse(writer.is_alive(), "the refresh thread never finished")
+        self.assertEqual(
+            set(during.values()),
+            {"A"},
+            f"a refresh still normalizing had already published: {during}",
+        )
+        self.assertEqual(
+            set(self._payload_generations(web_api._public_app_config()).values()),
+            {"B"},
+            "the finished refresh never became visible",
+        )
+
     def test_runtime_config_publishes_a_readable_snapshot(self):
         """Multi-field consumers need one captured generation to read from.
 
@@ -245,10 +294,13 @@ class WorkspaceLabelClaimTestCase(unittest.TestCase):
         while the namespace is still free. It waits with a timeout so that a
         stage which serializes check-and-commit under one lock cannot deadlock
         here — the second thread never reaches the barrier, the wait lapses, and
-        the assertions below still judge the outcome.
+        the assertions below still judge the outcome. That lapse is now the
+        *expected* path for a non-empty label: the claim in `web.workspaces`
+        holds the namespace across check and commit, so the second thread is
+        still waiting for the lock when the first reaches the barrier.
         """
         barrier = threading.Barrier(count, timeout=BARRIER_TIMEOUT_SECONDS)
-        real_conflict = web_api.workspace_label_conflict
+        real_conflict = web_workspaces.workspace_label_conflict
 
         def synchronized_conflict(*args, **kwargs):
             result = real_conflict(*args, **kwargs)
@@ -263,7 +315,7 @@ class WorkspaceLabelClaimTestCase(unittest.TestCase):
         def claim(index):
             responses[index] = request_factory(index)
 
-        with patch.object(web_api, "workspace_label_conflict", synchronized_conflict):
+        with patch.object(web_workspaces, "workspace_label_conflict", synchronized_conflict):
             threads = [
                 threading.Thread(target=claim, args=(index,), daemon=True)
                 for index in range(count)
@@ -284,7 +336,6 @@ class WorkspaceLabelClaimTestCase(unittest.TestCase):
             if str(getattr(workspace, "label", "") or "").strip().casefold() == normalized
         ]
 
-    @unittest.expectedFailure
     def test_concurrent_creates_of_one_label_leave_a_single_workspace(self):
         """Two windows, one name, one winner and one actionable 409."""
         label = "Concurrent Claim"
@@ -303,7 +354,6 @@ class WorkspaceLabelClaimTestCase(unittest.TestCase):
         self.assertEqual(body["label"], label)
         self.assertIn("error", body)
 
-    @unittest.expectedFailure
     def test_concurrent_create_and_rename_cannot_collide_on_one_label(self):
         """The rename path is the same check-then-act through a second route."""
         label = "Shared Name"
@@ -324,6 +374,94 @@ class WorkspaceLabelClaimTestCase(unittest.TestCase):
         statuses = sorted(response.status_code for response in responses)
         self.assertIn(409, statuses)
         self.assertEqual(len(self._labels_in_use(label)), 1)
+
+    def test_concurrent_renames_onto_one_label_leave_a_single_holder(self):
+        """Two renames, one name — the third of the four colliding paths."""
+        label = "Renamed Together"
+        first = api.session_manager.create_workspace(label="First", retain_when_empty=True)
+        second = api.session_manager.create_workspace(label="Second", retain_when_empty=True)
+        targets = [first.workspace_id, second.workspace_id]
+
+        responses = self._concurrent_claims(
+            lambda index: self.client.patch(
+                f"/api/workspaces/{targets[index]}",
+                json={"label": label},
+            )
+        )
+
+        statuses = sorted(response.status_code for response in responses)
+        self.assertEqual(statuses, [200, 409])
+        self.assertEqual(len(self._labels_in_use(label)), 1)
+        self.assertEqual(
+            next(
+                response for response in responses if response.status_code == 409
+            ).get_json()["conflict"],
+            "workspace_label_taken",
+        )
+
+    def test_concurrent_launches_into_one_new_label_leave_a_single_workspace(self):
+        """Launch-into-new claims through the same owner as create and rename.
+
+        Exercised at `resolve_launch_destination`, which is where a launch (and
+        a move into a new workspace) takes its name: going through the launch
+        route would spawn real shells to prove a naming rule.
+        """
+        label = "Launched Into"
+        outcomes = [None, None]
+
+        def claim(index):
+            try:
+                outcomes[index] = web_workspaces.resolve_launch_destination(
+                    {"new_workspace": True, "workspace_label": label}
+                )
+            except web_workspaces.WorkspaceRequestError as exc:
+                outcomes[index] = exc
+
+        self._concurrent_claims(lambda index: claim(index) or "done")
+
+        refusals = [outcome for outcome in outcomes if isinstance(outcome, Exception)]
+        self.assertEqual(len(refusals), 1, f"expected exactly one refusal: {outcomes}")
+        self.assertEqual(refusals[0].status, 409)
+        self.assertEqual(refusals[0].payload["conflict"], "workspace_label_taken")
+        self.assertEqual(len(self._labels_in_use(label)), 1)
+
+    def test_a_claim_reads_the_saved_slots_without_the_manager_lock(self):
+        """Durable-file I/O never happens under `SessionManager.lock`.
+
+        The saved half of the namespace lives in `runtime_state.json` and its
+        cross-process lock, so a claim that read it while holding the manager
+        lock would stall every session operation in this process behind another
+        process's write — the half of Guardrail 2 the fix must not trade away
+        to get the other half.
+        """
+        manager_lock_free = threading.Event()
+        real_list = web_runtime_state.list_restorable_workspaces
+
+        def probe_manager_lock():
+            if api.session_manager.lock.acquire(timeout=BARRIER_TIMEOUT_SECONDS):
+                try:
+                    manager_lock_free.set()
+                finally:
+                    api.session_manager.lock.release()
+
+        def probing_list(*args, **kwargs):
+            # A separate thread, because the manager lock is re-entrant and the
+            # claiming thread could re-acquire one it is already holding.
+            probe = threading.Thread(target=probe_manager_lock, daemon=True)
+            probe.start()
+            probe.join(BARRIER_TIMEOUT_SECONDS * 2)
+            return real_list(*args, **kwargs)
+
+        with patch.object(
+            web_runtime_state, "list_restorable_workspaces", probing_list
+        ):
+            response = self.client.post("/api/workspaces", json={"label": "Lock Probe"})
+
+        self.assertEqual(response.status_code, 201)
+        self.assertTrue(
+            manager_lock_free.is_set(),
+            "the manager lock was held across the saved-slot read",
+        )
 
     def test_concurrent_empty_label_claims_are_all_allowed(self):
         """Control: an empty label is not a name and stays unconstrained.

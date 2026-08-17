@@ -15520,15 +15520,15 @@ class DeadCodeSweepTestCase(unittest.TestCase):
     # ── 10.2: terminal font settings wired through to terminals page ────────
 
     def test_terminal_font_settings_in_terminals_page_body(self):
-        orig_size = api.runtime_config.terminal_font_size
-        orig_family = api.runtime_config.terminal_font_family
-        api.runtime_config.terminal_font_size = 18
-        api.runtime_config.terminal_font_family = "JetBrains Mono, monospace"
-        try:
+        # Scoped with patch.object like every other RuntimeConfig override in
+        # this suite: settings are published as one immutable generation now
+        # (ISSUE-2026-041), so an assignment is a lasting shadow rather than a
+        # value the next refresh overwrites, and restoring by assigning the old
+        # value back would freeze the field for every later test.
+        with patch.object(api.runtime_config, "terminal_font_size", 18), patch.object(
+            api.runtime_config, "terminal_font_family", "JetBrains Mono, monospace"
+        ):
             html = self.client.get("/terminals").get_data(as_text=True)
-        finally:
-            api.runtime_config.terminal_font_size = orig_size
-            api.runtime_config.terminal_font_family = orig_family
         self.assertIn('data-terminal-font-size="18"', html)
         self.assertIn("JetBrains Mono", html)
 

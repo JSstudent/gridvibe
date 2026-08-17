@@ -79,6 +79,7 @@ from web.config import (
     TERMINAL_FONT_SIZE_MIN,
     WHISPER_MODEL_OPTIONS,
     ConfigPersistenceError,
+    RuntimeConfigState,
     _config_lock,
     _merge_dicts,
     _normalize_surface_mode,
@@ -316,10 +317,12 @@ from web.voice import (  # noqa: F401 - re-exported for backwards compatibility
 )
 from web.workspaces import (
     DEFAULT_WORKSPACE_ID,
+    WorkspaceRequestError,
     _redacted_launch_summary,
     capacity_refusal,
     close_extra_workspaces,
     close_live_workspace,
+    create_labelled_workspace,
     forget_emptied_default_workspace,
     forget_pruned_workspaces,
     launch_session_group,
@@ -329,6 +332,7 @@ from web.workspaces import (
     normalize_workspace_id,
     normalize_workspace_label,
     public_workspace_payload,
+    rename_workspace_label,
     restore_workspaces,
     workspace_has_groups,
     workspace_label,
@@ -370,40 +374,51 @@ def _refresh_runtime_config():
     runtime_config.refresh()
 
 
-def _active_voice_model_name() -> str:
-    """Return the currently configured STT model name."""
-    return runtime_config.whisper_model if runtime_config.voice_engine == "whisper" else runtime_config.vosk_model
+def _active_voice_model_name(settings: Optional[RuntimeConfigState] = None) -> str:
+    """Return the currently configured STT model name.
+
+    A caller already holding a captured generation passes it in, so the engine
+    and the model it names come from the same one.
+    """
+    settings = settings if settings is not None else runtime_config.snapshot()
+    return settings.whisper_model if settings.voice_engine == "whisper" else settings.vosk_model
 
 
 def _public_app_config() -> Dict[str, Any]:
-    """Return the subset of app config that the launcher can edit safely."""
+    """Return the subset of app config that the launcher can edit safely.
+
+    Built from one captured generation (ISSUE-2026-041): a payload of twelve
+    independently read settings could otherwise describe a config file that
+    never existed, half from before a concurrent refresh and half from after.
+    """
+    settings = runtime_config.snapshot()
     return {
         "install_kind": install_kind(),
         "version": __version__,
         "appearance": {
-            "theme": runtime_config.app_theme,
+            "theme": settings.app_theme,
         },
         "workspace": {
-            "surface_mode": runtime_config.app_surface_mode,
-            "autosave_interval_minutes": runtime_config.workspace_autosave_interval_minutes,
-            "multi_workspace_enabled": runtime_config.multi_workspace_enabled,
+            "surface_mode": settings.app_surface_mode,
+            "autosave_interval_minutes": settings.workspace_autosave_interval_minutes,
+            "multi_workspace_enabled": settings.multi_workspace_enabled,
         },
         "ssh": {
-            "host_key_policy": runtime_config.ssh_host_key_policy,
+            "host_key_policy": settings.ssh_host_key_policy,
         },
         "terminal": {
-            "font_family": runtime_config.terminal_font_family,
-            "font_size": runtime_config.terminal_font_size,
-            "max_sessions": runtime_config.max_sessions,
+            "font_family": settings.terminal_font_family,
+            "font_size": settings.terminal_font_size,
+            "max_sessions": settings.max_sessions,
         },
         "voice_input": {
-            "enabled": runtime_config.voice_enabled,
-            "engine": runtime_config.voice_engine,
-            "vosk_model": runtime_config.vosk_model,
-            "whisper_model": runtime_config.whisper_model,
-            "whisper_device": runtime_config.whisper_device,
-            "whisper_compute_type": runtime_config.whisper_compute_type,
-            "language": runtime_config.voice_language,
+            "enabled": settings.voice_enabled,
+            "engine": settings.voice_engine,
+            "vosk_model": settings.vosk_model,
+            "whisper_model": settings.whisper_model,
+            "whisper_device": settings.whisper_device,
+            "whisper_compute_type": settings.whisper_compute_type,
+            "language": settings.voice_language,
         }
     }
 
@@ -415,19 +430,20 @@ def _broadcast_app_config_update(apply_scope: str = "session"):
     default ``session`` targets only the focused terminal, ``all`` pushes the
     font settings to every active session.
     """
+    settings = runtime_config.snapshot()
     socketio.emit(
         "app_config_updated",
         {
             "appearance": {
-                "theme": runtime_config.app_theme,
+                "theme": settings.app_theme,
             },
             "workspace": {
-                "surface_mode": runtime_config.app_surface_mode,
-                "multi_workspace_enabled": runtime_config.multi_workspace_enabled,
+                "surface_mode": settings.app_surface_mode,
+                "multi_workspace_enabled": settings.multi_workspace_enabled,
             },
             "terminal": {
-                "font_family": runtime_config.terminal_font_family,
-                "font_size": runtime_config.terminal_font_size,
+                "font_family": settings.terminal_font_family,
+                "font_size": settings.terminal_font_size,
                 "apply_scope": "all" if apply_scope == "all" else "session",
             },
             "timestamp": int(time.time() * 1000),
@@ -436,34 +452,40 @@ def _broadcast_app_config_update(apply_scope: str = "session"):
 
 
 def _normalize_app_config_update(data: Any) -> Dict[str, Any]:
-    """Validate and normalize launcher-editable app settings."""
+    """Validate and normalize launcher-editable app settings.
+
+    Every omitted field falls back to the *same* captured generation
+    (ISSUE-2026-041), so a partial update cannot write back a mixture of two
+    configs for the settings the request did not mention.
+    """
+    settings = runtime_config.snapshot()
     payload = data if isinstance(data, dict) else {}
     appearance = payload.get("appearance")
     if not isinstance(appearance, dict):
         appearance = {}
-    theme = str(appearance.get("theme", runtime_config.app_theme)).strip().lower()
+    theme = str(appearance.get("theme", settings.app_theme)).strip().lower()
     if theme not in {"system", "light", "dark"}:
-        theme = runtime_config.app_theme
+        theme = settings.app_theme
 
     workspace = payload.get("workspace")
     if not isinstance(workspace, dict):
         workspace = {}
-    surface_mode = _normalize_surface_mode(workspace.get("surface_mode"), runtime_config.app_surface_mode)
+    surface_mode = _normalize_surface_mode(workspace.get("surface_mode"), settings.app_surface_mode)
     multi_workspace_enabled = workspace.get(
         "multi_workspace_enabled",
-        runtime_config.multi_workspace_enabled,
+        settings.multi_workspace_enabled,
     )
     if not isinstance(multi_workspace_enabled, bool):
-        multi_workspace_enabled = runtime_config.multi_workspace_enabled
+        multi_workspace_enabled = settings.multi_workspace_enabled
     try:
         autosave_interval_minutes = int(
             workspace.get(
                 "autosave_interval_minutes",
-                runtime_config.workspace_autosave_interval_minutes,
+                settings.workspace_autosave_interval_minutes,
             )
         )
     except (TypeError, ValueError):
-        autosave_interval_minutes = runtime_config.workspace_autosave_interval_minutes
+        autosave_interval_minutes = settings.workspace_autosave_interval_minutes
     autosave_interval_minutes = max(
         AUTOSAVE_INTERVAL_MINUTES_MIN,
         min(AUTOSAVE_INTERVAL_MINUTES_MAX, autosave_interval_minutes),
@@ -473,47 +495,47 @@ def _normalize_app_config_update(data: Any) -> Dict[str, Any]:
     if not isinstance(ssh_settings, dict):
         ssh_settings = {}
     host_key_policy = str(
-        ssh_settings.get("host_key_policy", runtime_config.ssh_host_key_policy)
+        ssh_settings.get("host_key_policy", settings.ssh_host_key_policy)
     ).strip().lower()
     if host_key_policy not in HOST_KEY_POLICY_OPTIONS:
-        host_key_policy = runtime_config.ssh_host_key_policy
+        host_key_policy = settings.ssh_host_key_policy
 
     terminal_settings = payload.get("terminal")
     if not isinstance(terminal_settings, dict):
         terminal_settings = {}
     font_family = str(
-        terminal_settings.get("font_family", runtime_config.terminal_font_family)
+        terminal_settings.get("font_family", settings.terminal_font_family)
     ).strip()
     if not font_family or len(font_family) > TERMINAL_FONT_FAMILY_MAX_LENGTH:
-        font_family = runtime_config.terminal_font_family
+        font_family = settings.terminal_font_family
     try:
-        font_size = int(terminal_settings.get("font_size", runtime_config.terminal_font_size))
+        font_size = int(terminal_settings.get("font_size", settings.terminal_font_size))
     except (TypeError, ValueError):
-        font_size = runtime_config.terminal_font_size
+        font_size = settings.terminal_font_size
     font_size = max(TERMINAL_FONT_SIZE_MIN, min(TERMINAL_FONT_SIZE_MAX, font_size))
     try:
-        max_sessions = int(terminal_settings.get("max_sessions", runtime_config.max_sessions))
+        max_sessions = int(terminal_settings.get("max_sessions", settings.max_sessions))
     except (TypeError, ValueError):
-        max_sessions = runtime_config.max_sessions
+        max_sessions = settings.max_sessions
     max_sessions = max(MAX_SESSIONS_MIN, min(MAX_SESSIONS_MAX, max_sessions))
 
     voice_input = payload.get("voice_input")
     if not isinstance(voice_input, dict):
         voice_input = {}
 
-    engine = str(voice_input.get("engine", runtime_config.voice_engine)).strip().lower()
+    engine = str(voice_input.get("engine", settings.voice_engine)).strip().lower()
     if engine not in {"vosk", "whisper"}:
-        engine = runtime_config.voice_engine
+        engine = settings.voice_engine
 
     whisper_device_value = str(
-        voice_input.get("whisper_device", runtime_config.whisper_device)
+        voice_input.get("whisper_device", settings.whisper_device)
     ).strip().lower()
     if whisper_device_value not in {"cpu", "cuda"}:
-        whisper_device_value = runtime_config.whisper_device
+        whisper_device_value = settings.whisper_device
 
     next_whisper_model = str(
-        voice_input.get("whisper_model", runtime_config.whisper_model)
-    ).strip() or runtime_config.whisper_model
+        voice_input.get("whisper_model", settings.whisper_model)
+    ).strip() or settings.whisper_model
     if next_whisper_model not in WHISPER_MODEL_OPTIONS:
         next_whisper_model = "base"
 
@@ -535,15 +557,15 @@ def _normalize_app_config_update(data: Any) -> Dict[str, Any]:
             "max_sessions": max_sessions,
         },
         "voice_input": {
-            "enabled": bool(voice_input.get("enabled", runtime_config.voice_enabled)),
+            "enabled": bool(voice_input.get("enabled", settings.voice_enabled)),
             "engine": engine,
-            "vosk_model": str(voice_input.get("vosk_model", runtime_config.vosk_model)).strip() or runtime_config.vosk_model,
+            "vosk_model": str(voice_input.get("vosk_model", settings.vosk_model)).strip() or settings.vosk_model,
             "whisper_model": next_whisper_model,
             "whisper_device": whisper_device_value,
             "whisper_compute_type": str(
-                voice_input.get("whisper_compute_type", runtime_config.whisper_compute_type)
-            ).strip() or runtime_config.whisper_compute_type,
-            "language": str(voice_input.get("language", runtime_config.voice_language)).strip() or runtime_config.voice_language,
+                voice_input.get("whisper_compute_type", settings.whisper_compute_type)
+            ).strip() or settings.whisper_compute_type,
+            "language": str(voice_input.get("language", settings.voice_language)).strip() or settings.voice_language,
         }
     }
 
@@ -657,14 +679,15 @@ def index():
     logger.info("GET /")
     with _browser_shutdown_lock:
         browser_shutdown_token = _browser_shutdown_token
+    settings = runtime_config.snapshot()
     return render_template(
         'index.html',
-        max_sessions=runtime_config.max_sessions,
+        max_sessions=settings.max_sessions,
         agent_options=_agent_options(),
         local_windows_shells_available=os.name == "nt",
         browser_shutdown_enabled=bool(browser_shutdown_token),
         browser_shutdown_token=browser_shutdown_token,
-        multi_workspace_enabled=runtime_config.multi_workspace_enabled,
+        multi_workspace_enabled=settings.multi_workspace_enabled,
         version=__version__,
     )
 
@@ -679,18 +702,19 @@ def terminals_page():
         return str(exc), 400
     if not _workspace_exists(workspace_id):
         return "Workspace not found", 400
-    return render_template('terminals.html', max_sessions=runtime_config.max_sessions,
-                           app_surface_mode=runtime_config.app_surface_mode,
+    settings = runtime_config.snapshot()
+    return render_template('terminals.html', max_sessions=settings.max_sessions,
+                           app_surface_mode=settings.app_surface_mode,
                            workspace_id=workspace_id,
                            workspace_label=workspace_label(workspace_id),
-                           multi_workspace_enabled=runtime_config.multi_workspace_enabled,
+                           multi_workspace_enabled=settings.multi_workspace_enabled,
                            local_windows_shells_available=os.name == "nt",
-                           voice_enabled=runtime_config.voice_enabled,
-                           voice_engine=runtime_config.voice_engine,
-                           voice_model=_active_voice_model_name(),
-                           voice_language=runtime_config.voice_language,
-                           terminal_font_size=runtime_config.terminal_font_size,
-                           terminal_font_family=runtime_config.terminal_font_family,
+                           voice_enabled=settings.voice_enabled,
+                           voice_engine=settings.voice_engine,
+                           voice_model=_active_voice_model_name(settings),
+                           voice_language=settings.voice_language,
+                           terminal_font_size=settings.terminal_font_size,
+                           terminal_font_family=settings.terminal_font_family,
                            version=__version__)
 
 
@@ -1794,13 +1818,17 @@ def create_workspace():
     A workspace created here is deliberately empty, so it is marked
     ``retain_when_empty`` until its first group arrives — otherwise cleanup
     could not tell it apart from a workspace emptied by a close or a move.
+
+    The label is *claimed* rather than checked (ISSUE-2026-042): the namespace
+    verdict and the create are one decision, so two windows submitting the same
+    name produce one workspace and one actionable ``409``.
     """
     data = request.get_json(silent=True) or {}
     label = normalize_workspace_label(data.get("label") or data.get("workspace_label"))
-    conflict = workspace_label_conflict(label)
-    if conflict is not None:
-        return jsonify(conflict), 409
-    workspace = session_manager.create_workspace(label=label, retain_when_empty=True)
+    try:
+        workspace = create_labelled_workspace(label, retain_when_empty=True)
+    except WorkspaceRequestError as exc:
+        return jsonify({"error": str(exc), **exc.payload}), exc.status
     logger.debug("Created workspace %s label=%r", workspace.workspace_id, workspace.label)
     return jsonify(public_workspace_payload(workspace, 0)), 201
 
@@ -1860,17 +1888,13 @@ def rename_workspace(workspace_id: str):
     if "label" not in data:
         return jsonify({"error": "A 'label' is required"}), 400
 
-    label = normalize_workspace_label(data.get("label"))
-    if session_manager.get_workspace(resolved_workspace_id) is None:
-        return jsonify({"error": "Workspace not found"}), 404
-    # The renamed workspace's own live record and its own saved slot are the
-    # same identity, never a conflict (SGP-13).
-    conflict = workspace_label_conflict(label, exclude_workspace_id=resolved_workspace_id)
-    if conflict is not None:
-        return jsonify(conflict), 409
-    workspace = session_manager.rename_workspace(resolved_workspace_id, label)
-    if workspace is None:
-        return jsonify({"error": "Workspace not found"}), 404
+    # Claimed, not checked (ISSUE-2026-042). The renamed workspace's own live
+    # record and its own saved slot are the same identity, never a conflict
+    # (SGP-13), which is what the exclusion inside the claim is for.
+    try:
+        workspace = rename_workspace_label(resolved_workspace_id, data.get("label"))
+    except WorkspaceRequestError as exc:
+        return jsonify({"error": str(exc), **exc.payload}), exc.status
 
     groups = session_manager.get_workspace_groups(resolved_workspace_id)
     return jsonify(public_workspace_payload(workspace, len(groups)))
@@ -3300,21 +3324,22 @@ def _broadcast_voice_install_finished(state: Dict[str, Any]) -> None:
 @app.route('/api/voice-status', methods=['GET'])
 def voice_status_endpoint():
     """Check voice input availability and service status."""
-    if runtime_config.voice_engine == "vosk":
+    settings = runtime_config.snapshot()
+    if settings.voice_engine == "vosk":
         service_running: Optional[bool] = _vosk_service_reachable(timeout=1.0)
-        service_url = runtime_config.vosk_service_url
+        service_url = settings.vosk_service_url
     else:
         service_running = None
         service_url = ""
-    engine_available = _voice_engine_available(runtime_config.voice_engine, service_running)
+    engine_available = _voice_engine_available(settings.voice_engine, service_running)
     status_message = (
         "Voice backend is available."
         if engine_available
-        else _voice_engine_unavailable_message(runtime_config.voice_engine, service_running)
+        else _voice_engine_unavailable_message(settings.voice_engine, service_running)
     )
     return jsonify({
-        'enabled': runtime_config.voice_enabled,
-        'engine': runtime_config.voice_engine,
+        'enabled': settings.voice_enabled,
+        'engine': settings.voice_engine,
         'engine_available': engine_available,
         # Per-engine availability so App Settings can annotate the engine the
         # user is picking, not only the one currently saved.
@@ -3323,11 +3348,11 @@ def voice_status_endpoint():
         'vosk_packages_available': _vosk_service_packages_available(),
         'service_running': service_running,
         'service_url': service_url,
-        'model': _active_voice_model_name(),
-        'language': runtime_config.voice_language,
-        'startup_timeout_seconds': runtime_config.vosk_startup_timeout_seconds,
-        'whisper_device': runtime_config.whisper_device,
-        'whisper_compute_type': runtime_config.whisper_compute_type,
+        'model': _active_voice_model_name(settings),
+        'language': settings.voice_language,
+        'startup_timeout_seconds': settings.vosk_startup_timeout_seconds,
+        'whisper_device': settings.whisper_device,
+        'whisper_compute_type': settings.whisper_compute_type,
         'status_message': status_message,
         'install': _voice_install_status(),
     })

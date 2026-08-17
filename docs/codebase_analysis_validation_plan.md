@@ -230,7 +230,7 @@ Test organization by behavior is intentional; a module does not need a same-name
 - **The remote `| head -c N` pipeline had to go, not grow.** Item 5's bounded drain replaces it rather than joining it: a pipeline reports *head's* exit status, so bounding the remote diff that way would have turned a failed remote command into an empty successful one. That is also why the Diff view could never opt into a cap before. `_remote_git_shell_command()` no longer takes `max_output_bytes`; the drain carries the whole bound.
 - **The diff's `byte_count` is now the bytes read, not the bytes Git would have produced.** `_bounded_git_diff()` asks for `EXPLORER_GIT_DIFF_MAX_BYTES + 1`, which drops its peak from the repository's diff size to 256 KiB; `truncated` distinguishes the two, and no frontend reads the field. Everything else item 6 lists — `stdout_truncated`, the exit status, UTF-8 replacement, search truncation reporting, response shapes — is unchanged, and no Diff-view frontend change was needed, so the `explorer-diff.js` trigger did not fire.
 
-### Stage 2A — publish RuntimeConfig atomically
+### Stage 2A — publish RuntimeConfig atomically — **complete**
 
 1. Normalize the complete next runtime configuration into an immutable state object or equivalent private snapshot without mutating the published state.
 2. Publish the completed generation with one reference swap.
@@ -240,7 +240,13 @@ Test organization by behavior is intentional; a module does not need a same-name
 
 **Exit criteria:** a barrier-driven refresh/read test cannot produce a mixed payload; config durability and App Settings tests remain green.
 
-### Stage 2B — make workspace-label claims atomic
+**Met.** Both decorators came off in the change that made them pass, and the case is recorded in `docs/testing_issues.md` under ISSUE-2026-041 (now closed). Three decisions are worth carrying forward:
+
+- **The swap fixes the writer; the snapshot fixes the readers.** `_build_runtime_state()` returns a frozen `RuntimeConfigState` and `refresh()` installs it in one assignment, but that alone would have changed nothing for a consumer reading fifteen attributes in a row — `runtime_config.a` then `runtime_config.b` is still two reads. Every multi-field consumer now takes `snapshot()` once: the app-config payload and broadcast, `_normalize_app_config_update()` (so a partial update's fallbacks come from one config), `/api/voice-status`, both page renders, `search_limits_from_config()`, and the faster-whisper model cache, where the key and the model loaded under it have to describe the same settings.
+- **Item 4's compatibility clause cost exactly one test.** Attribute reads delegate to the published generation, so direct reads are unchanged and `patch.object` still shadows — and `snapshot()` folds those shadows in, so a patched setting reaches a snapshot reader as it always did. What changed is that an override now outlives a refresh instead of being overwritten by one, so `test_terminal_font_settings_in_terminals_page_body`, which hand-rolled save/restore by assignment, was migrated to `patch.object`: restoring by assigning the old value back installs a permanent shadow, which is precisely how it surfaced (three later tests in another class started reading a frozen font size).
+- **The pinned test could only prove the settled invariant**, because its pause hooks attribute assignment and the fix stops assigning attributes — its own docstring anticipated that. A second, undecorated test pauses inside the normalization instead and asserts a refresh caught mid-flight has published *nothing*; verified to fail (`unknown:'system'`, `unknown:4`) when publication is made partial again.
+
+### Stage 2B — make workspace-label claims atomic — **complete**
 
 1. Introduce one workspace-service owner for “check live namespace and create/rename” under `SessionManager.lock`.
 2. Snapshot saved-slot conflicts without holding the manager lock; do not perform durable-file I/O inside a shared manager lock.
@@ -249,6 +255,13 @@ Test organization by behavior is intentional; a module does not need a same-name
 5. Preserve actionable `409` payloads, case/whitespace-insensitive comparison, self-exclusion on rename, and unconstrained empty labels.
 
 **Exit criteria:** deterministic concurrent tests allow exactly one conflicting non-empty claim while empty-label concurrency remains allowed; no manager lock is held across file I/O or Socket.IO work.
+
+**Met.** Both decorators came off, and `WorkspaceLabelClaimTestCase` is 7 tests, none decorated — the four colliding combinations ISSUE-2026-042 asks for (create/create, create/rename, rename/rename, launch-into-new) plus three controls. The case is recorded under ISSUE-2026-042 (now closed). Four decisions:
+
+- **Item 1 asked for the owner "under `SessionManager.lock`"; it got a lock of its own instead, which is what item 2 actually requires.** The saved half of the namespace is a durable file behind a cross-process lock, so the claim cannot both consult it and hold the manager lock. `_label_namespace_lock` sits *above* both (claim → manager lock / runtime-state lock, never the reverse), and `_claim_workspace_label()` holds it across the verdict and the mutation. `create_labelled_workspace()` and `rename_workspace_label()` are the two owners; create, rename, launch-into-new and move-into-new all go through them, and `workspace_label_conflict()` keeps its signature for the advisory validate route.
+- **An empty label takes no lock at all.** It is not a name and claims nothing, so an unlabelled create neither waits on the namespace nor holds it up — which is also why the empty-label control test still runs at full speed while the contended ones spend the barrier timeout.
+- **Item 4's cross-process boundary is decided: process-local.** The live half of the namespace is this process's in-memory workspace table, which a second GridVibe process cannot see at all, so cross-process uniqueness is not reachable by locking and joining the claim to the runtime-state sidecar transaction would only cover the saved half. The boundary is now stated in `web/workspaces.py` and in Guardrail 2 rather than implied.
+- **The pinned tests moved their patch target by one module and nothing else.** The barrier wraps the namespace check, which now lives in `web.workspaces` rather than being called from `web.api`; every assertion is unchanged. All four contended tests were verified to fail — `[201, 201]`, `[200, 200]`, no refusal — when the claim is made non-serializing, and the manager-lock probe was verified to fail when the claim is made to hold the manager lock across the saved-slot read.
 
 ### Stage 3 — reserve pooled SSH clients before channel open
 
@@ -290,5 +303,7 @@ On systems with `make`, the final equivalent is `make check`. Any user-visible b
 For this validation pass, 156 focused tests covering lifecycle, saved-session durability/secrets, explorer filesystem mutations, SSH/SFTP pooling, output-buffer cleanup, status-broadcast locking, RuntimeConfig extraction, module re-exports, host-key policy, and config durability completed successfully (4 skipped for unavailable platform capabilities). Ruff completed successfully.
 
 The full runner executed 1,685 tests and reported one error (8 skipped): `ApiRoutesTestCase.test_repo_git_timeout_bounds_a_remote_that_goes_quiet` raised `WinError 32` while immediately deleting its temporary checkout after the timeout path.
+
+After Stages 2A and 2B the gate is 1,723 tests, green, 9 skipped, 1 expected failure — the one that remains is `PooledSshReservationTestCase`, which belongs to Stage 3. `ruff` clean.
 
 **Re-verified 2026-08-17 and withdrawn.** That test passes in isolation (6 consecutive runs) and in the full suite on the same Windows 11 / Python 3.14 environment, both before and after Stage 0. The gate was green at the reviewed revision: 1,685 tests, 0 failures, 8 skipped, `ruff` clean. `WinError 32` on an immediate `rmtree` of a just-released checkout is an environment artifact — an antivirus or search indexer holding the directory — and not evidence about `_run_repo_git()`, which already owns a process group, kills the tree, and reaps under a second bound. After Stage 0 the gate is 1,716 tests, green, 9 skipped, 17 expected failures.
