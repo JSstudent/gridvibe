@@ -4221,6 +4221,23 @@
             gap: 4px;
         }
 
+        /* The Graph section's commit-message find — the Source find's controls
+           on a sidebar row, aligned with the commit rows beneath it. Sticky
+           within its own section, because stepping through matches scrolls the
+           panel: an input and a `3/17` counter that have scrolled off the top
+           are controls the reader is using blind. It sticks only while the
+           Graph section is on screen, which is the only section it belongs to. */
+        .explorer-git-commit-search {
+            position: sticky;
+            top: 0;
+            z-index: 1;
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            padding: 2px 10px 6px;
+            background: var(--explorer-bar-bg);
+        }
+
         .explorer-diff-sidebar-empty,
         .explorer-diff-sidebar-error {
             padding: 8px 10px;
@@ -4731,16 +4748,23 @@
            renderings of one find that do not agree on a word's width read as
            two different fonts, so the padding goes and both are exactly the
            glyphs. Border-radius stays: a corner is not advance. */
-        .explorer-search-match {
+        /* The find highlight, shared by every find that paints one. The commit
+           find's row-level marker joins it rather than restating it: a matched
+           word can sit past a commit subject's cut-off, invisible, so the
+           always-visible short hash carries the same tint — and the same
+           active variant — as the marks inside the subject. */
+        .explorer-search-match,
+        .explorer-diff-commit-hash.explorer-git-commit-search-hit {
             border-radius: 2px;
             background: rgb(var(--gv-match-rgb));
             color: var(--gv-match-ink);
         }
 
-        .explorer-search-match.active {
+        .explorer-search-match.active,
+        .explorer-diff-commit-hash.explorer-git-commit-search-hit.active {
             background: rgb(var(--gv-match-active-rgb));
             color: var(--gv-match-ink);
-            box-shadow: 0 0 0 1px rgba(17, 24, 39, .3);
+            box-shadow: 0 0 0 1px rgba(var(--gv-match-ink-rgb), .3);
         }
 
         /* Occurrences of the selected word in the Source view, painted through

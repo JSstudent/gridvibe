@@ -1658,6 +1658,130 @@
         wireExplorerContextMenu(panel, index);
     }
 
+    /* ── Commit-message find (Graph section) ──
+       The Source find's smaller twin: one query over the loaded commit
+       subjects, the same counter, the same ↑/↓/× controls, the same
+       Enter/Shift+Enter/Escape keys, and the same <mark> paint. The matching
+       itself lives in the DOM-free explorer-git-search.js; what is here only
+       paints rows already on screen. State is per pane and runtime-only —
+       like the Source find's, it is never persisted. */
+    function ensureExplorerGitCommitSearchState(pane) {
+        if (!pane._explorerGitCommitSearch) {
+            pane._explorerGitCommitSearch = { query: '', activeIndex: 0 };
+        }
+        return pane._explorerGitCommitSearch;
+    }
+
+    function explorerGitCommitSearchCountText(query, plan) {
+        return query
+            ? `${plan.matchCount ? plan.activeIndex + 1 : 0}/${plan.matchCount}`
+            : '';
+    }
+
+    /* Paint only, for the same reason as paintExplorerGitActiveRows below:
+       the panel carries the commit-message textarea and the search input
+       itself, so a keystroke must repaint the subject spans in place rather
+       than re-render the panel and take the caret with it. */
+    function paintExplorerGitCommitSearch(index, { scroll = false } = {}) {
+        const pane = terminals[index];
+        const panel = document.getElementById(`explorer-git-panel-${index}`);
+        const policy = window.GridVibeExplorerGitSearch;
+        if (!pane || !panel || !policy) {
+            return;
+        }
+        const state = ensureExplorerGitCommitSearchState(pane);
+        const repo = pane._explorerGitRepo || {};
+        const commits = Array.isArray(repo.commits) ? repo.commits : [];
+        const plan = policy.searchPlan(commits, state.query, state.activeIndex);
+        state.activeIndex = plan.activeIndex;
+        let ordinal = 0;
+        panel.querySelectorAll('[data-explorer-git-commit-toggle]').forEach((row, rowIndex) => {
+            const subjectEl = row.querySelector('.explorer-diff-commit-subject');
+            const commit = commits[rowIndex];
+            if (!subjectEl || !commit) {
+                return;
+            }
+            const hash = commit.hash || '';
+            const ranges = plan.perCommit[rowIndex] || [];
+            const subjectHtml = ranges.length
+                ? policy.markedSubjectHtml(
+                    policy.commitSubject(commit), ranges, ordinal, plan.activeIndex
+                )
+                : escHtml(policy.commitSubject(commit));
+            const hashMark = policy.hashMarkClass(ranges, ordinal, plan.activeIndex);
+            ordinal += ranges.length;
+            subjectEl.innerHTML =
+                `<span class="explorer-diff-commit-hash${hashMark}">${escHtml(hash ? hash.slice(0, 7) : '')}</span> `
+                + subjectHtml;
+        });
+        const count = panel.querySelector('[data-explorer-git-commit-search-count]');
+        if (count) {
+            count.textContent = explorerGitCommitSearchCountText(state.query, plan);
+        }
+        panel.querySelectorAll(
+            '[data-explorer-git-commit-search-prev], [data-explorer-git-commit-search-next]'
+        ).forEach(button => {
+            button.disabled = plan.matchCount === 0;
+        });
+        if (scroll && plan.matchCount) {
+            const active = panel.querySelector('.explorer-diff-commit .explorer-search-match.active');
+            if (active) {
+                requestAnimationFrame(() => {
+                    scrollExplorerGitCommitRowIntoView(panel, active);
+                });
+            }
+        }
+    }
+
+    /* Scroll the Git panel — vertically, and only it, which is why this does
+       the maths instead of calling `scrollIntoView` on the match: `nearest`
+       walks the horizontal axis too, and the subject span is an
+       `overflow: hidden` scroller, so scrolling the mark into view shifted the
+       whole subject left and pushed the hash out of the row. Same minimum-
+       scroll maths as scrollExplorerTreeRowIntoView: a row already in view is
+       left alone. */
+    function scrollExplorerGitCommitRowIntoView(panel, mark) {
+        const row = mark.closest('.explorer-diff-commit');
+        if (!row) {
+            return;
+        }
+        const panelBox = panel.getBoundingClientRect();
+        const rowBox = row.getBoundingClientRect();
+        const margin = Math.min(rowBox.height, Math.max(0, (panelBox.height - rowBox.height) / 2));
+        if (rowBox.top < panelBox.top + margin) {
+            panel.scrollTop -= (panelBox.top + margin) - rowBox.top;
+        } else if (rowBox.bottom > panelBox.bottom - margin) {
+            panel.scrollTop += rowBox.bottom - (panelBox.bottom - margin);
+        }
+    }
+
+    function stepExplorerGitCommitSearch(index, delta) {
+        const pane = terminals[index];
+        if (!pane) {
+            return;
+        }
+        const state = ensureExplorerGitCommitSearchState(pane);
+        state.activeIndex = Number(state.activeIndex || 0) + delta;
+        paintExplorerGitCommitSearch(index, { scroll: true });
+    }
+
+    function clearExplorerGitCommitSearch(index) {
+        const pane = terminals[index];
+        if (!pane) {
+            return;
+        }
+        const state = ensureExplorerGitCommitSearchState(pane);
+        state.query = '';
+        state.activeIndex = 0;
+        paintExplorerGitCommitSearch(index);
+        const panel = document.getElementById(`explorer-git-panel-${index}`);
+        const input = panel?.querySelector('[data-explorer-git-commit-search-input]');
+        if (input) {
+            input.value = '';
+            input.focus();
+        }
+    }
+
     function renderExplorerGitPanel(index) {
         const pane = terminals[index];
         const panel = document.getElementById(`explorer-git-panel-${index}`);
@@ -1697,17 +1821,35 @@
         const hasUpstream = git.ahead !== null && git.ahead !== undefined;
         const publishLabel = hasUpstream ? 'Push' : 'Publish branch';
         const branchText = explorerGitSummaryText(git) || 'Git';
+        const commitSearch = ensureExplorerGitCommitSearchState(pane);
+        const searchPolicy = window.GridVibeExplorerGitSearch;
+        const searchPlan = searchPolicy
+            ? searchPolicy.searchPlan(commits, commitSearch.query, commitSearch.activeIndex)
+            : { perCommit: commits.map(() => []), matchCount: 0, activeIndex: 0 };
+        commitSearch.activeIndex = searchPlan.activeIndex;
+        let searchOrdinal = 0;
         const commitRows = commits.length
-            ? commits.map(commit => {
+            ? commits.map((commit, commitIndex) => {
                 const hash = commit.hash || '';
                 const expanded = hash && expandedCommits.has(
                     window.GridVibeExplorerGitActive.commitKey(hash)
                 );
+                const subject = searchPolicy
+                    ? searchPolicy.commitSubject(commit)
+                    : (commit.subject || commit.line || '');
+                const ranges = searchPlan.perCommit[commitIndex] || [];
+                const subjectHtml = ranges.length
+                    ? searchPolicy.markedSubjectHtml(subject, ranges, searchOrdinal, searchPlan.activeIndex)
+                    : escHtml(subject);
+                const hashMark = searchPolicy
+                    ? searchPolicy.hashMarkClass(ranges, searchOrdinal, searchPlan.activeIndex)
+                    : '';
+                searchOrdinal += ranges.length;
                 return `
                     <button type="button" class="explorer-diff-commit" data-explorer-git-commit-toggle="${escHtml(hash)}" data-explorer-git-commit-full="${escHtml(commit.full_hash || '')}" data-explorer-git-commit-message="${escHtml(commit.message || '')}" ${hash ? '' : 'disabled'} title="${escHtml(commit.line || '')}" aria-expanded="${expanded ? 'true' : 'false'}">
                         <span class="explorer-diff-commit-graph">${explorerGitGraphHtml(commit.graph)}</span>
                         <span class="explorer-diff-commit-toggle" aria-hidden="true">${expanded ? UI_CHEVRON_DOWN_ICON : UI_CHEVRON_RIGHT_ICON}</span>
-                        <span class="explorer-diff-commit-subject"><span class="explorer-diff-commit-hash">${escHtml(hash ? hash.slice(0, 7) : '')}</span> ${escHtml(commit.subject || commit.line || '')}</span>
+                        <span class="explorer-diff-commit-subject"><span class="explorer-diff-commit-hash${hashMark}">${escHtml(hash ? hash.slice(0, 7) : '')}</span> ${subjectHtml}</span>
                     </button>
                     ${expanded ? `<div class="explorer-diff-commit-files">${renderExplorerGitFileRows(index, commit.files, { emptyText: 'No files recorded for this commit.', commitHash: hash })}</div>` : ''}
                 `;
@@ -1745,6 +1887,22 @@
             </div>
             <div class="explorer-diff-sidebar-section">
                 <div class="explorer-diff-sidebar-title">Graph</div>
+                <div class="explorer-git-commit-search">
+                    <input
+                        type="search"
+                        class="explorer-search-input"
+                        data-explorer-git-commit-search-input
+                        placeholder="Search commits"
+                        autocomplete="off"
+                        spellcheck="false"
+                        aria-label="Search commit messages"
+                        value="${escHtml(commitSearch.query)}"
+                    >
+                    <span class="explorer-search-count" data-explorer-git-commit-search-count>${explorerGitCommitSearchCountText(commitSearch.query, searchPlan)}</span>
+                    <button type="button" class="explorer-search-btn" data-explorer-git-commit-search-prev ${searchPlan.matchCount ? '' : 'disabled'} title="Previous match" aria-label="Previous match">↑</button>
+                    <button type="button" class="explorer-search-btn" data-explorer-git-commit-search-next ${searchPlan.matchCount ? '' : 'disabled'} title="Next match" aria-label="Next match">↓</button>
+                    <button type="button" class="explorer-search-btn" data-explorer-git-commit-search-clear title="Clear search" aria-label="Clear search">×</button>
+                </div>
                 ${commitRows}
             </div>
         `;
@@ -1754,6 +1912,33 @@
                 pane._explorerGitCommitMessage = commitMessageInput.value;
             });
         }
+        const commitSearchInput = panel.querySelector('[data-explorer-git-commit-search-input]');
+        if (commitSearchInput) {
+            commitSearchInput.addEventListener('input', () => {
+                const state = ensureExplorerGitCommitSearchState(pane);
+                state.query = commitSearchInput.value;
+                state.activeIndex = 0;
+                paintExplorerGitCommitSearch(index);
+            });
+            commitSearchInput.addEventListener('keydown', event => {
+                if (event.key === 'Enter') {
+                    event.preventDefault();
+                    stepExplorerGitCommitSearch(index, event.shiftKey ? -1 : 1);
+                } else if (event.key === 'Escape') {
+                    event.preventDefault();
+                    clearExplorerGitCommitSearch(index);
+                }
+            });
+        }
+        panel.querySelector('[data-explorer-git-commit-search-prev]')?.addEventListener('click', () => {
+            stepExplorerGitCommitSearch(index, -1);
+        });
+        panel.querySelector('[data-explorer-git-commit-search-next]')?.addEventListener('click', () => {
+            stepExplorerGitCommitSearch(index, 1);
+        });
+        panel.querySelector('[data-explorer-git-commit-search-clear]')?.addEventListener('click', () => {
+            clearExplorerGitCommitSearch(index);
+        });
         panel.querySelectorAll('[data-explorer-git-stage]').forEach(button => {
             button.addEventListener('click', event => {
                 event.stopPropagation();

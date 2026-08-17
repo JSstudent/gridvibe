@@ -96,8 +96,11 @@
        set — so it is a clearly separate hue, not a shade of the one above. */
     --gv-match-active-rgb: 251, 146, 60;
     /* Ink for text sitting on either match hue. Both are light enough that the
-       viewer's own foreground would not survive them, in either theme. */
+       viewer's own foreground would not survive them, in either theme. The
+       bare-channel twin is what the active mark's outline is drawn from, so
+       that outline is the same ink at low alpha rather than a literal. */
     --gv-match-ink: #111827;
+    --gv-match-ink-rgb: 17, 24, 39;
     /* Change-marker hues (diff gutters, the source-view change marks). Kept
        opaque so both the gutter bars and the deletion wedge can use them
        directly; the green/red match the existing diff-cell bases. */
