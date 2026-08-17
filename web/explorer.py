@@ -2984,11 +2984,12 @@ def _open_ssh_sftp(session: Any) -> Tuple[Any, Any]:
 class _PooledSSHClient:
     """One pooled SSH transport, with the bookkeeping the reaper needs.
 
-    `in_use` counts the explorer requests currently holding this client. It
-    lives on the record rather than in a parallel map so an entry cannot exist
-    without its count, and evicting the entry drops the count with it — a
-    stranded count would spare a client from the reaper forever, which is this
-    guard's own failure mode inverted.
+    `in_use` counts the explorer requests currently holding this client — and,
+    from the two-phase reservation on, the requests that have *selected* it and
+    are still opening their channel. It lives on the record rather than in a
+    parallel map so an entry cannot exist without its count, and evicting the
+    entry drops the count with it — a stranded count would spare a client from
+    the reaper forever, which is this guard's own failure mode inverted.
     """
 
     __slots__ = ("client", "last_used", "in_use")
@@ -3072,31 +3073,73 @@ def _evict_all_pooled_ssh_clients() -> None:
         _close_ssh_client_quietly(client)
 
 
+def _reserve_pooled_ssh_client(session_id: str) -> Optional[_PooledSSHClient]:
+    """Phase 1: pick this session's pooled entry and count the holder at once.
+
+    Selecting and counting are one lock hold, so the entry a request is about
+    to open a channel on is never momentarily idle. Counting *before* the
+    channel exists is the whole point: `open_sftp()` is a network round trip
+    that must run outside the lock, and for its duration the reaper — which
+    every acquire on every session runs — would otherwise see a free entry and
+    close the transport underneath the request that just chose it.
+    """
+    with _ssh_client_pool_lock:
+        entry = _ssh_client_pool.get(session_id)
+        if entry is None:
+            return None
+        entry.in_use += 1
+        return entry
+
+
+def _commit_pooled_ssh_reservation(session_id: str, entry: _PooledSSHClient) -> None:
+    """Phase 2, success: keep the reservation and stamp the entry it holds.
+
+    A reservation only survives on the entry it was taken against. If that
+    entry was evicted or replaced while the channel opened, the client is no
+    longer pooled and the count went with the record; the caller's handle stays
+    uncounted so release closes it rather than charging another entry.
+    """
+    with _ssh_client_pool_lock:
+        if _ssh_client_pool.get(session_id) is entry:
+            entry.last_used = time.monotonic()
+
+
+def _cancel_pooled_ssh_reservation(session_id: str, entry: _PooledSSHClient) -> None:
+    """Phase 2, failure: give the reservation back and drop the entry.
+
+    Both callers found the transport unusable — a dead transport, or a channel
+    open that raised — so the client is closed rather than left pooled for the
+    next request to fail on. Matching by entry identity is what keeps a
+    replacement another request is already holding out of it.
+    """
+    stale_client = None
+    with _ssh_client_pool_lock:
+        if entry.in_use:
+            entry.in_use -= 1
+        if _ssh_client_pool.get(session_id) is entry:
+            del _ssh_client_pool[session_id]
+            stale_client = entry.client
+    if stale_client is not None:
+        _close_ssh_client_quietly(stale_client)
+
+
 def _acquire_ssh_sftp(session: Any) -> Tuple[Any, Any]:
     """Return (client, sftp), reusing the pooled SSH transport when it is alive."""
     _reap_idle_pooled_ssh_clients()
     session_id = session.session_id
-    with _ssh_client_pool_lock:
-        entry = _ssh_client_pool.get(session_id)
+    entry = _reserve_pooled_ssh_client(session_id)
     if entry is not None:
         client = entry.client
         if _ssh_client_transport_active(client):
             try:
                 sftp = client.open_sftp()
             except Exception:
-                _evict_pooled_ssh_client(session_id, client)
+                _cancel_pooled_ssh_reservation(session_id, entry)
             else:
-                with _ssh_client_pool_lock:
-                    current = _ssh_client_pool.get(session_id)
-                    # If the entry was evicted and replaced meanwhile this
-                    # client is no longer pooled: leave it uncounted so
-                    # release closes it rather than charging another record.
-                    if current is not None and current.client is client:
-                        current.last_used = time.monotonic()
-                        current.in_use += 1
+                _commit_pooled_ssh_reservation(session_id, entry)
                 return client, sftp
         else:
-            _evict_pooled_ssh_client(session_id, client)
+            _cancel_pooled_ssh_reservation(session_id, entry)
 
     client, sftp = _open_ssh_sftp(session)
     if _ssh_client_transport_active(client):

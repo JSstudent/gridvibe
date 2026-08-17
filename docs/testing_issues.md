@@ -33,19 +33,22 @@ Confirmed by code inspection. Nothing in GridVibe enables or disables mouse trac
 ### Proposed solution:
 Make the recovery explicit instead of incidental. In `web/static/js/terminals.js`, have both `clearTerminalDisplay()` and `refreshTerminalDisplay()` write an explicit mouse-tracking teardown into the pane after `term.reset()` — `\033[?1000l\033[?1002l\033[?1003l\033[?1005l\033[?1006l\033[?1015l` through `term.write()`, which changes only the client's mode state and sends nothing to the shell, so it stays inside the pane's existing behavior and touches no route. For `refreshTerminalDisplay()` the write must happen *after* the replayed buffer is applied, not before the `join_session` round trip, or the replay will overwrite it again; sequencing it against the async replay is the main implementation question. Consider whether the replay itself should be sanitized instead — filtering mode-setting sequences out of `_get_buffered_terminal_output()` is more invasive, risks corrupting a legitimately running TUI's state on rejoin, and should not be done without deciding what a rejoin to a *live* TUI is supposed to look like. A visible affordance is worth considering separately: a pane that is receiving mouse reports at a shell prompt could surface a one-click "Reset terminal modes" action rather than requiring the user to guess. Regression tests belong in `tests/test_api.py` alongside `test_terminals_page_clear_sends_shell_command_and_purges_replay_buffer`, asserting that both handlers emit the teardown sequence and that the refresh path emits it after the rejoin.
 
+## Closed Issues
+
 ### Issue ID: ISSUE-2026-043
 - Title: A pooled SSH transport can be reaped while the request that selected it is still opening its channel
 - Priority: Low
-- Status: Open
+- Status: Closed
 - Area: `web/explorer.py`, `tests/test_backend_concurrency_contract.py`
 - Assignee: Unassigned
 - Tags: `explorer`, `ssh`, `concurrency`, `performance`, `tests`
 - Reported: 2026-08-17
+- Closed: 2026-08-17
 
 Description:
-`_acquire_ssh_sftp()` reads the pool entry under `_ssh_client_pool_lock` but increments `in_use` only after `open_sftp()` has returned. For the length of that round trip the entry looks idle to any reaper — and every acquire, on any session, runs one — so an entry picked up at 59 s of the 60 s idle timeout can have its transport closed underneath the request that just chose it.
+`_acquire_ssh_sftp()` read the pool entry under `_ssh_client_pool_lock` but incremented `in_use` only after `open_sftp()` had returned. For the length of that round trip the entry looked idle to any reaper — and every acquire, on any session, runs one — so an entry picked up at 59 s of the 60 s idle timeout could have its transport closed underneath the request that just chose it.
 
-There is no channel or client *leak*: `_release_ssh_sftp()` always closes the SFTP channel and closes a client that is no longer pooled. The consequence is a spurious request failure the user did nothing to cause. `SshSftpPoolTestCase` in `tests/test_api.py` already covers the symmetric case for a holder that *is* counted (`test_a_request_in_flight_past_the_idle_timeout_is_not_reaped`); this is the window before the count exists.
+There was no channel or client *leak*: `_release_ssh_sftp()` always closes the SFTP channel and closes a client that is no longer pooled. The consequence was a spurious request failure the user did nothing to cause. `SshSftpPoolTestCase` in `tests/test_api.py` already covered the symmetric case for a holder that *is* counted (`test_a_request_in_flight_past_the_idle_timeout_is_not_reaped`); this was the window before the count existed.
 
 Steps to reproduce:
 Run `python -m unittest tests.test_backend_concurrency_contract.PooledSshReservationTestCase`. The pooled client blocks inside `open_sftp()` while the entry ages past the idle timeout and a reap runs.
@@ -54,12 +57,17 @@ Expected behavior:
 An entry selected for a channel open is already reserved, so the reaper skips it and the acquire returns the pooled client.
 
 Actual behavior / logs:
-The reaper closes the selected transport mid-open and drops the pool entry.
+The reaper closed the selected transport mid-open and dropped the pool entry.
 
-### Proposed solution:
-Two-phase reservation: select the exact entry and increment its reservation count under the pool lock, run `open_sftp()` outside the lock, then commit last-used metadata by entry identity on success, or release the reservation / evict only the matching failed client on failure. Do **not** move `open_sftp()` under the pool lock — that is network work inside a shared lock, which Guardrails 2 and 3 forbid. Release must stay idempotent across the replacement and loser paths, and every SFTP channel must still be closed exactly once.
+Resolution:
+**Selecting and counting are now one lock hold.** `_reserve_pooled_ssh_client()` takes the entry and increments `in_use` under `_ssh_client_pool_lock`, so the entry a request is about to open a channel on is never momentarily idle; `open_sftp()` still runs outside the lock, because network work inside a shared lock is what Guardrails 2 and 3 forbid and moving it in would have been a worse defect than the one being fixed. `_commit_pooled_ssh_reservation()` stamps `last_used` on success and `_cancel_pooled_ssh_reservation()` gives the reservation back and drops the entry on failure — a dead transport, or a channel open that raised.
 
-## Closed Issues
+**A reservation lives on the entry it was taken against, not on the session id.** Both the commit and the rollback match by entry identity, which is what keeps a replacement out of them: if the selected entry is evicted mid-open and another request pools its own transport under the same id, committing by id would charge the replacement for a holder it never had — a count no release can give back, so that transport would be spared from the reaper for the life of the process — and rolling back by id would close a transport another request is using. Two tests pin exactly those two cases, each verified to fail when the matching is degraded to the session id.
+
+**`in_use` widened its meaning by one word and nothing else.** It now counts the requests holding a client *and* those that have selected it and are still opening their channel. Everything downstream is unchanged: the reaper still skips a non-zero count, `_evict_pooled_ssh_client()` still ignores it (its callers found the transport dead or are tearing the session down), and release still matches by client identity, so the loser of a pooling race still discharges nothing and closes its own handle.
+
+Plan followed:
+Select the exact entry and increment its reservation count under the pool lock; run `open_sftp()` outside it; commit last-used metadata by entry identity on success, or release the reservation and evict only the matching failed client on failure. Keep release idempotent across the replacement and loser paths, and close every SFTP channel exactly once. Keep the existing reuse, idle-reap, concurrent-holder, loser, and teardown tests green untouched.
 
 ### Issue ID: ISSUE-2026-042
 - Title: A workspace label is checked for uniqueness but never claimed, so two concurrent creates both win

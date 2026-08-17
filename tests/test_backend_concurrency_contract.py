@@ -518,7 +518,6 @@ class PooledSshReservationTestCase(unittest.TestCase):
             entry = web_explorer._ssh_client_pool[session_id]
             entry.last_used -= web_explorer.SSH_CLIENT_POOL_IDLE_TIMEOUT + 1
 
-    @unittest.expectedFailure
     def test_a_transport_mid_channel_open_is_not_reaped(self):
         """The window between selecting an entry and counting the holder.
 
@@ -567,6 +566,121 @@ class PooledSshReservationTestCase(unittest.TestCase):
         got_client, got_sftp = acquired["result"]
         self.assertIs(got_client, client)
         api._release_ssh_sftp(session, got_client, got_sftp)
+
+    def test_a_reservation_that_lost_its_entry_mid_open_leaves_it_uncounted(self):
+        """A reservation lives on the entry it was taken against, not the id.
+
+        If that entry is evicted while the channel opens and another request
+        pools its own transport under the same session, committing by session id
+        would charge the replacement for a holder it never had — a count no
+        release can give back, which spares that transport from the reaper for
+        the life of the process.
+        """
+        session = SimpleNamespace(session_id="reserve-replaced")
+        opening = threading.Event()
+        may_finish = threading.Event()
+        original_sftp = MagicMock()
+
+        def blocking_open_sftp():
+            opening.set()
+            may_finish.wait(BARRIER_TIMEOUT_SECONDS * 2)
+            return original_sftp
+
+        original = self._fake_client(open_sftp=blocking_open_sftp)
+        self._pool("reserve-replaced", original)
+
+        acquired = {}
+
+        def acquire():
+            acquired["result"] = api._acquire_ssh_sftp(session)
+
+        worker = threading.Thread(target=acquire, daemon=True)
+        worker.start()
+        self.assertTrue(
+            opening.wait(BARRIER_TIMEOUT_SECONDS),
+            "the acquire never reached open_sftp",
+        )
+
+        # The session's transport is torn down mid-open and a later request
+        # pools a fresh one under the same id.
+        api._evict_pooled_ssh_client("reserve-replaced", original)
+        replacement = self._fake_client()
+        self._pool("reserve-replaced", replacement)
+
+        may_finish.set()
+        worker.join(BARRIER_TIMEOUT_SECONDS * 4)
+        self.assertFalse(worker.is_alive(), "the acquire never returned")
+
+        got_client, got_sftp = acquired["result"]
+        self.assertIs(got_client, original)
+        with web_explorer._ssh_client_pool_lock:
+            entry = web_explorer._ssh_client_pool["reserve-replaced"]
+        self.assertIs(entry.client, replacement)
+        self.assertEqual(entry.in_use, 0)
+
+        # The orphaned handle closes on release; the replacement is untouched
+        # and still reapable once it goes idle.
+        api._release_ssh_sftp(session, got_client, got_sftp)
+        got_sftp.close.assert_called_once()
+        replacement.close.assert_not_called()
+        self._age_out("reserve-replaced")
+        web_explorer._reap_idle_pooled_ssh_clients()
+        replacement.close.assert_called_once()
+
+    def test_a_failed_open_after_the_entry_was_replaced_spares_the_replacement(self):
+        """Rolling a reservation back drops its own entry, not the session's.
+
+        The failure path closes the transport it could not open a channel on. It
+        must find that transport by entry identity: a rollback that dropped
+        whatever is under the session id would close a replacement another
+        request is already using.
+        """
+        session = SimpleNamespace(session_id="reserve-replaced-failure")
+        opening = threading.Event()
+        may_finish = threading.Event()
+
+        def failing_open_sftp():
+            opening.set()
+            may_finish.wait(BARRIER_TIMEOUT_SECONDS * 2)
+            raise OSError("no channel")
+
+        original = self._fake_client(open_sftp=failing_open_sftp)
+        self._pool("reserve-replaced-failure", original)
+
+        fresh = self._fake_client()
+        fresh_sftp = MagicMock()
+        acquired = {}
+
+        def acquire():
+            acquired["result"] = api._acquire_ssh_sftp(session)
+
+        with patch.object(web_explorer, "_open_ssh_sftp", return_value=(fresh, fresh_sftp)):
+            worker = threading.Thread(target=acquire, daemon=True)
+            worker.start()
+            self.assertTrue(
+                opening.wait(BARRIER_TIMEOUT_SECONDS),
+                "the acquire never reached open_sftp",
+            )
+
+            api._evict_pooled_ssh_client("reserve-replaced-failure", original)
+            replacement = self._fake_client()
+            self._pool("reserve-replaced-failure", replacement)
+
+            may_finish.set()
+            worker.join(BARRIER_TIMEOUT_SECONDS * 4)
+            self.assertFalse(worker.is_alive(), "the acquire never returned")
+
+        got_client, got_sftp = acquired["result"]
+        self.assertIs(got_client, fresh)
+        replacement.close.assert_not_called()
+        with web_explorer._ssh_client_pool_lock:
+            entry = web_explorer._ssh_client_pool["reserve-replaced-failure"]
+        self.assertIs(entry.client, replacement)
+
+        # The unpooled loser closes on release, as it always has.
+        api._release_ssh_sftp(session, got_client, got_sftp)
+        got_sftp.close.assert_called_once()
+        fresh.close.assert_called_once()
 
     def test_a_failed_channel_open_evicts_only_the_failed_client(self):
         """Control: eviction matches by identity, and must keep doing so.

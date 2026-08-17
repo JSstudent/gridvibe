@@ -263,7 +263,7 @@ Test organization by behavior is intentional; a module does not need a same-name
 - **Item 4's cross-process boundary is decided: process-local.** The live half of the namespace is this process's in-memory workspace table, which a second GridVibe process cannot see at all, so cross-process uniqueness is not reachable by locking and joining the claim to the runtime-state sidecar transaction would only cover the saved half. The boundary is now stated in `web/workspaces.py` and in Guardrail 2 rather than implied.
 - **The pinned tests moved their patch target by one module and nothing else.** The barrier wraps the namespace check, which now lives in `web.workspaces` rather than being called from `web.api`; every assertion is unchanged. All four contended tests were verified to fail — `[201, 201]`, `[200, 200]`, no refusal — when the claim is made non-serializing, and the manager-lock probe was verified to fail when the claim is made to hold the manager lock across the saved-slot read.
 
-### Stage 3 — reserve pooled SSH clients before channel open
+### Stage 3 — reserve pooled SSH clients before channel open — **complete**
 
 1. Under `_ssh_client_pool_lock`, select the exact entry and increment its reservation count before releasing the lock.
 2. Run `open_sftp()` outside the lock.
@@ -271,6 +271,12 @@ Test organization by behavior is intentional; a module does not need a same-name
 4. Keep release idempotent with replacement/loser paths and close every SFTP channel exactly once.
 
 **Exit criteria:** a barrier-controlled open/reaper race cannot close the selected transport mid-open; existing reuse, idle-reap, concurrent-holder, loser, and teardown tests remain green.
+
+**Met.** The last decorator came off in the change that made it pass; `PooledSshReservationTestCase` is 5 tests, none decorated, and `SshSftpPoolTestCase` in `tests/test_api.py` — reuse, idle reap, dead-client replacement, teardown eviction, the counted in-flight holder, two concurrent holders, and the pooling loser — passed untouched. The case is recorded in `docs/testing_issues.md` under ISSUE-2026-043 (now closed). Three decisions are worth carrying forward:
+
+- **Item 3's "by entry identity" was the part with teeth, and it needed its own tests.** The reservation itself is three lines; what makes it correct is that the commit and the rollback both match the entry *object* rather than the session id, and the pinned test could not see that — it only proves the reaper skips a reserved entry. Two tests were added for the two ways identity matters, each verified to fail when the matching is degraded to the session id: committing by id charges a replacement for a holder it never had, stranding a count no release can give back (this guard's own failure mode inverted — a transport spared from the reaper forever), and rolling back by id closes a replacement another request is already using.
+- **`in_use` widened its meaning rather than gaining a sibling field.** A separate "reserved" count would have needed every reader — the reaper, `_evict_pooled_ssh_client()`, release — to consult both, which is the same check-then-act shape one level up. It now counts holders *and* selectors, and nothing downstream changed: the reaper still skips a non-zero count, eviction still ignores it, and release still matches by client identity, so the loser of a pooling race still discharges nothing.
+- **The open stayed outside the lock, as item 2 requires and as the corrected finding 2 insists.** Moving `open_sftp()` under `_ssh_client_pool_lock` would close this race and open a worse one — network work inside a shared lock, serializing every explorer request on every session behind one round trip. The reservation exists precisely so the lock does not have to be held across it.
 
 ### Stage 4 — conditional lifecycle improvement
 
@@ -305,5 +311,7 @@ For this validation pass, 156 focused tests covering lifecycle, saved-session du
 The full runner executed 1,685 tests and reported one error (8 skipped): `ApiRoutesTestCase.test_repo_git_timeout_bounds_a_remote_that_goes_quiet` raised `WinError 32` while immediately deleting its temporary checkout after the timeout path.
 
 After Stages 2A and 2B the gate is 1,723 tests, green, 9 skipped, 1 expected failure — the one that remains is `PooledSshReservationTestCase`, which belongs to Stage 3. `ruff` clean.
+
+After Stage 3 the gate is 1,725 tests, green, 9 skipped, **0 expected failures**: every issue Stage 0 pinned has been cleared by the stage that owned it, and `tests/test_git_process_bounds.py` and `tests/test_backend_concurrency_contract.py` now carry no decorators at all. `ruff` clean. Stages 1, 2A, 2B and 3 are the whole of the actionable work this review found; Stage 4 remains conditional on a browser reproduction that has not been produced, and Stage 5 remains optional.
 
 **Re-verified 2026-08-17 and withdrawn.** That test passes in isolation (6 consecutive runs) and in the full suite on the same Windows 11 / Python 3.14 environment, both before and after Stage 0. The gate was green at the reviewed revision: 1,685 tests, 0 failures, 8 skipped, `ruff` clean. `WinError 32` on an immediate `rmtree` of a just-released checkout is an environment artifact — an antivirus or search indexer holding the directory — and not evidence about `_run_repo_git()`, which already owns a process group, kills the tree, and reaps under a second bound. After Stage 0 the gate is 1,716 tests, green, 9 skipped, 17 expected failures.
