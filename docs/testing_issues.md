@@ -3,14 +3,19 @@ Last updated: 2026-08-17
 
 ## Open Issues
 
+_None._
+
+## Closed Issues
+
 ### Issue ID: ISSUE-2026-038
 - Title: A crashed TUI leaves mouse tracking on and types escape sequences at the prompt
 - Priority: Medium
-- Status: Open
-- Area: `web/static/js/terminals.js`, `web/api.py`
+- Status: Closed
+- Area: `web/static/js/terminal-modes.js`, `web/static/js/terminals.js`, `templates/terminals.html`, `tests/test_terminal_modes.py`, `tests/test_api.py`
 - Assignee: Unassigned
 - Tags: `terminal`, `session`, `socketio`, `ui`, `tests`
 - Reported: 2026-07-30
+- Closed: 2026-08-17
 
 Description:
 When a TUI running in a GridVibe pane exits without restoring terminal state — a crash, a `SIGKILL`, or a dropped SSH connection — the DECSET mouse-tracking modes it enabled stay set in the pane's xterm.js instance. The shell that regains the prompt is a plain line editor with no interest in mouse reports, so every pointer movement or click over the pane is encoded and sent as input, filling the command line with sequences such as `35;43;24M35;43;19M35;39;18M…`. The pane is unusable for typing until the user notices, clears the line, and finds a way to turn the mode back off, and the user can easily submit the accumulated garbage by pressing Enter. Observed on an Ubuntu host after `opencode` died with `Illegal instruction (core dumped)`.
@@ -33,7 +38,18 @@ Confirmed by code inspection. Nothing in GridVibe enables or disables mouse trac
 ### Proposed solution:
 Make the recovery explicit instead of incidental. In `web/static/js/terminals.js`, have both `clearTerminalDisplay()` and `refreshTerminalDisplay()` write an explicit mouse-tracking teardown into the pane after `term.reset()` — `\033[?1000l\033[?1002l\033[?1003l\033[?1005l\033[?1006l\033[?1015l` through `term.write()`, which changes only the client's mode state and sends nothing to the shell, so it stays inside the pane's existing behavior and touches no route. For `refreshTerminalDisplay()` the write must happen *after* the replayed buffer is applied, not before the `join_session` round trip, or the replay will overwrite it again; sequencing it against the async replay is the main implementation question. Consider whether the replay itself should be sanitized instead — filtering mode-setting sequences out of `_get_buffered_terminal_output()` is more invasive, risks corrupting a legitimately running TUI's state on rejoin, and should not be done without deciding what a rejoin to a *live* TUI is supposed to look like. A visible affordance is worth considering separately: a pane that is receiving mouse reports at a shell prompt could surface a one-click "Reset terminal modes" action rather than requiring the user to guess. Regression tests belong in `tests/test_api.py` alongside `test_terminals_page_clear_sends_shell_command_and_purges_replay_buffer`, asserting that both handlers emit the teardown sequence and that the refresh path emits it after the rejoin.
 
-## Closed Issues
+Resolution:
+Still reproducible as described, and the investigation target resolved against the code: `TERMINAL_OUTPUT_BUFFER_MAX_CHARS` is 50,000, so whether a long-running pane has evicted the enabling sequence is a matter of how much the dead program happened to print. That is exactly why the recovery could not be left to depend on it.
+
+**The teardown is a named module, not two inline writes.** `web/static/js/terminal-modes.js` (DOM-free, `require()`-able, loaded on the terminals page ahead of `terminals.js`) publishes `MOUSE_REPORTING_MODES` — the trackers `1000/1002/1003` beside the encodings `1005/1006/1015`, because a stale encoding left on its own still changes what the next program's reports look like — and `MOUSE_REPORTING_RESET`, which is written through `term.write()`. That feeds the pane's own parser and sends nothing to the shell, so no route moved and no command appears at the prompt.
+
+**The two controls needed different amounts of work, and the difference is the bug.** `clearTerminalDisplay()` purges the server buffer, so nothing can re-arm what `term.reset()` cleared and a plain write suffices; it is written all the same, so the cure is named rather than left as a side effect of `term.reset()`'s scope. `refreshTerminalDisplay()` replays that buffer on purpose, so its two bare emits were replaced by `rejoinAndResetAfterReplay()`, which carries an **acknowledgement callback** on the `join_session` emit: `handle_join_session()` emits the replay inside the handler and the ack packet is written after it, over the same ordered connection, so the ack fires on a client that has already processed the replayed bytes. No guessed delay, and a bounded 1.5 s fallback covers a socket that never answers — the pane comes back either way, and exactly one of the two paths writes the teardown.
+
+**The replay itself is not sanitized, and that is a decision rather than an omission.** The same rejoin serves the initial page load and every session-group switch, where a pane with a TUI *still running* needs that program's mouse reporting restored with it. Filtering mode sets out of `_get_buffered_terminal_output()` would break the live case in order to fix the dead one, and neither the server nor the client can tell the two apart — a `kill -9` leaves the alternate screen buffer set too, so even that cannot distinguish them. The accepted cost is stated rather than hidden: **Reset view is now genuinely a reset**, and a live full-screen TUI loses mouse reporting until it re-arms, as it would in any terminal emulator. The pane the feature exists to rescue has no program left to re-arm anything.
+
+The separately-deferred affordance was not built. It would have had to appear whenever mouse reports are flowing, which is indistinguishable from ordinary TUI use, and both existing controls now cure the pane — so there is nothing left to guess between.
+
+Covered behaviorally by `tests/test_terminal_modes.py`, which executes the module in Node against a stubbed socket, pane writer, and clock: the teardown lands *after* the replayed buffer (verified to fail when the ordering is degraded to the pre-fix write), the pane leaves its room before rejoining, an unacknowledged rejoin still resets under the published bound, an acknowledged one cancels the fallback and writes once, and a pane with nothing to rejoin resets immediately. `tests/test_api.py` adds the two server-side premises — `test_join_session_replays_mode_sequences_inside_the_handler` pins that the replay is emitted inside the handler and is not filtered — plus `test_terminals_page_recovery_controls_both_reset_mouse_reporting`. Two legacy source-text tests were converted to contract-level checks in the same change rather than having their literals patched: `test_terminals_page_refreshes_only_one_terminal_by_replaying_its_buffer` now asserts the rejoin rather than the spelling of two emits, and `test_terminals_joins_rooms_for_every_pane` asserts that each pane-creation path joins instead of counting occurrences of a string.
 
 ### Issue ID: ISSUE-2026-043
 - Title: A pooled SSH transport can be reaped while the request that selected it is still opening its channel

@@ -4619,6 +4619,29 @@
         await redrawPass({ delayMs: 90, dispatchResize: true });
     }
 
+    /* A pane whose TUI died without unwinding keeps that program's mouse
+       reporting armed, and the shell that inherits the prompt gets every
+       pointer movement typed at it. GridVibeTerminalModes owns the teardown
+       and, for the replaying path, the ordering it has to land in; the page
+       owns only the pane it lands on. */
+    function terminalModeResetWriter(index) {
+        return data => {
+            const terminal = terminals[index];
+            if (!terminal?.term) {
+                return;
+            }
+            /* Anything already queued behind a not-yet-fitted pane — the
+               replay included — has to be applied first, or the teardown would
+               be overwritten by the very bytes it exists to undo. */
+            flushPendingOutput(index);
+            terminal.term.write(data);
+        };
+    }
+
+    function resetTerminalMouseReporting(index) {
+        return GridVibeTerminalModes.resetMouseReporting(terminalModeResetWriter(index));
+    }
+
     async function refreshTerminalDisplay(index) {
         const terminal = terminals[index];
         const sessionId = sessionIds[index];
@@ -4655,11 +4678,26 @@
             }
 
             if (sessionId && socket) {
-                socket.emit('leave_session', { session_id: sessionId });
-                socket.emit('join_session', { session_id: sessionId });
+                /* The rejoin is what replays the server's rolling buffer, and
+                   that buffer still holds a dead TUI's `?1003h`. The mode
+                   teardown therefore has to be written *after* the replayed
+                   bytes land, not after term.reset() — hence the ack-sequenced
+                   rejoin rather than two bare emits. */
+                await GridVibeTerminalModes.rejoinAndResetAfterReplay({
+                    sessionId,
+                    emit: (event, payload, ack) => (
+                        ack ? socket.emit(event, payload, ack) : socket.emit(event, payload)
+                    ),
+                    write: terminalModeResetWriter(index),
+                    setTimeout: (fn, ms) => window.setTimeout(fn, ms),
+                    clearTimeout: handle => window.clearTimeout(handle)
+                });
                 await redrawAttachedTerminals([index], { forceResize: true });
                 return false;
             }
+
+            /* No socket, so no replay to wait behind. */
+            resetTerminalMouseReporting(index);
 
             if (terminal._attached && terminal.term.rows > 0) {
                 terminal.term.refresh(0, terminal.term.rows - 1);
@@ -4700,6 +4738,11 @@
             terminal._pendingOutput = '';
             terminal.term.reset();
             terminal.term.clear();
+            /* Clear purges the replay buffer below, so nothing can re-arm what
+               the reset cleared and the teardown needs no ordering of its own.
+               It is written all the same: the cure is named here rather than
+               left as a side effect of term.reset()'s scope. */
+            resetTerminalMouseReporting(index);
 
             if (terminal._attached) {
                 await ensureTerminalReady(index);

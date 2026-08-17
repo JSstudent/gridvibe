@@ -3502,10 +3502,15 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         html = self._page_html(response)
         refresh_start = html.index("async function refreshTerminalDisplay(index)")
-        self.assertIn("terminal.term.reset();", html[refresh_start:])
-        self.assertIn("emitTerminalResize(index, true);", html[refresh_start:])
-        self.assertIn("socket.emit('leave_session', { session_id: sessionId });", html[refresh_start:])
-        self.assertIn("socket.emit('join_session', { session_id: sessionId });", html[refresh_start:])
+        refresh_body = html[refresh_start:html.index("async function clearTerminalDisplay(index)")]
+        self.assertIn("terminal.term.reset();", refresh_body)
+        self.assertIn("emitTerminalResize(index, true);", refresh_body)
+        # The replay is what a refresh is for: the pane leaves its room and
+        # rejoins it so the server resends that one session's buffer. Both
+        # emits now go through GridVibeTerminalModes, which owns the ordering
+        # the mouse-reporting teardown needs (ISSUE-2026-038).
+        self.assertIn("GridVibeTerminalModes.rejoinAndResetAfterReplay({", refresh_body)
+        self.assertIn("sessionId,", refresh_body)
 
     def test_terminals_page_uses_updated_session_action_labels_and_styles(self):
         response = self.client.get("/terminals")
@@ -3641,6 +3646,31 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("const clearCommand = getTerminalClearCommand(index);", html[clear_start:])
         self.assertIn("socket.emit('clear_terminal_buffer', { session_id: sessionId });", html[clear_start:])
         self.assertIn("socket.emit('terminal_input', { session_id: sessionId, data: clearCommand });", html[clear_start:])
+
+    def test_terminals_page_recovery_controls_both_reset_mouse_reporting(self):
+        """ISSUE-2026-038 — a TUI that died without unwinding leaves its mouse
+        reporting armed and the shell types the reports at its own prompt. Both
+        header controls named for recovery have to cure it, not just Clear."""
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = self._page_html(response)
+
+        refresh_start = html.index("async function refreshTerminalDisplay(index)")
+        clear_start = html.index("async function clearTerminalDisplay(index)")
+        clear_end = html.index("function clearTerminalDisplayFromButton(index)", clear_start)
+        refresh_body = html[refresh_start:clear_start]
+        clear_body = html[clear_start:clear_end]
+
+        # Clear purges the replay buffer, so a plain teardown needs no ordering.
+        self.assertIn("resetTerminalMouseReporting(index);", clear_body)
+
+        # Reset view replays that buffer instead, and the buffer still holds the
+        # dead program's `?1003h` — so the rejoin has to be the ack-sequenced one
+        # that resets *after* the replayed bytes land, never two bare emits.
+        self.assertIn("GridVibeTerminalModes.rejoinAndResetAfterReplay(", refresh_body)
+        self.assertNotIn("socket.emit('join_session'", refresh_body)
+        self.assertNotIn("socket.emit('leave_session'", refresh_body)
 
     def test_terminals_page_clear_command_matches_shell_family_and_host(self):
         """`cls` is a cmd/PowerShell command; POSIX hosts and WSL panes get `clear`."""
@@ -11677,6 +11707,51 @@ class ApiRoutesTestCase(unittest.TestCase):
             },
         )
 
+    def test_join_session_replays_mode_sequences_inside_the_handler(self):
+        """ISSUE-2026-038 — the client resets a crashed TUI's mouse reporting
+        after the replay, sequenced on the join acknowledgement.
+
+        Two server-side premises hold that up. The replay is emitted *inside*
+        the handler, so the ack packet written when the handler returns can
+        never overtake it; and the replay is not filtered for mode-setting
+        sequences, because a rejoin to a pane whose TUI is still running has to
+        restore that program's mouse reporting.
+        """
+        api.session_manager.create_group(
+            name="Modes",
+            connection_mode="ssh",
+            layout="single",
+            terminal_count=1,
+            group_id="group-modes",
+        )
+        session = api.session_manager.create_session(
+            group_id="group-modes",
+            host="10.0.0.13",
+            directory="/tmp/project",
+        )
+
+        api._cache_terminal_output(session.session_id, "\x1b[?1003h\x1b[?1006hframe")
+
+        socket_client = api.socketio.test_client(
+            api.app,
+            flask_test_client=self.client,
+        )
+        self.addCleanup(socket_client.disconnect)
+
+        socket_client.emit("join_session", {"session_id": session.session_id})
+        # No sleep, no background-task flush: the replay is already queued by
+        # the time the handler has returned.
+        events = socket_client.get_received()
+
+        terminal_output_events = [
+            event for event in events if event["name"] == "terminal_output"
+        ]
+        self.assertEqual(len(terminal_output_events), 1)
+        self.assertEqual(
+            terminal_output_events[0]["args"][0]["data"],
+            "\x1b[?1003h\x1b[?1006hframe",
+        )
+
     def test_join_session_replays_buffer_only_once_per_socket_client(self):
         api.session_manager.create_group(
             name="Buffered",
@@ -14505,6 +14580,13 @@ class ExtractedFrontendAssetsTestCase(unittest.TestCase):
             terminals_html.index("js/terminal-shell.js"),
             terminals_html.index("js/terminals.js"),
         )
+        # terminal-modes.js (mouse-reporting recovery) is DOM-free policy that
+        # terminals.js calls into, so it has to be defined before it.
+        self.assertIn(f"/static/js/terminal-modes.js?v={__version__}", terminals_html)
+        self.assertLess(
+            terminals_html.index("js/terminal-modes.js"),
+            terminals_html.index("js/terminals.js"),
+        )
 
     def test_extracted_assets_are_served_without_jinja(self):
         for filename in (
@@ -14602,8 +14684,16 @@ class ExtractedFrontendAssetsTestCase(unittest.TestCase):
         """Finding 1.1 step 3 — room-scoped session_status requires explorer
         and browser panes to join their session rooms like terminal panes."""
         terminals = self.client.get("/static/js/terminals.js").get_data(as_text=True)
-        join_calls = terminals.count("socket.emit('join_session'")
-        self.assertGreaterEqual(join_calls, 4)
+        # Every path that puts a live session on screen joins its room, whatever
+        # kind of pane it is — the initial load, a pane replaced in place, and a
+        # pane created by a split.
+        for function_name in (
+            "function replacePaneWithTerminal(index, session) {",
+            "async function splitTerminalPane(index, axis) {",
+        ):
+            with self.subTest(function=function_name):
+                body = terminals[terminals.index(function_name):]
+                self.assertIn("socket.emit('join_session'", body[:body.index("\n    }\n")])
         # The initial-load join loop must not filter sessions by pane type.
         load_join = terminals[terminals.index("data.sessions.forEach(session => {"):]
         load_join = load_join[:load_join.index("});")]
