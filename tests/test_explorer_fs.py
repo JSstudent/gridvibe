@@ -3,6 +3,8 @@ import io
 import os
 import posixpath
 import stat
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -1331,6 +1333,122 @@ class ExplorerFilesystemRoutesTestCase(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 400)
         self.assertTrue((outside / "secret.txt").exists())
+
+    def _link_directory(self, link: Path, target: Path) -> None:
+        """Create a directory link, using whichever kind this host allows.
+
+        A plain `symlink_to` needs a privilege an ordinary Windows account does
+        not hold, which silently skipped the read-side containment tests on the
+        platform GridVibe most often runs on. A junction needs no privilege and
+        `os.path.realpath` resolves it the same way, so the escape these tests
+        are about is reproduced either way.
+        """
+        try:
+            link.symlink_to(target, target_is_directory=True)
+            return
+        except OSError as symlink_error:
+            if sys.platform != "win32":
+                self.skipTest(f"Directory link creation is unavailable: {symlink_error}")
+        result = subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(link), str(target)],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if result.returncode != 0 or not link.exists():
+            self.skipTest(f"Junction creation is unavailable: {result.stderr.strip()}")
+
+    def test_read_routes_refuse_a_directory_link_resolving_outside_the_root(self):
+        """Defense in depth for the *read* side of root confinement.
+
+        The mutation policy has symlink escape coverage above, and search and
+        find refuse to descend a symlinked directory, but the plain read routes
+        had none — and they are the ones an escape would actually exfiltrate
+        through. Containment works because a candidate is canonicalized with
+        `realpath()` *before* it is compared: for a link inside the root whose
+        target is outside, `commonpath([root, resolved])` is some ancestor and
+        fails the equality check.
+
+        This test therefore fails the moment containment is weakened to compare
+        unresolved paths, because `<root>/outside-dir/secret.txt` is lexically
+        inside the root and only its resolved target is not.
+        """
+        outside = Path(self.temp_dir.name) / "outside"
+        outside.mkdir()
+        (outside / "secret.txt").write_text("out-of-root secret", encoding="utf-8")
+        self._link_directory(self.root / "outside-dir", outside)
+
+        entries_response = self.client.get(
+            f"/api/explorer/{self.session_id}/entries",
+            query_string={"path": "outside-dir"},
+        )
+        self.assertEqual(entries_response.status_code, 400)
+        self.assertNotIn("secret.txt", entries_response.get_data(as_text=True))
+
+        file_response = self.client.get(
+            f"/api/explorer/{self.session_id}/file",
+            query_string={"path": "outside-dir/secret.txt"},
+        )
+        self.assertEqual(file_response.status_code, 400)
+        self.assertNotIn("out-of-root secret", file_response.get_data(as_text=True))
+
+        download_response = self.client.get(
+            f"/api/explorer/{self.session_id}/download",
+            query_string={"path": "outside-dir/secret.txt"},
+        )
+        self.assertEqual(download_response.status_code, 400)
+        self.assertNotIn("out-of-root secret", download_response.get_data(as_text=True))
+
+    def test_read_routes_still_follow_a_directory_link_inside_the_root(self):
+        """The refusal above is about the resolved *target*, not about links.
+
+        Banning links outright would pass the escape test and break every
+        repository that uses one internally, so pin the in-root case too.
+        """
+        target = self.root / "src"
+        target.mkdir()
+        (target / "app.py").write_text("inside the root", encoding="utf-8")
+        self._link_directory(self.root / "src-link", target)
+
+        response = self.client.get(
+            f"/api/explorer/{self.session_id}/file",
+            query_string={"path": "src-link/app.py"},
+        )
+
+        self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+        self.assertEqual(response.get_json()["content"], "inside the root")
+
+    @unittest.skipUnless(hasattr(os, "symlink"), "symlinks unsupported")
+    def test_read_routes_refuse_a_file_symlink_resolving_outside_the_root(self):
+        """The same containment, reached through a link to a *file*.
+
+        Kept separate from the directory case because a file symlink has no
+        privilege-free Windows equivalent — a junction is directories only — so
+        this one legitimately skips where symlinks are unavailable.
+        """
+        outside = Path(self.temp_dir.name) / "outside"
+        outside.mkdir()
+        secret = outside / "secret.txt"
+        secret.write_text("out-of-root secret", encoding="utf-8")
+        link = self.root / "secret-link.txt"
+        try:
+            link.symlink_to(secret)
+        except OSError as exc:
+            self.skipTest(f"Symlink creation is unavailable: {exc}")
+
+        file_response = self.client.get(
+            f"/api/explorer/{self.session_id}/file",
+            query_string={"path": "secret-link.txt"},
+        )
+        self.assertEqual(file_response.status_code, 400)
+        self.assertNotIn("out-of-root secret", file_response.get_data(as_text=True))
+
+        download_response = self.client.get(
+            f"/api/explorer/{self.session_id}/download",
+            query_string={"path": "secret-link.txt"},
+        )
+        self.assertEqual(download_response.status_code, 400)
+        self.assertNotIn("out-of-root secret", download_response.get_data(as_text=True))
 
     def test_failed_copy_cleans_only_its_reserved_destination(self):
         source = self.root / "app.py"

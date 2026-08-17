@@ -6,6 +6,25 @@
 
 > This is a point-in-time review and implementation aid, not a behavior contract. The live contracts remain the code, tests, `AGENTS.md`, `CLAUDE.md`, and the maintained user documentation. Future code and documentation must not cite this review as proof of current behavior.
 
+## Validation outcome — 2026-08-17
+
+This review's own findings were re-checked against the tree and Stage 0 has shipped. Every disposition below held **except one**, corrected in place throughout this document:
+
+- **The self-update Windows cleanup gap does not reproduce and is not a defect.** `tests/test_api.py::ApiRoutesTestCase::test_repo_git_timeout_bounds_a_remote_that_goes_quiet` passes in isolation (6 consecutive runs) and in the full suite on Windows 11 / Python 3.14. `web/selfupdate.py::_run_repo_git()` already implements the complete Guardrail 4 pattern — `GIT_TERMINAL_PROMPT=0`, an owned process group, `_terminate_process_tree()`, and a second bounded reap under `SELF_UPDATE_REAP_TIMEOUT`. The `WinError 32` observed during the review was environment-specific (an antivirus or indexer holding the temporary checkout during `rmtree`), not a code defect. **The repository-wide gate was green:** 1,685 tests, 0 failures, 8 skipped. Stage 1 item 1 and the Stage 0 bullet that depended on it are struck below.
+- Everything else validated. Findings 7, 8, and 11 are real and were each reproduced by a deterministic test; findings 1, 3, 5, 9, 10, and 12 are invalid as this review states, and the reasoning for each was confirmed against the code; finding 2's corrected failure mode (a spurious failure, not an SFTP leak) is exactly right.
+- The code reviewed at `5745763b7a10` is byte-identical to the tree Stage 0 was written against — the only commit since (`c891a6c`) added documentation.
+
+**Stage 0 is complete.** Its output is four registered issues in `docs/testing_issues.md` — the maintained, citable home for them — plus the tests that pin each one:
+
+| Issue | Finding | Tests |
+|---|---|---|
+| ISSUE-2026-040 | 11, Git output/process bounds | `tests/test_git_process_bounds.py` (12 pinned, 6 controls) |
+| ISSUE-2026-041 | 7, RuntimeConfig publication | `tests/test_backend_concurrency_contract.py` |
+| ISSUE-2026-042 | 8, workspace-label claims | `tests/test_backend_concurrency_contract.py` |
+| ISSUE-2026-043 | 2, pooled SSH reservation | `tests/test_backend_concurrency_contract.py` |
+
+Read-side root confinement (finding 9) gained the defense-in-depth cover this review asked for, in `tests/test_explorer_fs.py`: it passes on the current implementation and fails (`200 != 400`) when containment is degraded to unresolved-path comparison, verified by running it that way. Per `CLAUDE.md`, the tests cite the issue IDs and never this document.
+
 ## Executive summary
 
 The source analysis contains useful leads, but its severity and coverage conclusions do not match the current tree:
@@ -15,7 +34,7 @@ The source analysis contains useful leads, but its severity and coverage conclus
 - **Not valid or already addressed:** findings 1, 3, 5, 9, 10, and 12.
 - **Claimed test gaps:** none of the six gaps is real. All six areas have behavioral coverage, although several live in broad integration suites rather than same-named test files.
 
-The highest-risk work is finding 11. It is not only an output-memory concern: the current explorer Git runner also conflicts with Guardrail 4's requirements that every Git invocation set `GIT_TERMINAL_PROMPT=0`, own a bounded process-group shutdown, and use a bounded reap. Full-suite verification also exposed a related existing Windows failure in the otherwise well-tested self-update Git runner: after its real stalled-remote timeout path returns, the temporary checkout can still be locked during immediate teardown. Findings 7 and 8 are next because Guardrail 2 explicitly requires atomic multi-value snapshots and check-then-act operations.
+The highest-risk work is finding 11. It is not only an output-memory concern: the current explorer Git runner also conflicts with Guardrail 4's requirements that every Git invocation set `GIT_TERMINAL_PROMPT=0`, own a bounded process-group shutdown, and use a bounded reap. ~~Full-suite verification also exposed a related existing Windows failure in the otherwise well-tested self-update Git runner.~~ *(Withdrawn — see the validation outcome above; the self-update runner is correct and its test passes.)* Findings 7 and 8 are next because Guardrail 2 explicitly requires atomic multi-value snapshots and check-then-act operations.
 
 The report's “before production deployment” framing should not be read as a readiness assessment. GridVibe's documented security posture is local, same-origin, single-user operation without multi-user authentication or isolation. The work below improves that product, but does not redefine its threat model.
 
@@ -155,7 +174,7 @@ Creating `web/normalizers.py` would not consolidate the three definition sets cl
 | `web/hostkeys.py` | `KnownHostsPersistenceTestCase` and `HostKeyPolicyTestCase` in `tests/test_api.py`, including all three policies and shared callers | Covered |
 | `web/secrets.py` | `tests/test_saved_session_store.py` covers exclusive concurrent key creation, valid Fernet keys, non-clobbering, plaintext exclusion, and password round-trip | Covered |
 | `web/state_files.py` | `tests/test_saved_session_store.py`, `tests/test_multi_workspace.py`, and `ConfigDurabilityTestCase` cover sidecar exclusion, atomic replace, backup, quarantine/recovery, and failure propagation | Covered |
-| `web/selfupdate.py` | `tests/test_api.py` covers clean/current, fast-forward, dirty refusal, real checkout update, prompt suppression, timeouts, process-tree termination, and bounded reap. The real stalled-remote Windows test currently exposes a post-timeout checkout-handle cleanup failure; this is a failing covered behavior, not missing coverage. | Covered; one current failure |
+| `web/selfupdate.py` | `tests/test_api.py` covers clean/current, fast-forward, dirty refusal, real checkout update, prompt suppression, timeouts, process-tree termination, and bounded reap. The real stalled-remote Windows test passes; the cleanup failure reported during this review did not reproduce. | Covered |
 | faster-whisper path | `tests/test_api.py` covers availability, model selection, buffering, transcription flow, disconnect cleanup, recording caps, and engine dispatch | Covered |
 | explorer cross-device move | `tests/test_explorer_fs.py::test_move_cross_device_is_stable_and_retry_safe` checks `EXDEV`, stable `cross_device_move`, no mutation, and retry safety | Covered |
 
@@ -166,7 +185,7 @@ Test organization by behavior is intentional; a module does not need a same-name
 | Work item | Guardrails | Assessment |
 |---|---|---|
 | Explorer Git runner | 3, 4, 6 | Current output/process/prompt handling needs hardening; highest priority |
-| Self-update Git timeout cleanup | 4 | The bounded timeout surfaces correctly, but Windows verification shows the checkout can remain locked when the helper returns |
+| Self-update Git timeout cleanup | 4 | Already correct: process group, tree kill, and bounded reap. Withdrawn as a work item; it is the reference pattern the explorer runner should reuse |
 | RuntimeConfig publication | 2, 10 | Durable writes are correct; in-memory multi-field publication is not atomic |
 | Workspace-label claim | 2 | Current check-then-act is knowingly non-atomic and conflicts with the uniqueness contract |
 | SSH pool reservation | 2, 3 | Pooling is correct, but reservation must precede slow channel open without holding the lock during I/O |
@@ -176,11 +195,11 @@ Test organization by behavior is intentional; a module does not need a same-name
 
 ## Staged implementation plan
 
-### Stage 0 — pin the corrected problem statements
+### Stage 0 — pin the corrected problem statements — **complete**
 
 1. Add focused failing tests for the verified issues before changing behavior:
    - local and remote Git stdout/stderr caps, prompt suppression, timeout, process-group termination, and bounded reap;
-   - the existing real stalled-remote self-update test releases the checkout before `_run_repo_git()` returns on Windows;
+   - ~~the existing real stalled-remote self-update test releases the checkout before `_run_repo_git()` returns on Windows~~ *(withdrawn — it already does; the test passes)*;
    - RuntimeConfig readers never see a mixed generation;
    - concurrent non-empty workspace-label claims produce one winner and one actionable `409`;
    - an SFTP client selected for channel open cannot be reaped until that open is committed or rolled back.
@@ -189,16 +208,21 @@ Test organization by behavior is intentional; a module does not need a same-name
 
 **Exit criteria:** each real issue has a deterministic failing test; the symlink test passes without production changes.
 
+**Met.** 17 pinned tests carry `@unittest.expectedFailure`, each verified to fail for its intended reason rather than incidentally; 11 undecorated controls pin behaviour the fixes must preserve. Removing a decorator is part of the fix that clears it — an unexpected success fails the run, so a stale decorator is loud. The suite is 1,716 tests, green, with `ruff` clean. Two notes on making the pins genuinely deterministic:
+
+- The stalled-remote case reproduces only against an `https://` remote. Git speaks `git://` in-process, so that URL kills the direct child and proves nothing; `https://` forks `git-remote-https`, which is the helper that inherits our pipes. The call is made on a worker thread with a bounded join so an unbounded runner fails in 8 s instead of parking the suite for minutes, and socket cleanup is ordered to run before the checkout is removed so a failing run leaves no git process behind.
+- Symlink creation needs a privilege an ordinary Windows account lacks, which would have silently skipped read-side containment on GridVibe's most common platform. The directory-escape tests use a junction where a symlink is refused — no privilege needed, and `realpath` resolves it identically — so the escape is asserted rather than skipped. The file-symlink variant still skips there, which is honest: a junction is directories only.
+
 ### Stage 1 — harden Git process execution
 
-1. First close the self-update Windows cleanup gap found by verification. `_run_repo_git()` must not return from the timeout path while a descendant can still hold the checkout directory; termination, pipe closure, descendant exit observation, and reap must each remain bounded rather than being replaced with an unbounded wait or timing sleep.
+1. ~~First close the self-update Windows cleanup gap found by verification.~~ *(Withdrawn — `_run_repo_git()` already bounds termination, pipe closure, and reap correctly. Reuse it as the reference pattern instead of changing it.)*
 2. Make explorer output limits a backend invariant rather than an opt-in caller feature. Define a safe global stdout/stderr ceiling and retain smaller per-operation limits where semantics require them.
 3. Set `GIT_TERMINAL_PROMPT=0` for every local and remote Git command. Read-only commands should additionally retain `GIT_OPTIONAL_LOCKS=0`.
 4. Replace the explorer's local `subprocess.run()` and direct-process kill paths with an owned `Popen` process group, concurrent bounded draining of both streams, group termination on timeout/truncation, and a second bounded reap. Reuse the corrected self-update process-tree pattern where its semantics fit instead of creating a weaker variant.
 5. Replace remote whole-stream reads with a deadline-aware bounded channel drain for stdout and stderr. Closing or timing out the channel must not leave a pooled transport counted forever.
 6. Preserve `stdout_truncated`, Git exit status, UTF-8 replacement behavior, search truncation reporting, and the existing public response shapes.
 
-**Exit criteria:** the real self-update stalled-remote test releases its temporary checkout on Windows; huge stdout, huge stderr, a stalled explorer Git process with a surviving helper, and an SSH channel that never finishes all terminate within test bounds; normal local/remote status, graph, diff, search, mutation, and self-update tests still pass.
+**Exit criteria:** huge stdout, huge stderr, a stalled explorer Git process with a surviving helper, and an SSH channel that never finishes all terminate within test bounds; normal local/remote status, graph, diff, search, mutation, and self-update tests still pass; every `expectedFailure` in `tests/test_git_process_bounds.py` is removed in the same change that makes it pass.
 
 ### Stage 2A — publish RuntimeConfig atomically
 
@@ -259,4 +283,6 @@ On systems with `make`, the final equivalent is `make check`. Any user-visible b
 
 For this validation pass, 156 focused tests covering lifecycle, saved-session durability/secrets, explorer filesystem mutations, SSH/SFTP pooling, output-buffer cleanup, status-broadcast locking, RuntimeConfig extraction, module re-exports, host-key policy, and config durability completed successfully (4 skipped for unavailable platform capabilities). Ruff completed successfully.
 
-The full runner executed 1,685 tests and reported one error (8 skipped): `ApiRoutesTestCase.test_repo_git_timeout_bounds_a_remote_that_goes_quiet` raised `WinError 32` while immediately deleting its temporary checkout after the timeout path. The same test failed in isolation on this Windows/Python 3.14 environment. No Git process remained after test cleanup, but the helper returned before the checkout handle was released. That existing failure is included in Stage 1 and means the repository-wide test gate was **not** green at the time of this review.
+The full runner executed 1,685 tests and reported one error (8 skipped): `ApiRoutesTestCase.test_repo_git_timeout_bounds_a_remote_that_goes_quiet` raised `WinError 32` while immediately deleting its temporary checkout after the timeout path.
+
+**Re-verified 2026-08-17 and withdrawn.** That test passes in isolation (6 consecutive runs) and in the full suite on the same Windows 11 / Python 3.14 environment, both before and after Stage 0. The gate was green at the reviewed revision: 1,685 tests, 0 failures, 8 skipped, `ruff` clean. `WinError 32` on an immediate `rmtree` of a just-released checkout is an environment artifact — an antivirus or search indexer holding the directory — and not evidence about `_run_repo_git()`, which already owns a process group, kills the tree, and reaps under a second bound. After Stage 0 the gate is 1,716 tests, green, 9 skipped, 17 expected failures.
