@@ -2236,7 +2236,9 @@
                 explorerCaptureActiveTabView(index);
             }
             const tabs = explorerSerializeTabs(terminal);
-            const sidebar = explorerSidebarPresentation(index);
+            /* The pane object, not just its slot: this describes cached groups
+               too, and a detached pane has no slot in `terminals`. */
+            const sidebar = explorerSidebarPresentation(index, terminal);
             return {
                 sessionId,
                 mode: 'explorer',
@@ -2419,8 +2421,8 @@
             ? explorerSerializeTabs(terminal)
             : { open_tabs: [], active_tab: '', tab_views: {} };
         const mdAppearance = startupMode === 'explorer' ? explorerMarkdownAppearance() : null;
-        const explorerSidebar = startupMode === 'explorer' && explorerSlot !== -1
-            ? explorerSidebarPresentation(explorerSlot)
+        const explorerSidebar = startupMode === 'explorer' && terminal
+            ? explorerSidebarPresentation(explorerSlot, terminal)
             : {
                 width: Number(session.explorer_sidebar_width) || 260,
                 scroll: session.explorer_sidebar_scroll || {},

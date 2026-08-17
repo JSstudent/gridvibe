@@ -1101,8 +1101,12 @@
             const downloadPath = (path && !commitHash && status !== 'deleted')
                 ? ` data-explorer-download-path="${escHtml(path)}"`
                 : '';
+            /* The row's own diff identity, so the active-row paint can tell
+               this row from the other three that name the same path without
+               reading the action attributes off the button inside it. */
+            const rowIdentity = ` data-explorer-git-row-commit="${escHtml(commitHash)}" data-explorer-git-row-mode="${escHtml(commitHash ? '' : diffMode)}"`;
             return `
-                <div class="explorer-diff-commit-file" title="${escHtml(path)}" data-explorer-copy-path="${escHtml(path)}"${downloadPath}>
+                <div class="explorer-diff-commit-file" title="${escHtml(path)}" data-explorer-copy-path="${escHtml(path)}"${downloadPath}${rowIdentity}>
                     ${explorerFileTypeIconHtml(path)}
                     <button type="button" class="explorer-diff-commit-file-path" ${pathAction}>${explorerGitFileLabelHtml(path, file.name)}</button>
                     ${explorerDiffSidebarStatusHtml(file.git)}
@@ -1696,7 +1700,9 @@
         const commitRows = commits.length
             ? commits.map(commit => {
                 const hash = commit.hash || '';
-                const expanded = hash && expandedCommits.has(`explorer:${hash}`);
+                const expanded = hash && expandedCommits.has(
+                    window.GridVibeExplorerGitActive.commitKey(hash)
+                );
                 return `
                     <button type="button" class="explorer-diff-commit" data-explorer-git-commit-toggle="${escHtml(hash)}" data-explorer-git-commit-full="${escHtml(commit.full_hash || '')}" data-explorer-git-commit-message="${escHtml(commit.message || '')}" ${hash ? '' : 'disabled'} title="${escHtml(commit.line || '')}" aria-expanded="${expanded ? 'true' : 'false'}">
                         <span class="explorer-diff-commit-graph">${explorerGitGraphHtml(commit.graph)}</span>
@@ -1817,7 +1823,10 @@
                     return;
                 }
                 const expanded = ensureExplorerDiffExpandedCommits(pane);
-                const key = `explorer:${commit}`;
+                const key = window.GridVibeExplorerGitActive.commitKey(commit);
+                /* Collapsing the commit holding the open diff is final: this
+                   pane has already recorded it as revealed, so the reveal in
+                   syncExplorerGitActiveRows() never re-opens it. */
                 if (expanded.has(key)) {
                     expanded.delete(key);
                 } else {
@@ -1827,10 +1836,93 @@
                 notePanePresentationChanged(index);
             });
         });
+        paintExplorerGitActiveRows(index);
+    }
+
+    /* The viewer's identity in the sidebar's vocabulary. `_explorerDiffCommit`
+       is what separates a past commit's copy of a path from the worktree's. */
+    function explorerGitViewerTarget(pane) {
+        return window.GridVibeExplorerGitActive.viewerTarget({
+            mode: pane?._explorerMode,
+            filePath: pane?._explorerFilePath,
+            diffCommit: pane?._explorerDiffCommit,
+            diffMode: pane?._explorerDiffMode
+        });
+    }
+
+    /* Paint only — a class toggle over rows already on screen (guardrail 8),
+       never a markup rewrite: the sidebar carries a commit-message textarea,
+       and re-rendering it on every file open would take the caret with it. */
+    function paintExplorerGitActiveRows(index) {
+        const pane = terminals[index];
+        const panel = document.getElementById(`explorer-git-panel-${index}`);
+        if (!pane || !panel) {
+            return;
+        }
+        const model = window.GridVibeExplorerGitActive;
+        const target = explorerGitViewerTarget(pane);
+        let activeRow = null;
+        panel.querySelectorAll('.explorer-diff-commit-file[data-explorer-copy-path]').forEach(row => {
+            const active = model.rowIsActive(target, {
+                path: row.dataset.explorerCopyPath || '',
+                commitHash: row.dataset.explorerGitRowCommit || '',
+                diffMode: row.dataset.explorerGitRowMode || ''
+            });
+            row.classList.toggle('active', active);
+            if (active) {
+                row.setAttribute('aria-current', 'true');
+                activeRow = activeRow || row;
+            } else {
+                row.removeAttribute('aria-current');
+            }
+        });
+        panel.querySelectorAll('[data-explorer-git-commit-toggle]').forEach(button => {
+            button.classList.toggle(
+                'active',
+                model.commitIsActive(target, button.dataset.explorerGitCommitToggle || '')
+            );
+        });
+        /* Only after a reveal, so an ordinary repaint never fights the scroll
+           position the sidebar was restored (or scrolled by hand) to. */
+        if (pane._explorerGitScrollActiveIntoView) {
+            pane._explorerGitScrollActiveIntoView = false;
+            activeRow?.scrollIntoView({ block: 'nearest' });
+        }
+    }
+
+    /* Reveal + paint. Re-renders the panel only when a commit actually had to
+       be opened, which happens at most once per pane per commit. */
+    function syncExplorerGitActiveRows(index) {
+        const pane = terminals[index];
+        if (!pane || !document.getElementById(`explorer-git-panel-${index}`)) {
+            return;
+        }
+        const expanded = ensureExplorerDiffExpandedCommits(pane);
+        const plan = window.GridVibeExplorerGitActive.revealPlan(explorerGitViewerTarget(pane), {
+            expanded: Array.from(expanded),
+            revealed: pane._explorerGitRevealedCommit || '',
+            commits: (pane._explorerGitRepo?.commits || []).map(commit => commit.hash || '')
+        });
+        if (!plan.revealedCommit) {
+            paintExplorerGitActiveRows(index);
+            return;
+        }
+        pane._explorerGitRevealedCommit = plan.revealedCommit;
+        pane._explorerGitScrollActiveIntoView = true;
+        if (!plan.expandKey) {
+            paintExplorerGitActiveRows(index);
+            return;
+        }
+        expanded.add(plan.expandKey);
+        // Opening the row is expansion state like any other, so it is saved
+        // like any other — the whole point is that it survives the next restore.
+        renderExplorerGitPanel(index);
+        notePanePresentationChanged(index);
     }
 
     function renderExplorerGitPanels(index) {
         renderExplorerGitPanel(index);
+        syncExplorerGitActiveRows(index);
     }
 
     function invalidateExplorerGitRepo(index) {
@@ -2022,8 +2114,14 @@
         main.style.setProperty('--explorer-sidebar-width', `${width}px`);
     }
 
-    function explorerSidebarPresentation(index) {
-        const pane = terminals[index];
+    /* `pane` is passed explicitly by callers that describe a group which is not
+       the one mounted in the grid: a cached group's panes are detached, so
+       `terminals.indexOf()` answers -1 for them and resolving by slot alone
+       reported this whole function's defaults — collapsing every background
+       workspace tab's tree and Git expansion on the next save. The index is
+       still used, but only for the live scroll read, which correctly finds
+       nothing for a detached pane and leaves the stored point in place. */
+    function explorerSidebarPresentation(index, pane = terminals[index]) {
         if (!pane) return { width: 260, scroll: {}, expanded: [], gitExpanded: [] };
         ensureExplorerTreeState(pane);
         const scroll = { ...(pane._explorerSidebarScroll || {}) };
@@ -7153,6 +7251,7 @@
 
         renderExplorerTabStrip(index);
         persistExplorerTabsToSession(index);
+        syncExplorerGitActiveRows(index);
         return true;
     }
 
@@ -7404,6 +7503,7 @@
         restoreExplorerFileScroll(index, effectiveScrollState);
         renderExplorerTabStrip(index);
         persistExplorerTabsToSession(index);
+        syncExplorerGitActiveRows(index);
         return true;
     }
 
@@ -7608,6 +7708,7 @@
         );
         loadExplorerDiff(index);
         renderExplorerTabStrip(index);
+        syncExplorerGitActiveRows(index);
         return true;
     }
 
@@ -7825,6 +7926,9 @@
                 restoreExplorerFileScroll(index, restoredDirView.scroll);
             }
             renderExplorerTabStrip(index);
+            // A listing is not a diff, so the Git sidebar's highlight goes out
+            // with the file the viewer just left.
+            paintExplorerGitActiveRows(index);
             return true;
         } catch (error) {
             console.error('[GridVibe Sessions] Explorer load failed:', error);
