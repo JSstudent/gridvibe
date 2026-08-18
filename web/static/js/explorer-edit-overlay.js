@@ -117,6 +117,15 @@ function explorerEditOverlayViable(draft) {
     if (!policy) {
         return false;
     }
+    /* The underlay *is* the read-only row renderer, run again on the live
+       draft every animation frame. A buffer the viewer already refuses to
+       build rows for once is not one to rebuild sixty times a second, so the
+       presentation tier stands the overlay down before its own byte cap is
+       even consulted; the editor falls back to a bare textarea exactly as it
+       does above 2 MiB. */
+    if (window.GridVibeExplorerTiers?.sourceTierForContent(draft) === 'large') {
+        return false;
+    }
     return policy.overlayViability({
         contentLength: String(draft == null ? '' : draft).length,
         maxContentLength: EXPLORER_PLAIN_PREVIEW_THRESHOLD

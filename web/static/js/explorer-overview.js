@@ -70,6 +70,11 @@ function explorerChangeMarksEligible(pane) {
         && pane._explorerGitContext?.available
         && !pane._explorerDiffCommit
         && !pane._explorerEdit
+        // The large-file tier renders no per-line rows, so there is nothing to
+        // hang a gutter marker or a ruler lane on — and fetching a diff to
+        // build a model nothing can paint is the work the tier exists to
+        // avoid. Its notice tells the reader the marks are off.
+        && explorerPaneSourceTier(pane) !== 'large'
     );
 }
 
@@ -163,10 +168,19 @@ async function loadExplorerChangeMarks(index, { force = false } = {}) {
         truncated = Boolean(pane._explorerDiffTruncated);
     } else {
         try {
-            const params = new URLSearchParams({ path, mode: 'head' });
+            /* `context=zero` is the marks' own narrower read of the same
+               bounded endpoint: -U0 drops the context lines and keeps every
+               +/- line, which is exactly what a mark and a peek are made of,
+               so the model is identical and up to six lines per hunk never
+               travel. The reply is deliberately *not* written into
+               `_explorerDiffContent` / `_explorerDiffCacheKey` — the Diff
+               panel reads those and would render a context-free patch. The
+               reverse reuse above is still sound: a -U3 diff yields the same
+               marks. */
+            const params = new URLSearchParams({ path, mode: 'head', context: 'zero' });
             const response = await fetch(
                 `/api/explorer/${encodeURIComponent(sessionId)}/git/diff?${params.toString()}`,
-                { cache: 'no-store' }
+                { cache: 'no-store', signal: explorerRequestSignal(pane, 'changeMarks') }
             );
             const data = await response.json().catch(() => ({}));
             if (!response.ok) {
@@ -175,6 +189,12 @@ async function loadExplorerChangeMarks(index, { force = false } = {}) {
             diff = data.diff || '';
             truncated = Boolean(data.truncated);
         } catch (error) {
+            // A superseded load is not a failure: a newer open cancelled it
+            // and will paint its own marks. Logging it would put a red line in
+            // the console for every fast file switch (guardrail 9).
+            if (explorerIsAbortError(error)) {
+                return;
+            }
             // An untracked file returns an empty diff, but any genuine failure
             // also just means no marks — the Source view stands on its own.
             console.error('[GridVibe Sessions] Explorer change marks failed:', error);

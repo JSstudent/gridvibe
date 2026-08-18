@@ -47,6 +47,113 @@
        decoded character count, which is a close proxy for the byte size. */
     const EXPLORER_PLAIN_PREVIEW_THRESHOLD = 2 * 1024 * 1024;
 
+    /* One in-flight request per pane per named slot. Opening a second file
+       while the first is still arriving used to leave both fetches, both JSON
+       decodes and both renders to run to completion, so clicking down a tree
+       queued up work for content nobody was looking at any more; the newer
+       load now cancels the one it replaces.
+
+       Superseding is deliberately *within* a slot only — a diff load does not
+       cancel a file load — and abort stays an optimization, never a
+       correctness mechanism: a request that already resolved cannot be called
+       back, so every caller keeps its post-arrival identity check exactly as
+       it was. Returns undefined where AbortController is unavailable, which
+       fetch() reads as "no signal". */
+    function explorerRequestSignal(pane, slot) {
+        if (!pane || typeof AbortController !== 'function') {
+            return undefined;
+        }
+        const slots = pane._explorerRequestAborters || (pane._explorerRequestAborters = {});
+        slots[slot]?.abort();
+        const controller = new AbortController();
+        slots[slot] = controller;
+        return controller.signal;
+    }
+
+    /* A deliberate abort is not a failure and must not reach the console
+       (guardrail 9) — otherwise every fast file switch writes a red line.
+       `AbortError` is the fetch contract; the legacy numeric ABORT_ERR code
+       covers engines that still reject with a bare DOMException. */
+    function explorerIsAbortError(error) {
+        return Boolean(error) && (error.name === 'AbortError' || error.code === 20);
+    }
+
+    /* The presentation-tier policy (explorer-tiers.js, DOM-free and
+       Node-tested). Looked up rather than captured so a page that somehow
+       loaded without it degrades to today's behaviour instead of throwing. */
+    function explorerTierPolicy() {
+        return (typeof window !== 'undefined' && window.GridVibeExplorerTiers) || null;
+    }
+
+    /* One place decides how a buffer is presented, so the 2 MiB highlight
+       threshold and the presentation tier can never end up computed from
+       different content. Cached on the pane because counting lines is O(bytes)
+       and the render path asks on every repaint. */
+    function applyExplorerSourceTier(pane, content) {
+        if (!pane) {
+            return;
+        }
+        const text = typeof content === 'string' ? content : '';
+        const policy = explorerTierPolicy();
+        pane._explorerFilePlain = text.length > EXPLORER_PLAIN_PREVIEW_THRESHOLD;
+        pane._explorerSourceMetrics = policy
+            ? policy.sourceMetrics(text)
+            : { bytes: text.length, lines: 0 };
+        pane._explorerSourceTier = policy
+            ? policy.sourceTier(pane._explorerSourceMetrics)
+            : 'full';
+    }
+
+    function explorerPaneSourceTier(pane) {
+        return pane?._explorerSourceTier || 'full';
+    }
+
+    /* Find is a capability of the tier, not of the view: the one input in the
+       header serves Source, Preview and Diff, so leaving it live while the
+       view it is pointed at cannot answer would hand the reader a control that
+       silently does nothing. The tier's notice says so in as many words. */
+    function explorerPaneAllowsFind(pane) {
+        const policy = explorerTierPolicy();
+        return policy
+            ? policy.sourceTierAllows(explorerPaneSourceTier(pane), 'find')
+            : true;
+    }
+
+    /* The tier's in-pane notice. Deliberately *not* showGridVibeNotice(): that
+       is the launcher's one global banner and it reports events, while this
+       describes a state that lasts as long as the file is open. Same shape as
+       the diff truncation banner — one role="status" element inside the
+       surface it describes, styled from tokens.css. */
+    function explorerSourceTierNoticeHtml(pane) {
+        const policy = explorerTierPolicy();
+        const notice = policy ? policy.sourceTierNotice(pane?._explorerSourceMetrics || null) : null;
+        if (!notice) {
+            return '';
+        }
+        return '<div class="explorer-source-tier-notice" role="status">'
+            + `<strong>${escHtml(notice.title)}</strong> `
+            + `${escHtml(notice.detail)} `
+            + `Turned off: ${escHtml(notice.disabled.join(', '))}. `
+            + `<strong>${escHtml(notice.findNote)}</strong> `
+            + escHtml(notice.retained)
+            + '</div>';
+    }
+
+    /* The large tier's body: a bounded number of plain chunks instead of one
+       row per line. Nothing here is per-line, so the gutter, section folding,
+       the occurrence tint (which anchors on `.explorer-source-lines`), the
+       change marks and the overview ruler are absent by construction rather
+       than by a flag each of them has to remember to check. */
+    function renderExplorerLargeSourceHtml(pane) {
+        const policy = explorerTierPolicy();
+        const content = pane?._explorerFileContent || '';
+        const chunks = policy ? policy.sourceChunks(content) : [content];
+        const body = chunks
+            .map(chunk => `<pre class="explorer-source-chunk">${escHtml(chunk)}</pre>`)
+            .join('');
+        return `${explorerSourceTierNoticeHtml(pane)}<div class="explorer-source-plain">${body}</div>`;
+    }
+
     const EXPLORER_LANGUAGE_BY_EXTENSION = Object.freeze({
         '.bash': 'shell',
         '.bat': 'batch',
@@ -3696,1001 +3803,6 @@
         performExplorerGitAction(index, 'publish', {});
     }
 
-    /* Diff2HtmlUI configuration.
-       `matching: 'words'` + `diffStyle: 'char'` give character-level intraline
-       emphasis and LCS-based line matching instead of the fallback renderer's
-       FIFO pairing; the comparison limits are explicit so pathological diffs
-       stay responsive (Diff2Html documents line matching as the main cost). */
-    function explorerDiff2HtmlConfig() {
-        return {
-            outputFormat: 'side-by-side',
-            drawFileList: false,
-            fileContentToggle: false,
-            matching: 'words',
-            diffStyle: 'char',
-            highlight: true,
-            synchronisedScroll: false,
-            matchingMaxComparisons: 1500,
-            /* Diff2Html's own default. A line longer than this gets a plain
-               red/green block and no intraline ins/del at all, so the previous
-               2000 silently dropped emphasis on generated SQL, minified assets,
-               and long single-statement lines. The char diff is O(n·d) in the
-               edit distance, which stays cheap for the usual small edit inside
-               a long line; the bounded diff payload (256 KiB / 4,000 lines)
-               caps how many pairs can reach it. */
-            maxLineLengthHighlight: 10000
-        };
-    }
-
-    function explorerDiffTruncationBannerHtml(pane) {
-        if (!pane || !pane._explorerDiffTruncated) {
-            return '';
-        }
-        return '<div class="explorer-diff-truncated" role="status">'
-            + 'Diff truncated to 256 KiB / 4,000 lines — the change shown is incomplete.'
-            + '</div>';
-    }
-
-    function synchroniseExplorerDiffScrollbars(host) {
-        const sides = host?._explorerDiffSides || [];
-        const spacers = host?._explorerDiffScrollSpacers || [];
-        sides.forEach((side, sideIndex) => {
-            const spacer = spacers[sideIndex];
-            if (spacer) {
-                spacer.style.width = `${Math.max(side.clientWidth, side.scrollWidth)}px`;
-            }
-        });
-    }
-
-    function synchroniseExplorerDiffWrappedRows(host) {
-        const sides = host?._explorerDiffSides || [];
-        const rowsBySide = sides.map(side => [
-            ...side.querySelectorAll('.d2h-diff-tbody > tr')
-        ]);
-        rowsBySide.flat().forEach(row => {
-            row.style.height = '';
-        });
-        if (sides.length !== 2
-            || !host.closest('.explorer-diff-content')?.classList.contains('wrap-lines')) {
-            return;
-        }
-
-        const rowCount = Math.max(...rowsBySide.map(rows => rows.length), 0);
-        for (let rowIndex = 0; rowIndex < rowCount; rowIndex += 1) {
-            const pairedRows = rowsBySide
-                .map(rows => rows[rowIndex])
-                .filter(Boolean);
-            const heights = pairedRows.map(row => row.getBoundingClientRect().height);
-            const maxHeight = Math.max(...heights, 0);
-            pairedRows.forEach((row, sideIndex) => {
-                if (maxHeight - heights[sideIndex] > 0.5) {
-                    row.style.height = `${maxHeight}px`;
-                }
-            });
-        }
-    }
-
-    function scheduleExplorerDiffScrollbarSync(host) {
-        if (!host || host._explorerDiffScrollbarFrame) {
-            return;
-        }
-        const sync = () => {
-            host._explorerDiffScrollbarFrame = null;
-            if (host.isConnected) {
-                synchroniseExplorerDiffWrappedRows(host);
-                synchroniseExplorerDiffScrollbars(host);
-            }
-        };
-        if (typeof window.requestAnimationFrame === 'function') {
-            host._explorerDiffScrollbarFrame = window.requestAnimationFrame(sync);
-        } else {
-            sync();
-        }
-    }
-
-    function observeExplorerDiffLayout(host) {
-        const filesDiff = host?.querySelector('.d2h-files-diff');
-        const sides = filesDiff
-            ? [...filesDiff.querySelectorAll(':scope > .d2h-file-side-diff')]
-            : [];
-        if (sides.length !== 2) {
-            return;
-        }
-
-        const scrollbars = document.createElement('div');
-        scrollbars.className = 'explorer-diff-horizontal-scrollbars';
-        scrollbars.setAttribute('aria-hidden', 'true');
-        const tracks = sides.map((side, sideIndex) => {
-            const track = document.createElement('div');
-            track.className = 'explorer-diff-horizontal-scroll';
-            track.dataset.explorerDiffSide = sideIndex === 0 ? 'left' : 'right';
-            const spacer = document.createElement('div');
-            spacer.className = 'explorer-diff-horizontal-scroll-spacer';
-            track.appendChild(spacer);
-            track.addEventListener('scroll', () => {
-                side.scrollLeft = track.scrollLeft;
-            });
-            scrollbars.appendChild(track);
-            return { track, spacer };
-        });
-        host.appendChild(scrollbars);
-        host._explorerDiffSides = sides;
-        host._explorerDiffScrollTracks = tracks.map(item => item.track);
-        host._explorerDiffScrollSpacers = tracks.map(item => item.spacer);
-        scheduleExplorerDiffScrollbarSync(host);
-
-        sides.forEach((side, sideIndex) => {
-            side.addEventListener('wheel', event => {
-                const horizontalDelta = event.deltaX || (event.shiftKey ? event.deltaY : 0);
-                if (!horizontalDelta) {
-                    return;
-                }
-                event.preventDefault();
-                tracks[sideIndex].track.scrollLeft += horizontalDelta;
-            }, { passive: false });
-        });
-
-        if (typeof window.ResizeObserver === 'function') {
-            const observer = new window.ResizeObserver(entries => {
-                const width = entries[0]?.contentRect?.width;
-                if (Number.isFinite(width)
-                    && Math.abs(width - (host._explorerDiffObservedWidth || 0)) > 0.5) {
-                    host._explorerDiffObservedWidth = width;
-                    scheduleExplorerDiffScrollbarSync(host);
-                }
-            });
-            host._explorerDiffObservedWidth = filesDiff.getBoundingClientRect().width;
-            observer.observe(filesDiff);
-            host._explorerDiffResizeObserver = observer;
-        }
-    }
-
-    function disconnectExplorerDiffLayout(host) {
-        host?._explorerDiffResizeObserver?.disconnect();
-        if (host?._explorerDiffScrollbarFrame && typeof window.cancelAnimationFrame === 'function') {
-            window.cancelAnimationFrame(host._explorerDiffScrollbarFrame);
-        }
-    }
-
-    /* A file opened from the Changes sidebar carries an explicit worktree mode.
-       A file opened directly uses the legacy HEAD diff; that view is equally
-    safe for line undo only when the index is clean, because HEAD→worktree
-       then contains exactly the unstaged worktree changes. */
-    function explorerDiffShowsOnlyWorktreeChanges(pane) {
-        if (pane && pane._explorerDiffMode === 'worktree') {
-            return true;
-        }
-        if (!pane || (pane._explorerDiffMode && pane._explorerDiffMode !== 'head')) {
-            return false;
-        }
-        const git = pane._explorerGit;
-        if (!git || git.status === 'conflicted') {
-            return false;
-        }
-        const indexCode = git.index_status || ' ';
-        const worktreeCode = git.worktree_status || ' ';
-        return explorerGitCodeUnmodified(indexCode)
-            && !explorerGitCodeUnmodified(worktreeCode);
-    }
-
-    function explorerCanUndoDiffLine(pane) {
-        return Boolean(
-            pane
-            && pane._explorerMode === 'file'
-            && explorerDiffShowsOnlyWorktreeChanges(pane)
-            && !pane._explorerDiffCommit
-            && pane._explorerFileEditable
-            && !pane._explorerFileTruncated
-            && !pane._explorerDiffTruncated
-            && !pane._explorerDiffUndoBusy
-            && !pane._explorerEdit
-            && pane._explorerFileRevision
-            && !String(pane._explorerDiffContent || '').includes('\\ No newline at end of file')
-        );
-    }
-
-    /* Record the current worktree insertion point for every deleted line. A
-       deleted line has no new-side line number of its own, so this small map is
-       what lets a one-line restore put it back at the exact hunk position. */
-    function explorerDiffDeletionInsertions(diff) {
-        const insertions = new Map();
-        let oldLine = 0;
-        let newLine = 0;
-        String(diff || '').split(/\r?\n/).forEach(line => {
-            const hunk = line.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
-            if (hunk) {
-                oldLine = Number(hunk[1]);
-                newLine = Number(hunk[2]);
-                return;
-            }
-            if (!oldLine && !newLine) {
-                return;
-            }
-            if (line.startsWith('-') && !line.startsWith('---')) {
-                insertions.set(oldLine, newLine);
-                oldLine += 1;
-            } else if (line.startsWith('+') && !line.startsWith('+++')) {
-                newLine += 1;
-            } else if (line.startsWith(' ')) {
-                oldLine += 1;
-                newLine += 1;
-            }
-        });
-        return insertions;
-    }
-
-    /* Group the patch into change blocks: a maximal run of consecutive changed
-       lines with no context line between them — the "paragraph" a reader sees
-       as one edit. Undoing a block swaps its worktree lines (`expected`) back
-       to the HEAD lines it replaced (`replacement`) in a single save, so a
-       20-line rewrite is one click instead of twenty. `line` is the 1-based
-       worktree line the run starts at (for a pure deletion, where the removed
-       lines go back in); `oldLine` is the matching HEAD line. */
-    function explorerDiffChangeBlocks(diff) {
-        const blocks = [];
-        let oldLine = 0;
-        let newLine = 0;
-        let run = null;
-        const startRun = () => {
-            if (!run) {
-                run = { kind: 'block', line: newLine, oldLine, expected: [], replacement: [] };
-            }
-            return run;
-        };
-        const flushRun = () => {
-            if (run && (run.expected.length || run.replacement.length)) {
-                blocks.push(run);
-            }
-            run = null;
-        };
-        String(diff || '').split(/\r?\n/).forEach(line => {
-            const hunk = line.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
-            if (hunk) {
-                flushRun();
-                oldLine = Number(hunk[1]);
-                newLine = Number(hunk[2]);
-                return;
-            }
-            if (!oldLine && !newLine) {
-                return;
-            }
-            if (line.startsWith('-') && !line.startsWith('---')) {
-                startRun().replacement.push(line.slice(1));
-                oldLine += 1;
-                return;
-            }
-            if (line.startsWith('+') && !line.startsWith('+++')) {
-                startRun().expected.push(line.slice(1));
-                newLine += 1;
-                return;
-            }
-            flushRun();
-            if (line.startsWith(' ')) {
-                oldLine += 1;
-                newLine += 1;
-            }
-        });
-        flushRun();
-        return blocks;
-    }
-
-    /* Index every changed line of every block by its rendered line number so a
-       diff row can be mapped back to the block it belongs to. */
-    function explorerDiffBlockLineIndex(blocks) {
-        const byNewLine = new Map();
-        const byOldLine = new Map();
-        blocks.forEach((block, position) => {
-            block.id = String(position + 1);
-            block.rows = Math.max(block.expected.length, block.replacement.length);
-            block.expected.forEach((_, offset) => byNewLine.set(block.line + offset, block));
-            block.replacement.forEach((_, offset) => byOldLine.set(block.oldLine + offset, block));
-        });
-        return { byNewLine, byOldLine };
-    }
-
-    function explorerDiffRowBlock(blockIndex, oldLine, newLine) {
-        if (newLine?.type === 'add') {
-            const block = blockIndex.byNewLine.get(newLine.number);
-            if (block) {
-                return block;
-            }
-        }
-        if (oldLine?.type === 'delete') {
-            return blockIndex.byOldLine.get(oldLine.number) || null;
-        }
-        return null;
-    }
-
-    function explorerRenderedDiffLine(row, {
-        cellSelector,
-        numberSelector,
-        codeSelector,
-        addClass,
-        deleteClass
-    }) {
-        const cell = row?.querySelector(cellSelector);
-        const numberCell = cell?.matches(numberSelector)
-            ? cell
-            : cell?.querySelector(numberSelector);
-        const number = Number.parseInt(numberCell?.textContent || '', 10);
-        if (!cell || !numberCell || !Number.isFinite(number)) {
-            return null;
-        }
-        const typeHost = cell.matches(numberSelector) ? row : cell;
-        const type = typeHost.querySelector(`.${addClass}`)
-            || typeHost.classList.contains(addClass)
-            ? 'add'
-            : (
-                typeHost.querySelector(`.${deleteClass}`)
-                || typeHost.classList.contains(deleteClass)
-                    ? 'delete'
-                    : 'context'
-            );
-        return {
-            type,
-            number,
-            text: (cell.querySelector(codeSelector) || row.querySelector(codeSelector))?.textContent || '',
-            numberCell
-        };
-    }
-
-    function explorerDiffUndoAction(oldLine, newLine, deletionInsertions) {
-        const deleted = oldLine?.type === 'delete';
-        const added = newLine?.type === 'add';
-        if (deleted && added) {
-            return {
-                kind: 'replace',
-                line: newLine.number,
-                expected: newLine.text,
-                replacement: oldLine.text
-            };
-        }
-        if (added) {
-            return {
-                kind: 'remove',
-                line: newLine.number,
-                expected: newLine.text,
-                replacement: ''
-            };
-        }
-        if (deleted) {
-            const insertLine = deletionInsertions.get(oldLine.number);
-            if (Number.isFinite(insertLine) && insertLine > 0) {
-                return {
-                    kind: 'insert',
-                    line: insertLine,
-                    expected: '',
-                    replacement: oldLine.text
-                };
-            }
-        }
-        return null;
-    }
-
-    function registerExplorerDiffUndoAction(pane, actionId, action) {
-        if (!(pane._explorerDiffUndoActions instanceof Map)) {
-            pane._explorerDiffUndoActions = new Map();
-        }
-        pane._explorerDiffUndoActions.set(actionId, action);
-        return actionId;
-    }
-
-    function attachExplorerDiffUndoButton(index, numberCell, action) {
-        const pane = terminals[index];
-        if (!pane || !numberCell || !action) {
-            return;
-        }
-        if (!(pane._explorerDiffUndoActions instanceof Map)) {
-            pane._explorerDiffUndoActions = new Map();
-        }
-        const actionId = registerExplorerDiffUndoAction(
-            pane,
-            String(pane._explorerDiffUndoActions.size + 1),
-            action
-        );
-        const button = document.createElement('button');
-        button.type = 'button';
-        button.className = 'explorer-diff-undo-line';
-        button.dataset.explorerDiffUndoLine = actionId;
-        button.title = 'Undo this unstaged line change';
-        button.setAttribute('aria-label', 'Undo this unstaged line change');
-        button.innerHTML = EXPLORER_GIT_REVERT_ICON;
-        button.addEventListener('click', event => {
-            event.preventDefault();
-            event.stopPropagation();
-            undoExplorerDiffChange(index, actionId);
-        });
-        numberCell.appendChild(button);
-    }
-
-    /* Tag every rendered row of a multi-line block, and hang one "Undo block"
-       pill off the block's first row. Single-line blocks are left to the
-       per-line button — a pill there would say the same thing twice. */
-    function attachExplorerDiffUndoBlockButton(index, block, rows, numberCell) {
-        const pane = terminals[index];
-        if (!pane || !block || block.rows < 2) {
-            return;
-        }
-        rows.filter(Boolean).forEach(row => {
-            row.dataset.explorerDiffBlock = block.id;
-        });
-        const actionId = `block-${block.id}`;
-        if (!numberCell || pane._explorerDiffUndoActions?.has(actionId)) {
-            return;
-        }
-        registerExplorerDiffUndoAction(pane, actionId, block);
-        const label = `Undo this block of ${block.rows} unstaged line changes`;
-        const pill = document.createElement('button');
-        pill.type = 'button';
-        pill.className = 'explorer-diff-undo-block';
-        pill.dataset.explorerDiffUndoBlock = block.id;
-        pill.dataset.explorerDiffUndoAction = actionId;
-        pill.title = label;
-        pill.setAttribute('aria-label', label);
-        pill.innerHTML = `${EXPLORER_GIT_REVERT_ICON}<span>Undo block (${block.rows})</span>`;
-        pill.addEventListener('click', event => {
-            event.preventDefault();
-            event.stopPropagation();
-            undoExplorerDiffChange(index, actionId);
-        });
-        numberCell.classList.add('has-block-undo');
-        numberCell.appendChild(pill);
-    }
-
-    /* Hovering anywhere inside a block reveals that block's pill, which lives
-       on a different row (and, side by side, a different table) — so this is a
-       pair of delegated listeners on the diff root rather than CSS. */
-    function setExplorerDiffHoveredBlock(root, blockId) {
-        if (root._explorerDiffHoveredBlock === blockId) {
-            return;
-        }
-        root._explorerDiffHoveredBlock = blockId;
-        root.querySelectorAll('[data-explorer-diff-undo-block]').forEach(pill => {
-            pill.classList.toggle(
-                'is-visible',
-                Boolean(blockId) && pill.dataset.explorerDiffUndoBlock === blockId
-            );
-        });
-    }
-
-    function wireExplorerDiffBlockHover(root) {
-        /* The fallback renderer re-wires the same persistent container on every
-           render, so the listeners are attached once per element. */
-        if (root._explorerDiffBlockHoverWired) {
-            root._explorerDiffHoveredBlock = '';
-            return;
-        }
-        root._explorerDiffBlockHoverWired = true;
-        root.addEventListener('mouseover', event => {
-            const row = event.target?.closest?.('[data-explorer-diff-block]');
-            setExplorerDiffHoveredBlock(root, row?.dataset.explorerDiffBlock || '');
-        });
-        root.addEventListener('mouseleave', () => {
-            setExplorerDiffHoveredBlock(root, '');
-        });
-    }
-
-    function wireExplorerDiffUndoControls(index, root) {
-        const pane = terminals[index];
-        if (pane) {
-            pane._explorerDiffUndoActions = new Map();
-        }
-        if (!root || !explorerCanUndoDiffLine(pane)) {
-            return;
-        }
-        const deletionInsertions = explorerDiffDeletionInsertions(pane._explorerDiffContent);
-        const blockIndex = explorerDiffBlockLineIndex(
-            explorerDiffChangeBlocks(pane._explorerDiffContent)
-        );
-        wireExplorerDiffBlockHover(root);
-        const diff2HtmlSides = root._explorerDiffSides || [];
-        if (diff2HtmlSides.length === 2) {
-            const rowsBySide = diff2HtmlSides.map(side => [
-                ...side.querySelectorAll('.d2h-diff-tbody > tr')
-            ]);
-            const rowCount = Math.max(rowsBySide[0].length, rowsBySide[1].length);
-            for (let rowIndex = 0; rowIndex < rowCount; rowIndex += 1) {
-                const oldLine = explorerRenderedDiffLine(rowsBySide[0][rowIndex], {
-                    cellSelector: '.d2h-code-side-linenumber',
-                    numberSelector: '.d2h-code-side-linenumber',
-                    codeSelector: '.d2h-code-line-ctn',
-                    addClass: 'd2h-ins',
-                    deleteClass: 'd2h-del'
-                });
-                const newLine = explorerRenderedDiffLine(rowsBySide[1][rowIndex], {
-                    cellSelector: '.d2h-code-side-linenumber',
-                    numberSelector: '.d2h-code-side-linenumber',
-                    codeSelector: '.d2h-code-line-ctn',
-                    addClass: 'd2h-ins',
-                    deleteClass: 'd2h-del'
-                });
-                const action = explorerDiffUndoAction(oldLine, newLine, deletionInsertions);
-                attachExplorerDiffUndoButton(index, (newLine || oldLine)?.numberCell, action);
-                attachExplorerDiffUndoBlockButton(
-                    index,
-                    explorerDiffRowBlock(blockIndex, oldLine, newLine),
-                    [rowsBySide[0][rowIndex], rowsBySide[1][rowIndex]],
-                    (newLine || oldLine)?.numberCell
-                );
-            }
-            return;
-        }
-
-        root.querySelectorAll('.explorer-diff-row').forEach(row => {
-            const options = {
-                numberSelector: '.explorer-diff-line-number',
-                codeSelector: '.explorer-diff-line-code',
-                addClass: 'add',
-                deleteClass: 'delete'
-            };
-            const oldLine = explorerRenderedDiffLine(row, {
-                ...options,
-                cellSelector: '.explorer-diff-cell.old'
-            });
-            const newLine = explorerRenderedDiffLine(row, {
-                ...options,
-                cellSelector: '.explorer-diff-cell.new'
-            });
-            const action = explorerDiffUndoAction(oldLine, newLine, deletionInsertions);
-            attachExplorerDiffUndoButton(index, (newLine || oldLine)?.numberCell, action);
-            attachExplorerDiffUndoBlockButton(
-                index,
-                explorerDiffRowBlock(blockIndex, oldLine, newLine),
-                [row],
-                (newLine || oldLine)?.numberCell
-            );
-        });
-    }
-
-    function explorerDiffUndoContent(content, action) {
-        const lines = String(content == null ? '' : content)
-            .replace(/\r\n/g, '\n')
-            .replace(/\r/g, '\n')
-            .split('\n');
-        const lineIndex = Number(action?.line) - 1;
-        if (!Number.isInteger(lineIndex) || lineIndex < 0) {
-            return null;
-        }
-        if (action.kind === 'block') {
-            const expected = Array.isArray(action.expected) ? action.expected : [];
-            const replacement = Array.isArray(action.replacement) ? action.replacement : [];
-            if (lineIndex + expected.length > lines.length) {
-                return null;
-            }
-            const stale = expected.some((text, offset) => lines[lineIndex + offset] !== text);
-            if (stale) {
-                return null;
-            }
-            lines.splice(lineIndex, expected.length, ...replacement);
-            return lines.join('\n');
-        }
-        if (action.kind === 'insert') {
-            if (lineIndex > lines.length) {
-                return null;
-            }
-            lines.splice(lineIndex, 0, action.replacement);
-            return lines.join('\n');
-        }
-        if (lineIndex >= lines.length || lines[lineIndex] !== action.expected) {
-            return null;
-        }
-        if (action.kind === 'replace') {
-            lines[lineIndex] = action.replacement;
-        } else if (action.kind === 'remove') {
-            lines.splice(lineIndex, 1);
-        } else {
-            return null;
-        }
-        return lines.join('\n');
-    }
-
-    function setExplorerDiffUndoBusy(index, busy) {
-        const pane = terminals[index];
-        if (pane) {
-            pane._explorerDiffUndoBusy = Boolean(busy);
-        }
-        document.querySelectorAll(
-            `#explorer-diff-code-${index} :is([data-explorer-diff-undo-line], [data-explorer-diff-undo-block])`
-        ).forEach(button => {
-            button.disabled = Boolean(busy);
-            button.classList.toggle('is-busy', Boolean(busy));
-        });
-    }
-
-    function explorerDiffUndoCopy(action) {
-        if (action.kind === 'block') {
-            return {
-                title: 'Undo block of changes?',
-                copy: `Undo these ${action.rows} unstaged line changes starting at line ${action.line}?`,
-                confirmLabel: 'Undo block',
-                toast: `Undid ${action.rows} line changes`
-            };
-        }
-        return {
-            title: 'Undo line change?',
-            copy: `Undo this unstaged change on line ${action.line}?`,
-            confirmLabel: 'Undo line',
-            toast: 'Undid line change'
-        };
-    }
-
-    async function undoExplorerDiffChange(index, actionId) {
-        const pane = terminals[index];
-        const sessionId = sessionIds[index];
-        const action = pane?._explorerDiffUndoActions?.get(String(actionId));
-        if (!pane || !sessionId || !action || !explorerCanUndoDiffLine(pane)) {
-            return;
-        }
-        const content = explorerDiffUndoContent(pane._explorerFileContent, action);
-        if (content === null) {
-            showTerminalToast('This diff is stale. Refresh the file and try again.', 'error');
-            return;
-        }
-        const copy = explorerDiffUndoCopy(action);
-        const filePath = pane._explorerFilePath;
-        const baseRevision = pane._explorerFileRevision;
-        const confirmed = await openGenericConfirmModal({
-            title: copy.title,
-            copy: copy.copy,
-            note: 'The file is saved immediately. Staged changes are preserved.',
-            confirmLabel: copy.confirmLabel,
-            danger: true
-        });
-        if (
-            !confirmed
-            || !explorerCanUndoDiffLine(pane)
-            || pane._explorerFilePath !== filePath
-            || pane._explorerFileRevision !== baseRevision
-        ) {
-            return;
-        }
-
-        const scrollState = captureExplorerFileScroll(index);
-        const activeTabId = pane._explorerActiveTabId;
-        setExplorerDiffUndoBusy(index, true);
-        try {
-            const response = await fetch(`/api/explorer/${encodeURIComponent(sessionId)}/file`, {
-                method: 'PUT',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    path: filePath,
-                    content,
-                    base_revision: baseRevision
-                })
-            });
-            const data = await response.json().catch(() => ({}));
-            if (!response.ok) {
-                throw new Error(data.error || 'Could not undo this change.');
-            }
-            setExplorerDiffUndoBusy(index, false);
-            const hasRemainingDiff = explorerHasGitDiff(data.git);
-            const applied = updateExplorerFileInPlace(index, data, scrollState);
-            if (!applied) {
-                renderExplorerFile(index, data, {
-                    scrollState,
-                    openDiff: hasRemainingDiff,
-                    diffMode: 'worktree',
-                    tab: activeTabId
-                });
-            }
-            if (pane._explorerGitSidebarOpen) {
-                invalidateExplorerGitRepo(index);
-                loadExplorerGitRepo(index);
-            }
-            if (pane._explorerTreeSidebarOpen) {
-                reloadExplorerTree(index);
-            }
-            showTerminalToast(`${copy.toast} in ${data.name || pane._explorerFileName || 'file'}`, 'success');
-        } catch (error) {
-            console.error('[GridVibe Sessions] Explorer diff undo failed:', error);
-            setExplorerDiffUndoBusy(index, false);
-            showTerminalToast(error.message || 'Could not undo this change.', 'error');
-        }
-    }
-
-    /* Render the patch with the pinned Diff2Html build, reusing the pinned
-       Highlight.js instance for syntax colour. Returns false — so the caller
-       falls back to the tolerant handwritten side-by-side renderer — when the
-       assets are missing, Diff2Html throws, or it parses the patch to nothing
-       (e.g. a partial patch without a file header). */
-    function renderExplorerDiffWithDiff2Html(index, code, diff, banner) {
-        if (typeof window === 'undefined' || !window.Diff2HtmlUI || !window.hljs) {
-            return false;
-        }
-        try {
-            const host = document.createElement('div');
-            host.className = 'explorer-diff2html';
-            const ui = new window.Diff2HtmlUI(host, diff, explorerDiff2HtmlConfig(), window.hljs);
-            // draw() already runs highlightCode() because the config sets
-            // `highlight: true`. Calling it a second time re-highlights markup
-            // that is already highlighted, which nests a duplicate hljs span
-            // inside every existing one.
-            ui.draw();
-            if (!host.querySelector('.d2h-diff-table, .d2h-code-line, .d2h-file-wrapper')) {
-                return false;
-            }
-            code.innerHTML = banner;
-            code.appendChild(host);
-            observeExplorerDiffLayout(host);
-            wireExplorerDiffUndoControls(index, host);
-            return true;
-        } catch (error) {
-            console.error('[GridVibe Sessions] Diff2Html render failed:', error);
-            return false;
-        }
-    }
-
-    function renderExplorerDiff(index) {
-        const pane = terminals[index];
-        const code = document.getElementById(`explorer-diff-code-${index}`);
-        if (!pane || !code) {
-            return;
-        }
-        disconnectExplorerDiffLayout(code.querySelector('.explorer-diff2html'));
-        const wrapLines = explorerLineWrapPreference(index, 'diff');
-        code.classList.toggle('wrap-lines', wrapLines);
-        const diff = pane._explorerDiffContent || '';
-        if (!diff) {
-            code.innerHTML = '<span class="explorer-diff-empty">No Git diff for selected file.</span>';
-            return;
-        }
-        const banner = explorerDiffTruncationBannerHtml(pane);
-        if (!renderExplorerDiffWithDiff2Html(index, code, diff, banner)) {
-            code.innerHTML = banner + renderExplorerSideBySideDiff(index, diff);
-            wireExplorerDiffUndoControls(index, code);
-        }
-    }
-
-    function explorerDiffLanguage(index) {
-        const pane = terminals[index];
-        const filePath = pane?._explorerFilePath || '';
-        return normalizeExplorerLanguage(pane?._explorerFileLanguage || '') || explorerCodeLanguage(filePath);
-    }
-
-    function explorerDiffLineCodeHtml(index, text) {
-        return highlightExplorerCode(String(text || ''), explorerDiffLanguage(index)) || '&nbsp;';
-    }
-
-    function explorerDiffCellHtml(index, cell, side) {
-        if (!cell) {
-            return `
-                <div class="explorer-diff-cell empty ${side}">
-                    <span class="explorer-diff-line-number"></span>
-                    <span class="explorer-diff-line-code"></span>
-                </div>
-            `;
-        }
-        return `
-            <div class="explorer-diff-cell ${escHtml(cell.type || 'context')} ${side}">
-                <span class="explorer-diff-line-number">${cell.number ? escHtml(String(cell.number)) : ''}</span>
-                <span class="explorer-diff-line-code">${explorerDiffLineCodeHtml(index, cell.text || '')}</span>
-            </div>
-        `;
-    }
-
-    function explorerDiffRowHtml(index, left, right) {
-        if (left?.type === 'hunk') {
-            return `
-                <div class="explorer-diff-row">
-                    <div class="explorer-diff-cell hunk">${escHtml(left.text || '')}</div>
-                </div>
-            `;
-        }
-        return `
-            <div class="explorer-diff-row">
-                ${explorerDiffCellHtml(index, left, 'old')}
-                ${explorerDiffCellHtml(index, right, 'new')}
-            </div>
-        `;
-    }
-
-    function renderExplorerSideBySideDiff(index, diff) {
-        const source = String(diff || '');
-        if (!source.trim()) {
-            return '<span class="explorer-diff-empty">No Git diff for selected file.</span>';
-        }
-
-        const lines = source.split(/\r?\n/);
-        const rows = [];
-        let oldLine = 0;
-        let newLine = 0;
-        const pendingDeletes = [];
-
-        const flushDeletes = () => {
-            while (pendingDeletes.length) {
-                rows.push(explorerDiffRowHtml(index, pendingDeletes.shift(), null));
-            }
-        };
-
-        lines.forEach(line => {
-            const hunk = line.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@(.*)$/);
-            if (hunk) {
-                flushDeletes();
-                oldLine = Number(hunk[1]);
-                newLine = Number(hunk[2]);
-                rows.push(explorerDiffRowHtml(index, { type: 'hunk', text: line }, null));
-                return;
-            }
-            if (!oldLine && !newLine) {
-                return;
-            }
-            if (line.startsWith('\\ No newline')) {
-                return;
-            }
-            if (line.startsWith('-') && !line.startsWith('---')) {
-                pendingDeletes.push({
-                    type: 'delete',
-                    number: oldLine,
-                    text: line.slice(1)
-                });
-                oldLine += 1;
-                return;
-            }
-            if (line.startsWith('+') && !line.startsWith('+++')) {
-                const right = {
-                    type: 'add',
-                    number: newLine,
-                    text: line.slice(1)
-                };
-                newLine += 1;
-                rows.push(explorerDiffRowHtml(index, pendingDeletes.shift() || null, right));
-                return;
-            }
-            if (line.startsWith(' ')) {
-                flushDeletes();
-                rows.push(explorerDiffRowHtml(index,
-                    { type: 'context', number: oldLine, text: line.slice(1) },
-                    { type: 'context', number: newLine, text: line.slice(1) }
-                ));
-                oldLine += 1;
-                newLine += 1;
-            }
-        });
-
-        flushDeletes();
-        return `<div class="explorer-side-by-side-diff">${rows.join('')}</div>`;
-    }
-
-    /* Undoing the last hunk (or discarding the file's changes from the Git
-       sidebar) can leave the Diff view with nothing in it. When the file's Git
-       status stays non-clean — a partially staged file whose *staged* version
-       survives the discard — the in-place refresh keeps the Diff panel mounted
-       and the user is stranded on "No Git diff for selected file". Bounce back
-       to the file's own content view instead, honouring the sticky
-       source/preview preference, and hide the now-pointless Diff toggle until a
-       later load finds a patch again. Commit diffs are historical and never
-       empty out this way, so they are left alone. */
-    function explorerFallbackFromEmptyDiff(index) {
-        const pane = terminals[index];
-        const list = document.getElementById(`explorer-list-${index}`);
-        if (!pane || !list || pane._explorerDiffCommit) {
-            return false;
-        }
-        if (String(pane._explorerDiffContent || '').trim()) {
-            return false;
-        }
-        if (activeExplorerFileView(index) !== 'diff') {
-            return false;
-        }
-        const hasSource = Boolean(document.getElementById(`explorer-code-${index}`));
-        const hasPreview = Boolean(document.getElementById(`explorer-preview-${index}`));
-        const preferred = pane._explorerLastFileView === 'preview' && hasPreview
-            ? 'preview'
-            : (hasSource ? 'source' : (hasPreview ? 'preview' : ''));
-        if (!preferred) {
-            return false;
-        }
-        // The diff panel is not being shown, so its stashed scroll would only
-        // be restored later against unrelated content.
-        pane._explorerPendingDiffScroll = null;
-        setExplorerDiffToggleHidden(index, true);
-        setExplorerFileView(index, preferred);
-        return true;
-    }
-
-    function setExplorerDiffToggleHidden(index, hidden) {
-        const list = document.getElementById(`explorer-list-${index}`);
-        // `hidden` (not `disabled`): setExplorerEditChromeDisabled owns the
-        // disabled flag on every file-view button while the editor is open.
-        list?.querySelectorAll('[data-explorer-file-view="diff"]').forEach(button => {
-            button.hidden = Boolean(hidden);
-        });
-    }
-
-    function setExplorerDiffSplit(index, open) {
-        const pane = terminals[index];
-        if (!pane) {
-            return;
-        }
-        setExplorerFileView(index, open ? 'diff' : (pane._explorerLastFileView || 'source'));
-    }
-
-    function toggleExplorerDiffSplit(index) {
-        const pane = terminals[index];
-        setExplorerDiffSplit(index, !pane?._explorerDiffSplit);
-    }
-
-    async function loadExplorerDiff(index) {
-        const pane = terminals[index];
-        const sessionId = sessionIds[index];
-        const code = document.getElementById(`explorer-diff-code-${index}`);
-        const diffPath = pane?._explorerFilePath || '';
-        const commit = pane?._explorerDiffCommit || '';
-        // Changed-file rows request a section-specific diff (worktree vs staged)
-        // so a partially staged file never shows the other section's hunks;
-        // commit-history rows and legacy callers fall back to the HEAD diff.
-        const diffMode = commit ? 'commit' : (pane?._explorerDiffMode || 'head');
-        const cacheKey = explorerDiffCacheKey(diffPath, commit, diffMode);
-        if (!pane || !sessionId || !diffPath || !code) {
-            renderExplorerDiff(index);
-            return;
-        }
-        if (pane._explorerDiffLoaded && pane._explorerDiffCacheKey === cacheKey) {
-            renderExplorerDiff(index);
-            if (explorerFallbackFromEmptyDiff(index)) {
-                return;
-            }
-            applyExplorerPendingDiffScroll(index);
-            return;
-        }
-
-        code.textContent = 'Loading diff...';
-        try {
-            const params = new URLSearchParams({
-                path: diffPath,
-                mode: diffMode
-            });
-            if (commit) {
-                params.set('commit', commit);
-            }
-            const response = await fetch(
-                `/api/explorer/${encodeURIComponent(sessionId)}/git/diff?${params.toString()}`
-            );
-            const data = await response.json();
-            if (!response.ok) {
-                throw new Error(data.error || 'Failed to load Git diff');
-            }
-            pane._explorerDiffLoaded = true;
-            pane._explorerDiffCacheKey = cacheKey;
-            pane._explorerDiffContent = data.diff || '';
-            // The backend already bounds diffs to 256 KiB / 4,000 lines and
-            // reports truncation; keep
-            // the flag so the rendered patch is never mistaken for the whole change.
-            pane._explorerDiffTruncated = Boolean(data.truncated);
-            renderExplorerDiff(index);
-            const renderedTab = explorerFindTab(
-                pane,
-                pane._explorerRenderedTabId || pane._explorerActiveTabId
-            );
-            const restoredDiffView = explorerMatchingTabView(
-                renderedTab,
-                explorerCurrentContentRevisions(pane)
-            );
-            const restoredDiffScroll = restoredDiffView?.scroll?.panels?.diff;
-            if (restoredDiffScroll) {
-                applyScrollMetrics(
-                    explorerPanelScrollTarget(
-                        document.getElementById(`explorer-diff-panel-${index}`)
-                    ),
-                    restoredDiffScroll
-                );
-            }
-            // A patch is back (or was there all along): re-expose the toggle a
-            // previous empty-diff fallback may have hidden.
-            setExplorerDiffToggleHidden(index, false);
-            if (explorerFallbackFromEmptyDiff(index)) {
-                return;
-            }
-            applyExplorerPendingDiffScroll(index);
-            if (activeExplorerFileView(index) === 'diff') {
-                applyExplorerSearch(index);
-            }
-        } catch (error) {
-            console.error('[GridVibe Sessions] Explorer Git diff failed:', error);
-            code.innerHTML = `<span class="explorer-diff-empty">${escHtml(error.message || 'Failed to load Git diff.')}</span>`;
-        }
-    }
-
     /* Resolve a requested view onto a panel that actually exists. A stored or
        restored 'diff' mode routinely outlives its panel — discarding a file's
        changes rebuilds the viewer without one, and the captured scroll state
@@ -4755,6 +3867,11 @@
             panel.hidden = panel.dataset.explorerFilePanel !== selectedMode;
         });
         applyExplorerLineWrapState(index, selectedMode);
+        // First visit to Preview is where the render cost now lands; later
+        // visits reuse the pane's cached HTML and are instant.
+        if (selectedMode === 'preview') {
+            ensureExplorerPreviewLoaded(index);
+        }
         if (isDiffMode) {
             loadExplorerDiff(index);
             const state = pane ? ensureExplorerSearchState(pane, 'file') : null;
@@ -5661,6 +4778,16 @@
             return;
         }
 
+        /* Above the tier's ceiling the per-line renderer is the freeze, not a
+           step towards it: 200k lines is 600k elements before a single
+           highlight token is counted. Render the bounded plain chunks and
+           stop — no fold wiring, no occurrence tint, no change marks, none of
+           which have rows to attach to. */
+        if (explorerPaneSourceTier(pane) === 'large') {
+            code.innerHTML = renderExplorerLargeSourceHtml(pane);
+            return;
+        }
+
         const content = pane._explorerFileContent || '';
         const language = pane._explorerFilePlain ? '' : (pane._explorerFileLanguage || '');
         const highlightedLines = explorerHighlightDocumentLinesCached(
@@ -5712,12 +4839,47 @@
 
     let explorerMermaidRenderId = 0;
 
+    /* Render each diagram as it comes into view rather than all of them up
+       front. A README with a dozen diagrams used to render every one in a
+       sequential await loop the moment the file opened — before the reader had
+       even chosen the Preview tab — which is seconds of frozen pane for
+       pictures mostly below the fold. Where IntersectionObserver is missing the
+       eager loop is still correct, so it simply runs.
+
+       The observer is stored on the preview element and disconnected when the
+       panel is rebuilt, so a pane switching files does not accumulate them. */
+    function renderExplorerMermaidLazily(preview, blocks) {
+        if (typeof window.IntersectionObserver !== 'function') {
+            return false;
+        }
+        preview._explorerMermaidObserver?.disconnect();
+        const pending = new Set(blocks.map(code => code.parentElement).filter(Boolean));
+        const observer = new window.IntersectionObserver(entries => {
+            entries.forEach(entry => {
+                if (!entry.isIntersecting || !pending.has(entry.target)) {
+                    return;
+                }
+                pending.delete(entry.target);
+                observer.unobserve(entry.target);
+                const code = entry.target.querySelector('code.language-mermaid');
+                if (code) {
+                    renderExplorerMermaidBlock(preview, code);
+                }
+            });
+        }, { root: preview, rootMargin: '200px' });
+        pending.forEach(block => observer.observe(block));
+        preview._explorerMermaidObserver = observer;
+        return true;
+    }
+
     async function renderExplorerMermaid(preview) {
         if (!preview || !window.mermaid) {
             return;
         }
         const blocks = Array.from(preview.querySelectorAll('pre > code.language-mermaid'));
         if (!blocks.length) {
+            preview._explorerMermaidObserver?.disconnect();
+            preview._explorerMermaidObserver = null;
             return;
         }
         window.mermaid.initialize({
@@ -5726,34 +4888,44 @@
             theme: currentResolvedTheme() === 'dark' ? 'dark' : 'default',
             suppressErrorRendering: true
         });
-        for (const code of blocks) {
-            const source = code.textContent || '';
-            const pre = code.parentElement;
-            const diagram = document.createElement('div');
-            diagram.className = 'explorer-mermaid';
-            pre.replaceWith(diagram);
-            try {
-                explorerMermaidRenderId += 1;
-                const rendered = await window.mermaid.render(
-                    `explorer-mermaid-${explorerMermaidRenderId}`,
-                    source
-                );
-                if (!preview.contains(diagram)) {
-                    continue;
-                }
-                diagram.innerHTML = rendered.svg;
-                rendered.bindFunctions?.(diagram);
-            } catch (error) {
-                diagram.classList.add('explorer-mermaid-error');
-                const message = String(error?.message || 'Invalid diagram').split('\n')[0];
-                diagram.textContent = `Mermaid diagram error: ${message}`;
-                continue;
-            }
-            /* Ctrl+scroll zooms the rendered diagram (notes 3); double-click
-               resets it. Bound on the diagram box so the page-zoom default is
-               suppressed only while the pointer is over the diagram. */
-            enableExplorerWheelZoom(diagram, diagram.querySelector('svg'));
+        if (renderExplorerMermaidLazily(preview, blocks)) {
+            return;
         }
+        for (const code of blocks) {
+            await renderExplorerMermaidBlock(preview, code);
+        }
+    }
+
+    async function renderExplorerMermaidBlock(preview, code) {
+        const source = code.textContent || '';
+        const pre = code.parentElement;
+        if (!pre) {
+            return;
+        }
+        const diagram = document.createElement('div');
+        diagram.className = 'explorer-mermaid';
+        pre.replaceWith(diagram);
+        try {
+            explorerMermaidRenderId += 1;
+            const rendered = await window.mermaid.render(
+                `explorer-mermaid-${explorerMermaidRenderId}`,
+                source
+            );
+            if (!preview.contains(diagram)) {
+                return;
+            }
+            diagram.innerHTML = rendered.svg;
+            rendered.bindFunctions?.(diagram);
+        } catch (error) {
+            diagram.classList.add('explorer-mermaid-error');
+            const message = String(error?.message || 'Invalid diagram').split('\n')[0];
+            diagram.textContent = `Mermaid diagram error: ${message}`;
+            return;
+        }
+        /* Ctrl+scroll zooms the rendered diagram (notes 3); double-click
+           resets it. Bound on the diagram box so the page-zoom default is
+           suppressed only while the pointer is over the diagram. */
+        enableExplorerWheelZoom(diagram, diagram.querySelector('svg'));
     }
 
     /* Ctrl+scroll zoom for a scrollable view (container) around a scalable
@@ -5862,17 +5034,94 @@
         container.addEventListener('pointercancel', endDrag);
     }
 
-    function restoreExplorerPreview(index) {
+    /* Paint whatever preview HTML the pane already holds. Split out of
+       restoreExplorerPreview() so the fetch path and the restore path share
+       one insertion, one highlight pass and one Mermaid pass. */
+    function paintExplorerPreview(index) {
         const pane = terminals[index];
         const preview = document.getElementById(`explorer-preview-${index}`);
-        if (pane && preview) {
-            preview.innerHTML = pane._explorerPreviewHtml || '';
-            if (!pane._explorerFilePlain) {
-                highlightExplorerPreviewCode(preview);
-            }
-            renderExplorerMermaid(preview);
+        if (!pane || !preview) {
+            return null;
         }
+        preview._explorerMermaidObserver?.disconnect();
+        preview._explorerMermaidObserver = null;
+        preview.innerHTML = pane._explorerPreviewHtml || '';
+        if (!pane._explorerFilePlain) {
+            highlightExplorerPreviewCode(preview);
+        }
+        wireExplorerMarkdownLinks(index, preview);
+        applyExplorerMarkdownAppearanceToElement(preview, explorerMarkdownAppearance());
+        renderExplorerMermaid(preview);
         return preview;
+    }
+
+    /* Fetch the rendered Markdown the first time the Preview panel is shown,
+       and paint it. The file GET no longer carries `preview_html`: rendering
+       and Bleach-sanitizing it on every open and every save, for a panel the
+       reader may never select, was one of the two costs of opening a large
+       Markdown file. `preview_type` is an independent field now, so the panel
+       still *exists* from the moment the file loads — only its content is
+       deferred.
+
+       Reuses the pane's cached HTML on every later visit, so the pause lands
+       once. Failures paint the message in the panel rather than anywhere
+       global: this is one panel's content, not an app-level event. */
+    async function ensureExplorerPreviewLoaded(index) {
+        const pane = terminals[index];
+        const sessionId = sessionIds[index];
+        const preview = document.getElementById(`explorer-preview-${index}`);
+        if (!pane || !preview || !sessionId) {
+            return null;
+        }
+        if (pane._explorerPreviewLoaded) {
+            return paintExplorerPreview(index);
+        }
+        const path = pane._explorerFilePath || '';
+        if (!path) {
+            return preview;
+        }
+        preview.textContent = 'Rendering preview...';
+        try {
+            const response = await fetch(
+                `/api/explorer/${encodeURIComponent(sessionId)}/file/preview?path=${encodeURIComponent(path)}`,
+                { signal: explorerRequestSignal(pane, 'preview') }
+            );
+            const data = await response.json();
+            if (!response.ok) {
+                throw new Error(data.error || 'Failed to render preview');
+            }
+            // The viewer may have moved on during the flight; the response
+            // describes whatever was open when it started.
+            if (terminals[index] !== pane
+                || sessionIds[index] !== sessionId
+                || pane._explorerFilePath !== path) {
+                return null;
+            }
+            pane._explorerPreviewHtml = data.preview_html || '';
+            pane._explorerPreviewLoaded = true;
+        } catch (error) {
+            if (explorerIsAbortError(error)) {
+                return null;
+            }
+            console.error('[GridVibe Sessions] Explorer preview render failed:', error);
+            preview.textContent = error.message || 'Failed to render preview.';
+            return preview;
+        }
+        return paintExplorerPreview(index);
+    }
+
+    function restoreExplorerPreview(index) {
+        const preview = document.getElementById(`explorer-preview-${index}`);
+        const pane = terminals[index];
+        /* Repainting before the lazy render has answered would wipe the
+           loader's placeholder and leave a blank panel until the fetch lands.
+           Hand the panel to the loader instead — it paints when it has
+           something to paint. */
+        if (pane && preview && !pane._explorerPreviewLoaded) {
+            ensureExplorerPreviewLoaded(index);
+            return preview;
+        }
+        return paintExplorerPreview(index) || preview;
     }
 
     function markExplorerSearchInElement(root, query, activeIndex = 0, maxMatches = EXPLORER_SEARCH_MAX_MATCHES) {
@@ -6184,6 +5433,15 @@
     async function applyExplorerSearch(index, { resetActive = false, scroll = true } = {}) {
         const pane = terminals[index];
         if (!pane || !isExplorerSearchablePane(pane)) {
+            return;
+        }
+
+        /* The tier that removed the rows removed the find with them, and the
+           header renders no search bar — so there is no query to apply and
+           nothing to repaint. Returning here rather than falling through keeps
+           a restored search state (a tab reopened at a now-larger file) from
+           driving a repaint against rows that do not exist. */
+        if (pane._explorerMode === 'file' && !explorerPaneAllowsFind(pane)) {
             return;
         }
 
@@ -7424,8 +6682,9 @@
         pane._explorerFileName = fileName;
         pane._explorerFileContent = '';
         pane._explorerFileLanguage = '';
-        pane._explorerFilePlain = false;
+        applyExplorerSourceTier(pane, '');
         pane._explorerPreviewHtml = '';
+        pane._explorerPreviewLoaded = false;
         pane._explorerGit = null;
         /* `_explorerGitContext` describes the repository the *pane* is rooted
            in, not the shown file, so the image viewer leaves it alone — the
@@ -7534,7 +6793,13 @@
         }
         const codeLanguage = normalizeExplorerLanguage(data.language) || explorerCodeLanguage(path || fileName);
         const fileType = explorerFileTypeLabel(path || fileName, codeLanguage);
-        const hasPreview = data.preview_type === 'markdown' && typeof data.preview_html === 'string';
+        /* Read `preview_type` and never the HTML string. The panel's existence
+           is a property of the file; the HTML now arrives lazily, so deriving
+           it from `typeof data.preview_html === 'string'` would make the panel
+           blink out of existence on every load — and, since a save answers with
+           the same payload shape, would make every save on a Markdown file
+           bail updateExplorerFileInPlace() into a full pane rebuild. */
+        const hasPreview = data.preview_type === 'markdown';
         const requestedDiffCommit = String(diffCommit || '');
         const requestedDiffMode = requestedDiffCommit ? '' : String(diffMode || '');
         const hasGitDiff = explorerHasGitDiff(data.git) || Boolean(requestedDiffCommit);
@@ -7610,8 +6875,20 @@
         pane._explorerFileUtf8Bom = Boolean(data.utf8_bom);
         pane._explorerFileTruncated = Boolean(data.truncated);
         pane._explorerFileLanguage = codeLanguage;
-        pane._explorerFilePlain = pane._explorerFileContent.length > EXPLORER_PLAIN_PREVIEW_THRESHOLD;
-        pane._explorerPreviewHtml = hasPreview ? (data.preview_html || '') : '';
+        applyExplorerSourceTier(pane, pane._explorerFileContent);
+        /* Read *after* the tier is recomputed for the incoming content, never
+           before: the large tier renders no per-line rows for a find to
+           address, so the header renders no find bar, and deciding that from
+           the outgoing file's tier put one on a large file opened after a small
+           one. updateExplorerFileInPlace() treats a change in this value the
+           way it treats a change in `hasPreview` — the header is not the same
+           header, so it hands back to a full rebuild. */
+        const findAvailable = explorerPaneAllowsFind(pane);
+        // Not fetched yet — the panel exists from here, its content arrives the
+        // first time it is shown. The flag, not the string, is what says so:
+        // an empty Markdown file renders an empty preview, legitimately.
+        pane._explorerPreviewHtml = '';
+        pane._explorerPreviewLoaded = false;
         pane._explorerGit = data.git || null;
         pane._explorerGitContext = data.git_context || null;
         pane._explorerDiffLoaded = false;
@@ -7670,7 +6947,7 @@
                     <button type="button" class="explorer-md-appearance-btn" data-explorer-md-appearance="${index}" title="Appearance" aria-label="Viewer appearance" aria-haspopup="menu" aria-expanded="false">${EXPLORER_MD_APPEARANCE_ICON}</button>
                     ${explorerEditorControlsHtml(index)}
                     <button type="button" class="explorer-download-btn" data-explorer-download="${index}" title="Download file" aria-label="Download file">${EXPLORER_DOWNLOAD_ICON}</button>
-                    <div class="explorer-editor-search" data-explorer-search="${index}">
+                    ${findAvailable ? `<div class="explorer-editor-search" data-explorer-search="${index}">
                         <input
                             type="search"
                             class="explorer-search-input"
@@ -7684,7 +6961,7 @@
                         <button type="button" class="explorer-search-btn" data-explorer-search-prev="${index}" title="Previous match" aria-label="Previous match">↑</button>
                         <button type="button" class="explorer-search-btn" data-explorer-search-next="${index}" title="Next match" aria-label="Next match">↓</button>
                         <button type="button" class="explorer-search-btn" data-explorer-search-clear="${index}" title="Clear search" aria-label="Clear search">×</button>
-                    </div>
+                    </div>` : ''}
                 </div>
                 <div class="explorer-editor-body${keepDiffSplit ? ' split-diff' : ''}">
                     <div class="explorer-editor-main">
@@ -7708,15 +6985,10 @@
         applyExplorerSourceFontToElement(
             document.getElementById(`explorer-diff-code-${index}`), sourceFontAppearance
         );
-        const preview = document.getElementById(`explorer-preview-${index}`);
-        if (preview && hasPreview) {
-            preview.innerHTML = pane._explorerPreviewHtml;
-            if (!pane._explorerFilePlain) {
-                highlightExplorerPreviewCode(preview);
-            }
-            wireExplorerMarkdownLinks(index, preview);
-            applyExplorerMarkdownAppearanceToElement(preview, explorerMarkdownAppearance());
-            renderExplorerMermaid(preview);
+        // Only the panel the reader is actually looking at pays for its
+        // content; selecting Preview later goes through the same loader.
+        if (hasPreview && initialFileView === 'preview') {
+            ensureExplorerPreviewLoaded(index);
         }
 
         const appearanceButton = list.querySelector(`[data-explorer-md-appearance="${index}"]`);
@@ -7778,11 +7050,30 @@
             return false;
         }
 
-        const hasPreview = data.preview_type === 'markdown' && typeof data.preview_html === 'string';
+        /* Read `preview_type` and never the HTML string. The panel's existence
+           is a property of the file; the HTML now arrives lazily, so deriving
+           it from `typeof data.preview_html === 'string'` would make the panel
+           blink out of existence on every load — and, since a save answers with
+           the same payload shape, would make every save on a Markdown file
+           bail updateExplorerFileInPlace() into a full pane rebuild. */
+        const hasPreview = data.preview_type === 'markdown';
         const hasGitDiff = explorerHasGitDiff(data.git);
         const preview = document.getElementById(`explorer-preview-${index}`);
         const diffPanel = document.getElementById(`explorer-diff-code-${index}`);
         if (hasPreview !== Boolean(preview) || hasGitDiff !== Boolean(diffPanel)) {
+            return false;
+        }
+        /* A save (or an external write) that pushes a file across the tier
+           boundary changes the header, not just the body: the find bar appears
+           or disappears with the tier. That is the same class of shape change
+           as the preview panel flipping, and takes the same answer — hand back
+           to a full rebuild rather than update in place around a control that
+           is no longer the one standing there. */
+        const policy = explorerTierPolicy();
+        const nextTier = policy
+            ? policy.sourceTierForContent(data.content || '')
+            : explorerPaneSourceTier(pane);
+        if (nextTier !== explorerPaneSourceTier(pane)) {
             return false;
         }
 
@@ -7803,8 +7094,12 @@
         pane._explorerFileUtf8Bom = Boolean(data.utf8_bom);
         pane._explorerFileTruncated = Boolean(data.truncated);
         pane._explorerFileLanguage = codeLanguage;
-        pane._explorerFilePlain = pane._explorerFileContent.length > EXPLORER_PLAIN_PREVIEW_THRESHOLD;
-        pane._explorerPreviewHtml = hasPreview ? (data.preview_html || '') : '';
+        applyExplorerSourceTier(pane, pane._explorerFileContent);
+        /* The file moved on disk, so any preview the pane is holding describes
+           the old bytes. Drop it; the panel refills below if it is the one on
+           screen, and otherwise on the next visit to it. */
+        pane._explorerPreviewHtml = '';
+        pane._explorerPreviewLoaded = false;
         pane._explorerGit = data.git || null;
         pane._explorerGitContext = data.git_context || null;
         const renderedTab = explorerFindTab(
@@ -7822,14 +7117,8 @@
         // watcher) while HEAD usually did not, so the path + HEAD cache key
         // would serve stale marks: force the refetch.
         loadExplorerChangeMarks(index, { force: true });
-        if (preview && hasPreview) {
-            preview.innerHTML = pane._explorerPreviewHtml;
-            if (!pane._explorerFilePlain) {
-                highlightExplorerPreviewCode(preview);
-            }
-            wireExplorerMarkdownLinks(index, preview);
-            applyExplorerMarkdownAppearanceToElement(preview, explorerMarkdownAppearance());
-            renderExplorerMermaid(preview);
+        if (preview && hasPreview && activeExplorerFileView(index) === 'preview') {
+            ensureExplorerPreviewLoaded(index);
         }
         if (diffPanel && hasGitDiff) {
             // The header survives an in-place refresh, so a Diff toggle hidden
@@ -7898,6 +7187,7 @@
         pane._explorerFileContent = '';
         pane._explorerFileLanguage = codeLanguage;
         pane._explorerPreviewHtml = '';
+        pane._explorerPreviewLoaded = false;
         pane._explorerGit = null;
         // A commit diff is history: nothing on disk can change what it shows.
         setExplorerFileWatchBaseline(pane, '');
@@ -7996,7 +7286,10 @@
             renderExplorerMessage(index, 'Opening file...');
         }
         try {
-            const response = await fetch(`/api/explorer/${encodeURIComponent(sessionId)}/file?path=${encodeURIComponent(path)}`);
+            const response = await fetch(
+                `/api/explorer/${encodeURIComponent(sessionId)}/file?path=${encodeURIComponent(path)}`,
+                { signal: explorerRequestSignal(pane, 'file') }
+            );
             const data = await response.json();
             if (!response.ok) {
                 pane._explorerOpenErrorCode = String(data.code || '');
@@ -8025,6 +7318,11 @@
             }
             return rendered;
         } catch (error) {
+            if (explorerIsAbortError(error)) {
+                // A newer open superseded this one and owns the viewer now;
+                // reporting a failure here would paint an error over it.
+                return false;
+            }
             console.error('[GridVibe Sessions] Explorer file open failed:', error);
             renderExplorerDirectoryOpenError(index, error.message || 'Failed to open file.');
             return false;
@@ -8123,6 +7421,7 @@
             pane._explorerFileContent = '';
             pane._explorerFileLanguage = '';
             pane._explorerPreviewHtml = '';
+            pane._explorerPreviewLoaded = false;
             pane._explorerGit = null;
             pane._explorerGitContext = data.git || null;
             pane._explorerDiffLoaded = false;

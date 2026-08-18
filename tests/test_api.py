@@ -270,6 +270,22 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 201)
         return response.get_json()["sessions"][0]["session_id"]
 
+    def _preview_html(self, session_id: str, path: str) -> str:
+        """Return the lazily rendered Markdown preview for one explorer file.
+
+        The file GET no longer renders one: `preview_type` says the panel
+        exists, and this bounded read is what fills it the first time the
+        reader selects Preview.
+        """
+        response = self.client.get(
+            f"/api/explorer/{session_id}/file/preview",
+            query_string={"path": path},
+        )
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["preview_type"], "markdown")
+        return payload["preview_html"]
+
     def _page_html(self, response) -> str:
         """Return page HTML plus its extracted static CSS/JS.
 
@@ -287,6 +303,7 @@ class ApiRoutesTestCase(unittest.TestCase):
             "js/terminal-icons.js",
             "js/voice-input.js",
             "js/explorer-viewer.js",
+            "js/explorer-diff.js",
             "js/explorer-tabs.js",
             "js/explorer-editor.js",
             "js/explorer-search.js",
@@ -1748,7 +1765,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("/static/vendor/diff2html-ui-base.min.js", html)
         self.assertIn("/static/vendor/diff2html.min.css", html)
         # Diff2Html configuration: char-level intraline + explicit limits.
-        self.assertIn("function explorerDiff2HtmlConfig()", html)
+        self.assertIn("function explorerDiff2HtmlConfig(tier)", html)
         self.assertIn("matching: 'words',", html)
         self.assertIn("diffStyle: 'char',", html)
         self.assertIn("synchronisedScroll: false,", html)
@@ -1757,7 +1774,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         # tracks Diff2Html's own default rather than sitting below it.
         self.assertIn("maxLineLengthHighlight: 10000", html)
         self.assertIn(
-            "new window.Diff2HtmlUI(host, diff, explorerDiff2HtmlConfig(), window.hljs)",
+            "new window.Diff2HtmlUI(host, diff, explorerDiff2HtmlConfig(tier), window.hljs)",
             html,
         )
         # draw() highlights on its own because the config sets `highlight: true`.
@@ -1766,11 +1783,13 @@ class ApiRoutesTestCase(unittest.TestCase):
         # and no explicit re-highlight.
         self.assertIn("ui.draw();", html)
         self.assertNotIn("ui.highlightCode();", html)
-        # Both wrapped and unwrapped paths prefer Diff2Html; only unavailable
-        # vendor assets use the handwritten renderer.
-        self.assertIn("function renderExplorerDiffWithDiff2Html(index, code, diff, banner)", html)
+        # Diff2Html is preferred at every size it can serve; the handwritten
+        # renderer takes over when the vendor assets are unavailable, when the
+        # render fails, or when the size tier says the parse itself is the
+        # freeze. All three land on the same fallback, which is what keeps the
+        # per-line and per-block undo buttons alive in the degraded views.
         self.assertIn(
-            "if (!renderExplorerDiffWithDiff2Html(index, code, diff, banner)) {",
+            "if (tier === 'large' || !renderExplorerDiffWithDiff2Html(index, code, diff, banner, tier)) {",
             html,
         )
         self.assertIn("code.innerHTML = banner + renderExplorerSideBySideDiff(index, diff);", html)
@@ -2147,7 +2166,9 @@ class ApiRoutesTestCase(unittest.TestCase):
 
     def test_terminals_page_explorer_diff_line_undo_is_revision_guarded(self):
         """Per-line discard stays inside the existing bounded editor save route."""
-        viewer = self._static("js/explorer-viewer.js")
+        # The Diff view moved to its own file (guardrail 6's extraction
+        # trigger); the undo controls travelled with it.
+        viewer = self._static("js/explorer-diff.js")
         css = self._static("css/terminals.css")
         line_undo = viewer[
             viewer.index("function explorerDiffShowsOnlyWorktreeChanges(pane)"):
@@ -2196,7 +2217,7 @@ class ApiRoutesTestCase(unittest.TestCase):
     def test_terminals_page_explorer_diff_block_undo(self):
         """A contiguous run of changed lines can be undone in one save, through
         the same revision-guarded editor route the per-line undo uses."""
-        viewer = self._static("js/explorer-viewer.js")
+        viewer = self._static("js/explorer-diff.js")
         css = self._static("css/terminals.css")
         blocks = viewer[
             viewer.index("function explorerDiffChangeBlocks(diff)"):
@@ -2256,8 +2277,11 @@ class ApiRoutesTestCase(unittest.TestCase):
         # Traversal above the Explorer root is rejected.
         self.assertIn("if (!segments.length) {", html)
         self.assertIn("if (segment.includes(':')) {", html)
-        # Wired into both the full render and in-place refresh preview paths.
-        self.assertEqual(html.count("wireExplorerMarkdownLinks(index, preview);"), 2)
+        # One paint serves every preview path — first render, in-place refresh,
+        # restore and the lazy first visit to the Preview tab all go through
+        # paintExplorerPreview(), so the wiring happens exactly once.
+        self.assertEqual(html.count("wireExplorerMarkdownLinks(index, preview);"), 1)
+        self.assertIn("function paintExplorerPreview(index)", html)
 
     def test_terminals_page_explorer_persists_open_tabs(self):
         """ISSUE-2026-015: open tabs serialize into and restore from a session."""
@@ -2958,12 +2982,13 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("const EXPLORER_MD_FONT_KEY = 'gridvibe.mdPreviewFont';", html)
         # Header control is present.
         self.assertIn('data-explorer-md-appearance="${index}"', html)
-        # Appearance is applied idempotently on both preview render paths.
+        # Appearance is applied by the one shared preview paint, so every path
+        # into the panel gets it without any of them restating it.
         self.assertEqual(
             html.count(
                 "applyExplorerMarkdownAppearanceToElement(preview, explorerMarkdownAppearance());"
             ),
-            2,
+            1,
         )
         # Preset/font classes and their token-driven surfaces exist in CSS.
         self.assertIn(".explorer-markdown-preview.md-preset-paper {", html)
@@ -3323,14 +3348,46 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         html = self._page_html(response)
         self.assertIn("const EXPLORER_PLAIN_PREVIEW_THRESHOLD = 2 * 1024 * 1024;", html)
-        # The flag is captured on both render paths and consulted by the source
-        # renderer plus the Markdown preview highlighter.
+        # One decision point sets the flag, from the threshold, so it and the
+        # presentation tier beside it can never be computed from different
+        # content; both render paths go through it.
         self.assertIn(
-            "pane._explorerFilePlain = pane._explorerFileContent.length > EXPLORER_PLAIN_PREVIEW_THRESHOLD;",
+            "pane._explorerFilePlain = text.length > EXPLORER_PLAIN_PREVIEW_THRESHOLD;",
             html,
         )
+        self.assertEqual(
+            html.count("applyExplorerSourceTier(pane, pane._explorerFileContent);"), 2
+        )
+        # Consulted by the source renderer and the Markdown preview highlighter.
         self.assertIn("pane._explorerFilePlain ? '' : (pane._explorerFileLanguage || '')", html)
         self.assertIn("if (!pane._explorerFilePlain) {", html)
+
+    def test_terminals_page_find_bar_follows_the_incoming_file_tier(self):
+        """The header's find bar is decided after the tier is recomputed.
+
+        The large-file tier renders no per-line rows for a find to address, so
+        the header renders no find bar. Reading that decision before
+        `applyExplorerSourceTier()` reads the *outgoing* file's tier, which put
+        a find bar on a large file opened after a small one and took it off a
+        small file opened after a large one — an ordering bug with no visible
+        symptom until the second file.
+        """
+        viewer = self._static("js/explorer-viewer.js")
+
+        applied = viewer.index("applyExplorerSourceTier(pane, pane._explorerFileContent);")
+        decided = viewer.index("const findAvailable = explorerPaneAllowsFind(pane);")
+        rendered = viewer.index("${findAvailable ?")
+        self.assertLess(applied, decided)
+        self.assertLess(decided, rendered)
+
+        # An in-place refresh across the boundary is a different header, so it
+        # hands back to a full rebuild rather than updating around a control
+        # that is no longer standing there. That check reads the incoming
+        # content directly, so it does not depend on this ordering at all.
+        self.assertIn(
+            "if (nextTier !== explorerPaneSourceTier(pane)) {",
+            viewer,
+        )
 
     def test_terminals_page_exposes_per_terminal_clear_control(self):
         response = self.client.get("/terminals")
@@ -6237,6 +6294,58 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("+changed", payload["diff"])
         self.assertFalse(payload["truncated"])
 
+    def test_explorer_git_diff_context_width_is_named_not_supplied(self):
+        """The Source gutter's narrower read, and the allowlist behind it.
+
+        The route takes the *name* of a context width, never a number: the
+        value that reaches Git's argv is chosen server-side, so the same
+        refusal shape as the mode allowlist applies to a width nobody
+        published.
+        """
+        repo_dir = self._init_committed_repo()
+        readme = repo_dir / "README.md"
+        readme.write_text("\n".join(f"line {n}" for n in range(1, 21)) + "\n", encoding="utf-8")
+        self._run_git(repo_dir, "add", "README.md")
+        self._run_git(repo_dir, "commit", "-m", "twenty lines")
+        changed = [f"line {n}" for n in range(1, 21)]
+        changed[9] = "line 10 edited"
+        readme.write_text("\n".join(changed) + "\n", encoding="utf-8")
+        session_id = self._create_explorer_session(repo_dir)
+
+        def diff_for(**extra):
+            response = self.client.get(
+                f"/api/explorer/{session_id}/git/diff",
+                query_string={"path": "README.md", "mode": "head", **extra},
+            )
+            return response
+
+        default_response = diff_for()
+        zero_response = diff_for(context="zero")
+
+        self.assertEqual(default_response.status_code, 200)
+        self.assertEqual(zero_response.status_code, 200)
+        default_diff = default_response.get_json()["diff"]
+        zero_diff = zero_response.get_json()["diff"]
+        # Both describe the same change...
+        for changed_line in ("+line 10 edited", "-line 10"):
+            self.assertIn(changed_line, default_diff)
+            self.assertIn(changed_line, zero_diff)
+        # ...but only the default carries the surrounding context lines.
+        self.assertIn("\n line 9", default_diff)
+        self.assertNotIn("\n line 9", zero_diff)
+        self.assertLess(len(zero_diff), len(default_diff))
+
+        # A width the server never published is a refusal, not a fallback to
+        # the default — a typo must not quietly serve the wider diff.
+        # Surrounding whitespace is trimmed, as it is for a commit ref; the
+        # name itself is what has to match.
+        self.assertEqual(diff_for(context=" zero ").status_code, 200)
+        for rejected in ("0", "3", "--unified=0", "999", "default"):
+            with self.subTest(context=rejected):
+                refusal = diff_for(context=rejected)
+                self.assertEqual(refusal.status_code, 400)
+                self.assertIn("context", refusal.get_json()["error"].lower())
+
     def test_explorer_git_diff_returns_commit_file_diff(self):
         repo_dir = Path(self.temp_dir.name) / "repo"
         repo_dir.mkdir()
@@ -7436,9 +7545,11 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(payload["encoding"], "utf-8")
         self.assertFalse(payload["truncated"])
         self.assertEqual(payload["size"], file_path.stat().st_size)
+        # The panel's existence travels with the file; its content does not.
         self.assertEqual(payload["preview_type"], "markdown")
-        self.assertIn("<h1>Project</h1>", payload["preview_html"])
+        self.assertIsNone(payload["preview_html"])
         self.assertEqual(payload["language"], "markdown")
+        self.assertIn("<h1>Project</h1>", self._preview_html(session_id, "README.md"))
 
     # ── In-app editor: read metadata ──
     def test_explorer_file_returns_editor_metadata_for_complete_file(self):
@@ -8087,18 +8198,12 @@ class ApiRoutesTestCase(unittest.TestCase):
         )
         session_id = self._create_explorer_session(repo_dir)
 
-        file_response = self.client.get(
-            f"/api/explorer/{session_id}/file",
-            query_string={"path": "README.md"},
-        )
+        preview_html = self._preview_html(session_id, "README.md")
 
-        self.assertEqual(file_response.status_code, 200)
-        payload = file_response.get_json()
-        self.assertEqual(payload["preview_type"], "markdown")
-        self.assertIn("<h1>Title</h1>", payload["preview_html"])
-        self.assertIn("<strong>Safe bold</strong>", payload["preview_html"])
-        self.assertNotIn("<script", payload["preview_html"])
-        self.assertNotIn("javascript:", payload["preview_html"])
+        self.assertIn("<h1>Title</h1>", preview_html)
+        self.assertIn("<strong>Safe bold</strong>", preview_html)
+        self.assertNotIn("<script", preview_html)
+        self.assertNotIn("javascript:", preview_html)
 
     def test_explorer_markdown_preview_keeps_fenced_code_language(self):
         repo_dir = Path(self.temp_dir.name) / "repo"
@@ -8110,13 +8215,8 @@ class ApiRoutesTestCase(unittest.TestCase):
         )
         session_id = self._create_explorer_session(repo_dir)
 
-        file_response = self.client.get(
-            f"/api/explorer/{session_id}/file",
-            query_string={"path": "README.md"},
-        )
+        preview_html = self._preview_html(session_id, "README.md")
 
-        self.assertEqual(file_response.status_code, 200)
-        preview_html = file_response.get_json()["preview_html"]
         # Fenced blocks keep their language hint so the client can syntax-highlight.
         self.assertIn('<code class="language-python">', preview_html)
         # Inline code stays classless and is left as plain monospace.
@@ -8131,13 +8231,8 @@ class ApiRoutesTestCase(unittest.TestCase):
         )
         session_id = self._create_explorer_session(repo_dir)
 
-        response = self.client.get(
-            f"/api/explorer/{session_id}/file",
-            query_string={"path": "diagram.md"},
-        )
+        preview_html = self._preview_html(session_id, "diagram.md")
 
-        self.assertEqual(response.status_code, 200)
-        preview_html = response.get_json()["preview_html"]
         self.assertIn('<code class="language-mermaid">', preview_html)
         self.assertIn("flowchart LR", preview_html)
         self.assertNotIn("<svg", preview_html)
@@ -8153,13 +8248,8 @@ class ApiRoutesTestCase(unittest.TestCase):
         )
         session_id = self._create_explorer_session(repo_dir)
 
-        file_response = self.client.get(
-            f"/api/explorer/{session_id}/file",
-            query_string={"path": "README.md"},
-        )
+        preview_html = self._preview_html(session_id, "README.md")
 
-        self.assertEqual(file_response.status_code, 200)
-        preview_html = file_response.get_json()["preview_html"]
         self.assertIn("The feed ends at &lt;img&gt; before this text.", preview_html)
         self.assertIn(
             '<img alt="Markdown image" src="https://example.com/image.png">',
@@ -8233,15 +8323,71 @@ class ApiRoutesTestCase(unittest.TestCase):
         )
         session_id = self._create_explorer_session(repo_dir)
 
-        file_response = self.client.get(
-            f"/api/explorer/{session_id}/file",
-            query_string={"path": "README.md"},
-        )
+        preview_html = self._preview_html(session_id, "README.md")
 
-        self.assertEqual(file_response.status_code, 200)
-        preview_html = file_response.get_json()["preview_html"]
         self.assertIn('<div class="md-callout md-callout-tip">', preview_html)
         self.assertIn("Helpful hint.", preview_html)
+
+    def test_explorer_file_preview_is_a_separate_bounded_read(self):
+        """0.4: the Markdown render is lazy, and it is still a *read*.
+
+        The file GET stopped rendering and sanitizing a preview for a panel the
+        reader may never select. What it kept is the field that says the panel
+        exists — `preview_type` — because a save answers with this same payload
+        and the client bails to a full pane rebuild whenever that flips.
+        """
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        (repo_dir / "README.md").write_text("# Title\n\nbody\n", encoding="utf-8")
+        (repo_dir / "notes.txt").write_text("# Not markdown\n", encoding="utf-8")
+        session_id = self._create_explorer_session(repo_dir)
+
+        file_payload = self.client.get(
+            f"/api/explorer/{session_id}/file",
+            query_string={"path": "README.md"},
+        ).get_json()
+        self.assertEqual(file_payload["preview_type"], "markdown")
+        self.assertIsNone(file_payload["preview_html"])
+
+        # The lazy read renders the same HTML the eager one used to.
+        self.assertIn("<h1>Title</h1>", self._preview_html(session_id, "README.md"))
+
+        # A save answers with the same shape, so the panel never blinks out of
+        # existence and the client never rebuilds the pane around it.
+        saved = self.client.put(
+            f"/api/explorer/{session_id}/file",
+            json={
+                "path": "README.md",
+                "content": "# Title\n\nedited\n",
+                "base_revision": file_payload["revision"],
+            },
+        )
+        self.assertEqual(saved.status_code, 200)
+        self.assertEqual(saved.get_json()["preview_type"], "markdown")
+        self.assertIsNone(saved.get_json()["preview_html"])
+        # ...and the next lazy read reflects the write.
+        self.assertIn("edited", self._preview_html(session_id, "README.md"))
+
+    def test_explorer_file_preview_refuses_what_it_cannot_preview(self):
+        """Same resolution and root confinement as every other bounded read."""
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        (repo_dir / "notes.txt").write_text("# Not markdown\n", encoding="utf-8")
+        outside = Path(self.temp_dir.name) / "outside.md"
+        outside.write_text("# Secret\n", encoding="utf-8")
+        session_id = self._create_explorer_session(repo_dir)
+
+        for path in ("notes.txt", "../outside.md", "missing.md"):
+            with self.subTest(path=path):
+                response = self.client.get(
+                    f"/api/explorer/{session_id}/file/preview",
+                    query_string={"path": path},
+                )
+                # A refusal, never a rendered body: not-Markdown and missing
+                # answer differently (400 / 404), and neither leaks content.
+                self.assertIn(response.status_code, (400, 404))
+                self.assertNotIn("Secret", response.get_data(as_text=True))
+                self.assertNotIn("preview_html", response.get_data(as_text=True))
 
     def test_explorer_file_does_not_preview_non_markdown_text(self):
         repo_dir = Path(self.temp_dir.name) / "repo"
@@ -13074,7 +13220,7 @@ class ExplorerGitWatchFrontendTestCase(unittest.TestCase):
         self.assertIn("pinnedTab.git = preview.git || null;", promote_fn)
 
     def test_empty_diff_falls_back_to_the_file_content_view(self):
-        viewer = self._static("js/explorer-viewer.js")
+        viewer = self._static("js/explorer-diff.js")
         self.assertIn("function explorerFallbackFromEmptyDiff(index)", viewer)
         fallback = viewer[
             viewer.index("function explorerFallbackFromEmptyDiff(index)"):
@@ -14385,6 +14531,7 @@ class GuardrailAuditFixesTestCase(unittest.TestCase):
         "js/launcher.js",
         "js/terminals.js",
         "js/explorer-viewer.js",
+        "js/explorer-diff.js",
         "js/explorer-tabs.js",
         "js/explorer-editor.js",
         "js/explorer-search.js",
@@ -14521,6 +14668,18 @@ class ExtractedFrontendAssetsTestCase(unittest.TestCase):
             terminals_html.index("js/voice-input.js"),
             terminals_html.index("js/explorer-viewer.js"),
         )
+        # explorer-diff.js is the Diff domain lifted out of explorer-viewer.js
+        # by guardrail 6's extraction trigger, and loads directly after it.
+        self.assertIn(f"/static/js/explorer-diff.js?v={__version__}", terminals_html)
+        self.assertNotIn("js/explorer-diff.js", launcher_html)
+        self.assertLess(
+            terminals_html.index("js/explorer-viewer.js"),
+            terminals_html.index("js/explorer-diff.js"),
+        )
+        self.assertLess(
+            terminals_html.index("js/explorer-diff.js"),
+            terminals_html.index("js/terminals.js"),
+        )
         # explorer-tabs.js is the tab domain lifted out of explorer-viewer.js;
         # the two are one surface split across two files and load as a pair,
         # ahead of every module that renders into a tab.
@@ -14599,6 +14758,7 @@ class ExtractedFrontendAssetsTestCase(unittest.TestCase):
             "js/terminal-icons.js",
             "js/voice-input.js",
             "js/explorer-viewer.js",
+            "js/explorer-diff.js",
             "js/explorer-tabs.js",
             "js/explorer-editor.js",
             "js/explorer-search.js",

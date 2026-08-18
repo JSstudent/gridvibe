@@ -1,7 +1,10 @@
 # Large Source Files and Diff Views: Freeze Analysis and Proposal
 
 **Status:** Analysis and implementation proposal — **verified against the working
-tree on 2026-08-17**
+tree on 2026-08-17**. **Phase 0 (0.0–0.6) is implemented as of 2026-08-18**;
+open question 0.1 was resolved as *state plainly in the notice that find is
+unavailable in this tier*. Phases 1–3 are still proposals. Two claims below did
+not survive implementation and are corrected in place — see 0.1 and 0.6.
 **Date:** 2026-08-17 (verification pass same day)
 **Scope:** Why opening or interacting with large source files and large diffs
 freezes the GridVibe UI, verified against the current code, and a staged plan
@@ -324,6 +327,19 @@ was turned off. Caps DOM nodes for pathological files at O(1).
   a 10 MiB buffer. Decide before building: either paint only a bounded window of
   matches, or state plainly in the notice that find is unavailable in this tier.
   Do not ship a find that reintroduces the freeze the tier exists to remove.
+- *Resolved (2026-08-18): the notice states it.* Find is unavailable in the
+  tier, the header renders no find bar, and the notice says *"Find is
+  unavailable in this view."* in those words. It is a property of the tier
+  rather than of one view, because the single header input serves Source,
+  Preview and Diff — a live control that only some panels can answer is the
+  dead-control problem guardrail 8 names. `sourceTierAllows()` is the one
+  predicate behind both the notice and the switch.
+- *One thing the draft assumed and implementation disproved:* the tier could not
+  be decided on the line count. `explorerSourceLineRecords()` emits a trailing
+  record after the final newline, so a file ending in one builds `lines + 1`
+  rows — the two counts disagree by exactly one at exactly the boundary the
+  threshold sits on. The tier decides on `rowCount()`; the notice reports the
+  reader-facing `lineCount()`.
 
 **0.2 — Diff size tiers (corrected).** The draft proposed `diffMaxChanges` /
 `diffMaxLineLength` as a degradation lever. Both keys exist in the pinned
@@ -403,10 +419,21 @@ needed, and none should be built.
 
 The change is still worth making, for a smaller and more defensible saving: up
 to six context lines per hunk disappear from the payload and from the parse. It
-is provably mark-identical — a block is flushed either by a context line
-(`explorer-viewer.js:3967`) or by a hunk header (`3949`), and `-U0` converts the
-former into the latter — so the gutter, the peeks, and the overview ruler render
-exactly as they do now.
+~~is provably mark-identical~~ — **this was wrong, and implementation caught
+it.** The flush argument holds (a block ends on a context line or on a hunk
+header, and `-U0` turns the former into the latter), but the *anchors* did not:
+a unified-diff range of length zero names the line **before** the change rather
+than the line the change sits at, so `@@ -19,0 +20,2 @@` and `@@ -31 +32,0 @@`
+leave a pure insertion's `oldLine` and a pure deletion's `line` one off from
+where the `-U3` walk arrives. A deletion wedge therefore sat one row high on the
+narrow patch and one row lower on the wide one the Diff panel caches — the same
+change marking two different places depending on which surface had been opened
+first. `explorerDiffHunkStart()` (`explorer-diff.js`) normalizes the
+zero-length case, which is a no-op on every `-U3` patch (a zero-length range
+only occurs there for a whole-file create or delete, which is left alone). With
+that in place the claim is true, and it is now *tested* rather than argued:
+`tests/test_explorer_change_marks.py` runs real Git output at both widths
+through the real parser and compares block for block.
 
 - *Constraints:* thread the context count through `_git_diff_args_for_mode()`
   (`web/explorer.py:2379`) as a server-controlled value, never a client string,

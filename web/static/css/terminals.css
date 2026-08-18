@@ -4165,6 +4165,47 @@
             word-break: break-word;
         }
 
+        /* Large-file tier (explorer-tiers.js): bounded plain chunks instead of
+           one row per line, and the notice that names everything the tier
+           turned off. The notice is sticky because it is the only explanation
+           for a missing gutter, missing marks and a missing find — scrolling it
+           away leaves the reader looking at what reads like a broken pane. */
+        .explorer-source-tier-notice {
+            position: sticky;
+            top: 0;
+            z-index: 1;
+            padding: 6px 12px;
+            font-size: .74rem;
+            line-height: 1.5;
+            color: var(--explorer-muted);
+            background: var(--explorer-bar-bg);
+            border-bottom: 1px solid var(--explorer-border);
+        }
+
+        .explorer-source-plain {
+            display: block;
+            min-width: max-content;
+        }
+
+        .explorer-source-chunk {
+            margin: 0;
+            padding: 0 12px;
+            font: inherit;
+            color: inherit;
+            background: none;
+            white-space: pre;
+        }
+
+        .explorer-source-view.wrap-lines .explorer-source-plain {
+            min-width: 0;
+        }
+
+        .explorer-source-view.wrap-lines .explorer-source-chunk {
+            white-space: pre-wrap;
+            overflow-wrap: anywhere;
+            word-break: break-word;
+        }
+
         .explorer-editor-content code {
             white-space: inherit;
             overflow-wrap: inherit;
@@ -5231,6 +5272,26 @@
             color: #92400e;
             background: rgba(251, 191, 36, .18);
             border-bottom: 1px solid rgba(180, 83, 9, .35);
+        }
+
+        /* The size tier's banner (explorer-tiers.js). Deliberately a different
+           surface from the truncation banner above: truncation says part of the
+           change is *missing*, this says all of it is here and looks plainer.
+           Both can stand at once, in that order. */
+        .explorer-diff-tier-notice {
+            padding: 6px 12px;
+            margin: 0 0 6px;
+            font-size: .74rem;
+            line-height: 1.5;
+            color: var(--explorer-muted);
+            background: var(--explorer-bar-bg);
+            border-bottom: 1px solid var(--explorer-border);
+        }
+
+        .explorer-diff-tier-notice strong,
+        .explorer-source-tier-notice strong {
+            color: var(--explorer-text);
+            font-weight: 600;
         }
 
         .explorer-pane[data-explorer-theme="dark"] .explorer-diff-truncated {

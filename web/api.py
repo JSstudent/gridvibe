@@ -131,6 +131,7 @@ from web.explorer import (  # noqa: F401 - some names re-exported for backwards 
     _resolve_remote_explorer_candidate_path,
     _sftp_request_error_types,
     get_explorer_file_payload,
+    get_explorer_file_preview_payload,
     get_explorer_file_state_payload,
     open_path_in_os_file_manager,
     read_explorer_file_preview,
@@ -1305,6 +1306,26 @@ def get_explorer_file(session_id: str):
     return _explorer_route_response(session, handler)
 
 
+@app.route('/api/explorer/<session_id>/file/preview', methods=['GET'])
+def get_explorer_file_preview(session_id: str):
+    """Return the rendered Markdown preview for one explorer file.
+
+    Split out of the file GET so that opening a Markdown file in Source view
+    stops rendering and sanitizing a preview nobody asked to see. Same bounded,
+    root-confined read as the file payload; the Preview panel asks for this the
+    first time it is shown, and again after a save while it is the shown panel.
+    """
+    session = session_manager.get_session(session_id)
+    if session is None:
+        return jsonify({"error": "Session not found"}), 404
+    requested_path = request.args.get("path", "")
+
+    def handler(backend: Any) -> Dict[str, Any]:
+        return get_explorer_file_preview_payload(backend, requested_path)
+
+    return _explorer_route_response(session, handler)
+
+
 @app.route('/api/explorer/<session_id>/file', methods=['PUT'])
 def save_explorer_file(session_id: str):
     """Atomically replace one explorer text file with edited contents.
@@ -1574,10 +1595,14 @@ def get_explorer_git_diff(session_id: str):
     mode = request.args.get("mode", "worktree")
     commit = request.args.get("commit")
     requested_path = request.args.get("path", "")
+    # Names a context width from the server's own allowlist
+    # (GIT_DIFF_CONTEXT_WIDTHS); absent means Git's default, which is what the
+    # Diff panel renders. The Source gutter's change marks pass "zero".
+    context = request.args.get("context", "")
 
     def handler(backend: Any) -> Dict[str, Any]:
         root_path, file_path = backend.resolve_diff_path(requested_path)
-        diff_payload = _get_git_diff(backend, root_path, file_path, mode, commit)
+        diff_payload = _get_git_diff(backend, root_path, file_path, mode, commit, context)
         return {
             "root": root_path,
             "path": backend.rel_explorer_path(root_path, file_path),

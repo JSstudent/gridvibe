@@ -2376,16 +2376,45 @@ def _validated_git_commit_ref(value: Any) -> str:
     return commit
 
 
-def _git_diff_args_for_mode(mode: str, pathspec: str, commit: Optional[str] = None) -> List[str]:
+#: Context widths the read-only diff route will produce, keyed by the flag a
+#: client may send. The client picks a *name*, never a number: the width that
+#: reaches argv is chosen here, so the route keeps the same shape as the mode
+#: allowlist beside it and no request can dictate a Git argument.
+#:
+#: ``zero`` exists for the Source gutter's change marks. They need every +/-
+#: line and no context at all — a block is flushed by a context line or by a
+#: hunk header, and ``-U0`` turns the former into the latter — so the marks
+#: are identical either way and up to six lines per hunk stop being sent and
+#: stop being parsed. ``None`` is Git's own default (three lines), which is
+#: what the Diff *panel* renders and must keep.
+GIT_DIFF_CONTEXT_WIDTHS: Dict[str, Optional[int]] = {"zero": 0}
+
+
+def _git_diff_args_for_mode(
+    mode: str,
+    pathspec: str,
+    commit: Optional[str] = None,
+    context_lines: Optional[int] = None,
+) -> List[str]:
     """Return read-only Git diff arguments for an explorer file."""
+    context = [] if context_lines is None else [f"--unified={int(context_lines)}"]
     if mode == "worktree":
-        return ["diff", "--no-ext-diff", "--no-color", "--", pathspec]
+        return ["diff", *context, "--no-ext-diff", "--no-color", "--", pathspec]
     if mode == "staged":
-        return ["diff", "--cached", "--no-ext-diff", "--no-color", "--", pathspec]
+        return ["diff", "--cached", *context, "--no-ext-diff", "--no-color", "--", pathspec]
     if mode == "head":
-        return ["diff", "HEAD", "--no-ext-diff", "--no-color", "--", pathspec]
+        return ["diff", "HEAD", *context, "--no-ext-diff", "--no-color", "--", pathspec]
     if mode == "commit":
-        return ["show", "--format=", "--no-ext-diff", "--no-color", commit or "", "--", pathspec]
+        return [
+            "show",
+            "--format=",
+            *context,
+            "--no-ext-diff",
+            "--no-color",
+            commit or "",
+            "--",
+            pathspec,
+        ]
     raise ValueError("Invalid Git diff mode")
 
 
@@ -2633,12 +2662,23 @@ def _get_git_diff(
     file_path: str,
     mode: str,
     commit: Optional[str] = None,
+    context: Any = None,
 ) -> Dict[str, Any]:
-    """Return a bounded read-only Git diff for an explorer file."""
+    """Return a bounded read-only Git diff for an explorer file.
+
+    ``context`` names a width in ``GIT_DIFF_CONTEXT_WIDTHS`` (the request's
+    string, resolved here) rather than carrying one; an unknown name is a
+    refusal, not a fallback, so a typo cannot quietly serve the panel's diff to
+    a caller that asked for the narrow one.
+    """
     if mode not in {"worktree", "staged", "head", "commit"}:
         raise ValueError("Invalid Git diff mode")
     if mode == "commit":
         commit = _validated_git_commit_ref(commit)
+    context_name = str(context or "").strip()
+    if context_name and context_name not in GIT_DIFF_CONTEXT_WIDTHS:
+        raise ValueError("Invalid Git diff context")
+    context_lines = GIT_DIFF_CONTEXT_WIDTHS.get(context_name) if context_name else None
 
     git_context, _statuses = _get_git_context(backend, root_path, backend.file_dirname(file_path))
     if not git_context.get("available"):
@@ -2650,7 +2690,7 @@ def _get_git_diff(
         diff_text, truncated, raw_bytes = _bounded_git_diff(
             backend,
             repo_root,
-            _git_diff_args_for_mode(mode, pathspec, commit),
+            _git_diff_args_for_mode(mode, pathspec, commit, context_lines),
         )
     except subprocess.TimeoutExpired as exc:
         raise ValueError("Git diff timed out") from exc
@@ -3389,6 +3429,39 @@ def _resolve_remote_explorer_file_path(sftp: Any, session: Any, requested_path: 
 # ── Explorer file read/save payload builders (in-app editor) ────────────────
 
 
+def get_explorer_file_preview_payload(backend: Any, requested_path: Any) -> Dict[str, Any]:
+    """Return the rendered Markdown preview for one explorer file.
+
+    The lazy half of the file read: same resolution, same root confinement and
+    the same bounded ``read_explorer_file_preview`` cap as the file payload,
+    but it renders and sanitizes the Markdown and returns nothing else. A
+    read, so the file explorer's read-only contract is unchanged; it exists so
+    that opening a Markdown file in Source view stops paying for a preview
+    nobody asked to see.
+    """
+    root_path, file_path = backend.resolve_file(requested_path)
+    if not _is_markdown_file(file_path):
+        raise ValueError("File has no Markdown preview")
+    size, _modified = backend.stat_file(file_path)
+    preview = read_explorer_file_preview(
+        backend,
+        file_path,
+        total_size=size,
+        tail=_is_tail_preview_file(file_path),
+    )
+    preview_bytes = preview["bytes"]
+    if _explorer_content_looks_binary(preview_bytes):
+        raise ValueError("Explorer file appears to be binary")
+    content = preview_bytes.decode("utf-8", errors="replace")
+    return {
+        "root": root_path,
+        "path": backend.rel_explorer_path(root_path, file_path),
+        "preview_type": "markdown",
+        "preview_html": _render_markdown_preview(content) or "",
+        "truncated": preview["truncated"],
+    }
+
+
 def get_explorer_file_payload(backend: Any, requested_path: Any) -> Dict[str, Any]:
     """Return the canonical read payload for one explorer file.
 
@@ -3436,7 +3509,6 @@ def get_explorer_file_payload(backend: Any, requested_path: Any) -> Dict[str, An
 
     truncated = preview["truncated"]
     content = preview_bytes.decode("utf-8", errors="replace")
-    preview_html = _render_markdown_preview(content) if _is_markdown_file(file_path) else None
     edit_metadata = _explorer_edit_metadata(preview_bytes, truncated=truncated)
     git_context, git_statuses = _get_git_context(backend, root_path, backend.file_dirname(file_path))
     file_git = (
@@ -3457,8 +3529,19 @@ def get_explorer_file_payload(backend: Any, requested_path: Any) -> Dict[str, An
         "preview_end_byte": preview["preview_end_byte"],
         "total_size": preview["total_size"],
         "content": content,
-        "preview_type": "markdown" if preview_html is not None else None,
-        "preview_html": preview_html,
+        # An independent, always-present field: the *existence* of a Preview
+        # panel is a property of the file, not of whether a preview happened to
+        # be rendered into this response. Deriving it from `preview_html` was
+        # what tied the panel's existence to the eager render — and since this
+        # payload also answers a successful save, flipping it there would have
+        # made every save on a Markdown file rebuild the whole pane.
+        "preview_type": "markdown" if _is_markdown_file(file_path) else None,
+        # Never rendered here. Markdown rendering plus Bleach sanitization ran
+        # on every file GET and every save, for every Markdown file, whether or
+        # not the reader ever left Source view — and nothing cached it, so each
+        # refresh paid again. The Preview panel asks for it when it is first
+        # shown, through get_explorer_file_preview_payload() below.
+        "preview_html": None,
         "language": code_language,
         "editable": edit_metadata["editable"],
         "edit_block_reason": edit_metadata["edit_block_reason"],
