@@ -282,11 +282,12 @@ class ExplorerSourceFrameTestCase(unittest.TestCase):
             viewer.index("function renderExplorerSource(index, searchRanges = [])"):
             viewer.index("function explorerPreviewBlockLanguage(code)")
         ]
-        # Search keystrokes, wrap toggles and Markdown folds all re-render
-        # without touching the content; they must hit the pane cache instead
-        # of re-tokenizing the whole document each time.
-        self.assertIn("explorerHighlightDocumentLinesCached(", render)
-        self.assertIn("pane, content, normalizeExplorerLanguage(language)", render)
+        # Search keystrokes, wrap toggles and Markdown folds all go through the
+        # async-aware cache gate. It returns the memoized map, one shared
+        # pending worker job, or the synchronous small-file result — never a
+        # second whole-document tokenization for the same identity.
+        self.assertIn("explorerHighlightLinesForRender(", render)
+        self.assertIn("index, pane, content, normalizeExplorerLanguage(language)", render)
         self.assertIn("highlightedLines\n        );", render)
 
     @unittest.skipUnless(NODE, "Node.js is required for token-map tests")

@@ -110,8 +110,20 @@ function explorerEditMountRuns(pane, draft, language) {
     if (!pane || draft !== pane._explorerFileContent) {
         return undefined;
     }
+    const normalizedLanguage = normalizeExplorerLanguage(language);
+    const cache = pane._explorerHighlightCache;
+    if (cache && cache.content === draft && cache.language === normalizedLanguage) {
+        return cache.lines;
+    }
+    /* The Source worker may still be tokenizing when Edit is pressed. Do not
+       undo Phase 2 by running the same large pass synchronously at mount; the
+       underlay starts in fallback colour and its normal settle pass fills the
+       whole-document colours in. */
+    if (explorerEditWorkerEligible(draft, normalizedLanguage)) {
+        return null;
+    }
     return explorerHighlightDocumentLinesCached(
-        pane, draft, normalizeExplorerLanguage(language)
+        pane, draft, normalizedLanguage
     );
 }
 
@@ -152,6 +164,7 @@ function mountExplorerEditOverlay(index, code, textareaHtml) {
         return;
     }
     const language = explorerEditLanguage(pane);
+    const mountRuns = explorerEditMountRuns(pane, draft, language);
 
     code.innerHTML = `
         <div
@@ -159,7 +172,7 @@ function mountExplorerEditOverlay(index, code, textareaHtml) {
             data-explorer-edit-stack="${index}"
             style="--explorer-source-gutter-width: ${explorerEditGutterWidthCss(draft, language)};"
         >
-            <div class="explorer-edit-underlay" aria-hidden="true">${explorerEditUnderlayHtml(draft, language, explorerEditMountRuns(pane, draft, language))}</div>
+            <div class="explorer-edit-underlay" aria-hidden="true">${explorerEditUnderlayHtml(draft, language, mountRuns)}</div>
             ${textareaHtml}
         </div>
     `;
@@ -177,6 +190,9 @@ function mountExplorerEditOverlay(index, code, textareaHtml) {
     }
     textarea.addEventListener('focus', () => view.classList.add('editor-focused'));
     textarea.addEventListener('blur', () => view.classList.remove('editor-focused'));
+    if (mountRuns === null && explorerEditWorkerEligible(draft, normalizeExplorerLanguage(language))) {
+        scheduleExplorerEditUnderlaySettle(index);
+    }
 }
 
 /* The line texts the rows are built from, in the renderer's own terms (a
@@ -236,7 +252,7 @@ function spliceExplorerEditUnderlayRows(underlay, model, plan) {
 /* `full` forces the whole-document rebuild: the settle pass asks for it, and
    so does anything the splice cannot express (a first paint, a change too wide
    to be a splice, a container that is not the shape the plan assumed). */
-function paintExplorerEditUnderlay(index, { full = false } = {}) {
+function paintExplorerEditUnderlay(index, { full = false, runs } = {}) {
     const pane = terminals[index];
     const state = pane && pane._explorerEdit;
     const stack = document.querySelector(`[data-explorer-edit-stack="${index}"]`);
@@ -246,6 +262,9 @@ function paintExplorerEditUnderlay(index, { full = false } = {}) {
     }
     const draft = String(state.draft == null ? '' : state.draft);
     const language = explorerEditLanguage(pane);
+    if (pane._explorerEditHighlightPending?.draft !== draft) {
+        cancelExplorerEditHighlight(pane);
+    }
     stack.style.setProperty(
         '--explorer-source-gutter-width', explorerEditGutterWidthCss(draft, language)
     );
@@ -272,7 +291,19 @@ function paintExplorerEditUnderlay(index, { full = false } = {}) {
     }
     if (!spliced) {
         cancelExplorerEditUnderlaySettle(pane);
-        underlay.innerHTML = explorerEditUnderlayHtml(draft, language);
+        /* A wide paste still needs an immediate geometry-correct paint, but it
+           does not need a main-thread whole-document tokenization. The edit is
+           shown with fallback colour now and the same settle path as a small
+           splice supplies real runs after the worker (or the small-file sync
+           path) finishes. */
+        underlay.innerHTML = explorerEditUnderlayHtml(
+            draft,
+            language,
+            full ? runs : null
+        );
+        if (!full) {
+            scheduleExplorerEditUnderlaySettle(index);
+        }
     } else {
         scheduleExplorerEditUnderlaySettle(index);
     }
@@ -290,6 +321,65 @@ function paintExplorerEditUnderlay(index, { full = false } = {}) {
    a splice and disarmed by the next full paint or by teardown. */
 const EXPLORER_EDIT_UNDERLAY_SETTLE_MS = 180;
 
+function explorerEditWorkerEligible(draft, normalizedLanguage) {
+    const workers = (typeof window !== 'undefined' && window.GridVibeExplorerWorkers) || null;
+    const grammar = EXPLORER_HLJS_LANGUAGE[normalizedLanguage];
+    return Boolean(grammar && workers?.canHighlight?.(String(draft == null ? '' : draft)));
+}
+
+function cancelExplorerEditHighlight(pane) {
+    if (!pane?._explorerEditHighlightPending) {
+        return;
+    }
+    pane._explorerEditHighlightPending = null;
+    cancelExplorerRequestSlot(pane, 'editHighlight');
+}
+
+function settleExplorerEditUnderlay(index) {
+    const pane = terminals[index];
+    const state = pane?._explorerEdit;
+    if (!state) {
+        return;
+    }
+    const draft = String(state.draft == null ? '' : state.draft);
+    const language = explorerEditLanguage(pane);
+    const normalizedLanguage = normalizeExplorerLanguage(language);
+    const workers = (typeof window !== 'undefined' && window.GridVibeExplorerWorkers) || null;
+    const grammar = EXPLORER_HLJS_LANGUAGE[normalizedLanguage];
+    if (!grammar || !workers?.canHighlight?.(draft)) {
+        paintExplorerEditUnderlay(index, { full: true });
+        return;
+    }
+    const previous = pane._explorerEditHighlightPending;
+    if (previous && previous.draft === draft && previous.language === normalizedLanguage) {
+        return;
+    }
+    cancelExplorerEditHighlight(pane);
+    const pending = { draft, language: normalizedLanguage };
+    pane._explorerEditHighlightPending = pending;
+    workers.highlight(draft, grammar, {
+        signal: explorerRequestSignal(pane, 'editHighlight')
+    }).then(runs => {
+        if (pane._explorerEditHighlightPending !== pending) {
+            return;
+        }
+        pane._explorerEditHighlightPending = null;
+        if (!pane._explorerEdit || String(pane._explorerEdit.draft || '') !== draft) {
+            return;
+        }
+        paintExplorerEditUnderlay(index, { full: true, runs });
+    }).catch(error => {
+        if (pane._explorerEditHighlightPending !== pending) {
+            return;
+        }
+        pane._explorerEditHighlightPending = null;
+        if (!explorerIsAbortError(error)) {
+            console.error('[GridVibe Sessions] Explorer edit highlight worker failed:', error);
+        }
+        /* Fallback-coloured rows are already on screen and stay usable. */
+    });
+}
+
 function cancelExplorerEditUnderlaySettle(pane) {
     if (pane && pane._explorerEditOverlaySettle) {
         window.clearTimeout(pane._explorerEditOverlaySettle);
@@ -306,7 +396,7 @@ function scheduleExplorerEditUnderlaySettle(index) {
     pane._explorerEditOverlaySettle = window.setTimeout(() => {
         pane._explorerEditOverlaySettle = 0;
         if (pane._explorerEdit) {
-            paintExplorerEditUnderlay(index, { full: true });
+            settleExplorerEditUnderlay(index);
         }
     }, EXPLORER_EDIT_UNDERLAY_SETTLE_MS);
 }
@@ -357,6 +447,7 @@ function teardownExplorerEditOverlay(index) {
         pane._explorerEditOverlayDraft = '';
         pane._explorerEditOverlayLines = null;
         cancelExplorerEditUnderlaySettle(pane);
+        cancelExplorerEditHighlight(pane);
     }
     // The find's paint and its cached ranges were resolved against a draft
     // that is about to stop existing.

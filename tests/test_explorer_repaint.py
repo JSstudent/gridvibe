@@ -477,6 +477,101 @@ class SourceRepaintAdapterTestCase(NodeHarnessMixin, unittest.TestCase):
 
 
 @unittest.skipUnless(NODE, "Node.js is required for explorer repaint tests")
+class SourceWorkerAdapterTestCase(NodeHarnessMixin, unittest.TestCase):
+    """The Source adapter paints first, then accepts only its worker answer."""
+
+    def _worker_render(self, script: str):
+        return self._run_node(
+            DOM_STUB
+            + """
+            const fs = require('fs');
+            const vm = require('vm');
+            const panel = makeSourcePanel('explorer-code-0');
+            const sandbox = makeSandbox({ 'explorer-code-0': panel });
+            vm.createContext(sandbox);
+            [process.argv[2], process.argv[3], process.argv[4]].forEach(path => {
+                vm.runInContext(fs.readFileSync(path, 'utf8'), sandbox);
+            });
+            sandbox.window.GridVibeExplorerRepaint = sandbox.GridVibeExplorerRepaint;
+            const jobs = [];
+            sandbox.window.GridVibeExplorerWorkers = {
+                canHighlight: () => true,
+                highlight(source, grammar) {
+                    return new Promise((resolve, reject) => jobs.push({
+                        source, grammar, resolve, reject
+                    }));
+                }
+            };
+            const pane = {
+                _explorerMode: 'file',
+                _explorerFilePath: 'sample.py',
+                _explorerFileContent: 'def first():',
+                _explorerFileLanguage: 'python',
+                _explorerFilePlain: false,
+                _explorerEdit: null
+            };
+            sandbox.terminals[0] = pane;
+            const keywordMap = (source, word) => new Map([[
+                1, [
+                    { className: 'hljs-keyword', text: word, start: 0 },
+                    { className: '', text: source.slice(word.length), start: word.length }
+                ]
+            ]]);
+            """
+            + script,
+            str(REPAINT_JS),
+            str(VIEWER_JS),
+            str(TABS_JS),
+        )
+
+    def test_plain_rows_paint_once_while_one_worker_job_is_shared(self):
+        result = self._worker_render(
+            "(async () => {"
+            "  sandbox.renderExplorerSource(0);"
+            "  const first = panel.block.rows[0].cell.innerHTML;"
+            "  sandbox.renderExplorerSource(0);"
+            "  const launchesBeforeAnswer = jobs.length;"
+            "  jobs[0].resolve(keywordMap(jobs[0].source, 'def'));"
+            "  await Promise.resolve(); await Promise.resolve();"
+            "  console.log(JSON.stringify({"
+            "    first, launchesBeforeAnswer, panelWrites: panel.writes,"
+            "    final: panel.block.rows[0].cell.innerHTML"
+            "  }));"
+            "})();"
+        )
+
+        self.assertEqual(result["launchesBeforeAnswer"], 1)
+        self.assertNotIn("explorer-code-keyword", result["first"])
+        self.assertNotIn("hljs-keyword", result["first"])
+        self.assertEqual(result["panelWrites"], 2)
+        self.assertIn('<span class="hljs-keyword">def</span>', result["final"])
+
+    def test_a_stale_worker_answer_never_repaints_newer_content(self):
+        result = self._worker_render(
+            "(async () => {"
+            "  sandbox.renderExplorerSource(0);"
+            "  pane._explorerFileContent = 'def second():';"
+            "  sandbox.renderExplorerSource(0);"
+            "  const writesBeforeStale = panel.writes;"
+            "  jobs[0].resolve(keywordMap(jobs[0].source, 'def'));"
+            "  await Promise.resolve(); await Promise.resolve();"
+            "  const writesAfterStale = panel.writes;"
+            "  jobs[1].resolve(keywordMap(jobs[1].source, 'def'));"
+            "  await Promise.resolve(); await Promise.resolve();"
+            "  console.log(JSON.stringify({"
+            "    launches: jobs.length, writesBeforeStale, writesAfterStale,"
+            "    final: panel.block.rows[0].cell.innerHTML"
+            "  }));"
+            "})();"
+        )
+
+        self.assertEqual(result["launches"], 2)
+        self.assertEqual(result["writesAfterStale"], result["writesBeforeStale"])
+        self.assertIn("second", result["final"])
+        self.assertIn("hljs-keyword", result["final"])
+
+
+@unittest.skipUnless(NODE, "Node.js is required for explorer repaint tests")
 class ChunkedSourceBuildTestCase(NodeHarnessMixin, unittest.TestCase):
     """A document too large to build in one task fills in over frames.
 
@@ -706,6 +801,41 @@ class EditUnderlayRepaintTestCase(NodeHarnessMixin, unittest.TestCase):
         self.assertEqual(result["tokenized"], 1)
         # A full paint is the settled state; nothing is left pending behind it.
         self.assertFalse(result["settleArmed"])
+
+    def test_the_settle_pass_uses_the_worker_for_an_eligible_draft(self):
+        result = self._type(
+            "(async () => {"
+            "  let resolveRuns; let workerCalls = 0;"
+            "  sandbox.window.GridVibeExplorerWorkers = {"
+            "    canHighlight: () => true,"
+            "    highlight: () => { workerCalls += 1; return new Promise(resolve => { resolveRuns = resolve; }); }"
+            "  };"
+            "  pane._explorerEdit.draft = ['one', 'twoX', 'three', 'four'].join(NL);"
+            "  sandbox.paintExplorerEditUnderlay(0);"
+            "  timers.shift()();"
+            "  const beforeAnswer = underlay.writes;"
+            "  let offset = 0;"
+            "  const runs = new Map();"
+            "  pane._explorerEdit.draft.split(NL).forEach((line, at) => {"
+            "    runs.set(at + 1, [{"
+            "      className: at === 0 ? 'hljs-keyword' : '', text: line, start: offset"
+            "    }]);"
+            "    offset += line.length + 1;"
+            "  });"
+            "  resolveRuns(runs);"
+            "  await Promise.resolve(); await Promise.resolve();"
+            "  console.log(JSON.stringify({"
+            "    workerCalls, tokenized, beforeAnswer, underlayWrites: underlay.writes,"
+            "    first: underlay.block.rows[0].cell.innerHTML"
+            "  }));"
+            "})();"
+        )
+
+        self.assertEqual(result["workerCalls"], 1)
+        self.assertEqual(result["tokenized"], 0)
+        self.assertEqual(result["beforeAnswer"], 1)
+        self.assertEqual(result["underlayWrites"], 2)
+        self.assertIn("hljs-keyword", result["first"])
 
 
 if __name__ == "__main__":

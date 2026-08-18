@@ -70,6 +70,15 @@
         return controller.signal;
     }
 
+    function cancelExplorerRequestSlot(pane, slot) {
+        const slots = pane?._explorerRequestAborters;
+        if (!slots || !slots[slot]) {
+            return;
+        }
+        slots[slot].abort();
+        delete slots[slot];
+    }
+
     /* A deliberate abort is not a failure and must not reach the console
        (guardrail 9) — otherwise every fast file switch writes a red line.
        `AbortError` is the fetch contract; the legacy numeric ABORT_ERR code
@@ -904,6 +913,101 @@
             pane._explorerHighlightCache = { content, language: normalizedLanguage, lines };
         }
         return lines;
+    }
+
+    /* An explicit third state beside a token Map and the cached-null fallback:
+       the worker owns tokenization for this buffer, so the first paint is plain
+       escaped text. It must not fall through to the handwritten lexer — on a
+       1.5 MiB minified line that lexer is another long main-thread task, which
+       would defeat moving Highlight.js away in the first place. */
+    const EXPLORER_HIGHLIGHT_PENDING = Symbol('explorer-highlight-pending');
+
+    function explorerWorkerClient() {
+        return (typeof window !== 'undefined' && window.GridVibeExplorerWorkers) || null;
+    }
+
+    function explorerSourceSearchRangesOnScreen(index, pane) {
+        if (activeExplorerFileView(index) !== 'source') {
+            return [];
+        }
+        const state = ensureExplorerSearchState(pane);
+        if (!state.query || state.resultQuery !== state.query || !Array.isArray(state.ranges)) {
+            return [];
+        }
+        return decorateExplorerSearchRanges(state.ranges, state.activeIndex || 0);
+    }
+
+    /* Small files keep the zero-startup-cost synchronous path. Above the
+       worker client's measured floor, a cache miss starts one shared-pool job
+       and returns the pending sentinel immediately. Repaints while it runs
+       reuse that job; a different content/language identity aborts it through
+       the same per-pane request slots file/diff loads use.
+
+       The answer is committed only if it still describes the pane. A winning
+       answer invalidates the render token and rebuilds with the current find
+       decorations; a superseded answer never paints stale content. */
+    function explorerHighlightLinesForRender(index, pane, content, normalizedLanguage) {
+        const cache = pane ? pane._explorerHighlightCache : null;
+        if (cache && cache.content === content && cache.language === normalizedLanguage) {
+            return cache.plain ? EXPLORER_HIGHLIGHT_PENDING : cache.lines;
+        }
+        const previous = pane?._explorerHighlightPending;
+        const grammar = EXPLORER_HLJS_LANGUAGE[normalizedLanguage];
+        const workers = explorerWorkerClient();
+        const source = String(content || '');
+        if (!pane || !grammar || source.length > EXPLORER_PLAIN_PREVIEW_THRESHOLD
+            || !workers?.canHighlight?.(source)) {
+            if (previous) {
+                pane._explorerHighlightPending = null;
+                cancelExplorerRequestSlot(pane, 'highlight');
+            }
+            return explorerHighlightDocumentLinesCached(pane, content, normalizedLanguage);
+        }
+
+        if (previous && previous.content === content && previous.language === normalizedLanguage) {
+            return EXPLORER_HIGHLIGHT_PENDING;
+        }
+
+        const pending = { content, language: normalizedLanguage };
+        pane._explorerHighlightPending = pending;
+        workers.highlight(source, grammar, {
+            signal: explorerRequestSignal(pane, 'highlight')
+        }).then(lines => {
+            if (pane._explorerHighlightPending !== pending) {
+                return;
+            }
+            pane._explorerHighlightPending = null;
+            const currentLanguage = normalizeExplorerLanguage(
+                pane._explorerFilePlain ? '' : (pane._explorerFileLanguage || '')
+            );
+            if (pane._explorerFileContent !== content || currentLanguage !== normalizedLanguage) {
+                return;
+            }
+            pane._explorerHighlightCache = { content, language: normalizedLanguage, lines };
+            /* The rows on screen are the deliberately plain first paint. The
+               content did not move, so the normal repaint policy would skip;
+               clearing its identity makes the syntax-coloured pass a rebuild. */
+            pane._explorerSourceRender = null;
+            renderExplorerSource(index, explorerSourceSearchRangesOnScreen(index, pane));
+        }).catch(error => {
+            if (pane._explorerHighlightPending !== pending) {
+                return;
+            }
+            pane._explorerHighlightPending = null;
+            if (explorerIsAbortError(error)) {
+                return;
+            }
+            console.error('[GridVibe Sessions] Explorer highlight worker failed:', error);
+            /* The plain/fallback rows are already useful. Cache the miss so a
+               disabled worker does not turn every repaint into another job. */
+            pane._explorerHighlightCache = {
+                content,
+                language: normalizedLanguage,
+                lines: null,
+                plain: true
+            };
+        });
+        return EXPLORER_HIGHLIGHT_PENDING;
     }
 
     /* Render one line's worth of Highlight.js runs, reusing the shared
@@ -4608,8 +4712,9 @@
         // Highlight.js failure, in which case each line uses the fallback lexer.
         // Callers with a pane pass the pane-cached map in (undefined here means
         // "tokenize now"); a passed-in null is a legitimate cached miss.
+        const highlightPending = highlightedLines === EXPLORER_HIGHLIGHT_PENDING;
         const runs = highlightedLines !== undefined
-            ? highlightedLines
+            ? (highlightPending ? null : highlightedLines)
             : explorerHighlightDocumentLines(content, normalizedLanguage);
         const rows = [];
         let hiddenUntilHeadingLevel = 0;
@@ -4635,6 +4740,7 @@
             records,
             rows,
             runs,
+            highlightPending,
             language,
             codeClass,
             foldControls,
@@ -4652,7 +4758,9 @@
         const { record, headingLevel } = row;
         const lineHtml = model.runs
             ? explorerRenderHighlightedRuns(model.runs.get(record.number), searchRanges)
-            : highlightExplorerCode(record.text, model.language, searchRanges, record.start);
+            : (model.highlightPending
+                ? explorerMarkedEscHtml(record.text, record.start, searchRanges)
+                : highlightExplorerCode(record.text, model.language, searchRanges, record.start));
         // Heading-only Markdown tokeniser (OD-8): the fence-aware heading map
         // already computed for section collapse doubles as the highlighter,
         // so heading lines get a distinct token colour without a full grammar.
@@ -4838,8 +4946,8 @@
             return;
         }
 
-        const highlightedLines = explorerHighlightDocumentLinesCached(
-            pane, content, normalizeExplorerLanguage(language)
+        const highlightedLines = explorerHighlightLinesForRender(
+            index, pane, content, normalizeExplorerLanguage(language)
         );
         const model = explorerSourceRowModel(content, language, collapsedLines, highlightedLines);
         const chunking = explorerRepaintPolicy()?.chunkPlan(model.rows.length, {
@@ -5045,8 +5153,8 @@
             return true;
         }
 
-        const highlightedLines = explorerHighlightDocumentLinesCached(
-            pane, next.content, normalizeExplorerLanguage(next.language)
+        const highlightedLines = explorerHighlightLinesForRender(
+            index, pane, next.content, normalizeExplorerLanguage(next.language)
         );
         const model = explorerSourceRowModel(
             next.content,
@@ -5783,7 +5891,7 @@
             renderExplorerSource(index);
             restoreExplorerPreview(index);
             if (pane._explorerDiffLoaded) {
-                renderExplorerDiff(index);
+                await renderExplorerDiff(index);
             }
             const diff = document.getElementById(`explorer-diff-code-${index}`);
             if (!diff) {

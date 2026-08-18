@@ -818,19 +818,102 @@
         }
     }
 
+    function explorerDiffWorkerClient() {
+        return (typeof window !== 'undefined' && window.GridVibeExplorerWorkers) || null;
+    }
+
+    function explorerDiffWorkerCore() {
+        return (typeof window !== 'undefined' && window.GridVibeExplorerWorkerCore) || null;
+    }
+
+    function paintExplorerSideBySideDiff(index, code, banner, model) {
+        code.innerHTML = banner + renderExplorerSideBySideDiffModel(index, model);
+        wireExplorerDiffUndoControls(index, code);
+    }
+
+    /* Only the large tier comes here: small/medium diffs still use Diff2Html's
+       DOM renderer synchronously. The worker owns the handwritten parse, while
+       the page retains HTML creation and the undo wiring. A matching pending
+       job is shared by repaint/search callers; a different patch aborts it.
+       The cache is the parsed model, never rendered HTML or user state. */
+    function renderExplorerLargeDiff(index, pane, code, diff, banner) {
+        const cached = pane._explorerDiffModelCache;
+        if (cached && cached.diff === diff) {
+            paintExplorerSideBySideDiff(index, code, banner, cached.model);
+            return Promise.resolve(true);
+        }
+        const previous = pane._explorerDiffParsePending;
+        if (previous && previous.diff === diff) {
+            return previous.promise;
+        }
+        const workers = explorerDiffWorkerClient();
+        if (!workers?.available?.()) {
+            if (previous) {
+                pane._explorerDiffParsePending = null;
+                cancelExplorerRequestSlot(pane, 'diffParse');
+            }
+            const model = explorerDiffWorkerCore().parseSideBySideDiff(diff);
+            pane._explorerDiffModelCache = { diff, model };
+            paintExplorerSideBySideDiff(index, code, banner, model);
+            return Promise.resolve(true);
+        }
+
+        const pending = { diff, promise: null };
+        pane._explorerDiffParsePending = pending;
+        code.innerHTML = banner
+            + '<span class="explorer-diff-empty">Rendering large diff…</span>';
+        pending.promise = workers.parseDiff(diff, {
+            signal: explorerRequestSignal(pane, 'diffParse')
+        }).then(model => {
+            if (pane._explorerDiffParsePending !== pending) {
+                return false;
+            }
+            pane._explorerDiffParsePending = null;
+            if (pane._explorerDiffContent !== diff
+                || document.getElementById(`explorer-diff-code-${index}`) !== code) {
+                return false;
+            }
+            pane._explorerDiffModelCache = { diff, model };
+            paintExplorerSideBySideDiff(index, code, banner, model);
+            return true;
+        }).catch(error => {
+            if (pane._explorerDiffParsePending !== pending) {
+                return false;
+            }
+            pane._explorerDiffParsePending = null;
+            if (explorerIsAbortError(error)) {
+                return false;
+            }
+            console.error('[GridVibe Sessions] Explorer diff worker failed:', error);
+            if (pane._explorerDiffContent !== diff
+                || document.getElementById(`explorer-diff-code-${index}`) !== code) {
+                return false;
+            }
+            const model = explorerDiffWorkerCore().parseSideBySideDiff(diff);
+            pane._explorerDiffModelCache = { diff, model };
+            paintExplorerSideBySideDiff(index, code, banner, model);
+            return true;
+        });
+        return pending.promise;
+    }
+
     function renderExplorerDiff(index) {
         const pane = terminals[index];
         const code = document.getElementById(`explorer-diff-code-${index}`);
         if (!pane || !code) {
-            return;
+            return Promise.resolve(false);
         }
         disconnectExplorerDiffLayout(code.querySelector('.explorer-diff2html'));
         const wrapLines = explorerLineWrapPreference(index, 'diff');
         code.classList.toggle('wrap-lines', wrapLines);
         const diff = pane._explorerDiffContent || '';
         if (!diff) {
+            if (pane._explorerDiffParsePending) {
+                pane._explorerDiffParsePending = null;
+                cancelExplorerRequestSlot(pane, 'diffParse');
+            }
             code.innerHTML = '<span class="explorer-diff-empty">No Git diff for selected file.</span>';
-            return;
+            return Promise.resolve(true);
         }
         /* The tier is recomputed from the patch on every render rather than
            cached: a bounded diff is at most 256 KiB, so counting its lines
@@ -849,10 +932,18 @@
            which is what per-line and per-block undo are wired onto, so the
            degradation costs emphasis and colour and never a mutation
            affordance. */
-        if (tier === 'large' || !renderExplorerDiffWithDiff2Html(index, code, diff, banner, tier)) {
+        if (tier === 'large') {
+            return renderExplorerLargeDiff(index, pane, code, diff, banner);
+        }
+        if (pane._explorerDiffParsePending) {
+            pane._explorerDiffParsePending = null;
+            cancelExplorerRequestSlot(pane, 'diffParse');
+        }
+        if (!renderExplorerDiffWithDiff2Html(index, code, diff, banner, tier)) {
             code.innerHTML = banner + renderExplorerSideBySideDiff(index, diff);
             wireExplorerDiffUndoControls(index, code);
         }
+        return Promise.resolve(true);
     }
 
     function explorerDiffLanguage(index) {
@@ -904,71 +995,20 @@
         `;
     }
 
-    function renderExplorerSideBySideDiff(index, diff) {
-        const source = String(diff || '');
-        if (!source.trim()) {
+    function renderExplorerSideBySideDiffModel(index, model) {
+        const rows = Array.isArray(model?.rows) ? model.rows : [];
+        if (!rows.length) {
             return '<span class="explorer-diff-empty">No Git diff for selected file.</span>';
         }
+        return `<div class="explorer-side-by-side-diff">${rows
+            .map(row => explorerDiffRowHtml(index, row.left, row.right)).join('')}</div>`;
+    }
 
-        const lines = source.split(/\r?\n/);
-        const rows = [];
-        let oldLine = 0;
-        let newLine = 0;
-        const pendingDeletes = [];
-
-        const flushDeletes = () => {
-            while (pendingDeletes.length) {
-                rows.push(explorerDiffRowHtml(index, pendingDeletes.shift(), null));
-            }
-        };
-
-        lines.forEach(line => {
-            const hunk = line.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@(.*)$/);
-            if (hunk) {
-                flushDeletes();
-                oldLine = Number(hunk[1]);
-                newLine = Number(hunk[2]);
-                rows.push(explorerDiffRowHtml(index, { type: 'hunk', text: line }, null));
-                return;
-            }
-            if (!oldLine && !newLine) {
-                return;
-            }
-            if (line.startsWith('\\ No newline')) {
-                return;
-            }
-            if (line.startsWith('-') && !line.startsWith('---')) {
-                pendingDeletes.push({
-                    type: 'delete',
-                    number: oldLine,
-                    text: line.slice(1)
-                });
-                oldLine += 1;
-                return;
-            }
-            if (line.startsWith('+') && !line.startsWith('+++')) {
-                const right = {
-                    type: 'add',
-                    number: newLine,
-                    text: line.slice(1)
-                };
-                newLine += 1;
-                rows.push(explorerDiffRowHtml(index, pendingDeletes.shift() || null, right));
-                return;
-            }
-            if (line.startsWith(' ')) {
-                flushDeletes();
-                rows.push(explorerDiffRowHtml(index,
-                    { type: 'context', number: oldLine, text: line.slice(1) },
-                    { type: 'context', number: newLine, text: line.slice(1) }
-                ));
-                oldLine += 1;
-                newLine += 1;
-            }
-        });
-
-        flushDeletes();
-        return `<div class="explorer-side-by-side-diff">${rows.join('')}</div>`;
+    function renderExplorerSideBySideDiff(index, diff) {
+        return renderExplorerSideBySideDiffModel(
+            index,
+            explorerDiffWorkerCore().parseSideBySideDiff(diff)
+        );
     }
 
     /* Undoing the last hunk (or discarding the file's changes from the Git
@@ -1042,11 +1082,11 @@
         const diffMode = commit ? 'commit' : (pane?._explorerDiffMode || 'head');
         const cacheKey = explorerDiffCacheKey(diffPath, commit, diffMode);
         if (!pane || !sessionId || !diffPath || !code) {
-            renderExplorerDiff(index);
+            await renderExplorerDiff(index);
             return;
         }
         if (pane._explorerDiffLoaded && pane._explorerDiffCacheKey === cacheKey) {
-            renderExplorerDiff(index);
+            await renderExplorerDiff(index);
             if (explorerFallbackFromEmptyDiff(index)) {
                 return;
             }
@@ -1078,7 +1118,7 @@
             // reports truncation; keep
             // the flag so the rendered patch is never mistaken for the whole change.
             pane._explorerDiffTruncated = Boolean(data.truncated);
-            renderExplorerDiff(index);
+            await renderExplorerDiff(index);
             const renderedTab = explorerFindTab(
                 pane,
                 pane._explorerRenderedTabId || pane._explorerActiveTabId

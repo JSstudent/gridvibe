@@ -1,9 +1,10 @@
 # Large Source Files and Diff Views: Freeze Analysis and Proposal
 
 **Status:** Analysis and implementation proposal — **verified against the working
-tree on 2026-08-17**. **Phase 0 (0.0–0.6) and Phase 1 (1.7–1.9) are implemented
-as of 2026-08-18**; open question 0.1 was resolved as *state plainly in the
-notice that find is unavailable in this tier*. Phases 2–3 are still proposals.
+tree on 2026-08-17**. **Phases 0 (0.0–0.6), 1 (1.7–1.9), and 2 (2.10–2.11)
+are implemented as of 2026-08-18**; open question 0.1 was resolved as *state
+plainly in the notice that find is unavailable in this tier*. Phase 3 is still
+a proposal.
 Several claims below did not survive implementation and are corrected in
 place — see 0.1, 0.6, 1.7, 1.8 and 1.9.
 **Date:** 2026-08-17 (verification pass same day)
@@ -542,12 +543,41 @@ main thread receives the run map and only builds DOM.
   tokenization saved. Transfer a flat, compact encoding (parallel typed arrays
   for offsets/lengths plus a class-name dictionary) and rebuild the map on the
   main thread, or the win evaporates.
+- *Shipped (2026-08-18)* as `explorer-worker-core.js`,
+  `explorer-worker-client.js`, and the dedicated `explorer-worker.js` entry.
+  The pool is lazy, shared by every pane, leaves one reported logical processor
+  for the browser and caps itself at four. Source buffers below 64 KiB keep the
+  synchronous path; above that floor the viewer paints escaped, uncoloured rows
+  first and replaces them with the worker's run map when it arrives. The
+  editor underlay's one-shot settle pass uses the same route, so pausing after
+  an edit no longer moves a whole-document Highlight.js pass back onto the UI
+  thread. A superseded running task terminates its worker rather than merely
+  ignoring the eventual answer, and the pane's content/language identity is
+  checked again before paint.
+- *The watch item was resolved, not waived.* The worker transfers a class-name
+  dictionary plus `Uint32Array`s for offsets, lengths and per-line run starts
+  and a `Uint16Array` of class ids. The page reconstructs the existing `Map`
+  against the source string it already holds; neither highlighted HTML nor a
+  cloned object per run crosses the boundary. Behavioral tests execute the
+  real pinned Highlight.js build, including multiline spans, HTML entities and
+  CRLF offsets. `importScripts()` is same-origin and loads the existing pinned
+  vendor file; no asset, CDN, bundler or lockfile was added.
 
 **2.11 — Worker-side diff parsing.** Note the overlap with 0.2: diff2html's
 `ui.draw()` and its highlighting need the DOM, so only the *parse* can move —
 which in practice means rendering from GridVibe's own model instead of
 diff2html, i.e. the "large" tier from 0.2. Treat 2.11 as "make the large tier's
 parse asynchronous", not as a separate architecture.
+
+- *Shipped (2026-08-18) exactly in that scope.* Small and medium patches still
+  go through Diff2Html on the page. The large tier sends the handwritten
+  side-by-side parse through the shared pool, immediately paints its existing
+  tier notice plus `Rendering large diff…`, caches only the parsed model, and
+  builds/wires the same `.explorer-diff-row` DOM when the answer arrives. Diff
+  find and restored-scroll callers await that first model; a matching repaint
+  shares the in-flight job, a different patch aborts it, and identity is
+  checked before paint. The worker therefore removes the parse without moving
+  DOM, search, line numbers, or either undo affordance off the page.
 
 ### Phase 3 — Viewport virtualization (the durable fix)
 
@@ -604,8 +634,8 @@ frequent answer — those are the safest items.
 | **1.7** incremental decoration | Typing in Find on a large file goes from stuttering to smooth. A quieter side effect worth naming: because rows stop being destroyed and rebuilt, **text selection and the occurrence tint stop flickering/disappearing** on every keystroke and every fold. |
 | **1.8** editor repaint | Typing in the in-place editor on a large file stops lagging behind the keyboard. If the interim threshold route is taken instead, mid-size files lose the coloured underlay while editing (bare textarea, exactly as >2 MiB files already do) and regain it on save. |
 | **1.9** chunked rows | The most visible change in the plan: a large file **fills in progressively from the top** while the rest of the app stays responsive, instead of the window freezing and then showing everything at once. Scroll restore and the jump to a find match land a beat later than they do now. |
-| **2.10** hljs worker | Large files open without blocking, but **syntax colours can arrive a frame or two after the text does** — a brief uncoloured flash on open. Small files should be unaffected (keep them on the synchronous path). |
-| **2.11** worker diff parse | Large diffs stop blocking on parse. Presentation is whatever tier 0.2 chose; no additional visible change. |
+| **2.10** hljs worker | Large files open without blocking, but **syntax colours can arrive after the text does** — a brief uncoloured first paint on open and on the editor's settled repaint. Files below 64 KiB keep the synchronous path. |
+| **2.11** worker diff parse | Large diffs show their existing tier notice plus a brief **Rendering large diff…** state, then the same side-by-side rows and undo controls. |
 | **3.12** virtualization | Potentially a large visual change if CodeMirror is adopted — its own gutter, scrollbar, selection and find behaviour, which would have to be themed back to GridVibe's tokens. A confined custom virtualizer would be invisible apart from scrolling that no longer stalls on huge files. |
 
 ## Freeze-to-fix map
@@ -635,8 +665,8 @@ frequent answer — those are the safest items.
 | 1.7 incremental decoration | G6 | Medium | **Shipped** — `explorer-repaint.js` + adapter |
 | 1.8 editor repaint | ordering contract in `explorer-editor.js` | Medium | **Shipped** — ordering kept, underlay splices |
 | 1.9 chunked rows | six synchronous post-render assumptions; four test files | **High** | **Shipped** — row-count floor kept the synchronous path, so no test file changed its assertions |
-| 2.10 hljs worker | G3 (vendored, no CDN) | Medium | Yes — measure the clone cost first |
-| 2.11 worker diff | overlaps 0.2 | Medium | Fold into 0.2's large tier |
+| 2.10 hljs worker | G3 (vendored, no CDN) | Medium | **Shipped** — compact transfer + lazy bounded pool |
+| 2.11 worker diff | overlaps 0.2 | Medium | **Shipped** — large tier only |
 | 3.12 virtualization | no build step; six dependent subsystems | **High** | Spike only |
 
 Nothing in Phase 0 touches the read-only mutation contract, the concurrency
@@ -656,7 +686,8 @@ Whatever ships from here has to leave the maintained documents true:
   0.0 lands (and the recorded ~7.7k is already stale at 8,196).
 - `README.md` / `CHANGELOG.md`: 0.1 and 0.2 are user-visible degradations with
   banners — they are exactly the kind of change the changelog exists for.
-- `web/static/vendor/README.md`: only if Phase 2 or 3 adds an asset.
+- `web/static/vendor/README.md`: Phase 2 added no vendor asset, but now records
+  that the existing pinned Highlight.js build is also imported by the worker.
 - Any rule that survives implementation goes into the **Regression Guardrails**
   lists, not into a reference to this document.
 
@@ -669,7 +700,8 @@ two tiering items 0.1 and 0.2 with their banners. 0.4 last in Phase 0, because
 it is the only item that changes a response shape and it has a save-path trap
 in it.
 
-Phase 1.7 is the keystone: chunked rendering (1.9), the editor's double rebuild
+Phase 1.7 was the keystone: chunked rendering (1.9), the editor's double rebuild
 (1.8), and finding 9's duplicate open render all reduce to "make a repaint
-cheaper than a rebuild". Phases 2–3 then remove the ceiling entirely. Measure at
-each step so regressions show up in numbers, not in user reports.
+cheaper than a rebuild". Phase 2 now moves the remaining CPU-only parses to a
+bounded shared pool. Phase 3 is the remaining architectural ceiling. Measure
+at each step so regressions show up in numbers, not in user reports.

@@ -302,6 +302,8 @@ class ApiRoutesTestCase(unittest.TestCase):
             "css/terminals.css",
             "js/terminal-icons.js",
             "js/voice-input.js",
+            "js/explorer-worker-core.js",
+            "js/explorer-worker-client.js",
             "js/explorer-viewer.js",
             "js/explorer-diff.js",
             "js/explorer-tabs.js",
@@ -1742,7 +1744,15 @@ class ApiRoutesTestCase(unittest.TestCase):
         # Source rendering prefers the whole-document pass, falling back per line.
         self.assertIn(": explorerHighlightDocumentLines(content, normalizedLanguage);", html)
         self.assertIn("? explorerRenderHighlightedRuns(model.runs.get(record.number), searchRanges)", html)
-        self.assertIn(": highlightExplorerCode(record.text, model.language, searchRanges, record.start);", html)
+        self.assertIn("model.highlightPending", html)
+        self.assertIn(": highlightExplorerCode(record.text, model.language, searchRanges, record.start));", html)
+        # Non-trivial buffers start as plain escaped rows while the shared,
+        # bounded worker pool tokenizes. The transferred result is compact —
+        # typed arrays and a class dictionary, not a cloned Map of run objects.
+        self.assertIn("/static/js/explorer-worker-client.js", html)
+        self.assertIn("function explorerHighlightLinesForRender(", html)
+        self.assertIn("const HIGHLIGHT_WORKER_MIN_CHARS = 64 * 1024;", html)
+        self.assertIn("function decodeHighlightResult(source, result)", html)
         # The oversized-file guard is preserved for the highlighter.
         self.assertIn("if (source.length > EXPLORER_PLAIN_PREVIEW_THRESHOLD) {", html)
         # Explorer-scoped token palette for both themes, shared by the Source
@@ -1786,15 +1796,13 @@ class ApiRoutesTestCase(unittest.TestCase):
         # and no explicit re-highlight.
         self.assertIn("ui.draw();", html)
         self.assertNotIn("ui.highlightCode();", html)
-        # Diff2Html is preferred at every size it can serve; the handwritten
-        # renderer takes over when the vendor assets are unavailable, when the
-        # render fails, or when the size tier says the parse itself is the
-        # freeze. All three land on the same fallback, which is what keeps the
-        # per-line and per-block undo buttons alive in the degraded views.
-        self.assertIn(
-            "if (tier === 'large' || !renderExplorerDiffWithDiff2Html(index, code, diff, banner, tier)) {",
-            html,
-        )
+        # Diff2Html remains synchronous for small/medium patches. The large
+        # tier's handwritten parse goes through the shared worker and only its
+        # DOM adapter stays on the page, preserving both undo affordances.
+        self.assertIn("if (tier === 'large') {", html)
+        self.assertIn("return renderExplorerLargeDiff(index, pane, code, diff, banner);", html)
+        self.assertIn("pending.promise = workers.parseDiff(diff, {", html)
+        self.assertIn("function renderExplorerSideBySideDiffModel(index, model)", html)
         self.assertIn("code.innerHTML = banner + renderExplorerSideBySideDiff(index, diff);", html)
         self.assertIn("function renderExplorerSideBySideDiff(index, diff)", html)
         # Truncation is captured from the API and surfaced without blocking.
@@ -1850,6 +1858,9 @@ class ApiRoutesTestCase(unittest.TestCase):
             "vendor/highlight.min.js",
             "vendor/diff2html-ui-base.min.js",
             "vendor/diff2html.min.css",
+            "js/explorer-worker-core.js",
+            "js/explorer-worker-client.js",
+            "js/explorer-worker.js",
         ):
             with self.subTest(filename=filename):
                 response = self.client.get(f"/static/{filename}")
@@ -14539,6 +14550,9 @@ class GuardrailAuditFixesTestCase(unittest.TestCase):
         "js/lifecycle.js",
         "js/launcher.js",
         "js/terminals.js",
+        "js/explorer-worker-core.js",
+        "js/explorer-worker-client.js",
+        "js/explorer-worker.js",
         "js/explorer-viewer.js",
         "js/explorer-diff.js",
         "js/explorer-tabs.js",
@@ -14675,6 +14689,20 @@ class ExtractedFrontendAssetsTestCase(unittest.TestCase):
         )
         self.assertLess(
             terminals_html.index("js/voice-input.js"),
+            terminals_html.index("js/explorer-viewer.js"),
+        )
+        # The DOM-free worker transform and its lazy shared pool load before
+        # both paint adapters. They are terminals-only; the launcher has no
+        # Source or Diff surface to tokenize.
+        for worker_asset in ("explorer-worker-core.js", "explorer-worker-client.js"):
+            self.assertIn(f"/static/js/{worker_asset}?v={__version__}", terminals_html)
+            self.assertNotIn(f"js/{worker_asset}", launcher_html)
+        self.assertLess(
+            terminals_html.index("js/explorer-worker-core.js"),
+            terminals_html.index("js/explorer-worker-client.js"),
+        )
+        self.assertLess(
+            terminals_html.index("js/explorer-worker-client.js"),
             terminals_html.index("js/explorer-viewer.js"),
         )
         # explorer-diff.js is the Diff domain lifted out of explorer-viewer.js
