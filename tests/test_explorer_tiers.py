@@ -159,6 +159,45 @@ class SourceTierTestCase(ExplorerTierHarness):
         self.assertIn("Download", large["retained"])
         self.assertIn("Edit", large["retained"])
 
+    def test_the_notice_reads_the_same_metrics_the_switch_does(self):
+        """A degraded pane always explains itself, boundary included.
+
+        The tier decides on ``rows`` and the notice reports ``lines``, and the
+        two disagree by exactly one for a file ending in a newline. A notice
+        that re-derived the tier from ``lines`` therefore went silent at
+        precisely the row the switch trips on, leaving the reader a pane with
+        no gutter, no marks and no find and nothing saying why.
+        """
+        verdicts = self._run_node(
+            "const at = 'x' + String.fromCharCode(10);"
+            "const body = at.repeat(tiers.SOURCE_LARGE_MAX_LINES);"
+            "const metrics = tiers.sourceMetrics(body);"
+            "emit({"
+            "  metrics,"
+            "  tier: tiers.sourceTier(metrics),"
+            "  notice: tiers.sourceTierNotice(metrics),"
+            "  belowTier: tiers.sourceTier(tiers.sourceMetrics(at.repeat(10))),"
+            "  belowNotice: tiers.sourceTierNotice(tiers.sourceMetrics(at.repeat(10)))"
+            "});"
+        )
+
+        # The boundary itself: one more row than the reader-facing count.
+        self.assertEqual(verdicts["metrics"]["lines"], 20000)
+        self.assertEqual(verdicts["metrics"]["rows"], 20001)
+        self.assertEqual(verdicts["tier"], "large")
+        self.assertIsNotNone(
+            verdicts["notice"],
+            "a pane rendered in the large tier must carry its notice",
+        )
+        self.assertEqual(
+            verdicts["notice"]["findNote"], "Find is unavailable in this view."
+        )
+        # The reader-facing count is still what the notice reports.
+        self.assertIn("20,000 lines", verdicts["notice"]["detail"])
+        # And a file inside the tier still explains nothing.
+        self.assertEqual(verdicts["belowTier"], "full")
+        self.assertIsNone(verdicts["belowNotice"])
+
     def test_capability_predicate_agrees_with_the_notice(self):
         """One predicate, so the notice and the switch cannot promise different things."""
         allowed = self._run_node(

@@ -1587,7 +1587,14 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("scheduleExplorerSearch(index, { resetActive: true });", html)
         self.assertIn("capped: ranges.length >= maxMatches,", html)
         self.assertIn("count.title = capped ? `Showing first ${matchCount} matches` : '';", html)
-        self.assertIn("state.resultQuery === query && Array.isArray(state.ranges)", html)
+        # Cached ranges are reused only for the same query *and* the same
+        # buffer they were resolved against: they are absolute offsets into
+        # one exact string. Pinned as the two conditions rather than as one
+        # spelling of them; the drift this prevents is executed in
+        # tests/test_explorer_source_frame.py.
+        self.assertIn("state.resultQuery === query", html)
+        self.assertIn("explorerSearchRangesMatchContent(state, pane)", html)
+        self.assertIn("state.resultContent = scanned;", html)
         self.assertIn("state.matchCapped = capped;", html)
 
     def test_terminals_page_explorer_directory_search_filters_current_entries(self):

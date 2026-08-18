@@ -16,6 +16,10 @@ from tempfile import TemporaryDirectory
 import api
 
 VIEWER_JS = Path(__file__).resolve().parent.parent / "web" / "static" / "js" / "explorer-viewer.js"
+_JS = Path(__file__).resolve().parent.parent / "web" / "static" / "js"
+TIERS_JS = _JS / "explorer-tiers.js"
+REPAINT_JS = _JS / "explorer-repaint.js"
+TABS_JS = _JS / "explorer-tabs.js"
 NODE = shutil.which("node")
 
 # Enough document for explorer-viewer.js to evaluate, plus a panel whose
@@ -158,6 +162,105 @@ process.stdout.write(JSON.stringify({
 """
 
 
+STALE_RANGE_HARNESS = r"""
+const fs = require('fs');
+const vm = require('vm');
+
+const code = {
+    id: 'explorer-code-0',
+    innerHTML: '',
+    dataset: {},
+    style: { setProperty() {}, removeProperty() {} },
+    classList: { add() {}, remove() {}, contains: () => false, toggle: () => false },
+    querySelector: () => null,
+    querySelectorAll: () => [],
+    addEventListener() {},
+    setAttribute() {}
+};
+
+const sandbox = {
+    console,
+    document: {
+        getElementById: id => (id === 'explorer-code-0' ? code : null),
+        querySelector: () => null,
+        querySelectorAll: () => [],
+        addEventListener() {},
+        createElement: () => ({ innerHTML: '', className: '', appendChild() {} }),
+        body: { dataset: {}, addEventListener() {} }
+    },
+    window: {
+        addEventListener() {}, setTimeout, clearTimeout,
+        matchMedia: () => ({ matches: false }),
+        localStorage: { getItem: () => null, setItem() {}, removeItem() {} },
+        requestAnimationFrame: () => 0
+    },
+    navigator: {}, setTimeout, clearTimeout, requestAnimationFrame: () => 0,
+    terminals: [], sessionIds: [],
+    escHtml: value => String(value == null ? '' : value)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+};
+sandbox.globalThis = sandbox;
+sandbox.applyExplorerChangeMarks = () => {};
+sandbox.scheduleExplorerOccurrenceHighlight = () => {};
+vm.createContext(sandbox);
+[process.argv[2], process.argv[3], process.argv[4], process.argv[5]].forEach(path => {
+    vm.runInContext(fs.readFileSync(path, 'utf8'), sandbox);
+});
+sandbox.window.GridVibeExplorerTiers = sandbox.GridVibeExplorerTiers;
+sandbox.window.GridVibeExplorerRepaint = sandbox.GridVibeExplorerRepaint;
+
+const NL = String.fromCharCode(13, 10);
+const rows = 40;
+const line = n => 'const s' + n + ' = { id: ' + n + ' };';
+const crlf = Array.from({ length: rows }, (_, i) => line(i + 1)).join(NL) + NL;
+const lf = crlf.split(NL).join(String.fromCharCode(10));
+
+const pane = {
+    _explorerMode: 'file',
+    _explorerFilePath: 'probe.js',
+    _explorerFileContent: crlf,
+    _explorerFileLanguage: 'javascript',
+    _explorerEdit: null
+};
+sandbox.terminals[0] = pane;
+sandbox.applyExplorerSourceTier(pane, crlf);
+
+// Offsets resolved against the LF-normalised buffer the in-place editor keeps,
+// then stamped as this pane's result — exactly what a stale range set is.
+const needle = 'const s';
+const stale = [];
+let at = lf.indexOf(needle);
+while (at !== -1) { stale.push({ start: at, end: at + needle.length }); at = lf.indexOf(needle, at + 1); }
+
+const state = sandbox.ensureExplorerSearchState(pane);
+state.query = needle;
+state.resultQuery = needle;
+state.ranges = stale;
+state.resultContent = lf;
+
+const onScreen = sandbox.explorerSourceSearchRangesOnScreen(0, pane);
+
+// Paint the stale set directly to show what it would have done to the rows.
+sandbox.renderExplorerSource(0, stale);
+const painted = [...code.innerHTML.matchAll(
+    /data-explorer-line="(\d+)"[\s\S]*?<code[^>]*>([\s\S]*?)<\/code>/g
+)].map(match => {
+    const cell = match[2];
+    const mark = cell.indexOf('<mark');
+    if (mark === -1) return null;
+    const before = cell.slice(0, mark).replace(/<[^>]*>/g, '')
+        .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>');
+    return before.length;
+}).filter(column => column !== null);
+
+console.log(JSON.stringify({
+    staleCount: stale.length,
+    onScreen: onScreen.length,
+    driftedColumns: painted.filter(column => column !== 0).length
+}));
+"""
+
 class ExplorerSourceFrameTestCase(unittest.TestCase):
     def setUp(self):
         api.app.config["TESTING"] = True
@@ -186,6 +289,40 @@ class ExplorerSourceFrameTestCase(unittest.TestCase):
         if completed.returncode != 0:
             self.fail("node harness failed:" + chr(10) + completed.stderr)
         return json.loads(completed.stdout)
+
+    def test_search_ranges_never_outlive_the_buffer_they_address(self):
+        """A range set is offsets into one exact string, so it dies with it.
+
+        The in-place editor normalizes CRLF to LF for its draft while the file
+        keeps its own endings, so the two buffers differ by one character per
+        line. Keying cached ranges on the query alone let a set resolved
+        against one be painted onto rows built from the other, putting every
+        mark a line-count of characters away from its match — a highlight that
+        walked across each row and wrapped at the row length.
+        """
+        with TemporaryDirectory() as temp_dir:
+            script = Path(temp_dir) / "stale.js"
+            script.write_text(STALE_RANGE_HARNESS, encoding="utf-8")
+            result = subprocess.run(
+                [NODE, str(script), str(TIERS_JS), str(REPAINT_JS),
+                 str(VIEWER_JS), str(TABS_JS)],
+                capture_output=True, text=True, timeout=120,
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        rendered = json.loads(result.stdout.strip().splitlines()[-1])
+
+        # The set really is stale and really would have drifted: every mark
+        # after the first lands away from column 0 on rows built from CRLF.
+        self.assertEqual(rendered["staleCount"], 40)
+        self.assertGreater(
+            rendered["driftedColumns"], 20,
+            "the harness must reproduce the drift it is guarding against",
+        )
+        # And the resolver refuses to hand those offsets to a render at all.
+        self.assertEqual(
+            rendered["onScreen"], 0,
+            "ranges stamped with a different buffer must not reach the rows",
+        )
 
     def test_source_panel_is_wrapped_in_a_fixed_frame(self):
         viewer = self._viewer()

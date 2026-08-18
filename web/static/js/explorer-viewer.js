@@ -926,12 +926,33 @@
         return (typeof window !== 'undefined' && window.GridVibeExplorerWorkers) || null;
     }
 
+    /* Search ranges are absolute offsets into one exact string, so they are
+       only meaningful against that string. Keying them on the query alone let
+       a range set outlive the buffer it was resolved against — and the two
+       buffers in play here differ by their line endings, because the in-place
+       editor normalizes CRLF to LF for its draft while the file keeps its own.
+       Painting one on the other put every mark a line-count of characters away
+       from its match, walking further across each row and wrapping at the row
+       length: a highlight that drifted diagonally down the file.
+
+       The content is compared by reference-or-value against the buffer the
+       rows are about to be built from, which is the only thing that makes the
+       offsets mean what they say. Holding the string costs nothing — it is the
+       same reference the pane already owns, exactly as the highlight cache
+       holds its key. */
+    function explorerSearchRangesMatchContent(state, pane) {
+        return state.resultContent === (pane?._explorerFileContent || '');
+    }
+
     function explorerSourceSearchRangesOnScreen(index, pane) {
         if (activeExplorerFileView(index) !== 'source') {
             return [];
         }
         const state = ensureExplorerSearchState(pane);
-        if (!state.query || state.resultQuery !== state.query || !Array.isArray(state.ranges)) {
+        if (!state.query
+            || state.resultQuery !== state.query
+            || !Array.isArray(state.ranges)
+            || !explorerSearchRangesMatchContent(state, pane)) {
             return [];
         }
         return decorateExplorerSearchRanges(state.ranges, state.activeIndex || 0);
@@ -5839,7 +5860,9 @@
         let matchCount = 0;
         let capped = false;
         if (query && view === 'source') {
-            const cachedRanges = state.resultQuery === query && Array.isArray(state.ranges)
+            const cachedRanges = state.resultQuery === query
+                && Array.isArray(state.ranges)
+                && explorerSearchRangesMatchContent(state, pane)
                 ? state.ranges
                 : null;
             const ranges = cachedRanges || [];
@@ -5848,7 +5871,10 @@
                 const token = { cancelled: false };
                 pane._explorerSearchToken = token;
                 updateExplorerSearchControls(index, query, 0, 0);
-                const result = await explorerFindRangesAsync(pane._explorerFileContent || '', query, token);
+                // The buffer that is actually scanned, held across the await:
+                // the offsets below address this string and no other.
+                const scanned = pane._explorerFileContent || '';
+                const result = await explorerFindRangesAsync(scanned, query, token);
                 if (token.cancelled || pane._explorerSearchToken !== token) {
                     return;
                 }
@@ -5857,6 +5883,8 @@
                 ranges.capped = result.capped;
                 state.ranges = ranges;
                 state.resultQuery = query;
+                // Stamped with the exact buffer these offsets address.
+                state.resultContent = scanned;
                 explorerRevealMarkdownSearchMatches(index, ranges);
             }
             matchCount = ranges.length;

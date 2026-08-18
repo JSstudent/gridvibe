@@ -149,7 +149,13 @@
     function sourceTierNotice(metrics) {
         const bytes = count(metrics && metrics.bytes);
         const lines = count(metrics && metrics.lines);
-        if (sourceTier({ bytes, lines }) !== 'large') {
+        // Decided on the same metrics the switch reads, `rows` included.
+        // Re-deriving the tier from `lines` alone silently handed sourceTier()
+        // the reader-facing count through its fallback, and the two disagree by
+        // exactly one at exactly this boundary — so a file of precisely
+        // SOURCE_LARGE_MAX_LINES lines rendered as plain chunks with the gutter,
+        // the marks and the find all gone and nothing on screen saying why.
+        if (sourceTier(metrics || { bytes, lines }) !== 'large') {
             return null;
         }
         return {
