@@ -232,9 +232,14 @@ function applyExplorerChangeMarks(index) {
     scheduleExplorerOverviewSync(index);
 }
 
-/* The gutter half. Rows are rebuilt from scratch on every render, so there is
-   never anything to clean up — a missing model or an ineligible pane simply
-   means no marks. No layout reads here: the geometry pass owns those.
+/* The gutter half. This used to lean on the rows being rebuilt from scratch on
+   every render, so there was never anything to clean up. That is no longer
+   true: a repaint that only moves search marks leaves the row <div>s standing
+   (which is the point of it), and a reload of the model — a Git action, a
+   watcher signal — then paints onto rows that already carry the last pass's
+   attribute and its marker button. So the pass clears its own output first,
+   over the rows it is about to walk, and stays idempotent however often it
+   runs. No layout reads here: the geometry pass owns those.
 
    Every marked row also gains its marker button (Phase 5): the coloured bar /
    wedge is itself the click target that toggles the block's peek. It is a
@@ -243,10 +248,22 @@ function applyExplorerChangeMarks(index) {
    nested button is invalid HTML. One `appendChild` per marked row inside the
    pass that already walks exactly those rows; the clicks are handled by one
    delegated listener (wireExplorerChangePeek). */
+function clearExplorerChangeMarkGutter(code) {
+    if (!code) {
+        return;
+    }
+    code.querySelectorAll('.explorer-source-line[data-explorer-change]').forEach(row => {
+        delete row.dataset.explorerChange;
+        row.classList.remove('explorer-source-change-after');
+    });
+    code.querySelectorAll('.explorer-change-marker').forEach(marker => marker.remove());
+}
+
 function applyExplorerChangeMarkGutter(index) {
     const pane = terminals[index];
     const code = document.getElementById(`explorer-code-${index}`);
     const model = pane?._explorerChangeMarks;
+    clearExplorerChangeMarkGutter(code);
     if (
         !pane
         || !code

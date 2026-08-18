@@ -93,6 +93,70 @@ resolved.missing = String(sandbox.explorerPanelScrollTarget(null));
 process.stdout.write(JSON.stringify(resolved));
 """
 
+# The three states of renderExplorerSourceLines()'s token-map argument, with
+# the whole-document pass replaced by a spy so "did this tokenize?" is an
+# observation rather than a reading of the source.
+TOKEN_MAP_HARNESS = """
+const fs = require('fs');
+const vm = require('vm');
+
+const sandbox = {
+    console,
+    document: {
+        getElementById: () => null,
+        querySelector: () => null,
+        querySelectorAll: () => [],
+        addEventListener() {},
+        body: { dataset: {}, addEventListener() {} }
+    },
+    window: {
+        addEventListener() {},
+        setTimeout,
+        clearTimeout,
+        matchMedia: () => ({ matches: false }),
+        localStorage: { getItem: () => null, setItem() {}, removeItem() {} },
+        requestAnimationFrame: () => 0
+    },
+    navigator: {},
+    setTimeout,
+    clearTimeout,
+    requestAnimationFrame: () => 0,
+    terminals: [],
+    sessionIds: [],
+    applyExplorerChangeMarks: () => {},
+    escHtml: value => String(value == null ? '' : value)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+};
+sandbox.globalThis = sandbox;
+vm.createContext(sandbox);
+vm.runInContext(fs.readFileSync(process.argv[2], 'utf8'), sandbox);
+
+const source = 'def spam' + String.fromCharCode(10);
+const calls = [];
+sandbox.explorerHighlightDocumentLines = (content, normalizedLanguage) => {
+    calls.push([content, normalizedLanguage]);
+    return null;
+};
+
+const run = (label, invoke) => {
+    calls.length = 0;
+    const html = invoke();
+    return { html, tokenizeCalls: calls.length, tokenizeArgs: calls[0] || null };
+};
+
+const supplied = new Map([[1, [{ className: 'hljs-keyword', text: 'def', start: 0 }]]]);
+process.stdout.write(JSON.stringify({
+    supplied: run('supplied', () => sandbox.renderExplorerSourceLines(
+        source, 'python', [], new Set(), supplied
+    )),
+    cachedMiss: run('cachedMiss', () => sandbox.renderExplorerSourceLines(
+        source, 'python', [], new Set(), null
+    )),
+    omitted: run('omitted', () => sandbox.renderExplorerSourceLines(source, 'python'))
+}));
+"""
+
 
 class ExplorerSourceFrameTestCase(unittest.TestCase):
     def setUp(self):
@@ -108,6 +172,20 @@ class ExplorerSourceFrameTestCase(unittest.TestCase):
 
     def _viewer(self) -> str:
         return self._static("js/explorer-viewer.js")
+
+    def _run_node(self, harness: str):
+        with TemporaryDirectory() as script_dir:
+            script_path = Path(script_dir) / "harness.js"
+            script_path.write_text(harness, encoding="utf-8")
+            completed = subprocess.run(
+                [NODE, str(script_path), str(VIEWER_JS)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        if completed.returncode != 0:
+            self.fail("node harness failed:" + chr(10) + completed.stderr)
+        return json.loads(completed.stdout)
 
     def test_source_panel_is_wrapped_in_a_fixed_frame(self):
         viewer = self._viewer()
@@ -211,17 +289,30 @@ class ExplorerSourceFrameTestCase(unittest.TestCase):
         self.assertIn("pane, content, normalizeExplorerLanguage(language)", render)
         self.assertIn("highlightedLines\n        );", render)
 
+    @unittest.skipUnless(NODE, "Node.js is required for token-map tests")
     def test_source_lines_renderer_honours_a_passed_in_token_map(self):
-        viewer = self._viewer()
-        lines = viewer[
-            viewer.index("function renderExplorerSourceLines("):
-            viewer.index("function explorerRevealMarkdownSearchMatches")
-        ]
-        # Only an absent argument tokenizes inline; an explicit null (cached
-        # miss for an unsupported language) must not re-tokenize per render.
-        self.assertIn("highlightedLines !== undefined", lines)
-        self.assertIn(": explorerHighlightDocumentLines(content, normalizedLanguage);", lines)
-        self.assertIn("explorerRenderHighlightedRuns(runs.get(record.number), searchRanges)", lines)
+        """Only an *absent* token map tokenizes inline.
+
+        An explicit ``null`` is a cached miss — an unsupported language, an
+        oversized file, a Highlight.js failure — and re-tokenizing on it would
+        pay the whole-document cost on every single render. Executed rather
+        than read: the whole-document pass is replaced by a spy, so what the
+        renderer does with each of the three argument states is observable.
+        """
+        rendered = self._run_node(TOKEN_MAP_HARNESS)
+
+        # A supplied map is used as given, and nothing is tokenized.
+        self.assertEqual(rendered["supplied"]["tokenizeCalls"], 0)
+        self.assertIn('<span class="hljs-keyword">def</span>', rendered["supplied"]["html"])
+        # A cached miss renders through the per-line fallback lexer, silently.
+        self.assertEqual(rendered["cachedMiss"]["tokenizeCalls"], 0)
+        self.assertNotIn("hljs-keyword", rendered["cachedMiss"]["html"])
+        self.assertIn('<span class="explorer-code-keyword">def</span> spam', rendered["cachedMiss"]["html"])
+        # Omitted: this caller has no cache of its own, so it tokenizes here.
+        self.assertEqual(rendered["omitted"]["tokenizeCalls"], 1)
+        self.assertEqual(
+            rendered["omitted"]["tokenizeArgs"], ["def spam" + chr(10), "python"]
+        )
 
 
 if __name__ == "__main__":

@@ -1497,7 +1497,10 @@ class ApiRoutesTestCase(unittest.TestCase):
         # lists here only broke the page test whenever one gained an argument.
         self.assertIn("function renderExplorerSourceLines(", html)
         self.assertIn("function highlightExplorerCode(", html)
-        self.assertIn("code.innerHTML = renderExplorerSourceLines(", html)
+        # The rendered row, not the expression that assembles it: the Source
+        # panel builds one <div> per line, in one pass or in frame-sized
+        # slices, and both emit exactly this markup.
+        self.assertIn('<div class="explorer-source-line" data-explorer-line=', html)
         self.assertIn("const EXPLORER_LANGUAGE_BY_EXTENSION = Object.freeze({", html)
         self.assertIn("'.py': 'python'", html)
         self.assertIn("'.go': 'go'", html)
@@ -1551,7 +1554,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("function markExplorerSearchInElement(root, query, activeIndex = 0, maxMatches = EXPLORER_SEARCH_MAX_MATCHES)", html)
         self.assertIn("document.createTreeWalker(", html)
         self.assertIn("node.replaceWith(fragment);", html)
-        self.assertIn("code.innerHTML = renderExplorerSourceLines(", html)
+        self.assertIn('<div class="explorer-source-line" data-explorer-line=', html)
         self.assertIn("function findExplorerSearchTargetIndex()", html)
         target = html[
             html.index("function findExplorerSearchTargetIndex()"):
@@ -1738,8 +1741,8 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("engine.highlight(source, { language: grammar, ignoreIllegal: true })", html)
         # Source rendering prefers the whole-document pass, falling back per line.
         self.assertIn(": explorerHighlightDocumentLines(content, normalizedLanguage);", html)
-        self.assertIn("? explorerRenderHighlightedRuns(runs.get(record.number), searchRanges)", html)
-        self.assertIn(": highlightExplorerCode(record.text, language, searchRanges, record.start);", html)
+        self.assertIn("? explorerRenderHighlightedRuns(model.runs.get(record.number), searchRanges)", html)
+        self.assertIn(": highlightExplorerCode(record.text, model.language, searchRanges, record.start);", html)
         # The oversized-file guard is preserved for the highlighter.
         self.assertIn("if (source.length > EXPLORER_PLAIN_PREVIEW_THRESHOLD) {", html)
         # Explorer-scoped token palette for both themes, shared by the Source
@@ -1920,7 +1923,7 @@ class ApiRoutesTestCase(unittest.TestCase):
             html,
         )
         # Result activation: source rows carry line identity for scroll+flash.
-        self.assertIn('data-explorer-line="${record.number}"', html)
+        self.assertIn('<div class="explorer-source-line" data-explorer-line=', html)
         # Ctrl+Shift+F dispatch tries the explorer target before the terminal
         # scrollback overlay, so a focused explorer pane wins the shared
         # shortcut deterministically.
@@ -13414,13 +13417,19 @@ class ExplorerSourceSelectionHighlightTestCase(unittest.TestCase):
         # the expression, which broke whenever the decision gained an unrelated
         # term (the editor underlay's fold opt-out).
         renderer = viewer[
-            viewer.index("function renderExplorerSourceLines("):
+            viewer.index("function explorerSourceRowModel("):
             viewer.index("function explorerRevealMarkdownSearchMatches")
         ]
         collapse_decision = next(
             line for line in renderer.splitlines() if "const allowMarkdownCollapse" in line
         )
         self.assertNotIn("searchRanges", collapse_decision)
+        # Stronger than the line above, and the reason it cannot regress: the
+        # row model — which resolves which rows a fold set leaves standing —
+        # is not passed the search ranges at all. They reach the per-row code
+        # cell, which is the only thing a find repaint touches.
+        model = renderer[: renderer.index("function explorerSourceRowCodeHtml(")]
+        self.assertNotIn("searchRanges", model)
         self.assertNotIn(
             "normalizedLanguage === 'markdown' && !searchRanges.length", viewer
         )

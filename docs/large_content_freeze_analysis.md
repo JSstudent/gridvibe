@@ -1,10 +1,11 @@
 # Large Source Files and Diff Views: Freeze Analysis and Proposal
 
 **Status:** Analysis and implementation proposal — **verified against the working
-tree on 2026-08-17**. **Phase 0 (0.0–0.6) is implemented as of 2026-08-18**;
-open question 0.1 was resolved as *state plainly in the notice that find is
-unavailable in this tier*. Phases 1–3 are still proposals. Two claims below did
-not survive implementation and are corrected in place — see 0.1 and 0.6.
+tree on 2026-08-17**. **Phase 0 (0.0–0.6) and Phase 1 (1.7–1.9) are implemented
+as of 2026-08-18**; open question 0.1 was resolved as *state plainly in the
+notice that find is unavailable in this tier*. Phases 2–3 are still proposals.
+Several claims below did not survive implementation and are corrected in
+place — see 0.1, 0.6, 1.7, 1.8 and 1.9.
 **Date:** 2026-08-17 (verification pass same day)
 **Scope:** Why opening or interacting with large source files and large diffs
 freezes the GridVibe UI, verified against the current code, and a staged plan
@@ -453,6 +454,24 @@ reusable; what is missing is a row-update path that skips `innerHTML` when the
 line content itself has not changed. This is the keystone item — 1.8, 1.9 and
 finding 9's fix all depend on it.
 
+- *Shipped (2026-08-18)* as `web/static/js/explorer-repaint.js` (DOM-free,
+  Node-tested) plus an adapter in `renderExplorerSource()`. Three verdicts:
+  `skip` when nothing on screen would change (finding 9's second render),
+  `decorate` when only the marks moved — the code cell of exactly those rows is
+  rewritten, so the row `<div>`s and everything bolted onto them survive — and
+  `full` otherwise. Change marks and fold toggles did **not** need a class-only
+  path after all: marks live on the row `<div>`, so a decoration repaint leaves
+  them alone by construction, and a fold changes which rows *exist*, which is a
+  rebuild by definition.
+- *Two things the draft did not anticipate.* The surface has to be identified by
+  a token **stamped on the rendered rows**, not by pane state: a panel the
+  editor or a tab switch replaced looks unchanged from the pane's side, and
+  skipping there leaves an empty view. And
+  `applyExplorerChangeMarkGutter()`'s comment stated outright that it needed no
+  cleanup because "rows are rebuilt from scratch on every render" — that premise
+  is now false, so it clears its own markers first. (It could already duplicate
+  them on a model reload; this made that reachable more often.)
+
 **1.8 — The editor's double rebuild (reframed).** The size cap the draft asked
 for already exists (see "What is already fine"). Two real items remain:
 
@@ -462,17 +481,41 @@ for already exists (see "What is already fine"). Two real items remain:
   `applyExplorerSearch()` builds, not the earlier ones. It can only be collapsed
   *after* 1.7 makes the search repaint non-destructive. Deleting it first
   reintroduces the disappearing-selection bug it was written to fix.
+  - *Resolved by not collapsing it (2026-08-18).* With 1.7 in place the second
+    pass is a `decorate` or a `skip`, so it costs a couple of row cells or
+    nothing at all — there is no longer a double render to remove, and the
+    ordering the comment defends is kept. The restore moved inside
+    `whenExplorerSourceRendered()` so it also survives 1.9's sliced build.
 - Finding 10's per-frame whole-draft re-tokenize is the bigger cost. Fix it by
   repainting only the rows the edit touched (1.7's machinery again), or — as a
   cheap interim — give the underlay its own threshold well below
   `EXPLORER_PLAIN_PREVIEW_THRESHOLD`, accepting that mid-size files lose the
   coloured underlay while editing.
+  - *Shipped as the first option (2026-08-18)*, so no threshold was added and no
+    mid-size file loses its colour. `lineSplicePlan()` names the contiguous run
+    of lines between the common prefix and suffix; the underlay replaces exactly
+    those rows and renumbers the tail when the line count moved. Tokenization
+    cannot be done per line — a line's colour depends on the block it sits in —
+    so the spliced rows use the per-line fallback lexer and a one-shot settle
+    debounce (180 ms) repaints the whole underlay with real tokens once typing
+    stops. The visible cost is that the line under the caret carries fallback
+    colour for a fraction of a second; where the file has no Highlight.js
+    grammar the two passes agree exactly.
 
 **1.9 — Chunk the row build.** Build rows in `requestAnimationFrame` slices
 (e.g. 2,000 rows per frame) with a render token so a newer render supersedes an
 in-flight one. Converts one 3-second freeze into progressive paint.
 
-- *This is the riskiest Phase 0–1 item.* Six things currently assume the rows
+- *Shipped (2026-08-18) with a row-count floor,* which is what took the risk out
+  of it: below ~4,000 rows the build stays one synchronous pass, so every
+  caller's existing ordering is untouched for the overwhelming majority of
+  files, and the four test files the draft expected to need updating did not.
+  Above it the rows are emitted in `requestAnimationFrame` slices under a render
+  token; a superseded build stops and hands its queued readers to the build that
+  replaced it, so a scroll restore is never dropped. The six call sites below go
+  through `whenExplorerSourceRendered()`, which runs immediately when no build is
+  in flight.
+- *This was the riskiest Phase 0–1 item.* Six things assume the rows
   exist the instant `renderExplorerSource()` returns: `applyExplorerChangeMarks`
   (`explorer-viewer.js:5682`), `wireExplorerMarkdownSectionControls` (`5676`),
   `scheduleExplorerOccurrenceHighlight` (`5679`), `restoreExplorerFileScroll`
@@ -589,9 +632,9 @@ frequent answer — those are the safest items.
 | 0.4 lazy Markdown | read-only contract (docs update), save-response shape | Medium | **Yes, with the `preview_type` decoupling** |
 | 0.5 AbortController | G9 (no console noise on abort) | Low | **Yes** |
 | 0.6 `-U0` marks | server arg allowlist, diff cache separation | Low | **Yes, as corrected** |
-| 1.7 incremental decoration | G6 | Medium | Yes — design work, no contract change |
-| 1.8 editor repaint | ordering contract in `explorer-editor.js` | Medium | Only after 1.7 |
-| 1.9 chunked rows | six synchronous post-render assumptions; four test files | **High** | Only after 1.7, and reviewed as a behaviour change |
+| 1.7 incremental decoration | G6 | Medium | **Shipped** — `explorer-repaint.js` + adapter |
+| 1.8 editor repaint | ordering contract in `explorer-editor.js` | Medium | **Shipped** — ordering kept, underlay splices |
+| 1.9 chunked rows | six synchronous post-render assumptions; four test files | **High** | **Shipped** — row-count floor kept the synchronous path, so no test file changed its assertions |
 | 2.10 hljs worker | G3 (vendored, no CDN) | Medium | Yes — measure the clone cost first |
 | 2.11 worker diff | overlaps 0.2 | Medium | Fold into 0.2's large tier |
 | 3.12 virtualization | no build step; six dependent subsystems | **High** | Spike only |

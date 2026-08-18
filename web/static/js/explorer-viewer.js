@@ -4580,7 +4580,14 @@
        typed into is incoherent anyway. The gutter still reserves the chevron's
        width, so the code column sits exactly where the read-only view put it
        and entering edit mode moves no glyph. */
-    function renderExplorerSourceLines(content, language, searchRanges = [], collapsedLines = new Set(), highlightedLines, options = {}) {
+    /* The rows a document renders, resolved once: which records survive the
+       fold set, what heading level each carries, and the token map, gutter
+       width and language class the whole build shares. Everything downstream —
+       the one-string build below, the frame-sliced build, and the single-row
+       repaints the find and the editor's underlay make — emits rows from this
+       same model, so a row built one at a time is byte-identical to the same
+       row built in bulk. */
+    function explorerSourceRowModel(content, language, collapsedLines = new Set(), highlightedLines, options = {}) {
         const normalizedLanguage = normalizeExplorerLanguage(language);
         const records = explorerSourceLineRecords(content);
         const languageClass = explorerLanguageClass(language);
@@ -4617,32 +4624,61 @@
             }
 
             const collapsed = allowMarkdownCollapse && headingLevel && collapsedLines.has(record.number);
-            const lineHtml = runs
-                ? explorerRenderHighlightedRuns(runs.get(record.number), searchRanges)
-                : highlightExplorerCode(record.text, language, searchRanges, record.start);
-            // Heading-only Markdown tokeniser (OD-8): the fence-aware heading map
-            // already computed for section collapse doubles as the highlighter,
-            // so heading lines get a distinct token colour without a full grammar.
-            const contentHtml = headingLevel
-                ? `<span class="explorer-md-source-heading explorer-md-source-heading-${headingLevel}">${lineHtml}</span>`
-                : lineHtml;
-            rows.push(`
-                <div class="explorer-source-line" data-explorer-line="${record.number}">
-                    ${explorerSourceLineNumberHtml(record, foldControls ? headingLevel : 0, collapsed)}
-                    <code class="explorer-source-line-code${codeClass}">${contentHtml || '&nbsp;'}</code>
-                </div>
-            `);
+            rows.push({ record, headingLevel, collapsed: Boolean(collapsed) });
 
             if (collapsed) {
                 hiddenUntilHeadingLevel = headingLevel;
             }
         });
 
-        // Width follows the document, not the controls: a Markdown underlay
-        // with its buttons suppressed still keeps the read-only gutter, so the
-        // code column does not shift under the caret on entering edit mode.
-        const gutterWidth = explorerSourceGutterWidthCss(records.length, markdownDocument);
-        return `<div class="explorer-source-lines" style="--explorer-source-gutter-width: ${gutterWidth};">${rows.join('')}</div>`;
+        return {
+            records,
+            rows,
+            runs,
+            language,
+            codeClass,
+            foldControls,
+            // Width follows the document, not the controls: a Markdown underlay
+            // with its buttons suppressed still keeps the read-only gutter, so the
+            // code column does not shift under the caret on entering edit mode.
+            gutterWidth: explorerSourceGutterWidthCss(records.length, markdownDocument)
+        };
+    }
+
+    /* One row's code cell — the only part of a row a decoration change can
+       move. The find repaints exactly this, leaving the row <div> (and with it
+       the change-mark attribute and its marker button) standing. */
+    function explorerSourceRowCodeHtml(model, row, searchRanges) {
+        const { record, headingLevel } = row;
+        const lineHtml = model.runs
+            ? explorerRenderHighlightedRuns(model.runs.get(record.number), searchRanges)
+            : highlightExplorerCode(record.text, model.language, searchRanges, record.start);
+        // Heading-only Markdown tokeniser (OD-8): the fence-aware heading map
+        // already computed for section collapse doubles as the highlighter,
+        // so heading lines get a distinct token colour without a full grammar.
+        const contentHtml = headingLevel
+            ? `<span class="explorer-md-source-heading explorer-md-source-heading-${headingLevel}">${lineHtml}</span>`
+            : lineHtml;
+        return contentHtml || '&nbsp;';
+    }
+
+    function explorerSourceRowHtml(model, row, searchRanges) {
+        return `
+                <div class="explorer-source-line" data-explorer-line="${row.record.number}">
+                    ${explorerSourceLineNumberHtml(row.record, model.foldControls ? row.headingLevel : 0, row.collapsed)}
+                    <code class="explorer-source-line-code${model.codeClass}">${explorerSourceRowCodeHtml(model, row, searchRanges)}</code>
+                </div>
+            `;
+    }
+
+    function explorerSourceLinesOpenTag(model) {
+        return `<div class="explorer-source-lines" style="--explorer-source-gutter-width: ${model.gutterWidth};">`;
+    }
+
+    function renderExplorerSourceLines(content, language, searchRanges = [], collapsedLines = new Set(), highlightedLines, options = {}) {
+        const model = explorerSourceRowModel(content, language, collapsedLines, highlightedLines, options);
+        const rows = model.rows.map(row => explorerSourceRowHtml(model, row, searchRanges));
+        return `${explorerSourceLinesOpenTag(model)}${rows.join('')}</div>`;
     }
 
     /* A match hidden inside a collapsed Markdown section has no row to
@@ -4775,6 +4811,7 @@
            the one that made it reachable was a group switch, whose cached-view
            restore re-applies the Source view through applyExplorerSearch. */
         if (pane._explorerEdit) {
+            explorerAbandonSourceRenderJob(pane);
             return;
         }
 
@@ -4785,21 +4822,92 @@
            which have rows to attach to. */
         if (explorerPaneSourceTier(pane) === 'large') {
             code.innerHTML = renderExplorerLargeSourceHtml(pane);
+            pane._explorerSourceRender = null;
+            explorerAbandonSourceRenderJob(pane);
             return;
         }
 
         const content = pane._explorerFileContent || '';
         const language = pane._explorerFilePlain ? '' : (pane._explorerFileLanguage || '');
+        const collapsedLines = ensureExplorerMarkdownCollapsedLines(pane);
+        const collapsedKey = explorerSourceCollapsedKey(collapsedLines);
+
+        if (explorerReuseRenderedSource(index, code, {
+            content, language, collapsedKey, searchRanges
+        })) {
+            return;
+        }
+
         const highlightedLines = explorerHighlightDocumentLinesCached(
             pane, content, normalizeExplorerLanguage(language)
         );
-        code.innerHTML = renderExplorerSourceLines(
-            content,
-            language,
-            searchRanges,
-            ensureExplorerMarkdownCollapsedLines(pane),
-            highlightedLines
-        );
+        const model = explorerSourceRowModel(content, language, collapsedLines, highlightedLines);
+        const chunking = explorerRepaintPolicy()?.chunkPlan(model.rows.length, {
+            async: typeof window.requestAnimationFrame === 'function'
+        });
+        explorerCancelSourceRenderJob(pane);
+        /* One string and one parse for a document that can afford it — which
+           is nearly all of them, and is cheaper than any number of appends. */
+        code.innerHTML = chunking && chunking.chunked
+            ? `${explorerSourceLinesOpenTag(model)}</div>`
+            : `${explorerSourceLinesOpenTag(model)}${model.rows
+                .map(row => explorerSourceRowHtml(model, row, searchRanges)).join('')}</div>`;
+        const container = explorerRenderedSourceContainer(code);
+        /* The rows are identified by a token stamped on them rather than by a
+           reference to the element: a pane that leaves file view would keep
+           the whole detached row tree alive for as long as it held that
+           reference, which on a large file is the biggest thing in the pane. */
+        _explorerSourceRenderToken += 1;
+        const token = String(_explorerSourceRenderToken);
+        if (container) {
+            container.dataset.explorerRender = token;
+        }
+        pane._explorerSourceRender = { token, content, language, collapsedKey, ranges: searchRanges };
+
+        if (!chunking || !chunking.chunked) {
+            explorerFinishSourceRender(index);
+            return;
+        }
+        /* Frame-sliced build: the file fills in from the top and the rest of
+           the app keeps painting. Everything that reads the rows the moment a
+           render "returns" goes through whenExplorerSourceRendered(), which is
+           immediate for the synchronous build above and queued for this one. */
+        explorerRunSourceRenderJob(index, code, container, model, searchRanges, chunking.size);
+    }
+
+    function explorerSourceCollapsedKey(collapsedLines) {
+        return Array.from(collapsedLines || []).sort((a, b) => a - b).join(',');
+    }
+
+    /* The DOM-free repaint policy (explorer-repaint.js). Looked up rather than
+       captured so a page that somehow loaded without it falls back to a full
+       rebuild every time — today's behaviour — instead of throwing. */
+    function explorerRepaintPolicy() {
+        return (typeof window !== 'undefined' && window.GridVibeExplorerRepaint) || null;
+    }
+
+    let _explorerSourceRenderToken = 0;
+
+    function explorerRenderedSourceContainer(code) {
+        return code ? code.querySelector(':scope > .explorer-source-lines') : null;
+    }
+
+    function explorerAppendSourceRows(container, model, searchRanges, from, to) {
+        if (!container) {
+            return;
+        }
+        const rows = [];
+        for (let at = from; at < to; at += 1) {
+            rows.push(explorerSourceRowHtml(model, model.rows[at], searchRanges));
+        }
+        container.insertAdjacentHTML('beforeend', rows.join(''));
+    }
+
+    /* Everything that used to sit at the tail of a rebuild. It runs once per
+       completed build — after the last slice of a chunked one — and never
+       after a skipped or decorated render, because a render that destroyed no
+       rows has nothing to re-attach. */
+    function explorerFinishSourceRender(index) {
         wireExplorerMarkdownSectionControls(index);
         // The rebuilt rows dropped the nodes the occurrence tint was anchored
         // to; re-derive it from whatever selection survived the render.
@@ -4807,6 +4915,157 @@
         // Re-paint the cached HEAD change marks onto the fresh rows (cheap;
         // no fetch — loads are triggered by the change signals only).
         applyExplorerChangeMarks(index);
+        explorerFlushSourceRenderCallbacks(terminals[index]);
+    }
+
+    function explorerFlushSourceRenderCallbacks(pane) {
+        const pending = pane?._explorerSourceRenderCallbacks;
+        if (!pending || !pending.length) {
+            return;
+        }
+        pane._explorerSourceRenderCallbacks = [];
+        pending.forEach(callback => {
+            try {
+                callback();
+            } catch (err) {
+                console.error('Explorer source render callback failed', err);
+            }
+        });
+    }
+
+    /* Read the rows once they exist. Immediate when no build is in flight —
+       which is every file small enough to render in one pass, so the ordering
+       those callers have always relied on is unchanged — and queued onto the
+       running build otherwise. A superseded build hands its queue to the build
+       that replaced it, so a scroll restore is never dropped on the floor. */
+    function whenExplorerSourceRendered(index, callback) {
+        const pane = terminals[index];
+        if (typeof callback !== 'function') {
+            return;
+        }
+        if (!pane || !pane._explorerSourceRenderJob) {
+            callback();
+            return;
+        }
+        (pane._explorerSourceRenderCallbacks || (pane._explorerSourceRenderCallbacks = []))
+            .push(callback);
+    }
+
+    function explorerCancelSourceRenderJob(pane) {
+        if (!pane || !pane._explorerSourceRenderJob) {
+            return;
+        }
+        if (typeof window.cancelAnimationFrame === 'function') {
+            window.cancelAnimationFrame(pane._explorerSourceRenderJob.frame);
+        }
+        pane._explorerSourceRenderJob = null;
+    }
+
+    /* The panel stopped being rows — the editor took it, or the large tier
+       replaced them with plain chunks — so no further slice may land. The
+       queued readers still run: they were waiting on "the rows are final",
+       and they are, just not as rows. Leaving them queued would strand a
+       scroll restore on a pane the reader is still looking at. */
+    function explorerAbandonSourceRenderJob(pane) {
+        explorerCancelSourceRenderJob(pane);
+        explorerFlushSourceRenderCallbacks(pane);
+    }
+
+    function explorerRunSourceRenderJob(index, code, container, model, searchRanges, size) {
+        const pane = terminals[index];
+        const job = { frame: 0, at: 0 };
+        pane._explorerSourceRenderJob = job;
+        const step = () => {
+            job.frame = 0;
+            /* Two ways this build stops being the one that should finish: a
+               newer render replaced it (identity, not a flag), or the panel it
+               was filling is no longer the panel on screen. Either way the
+               remaining rows are rows nobody asked for. */
+            if (pane._explorerSourceRenderJob !== job
+                || explorerRenderedSourceContainer(code) !== container) {
+                return;
+            }
+            const to = Math.min(model.rows.length, job.at + size);
+            explorerAppendSourceRows(container, model, searchRanges, job.at, to);
+            job.at = to;
+            if (job.at < model.rows.length) {
+                job.frame = window.requestAnimationFrame(step);
+                return;
+            }
+            pane._explorerSourceRenderJob = null;
+            explorerFinishSourceRender(index);
+        };
+        job.frame = window.requestAnimationFrame(step);
+    }
+
+    /* The rows already on screen, kept. `true` means this render is done —
+       either because nothing it would paint differs from what is there
+       (a file open renders the rows and then applyExplorerSearch renders them
+       again; with no query the second pass has nothing to say), or because
+       only the search marks moved and the rows carrying them have been
+       repainted in place.
+
+       Row <div>s survive a decoration repaint, and with them the change-mark
+       attribute, its marker button, the open change peek and the fold
+       controls' bound listeners — which is why none of those are re-applied
+       here. Only the occurrence tint is, because its ranges point at the text
+       nodes the repaint replaced. */
+    function explorerReuseRenderedSource(index, code, next) {
+        const pane = terminals[index];
+        const policy = explorerRepaintPolicy();
+        const previous = pane._explorerSourceRender;
+        if (!policy || !previous) {
+            return false;
+        }
+        const container = explorerRenderedSourceContainer(code);
+        const sameSurface = Boolean(container)
+            && container.dataset.explorerRender === previous.token;
+        const previousRanges = previous.ranges || [];
+        /* The overwhelmingly common repaint — no query before, no query now —
+           needs no records, no maps and no plan: there is nothing a search
+           mark could have moved. */
+        const decorationsPossible = Boolean(previousRanges.length || next.searchRanges.length);
+        const records = (sameSurface && decorationsPossible)
+            ? explorerSourceLineRecords(next.content)
+            : [];
+        const plan = policy.sourceRenderPlan({
+            sameSurface,
+            pending: Boolean(pane._explorerSourceRenderJob),
+            contentChanged: previous.content !== next.content,
+            languageChanged: previous.language !== next.language,
+            foldsChanged: previous.collapsedKey !== next.collapsedKey,
+            previousDecorations: policy.decorationMap(records, previousRanges),
+            nextDecorations: policy.decorationMap(records, next.searchRanges)
+        });
+        if (plan.mode === 'full') {
+            return false;
+        }
+        previous.ranges = next.searchRanges;
+        if (plan.mode === 'skip') {
+            return true;
+        }
+
+        const highlightedLines = explorerHighlightDocumentLinesCached(
+            pane, next.content, normalizeExplorerLanguage(next.language)
+        );
+        const model = explorerSourceRowModel(
+            next.content,
+            next.language,
+            ensureExplorerMarkdownCollapsedLines(pane),
+            highlightedLines
+        );
+        const byLine = new Map();
+        model.rows.forEach(row => byLine.set(row.record.number, row));
+        plan.lines.forEach(line => {
+            const row = byLine.get(line);
+            const cell = container
+                .querySelector(`.explorer-source-line[data-explorer-line="${line}"] > code`);
+            if (row && cell) {
+                cell.innerHTML = explorerSourceRowCodeHtml(model, row, next.searchRanges);
+            }
+        });
+        scheduleExplorerOccurrenceHighlight();
+        return true;
     }
 
     function explorerPreviewBlockLanguage(code) {
@@ -5560,7 +5819,9 @@
         state.matchCapped = capped;
         updateExplorerSearchControls(index, query, state.activeIndex || 0, matchCount, capped);
         if (query && matchCount && scroll) {
-            scrollExplorerSearchMatch(index);
+            // The active match may still be a row a frame-sliced build has not
+            // reached; scroll to it once the rows it is in exist.
+            whenExplorerSourceRendered(index, () => scrollExplorerSearchMatch(index));
         }
     }
 
@@ -7030,7 +7291,7 @@
         const effectiveScrollState = scrollState || (restoredTabView
             ? { ...restoredTabView.scroll, activeView: initialFileView }
             : null);
-        restoreExplorerFileScroll(index, effectiveScrollState);
+        whenExplorerSourceRendered(index, () => restoreExplorerFileScroll(index, effectiveScrollState));
         renderExplorerTabStrip(index);
         persistExplorerTabsToSession(index);
         syncExplorerGitActiveRows(index);
@@ -7156,7 +7417,7 @@
         // The captured position is restored on the next line; a find repainted
         // onto the refreshed rows must not undo that from its own frame.
         applyExplorerSearch(index, { scroll: false });
-        restoreExplorerFileScroll(index, scrollState);
+        whenExplorerSourceRendered(index, () => restoreExplorerFileScroll(index, scrollState));
         renderExplorerTabStrip(index);
         return true;
     }

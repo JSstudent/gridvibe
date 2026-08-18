@@ -437,28 +437,33 @@
         );
         setExplorerEditChromeDisabled(index, false);
         refreshExplorerEditControls(index);
-        /* The selection has to go back on the rows that are finally standing,
-           and with a find active those are not the rows renderExplorerSource()
-           just built — applyExplorerSearch() rebuilds them again, after an
-           await, to mark the matches. Restoring before that would put the
-           selection on rows about to be replaced, which is precisely the
-           disappearing act this is here to stop.
+        /* The selection has to go back on the rows that are finally standing.
+           With a find active, applyExplorerSearch() marks the matches after an
+           await; it no longer rebuilds the rows to do it — only the rows whose
+           marks moved are repainted — but the await is still there, and so is
+           the possibility that renderExplorerSource() above is building the
+           document in frame-sized slices. Restoring before either lands would
+           put the selection on rows that are about to be replaced or do not
+           exist yet, which is precisely the disappearing act this is here to
+           stop.
 
            Those late rows are also why the viewport is re-applied here. The
            find is repainted, never navigated (`scroll: false`), so nothing
-           pulls the view to a match on the way out — but the rebuild itself
-           lands after the restore above, and the position the reader was
-           looking at has to outlive it. */
+           pulls the view to a match on the way out — but the rows land after
+           the restore above, and the position the reader was looking at has to
+           outlive them. */
         Promise.resolve(applyExplorerSearch(index, { scroll: false })).catch(() => {}).then(() => {
-            restoreExplorerEditViewport(
-                document.getElementById(`explorer-code-${index}`),
-                editViewport
-            );
-            if (window.restoreExplorerSourceSelection?.(index, carriedSelection)) {
-                // renderExplorerSource() already scheduled a pass, but it ran
-                // against a selection that did not exist yet.
-                scheduleExplorerOccurrenceHighlight();
-            }
+            whenExplorerSourceRendered(index, () => {
+                restoreExplorerEditViewport(
+                    document.getElementById(`explorer-code-${index}`),
+                    editViewport
+                );
+                if (window.restoreExplorerSourceSelection?.(index, carriedSelection)) {
+                    // renderExplorerSource() already scheduled a pass, but it ran
+                    // against a selection that did not exist yet.
+                    scheduleExplorerOccurrenceHighlight();
+                }
+            });
         });
         if (focusEditButton) {
             document.querySelector(`[data-explorer-edit="${index}"]`)?.focus();

@@ -85,9 +85,12 @@ function explorerEditGutterWidthCss(draft, language) {
      "tokenize this yourself" argument (an explicit `null` means a cached
      miss), so a moved draft tokenizes and the viewer's cache is untouched.
 
-   The tokenizing pass is a whole-document one, which is why this is only ever
-   reached through the rAF-coalesced refresh below and only under the viability
-   bound. */
+   The tokenizing pass is a whole-document one, which is why this is now only
+   reached at mount (where the viewer's cache answers for the draft) and from
+   the settle pass a few frames after typing stops. The frames in between
+   splice the rows the draft actually moved — see
+   spliceExplorerEditUnderlayRows() — because running this on every keystroke
+   made the cost of typing O(document) rather than O(edit). */
 function explorerEditUnderlayHtml(draft, language, runs) {
     return renderExplorerSourceLines(
         draft, language, [], new Set(), runs, { foldControls: false }
@@ -161,6 +164,7 @@ function mountExplorerEditOverlay(index, code, textareaHtml) {
         </div>
     `;
     pane._explorerEditOverlayDraft = draft;
+    pane._explorerEditOverlayLines = explorerEditUnderlayLines(draft);
 
     /* The stacked textarea is as tall as the whole document, so its own focus
        outline would be drawn around the buffer and never seen. The ring moves
@@ -175,7 +179,64 @@ function mountExplorerEditOverlay(index, code, textareaHtml) {
     textarea.addEventListener('blur', () => view.classList.remove('editor-focused'));
 }
 
-function paintExplorerEditUnderlay(index) {
+/* The line texts the rows are built from, in the renderer's own terms (a
+   trailing newline opens a final empty line, a stray CR is not part of the
+   line) — so a splice compares like with like against what is on screen. */
+function explorerEditUnderlayLines(draft) {
+    return explorerSourceLineRecords(String(draft == null ? '' : draft))
+        .map(record => record.text);
+}
+
+function explorerEditRepaintPolicy() {
+    return (typeof window !== 'undefined' && window.GridVibeExplorerRepaint) || null;
+}
+
+/* Replace the rows the draft actually moved, and renumber whatever the change
+   in line count shifted. Returns false when the DOM is not the shape the plan
+   assumed, which sends the caller back to the full rebuild.
+
+   The replaced rows are coloured by the per-line fallback lexer rather than by
+   a whole-document Highlight.js pass: tokenizing the document is the cost this
+   exists to avoid, and it cannot be done for one line — a line's colour
+   depends on the block it sits in. The settle pass below repaints the whole
+   underlay with real tokens once typing stops, so the interim colour lives on
+   the line under the caret for a fraction of a second. Where the file has no
+   Highlight.js grammar at all, the two passes agree exactly. */
+function spliceExplorerEditUnderlayRows(underlay, model, plan) {
+    const container = underlay.querySelector('.explorer-source-lines');
+    if (!container || container.children.length !== plan.before) {
+        return false;
+    }
+    const html = [];
+    for (let at = plan.start; at < plan.start + plan.inserted; at += 1) {
+        html.push(explorerSourceRowHtml(model, model.rows[at], []));
+    }
+    const host = document.createElement('div');
+    host.innerHTML = html.join('');
+    const fresh = Array.from(host.children);
+    for (let removed = 0; removed < plan.removed; removed += 1) {
+        container.children[plan.start]?.remove();
+    }
+    const anchor = container.children[plan.start] || null;
+    fresh.forEach(row => container.insertBefore(row, anchor));
+
+    if (plan.inserted !== plan.removed) {
+        for (let at = plan.start + plan.inserted; at < container.children.length; at += 1) {
+            const row = container.children[at];
+            row.dataset.explorerLine = String(at + 1);
+            const gutter = row.firstElementChild;
+            if (gutter) {
+                gutter.textContent = String(at + 1);
+            }
+        }
+    }
+    return true;
+}
+
+/* `full` forces the whole-document rebuild: the settle pass asks for it, and
+   so does anything the splice cannot express (a first paint, a change too wide
+   to be a splice, a container that is not the shape the plan assumed). */
+function paintExplorerEditUnderlay(index, { full = false } = {}) {
     const pane = terminals[index];
     const state = pane && pane._explorerEdit;
     const stack = document.querySelector(`[data-explorer-edit-stack="${index}"]`);
@@ -188,12 +249,66 @@ function paintExplorerEditUnderlay(index) {
     stack.style.setProperty(
         '--explorer-source-gutter-width', explorerEditGutterWidthCss(draft, language)
     );
-    underlay.innerHTML = explorerEditUnderlayHtml(draft, language);
+
+    /* Built with a null token map — "no Highlight.js runs, lex each line" —
+       because the splice path must not tokenize. The full path swaps a real
+       map in below, having paid for it once rather than once per frame. */
+    const model = explorerSourceRowModel(draft, language, new Set(), null, { foldControls: false });
+    const lines = model.records.map(record => record.text);
+    const policy = explorerEditRepaintPolicy();
+    const plan = (!full && policy)
+        ? policy.lineSplicePlan(pane._explorerEditOverlayLines, lines)
+        : { mode: 'full' };
+    if (plan.mode === 'none') {
+        return;
+    }
+
+    let spliced = false;
+    if (plan.mode === 'splice') {
+        spliced = spliceExplorerEditUnderlayRows(underlay, model, {
+            ...plan,
+            before: (pane._explorerEditOverlayLines || []).length
+        });
+    }
+    if (!spliced) {
+        cancelExplorerEditUnderlaySettle(pane);
+        underlay.innerHTML = explorerEditUnderlayHtml(draft, language);
+    } else {
+        scheduleExplorerEditUnderlaySettle(index);
+    }
     pane._explorerEditOverlayDraft = draft;
-    /* These rows are new nodes, so every range the find and the occurrence
-       tint had painted onto the old ones is now detached. explorer-edit-find.js
-       drops them and re-derives from the draft that is now on screen. */
+    pane._explorerEditOverlayLines = lines;
+    /* The rows this touched are new nodes, so every range the find and the
+       occurrence tint had painted onto the ones they replaced is now detached.
+       explorer-edit-find.js drops them and re-derives from the draft that is
+       now on screen. */
     window.repaintExplorerEditFind?.(index);
+}
+
+/* How long the underlay may show fallback colours before it repaints with real
+   Highlight.js tokens. A one-shot debounce, never an interval: it is armed by
+   a splice and disarmed by the next full paint or by teardown. */
+const EXPLORER_EDIT_UNDERLAY_SETTLE_MS = 180;
+
+function cancelExplorerEditUnderlaySettle(pane) {
+    if (pane && pane._explorerEditOverlaySettle) {
+        window.clearTimeout(pane._explorerEditOverlaySettle);
+        pane._explorerEditOverlaySettle = 0;
+    }
+}
+
+function scheduleExplorerEditUnderlaySettle(index) {
+    const pane = terminals[index];
+    if (!pane) {
+        return;
+    }
+    cancelExplorerEditUnderlaySettle(pane);
+    pane._explorerEditOverlaySettle = window.setTimeout(() => {
+        pane._explorerEditOverlaySettle = 0;
+        if (pane._explorerEdit) {
+            paintExplorerEditUnderlay(index, { full: true });
+        }
+    }, EXPLORER_EDIT_UNDERLAY_SETTLE_MS);
 }
 
 /* Called from the editor's existing `input` handler, which covers typing, Tab
@@ -240,6 +355,8 @@ function teardownExplorerEditOverlay(index) {
         }
         pane._explorerEditOverlayFrame = 0;
         pane._explorerEditOverlayDraft = '';
+        pane._explorerEditOverlayLines = null;
+        cancelExplorerEditUnderlaySettle(pane);
     }
     // The find's paint and its cached ranges were resolved against a draft
     // that is about to stop existing.
