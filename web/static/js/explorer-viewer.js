@@ -4026,7 +4026,7 @@
        top. Entering the in-place editor does not: it is pinning the view to
        Source on its way to mounting the editor over it, and the position it is
        about to carry into the textarea is the one the reader left. */
-    function setExplorerFileView(index, mode, { scroll = true } = {}) {
+    function setExplorerFileView(index, mode, { scroll = true, captureScroll = true } = {}) {
         const normalizedMode =
             mode === 'preview' ? 'preview'
             : mode === 'diff' ? 'diff'
@@ -4041,6 +4041,10 @@
         const diffPanel = document.getElementById(`explorer-diff-panel-${index}`);
         const selectedMode = explorerResolveFileView(index, normalizedMode);
         const isDiffMode = selectedMode === 'diff';
+        const outgoingMode = activeExplorerFileView(index);
+        if (captureScroll && outgoingMode !== selectedMode) {
+            rememberExplorerPanelScroll(index, outgoingMode);
+        }
         if (pane) {
             pane._explorerDiffSplit = isDiffMode;
             if (selectedMode === 'source' || selectedMode === 'preview') {
@@ -4082,6 +4086,7 @@
         } else {
             applyExplorerSearch(index, { scroll });
         }
+        requestExplorerPanelScrollRestore(index, selectedMode);
     }
 
     function findExplorerMarkdownPreviewTargetIndex() {
@@ -5484,7 +5489,10 @@
                 observer.unobserve(entry.target);
                 const code = entry.target.querySelector('code.language-mermaid');
                 if (code) {
-                    renderExplorerMermaidBlock(preview, code);
+                    const blockOffset = entry.target.offsetTop;
+                    renderExplorerMermaidBlock(preview, code).then(() => {
+                        reapplyExplorerPreviewScrollAfterMermaid(preview, blockOffset);
+                    });
                 }
             });
         }, { root: preview, rootMargin: '200px' });
@@ -5513,7 +5521,9 @@
             return;
         }
         for (const code of blocks) {
+            const blockOffset = code.parentElement?.offsetTop;
             await renderExplorerMermaidBlock(preview, code);
+            reapplyExplorerPreviewScrollAfterMermaid(preview, blockOffset);
         }
     }
 
@@ -5763,6 +5773,7 @@
             return paintExplorerPreview(index);
         }
         const path = pane._explorerFilePath || '';
+        const content = pane._explorerFileContent;
         if (!path) {
             return preview;
         }
@@ -5780,7 +5791,9 @@
             // describes whatever was open when it started.
             if (terminals[index] !== pane
                 || sessionIds[index] !== sessionId
-                || pane._explorerFilePath !== path) {
+                || pane._explorerFilePath !== path
+                || pane._explorerFileContent !== content
+                || document.getElementById(`explorer-preview-${index}`) !== preview) {
                 return null;
             }
             pane._explorerPreviewHtml = data.preview_html || '';
@@ -5793,7 +5806,9 @@
             preview.textContent = error.message || 'Failed to render preview.';
             return preview;
         }
-        return paintExplorerPreview(index);
+        const painted = paintExplorerPreview(index);
+        requestExplorerPanelScrollRestore(index, 'preview');
+        return painted;
     }
 
     function restoreExplorerPreview(index) {
@@ -6671,15 +6686,26 @@
             if (!scrollEl) {
                 return;
             }
-            const maxScrollTop = Math.max(0, scrollEl.scrollHeight - scrollEl.clientHeight);
-            const maxScrollLeft = Math.max(0, scrollEl.scrollWidth - scrollEl.clientWidth);
-            state.panels[panel.dataset.explorerFilePanel || 'source'] = {
-                scrollLeft: scrollEl.scrollLeft,
-                scrollLeftRatio: maxScrollLeft > 0 ? scrollEl.scrollLeft / maxScrollLeft : 0,
-                scrollTop: scrollEl.scrollTop,
-                scrollTopRatio: maxScrollTop > 0 ? scrollEl.scrollTop / maxScrollTop : 0,
-                wasAtBottom: maxScrollTop > 0 && scrollEl.scrollTop >= maxScrollTop - 2
-            };
+            const mode = panel.dataset.explorerFilePanel || 'source';
+            const pane = terminals[index];
+            const store = pane?._explorerPanelScrollStore;
+            const stored = explorerPanelScrollStoreMatches(pane, store)
+                ? store.panels?.[mode]?.metrics
+                : null;
+            /* A visible Preview can still be only its loader. Capturing that
+               tiny box during the render's presentation snapshot would write
+               0 (or its small clamp) over the offset waiting for the lazy
+               Markdown response. Hidden panels and an unloaded Preview both
+               retain the content-bound value already in the pane store. */
+            const contentPending = mode === 'preview'
+                && !pane?._explorerPreviewLoaded;
+            const metrics = (panel.hidden || contentPending) && stored
+                ? { ...stored }
+                : captureScrollMetrics(scrollEl);
+            state.panels[mode] = metrics;
+            if (!panel.hidden && !contentPending && metrics) {
+                storeExplorerPanelMetrics(index, mode, metrics);
+            }
         });
         return state;
     }
@@ -6689,11 +6715,15 @@
             return;
         }
 
+        setExplorerPanelScrollState(index, state);
+
         /* Directory listings have no file-view panels; switching modes there
            would clobber stale diff state for no visual effect. */
         const listEl = document.getElementById(`explorer-list-${index}`);
+        let restoredMode = state.activeView || 'source';
         if (listEl && listEl.querySelector('[data-explorer-file-panel]')) {
-            setExplorerFileView(index, state.activeView || 'source');
+            setExplorerFileView(index, restoredMode, { captureScroll: false });
+            restoredMode = activeExplorerFileView(index);
         }
 
         const applyScroll = () => {
@@ -6707,15 +6737,6 @@
             applyScrollMetrics(document.getElementById(`explorer-tree-panel-${index}`), state.sidebar?.tree);
             applyScrollMetrics(document.getElementById(`explorer-git-panel-${index}`), state.sidebar?.git);
             applyScrollMetrics(document.getElementById(`explorer-search-panel-${index}`), state.sidebar?.search);
-            list.querySelectorAll('[data-explorer-file-panel]').forEach(panel => {
-                // One implementation of "put this element back where it was";
-                // this used to carry its own copy, which is how the two could
-                // have disagreed about which axis reads a ratio.
-                applyScrollMetrics(
-                    explorerPanelScrollTarget(panel),
-                    state.panels?.[panel.dataset.explorerFilePanel || 'source']
-                );
-            });
         };
 
         applyScroll();
@@ -6724,6 +6745,7 @@
             requestAnimationFrame(applyScroll);
         });
         window.setTimeout(applyScroll, 80);
+        requestExplorerPanelScrollRestore(index, restoredMode);
     }
 
     /* ── Per-tab view mode + scroll state (2.e) ──
@@ -6789,21 +6811,22 @@
     function applyExplorerPendingDiffScroll(index) {
         const pane = terminals[index];
         const pending = pane ? pane._explorerPendingDiffScroll : null;
-        if (!pane || !pending) {
+        if (!pane) {
             return;
         }
         pane._explorerPendingDiffScroll = null;
         let metrics = pending;
-        if (pending.persistedRecord) {
+        if (pending?.persistedRecord) {
             const resolved = window.GridVibeExplorerPersistence?.resolveRecord(
                 pending.persistedRecord,
                 explorerCurrentContentRevisions(pane)
             );
             metrics = resolved?.scroll?.panels?.diff || null;
         }
-        if (!metrics) return;
-        const panel = document.getElementById(`explorer-diff-panel-${index}`);
-        applyScrollMetrics(explorerPanelScrollTarget(panel), metrics);
+        if (metrics) {
+            storeExplorerPanelMetrics(index, 'diff', metrics);
+        }
+        requestExplorerPanelScrollRestore(index, 'diff');
     }
 
     const EXPLORER_FOLDER_ICON = `
@@ -7555,6 +7578,11 @@
         const initialFileView = keepDiffSplit
             ? 'diff'
             : (preferredFileView === 'preview' && hasPreview ? 'preview' : 'source');
+        // An explicit scrollState (in-place refresh) wins; otherwise fall back
+        // to the tab's stored snapshot, aligned with the restored view mode.
+        const effectiveScrollState = scrollState || (restoredTabView
+            ? { ...restoredTabView.scroll, activeView: initialFileView }
+            : null);
         const searchState = ensureExplorerSearchState(pane, 'file');
         if (previousPath && previousPath !== path) {
             cancelExplorerSearch(index);
@@ -7621,6 +7649,10 @@
                         : null)
                 : null)
             : null;
+        /* Install every panel's offset before an active Preview/Diff can start
+           its async load. Source still waits on whenExplorerSourceRendered()
+           below; each async panel reapplies from its own arrival hook. */
+        setExplorerPanelScrollState(index, effectiveScrollState);
         document.getElementById(`ph-${index}`)?.remove();
         list.classList.add('file-view');
         updateExplorerGitSummary(index, data.git_context || null);
@@ -7732,11 +7764,6 @@
         wireExplorerSearchControls(index);
         refreshExplorerEditControls(index);
         applyExplorerSearch(index);
-        // An explicit scrollState (in-place refresh) wins; otherwise fall back
-        // to the tab's stored snapshot, aligned with the restored view mode.
-        const effectiveScrollState = scrollState || (restoredTabView
-            ? { ...restoredTabView.scroll, activeView: initialFileView }
-            : null);
         whenExplorerSourceRendered(index, () => restoreExplorerFileScroll(index, effectiveScrollState));
         renderExplorerTabStrip(index);
         persistExplorerTabsToSession(index);
@@ -7819,6 +7846,10 @@
         pane._explorerDiffLoaded = false;
         pane._explorerDiffCacheKey = '';
         pane._explorerDiffContent = '';
+        /* The old viewport still describes where the reader was in this file,
+           but it must be associated with the replacement bytes before a lazy
+           Preview request can answer. */
+        setExplorerPanelScrollState(index, scrollState);
         renderExplorerSource(index);
         // An in-place refresh means the file moved on disk (save, undo,
         // watcher) while HEAD usually did not, so the path + HEAD cache key

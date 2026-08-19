@@ -318,6 +318,16 @@
         if (!view) {
             return null;
         }
+        const policy = typeof explorerScrollPolicy === 'function'
+            ? explorerScrollPolicy()
+            : null;
+        if (policy) {
+            return policy.resolveTabView(tab, revisions, {
+                resolveRecord: (record, current) => (
+                    window.GridVibeExplorerPersistence?.resolveRecord(record, current)
+                )
+            });
+        }
         const current = typeof revisions === 'string'
             ? { source: revisions, preview: revisions, diff: revisions, directory: revisions }
             : (revisions || {});

@@ -1,7 +1,8 @@
 # Explorer Scroll Stability and Group-Switch Cost After the Large-Content Work
 
-**Status:** Analysis and staged fix plan — verified against the working tree at
-`4eed02b` on **2026-08-19**. Nothing here is implemented yet.
+**Status:** Stage 1 implemented and live-browser verified on **2026-08-19**.
+Stages 2–4 remain pending. The original analysis was verified against the
+working tree at `4eed02b`.
 **Scope:** Three regressions reported after
 `docs/large_content_freeze_analysis.md` phases 0–2 landed:
 1. Markdown Preview scroll position is no longer preserved.
@@ -24,16 +25,55 @@ built and why), `docs/explorer_performance_research.md` (the broader picture).
 
 | # | Report | Verdict | Root cause |
 |---|---|---|---|
-| 1 | Preview scroll not preserved | **Confirmed, and a direct consequence of phase 0.4** | The restore runs on the *source* render queue, before the lazily-fetched preview HTML exists; nothing re-applies it afterwards |
-| 1b | Same for other open tabs | **Confirmed, same cause** | A tab switch is a full `renderExplorerFile()`, so every tab pays 1 on every activation |
-| 1c | — (not reported, found here) | **New** | A save / in-place refresh drops the cached preview too, so saving in Preview view throws the reader to the top |
-| 1d | — (not reported, found here) | **New, pre-existing** | An offset restored into a `hidden` (i.e. `display:none`) panel is silently discarded; only the *active* panel's restore ever lands |
+| 1 | Preview scroll not preserved | **Fixed in Stage 1** | The restore now waits for Preview readiness and reapplies from Preview's own arrival path |
+| 1b | Same for other open tabs | **Fixed in Stage 1** | Each tab retains revision-checked per-panel offsets across its full re-render |
+| 1c | — (not reported, found here) | **Fixed in Stage 1** | In-place refresh installs the captured offsets before starting the replacement Preview request |
+| 1d | — (not reported, found here) | **Fixed in Stage 1** | Hidden panels retain their offsets and apply them when shown |
 | 2 | Scrollbar jumps between modes | **Confirmed** | The Source panel's scroller is inset by the overview ruler column; the Preview panel's is not — and the ruler column *leaves the layout* in edit mode, in the large tier, and on an empty file |
 | 3 | Group switch is slow with a large file open | **Confirmed, four separate costs** | Whole-content re-hash per switch; a 4-pass read/write-interleaved scroll restore; frame-sliced builds that keep running off-screen; an overview-geometry cache poisoned by the detach |
 
 ---
 
 ## Finding 1 — the Preview scroll is restored before the Preview exists
+
+### Stage 1 implementation update — complete
+
+The original timing diagnosis was correct but incomplete. Live-browser
+validation exposed the final overwrite that the DOM stub did not reproduce:
+
+1. a saved Preview target of `640` was applied to the small
+   `Rendering preview...` loader;
+2. the loader could hold only `57` in the diagnostic window (normally `0` in
+   a full-size pane), so the write was clamped;
+3. the render's ordinary presentation snapshot then captured that temporary
+   loader position as if it were the reader's new position, replacing `640`
+   before the Markdown response arrived.
+
+Stage 1 now has one per-panel store and one bounded application path, split
+between the DOM-free `explorer-scroll.js` policy and
+`explorer-scroll-adapter.js`. A Preview that has not loaded cannot consume its
+saved target, and presentation capture retains the stored target instead of
+reading the loader. The Preview arrival reapplies after `paintExplorerPreview()`;
+view switches apply only the panel just shown; an in-place refresh associates
+the old viewport with the replacement bytes before fetching; late responses
+are rejected by pane, session, path, content and element identity. Source keeps
+its existing source-render queue, and Diff keeps its async arrival behavior.
+
+Lazy Mermaid growth uses the bounded correction option from 1.4 below: a
+diagram above an untouched restored position may reapply once after it draws;
+the first reader movement cancels that correction.
+
+Verification completed:
+
+- the Node-executed policy and DOM-adapter suite covers delayed Preview
+  arrival, the loader-snapshot overwrite, tab/view/group switches, in-place
+  refresh, revision filtering, late responses and Mermaid growth;
+- the related Preview/save/repaint/group-switch suites pass;
+- a live Chrome round trip against the running application held the exact
+  offset `640 → switch tab → switch back → 640`;
+- JavaScript syntax, Ruff and diff checks pass. The full 1,841-test run retains
+  only the two pre-existing Windows Git-timeout failures, unrelated to this
+  stage.
 
 ### What changed
 
@@ -265,20 +305,20 @@ does not land as a full re-render at the moment a group is restored.
 
 ## Staged fix plan
 
-Stages are independent; the recommended order is 2 → 1 → 3, because Stage 2 is
-nearly all CSS, Stage 1 is the reported regression, and Stage 3 wants numbers
-before and after. Stage 3's items 3.2 and 3.3 touch ordering Stage 1 also
-touches, so Stage 1 lands first of those two.
+Stages are independent. Stage 1 landed first to close the reported regression;
+Stages 2 and 3 remain separate follow-up work. Stage 3's items 3.2 and 3.3
+touch ordering that Stage 1 also touches, so they must build on the completed
+Stage 1 path rather than reintroducing a second restore mechanism.
 
-### Stage 1 — a panel's scroll offset is applied when the panel is shown, not when the rows finish
+### Stage 1 — complete: a panel's scroll offset is applied when the panel is shown, not when the rows finish
 
 **Goal:** the Preview offset survives a tab switch, a view switch, a save, and
 a group switch; Source and Diff keep behaving exactly as they do today.
 
-**1.1 — Give the pane a per-panel offset store and one application point.**
-Keep `captureExplorerFileScroll()` as the reader. Add a **DOM-free** policy
-module — `web/static/js/explorer-scroll.js`, with a Node-executed test, per
-guardrail 6 — owning:
+**1.1 — Complete: give the pane a per-panel offset store and one application point.**
+`captureExplorerFileScroll()` remains the reader. The **DOM-free** policy
+module `web/static/js/explorer-scroll.js`, with its Node-executed test, now
+owns:
 - which panel offsets are still valid for a given content revision set (the
   logic `explorerMatchingTabView()` already applies, lifted so both callers
   share it);
@@ -286,43 +326,41 @@ guardrail 6 — owning:
   extent can hold it, which is what "the content has arrived" actually means;
 - when to stop re-trying (a bounded number of attempts, not a fixed 80 ms).
 
-`explorer-viewer.js` keeps only the paint-side adapter. Same policy-module +
-adapter shape as `explorer-repaint.js` and `explorer-tiers.js`, and it must not
-grow `explorer-viewer.js`.
+Implemented as the DOM-free policy plus the separate
+`explorer-scroll-adapter.js`; `explorer-viewer.js` contains only the capture and
+paint/readiness call sites.
 
-**1.2 — Apply on show.** `setExplorerFileView()` applies the stored offset to
+**1.2 — Complete: apply on show.** `setExplorerFileView()` applies the stored offset to
 the panel it just un-hid, after `ensureExplorerPreviewLoaded()` /
 `loadExplorerDiff()` have had their chance. This alone closes 1d and the
 Source ⇄ Preview ⇄ Source case.
 
-**1.3 — Apply on arrival.** `ensureExplorerPreviewLoaded()` re-applies the
+**1.3 — Complete: apply on arrival.** `ensureExplorerPreviewLoaded()` re-applies the
 stored offset after `paintExplorerPreview()`, exactly as
 `applyExplorerPendingDiffScroll()` does for Diff, and for the same reason.
 Guard it with the identity checks the fetch already performs
 (`explorer-viewer.js:5779-5784`) so a pane that moved on is never scrolled.
 
-**1.4 — Survive lazily-drawn diagrams.** Two candidates; prefer the first:
-- Reserve height for un-drawn Mermaid blocks so the panel's `scrollHeight` does
-  not grow after paint (`contain-intrinsic-size`, or a min-height on the
-  placeholder). This makes the offset correct on the first attempt and is the
-  only option that also fixes reading position while diagrams draw during
-  ordinary scrolling.
-- Failing that, re-apply once from the `IntersectionObserver` callback in
-  `renderExplorerMermaidLazily()` when a diagram above the restored offset
-  finishes. Bounded, and dropped as soon as the reader scrolls.
+**1.4 — Complete: survive lazily-drawn diagrams.** The bounded reapply option
+was selected:
+- `renderExplorerMermaidLazily()` reapplies once when a diagram above the
+  restored offset finishes;
+- the correction is bounded and is dropped as soon as the reader scrolls;
+- no intrinsic placeholder height or unrelated Preview layout change was
+  introduced.
 
-**1.5 — A restore is not a source-render event.** `renderExplorerFile()` should
-queue each panel's restore on that panel's own readiness rather than
+**1.5 — Complete: a restore is not a source-render event.** `renderExplorerFile()` now
+queues each panel's restore on that panel's own readiness rather than
 unconditionally on `whenExplorerSourceRendered()`. Keep the source queue for
 the Source panel — that ordering is load-bearing for the find and the editor's
 selection restore (guardrail 3) and must not change.
 
-**Tests.** Node-executed against the existing DOM stub: an offset captured in
-Preview survives a tab switch where the preview fetch resolves *after* the
-source rows; a save on a Markdown file in Preview view keeps its position
-(extend `tests/test_explorer_save_refresh.py`'s premise); a hidden panel's
-offset is applied when it is shown; a pane that moved on is not scrolled by a
-late arrival.
+**Tests — complete.** `tests/test_explorer_scroll.py` executes the DOM-free
+policy and the DOM adapter in Node. It covers an offset captured in Preview
+surviving a tab switch where the preview fetch resolves *after* the source
+rows, the loader/presentation snapshot retaining the pending target, a save on
+a Markdown file in Preview view, a hidden panel applying its offset when shown,
+and a pane that moved on rejecting a late response.
 
 **What the user sees:** Preview keeps its place across tabs, view switches,
 saves and group switches. Source and Diff are unchanged.
