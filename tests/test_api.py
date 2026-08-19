@@ -1459,7 +1459,14 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("listScrollTop: list.scrollTop", html)
         self.assertIn("list.scrollTop = state.listScrollTop || 0;", html)
         self.assertIn("wasAtBottom: maxScrollTop > 0 && scrollEl.scrollTop >= maxScrollTop - 2", html)
-        self.assertIn("scrollEl.scrollTop = panelState.wasAtBottom", html)
+        # Every panel goes back through the one shared restore rather than a
+        # copy of it — what that restore actually does is executed in
+        # tests/test_explorer_repaint.py, not spelled out here.
+        self.assertIn(
+            "applyScrollMetrics(\n"
+            "                    explorerPanelScrollTarget(panel),",
+            html,
+        )
         self.assertIn("window.setTimeout(applyScroll, 80);", html)
         self.assertIn("async function syncExplorerPane(index)", html)
         self.assertIn("if (pane?._explorerMode === 'file' && pane._explorerFilePath) {\n            return true;\n        }", html)

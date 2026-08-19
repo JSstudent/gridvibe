@@ -54,6 +54,16 @@
        a browser can lay it out incrementally. */
     const SOURCE_LARGE_CHUNK_LINES = 5000;
 
+    /* And the same unit measured in bytes, because lines do not bound it. The
+       byte ceiling above exists for the file that is one enormous line — a
+       minified bundle — and such a file has no newline to cut at, so a
+       line-only chunker handed the whole 6 MiB back as a single chunk: the
+       tier degraded the view without removing the freeze it degraded it for.
+       A cut inside a line is visible (two <pre> blocks are two block boxes),
+       so it is the last resort and is never taken while a newline boundary is
+       still within budget. */
+    const SOURCE_LARGE_CHUNK_BYTES = 256 * 1024;
+
     /* The Diff ladder sits under the backend's own truncation ceiling
        (EXPLORER_GIT_DIFF_MAX_BYTES / _MAX_LINES = 256 KiB / 4,000 lines), so
        `large` is a band, not an overflow: a diff that reaches the ceiling is
@@ -189,21 +199,33 @@
        splitting the buffer into lines, because materializing 200k throwaway
        strings is the sort of thing this tier exists to stop doing.
 
-       Every chunk keeps its own trailing newline, so joining the result
-       reproduces the input byte for byte. */
+       A chunk ends at whichever ceiling it reaches first, lines or bytes, so
+       both of the ways a file gets too big to paint in one pass are bounded.
+       Cuts fall on newline boundaries wherever one is still within the byte
+       budget; only a single line longer than a whole chunk is cut mid-line.
+
+       Chunks are contiguous slices and the walk never moves backwards, so
+       joining the result reproduces the input byte for byte. */
     function sourceChunks(content) {
         const text = typeof content === 'string' ? content : '';
         const chunks = [];
         let start = 0;
         while (start < text.length) {
+            const limit = Math.min(text.length, start + SOURCE_LARGE_CHUNK_BYTES);
             let cursor = start;
             for (let seen = 0; seen < SOURCE_LARGE_CHUNK_LINES; seen += 1) {
                 const next = text.indexOf('\n', cursor);
-                if (next === -1) {
-                    cursor = text.length;
+                if (next === -1 || next + 1 > limit) {
                     break;
                 }
                 cursor = next + 1;
+            }
+            /* No newline boundary left inside the budget: either what remains
+               is a short unterminated tail, or one line is longer than a whole
+               chunk. Both end at the limit — the end of the buffer in the
+               first case, a mid-line cut in the second. */
+            if (cursor === start) {
+                cursor = limit;
             }
             chunks.push(text.slice(start, cursor));
             start = cursor;
@@ -274,6 +296,7 @@
         SOURCE_LARGE_MAX_LINES,
         SOURCE_LARGE_MAX_BYTES,
         SOURCE_LARGE_CHUNK_LINES,
+        SOURCE_LARGE_CHUNK_BYTES,
         DIFF_SMALL_MAX_BYTES,
         DIFF_SMALL_MAX_LINES,
         DIFF_MEDIUM_MAX_BYTES,

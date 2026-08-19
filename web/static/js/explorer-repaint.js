@@ -36,13 +36,25 @@
 }(typeof globalThis !== 'undefined' ? globalThis : this, function () {
     'use strict';
 
-    /* Past this many differing rows a decoration repaint stops being the cheap
-       option: each repainted row is its own innerHTML parse, and a thousand of
-       those cost more than one string and one parse for the whole document.
-       The find caps itself at 1,000 matches, so this is reached only by a
-       query that matches nearly every line — which is exactly when rebuilding
-       once is the better answer. */
+    /* The floor under "how many rows may a decoration repaint touch". It is a
+       floor and not the whole answer because the trade is relative: m single
+       row parses against one parse of the *whole* document, so what a 600-row
+       file should rebuild a 20,000-row file should not.
+
+       The ceiling therefore scales with the document (see repaintCeiling), and
+       this constant is what a small one gets. Getting the balance wrong the
+       other way was the defect: a find on a large file matched more than 400
+       lines on its first two keystrokes, so every one of them rebuilt tens of
+       thousands of rows — through the frame-sliced build, losing the scroll
+       position and the selection each time. */
     const MAX_DECORATION_REPAINT_ROWS = 400;
+
+    /* Above the floor a repaint may touch this fraction of the document. A
+       quarter is deliberately below break-even per row: the bulk build parses
+       one string and the repaint parses m, so the repaint has to be clearly
+       smaller to be worth it — and the find's own 1,000-match cap keeps every
+       real query far under this on the files where it matters. */
+    const DECORATION_REPAINT_DOCUMENT_SHARE = 4;
 
     /* The same trade for the editor's underlay. A keystroke moves one line and
        a paste moves a handful; a change spanning more rows than this is a
@@ -143,9 +155,27 @@
        still the rows on screen — the element identity, not a hash of what was
        put into it. Anything that replaced the panel (the editor mounting, a
        tab switch, a rebuilt card) makes it false, so a skip can never leave an
-       empty pane behind. A build still in flight counts as *not* the same
-       surface: its remaining rows would be emitted with the ranges it started
-       with. */
+       empty pane behind.
+
+       `pending` — a frame-sliced build still emitting rows — is judged against
+       what the render would *change*. The slices not yet emitted carry the
+       ranges that build started from, so a render that moves the marks has to
+       start again; a render that moves nothing is already being painted, and
+       rebuilding it is pure duplicate work. */
+    function repaintCeiling(options) {
+        if (Number.isFinite(options.maxRepaintRows)) {
+            return Number(options.maxRepaintRows);
+        }
+        const rows = Number(options.rowCount);
+        if (!Number.isFinite(rows) || rows <= 0) {
+            return MAX_DECORATION_REPAINT_ROWS;
+        }
+        return Math.max(
+            MAX_DECORATION_REPAINT_ROWS,
+            Math.floor(rows / DECORATION_REPAINT_DOCUMENT_SHARE)
+        );
+    }
+
     function sourceRenderPlan(input) {
         const options = input || {};
         if (
@@ -153,18 +183,27 @@
             || options.contentChanged
             || options.languageChanged
             || options.foldsChanged
-            || options.pending
         ) {
             return { mode: 'full', lines: [] };
         }
         const lines = decorationDelta(options.previousDecorations, options.nextDecorations);
         if (!lines.length) {
+            /* Nothing this render would paint differs from what the surface
+               already says — and that holds whether the rows are all on screen
+               or a frame-sliced build is still emitting them, because the
+               build was started with these exact ranges and will finish with
+               them. Rebuilding here is what made every large file open build
+               its rows twice: renderExplorerFile() renders, then
+               applyExplorerSearch() renders again with nothing to add. */
             return { mode: 'skip', lines: [] };
         }
-        const ceiling = Number.isFinite(options.maxRepaintRows)
-            ? Number(options.maxRepaintRows)
-            : MAX_DECORATION_REPAINT_ROWS;
-        if (lines.length > ceiling) {
+        if (options.pending) {
+            /* The marks did move, and the slices this build has not emitted
+               yet carry the ranges it started from. Half the document would
+               be marked and half would not, so it starts again. */
+            return { mode: 'full', lines: [] };
+        }
+        if (lines.length > repaintCeiling(options)) {
             return { mode: 'full', lines: [] };
         }
         return { mode: 'decorate', lines };
@@ -232,6 +271,7 @@
 
     return {
         MAX_DECORATION_REPAINT_ROWS,
+        DECORATION_REPAINT_DOCUMENT_SHARE,
         MAX_SPLICE_ROWS,
         CHUNK_ROWS,
         CHUNK_MIN_ROWS,

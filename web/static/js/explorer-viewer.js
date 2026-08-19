@@ -153,14 +153,85 @@
        the occurrence tint (which anchors on `.explorer-source-lines`), the
        change marks and the overview ruler are absent by construction rather
        than by a flag each of them has to remember to check. */
-    function renderExplorerLargeSourceHtml(pane) {
+    function explorerLargeSourceChunkHtml(chunk) {
+        return `<pre class="explorer-source-chunk">${escHtml(chunk)}</pre>`;
+    }
+
+    /* The large tier's paint, over frames.
+
+       Not building one row per line is what the tier is for, but escaping ten
+       megabytes and handing the parser a single string that size is the same
+       uninterruptible task wearing a different shape — and it lands on exactly
+       the files the tier exists to make openable. The chunks the policy
+       already cuts are the unit: the notice and an empty host go in first, and
+       the chunks follow under the same frame budget the row build uses, so the
+       file fills in from the top and the window keeps answering clicks.
+
+       Readers queued through whenExplorerSourceRendered() wait for the last
+       chunk, exactly as they wait for the last row: a scroll restore that ran
+       against an empty host would restore nothing. */
+    function renderExplorerLargeSource(index, code) {
+        const pane = terminals[index];
         const policy = explorerTierPolicy();
         const content = pane?._explorerFileContent || '';
+        /* Nothing this tier paints depends on anything a repaint moves: there
+           is no find, no gutter and no fold set, so a second call for the same
+           buffer would re-escape and re-parse megabytes to produce exactly the
+           chunks already on screen. */
+        const painted = pane._explorerLargeSourceRender;
+        if (painted
+            && painted.content === content
+            && !pane._explorerSourceRenderJob
+            && code.querySelector('.explorer-source-plain') === painted.host) {
+            explorerFlushSourceRenderCallbacks(pane);
+            return;
+        }
         const chunks = policy ? policy.sourceChunks(content) : [content];
-        const body = chunks
-            .map(chunk => `<pre class="explorer-source-chunk">${escHtml(chunk)}</pre>`)
-            .join('');
-        return `${explorerSourceTierNoticeHtml(pane)}<div class="explorer-source-plain">${body}</div>`;
+        explorerCancelSourceRenderJob(pane);
+        pane._explorerSourceRender = null;
+        pane._explorerSourceModel = null;
+        pane._explorerLargeSourceRender = null;
+        code.innerHTML = `${explorerSourceTierNoticeHtml(pane)}<div class="explorer-source-plain"></div>`;
+        const host = code.querySelector('.explorer-source-plain');
+        const paced = host
+            && chunks.length > 1
+            && typeof window.requestAnimationFrame === 'function';
+        if (!paced) {
+            const body = chunks.map(explorerLargeSourceChunkHtml).join('');
+            if (host) {
+                host.innerHTML = body;
+            } else {
+                code.innerHTML = `${explorerSourceTierNoticeHtml(pane)}<div class="explorer-source-plain">${body}</div>`;
+            }
+            pane._explorerLargeSourceRender = host ? { content, host } : null;
+            explorerFlushSourceRenderCallbacks(pane);
+            return;
+        }
+        const job = { frame: 0, at: 0 };
+        pane._explorerSourceRenderJob = job;
+        const step = () => {
+            job.frame = 0;
+            if (pane._explorerSourceRenderJob !== job
+                || code.querySelector('.explorer-source-plain') !== host) {
+                return;
+            }
+            const started = performance.now();
+            while (job.at < chunks.length) {
+                host.insertAdjacentHTML('beforeend', explorerLargeSourceChunkHtml(chunks[job.at]));
+                job.at += 1;
+                if (performance.now() - started >= EXPLORER_SOURCE_RENDER_BUDGET_MS) {
+                    break;
+                }
+            }
+            if (job.at < chunks.length) {
+                job.frame = window.requestAnimationFrame(step);
+                return;
+            }
+            pane._explorerSourceRenderJob = null;
+            pane._explorerLargeSourceRender = { content, host };
+            explorerFlushSourceRenderCallbacks(pane);
+        };
+        job.frame = window.requestAnimationFrame(step);
     }
 
     const EXPLORER_LANGUAGE_BY_EXTENSION = Object.freeze({
@@ -1007,8 +1078,13 @@
             pane._explorerHighlightCache = { content, language: normalizedLanguage, lines };
             /* The rows on screen are the deliberately plain first paint. The
                content did not move, so the normal repaint policy would skip;
-               clearing its identity makes the syntax-coloured pass a rebuild. */
-            pane._explorerSourceRender = null;
+               marking the record stale makes the syntax-coloured pass a
+               rebuild. The record itself is *kept* — discarding it is what
+               made the recolour look like a new document and drop the reader
+               back to line 1 a beat after a large file finished opening. */
+            if (pane._explorerSourceRender) {
+                pane._explorerSourceRender.stale = true;
+            }
             renderExplorerSource(index, explorerSourceSearchRangesOnScreen(index, pane));
         }).catch(error => {
             if (pane._explorerHighlightPending !== pending) {
@@ -4612,8 +4688,30 @@
         };
     }
 
+    /* One document's records, kept for as long as that exact string is the one
+       being asked about. The records are read-only to every caller, and the
+       whole point of the cache is that they are asked for repeatedly against
+       the *same* buffer: a single find keystroke used to walk the document
+       three times over — once for the decoration maps and twice more inside
+       the two row models — allocating a fresh record per line each pass. Two
+       entries, because the Source rows and the editor's draft are both live
+       during an edit and they are different strings. */
+    const _explorerLineRecordCache = [];
+
     function explorerSourceLineRecords(content) {
         const source = String(content || '');
+        for (let at = 0; at < _explorerLineRecordCache.length; at += 1) {
+            if (_explorerLineRecordCache[at].source === source) {
+                return _explorerLineRecordCache[at].records;
+            }
+        }
+        const records = explorerBuildSourceLineRecords(source);
+        _explorerLineRecordCache.unshift({ source, records });
+        _explorerLineRecordCache.length = Math.min(_explorerLineRecordCache.length, 2);
+        return records;
+    }
+
+    function explorerBuildSourceLineRecords(source) {
         const records = [];
         let lineNumber = 1;
         let index = 0;
@@ -4950,9 +5048,7 @@
            stop — no fold wiring, no occurrence tint, no change marks, none of
            which have rows to attach to. */
         if (explorerPaneSourceTier(pane) === 'large') {
-            code.innerHTML = renderExplorerLargeSourceHtml(pane);
-            pane._explorerSourceRender = null;
-            explorerAbandonSourceRenderJob(pane);
+            renderExplorerLargeSource(index, code);
             return;
         }
 
@@ -4970,11 +5066,24 @@
         const highlightedLines = explorerHighlightLinesForRender(
             index, pane, content, normalizeExplorerLanguage(language)
         );
-        const model = explorerSourceRowModel(content, language, collapsedLines, highlightedLines);
+        const model = explorerCachedSourceRowModel(
+            pane, content, language, collapsedLines, collapsedKey, highlightedLines
+        );
         const chunking = explorerRepaintPolicy()?.chunkPlan(model.rows.length, {
             async: typeof window.requestAnimationFrame === 'function'
         });
         explorerCancelSourceRenderJob(pane);
+        /* A rebuild of the *same document* is a presentation change, not a
+           navigation: the worker's syntax colours arriving, or a find whose
+           marks moved too widely to repaint in place. `code` is the scroller
+           itself, so replacing its rows sends the reader back to line 1 —
+           which is what made a large file jump to the top a beat after it
+           opened, and again on every wide find. Same content, same rows, same
+           geometry: hold the offset across the build. */
+        const keepScroll = pane._explorerSourceRender
+            && pane._explorerSourceRender.content === content
+            ? { top: code.scrollTop, left: code.scrollLeft }
+            : null;
         /* One string and one parse for a document that can afford it — which
            is nearly all of them, and is cheaper than any number of appends. */
         code.innerHTML = chunking && chunking.chunked
@@ -4991,7 +5100,9 @@
         if (container) {
             container.dataset.explorerRender = token;
         }
-        pane._explorerSourceRender = { token, content, language, collapsedKey, ranges: searchRanges };
+        pane._explorerSourceRender = {
+            token, content, language, collapsedKey, ranges: searchRanges, keepScroll
+        };
 
         if (!chunking || !chunking.chunked) {
             explorerFinishSourceRender(index);
@@ -5006,6 +5117,35 @@
 
     function explorerSourceCollapsedKey(collapsedLines) {
         return Array.from(collapsedLines || []).sort((a, b) => a - b).join(',');
+    }
+
+    /* The row model the Source view renders from, kept for as long as every
+       input to it is unchanged. A find keystroke asks for it twice — once to
+       decide which rows moved and once to emit them — and neither pass changes
+       the document, the language, the fold set or the token map. Rebuilding it
+       each time meant re-deriving every record and, on Markdown, re-running
+       the fence-aware heading scan over the whole file per keypress.
+
+       Identity comparison throughout, including on `highlightedLines`: the
+       highlight map is a stable reference held on the pane, and the pending
+       sentinel is a Symbol, so `===` distinguishes "still plain" from "the
+       worker answered" without inspecting either. */
+    function explorerCachedSourceRowModel(pane, content, language, collapsedLines, collapsedKey, highlightedLines) {
+        const cached = pane?._explorerSourceModel;
+        if (cached
+            && cached.content === content
+            && cached.language === language
+            && cached.collapsedKey === collapsedKey
+            && cached.highlightedLines === highlightedLines) {
+            return cached.model;
+        }
+        const model = explorerSourceRowModel(content, language, collapsedLines, highlightedLines);
+        if (pane) {
+            pane._explorerSourceModel = {
+                content, language, collapsedKey, highlightedLines, model
+            };
+        }
+        return model;
     }
 
     /* The DOM-free repaint policy (explorer-repaint.js). Looked up rather than
@@ -5037,6 +5177,7 @@
        after a skipped or decorated render, because a render that destroyed no
        rows has nothing to re-attach. */
     function explorerFinishSourceRender(index) {
+        explorerRestoreHeldSourceScroll(index);
         wireExplorerMarkdownSectionControls(index);
         // The rebuilt rows dropped the nodes the occurrence tint was anchored
         // to; re-derive it from whatever selection survived the render.
@@ -5045,6 +5186,24 @@
         // no fetch — loads are triggered by the change signals only).
         applyExplorerChangeMarks(index);
         explorerFlushSourceRenderCallbacks(terminals[index]);
+    }
+
+    /* One-use: the offset belongs to the build that captured it, and a later
+       render that legitimately moves the reader (a new file, a jump to a
+       match) must not be pulled back to it. */
+    function explorerRestoreHeldSourceScroll(index) {
+        const pane = terminals[index];
+        const held = pane?._explorerSourceRender?.keepScroll;
+        if (!held) {
+            return;
+        }
+        pane._explorerSourceRender.keepScroll = null;
+        const code = document.getElementById(`explorer-code-${index}`);
+        if (!code) {
+            return;
+        }
+        code.scrollTop = held.top;
+        code.scrollLeft = held.left;
     }
 
     function explorerFlushSourceRenderCallbacks(pane) {
@@ -5100,6 +5259,17 @@
         explorerFlushSourceRenderCallbacks(pane);
     }
 
+    /* The unit a frame emits rows in, and how long a frame may spend emitting
+       them. The chunk plan's slice size is a per-frame *ceiling*; this budget
+       is what actually ends a frame, because "rows" is not a unit of time —
+       2,000 rows of a minified bundle and 2,000 rows of a config file are two
+       orders of magnitude apart, and a frame that overruns is a frame the
+       window does not paint and a click the window does not answer. Filling in
+       from the top is only an improvement over freezing if the frames in
+       between are short enough to be interrupted. */
+    const EXPLORER_SOURCE_RENDER_BATCH_ROWS = 250;
+    const EXPLORER_SOURCE_RENDER_BUDGET_MS = 8;
+
     function explorerRunSourceRenderJob(index, code, container, model, searchRanges, size) {
         const pane = terminals[index];
         const job = { frame: 0, at: 0 };
@@ -5114,9 +5284,16 @@
                 || explorerRenderedSourceContainer(code) !== container) {
                 return;
             }
-            const to = Math.min(model.rows.length, job.at + size);
-            explorerAppendSourceRows(container, model, searchRanges, job.at, to);
-            job.at = to;
+            const started = performance.now();
+            const frameEnd = Math.min(model.rows.length, job.at + size);
+            while (job.at < frameEnd) {
+                const to = Math.min(frameEnd, job.at + EXPLORER_SOURCE_RENDER_BATCH_ROWS);
+                explorerAppendSourceRows(container, model, searchRanges, job.at, to);
+                job.at = to;
+                if (performance.now() - started >= EXPLORER_SOURCE_RENDER_BUDGET_MS) {
+                    break;
+                }
+            }
             if (job.at < model.rows.length) {
                 job.frame = window.requestAnimationFrame(step);
                 return;
@@ -5146,6 +5323,11 @@
         if (!policy || !previous) {
             return false;
         }
+        if (previous.stale) {
+            // The syntax colours arrived: every row's content changed even
+            // though the document did not.
+            return false;
+        }
         const container = explorerRenderedSourceContainer(code);
         const sameSurface = Boolean(container)
             && container.dataset.explorerRender === previous.token;
@@ -5163,6 +5345,9 @@
             contentChanged: previous.content !== next.content,
             languageChanged: previous.language !== next.language,
             foldsChanged: previous.collapsedKey !== next.collapsedKey,
+            // What a rebuild would cost, so the ceiling on what a repaint may
+            // touch is read against the document rather than as an absolute.
+            rowCount: records.length,
             previousDecorations: policy.decorationMap(records, previousRanges),
             nextDecorations: policy.decorationMap(records, next.searchRanges)
         });
@@ -5177,24 +5362,72 @@
         const highlightedLines = explorerHighlightLinesForRender(
             index, pane, next.content, normalizeExplorerLanguage(next.language)
         );
-        const model = explorerSourceRowModel(
+        const model = explorerCachedSourceRowModel(
+            pane,
             next.content,
             next.language,
             ensureExplorerMarkdownCollapsedLines(pane),
+            next.collapsedKey,
             highlightedLines
         );
         const byLine = new Map();
         model.rows.forEach(row => byLine.set(row.record.number, row));
+        const cells = explorerRenderedSourceCells(container, plan.lines);
         plan.lines.forEach(line => {
             const row = byLine.get(line);
-            const cell = container
-                .querySelector(`.explorer-source-line[data-explorer-line="${line}"] > code`);
+            const cell = cells.get(line);
             if (row && cell) {
                 cell.innerHTML = explorerSourceRowCodeHtml(model, row, next.searchRanges);
             }
         });
         scheduleExplorerOccurrenceHighlight();
         return true;
+    }
+
+    /* Past this many rows, finding them one at a time costs more than walking
+       the container once. Each `querySelector('[data-explorer-line="N"]')` is
+       a fresh scan of the whole row list, so a find matching a thousand lines
+       in a twenty-thousand-row file walked twenty million nodes to repaint a
+       thousand cells — that, and not the parsing, is what made typing in Find
+       lag behind the keyboard. Below the threshold the walk is the more
+       expensive of the two, and the commonest repaint of all — stepping from
+       one match to the next — touches exactly two rows. */
+    const EXPLORER_SOURCE_CELL_WALK_MIN_ROWS = 16;
+
+    /* Line number → that row's code cell, for the lines about to be repainted. */
+    function explorerRenderedSourceCells(container, lines) {
+        const cells = new Map();
+        const wanted = Array.isArray(lines) ? lines : [];
+        if (!container || !wanted.length) {
+            return cells;
+        }
+        if (wanted.length < EXPLORER_SOURCE_CELL_WALK_MIN_ROWS) {
+            wanted.forEach(line => {
+                const cell = container.querySelector(
+                    `.explorer-source-line[data-explorer-line="${line}"] > code`
+                );
+                if (cell) {
+                    cells.set(line, cell);
+                }
+            });
+            return cells;
+        }
+        const rows = container.children;
+        const needed = new Set(wanted);
+        for (let at = 0; at < rows.length; at += 1) {
+            const row = rows[at];
+            const line = Number(row.dataset?.explorerLine);
+            if (!needed.has(line)) {
+                continue;
+            }
+            /* Not `lastElementChild`: a changed row also carries the change
+               marker button, appended after the code cell. */
+            const cell = row.querySelector(':scope > code');
+            if (cell) {
+                cells.set(line, cell);
+            }
+        }
+        return cells;
     }
 
     function explorerPreviewBlockLanguage(code) {
@@ -5425,22 +5658,87 @@
     /* Paint whatever preview HTML the pane already holds. Split out of
        restoreExplorerPreview() so the fetch path and the restore path share
        one insertion, one highlight pass and one Mermaid pass. */
+    /* Hashed once per rendered document, not once per call: this is consulted
+       on every view switch and every find keystroke, and the string it hashes
+       is the whole rendered preview. */
+    function explorerPreviewRenderToken(pane) {
+        const path = pane._explorerFilePath || '';
+        const html = pane._explorerPreviewHtml || '';
+        const cached = pane._explorerPreviewToken;
+        if (cached && cached.path === path && cached.html === html) {
+            return cached.token;
+        }
+        const token = explorerHashText([path, html].join(String.fromCharCode(0)));
+        pane._explorerPreviewToken = { path, html, token };
+        return token;
+    }
+
+    /* A repaint of the Preview panel is not a re-visit of it.
+
+       Every path that shows the panel used to run this: selecting the tab,
+       switching Source/Preview/Diff, and every repaint of the find. Each one
+       replaced the panel's whole subtree, which puts the reader back at the
+       top — and since the Mermaid diagrams draw as they come into view, the
+       panel it lands on is also *shorter* than the one it replaced, so the
+       proportional restore that follows cannot find the way back either. On a
+       long document that reads as being thrown to the top for no reason.
+
+       So a panel already showing this exact render is left alone, and only the
+       appearance (a few custom properties on the element itself) is re-applied.
+       The token is the path and the rendered HTML, not the element: a panel the
+       viewer rebuilt carries no token and repaints, exactly as it must. */
     function paintExplorerPreview(index) {
         const pane = terminals[index];
         const preview = document.getElementById(`explorer-preview-${index}`);
         if (!pane || !preview) {
             return null;
         }
-        preview._explorerMermaidObserver?.disconnect();
-        preview._explorerMermaidObserver = null;
-        preview.innerHTML = pane._explorerPreviewHtml || '';
-        if (!pane._explorerFilePlain) {
-            highlightExplorerPreviewCode(preview);
+        const token = explorerPreviewRenderToken(pane);
+        const stale = preview.dataset.explorerPreviewRender !== token;
+        if (stale) {
+            preview._explorerMermaidObserver?.disconnect();
+            preview._explorerMermaidObserver = null;
+            preview.innerHTML = pane._explorerPreviewHtml || '';
+            preview.dataset.explorerPreviewRender = token;
+            if (!pane._explorerFilePlain) {
+                highlightExplorerPreviewCode(preview);
+            }
+            wireExplorerMarkdownLinks(index, preview);
         }
-        wireExplorerMarkdownLinks(index, preview);
+        /* Outside the guard, and still the one call site: appearance is a few
+           custom properties on this element, so it costs nothing to re-apply
+           and every path into the panel keeps getting it without restating it.
+           The diagrams stay inside, after it, because they are drawn against
+           the appearance that is on the element. */
         applyExplorerMarkdownAppearanceToElement(preview, explorerMarkdownAppearance());
-        renderExplorerMermaid(preview);
+        if (stale) {
+            renderExplorerMermaid(preview);
+        }
         return preview;
+    }
+
+    /* The find's <mark> wrappers, taken out without touching anything else.
+
+       A repaint used to drop them with the rest of the subtree; a reused panel
+       has to have them removed explicitly, or the next query would paint its
+       marks alongside the previous query's. Parents are normalized once each
+       rather than once per mark, because a paragraph with fifty hits in it
+       would otherwise re-walk its own children fifty times. */
+    function explorerClearSearchMarks(root) {
+        const marks = root?.querySelectorAll?.('mark.explorer-search-match');
+        if (!marks || !marks.length) {
+            return;
+        }
+        const parents = new Set();
+        marks.forEach(mark => {
+            const parent = mark.parentNode;
+            if (!parent) {
+                return;
+            }
+            parents.add(parent);
+            parent.replaceChild(document.createTextNode(mark.textContent || ''), mark);
+        });
+        parents.forEach(parent => parent.normalize());
     }
 
     /* Fetch the rendered Markdown the first time the Preview panel is shown,
@@ -5509,7 +5807,12 @@
             ensureExplorerPreviewLoaded(index);
             return preview;
         }
-        return paintExplorerPreview(index) || preview;
+        const painted = paintExplorerPreview(index) || preview;
+        /* "Restore" means the panel as the file renders it, so the find's
+           marks come off here. A repaint drops them with the subtree; a reused
+           panel keeps them until they are taken out. */
+        explorerClearSearchMarks(painted);
+        return painted;
     }
 
     function markExplorerSearchInElement(root, query, activeIndex = 0, maxMatches = EXPLORER_SEARCH_MAX_MATCHES) {
@@ -6294,6 +6597,26 @@
         };
     }
 
+    /* Restore an offset the reader actually had, and fall back to the fraction
+       only when that is all there is.
+
+       A capture taken in this session carries both — the exact offset and its
+       ratio — and inside a session the offset is the truthful one: a tab
+       switch, a re-render, a rebuild of the same document all return to the
+       same content, and a fraction of a scroll extent that moved by a few
+       pixels puts the reader somewhere they never were. Horizontally that is
+       not even approximately right: a code view's horizontal position is a
+       column, and the extent it would be a fraction of is the length of the
+       single longest line, which one folded section or one row a frame-sliced
+       build has not emitted yet is enough to change. Scaling by it threw the
+       view sideways on every restore, which is what made scrolling a large
+       file feel like it was fighting back.
+
+       The ratios are what survive a restart: a persisted record stores only
+       `{x, y}` (explorer-persistence.js), so a restored workspace has no
+       offset to return to and a proportional position is the best available
+       answer. `wasAtBottom` still wins outright — "the end of the file" is an
+       intent, not a coordinate. */
     function applyScrollMetrics(el, metrics) {
         if (!el || !metrics) {
             return;
@@ -6302,17 +6625,17 @@
         const maxScrollLeft = Math.max(0, el.scrollWidth - el.clientWidth);
         el.scrollLeft = Math.min(
             maxScrollLeft,
-            maxScrollLeft > 0
-                ? Math.round(maxScrollLeft * (metrics.scrollLeftRatio || 0))
-                : (metrics.scrollLeft || 0)
+            Number.isFinite(metrics.scrollLeft)
+                ? metrics.scrollLeft
+                : Math.round(maxScrollLeft * (metrics.scrollLeftRatio || 0))
         );
         el.scrollTop = metrics.wasAtBottom
             ? maxScrollTop
             : Math.min(
                 maxScrollTop,
-                maxScrollTop > 0
-                    ? Math.round(maxScrollTop * (metrics.scrollTopRatio || 0))
-                    : (metrics.scrollTop || 0)
+                Number.isFinite(metrics.scrollTop)
+                    ? metrics.scrollTop
+                    : Math.round(maxScrollTop * (metrics.scrollTopRatio || 0))
             );
     }
 
@@ -6385,26 +6708,13 @@
             applyScrollMetrics(document.getElementById(`explorer-git-panel-${index}`), state.sidebar?.git);
             applyScrollMetrics(document.getElementById(`explorer-search-panel-${index}`), state.sidebar?.search);
             list.querySelectorAll('[data-explorer-file-panel]').forEach(panel => {
-                const panelState = state.panels?.[panel.dataset.explorerFilePanel || 'source'];
-                const scrollEl = explorerPanelScrollTarget(panel);
-                if (panelState && scrollEl) {
-                    const maxScrollTop = Math.max(0, scrollEl.scrollHeight - scrollEl.clientHeight);
-                    const maxScrollLeft = Math.max(0, scrollEl.scrollWidth - scrollEl.clientWidth);
-                    scrollEl.scrollLeft = Math.min(
-                        maxScrollLeft,
-                        maxScrollLeft > 0
-                            ? Math.round(maxScrollLeft * (panelState.scrollLeftRatio || 0))
-                            : (panelState.scrollLeft || 0)
-                    );
-                    scrollEl.scrollTop = panelState.wasAtBottom
-                        ? maxScrollTop
-                        : Math.min(
-                            maxScrollTop,
-                            maxScrollTop > 0
-                                ? Math.round(maxScrollTop * (panelState.scrollTopRatio || 0))
-                                : (panelState.scrollTop || 0)
-                        );
-                }
+                // One implementation of "put this element back where it was";
+                // this used to carry its own copy, which is how the two could
+                // have disagreed about which axis reads a ratio.
+                applyScrollMetrics(
+                    explorerPanelScrollTarget(panel),
+                    state.panels?.[panel.dataset.explorerFilePanel || 'source']
+                );
             });
         };
 

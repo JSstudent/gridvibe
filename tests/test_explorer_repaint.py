@@ -16,6 +16,11 @@ the DOM agrees with them. The contracts:
   marks moved, and every other row survives as the same node — so the change
   marks, their marker buttons and the reader's selection survive with it;
 * a real change (content, language, the fold set) still rebuilds;
+* a rebuild of the same document holds the reader's scroll offset across it, and
+  a restore returns an exact offset rather than a fraction of a scroll extent
+  that may have moved;
+* the Markdown Preview panel is repainted only when its render moved, and a
+  reused panel has the find's marks taken out of it explicitly;
 * the in-place editor's underlay replaces the rows a keystroke moved instead of
   re-tokenizing the whole draft on every animation frame, and it renumbers the
   rows a new line shifted.
@@ -72,7 +77,9 @@ function makeRow(line, body) {
             const at = this._host ? this._host.indexOf(this) : -1;
             if (at !== -1) { this._host.splice(at, 1); }
         },
-        querySelector: selector => (selector === '> code' ? cell : null)
+        querySelector: selector => (
+            selector === ':scope > code' || selector === '> code' ? cell : null
+        )
     };
 }
 
@@ -125,6 +132,11 @@ function makeSourcePanel(id) {
         id,
         writes: 0,
         raw: '',
+        // The Source panel *is* the scroller, and replacing its children is
+        // what resets the offset in a browser. The stub does the same, so a
+        // held scroll position is a restore and not an untouched field.
+        scrollTop: 0,
+        scrollLeft: 0,
         dataset: {},
         style: { setProperty() {}, removeProperty() {} },
         classList: {
@@ -137,6 +149,8 @@ function makeSourcePanel(id) {
         set innerHTML(value) {
             panel.writes += 1;
             panel.raw = value;
+            panel.scrollTop = 0;
+            panel.scrollLeft = 0;
             block = value.includes('explorer-source-lines') ? makeLinesBlock(value) : null;
         },
         get block() { return block; },
@@ -166,6 +180,7 @@ function makeSandbox(nodes) {
                 set innerHTML(value) { this._html = value; this.children = parseRows(value); },
                 children: []
             }),
+            createTextNode: text => ({ text: String(text) }),
             body: { dataset: {}, addEventListener() {} }
         },
         window: {
@@ -177,6 +192,7 @@ function makeSandbox(nodes) {
             requestAnimationFrame: () => 0
         },
         navigator: {},
+        performance: { now: () => Date.now() },
         setTimeout,
         clearTimeout,
         requestAnimationFrame: () => 0,
@@ -286,7 +302,11 @@ class RepaintPolicyTestCase(NodeHarnessMixin, unittest.TestCase):
             "  foldsMoved: plan({ foldsChanged: true }),"
             "  replacedPanel: plan({ sameSurface: false }),"
             "  buildInFlight: plan({ pending: true }),"
-            "  tooWide: plan({ nextDecorations: wide })"
+            "  buildInFlightMoved: plan({"
+            "    pending: true, nextDecorations: new Map([[9, 'b']])"
+            "  }),"
+            "  tooWide: plan({ nextDecorations: wide }),"
+            "  tooWideForItsSize: plan({ nextDecorations: wide, rowCount: 20000 })"
             "});"
         )
 
@@ -297,13 +317,24 @@ class RepaintPolicyTestCase(NodeHarnessMixin, unittest.TestCase):
         self.assertEqual(verdicts["moved"]["lines"], [4, 9])
         for reason in ("contentMoved", "languageMoved", "foldsMoved"):
             self.assertEqual(verdicts[reason]["mode"], "full", reason)
-        # A panel that is no longer the one we rendered into, and a build still
-        # emitting rows with the ranges it started from, both have to rebuild —
-        # skipping either is how a pane ends up empty or half-marked.
+        # A panel that is no longer the one we rendered into has to rebuild —
+        # skipping it is how a pane ends up empty.
         self.assertEqual(verdicts["replacedPanel"]["mode"], "full")
-        self.assertEqual(verdicts["buildInFlight"]["mode"], "full")
-        # Past the ceiling one string beats hundreds of per-row parses.
+        # A frame-sliced build still emitting rows is judged on what this
+        # render would *change*. Nothing to change is already being painted, so
+        # rebuilding is the duplicate open render at full size; marks that did
+        # move have to start again, because the slices not yet emitted carry
+        # the ranges the build started from.
+        self.assertEqual(verdicts["buildInFlight"]["mode"], "skip")
+        self.assertEqual(verdicts["buildInFlightMoved"]["mode"], "full")
+        # Past the ceiling one string beats hundreds of per-row parses — but
+        # the ceiling is relative to the document, because the string a rebuild
+        # parses is the whole of it. 900 rows is too many for a small file and
+        # comfortably within reach on a 20,000-row one, which is exactly where
+        # a find's first keystroke lands.
         self.assertEqual(verdicts["tooWide"]["mode"], "full")
+        self.assertEqual(verdicts["tooWideForItsSize"]["mode"], "decorate")
+        self.assertEqual(len(verdicts["tooWideForItsSize"]["lines"]), 900)
 
     def test_a_moved_draft_names_the_run_of_lines_it_replaced(self):
         plans = self._policy(
@@ -356,6 +387,103 @@ class RepaintPolicyTestCase(NodeHarnessMixin, unittest.TestCase):
         # Without requestAnimationFrame there is nothing to slice against, so
         # the build stays synchronous rather than never finishing.
         self.assertFalse(plans["noFrames"]["chunked"])
+
+
+@unittest.skipUnless(NODE, "Node.js is required for explorer repaint tests")
+class PreviewRepaintTestCase(NodeHarnessMixin, unittest.TestCase):
+    """The Markdown Preview panel is repainted only when its render moved.
+
+    Every path that shows the panel ran the paint: selecting the tab, switching
+    Source/Preview/Diff, and every repaint of the find. Each one replaced the
+    whole subtree, which puts the reader at the top — and because the diagrams
+    draw as they scroll into view, the panel it lands on is shorter than the
+    one it replaced, so the restore that follows cannot find the way back
+    either. On a long document that reads as being thrown to the top.
+    """
+
+    def _preview(self, script: str):
+        return self._run_node(
+            DOM_STUB
+            + """
+            const fs = require('fs');
+            const vm = require('vm');
+            const preview = {
+                id: 'explorer-preview-0',
+                writes: 0,
+                _html: '',
+                dataset: {},
+                get innerHTML() { return preview._html; },
+                set innerHTML(value) { preview.writes += 1; preview._html = value; },
+                classList: { add() {}, remove() {}, contains: () => false },
+                addEventListener() {},
+                querySelectorAll: () => [],
+                querySelector: () => null
+            };
+            const sandbox = makeSandbox({ 'explorer-preview-0': preview });
+            vm.createContext(sandbox);
+            [process.argv[2], process.argv[3], process.argv[4]].forEach(path => {
+                vm.runInContext(fs.readFileSync(path, 'utf8'), sandbox);
+            });
+            const pane = {
+                _explorerMode: 'file',
+                _explorerFilePath: 'notes.md',
+                _explorerPreviewHtml: '<h1>Notes</h1>',
+                _explorerPreviewLoaded: true,
+                _explorerFilePlain: false
+            };
+            sandbox.terminals[0] = pane;
+            """
+            + script,
+            str(REPAINT_JS),
+            str(VIEWER_JS),
+            str(TABS_JS),
+        )
+
+    def test_revisiting_a_preview_does_not_replace_what_is_on_screen(self):
+        result = self._preview(
+            "sandbox.paintExplorerPreview(0);"
+            "sandbox.paintExplorerPreview(0);"
+            "sandbox.restoreExplorerPreview(0);"
+            "const revisits = preview.writes;"
+            "pane._explorerPreviewHtml = '<h1>Notes</h1><p>and more</p>';"
+            "sandbox.paintExplorerPreview(0);"
+            "console.log(JSON.stringify({"
+            "  revisits,"
+            "  afterNewRender: preview.writes,"
+            "  showing: preview.innerHTML"
+            "}));"
+        )
+
+        # Three visits to an unchanged render, one paint.
+        self.assertEqual(result["revisits"], 1)
+        # A render that actually moved still repaints.
+        self.assertEqual(result["afterNewRender"], 2)
+        self.assertEqual(result["showing"], "<h1>Notes</h1><p>and more</p>")
+
+    def test_a_reused_panel_has_the_find_marks_taken_out_of_it(self):
+        """A repaint dropped them with the subtree; a reused panel cannot."""
+        result = self._preview(
+            "const parent = { normalized: 0, normalize() { this.normalized += 1; } };"
+            "const marks = ['one', 'two'].map(text => ({"
+            "  textContent: text, parentNode: parent, replacedWith: null"
+            "}));"
+            "parent.replaceChild = (node, old) => { old.replacedWith = node; };"
+            "const root = {"
+            "  querySelectorAll: selector => ("
+            "    selector === 'mark.explorer-search-match' ? marks : []"
+            "  )"
+            "};"
+            "sandbox.explorerClearSearchMarks(root);"
+            "console.log(JSON.stringify({"
+            "  unwrapped: marks.map(mark => mark.replacedWith && mark.replacedWith.text),"
+            "  normalized: parent.normalized"
+            "}));"
+        )
+
+        self.assertEqual(result["unwrapped"], ["one", "two"])
+        # Once per parent, not once per mark: a paragraph with fifty hits in it
+        # would otherwise re-walk its own children fifty times.
+        self.assertEqual(result["normalized"], 1)
 
 
 @unittest.skipUnless(NODE, "Node.js is required for explorer repaint tests")
@@ -444,6 +572,136 @@ class SourceRepaintAdapterTestCase(NodeHarnessMixin, unittest.TestCase):
         # Rows 1 and 3 carry the two matches; rows 2 and 4 are untouched.
         self.assertEqual(result["cellWrites"], [1, 0, 1, 0])
         self.assertEqual(result["activeMarks"], [0, 0, 1, 0])
+
+    def test_a_wide_find_on_a_big_file_repaints_instead_of_rebuilding(self):
+        """The ceiling is relative, because a rebuild's cost is the document.
+
+        A find's first keystrokes match nearly every line, so an absolute
+        400-row ceiling turned each of them into a full rebuild of tens of
+        thousands of rows — which is exactly the case the incremental repaint
+        was built for and exactly the case it refused.
+        """
+        result = self._render(
+            "const NL = String.fromCharCode(10);"
+            "pane._explorerFileContent = Array.from({ length: 3000 },"
+            "  (_, i) => (i % 5 === 0 ? 'hit here' : 'plain line')).join(NL) + NL;"
+            "sandbox.renderExplorerSource(0);"
+            "const before = rowIds();"
+            "const ranges = [];"
+            "let at = pane._explorerFileContent.indexOf('hit');"
+            "while (at !== -1) {"
+            "  ranges.push({ start: at, end: at + 3, active: ranges.length === 0 });"
+            "  at = pane._explorerFileContent.indexOf('hit', at + 3);"
+            "}"
+            "sandbox.renderExplorerSource(0, ranges);"
+            "console.log(JSON.stringify({"
+            "  matches: ranges.length,"
+            "  panelWrites: panel.writes,"
+            "  survived: JSON.stringify(before) === JSON.stringify(rowIds()),"
+            "  touched: cellWrites().filter(Boolean).length,"
+            "  marked: panel.block.rows.filter("
+            "    row => row.cell.innerHTML.includes('explorer-search-match')"
+            "  ).length"
+            "}));"
+        )
+
+        self.assertEqual(result["matches"], 600)
+        # 600 rows is well past the old absolute ceiling and well inside a
+        # 3,000-row document's share of itself.
+        self.assertEqual(result["panelWrites"], 1, "the panel must not be rebuilt")
+        self.assertTrue(result["survived"], "no row may be rebuilt")
+        self.assertEqual(result["touched"], 600)
+        self.assertEqual(result["marked"], 600)
+
+    def test_a_rebuild_of_the_same_document_holds_the_scroll_position(self):
+        """A presentation change is not navigation.
+
+        A repaint too wide to do in place, and the syntax colours arriving from
+        the worker, both rebuild rows that describe the same document — and the
+        panel is the scroller, so rebuilding sent the reader back to line 1 a
+        beat after a large file finished opening.
+        """
+        result = self._render(
+            "const NL = String.fromCharCode(10);"
+            "pane._explorerFileContent ="
+            "  Array.from({ length: 600 }, () => 'hit line').join(NL) + NL;"
+            "sandbox.renderExplorerSource(0);"
+            "panel.scrollTop = 4200;"
+            "panel.scrollLeft = 17;"
+            "const ranges = [];"
+            "let at = pane._explorerFileContent.indexOf('hit');"
+            "while (at !== -1) {"
+            "  ranges.push({ start: at, end: at + 3, active: false });"
+            "  at = pane._explorerFileContent.indexOf('hit', at + 3);"
+            "}"
+            "sandbox.renderExplorerSource(0, ranges);"
+            "const held = { top: panel.scrollTop, left: panel.scrollLeft };"
+            "pane._explorerFileContent = 'a different file' + NL;"
+            "sandbox.renderExplorerSource(0);"
+            "console.log(JSON.stringify({"
+            "  matches: ranges.length,"
+            "  panelWrites: panel.writes,"
+            "  held,"
+            "  afterNewContent: panel.scrollTop"
+            "}));"
+        )
+
+        # 600 marked rows in a 600-row document: past its share, so this is a
+        # genuine rebuild and not the in-place repaint above.
+        self.assertEqual(result["matches"], 600)
+        self.assertEqual(result["panelWrites"], 3)
+        self.assertEqual(result["held"], {"top": 4200, "left": 17})
+        # A different document is navigation, and keeps nothing.
+        self.assertEqual(result["afterNewContent"], 0)
+
+    def test_a_restore_returns_an_exact_offset_and_falls_back_to_a_fraction(self):
+        """Inside a session the offset is the truthful thing.
+
+        A capture taken here carries both the offset and its ratio, and the
+        content it is restored onto is the same content. Scaling by a scroll
+        extent that moved a few pixels puts the reader somewhere they never
+        were — and horizontally the extent is the length of the single longest
+        line, which one fold or one row a frame-sliced build has not emitted
+        yet is enough to change. Only a record that survived a restart has
+        nothing but the fraction (explorer-persistence.js stores `{x, y}`), and
+        that is the case the fraction exists for.
+        """
+        result = self._render(
+            "const el = {"
+            "  scrollTop: 0, scrollLeft: 0,"
+            "  scrollHeight: 5000, clientHeight: 500,"
+            "  scrollWidth: 4000, clientWidth: 400"
+            "};"
+            "const at = (metrics, widen) => {"
+            "  el.scrollTop = 0; el.scrollLeft = 0;"
+            "  el.scrollWidth = widen ? 9000 : 4000;"
+            "  sandbox.applyScrollMetrics(el, metrics);"
+            "  return { top: el.scrollTop, left: el.scrollLeft };"
+            "};"
+            "const captured = {"
+            "  scrollLeft: 900, scrollLeftRatio: 900 / 3600,"
+            "  scrollTop: 1800, scrollTopRatio: 1800 / 4500,"
+            "  wasAtBottom: false"
+            "};"
+            "console.log(JSON.stringify({"
+            "  exact: at(captured),"
+            "  widened: at(captured, true),"
+            "  persisted: at({ scrollLeftRatio: 0.25, scrollTopRatio: 0.4 }),"
+            "  atBottom: at({ scrollTop: 10, scrollTopRatio: 0, wasAtBottom: true }),"
+            "  clamped: at({ scrollLeft: 99999, scrollTop: 99999 })"
+            "}));"
+        )
+
+        self.assertEqual(result["exact"], {"top": 1800, "left": 900})
+        # The longest line got longer between capture and restore. The column
+        # the reader was on did not move, so neither does the view.
+        self.assertEqual(result["widened"], {"top": 1800, "left": 900})
+        # Nothing but fractions: the best answer available, and the one a
+        # restored workspace gets.
+        self.assertEqual(result["persisted"], {"top": 1800, "left": 900})
+        # "The end of the file" is an intent, not a coordinate.
+        self.assertEqual(result["atBottom"]["top"], 4500)
+        self.assertEqual(result["clamped"], {"top": 4500, "left": 3600})
 
     def test_a_content_change_still_rebuilds_the_rows(self):
         result = self._render(

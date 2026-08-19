@@ -35,16 +35,56 @@ HARNESS = """
 const fs = require('fs');
 const vm = require('vm');
 
+// The chunks arrive over animation frames, so the stub has to be a real
+// element for the host lookup and a real queue for the frames — otherwise the
+// harness would silently measure the one-pass fallback instead of the paint
+// the page performs.
+function makePlainHost() {
+    return {
+        className: 'explorer-source-plain',
+        _html: '',
+        get innerHTML() { return this._html; },
+        set innerHTML(value) { this._html = value; },
+        insertAdjacentHTML(position, markup) { this._html += markup; }
+    };
+}
+
+let plainHost = null;
+
 const code = {
     id: 'explorer-code-0',
-    innerHTML: '',
+    _raw: '',
+    get innerHTML() {
+        return plainHost
+            ? code._raw.replace(
+                '<div class="explorer-source-plain"></div>',
+                '<div class="explorer-source-plain">' + plainHost.innerHTML + '</div>'
+            )
+            : code._raw;
+    },
+    set innerHTML(value) {
+        code._raw = value;
+        plainHost = value.includes('explorer-source-plain') ? makePlainHost() : null;
+    },
     dataset: {},
     style: { setProperty() {}, removeProperty() {} },
     classList: { add() {}, remove() {}, contains: () => false, toggle: () => false },
-    querySelector: () => null,
+    querySelector: selector => (
+        selector === '.explorer-source-plain' ? plainHost : null
+    ),
     querySelectorAll: () => [],
     addEventListener() {},
     setAttribute() {}
+};
+
+const frames = [];
+const runFrames = () => {
+    let ran = 0;
+    while (frames.length) {
+        frames.shift()();
+        ran += 1;
+    }
+    return ran;
 };
 
 const sandbox = {
@@ -63,12 +103,13 @@ const sandbox = {
         clearTimeout,
         matchMedia: () => ({ matches: false }),
         localStorage: { getItem: () => null, setItem() {}, removeItem() {} },
-        requestAnimationFrame: () => 0
+        requestAnimationFrame: callback => frames.push(callback)
     },
     navigator: {},
+    performance: { now: () => Date.now() },
     setTimeout,
     clearTimeout,
-    requestAnimationFrame: () => 0,
+    requestAnimationFrame: callback => frames.push(callback),
     terminals: [],
     sessionIds: [],
     escHtml: value => String(value == null ? '' : value)
@@ -100,6 +141,10 @@ const pane = {
 sandbox.terminals[0] = pane;
 sandbox.applyExplorerSourceTier(pane, body);
 sandbox.renderExplorerSource(0);
+// What the pane shows before a single frame has run, and how many frames the
+// paint took to finish.
+const beforeFrames = code.innerHTML;
+const frameCount = runFrames();
 
 const html = code.innerHTML;
 const chunkBodies = [...html.matchAll(
@@ -112,6 +157,12 @@ console.log(JSON.stringify({
     rowCount: (html.match(/class="explorer-source-line"/g) || []).length,
     linesBlocks: (html.match(/class="explorer-source-lines"/g) || []).length,
     chunkCount: chunkBodies.length,
+    frameCount,
+    // The notice is up immediately; the chunks are not.
+    noticeBeforeFrames: beforeFrames.includes('explorer-source-tier-notice'),
+    chunksBeforeFrames: (
+        beforeFrames.match(/class="explorer-source-chunk"/g) || []
+    ).length,
     noticeCount: (html.match(/class="explorer-source-tier-notice"/g) || []).length,
     hasStatusRole: html.includes('<div class="explorer-source-tier-notice" role="status">'),
     notice: (html.match(/<div class="explorer-source-tier-notice"[\\s\\S]*?<\\/div>/) || [''])[0],
@@ -154,6 +205,23 @@ class ExplorerLargeFileTierTestCase(unittest.TestCase):
         self.assertEqual(rendered["linesBlocks"], 0)
         self.assertEqual(rendered["chunkCount"], 8)
         self.assertTrue(rendered["lossless"], "the chunks must reproduce the file")
+
+    def test_the_chunks_arrive_over_frames_behind_the_notice(self):
+        """Not building rows is not the same as not blocking the thread.
+
+        Escaping the whole buffer and handing the parser one string that size
+        is the same uninterruptible task the tier exists to remove, so the
+        chunks are paced exactly as the rows are: the notice is on screen
+        before any of them, and no frame carries the whole file.
+        """
+        rendered = self._render(40000)
+
+        self.assertTrue(rendered["noticeBeforeFrames"])
+        self.assertEqual(rendered["chunksBeforeFrames"], 0)
+        self.assertGreater(rendered["frameCount"], 0)
+        # Still every chunk, and still byte-for-byte the file.
+        self.assertEqual(rendered["chunkCount"], 8)
+        self.assertTrue(rendered["lossless"])
 
     def test_the_notice_explains_the_tier_and_states_find_plainly(self):
         rendered = self._render(40000)

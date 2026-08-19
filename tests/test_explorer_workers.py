@@ -87,6 +87,72 @@ class ExplorerWorkerTestCase(unittest.TestCase):
             ["classIds", "classes", "lengths", "lineRunStarts", "starts"],
         )
 
+    def test_the_decoded_map_materializes_one_line_at_a_time(self):
+        """The freeze the worker removed must not reappear on the line after it.
+
+        Building every run object and every substring for a whole document is
+        one synchronous task proportional to the file, landing exactly where
+        the Highlight.js pass used to. A line's runs are a bounded slice of the
+        compact arrays, and the frame-sliced build asks for a few hundred lines
+        per frame — so they are built when they are asked for, and only then.
+
+        A bad shape still fails where the answer is accepted, not halfway
+        through a paint: the structural check stays eager.
+        """
+        result = self._run_node(
+            "const NL = String.fromCharCode(10);\n"
+            "const source = Array.from({ length: 400 },"
+            "  (_, i) => 'const v' + i + ' = 1;').join(NL);\n"
+            "const starts = [], lengths = [], classIds = [], lineRunStarts = [0];\n"
+            "let at = 0;\n"
+            "source.split(NL).forEach(line => {\n"
+            "  starts.push(at); lengths.push(line.length); classIds.push(0);\n"
+            "  at += line.length + 1; lineRunStarts.push(starts.length);\n"
+            "});\n"
+            "const compact = {\n"
+            "  classes: ['hljs-keyword'],\n"
+            "  starts: Uint32Array.from(starts), lengths: Uint32Array.from(lengths),\n"
+            "  classIds: Uint16Array.from(classIds),\n"
+            "  lineRunStarts: Uint32Array.from(lineRunStarts)\n"
+            "};\n"
+            "const lines = client.decodeHighlightResult(source, compact);\n"
+            "const untouched = lines.materialized;\n"
+            "const first = lines.get(1).map(run => run.text);\n"
+            "const afterOne = lines.materialized;\n"
+            "const stable = lines.get(1) === lines.get(1);\n"
+            "const afterRepeat = lines.materialized;\n"
+            "let threw = '';\n"
+            "try {\n"
+            "  client.decodeHighlightResult(source, Object.assign({}, compact, {\n"
+            "    lengths: Uint32Array.from(lengths.map(() => source.length + 5))\n"
+            "  }));\n"
+            "} catch (error) { threw = error.message; }\n"
+            "emit({\n"
+            "  size: lines.size, untouched, afterOne, afterRepeat, stable, first,\n"
+            "  last: lines.get(400).map(run => run.text),\n"
+            "  missing: lines.get(401) === undefined,\n"
+            "  allLines: Array.from(lines.values()).length,\n"
+            "  threw\n"
+            "});\n"
+        )
+
+        self.assertEqual(result["size"], 400)
+        # Decoding on its own materializes nothing.
+        self.assertEqual(result["untouched"], 0)
+        # One line asked for, one line built — and asking again reuses it
+        # rather than rebuilding, so a repaint of the same rows is free.
+        self.assertEqual(result["afterOne"], 1)
+        self.assertEqual(result["afterRepeat"], 1)
+        self.assertTrue(result["stable"])
+        self.assertEqual(result["first"], ["const v0 = 1;"])
+        self.assertEqual(result["last"], ["const v399 = 1;"])
+        self.assertTrue(result["missing"])
+        # Map's read surface is intact, so callers cannot tell the difference.
+        self.assertEqual(result["allLines"], 400)
+        # A run pointing past the buffer is refused at the boundary, not on the
+        # frame that happens to paint that line.
+        self.assertIn("invalid highlight run", result["threw"])
+
     def test_compact_markup_preserves_crlf_and_empty_lines(self):
         result = self._run_node(
             "const source = 'one' + String.fromCharCode(13, 10)"

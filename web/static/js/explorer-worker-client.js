@@ -210,6 +210,104 @@
         }
     }
 
+    /* The worker's answer, as the Map the row renderer reads — but materialized
+       one line at a time.
+
+       Building every run object and every substring up front is the whole
+       document's worth of allocation in one synchronous task, landing at
+       exactly the moment the worker was introduced to protect: a 300 KiB
+       source file is well over a hundred thousand runs, and the freeze the
+       page had while Highlight.js ran simply moved to the line after it. The
+       compact arrays are already the answer; a line's runs are a bounded slice
+       of them, and the frame-sliced build asks for at most a few hundred lines
+       per frame.
+
+       Every structural invariant is still checked eagerly, because a bad shape
+       must fail where the answer is accepted and not halfway through a paint.
+       That pass is arithmetic over the typed arrays and allocates nothing, so
+       it costs a fraction of what it replaces. Map's read surface is kept
+       whole (`get`/`has`/`size`/`keys`/`values`/`entries`/`forEach` and
+       iteration) so that callers cannot tell the difference. */
+    class HighlightLines {
+        constructor(text, starts, lengths, classIds, lineRunStarts, classes) {
+            this._text = text;
+            this._starts = starts;
+            this._lengths = lengths;
+            this._classIds = classIds;
+            this._lineRunStarts = lineRunStarts;
+            this._classes = classes;
+            this._cache = new Map();
+            this.size = lineRunStarts.length - 1;
+        }
+
+        /* How much of the document has actually been built. Not decoration:
+           "the runs are materialized on demand" is otherwise invisible from
+           the outside — every other observation a caller can make is identical
+           either way — and it is the property this class exists for, so it is
+           the property its test reads. */
+        get materialized() {
+            return this._cache.size;
+        }
+
+        has(line) {
+            const at = Number(line);
+            return Number.isInteger(at) && at >= 1 && at <= this.size;
+        }
+
+        get(line) {
+            if (!this.has(line)) {
+                return undefined;
+            }
+            const at = Number(line);
+            const cached = this._cache.get(at);
+            if (cached) {
+                return cached;
+            }
+            const from = Number(this._lineRunStarts[at - 1]);
+            const to = Number(this._lineRunStarts[at]);
+            const runs = [];
+            for (let run = from; run < to; run += 1) {
+                const start = Number(this._starts[run]);
+                const length = Number(this._lengths[run]);
+                runs.push({
+                    className: this._classes[Number(this._classIds[run])],
+                    text: this._text.slice(start, start + length),
+                    start
+                });
+            }
+            this._cache.set(at, runs);
+            return runs;
+        }
+
+        * keys() {
+            for (let line = 1; line <= this.size; line += 1) {
+                yield line;
+            }
+        }
+
+        * values() {
+            for (let line = 1; line <= this.size; line += 1) {
+                yield this.get(line);
+            }
+        }
+
+        * entries() {
+            for (let line = 1; line <= this.size; line += 1) {
+                yield [line, this.get(line)];
+            }
+        }
+
+        [Symbol.iterator]() {
+            return this.entries();
+        }
+
+        forEach(callback, thisArg) {
+            for (let line = 1; line <= this.size; line += 1) {
+                callback.call(thisArg, this.get(line), line, this);
+            }
+        }
+    }
+
     function decodeHighlightResult(source, result) {
         const text = String(source || '');
         const compact = result || {};
@@ -222,31 +320,22 @@
             || lineRunStarts.length < 2) {
             throw new Error('Explorer worker returned an invalid highlight map');
         }
-        const lines = new Map();
         for (let line = 0; line < lineRunStarts.length - 1; line += 1) {
-            const runs = [];
             const from = Number(lineRunStarts[line]);
             const to = Number(lineRunStarts[line + 1]);
             if (from < 0 || to < from || to > starts.length) {
                 throw new Error('Explorer worker returned invalid line offsets');
             }
-            for (let at = from; at < to; at += 1) {
-                const start = Number(starts[at]);
-                const length = Number(lengths[at]);
-                const className = classes[Number(classIds[at])];
-                if (start < 0 || length < 0 || start + length > text.length
-                    || typeof className !== 'string') {
-                    throw new Error('Explorer worker returned an invalid highlight run');
-                }
-                runs.push({
-                    className,
-                    text: text.slice(start, start + length),
-                    start
-                });
-            }
-            lines.set(line + 1, runs);
         }
-        return lines;
+        for (let run = 0; run < starts.length; run += 1) {
+            const start = Number(starts[run]);
+            const length = Number(lengths[run]);
+            if (start < 0 || length < 0 || start + length > text.length
+                || typeof classes[Number(classIds[run])] !== 'string') {
+                throw new Error('Explorer worker returned an invalid highlight run');
+            }
+        }
+        return new HighlightLines(text, starts, lengths, classIds, lineRunStarts, classes);
     }
 
     function workerUrlFrom(scriptUrl, baseUrl) {
@@ -296,6 +385,7 @@
 
     return {
         HIGHLIGHT_WORKER_MIN_CHARS,
+        HighlightLines,
         WorkerPool,
         poolSizeFor,
         decodeHighlightResult,
