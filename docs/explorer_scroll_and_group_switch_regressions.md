@@ -1,8 +1,8 @@
 # Explorer Scroll Stability and Group-Switch Cost After the Large-Content Work
 
-**Status:** Stage 1 implemented and live-browser verified on **2026-08-19**.
-Stages 2–4 remain pending. The original analysis was verified against the
-working tree at `4eed02b`.
+**Status:** Stages 1 and 2 implemented on **2026-08-19**; Stage 1 was also
+live-browser verified. Stages 3–4 remain pending. The original analysis was
+verified against the working tree at `4eed02b`.
 **Scope:** Three regressions reported after
 `docs/large_content_freeze_analysis.md` phases 0–2 landed:
 1. Markdown Preview scroll position is no longer preserved.
@@ -29,7 +29,7 @@ built and why), `docs/explorer_performance_research.md` (the broader picture).
 | 1b | Same for other open tabs | **Fixed in Stage 1** | Each tab retains revision-checked per-panel offsets across its full re-render |
 | 1c | — (not reported, found here) | **Fixed in Stage 1** | In-place refresh installs the captured offsets before starting the replacement Preview request |
 | 1d | — (not reported, found here) | **Fixed in Stage 1** | Hidden panels retain their offsets and apply them when shown |
-| 2 | Scrollbar jumps between modes | **Confirmed** | The Source panel's scroller is inset by the overview ruler column; the Preview panel's is not — and the ruler column *leaves the layout* in edit mode, in the large tier, and on an empty file |
+| 2 | Scrollbar jumps between modes | **Fixed in Stage 2** | The frame's overview track is reserved rather than `auto`, the column stands down in place, and Preview and Diff reserve the same lane |
 | 3 | Group switch is slow with a large file open | **Confirmed, four separate costs** | Whole-content re-hash per switch; a 4-pass read/write-interleaved scroll restore; frame-sliced builds that keep running off-screen; an overview-geometry cache poisoned by the detach |
 
 ---
@@ -370,12 +370,24 @@ not become a polling loop — bound the attempts), and the
 `whenExplorerSourceRendered()` ordering contract must survive intact.
 **Risk:** medium — it touches the restore path four call sites depend on.
 
-### Stage 2 — the viewer's right edge stops moving
+### Stage 2 — complete: the viewer's right edge stops moving
+
+**Implementation update.** All of 2.1–2.5 landed; 2.3 took **option A**
+(CSS-only), and 2.5 was taken after all — Diff is a view the reader switches to
+from the same header, so leaving its bar at the pane edge would have kept a
+third of the reported symptom. Measured in headless Chrome against the real
+`terminals.css`: Source, Preview and Diff all report the **identical** client
+width and put their scrollbar at the same x, with or without the overview
+column standing down; a pixel read of all three surfaces returns the identical
+three bands (surface, 1 px `--explorer-row-border` separator,
+`--explorer-bar-bg` strip). `scrollbar-gutter: stable` was confirmed to reserve
+the inline-end gutter only, so no band appears along the bottom of any of
+them.
 
 **Goal:** the scrollbar sits in the same place, and the text wraps to the same
 measure, in Source, Preview and edit mode.
 
-**2.1 — Reserve the ruler track unconditionally.** Change
+**2.1 — Complete: reserve the ruler track unconditionally.** Change
 `.explorer-source-frame`'s second track from `auto` to the mode's width
 (`var(--explorer-overview-ruler-width)`). An explicit track keeps its width
 even when its only item is `display: none`, so the frame stops re-wrapping when
@@ -384,14 +396,14 @@ the aside stands down. `map` mode is not currently reachable
 `explorer-overview.js:622`); if it returns, key the track off that same
 attribute rather than adding a second source of truth.
 
-**2.2 — Keep the aside in layout and mark it empty.** An empty reserved track
+**2.2 — Complete: keep the aside in layout and mark it empty.** An empty reserved track
 shows the frame's background where the aside's `--explorer-bar-bg` and its 1 px
 left border used to be, which is a visible seam. Replace
 `parts.aside.hidden = !geometry` with a state class that keeps the strip and
 its border and hides only the canvas and the viewport box. `hidden` stays
 available for a genuine "no overview column at all" case.
 
-**2.3 — Give Preview the same reserved gutter.** Two options:
+**2.3 — Complete (option A): give Preview the same reserved gutter.** Two options:
 - **A (CSS-only, recommended first):** inset the Preview panel's right edge by
   the ruler width so its scrollbar lands where Source's does — a right border
   in `--explorer-bar-bg` with the same 1 px separator, leaving the scroller and
@@ -403,21 +415,33 @@ available for a genuine "no overview column at all" case.
   the frame from `code.parentElement`) and the `parts.frame.hidden` check.
   Worth doing if `map` mode ever returns; not worth the blast radius now.
 
-**2.4 — `scrollbar-gutter: stable`** on the Source view and the Preview panel,
-so the bar appearing or disappearing no longer re-wraps the text.
+**2.4 — Complete: `scrollbar-gutter: stable`** on the Source view and the
+Preview panel, so the bar appearing or disappearing no longer re-wraps the text.
 
-**2.5 — Optional consistency.** The Diff panel is a full-width scroller of its
-own (`.explorer-diff-split`, `terminals.css:4224`) and its bar sits at the pane
-edge. Not part of the report; include only if the same gutter can be reserved
-without disturbing `synchroniseExplorerDiffWrappedRows()`.
+**2.5 — Complete: the Diff panel too.** `.explorer-diff-content` is the
+scroller (`overflow-y: auto`; its horizontal axis is the sticky two-half
+widget, not the box's own bar), so it reserves the lane exactly as Preview
+does. The gating condition holds: nothing in the diff layout measures the pane
+independently — `synchroniseExplorerDiffWrappedRows()` reads row rects,
+`synchroniseExplorerDiffScrollbars()` reads each side's own client/scroll
+width, and the `ResizeObserver` on the files-diff element re-runs the spacer
+sync once for the narrower box. The sticky scrollbar widget is `width: 100%`
+of the padding box, so it stops at the lane rather than running under it.
 
-**Tests.** `tests/test_explorer_source_frame.py` already asserts the frame's
-CSS block (`display: grid`, `overflow: hidden`, the `[hidden]` rule ordering) —
-extend it with the fixed second track and the Preview gutter. Add a Node test
-that the aside stands down without leaving the layout.
+**Tests — complete.** `tests/test_explorer_source_frame.py` gained the reserved
+second track (and the assertion that it is no longer `auto`), the Preview and
+Diff gutters' border/gradient built from the shared width and colour tokens,
+and the stable scrollbar gutter on all three scrollers.
+`tests/test_explorer_overview.py` gained a Node-executed harness that drives
+`syncExplorerOverview()` against a DOM stub through every state the column can
+be in — rows to survey, an empty file, the in-place editor's draft, and a
+hidden panel — and observes that standing down costs the canvas, the viewport
+box and the scrollbar semantics but never the element's box. Its
+source-text assertion on `parts.aside.hidden = !geometry` is gone; the
+behaviour is executed instead.
 
 **What the user sees:** entering and leaving edit mode no longer re-wraps the
-text or slides the scrollbar; Source and Preview show the bar in the same
+text or slides the scrollbar; Source, Preview and Diff show the bar in the same
 place; large-tier files keep the same measure as small ones.
 
 **Guardrail exposure:** G7 — widths and colours come from the existing custom
@@ -515,7 +539,7 @@ Source, edit and large-tier modes.
 ## Documentation obligations
 
 - `CHANGELOG.md` — Stages 1 and 2 fix behaviour that regressed and are
-  user-visible; both belong there.
+  user-visible; both belong there. **Both are written.**
 - `CLAUDE.md` + `AGENTS.md` — any rule that survives implementation goes into
   the **Regression Guardrails** lists as a rule, never as a pointer here. The
   three candidates, phrased as rules:
@@ -523,9 +547,14 @@ Source, edit and large-tier modes.
     can hold it, not when some other panel's render finishes.* (Stage 1)
   - *A surface's chrome keeps its width when its content stands down* — a
     reserved track, not an `auto` one that collapses and re-wraps the text
-    beside it. (Stage 2)
+    beside it. (Stage 2 — **written into guardrail 7 in both files**, together
+    with the one-declaration rule for a second surface that must line up and
+    the stable scrollbar gutter.)
   - *Work belonging to a detached pane is suspended, and nothing measures a
     disconnected element* — a zero-size observation must never be cached as
     geometry. (Stage 3)
-- If Stage 2 option B is taken, `CLAUDE.md`'s one-line description of
-  `explorer-overview.js` needs the new parent element.
+- Stage 2 took option A, so `explorer-overview.js`'s parent element is
+  unchanged and `CLAUDE.md`'s one-line description of it still stands. (The
+  two width custom properties did move up, from `.explorer-source-frame` to
+  `.explorer-editor-body`, so that the Preview and Diff scrollers read the
+  same declaration — a CSS change only.)

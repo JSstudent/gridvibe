@@ -14,10 +14,146 @@ by the ``git/diff`` tests in ``tests/test_api.py``; Phase 2 adds no backend
 surface of its own.
 """
 
+import json
 import re
+import shutil
+import subprocess
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import api
+
+OVERVIEW_JS = (
+    Path(__file__).resolve().parent.parent
+    / "web" / "static" / "js" / "explorer-overview.js"
+)
+NODE = shutil.which("node")
+
+# syncExplorerOverview() against a DOM stub, so "does the column leave the
+# layout?" is an observation rather than a reading of the source. Every state
+# the column can be in is driven through the one real entry point: rows to
+# survey, no rows at all, and rows behind the in-place editor's draft.
+STAND_DOWN_HARNESS = r"""
+const fs = require('fs');
+const vm = require('vm');
+
+function classList(initial) {
+    const set = new Set(initial || []);
+    return {
+        add: (...names) => names.forEach(name => set.add(name)),
+        remove: (...names) => names.forEach(name => set.delete(name)),
+        contains: name => set.has(name),
+        toggle: (name, force) => {
+            const on = force === undefined ? !set.has(name) : !!force;
+            if (on) { set.add(name); } else { set.delete(name); }
+            return on;
+        }
+    };
+}
+
+function el(extra) {
+    const attributes = {};
+    return Object.assign({
+        attributes,
+        hidden: false,
+        dataset: {},
+        style: { setProperty() {}, removeProperty() {} },
+        classList: classList(extra && extra.classes),
+        addEventListener() {},
+        setAttribute(name, value) { attributes[name] = String(value); },
+        getAttribute(name) { return name in attributes ? attributes[name] : null; },
+        removeAttribute(name) { delete attributes[name]; },
+        querySelector: () => null,
+        querySelectorAll: () => [],
+        getBoundingClientRect: () => ({ top: 0, left: 0, width: 100, height: 200 }),
+        clientWidth: 100,
+        clientHeight: 200,
+        scrollHeight: 400,
+        scrollTop: 0,
+        offsetTop: 0,
+        offsetHeight: 16
+    }, extra || {});
+}
+
+const context2d = { setTransform() {}, clearRect() {}, fillRect() {}, fillStyle: '' };
+const canvas = el({ getContext: () => context2d, width: 0, height: 0 });
+const viewport = el();
+const aside = el({ classes: ['is-empty'] });
+aside.setAttribute('aria-hidden', 'true');
+aside.querySelector = selector => (
+    selector === '.explorer-overview-canvas' ? canvas
+        : (selector === '.explorer-overview-viewport' ? viewport : null)
+);
+
+let rows = [];
+const code = el({ querySelectorAll: () => rows });
+const frame = el({ querySelector: () => aside });
+code.parentElement = frame;
+
+const sandbox = {
+    console,
+    document: {
+        getElementById: id => (id === 'explorer-code-0' ? code : null),
+        querySelector: () => null,
+        querySelectorAll: () => [],
+        addEventListener() {},
+        body: { dataset: {}, addEventListener() {} }
+    },
+    window: {
+        addEventListener() {},
+        setTimeout,
+        clearTimeout,
+        devicePixelRatio: 1,
+        getComputedStyle: () => ({ getPropertyValue: () => '' }),
+        requestAnimationFrame: () => 0
+    },
+    navigator: {},
+    setTimeout,
+    clearTimeout,
+    terminals: [],
+    sessionIds: [],
+    scrollExplorerSourceToLine: () => {},
+    escHtml: value => String(value == null ? '' : value)
+};
+sandbox.globalThis = sandbox;
+vm.createContext(sandbox);
+vm.runInContext(fs.readFileSync(process.argv[2], 'utf8'), sandbox);
+
+const pane = { _explorerEdit: null };
+sandbox.terminals[0] = pane;
+
+const observe = label => {
+    viewport.style = {};
+    sandbox.syncExplorerOverview(0);
+    return {
+        label,
+        // The element's own box: `hidden` would take it out of the grid and
+        // collapse the reserved track beside it.
+        leftTheLayout: aside.hidden === true,
+        stoodDown: aside.classList.contains('is-empty'),
+        ariaHidden: aside.getAttribute('aria-hidden'),
+        painted: viewport.style.height !== undefined
+    };
+};
+
+const row = line => el({ dataset: { explorerLine: String(line) } });
+
+const states = [];
+states.push(observe('empty file'));
+rows = [row(1), row(2), row(3)];
+states.push(observe('rows to survey'));
+pane._explorerEdit = { draft: 'x' };
+states.push(observe('in-place editor'));
+pane._explorerEdit = null;
+states.push(observe('editor left'));
+// A panel switched to Preview or Diff: the frame has no box, so every offset
+// inside it reads 0 and measuring there would cache a geometry describing
+// nothing.
+frame.hidden = true;
+states.push(observe('panel hidden'));
+process.stdout.write(JSON.stringify(states));
+"""
 
 
 class ExplorerOverviewTestCase(unittest.TestCase):
@@ -197,7 +333,7 @@ class ExplorerOverviewColumnTestCase(unittest.TestCase):
     def test_overview_markup_carries_its_hooks_and_scrollbar_semantics(self):
         overview = self._overview()
         for hook in (
-            'class="explorer-source-overview"',
+            'class="explorer-source-overview is-empty"',
             'data-explorer-overview="${index}"',
             'data-explorer-overview-mode="ruler"',
             'class="explorer-overview-canvas"',
@@ -225,12 +361,17 @@ class ExplorerOverviewColumnTestCase(unittest.TestCase):
         ):
             with self.subTest(selector=selector):
                 self.assertIn(selector, css)
+        self.assertIn(".explorer-source-overview.is-empty {", css)
         # Settled decision 2: the width is a fixed custom property, not a
         # draggable per-pane value that would need persisting and restoring.
-        frame = css[css.index(".explorer-source-frame {"):]
-        frame = frame[: frame.index("}")]
-        self.assertIn("--explorer-overview-width:", frame)
-        self.assertIn("--explorer-overview-ruler-width:", frame)
+        # It is declared on the parent every file panel shares, because the
+        # Source frame reserves that lane as a grid track while the Preview
+        # and Diff scrollers reserve the same lane inside their own box — one
+        # declaration, so the three panels cannot drift apart.
+        body = css[css.index(".explorer-editor-body {"):]
+        body = body[: body.index("}")]
+        self.assertIn("--explorer-overview-width:", body)
+        self.assertIn("--explorer-overview-ruler-width:", body)
 
     def test_overview_geometry_is_measured_over_rendered_rows_and_cached(self):
         overview = self._overview()
@@ -314,16 +455,56 @@ class ExplorerOverviewColumnTestCase(unittest.TestCase):
         # ResizeObserver pattern, not a timer.
         self.assertIn("new window.ResizeObserver(", overview)
 
-    def test_overview_stands_down_when_there_is_nothing_to_survey(self):
-        overview = self._overview()
-        sync = overview[
-            overview.index("function syncExplorerOverview("):
-            overview.index("function scheduleExplorerOverviewSync(")
-        ]
-        # An empty file, the editor's textarea, or a panel switched away: the
-        # column leaves the layout instead of showing the last file's shape.
-        self.assertIn("parts.aside.hidden = !geometry;", sync)
-        self.assertIn("parts.frame.hidden", sync)
+    @unittest.skipUnless(NODE, "Node.js is required for the stand-down test")
+    def test_overview_stands_down_without_leaving_the_layout(self):
+        """Nothing to survey costs the canvas, never the column's width.
+
+        An empty file, the in-place editor's draft and the large-file tier's
+        plain chunks all leave the column with no rows to describe. Taking it
+        out of the grid collapsed the frame's reserved track, which widened
+        the text by the ruler width and re-wrapped every line of it on the way
+        in and back again on the way out.
+        """
+        with TemporaryDirectory() as script_dir:
+            script = Path(script_dir) / "stand-down.js"
+            script.write_text(STAND_DOWN_HARNESS, encoding="utf-8")
+            completed = subprocess.run(
+                [NODE, str(script), str(OVERVIEW_JS)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        if completed.returncode != 0:
+            self.fail("node harness failed:" + chr(10) + completed.stderr)
+        states = {state["label"]: state for state in json.loads(completed.stdout)}
+
+        # Nothing to survey: the strip keeps its box, gives up its canvas and
+        # its viewport box, and stops claiming to be a scrollbar.
+        for label in ("empty file", "in-place editor"):
+            with self.subTest(state=label):
+                state = states[label]
+                self.assertFalse(state["leftTheLayout"])
+                self.assertTrue(state["stoodDown"])
+                self.assertEqual(state["ariaHidden"], "true")
+                self.assertFalse(state["painted"])
+
+        # Rows to survey: the column comes back with its position and its
+        # semantics, through the same one entry point.
+        for label in ("rows to survey", "editor left"):
+            with self.subTest(state=label):
+                state = states[label]
+                self.assertFalse(state["leftTheLayout"])
+                self.assertFalse(state["stoodDown"])
+                self.assertIsNone(state["ariaHidden"])
+                self.assertTrue(state["painted"])
+
+        # A panel switched to Preview or Diff has no box, so every offset in
+        # it reads 0: the sync returns before it can measure, leaving the
+        # column exactly as the last visible sync left it.
+        hidden_panel = states["panel hidden"]
+        self.assertFalse(hidden_panel["painted"])
+        self.assertFalse(hidden_panel["stoodDown"])
+        self.assertFalse(hidden_panel["leftTheLayout"])
         # Entering the in-place editor replaces the rows with a textarea, so
         # the same re-apply that drops the gutter marks stands the column down.
         editor = self._static("js/explorer-editor.js")

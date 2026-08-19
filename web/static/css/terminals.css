@@ -3652,6 +3652,15 @@
         }
 
         .explorer-editor-body {
+            /* Fixed overview widths (settled decision 2: not draggable, so
+               there is no per-pane width to persist or restore). `map` gets
+               room for glyph bands; `ruler` only has to hold the marker lane
+               and the viewport box. They live here, on the parent every file
+               panel shares, because the lane is reserved by Source's frame
+               *and* inside the Preview and Diff scrollers beside it — one
+               declaration, three readers, so the panels cannot drift apart. */
+            --explorer-overview-width: 110px;
+            --explorer-overview-ruler-width: 14px;
             min-height: 0;
             overflow: hidden;
             display: grid;
@@ -3687,14 +3696,17 @@
            overlaps the horizontal scrollbar. Must come after the
            .explorer-editor-panel rule above — it overrides its overflow. */
         .explorer-source-frame {
-            /* Fixed overview widths (settled decision 2: not draggable, so
-               there is no per-pane width to persist or restore). `map` gets
-               room for glyph bands; `ruler` only has to hold the marker lane
-               and the viewport box. */
-            --explorer-overview-width: 110px;
-            --explorer-overview-ruler-width: 14px;
             display: grid;
-            grid-template-columns: minmax(0, 1fr) auto;
+            /* The overview track is reserved, never `auto`. An `auto` track
+               collapses to 0 the moment its only item stands down — the
+               in-place editor, an empty file, the large-file tier — which
+               widened the text by the ruler width, re-wrapped every line and
+               slid the scrollbar sideways on the way in and back on the way
+               out. An explicit track keeps its width even while the aside is
+               empty. `map` mode is not reachable today; if it returns, stamp
+               the mode on this element and key the track off that attribute
+               rather than adding a second source of truth. */
+            grid-template-columns: minmax(0, 1fr) var(--explorer-overview-ruler-width);
             overflow: hidden;
         }
 
@@ -3719,6 +3731,22 @@
         }
 
         .explorer-source-overview[hidden] {
+            display: none;
+        }
+
+        /* Stood down: there is nothing to survey (an empty file, the in-place
+           editor's draft, the large-file tier's plain chunks), so the column
+           gives up its canvas, its viewport box and its gestures — but keeps
+           its width, its background and its separator. Leaving the layout is
+           what re-wrapped the text beside it, so `hidden` is reserved for a
+           genuine "no overview column at all" case. */
+        .explorer-source-overview.is-empty {
+            cursor: default;
+            pointer-events: none;
+        }
+
+        .explorer-source-overview.is-empty .explorer-overview-canvas,
+        .explorer-source-overview.is-empty .explorer-overview-viewport {
             display: none;
         }
 
@@ -3851,6 +3879,11 @@
                the 100% fallback only covers the first frame before the sync
                runs. */
             --explorer-source-viewport-width: 100%;
+            /* Reserve the bar's own lane: without this the bar appearing or
+               disappearing — a fold, a find that changes the row set, a tier
+               switch — re-wraps every line under it. `stable` reserves the
+               inline-end gutter only, so no band appears along the bottom. */
+            scrollbar-gutter: stable;
         }
 
         /* Source view fonts are monospace only; `default` keeps the stack the
@@ -4219,6 +4252,25 @@
             overflow-x: hidden;
             overflow-y: auto;
             color: var(--explorer-text);
+            scrollbar-gutter: stable;
+            /* The same reserved overview lane the Source frame keeps as a grid
+               track and the Preview panel keeps inside its own box, so all
+               three views put the bar at the same x and none of them re-wraps
+               on the way in or out. A transparent border reserves it; the
+               gradient, positioned over the border box, paints the column's
+               1 px separator and strip. The sticky horizontal-scrollbar widget
+               is `width: 100%` of the padding box, so it stops at the lane
+               rather than running under it. */
+            border-right: var(--explorer-overview-ruler-width) solid transparent;
+            background-origin: border-box;
+            background-repeat: no-repeat;
+            background-position: right top;
+            background-size: var(--explorer-overview-ruler-width) 100%;
+            background-image: linear-gradient(
+                to right,
+                var(--explorer-row-border) 0 1px,
+                var(--explorer-bar-bg) 1px
+            );
         }
 
         .explorer-diff-split {
@@ -5363,6 +5415,24 @@
             font-family: var(--md-preview-font);
             font-size: var(--explorer-editor-font-size, .86rem);
             line-height: 1.6;
+            scrollbar-gutter: stable;
+            /* Preview is its own scroller and spans the whole pane, while
+               Source's scroller stops at the overview column — so the bar and
+               the wrapping measure used to move by the ruler width on every
+               Source <-> Preview switch. A transparent border reserves the
+               same lane inside this scroller; the gradient, positioned over
+               the border box, paints the column's 1px separator and strip so
+               the reserved space reads as the same chrome rather than a seam. */
+            border-right: var(--explorer-overview-ruler-width) solid transparent;
+            background-origin: border-box;
+            background-repeat: no-repeat;
+            background-position: right top;
+            background-size: var(--explorer-overview-ruler-width) 100%;
+            background-image: linear-gradient(
+                to right,
+                var(--explorer-row-border) 0 1px,
+                var(--explorer-bar-bg) 1px
+            );
         }
 
         .explorer-markdown-preview > * {

@@ -614,10 +614,15 @@ function wireExplorerChangePeek(index) {
    `role="scrollbar"` is the honest description: click, drag and wheel all
    drive the inner .explorer-source-view it points at. The viewport box is
    decorative — the scroll position it shows is already on the aside as
-   aria-valuenow. */
+   aria-valuenow.
+
+   It starts stood down rather than `hidden`: the frame's track is reserved
+   either way, so leaving the layout would only trade the column's own strip
+   for a bare seam until the first sync. `aria-hidden` goes with the state —
+   a scrollbar that controls nothing is not one to announce. */
 function explorerOverviewHtml(index) {
     return `<aside
-        class="explorer-source-overview"
+        class="explorer-source-overview is-empty"
         data-explorer-overview="${index}"
         data-explorer-overview-mode="ruler"
         role="scrollbar"
@@ -627,7 +632,7 @@ function explorerOverviewHtml(index) {
         aria-valuemin="0"
         aria-valuemax="100"
         aria-valuenow="0"
-        hidden
+        aria-hidden="true"
     ><canvas class="explorer-overview-canvas"></canvas><div class="explorer-overview-viewport" aria-hidden="true"></div></aside>`;
 }
 
@@ -993,6 +998,22 @@ function wireExplorerOverview(index, parts) {
     }
 }
 
+/* The one writer of the stood-down state. The strip keeps its box; the
+   canvas, the viewport box and the pointer gestures go with the geometry that
+   justified them (CSS), and so do the scrollbar semantics (here). */
+function setExplorerOverviewStoodDown(aside, stoodDown) {
+    aside.classList.toggle('is-empty', stoodDown);
+    if (stoodDown) {
+        aside.setAttribute('aria-hidden', 'true');
+    } else {
+        aside.removeAttribute('aria-hidden');
+    }
+}
+
+function explorerOverviewStoodDown(aside) {
+    return aside.hidden || aside.classList.contains('is-empty');
+}
+
 function syncExplorerOverview(index) {
     const parts = explorerOverviewParts(index);
     const pane = terminals[index];
@@ -1008,9 +1029,12 @@ function syncExplorerOverview(index) {
     }
     const geometry = explorerOverviewGeometry(index, parts);
     /* Nothing rendered to survey — an empty file, the in-place editor's
-       textarea, a panel switched away — so the column leaves the layout
-       instead of standing there showing the last file's shape. */
-    parts.aside.hidden = !geometry;
+       textarea, a panel switched away — so the column stands down instead of
+       standing there showing the last file's shape. It keeps its width while
+       it does: the frame's second track is reserved, and a column that left
+       the layout re-wrapped every line of text beside it on the way out and
+       back again on the way in. */
+    setExplorerOverviewStoodDown(parts.aside, !geometry);
     if (!geometry) {
         return;
     }
@@ -1048,7 +1072,7 @@ function scheduleExplorerOverviewViewport(index) {
     }
     const update = () => {
         const parts = explorerOverviewParts(index);
-        if (parts && !parts.aside.hidden) {
+        if (parts && !explorerOverviewStoodDown(parts.aside)) {
             updateExplorerOverviewViewport(parts);
         }
     };

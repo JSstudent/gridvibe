@@ -381,7 +381,16 @@ class ExplorerSourceFrameTestCase(unittest.TestCase):
         # Grid with a fixed side lane, and the frame itself never scrolls —
         # the inner .explorer-source-view keeps `overflow: auto`.
         self.assertIn("display: grid;", block)
-        self.assertIn("grid-template-columns: minmax(0, 1fr) auto;", block)
+        # The lane is *reserved*, not `auto`: an auto track collapses to zero
+        # whenever the overview column stands down (the in-place editor, an
+        # empty file, the large-file tier), which widened the text by the
+        # ruler width and re-wrapped every line of it on the way in and back
+        # again on the way out.
+        self.assertIn(
+            "grid-template-columns: minmax(0, 1fr) var(--explorer-overview-ruler-width);",
+            block,
+        )
+        self.assertNotIn("grid-template-columns: minmax(0, 1fr) auto;", block)
         self.assertIn("overflow: hidden;", block)
         # Equal specificity with `.explorer-editor-panel { overflow: auto }`,
         # so the override only wins by coming later in the stylesheet.
@@ -391,6 +400,80 @@ class ExplorerSourceFrameTestCase(unittest.TestCase):
         )
         # The hidden-panel rule must still beat the frame's `display: grid`.
         self.assertIn(".explorer-editor-panel[hidden] {", css)
+
+    @staticmethod
+    def _css_block(css: str, selector: str, contains: str = "") -> str:
+        """The first block for ``selector`` that carries ``contains``.
+
+        A selector can head more than one rule — ``.explorer-diff-content``
+        also appears as one half of the source-font custom-property host — so
+        the marker picks out the rule being asserted on.
+        """
+        start = 0
+        while True:
+            start = css.index(selector, start)
+            block = css[start : css.index("}", start)]
+            if contains in block:
+                return block
+            start += len(selector)
+
+    def test_every_file_panel_reserves_the_same_overview_lane(self):
+        """Source, Preview and Diff end their scrollers at the same x.
+
+        Source's scroller stops at the overview column, while Preview and Diff
+        are their own scrollers spanning the whole pane — so every switch
+        between views moved the visible scrollbar sideways by the ruler width
+        and re-wrapped the text to a different measure. Both reserve the
+        identical lane inside their own box, from the one declaration of that
+        width.
+        """
+        css = self._static("css/terminals.css")
+        # One declaration of the lane's width, on the parent every file panel
+        # shares — never restated as a literal beside any of them.
+        body = self._css_block(css, ".explorer-editor-body {")
+        self.assertIn("--explorer-overview-ruler-width:", body)
+
+        # A transparent border reserves the lane inside the scroller, so the
+        # bar lands where Source's does; the gradient paints that reserved
+        # strip as the overview column's own chrome (1 px separator over the
+        # bar background) instead of leaving a bare seam.
+        panels = {
+            ".explorer-markdown-preview {": "",
+            ".explorer-diff-content {": "overflow-y: auto;",
+        }
+        for selector, marker in panels.items():
+            with self.subTest(selector=selector):
+                block = self._css_block(css, selector, marker)
+                self.assertIn(
+                    "border-right: var(--explorer-overview-ruler-width) solid transparent;",
+                    block,
+                )
+                self.assertIn("background-origin: border-box;", block)
+                self.assertIn(
+                    "background-size: var(--explorer-overview-ruler-width) 100%;", block
+                )
+                self.assertIn("var(--explorer-row-border) 0 1px", block)
+                self.assertIn("var(--explorer-bar-bg) 1px", block)
+                # Guardrail 7: the lane's width and both colours are tokens.
+                self.assertNotIn("14px", block)
+
+    def test_every_scroller_reserves_its_scrollbar_gutter(self):
+        """The bar appearing must not re-wrap the text under it.
+
+        A fold, a find that changes the row set and a tier switch can each
+        make the vertical scrollbar come and go; without a stable gutter that
+        alone reflows every line.
+        """
+        css = self._static("css/terminals.css")
+        scrollers = {
+            ".explorer-source-view {": "overflow: auto;",
+            ".explorer-markdown-preview {": "",
+            ".explorer-diff-content {": "overflow-y: auto;",
+        }
+        for selector, marker in scrollers.items():
+            with self.subTest(selector=selector):
+                block = self._css_block(css, selector, marker)
+                self.assertIn("scrollbar-gutter: stable;", block)
 
     def test_document_tokens_are_memoized_per_pane(self):
         viewer = self._viewer()
