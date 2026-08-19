@@ -207,10 +207,13 @@
             explorerFlushSourceRenderCallbacks(pane);
             return;
         }
-        const job = { frame: 0, at: 0 };
+        const job = { frame: 0, at: 0, suspended: false, step: null };
         pane._explorerSourceRenderJob = job;
         const step = () => {
             job.frame = 0;
+            if (job.suspended) {
+                return;
+            }
             if (pane._explorerSourceRenderJob !== job
                 || code.querySelector('.explorer-source-plain') !== host) {
                 return;
@@ -231,6 +234,7 @@
             pane._explorerLargeSourceRender = { content, host };
             explorerFlushSourceRenderCallbacks(pane);
         };
+        job.step = step;
         job.frame = window.requestAnimationFrame(step);
     }
 
@@ -5254,6 +5258,40 @@
         pane._explorerSourceRenderJob = null;
     }
 
+    /* A card that left the document is a build nobody can see.
+
+       Neither sliced job stops on being detached: the row build stops on a
+       newer render token or on the panel it was filling being replaced, and
+       the large tier's chunk pacer on the same two things. So opening a large
+       file and switching groups left a job spending its whole frame budget
+       appending rows into a detached tree, in competition with the incoming
+       group's attach, fit and paint.
+
+       Suspension is not cancellation. The rows are still wanted and so are the
+       readers queued behind them, so the job keeps its position and resumes
+       when the card comes back — and if the group is closed while suspended,
+       explorerAbandonSourceRenderJob() still flushes that queue. */
+    function explorerSuspendSourceRenderJob(pane) {
+        const job = pane?._explorerSourceRenderJob;
+        if (!job || job.suspended || typeof job.step !== 'function') {
+            return;
+        }
+        if (job.frame && typeof window.cancelAnimationFrame === 'function') {
+            window.cancelAnimationFrame(job.frame);
+        }
+        job.frame = 0;
+        job.suspended = true;
+    }
+
+    function explorerResumeSourceRenderJob(pane) {
+        const job = pane?._explorerSourceRenderJob;
+        if (!job || !job.suspended) {
+            return;
+        }
+        job.suspended = false;
+        job.frame = window.requestAnimationFrame(job.step);
+    }
+
     /* The panel stopped being rows — the editor took it, or the large tier
        replaced them with plain chunks — so no further slice may land. The
        queued readers still run: they were waiting on "the rows are final",
@@ -5277,14 +5315,18 @@
 
     function explorerRunSourceRenderJob(index, code, container, model, searchRanges, size) {
         const pane = terminals[index];
-        const job = { frame: 0, at: 0 };
+        const job = { frame: 0, at: 0, suspended: false, step: null };
         pane._explorerSourceRenderJob = job;
         const step = () => {
             job.frame = 0;
             /* Two ways this build stops being the one that should finish: a
                newer render replaced it (identity, not a flag), or the panel it
                was filling is no longer the panel on screen. Either way the
-               remaining rows are rows nobody asked for. */
+               remaining rows are rows nobody asked for. A suspended job is
+               neither — it holds its position until the card is back. */
+            if (job.suspended) {
+                return;
+            }
             if (pane._explorerSourceRenderJob !== job
                 || explorerRenderedSourceContainer(code) !== container) {
                 return;
@@ -5306,6 +5348,7 @@
             pane._explorerSourceRenderJob = null;
             explorerFinishSourceRender(index);
         };
+        job.step = step;
         job.frame = window.requestAnimationFrame(step);
     }
 
@@ -6632,12 +6675,17 @@
        offset to return to and a proportional position is the best available
        answer. `wasAtBottom` still wins outright — "the end of the file" is an
        intent, not a coordinate. */
-    function applyScrollMetrics(el, metrics) {
+    function applyScrollMetrics(el, metrics, dimensions) {
         if (!el || !metrics) {
             return;
         }
-        const maxScrollTop = Math.max(0, el.scrollHeight - el.clientHeight);
-        const maxScrollLeft = Math.max(0, el.scrollWidth - el.clientWidth);
+        /* A caller restoring several scrollers at once reads every one of
+           their extents first and hands them back here, so the write below
+           cannot invalidate the layout the next target's read needs. Read
+           straight off the element when there is only one of it. */
+        const box = dimensions || el;
+        const maxScrollTop = Math.max(0, box.scrollHeight - box.clientHeight);
+        const maxScrollLeft = Math.max(0, box.scrollWidth - box.clientWidth);
         el.scrollLeft = Math.min(
             maxScrollLeft,
             Number.isFinite(metrics.scrollLeft)
@@ -6726,25 +6774,66 @@
             restoredMode = activeExplorerFileView(index);
         }
 
-        const applyScroll = () => {
+        /* The listing and the three sidebar panels are restored in one read
+           pass and one write pass, never element by element: reading an
+           extent after writing another element's offset forces the layout
+           again, and this runs for every pane of an incoming group.
+
+           They are also restored until they *land*, not a fixed number of
+           times. The four passes this replaces — immediate, two nested
+           frames, then an 80 ms timer — existed because nobody knew when the
+           content would be final, so a 20,000-row document paid three
+           layouts it had no use for. The panel policy already answers "can
+           this target hold that offset yet?"; the same bounded answer ends
+           the sequence as soon as it can. */
+        const applyScroll = (attempt = 0) => {
             const list = document.getElementById(`explorer-list-${index}`);
             if (!list) {
                 return;
             }
-            list.scrollLeft = state.listScrollLeft || 0;
-            list.scrollTop = state.listScrollTop || 0;
-            if (state.directory) applyScrollMetrics(list, state.directory);
-            applyScrollMetrics(document.getElementById(`explorer-tree-panel-${index}`), state.sidebar?.tree);
-            applyScrollMetrics(document.getElementById(`explorer-git-panel-${index}`), state.sidebar?.git);
-            applyScrollMetrics(document.getElementById(`explorer-search-panel-${index}`), state.sidebar?.search);
+            const targets = [
+                {
+                    el: list,
+                    metrics: state.directory || {
+                        scrollLeft: state.listScrollLeft || 0,
+                        scrollTop: state.listScrollTop || 0
+                    }
+                },
+                {
+                    el: document.getElementById(`explorer-tree-panel-${index}`),
+                    metrics: state.sidebar?.tree
+                },
+                {
+                    el: document.getElementById(`explorer-git-panel-${index}`),
+                    metrics: state.sidebar?.git
+                },
+                {
+                    el: document.getElementById(`explorer-search-panel-${index}`),
+                    metrics: state.sidebar?.search
+                }
+            ].filter(target => target.el && target.metrics);
+            const policy = explorerScrollPolicy();
+            const reads = targets.map(target => ({
+                scrollHeight: target.el.scrollHeight,
+                clientHeight: target.el.clientHeight,
+                scrollWidth: target.el.scrollWidth,
+                clientWidth: target.el.clientWidth
+            }));
+            const plans = targets.map((target, at) => (policy
+                ? policy.restorePlan(target.metrics, reads[at], attempt)
+                : { apply: true, retry: false, nextAttempt: attempt + 1 }));
+            targets.forEach((target, at) => {
+                if (plans[at].apply) {
+                    applyScrollMetrics(target.el, target.metrics, reads[at]);
+                }
+            });
+            const pending = plans.find(plan => plan.retry);
+            if (pending) {
+                requestAnimationFrame(() => applyScroll(pending.nextAttempt));
+            }
         };
 
         applyScroll();
-        requestAnimationFrame(() => {
-            applyScroll();
-            requestAnimationFrame(applyScroll);
-        });
-        window.setTimeout(applyScroll, 80);
         requestExplorerPanelScrollRestore(index, restoredMode);
     }
 
@@ -6780,8 +6869,56 @@
         ]))}`;
     }
 
+    /* One hash per document, not one per call.
+
+       `_explorerFileContent` is a stable string reference that changes
+       whenever the bytes do, so a cache keyed on the identity of the inputs is
+       exact rather than approximate. The alternative is what this used to be:
+       a djb2 pass over every character of the open file — preceded by a join
+       that materializes a full second copy of the buffer — run again for every
+       tab switch, every group switch and every presentation capture, in both
+       directions. explorerPreviewRenderToken() above caches on the same terms
+       for the same reason. The answer is handed back as a fresh object, so a
+       tab view holding it can never alias the next caller's. */
+    function explorerContentRevisionKey(pane) {
+        if (pane._explorerMode === 'directory') {
+            return {
+                mode: 'directory',
+                path: pane._explorerPath,
+                entries: pane._explorerEntries,
+                revision: pane._explorerDirectoryRevision
+            };
+        }
+        return {
+            mode: 'file',
+            path: pane._explorerFilePath,
+            content: pane._explorerFileContent,
+            diffLoaded: Boolean(pane._explorerDiffLoaded),
+            diffCommit: pane._explorerDiffCommit,
+            diffMode: pane._explorerDiffMode,
+            diffContent: pane._explorerDiffContent
+        };
+    }
+
+    function explorerContentRevisionKeyMatches(previous, next) {
+        return Boolean(previous)
+            && previous.mode === next.mode
+            && Object.keys(next).every(name => previous[name] === next[name]);
+    }
+
     function explorerCurrentContentRevisions(pane) {
         if (!pane) return {};
+        const key = explorerContentRevisionKey(pane);
+        const cached = pane._explorerContentRevisions;
+        if (cached && explorerContentRevisionKeyMatches(cached.key, key)) {
+            return { ...cached.revisions };
+        }
+        const revisions = explorerComputeContentRevisions(pane);
+        pane._explorerContentRevisions = { key, revisions };
+        return { ...revisions };
+    }
+
+    function explorerComputeContentRevisions(pane) {
         if (pane._explorerMode === 'directory') {
             return {
                 directory: String(

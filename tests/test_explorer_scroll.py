@@ -458,6 +458,107 @@ function resolvePreview(html) {
     await realTabRuntime.activate(0, tabA.id);
     results.tabRoundTrip = { preview: preview.scrollTop };
 
+    // The content identity behind every revision comparison is computed once
+    // per document, not once per capture. A group switch used to run a djb2
+    // pass over every character of the open file (plus the join's transient
+    // second copy of it) for every explorer pane, in both directions.
+    sandbox.terminals[0] = pane;
+    pane._explorerMode = 'file';
+    pane._explorerFilePath = 'big.txt';
+    pane._explorerFileContent = 'x'.repeat(4096);
+    pane._explorerDiffLoaded = false;
+    let hashed = 0;
+    const realHash = sandbox.explorerHashText;
+    sandbox.explorerHashText = value => { hashed += 1; return realHash(value); };
+    const firstRevisions = sandbox.explorerCurrentContentRevisions(pane);
+    const hashedFirst = hashed;
+    const repeatRevisions = sandbox.explorerCurrentContentRevisions(pane);
+    const hashedRepeat = hashed - hashedFirst;
+    pane._explorerFileContent = 'y'.repeat(4096);
+    const movedRevisions = sandbox.explorerCurrentContentRevisions(pane);
+    results.contentRevisions = {
+        hashedFirst,
+        hashedRepeat,
+        hashedAfterChange: hashed - hashedFirst - hashedRepeat,
+        repeated: repeatRevisions.source === firstRevisions.source,
+        aliased: repeatRevisions === firstRevisions,
+        moved: movedRevisions.source !== firstRevisions.source
+    };
+    sandbox.explorerHashText = realHash;
+
+    // The listing and the three sidebar scrollers are restored in one read
+    // pass and one write pass, and only until they land.
+    const ops = [];
+    function instrument(el, id, box) {
+        ['scrollHeight', 'clientHeight', 'scrollWidth', 'clientWidth'].forEach(name => {
+            Object.defineProperty(el, name, {
+                configurable: true,
+                get() { ops.push('read:' + id); return box[name]; }
+            });
+        });
+        let top = 0;
+        let left = 0;
+        Object.defineProperty(el, 'scrollTop', {
+            configurable: true,
+            get: () => top,
+            set(value) { ops.push('write:' + id); top = value; }
+        });
+        Object.defineProperty(el, 'scrollLeft', {
+            configurable: true,
+            get: () => left,
+            set(value) { ops.push('write:' + id); left = value; }
+        });
+        return box;
+    }
+    const treePanel = scroller('explorer-tree-panel-0', 900);
+    const gitPanel = scroller('explorer-git-panel-0', 900);
+    const searchPanel = scroller('explorer-search-panel-0', 900);
+    elements.set('explorer-tree-panel-0', treePanel);
+    elements.set('explorer-git-panel-0', gitPanel);
+    elements.set('explorer-search-panel-0', searchPanel);
+    const tall = { scrollHeight: 900, clientHeight: 300, scrollWidth: 300, clientWidth: 300 };
+    instrument(list, 'list', { scrollHeight: 300, clientHeight: 300, scrollWidth: 300, clientWidth: 300 });
+    // The sidebar tree is still as short as its viewport: nothing may
+    // manufacture a smaller offset for it while it is still filling in.
+    const treeBox = instrument(treePanel, 'tree', {
+        scrollHeight: 300, clientHeight: 300, scrollWidth: 300, clientWidth: 300
+    });
+    instrument(gitPanel, 'git', { ...tall });
+    instrument(searchPanel, 'search', { ...tall });
+    select('source');
+    pane._explorerPanelScrollStore = null;
+    raf.length = 0;
+    ops.length = 0;
+    sandbox.restoreExplorerFileScroll(0, {
+        activeView: 'source',
+        listScrollLeft: 0,
+        listScrollTop: 0,
+        panels: {},
+        sidebar: {
+            tree: { scrollTop: 220, scrollLeft: 0 },
+            git: { scrollTop: 140, scrollLeft: 0 },
+            search: { scrollTop: 60, scrollLeft: 0 }
+        }
+    });
+    const firstPassOps = ops.slice();
+    const treeBeforeContent = treePanel.scrollTop;
+    const retryQueued = raf.length;
+    treeBox.scrollHeight = 900;
+    let retryPasses = 0;
+    while (raf.length && retryPasses < 20) {
+        retryPasses += 1;
+        raf.shift()();
+    }
+    results.outerScrollers = {
+        ops: firstPassOps,
+        treeBeforeContent,
+        retryQueued,
+        retryPasses,
+        tree: treePanel.scrollTop,
+        git: gitPanel.scrollTop,
+        search: searchPanel.scrollTop
+    };
+
     process.stdout.write(JSON.stringify(results));
 })();
 """
@@ -567,6 +668,51 @@ class ExplorerScrollAdapterTestCase(unittest.TestCase):
 
     def test_a_preview_offset_survives_the_real_tab_activation_path(self):
         self.assertEqual(self.results["tabRoundTrip"], {"preview": 640})
+
+    def test_the_content_identity_is_computed_once_per_document(self):
+        """A capture is not a reason to re-hash the file.
+
+        ``explorerCurrentContentRevisions()`` is called for every explorer
+        pane on every group switch, every tab switch and every presentation
+        capture; the buffer it hashed is a stable string reference, so the
+        answer only moves when the bytes do.
+        """
+        revisions = self.results["contentRevisions"]
+        self.assertGreater(revisions["hashedFirst"], 0)
+        self.assertEqual(revisions["hashedRepeat"], 0)
+        self.assertTrue(revisions["repeated"])
+        # A stored tab view must never alias the next caller's answer.
+        self.assertFalse(revisions["aliased"])
+        # Exact, not approximate: new bytes are a new identity, hashed again.
+        self.assertGreater(revisions["hashedAfterChange"], 0)
+        self.assertTrue(revisions["moved"])
+
+    def test_the_outer_scrollers_are_read_then_written_and_only_until_they_land(self):
+        """One read pass, one write pass, and no fixed number of passes.
+
+        Reading an extent after writing another element's offset forces the
+        layout again, once per element per pass, for every pane of the
+        incoming group. The four unconditional passes this replaces also made
+        a 20,000-row document pay three layouts it had no use for.
+        """
+        outer = self.results["outerScrollers"]
+        reads = [at for at, op in enumerate(outer["ops"]) if op.startswith("read:")]
+        writes = [at for at, op in enumerate(outer["ops"]) if op.startswith("write:")]
+        self.assertTrue(reads)
+        self.assertTrue(writes)
+        self.assertLess(max(reads), min(writes))
+        # Each target is measured once in that pass, never re-measured by the
+        # write that follows it.
+        self.assertEqual(len(reads), 16)
+
+        # A panel that cannot hold its offset yet is left alone and retried;
+        # the ones that can are already home.
+        self.assertEqual(outer["treeBeforeContent"], 0)
+        self.assertEqual(outer["retryQueued"], 1)
+        self.assertEqual(outer["retryPasses"], 1)
+        self.assertEqual(outer["tree"], 220)
+        self.assertEqual(outer["git"], 140)
+        self.assertEqual(outer["search"], 60)
 
 
 if __name__ == "__main__":

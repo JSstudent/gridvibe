@@ -3795,6 +3795,12 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("function restoreTerminalViewportState(terminal, state, { isCurrent = null } = {})", html)
         self.assertIn("captureCachedPaneUiState();", html)
         self.assertIn("restoreCachedPaneUiState({", html)
+        # A frame-sliced Source build belongs to the card, not to the window:
+        # it is suspended on the way out, resumed on the way back, and its
+        # queued readers are flushed if the group is closed while suspended.
+        self.assertIn("explorerSuspendSourceRenderJob(terminal);", html)
+        self.assertIn("explorerResumeSourceRenderJob(terminal);", html)
+        self.assertIn("explorerAbandonSourceRenderJob(terminal);", html)
         self.assertIn("restoreTerminalViewports: false", html)
         self.assertIn("clearTerminalViewports: false", html)
 

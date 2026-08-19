@@ -870,6 +870,11 @@
                     || 'dark'
                 );
                 terminal._cachedExplorerScroll = captureExplorerFileScroll(index);
+                /* A frame-sliced Source build keeps appending rows into a
+                   detached tree otherwise, competing for frames with the
+                   group being attached in its place. It resumes on the way
+                   back with its position and its queued readers intact. */
+                explorerSuspendSourceRenderJob(terminal);
             } else {
                 terminal._cachedExplorerScroll = null;
             }
@@ -885,6 +890,7 @@
                 restoreTerminalViewportState(terminal, terminal._cachedTerminalViewport);
             }
             if (isExplorerPaneInstance(terminal)) {
+                explorerResumeSourceRenderJob(terminal);
                 restoreExplorerFileScroll(index, terminal._cachedExplorerScroll);
                 resyncExplorerEditorOnAttach(index);
             }
@@ -1099,6 +1105,11 @@
         }
         clearSessionRoutes(cached.sessionIds || []);
         (cached.terminals || []).forEach(terminal => {
+            /* Closed while suspended: the build will never resume, so its
+               queued readers are flushed here rather than stranded. */
+            if (terminal && isExplorerPaneInstance(terminal)) {
+                explorerAbandonSourceRenderJob(terminal);
+            }
             if (terminal?.term) {
                 try { terminal.term.dispose(); } catch (_) {}
             }

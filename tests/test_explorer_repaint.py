@@ -934,6 +934,70 @@ class ChunkedSourceBuildTestCase(NodeHarnessMixin, unittest.TestCase):
         self.assertEqual(result["seen"], [5001])
         self.assertEqual(result["final"], 5001)
 
+    def test_a_detached_build_is_suspended_and_resumes_where_it_stopped(self):
+        """A group switch detaches the card; the build kept spending its frame
+        budget appending rows into a tree nobody could see, in competition
+        with the incoming group's attach, fit and paint.
+        """
+        result = self._build(
+            "const seen = [];"
+            "sandbox.renderExplorerSource(0);"
+            "sandbox.whenExplorerSourceRendered(0, () => seen.push(rowCount()));"
+            "frames.shift()();"
+            "const partial = rowCount();"
+            "sandbox.explorerSuspendSourceRenderJob(pane);"
+            "drain();"
+            "const whileSuspended = rowCount();"
+            "const ranWhileSuspended = seen.length;"
+            "sandbox.explorerResumeSourceRenderJob(pane);"
+            "drain();"
+            "console.log(JSON.stringify({"
+            "  partial,"
+            "  whileSuspended,"
+            "  ranWhileSuspended,"
+            "  seen,"
+            "  final: rowCount()"
+            "}));"
+        )
+
+        self.assertGreater(result["partial"], 0)
+        self.assertLess(result["partial"], 9001)
+        # Not one further row while the card is off screen, however many
+        # frames go by.
+        self.assertEqual(result["whileSuspended"], result["partial"])
+        self.assertEqual(result["ranWhileSuspended"], 0)
+        # Suspension is not cancellation: the build resumes from where it
+        # stopped and its reader still gets the whole document.
+        self.assertEqual(result["seen"], [9001])
+        self.assertEqual(result["final"], 9001)
+
+    def test_a_build_closed_while_suspended_still_flushes_its_readers(self):
+        """The group can be closed while its build is suspended. A reader left
+        queued on a build that will never resume is the stranded scroll
+        restore the hand-over contract exists to prevent.
+        """
+        result = self._build(
+            "const seen = [];"
+            "sandbox.renderExplorerSource(0);"
+            "sandbox.whenExplorerSourceRendered(0, () => seen.push(rowCount()));"
+            "frames.shift()();"
+            "const partial = rowCount();"
+            "sandbox.explorerSuspendSourceRenderJob(pane);"
+            "sandbox.explorerAbandonSourceRenderJob(pane);"
+            "drain();"
+            "console.log(JSON.stringify({"
+            "  partial,"
+            "  seen,"
+            "  final: rowCount()"
+            "}));"
+        )
+
+        self.assertGreater(result["partial"], 0)
+        self.assertEqual(result["seen"], [result["partial"]])
+        # And nothing lands afterwards: the abandoned job is no longer the
+        # pane's, so a frame still in the queue paints nothing.
+        self.assertEqual(result["final"], result["partial"])
+
 
 @unittest.skipUnless(NODE, "Node.js is required for explorer repaint tests")
 class EditUnderlayRepaintTestCase(NodeHarnessMixin, unittest.TestCase):

@@ -167,7 +167,7 @@
             ? policy.restorePlan(entry.metrics, dimensions, attempt)
             : { apply: true, retry: false, nextAttempt: attempt + 1 };
         if (plan.apply) {
-            applyScrollMetrics(scrollEl, entry.metrics);
+            applyScrollMetrics(scrollEl, entry.metrics, dimensions);
             entry.lastAppliedTop = scrollEl.scrollTop;
             entry.lastAppliedLeft = scrollEl.scrollLeft;
             bindExplorerPanelScrollMovement(index, mode, pane, store, entry, scrollEl);

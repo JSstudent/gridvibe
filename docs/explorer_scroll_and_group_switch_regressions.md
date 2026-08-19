@@ -1,8 +1,9 @@
 # Explorer Scroll Stability and Group-Switch Cost After the Large-Content Work
 
-**Status:** Stages 1 and 2 implemented on **2026-08-19**; Stage 1 was also
-live-browser verified. Stages 3–4 remain pending. The original analysis was
-verified against the working tree at `4eed02b`.
+**Status:** Stages 1–3 implemented on **2026-08-19**; Stage 1 was also
+live-browser verified. Stage 3 landed 3.1–3.3 and **dropped 3.4**, which no
+longer reproduces (see the item). Stage 4 remains a spike and is pending. The
+original analysis was verified against the working tree at `4eed02b`.
 **Scope:** Three regressions reported after
 `docs/large_content_freeze_analysis.md` phases 0–2 landed:
 1. Markdown Preview scroll position is no longer preserved.
@@ -30,7 +31,7 @@ built and why), `docs/explorer_performance_research.md` (the broader picture).
 | 1c | — (not reported, found here) | **Fixed in Stage 1** | In-place refresh installs the captured offsets before starting the replacement Preview request |
 | 1d | — (not reported, found here) | **Fixed in Stage 1** | Hidden panels retain their offsets and apply them when shown |
 | 2 | Scrollbar jumps between modes | **Fixed in Stage 2** | The frame's overview track is reserved rather than `auto`, the column stands down in place, and Preview and Diff reserve the same lane |
-| 3 | Group switch is slow with a large file open | **Confirmed, four separate costs** | Whole-content re-hash per switch; a 4-pass read/write-interleaved scroll restore; frame-sliced builds that keep running off-screen; an overview-geometry cache poisoned by the detach |
+| 3 | Group switch is slow with a large file open | **Three costs fixed in Stage 3; the fourth was wrong** | Whole-content re-hash per switch, a 4-pass read/write-interleaved scroll restore and frame-sliced builds that keep running off-screen are all fixed. The claimed overview-geometry poisoning cannot happen — see 3d |
 
 ---
 
@@ -272,7 +273,7 @@ into a detached tree — competing with the incoming group's attach, fit and
 paint. The same applies to a worker highlight result arriving for a pane nobody
 is looking at.
 
-### 3d — the detach poisons the overview geometry cache
+### 3d — the detach poisons the overview geometry cache — **wrong, and not implemented**
 
 `explorerOverviewGeometry()` caches on a signature of
 `[rows.length, code.scrollHeight, code.clientWidth, wrapped]`
@@ -284,6 +285,25 @@ misses and a **full per-row measurement pass** runs — `offsetTop` and
 `offsetHeight` for every one of up to 20,000 rows
 (`explorer-overview.js:699-712`). Had the cache not been poisoned, the
 signature would have matched and the pass would have been skipped entirely.
+
+**Re-checked before implementing Stage 3: this cannot happen.** The zero-size
+observation never reaches `explorerOverviewGeometry()`, because the sync in
+front of it cannot resolve a detached card at all. Two independent guards stop
+it: `scheduleExplorerOverviewSync()` and `syncExplorerOverview()` both read
+`terminals[index]`, and `cacheVisibleGroupView()` empties `terminals` in the
+same synchronous task as the detach; and `explorerOverviewParts()` resolves
+every element through `document.getElementById()`, which by definition cannot
+reach a card living in a `DocumentFragment`. So the observer's zero-size
+callback returns before measuring, the cached geometry keeps the signature it
+had while the card was visible, and the re-attach is a cache **hit** — the
+per-row pass this item wanted to avoid is already skipped.
+
+The proposed guard (`parts.frame.isConnected`) would therefore be a condition
+that can never be false: `getElementById` only ever returns connected
+elements. Adding it would ship dead code, which guardrail 5 forbids, so 3.4
+was dropped rather than implemented. The rule it would have contributed —
+*nothing measures a disconnected element* — is not written into the guardrail
+lists either, because nothing in the code can do so.
 
 ### 3e — the irreducible part
 
@@ -449,48 +469,62 @@ properties (reuse `--explorer-overview-ruler-width`, never restate 14 px) and
 `tokens.css`, no new palette literals.
 **Risk:** low.
 
-### Stage 3 — make a group switch cost what the *visible* group costs
+### Stage 3 — complete (3.1–3.3): a group switch costs what the *visible* group costs
 
-Measure first (below); land the items the numbers justify.
+**Implementation update.** 3.1, 3.2 and 3.3 landed as described; **3.4 was
+dropped** — the defect it fixes does not exist in this code (see 3d above).
+3.2 was narrowed by Stage 1 before it started: the *panel* offsets already run
+on Stage 1's bounded, satisfiability-driven path, so what remained of the four
+interleaved passes was the file listing and the three sidebar scrollers, and
+that is what became one read pass and one write pass. `applyScrollMetrics()`
+stays the one implementation and now takes the extents its caller already
+read, so a batched restore's writes cannot invalidate the next target's read.
 
-**3.1 — Cache the content identity per pane.** Compare the held `content` and
+**3.1 — Complete: cache the content identity per pane.** Compare the held `content` and
 `path` by reference and reuse the previous revisions object, mirroring
 `explorerPreviewRenderToken()`. Exact, not approximate: the string reference
 changes whenever the bytes do. Removes ~58 ms per 10 MiB pane per switch, plus
 the transient full-buffer copy.
 
-**3.2 — Batch the scroll restore.** One read pass collecting every target's
+**3.2 — Complete: batch the scroll restore.** One read pass collecting every target's
 extents, then one write pass — the two-pass shape guardrail 3 already requires
 of the diff row sync. Then replace the fixed four passes with Stage 1's
 "satisfiable yet?" predicate, so a restore stops as soon as it has landed
 instead of forcing three more layouts on a 20,000-row document.
 
-**3.3 — Suspend off-screen builds.** `cacheVisibleGroupView()` suspends any
+**3.3 — Complete: suspend off-screen builds.** `cacheVisibleGroupView()` suspends any
 in-flight sliced source build or chunk pacer; `restoreCachedGroupView()`
 resumes it. **Queued readers must not be dropped** — the contract that a
 superseded build hands its queue on (`explorer-viewer.js:5229-5241`) applies
 here too: a suspended build whose group is closed while suspended must still
 flush, exactly as `explorerAbandonSourceRenderJob()` does.
 
-**3.4 — Don't measure a disconnected frame.** `syncExplorerOverview()` returns
+**3.4 — Dropped, not implemented.** `syncExplorerOverview()` returns
 early when `parts.frame.isConnected` is false, alongside the existing
 `parts.frame.hidden` check (`explorer-overview.js:1006`). The zero-size
 observation then never reaches the cache, the signature still matches on
 re-attach, and the per-row measurement pass is skipped.
 
-**Tests.** Node-executed: revisions are computed once for an unchanged buffer;
-a suspended build flushes its queued readers when its group is closed while
-suspended; a disconnected frame is not measured. Extend
-`tests/test_explorer_overview.py` and `tests/test_explorer_repaint.py` rather
-than adding a new file where the domain already has one.
+**Tests — complete.** Node-executed, in the files whose domain already
+covers the surface. `tests/test_explorer_scroll.py` gained the identity cache
+(hashed once for an unchanged buffer, again when the bytes move, and never
+handing back an object a stored tab view could alias) and the batched restore
+(every extent read before any offset is written, each target measured once,
+and a panel too short to hold its offset retried rather than clamped).
+`tests/test_explorer_repaint.py` gained the suspension pair on the real
+frame-sliced build: not one further row while the card is off screen, the
+build resuming where it stopped with its reader intact, and a build closed
+while suspended still flushing that reader. `tests/test_explorer_overview.py`
+is untouched, since 3.4 was dropped. Both new suites were confirmed to fail
+against the unfixed code before the fixes went in.
 
 **What the user sees:** switching groups with a large file open stops
 stuttering. Nothing looks different.
 
-**Guardrail exposure:** G3 (no busy-waiting — the resume is event-driven).
-Nothing here touches the backend, so guardrails 1, 2 and the durable stores are
-untouched.
-**Risk:** low for 3.1 and 3.4, medium for 3.2 and 3.3.
+**Guardrail exposure:** G3 (no busy-waiting — the resume is event-driven), and
+G5 is what dropped 3.4. Nothing here touches the backend, so guardrails 1, 2
+and the durable stores are untouched.
+**Risk:** low for 3.1, medium for 3.2 and 3.3.
 
 ### Stage 4 — spike only: stop laying out rows nobody can see
 
@@ -550,9 +584,13 @@ Source, edit and large-tier modes.
     beside it. (Stage 2 — **written into guardrail 7 in both files**, together
     with the one-declaration rule for a second surface that must line up and
     the stable scrollbar gutter.)
-  - *Work belonging to a detached pane is suspended, and nothing measures a
-    disconnected element* — a zero-size observation must never be cached as
-    geometry. (Stage 3)
+  - *Work belonging to a detached pane is suspended, never dropped, and
+    identity that costs a full pass over the content is computed once per
+    document.* (Stage 3 — **written into guardrail 3 in both files**, together
+    with the one-read-pass-then-one-write-pass rule for restoring several
+    scrollers at once.) The second half of the original candidate — *nothing
+    measures a disconnected element* — was **not** written, because 3.4 showed
+    nothing in this code can.
 - Stage 2 took option A, so `explorer-overview.js`'s parent element is
   unchanged and `CLAUDE.md`'s one-line description of it still stands. (The
   two width custom properties did move up, from `.explorer-source-frame` to
