@@ -214,8 +214,13 @@
             if (job.suspended) {
                 return;
             }
-            if (pane._explorerSourceRenderJob !== job
-                || code.querySelector('.explorer-source-plain') !== host) {
+            if (pane._explorerSourceRenderJob !== job) {
+                return;
+            }
+            if (code.querySelector('.explorer-source-plain') !== host) {
+                // Same standing-down rule as the row build above: a job that
+                // can never finish must not hold the pane's reader queue.
+                explorerAbandonSourceRenderJob(pane);
                 return;
             }
             const started = performance.now();
@@ -5327,8 +5332,20 @@
             if (job.suspended) {
                 return;
             }
-            if (pane._explorerSourceRenderJob !== job
-                || explorerRenderedSourceContainer(code) !== container) {
+            if (pane._explorerSourceRenderJob !== job) {
+                // A newer build owns the pane and the queue with it.
+                return;
+            }
+            if (explorerRenderedSourceContainer(code) !== container) {
+                /* The panel this was filling was replaced by something that is
+                   not a newer build — the in-place editor's textarea, the
+                   large tier's chunks, a tab switch. No further slice may
+                   land, and this job stays `_explorerSourceRenderJob` forever
+                   unless it stands down here: every later
+                   whenExplorerSourceRendered() would queue behind a build that
+                   can never finish, which silently kills the pane's scroll
+                   restores, its selection restore and its Git-active sync. */
+                explorerAbandonSourceRenderJob(pane);
                 return;
             }
             const started = performance.now();
@@ -7721,8 +7738,19 @@
             ? { ...restoredTabView.scroll, activeView: initialFileView }
             : null);
         const searchState = ensureExplorerSearchState(pane, 'file');
-        if (previousPath && previousPath !== path) {
+        /* The query the incoming surface gets is the one captured against
+           *this* tab and *this* path (explorerCaptureActiveTabView), not
+           whatever the pane was last searching. A pane-wide query is what made
+           a tab switch paint the previous file's find over the new one and
+           then scroll it to the first hit. */
+        const tabFind = assignedTab?.find;
+        const restoredQuery = tabFind
+            && explorerNormalizeTabPath(tabFind.path) === explorerNormalizeTabPath(path)
+            ? String(tabFind.query || '')
+            : '';
+        if (restoredQuery !== searchState.query || (previousPath && previousPath !== path)) {
             cancelExplorerSearch(index);
+            searchState.query = restoredQuery;
             searchState.activeIndex = 0;
             searchState.matchCount = 0;
             searchState.matchCapped = false;
@@ -7900,7 +7928,11 @@
         wireExplorerEditorZoomControls(index);
         wireExplorerSearchControls(index);
         refreshExplorerEditControls(index);
-        applyExplorerSearch(index);
+        /* A rebuild is a repaint, not a navigation: the restore on the next
+           line owns where this file opens. Letting the find scroll here put
+           the reader at match 1 of a query they had not retyped, a frame
+           before the stored offset was applied — and the last writer won. */
+        applyExplorerSearch(index, { scroll: false });
         whenExplorerSourceRendered(index, () => restoreExplorerFileScroll(index, effectiveScrollState));
         renderExplorerTabStrip(index);
         persistExplorerTabsToSession(index);

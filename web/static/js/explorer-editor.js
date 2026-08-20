@@ -286,6 +286,11 @@
             voice: null   // { epoch, phase, settleTimer } while dictating
         };
 
+        /* The textarea replaces the panel a frame-sliced row build may still be
+           filling. That build can never finish now, so it stands down here
+           rather than on its next frame — and its queued readers are flushed
+           rather than stranded behind a job nothing will complete. */
+        explorerAbandonSourceRenderJob(pane);
         renderExplorerEditTextarea(index);
         setExplorerEditChromeDisabled(index, true);
         refreshExplorerEditControls(index);

@@ -236,6 +236,7 @@ vm.runInContext(fs.readFileSync(process.argv[6], 'utf8'), sandbox);
 const realTabRuntime = {
     active: sandbox.explorerActiveTab,
     activate: sandbox.activateExplorerTab,
+    capture: sandbox.explorerCaptureActiveTabView,
     find: sandbox.explorerFindTab,
     matching: sandbox.explorerMatchingTabView
 };
@@ -458,6 +459,39 @@ function resolvePreview(html) {
     await realTabRuntime.activate(0, tabA.id);
     results.tabRoundTrip = { preview: preview.scrollTop };
 
+    /* The find query is captured against the tab *and* the path it was typed
+       on, so leaving a tab cannot carry its search onto the next file. A
+       pane-wide query re-ran the outgoing file's find over the incoming one and
+       scrolled it to the first hit, overriding the offset just restored. */
+    pane._explorerMode = 'file';
+    pane._explorerActiveTabId = tabA.id;
+    pane._explorerRenderedTabId = tabA.id;
+    pane._explorerFilePath = tabA.path;
+    pane._explorerFileContent = '# a';
+    pane._explorerSearch = { query: 'needle' };
+    realTabRuntime.capture(0);
+    const capturedOnA = tabA.find && { ...tabA.find };
+    // The permanent Preview tab shows a different file on every plain click, so
+    // its stored query answers for that path only.
+    pane._explorerActiveTabId = previewTab.id;
+    pane._explorerRenderedTabId = previewTab.id;
+    previewTab.path = 'first.md';
+    pane._explorerFilePath = 'first.md';
+    pane._explorerFileContent = '# first';
+    pane._explorerSearch = { query: 'first-query' };
+    realTabRuntime.capture(0);
+    const previewCarry = previewTab.find && { ...previewTab.find };
+    // Clearing the find clears what the tab carries — never a stale query kept
+    // alive by a tab nobody searched again.
+    pane._explorerSearch = { query: '' };
+    realTabRuntime.capture(0);
+    results.tabFindCarry = {
+        capturedOnA,
+        untouchedTab: tabB.find == null,
+        previewCarry,
+        clearedCarry: previewTab.find
+    };
+
     // The content identity behind every revision comparison is computed once
     // per document, not once per capture. A group switch used to run a djb2
     // pass over every character of the open file (plus the join's transient
@@ -668,6 +702,26 @@ class ExplorerScrollAdapterTestCase(unittest.TestCase):
 
     def test_a_preview_offset_survives_the_real_tab_activation_path(self):
         self.assertEqual(self.results["tabRoundTrip"], {"preview": 640})
+
+    def test_the_find_query_is_carried_by_tab_and_path_never_by_the_pane(self):
+        """One pane-wide find query is a find the reader did not ask for.
+
+        Leaving a tab used to leave its query on the pane, so the next file
+        opened was searched with it, painted with its marks and scrolled to its
+        first hit — over the offset the tab restore had just put back. The
+        query now travels with the tab *and* the path it was typed against,
+        which is what lets the permanent Preview tab drop it when the file
+        under it changes while a pinned tab keeps it.
+        """
+        carry = self.results["tabFindCarry"]
+        self.assertEqual(carry["capturedOnA"], {"path": "a.md", "query": "needle"})
+        # A tab nobody searched carries nothing to re-apply.
+        self.assertTrue(carry["untouchedTab"])
+        self.assertEqual(
+            carry["previewCarry"], {"path": "first.md", "query": "first-query"}
+        )
+        # Clearing the find clears the tab's carry with it.
+        self.assertIsNone(carry["clearedCarry"])
 
     def test_the_content_identity_is_computed_once_per_document(self):
         """A capture is not a reason to re-hash the file.

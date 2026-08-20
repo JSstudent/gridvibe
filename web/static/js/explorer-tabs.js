@@ -294,6 +294,23 @@
         } else if (tab.path) {
             return;
         }
+        /* The find query belongs to the tab *and the file it was typed
+           against*, never to the pane. One pane-wide query meant opening
+           anything else re-ran the outgoing file's search over the incoming
+           one: marks the reader never asked for, and a scroll-to-first-match
+           that overrode the offset the tab restore had just put back. Pairing
+           it with the path is what makes the permanent Preview tab — which
+           shows a different file on every plain click — drop the query while a
+           pinned tab, or a reopen of the same file, keeps it.
+
+           In-memory only. Nothing here reaches the persisted tab record; the
+           snapshot contract stores no Search query or result. */
+        if (isFile) {
+            const query = String(pane._explorerSearch?.query || '');
+            tab.find = query
+                ? { path: explorerNormalizeTabPath(pane._explorerFilePath), query }
+                : null;
+        }
         const scroll = captureExplorerFileScroll(index);
         if (!scroll) {
             return;

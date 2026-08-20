@@ -1093,66 +1093,90 @@
             applyExplorerPendingDiffScroll(index);
             return;
         }
+        /* The cache above only answers once a load has *finished*. Opening a
+           file with the Diff panel up asks for the same patch twice inside one
+           frame — renderExplorerFile()'s `keepDiffSplit` load, then the scroll
+           restore's setExplorerFileView(index, 'diff') — and the second call
+           aborted the first and refetched the identical URL, so every click on
+           a changed-file row cost two requests (one always cancelled) and two
+           server-side `git diff` runs. An identical in-flight load is joined,
+           not superseded; a load for a *different* identity still supersedes,
+           which is what the abort slot is for. */
+        const inFlight = pane._explorerDiffLoadInFlight;
+        if (inFlight && inFlight.key === cacheKey) {
+            await inFlight.promise;
+            return;
+        }
 
         code.textContent = 'Loading diff...';
-        try {
-            const params = new URLSearchParams({
-                path: diffPath,
-                mode: diffMode
-            });
-            if (commit) {
-                params.set('commit', commit);
-            }
-            const response = await fetch(
-                `/api/explorer/${encodeURIComponent(sessionId)}/git/diff?${params.toString()}`,
-                { signal: explorerRequestSignal(pane, 'diff') }
-            );
-            const data = await response.json();
-            if (!response.ok) {
-                throw new Error(data.error || 'Failed to load Git diff');
-            }
-            pane._explorerDiffLoaded = true;
-            pane._explorerDiffCacheKey = cacheKey;
-            pane._explorerDiffContent = data.diff || '';
-            // The backend already bounds diffs to 256 KiB / 4,000 lines and
-            // reports truncation; keep
-            // the flag so the rendered patch is never mistaken for the whole change.
-            pane._explorerDiffTruncated = Boolean(data.truncated);
-            await renderExplorerDiff(index);
-            const renderedTab = explorerFindTab(
-                pane,
-                pane._explorerRenderedTabId || pane._explorerActiveTabId
-            );
-            const restoredDiffView = explorerMatchingTabView(
-                renderedTab,
-                explorerCurrentContentRevisions(pane)
-            );
-            const restoredDiffScroll = restoredDiffView?.scroll?.panels?.diff;
-            if (restoredDiffScroll) {
-                applyScrollMetrics(
-                    explorerPanelScrollTarget(
-                        document.getElementById(`explorer-diff-panel-${index}`)
-                    ),
-                    restoredDiffScroll
+        const load = (async () => {
+            try {
+                const params = new URLSearchParams({
+                    path: diffPath,
+                    mode: diffMode
+                });
+                if (commit) {
+                    params.set('commit', commit);
+                }
+                const response = await fetch(
+                    `/api/explorer/${encodeURIComponent(sessionId)}/git/diff?${params.toString()}`,
+                    { signal: explorerRequestSignal(pane, 'diff') }
                 );
+                const data = await response.json();
+                if (!response.ok) {
+                    throw new Error(data.error || 'Failed to load Git diff');
+                }
+                pane._explorerDiffLoaded = true;
+                pane._explorerDiffCacheKey = cacheKey;
+                pane._explorerDiffContent = data.diff || '';
+                // The backend already bounds diffs to 256 KiB / 4,000 lines and
+                // reports truncation; keep
+                // the flag so the rendered patch is never mistaken for the whole change.
+                pane._explorerDiffTruncated = Boolean(data.truncated);
+                await renderExplorerDiff(index);
+                const renderedTab = explorerFindTab(
+                    pane,
+                    pane._explorerRenderedTabId || pane._explorerActiveTabId
+                );
+                const restoredDiffView = explorerMatchingTabView(
+                    renderedTab,
+                    explorerCurrentContentRevisions(pane)
+                );
+                const restoredDiffScroll = restoredDiffView?.scroll?.panels?.diff;
+                if (restoredDiffScroll) {
+                    applyScrollMetrics(
+                        explorerPanelScrollTarget(
+                            document.getElementById(`explorer-diff-panel-${index}`)
+                        ),
+                        restoredDiffScroll
+                    );
+                }
+                // A patch is back (or was there all along): re-expose the toggle a
+                // previous empty-diff fallback may have hidden.
+                setExplorerDiffToggleHidden(index, false);
+                if (explorerFallbackFromEmptyDiff(index)) {
+                    return;
+                }
+                applyExplorerPendingDiffScroll(index);
+                if (activeExplorerFileView(index) === 'diff') {
+                    applyExplorerSearch(index);
+                }
+            } catch (error) {
+                if (explorerIsAbortError(error)) {
+                    // Superseded by a newer diff load, which owns this panel and
+                    // its 'Loading diff...' placeholder now.
+                    return;
+                }
+                console.error('[GridVibe Sessions] Explorer Git diff failed:', error);
+                code.innerHTML = `<span class="explorer-diff-empty">${escHtml(error.message || 'Failed to load Git diff.')}</span>`;
             }
-            // A patch is back (or was there all along): re-expose the toggle a
-            // previous empty-diff fallback may have hidden.
-            setExplorerDiffToggleHidden(index, false);
-            if (explorerFallbackFromEmptyDiff(index)) {
-                return;
+        })();
+        pane._explorerDiffLoadInFlight = { key: cacheKey, promise: load };
+        try {
+            await load;
+        } finally {
+            if (pane._explorerDiffLoadInFlight?.promise === load) {
+                pane._explorerDiffLoadInFlight = null;
             }
-            applyExplorerPendingDiffScroll(index);
-            if (activeExplorerFileView(index) === 'diff') {
-                applyExplorerSearch(index);
-            }
-        } catch (error) {
-            if (explorerIsAbortError(error)) {
-                // Superseded by a newer diff load, which owns this panel and
-                // its 'Loading diff...' placeholder now.
-                return;
-            }
-            console.error('[GridVibe Sessions] Explorer Git diff failed:', error);
-            code.innerHTML = `<span class="explorer-diff-empty">${escHtml(error.message || 'Failed to load Git diff.')}</span>`;
         }
     }
