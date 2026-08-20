@@ -152,9 +152,19 @@
        row per line. Nothing here is per-line, so the gutter, section folding,
        the occurrence tint (which anchors on `.explorer-source-lines`), the
        change marks and the overview ruler are absent by construction rather
-       than by a flag each of them has to remember to check. */
+       than by a flag each of them has to remember to check.
+
+       The leading newline is sacrificial and has to stay. sourceChunks() cuts
+       *after* a newline, so a chunk begins with the next line's first
+       character — and when that line is blank, the chunk begins with a
+       newline. The HTML fragment parser drops a single U+000A immediately
+       following a `<pre>` start tag (the same rule covers `listing` and
+       `textarea`), and `innerHTML` and `insertAdjacentHTML` both run that
+       algorithm, so the file's own blank line was eaten and the pane stopped
+       being byte-faithful to it. Giving the parser a newline of ours leaves it
+       something to swallow that is not the file's. */
     function explorerLargeSourceChunkHtml(chunk) {
-        return `<pre class="explorer-source-chunk">${escHtml(chunk)}</pre>`;
+        return `<pre class="explorer-source-chunk">\n${escHtml(chunk)}</pre>`;
     }
 
     /* An element built outside the document, so a rebuild costs no layout
@@ -5942,38 +5952,82 @@
         if (!path) {
             return preview;
         }
-        preview.textContent = 'Rendering preview...';
-        try {
-            const response = await fetch(
-                `/api/explorer/${encodeURIComponent(sessionId)}/file/preview?path=${encodeURIComponent(path)}`,
-                { signal: explorerRequestSignal(pane, 'preview') }
-            );
-            const data = await response.json();
-            if (!response.ok) {
-                throw new Error(data.error || 'Failed to render preview');
-            }
-            // The viewer may have moved on during the flight; the response
-            // describes whatever was open when it started.
-            if (terminals[index] !== pane
-                || sessionIds[index] !== sessionId
-                || pane._explorerFilePath !== path
-                || pane._explorerFileContent !== content
-                || document.getElementById(`explorer-preview-${index}`) !== preview) {
-                return null;
-            }
-            pane._explorerPreviewHtml = data.preview_html || '';
-            pane._explorerPreviewLoaded = true;
-        } catch (error) {
-            if (explorerIsAbortError(error)) {
-                return null;
-            }
-            console.error('[GridVibe Sessions] Explorer preview render failed:', error);
-            preview.textContent = error.message || 'Failed to render preview.';
-            return preview;
+        /* The same in-flight join loadExplorerDiff() carries, for the same
+           reason. `_explorerPreviewLoaded` is set only once the response has
+           landed, so it cannot answer for a load still in the air — and every
+           first entry into the Preview panel asks twice inside one frame: the
+           caller starts the fetch, then applyExplorerSearch() runs
+           synchronously into restoreExplorerPreview(), which sees an unloaded
+           panel and asks again. The second ask aborted the first and refetched
+           the identical URL, so every first visit cost two requests and two
+           server-side Markdown renders — Flask does not cancel on client
+           abort, so the abandoned one still ran to completion. An identical
+           in-flight load is joined; a load for different bytes still
+           supersedes, which is what the abort slot is for. The identity is the
+           path *and* the buffer, matching the staleness check inside: a save
+           lands as the same path with different content, and joining that load
+           would hand the reader a render of the bytes they just replaced. */
+        const inFlight = pane._explorerPreviewLoadInFlight;
+        if (inFlight && inFlight.path === path && inFlight.content === content) {
+            await inFlight.promise;
+            return document.getElementById(`explorer-preview-${index}`) === preview
+                ? preview
+                : null;
         }
-        const painted = paintExplorerPreview(index);
-        requestExplorerPanelScrollRestore(index, 'preview');
-        return painted;
+        preview.textContent = 'Rendering preview...';
+        const load = (async () => {
+            try {
+                const response = await fetch(
+                    `/api/explorer/${encodeURIComponent(sessionId)}/file/preview?path=${encodeURIComponent(path)}`,
+                    { signal: explorerRequestSignal(pane, 'preview') }
+                );
+                const data = await response.json();
+                if (!response.ok) {
+                    throw new Error(data.error || 'Failed to render preview');
+                }
+                // The viewer may have moved on during the flight; the response
+                // describes whatever was open when it started.
+                if (terminals[index] !== pane
+                    || sessionIds[index] !== sessionId
+                    || pane._explorerFilePath !== path
+                    || pane._explorerFileContent !== content
+                    || document.getElementById(`explorer-preview-${index}`) !== preview) {
+                    return null;
+                }
+                pane._explorerPreviewHtml = data.preview_html || '';
+                pane._explorerPreviewLoaded = true;
+            } catch (error) {
+                if (explorerIsAbortError(error)) {
+                    return null;
+                }
+                console.error('[GridVibe Sessions] Explorer preview render failed:', error);
+                preview.textContent = error.message || 'Failed to render preview.';
+                return preview;
+            }
+            const painted = paintExplorerPreview(index);
+            requestExplorerPanelScrollRestore(index, 'preview');
+            /* The find that ran while this was in the air had nothing but the
+               loader's placeholder to mark, so it counted 0 and painted
+               nothing. paintExplorerPreview() has just replaced that subtree,
+               so the query is applied to the document that actually arrived —
+               the arrival hook loadExplorerDiff() already carries. Only while
+               the reader is still on Preview: a find pointed at Source or Diff
+               owns those panels, and re-running it from here would repaint
+               them on behalf of a panel nobody is looking at. */
+            if (painted && pane._explorerSearch?.query
+                && activeExplorerFileView(index) === 'preview') {
+                applyExplorerSearch(index, { scroll: false });
+            }
+            return painted;
+        })();
+        pane._explorerPreviewLoadInFlight = { path, content, promise: load };
+        try {
+            return await load;
+        } finally {
+            if (pane._explorerPreviewLoadInFlight?.promise === load) {
+                pane._explorerPreviewLoadInFlight = null;
+            }
+        }
     }
 
     function restoreExplorerPreview(index) {
@@ -8222,6 +8276,14 @@
         pane._explorerFilePath = path;
         pane._explorerFileContent = '';
         pane._explorerFileLanguage = codeLanguage;
+        /* The tier is a pane field and this view is `file` mode with no buffer
+           behind it, so it has to be restated here like every other path that
+           repoints a pane at new content. Inheriting the outgoing file's
+           `large` tier left the commit diff showing a Find bar that
+           applyExplorerSearch() then refused to serve — and, because the input
+           existed, focusExplorerSearch() still claimed Ctrl+F, so the reader
+           lost the browser's own find as well. */
+        applyExplorerSourceTier(pane, '');
         pane._explorerPreviewHtml = '';
         pane._explorerPreviewLoaded = false;
         pane._explorerGit = null;
@@ -8456,6 +8518,9 @@
             resetExplorerFsWatchBaseline(pane);
             pane._explorerFileContent = '';
             pane._explorerFileLanguage = '';
+            // Costs nothing today — the find guard checks the mode first — but
+            // the tier describes the buffer, and the buffer is now empty.
+            applyExplorerSourceTier(pane, '');
             pane._explorerPreviewHtml = '';
             pane._explorerPreviewLoaded = false;
             pane._explorerGit = null;

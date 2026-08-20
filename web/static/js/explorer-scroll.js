@@ -88,10 +88,20 @@
             panels,
             sidebar: same ? (view.scroll?.sidebar || {}) : {}
         };
+        /* `listScrollLeft`/`listScrollTop` are the legacy exact-offset
+           spelling of the very same scroller `directory` describes, and the
+           restore falls back to them whenever `directory` is absent. Dropping
+           only the one the revision guards left a genuinely new listing
+           opening at the previous directory's offset — and, now that
+           applyScrollMetrics() prefers an exact offset over a ratio,
+           verbatim.
+           They stand or fall together. */
         if (view.scroll?.directory && matches('directory')) {
             scroll.directory = view.scroll.directory;
         } else {
             delete scroll.directory;
+            delete scroll.listScrollLeft;
+            delete scroll.listScrollTop;
         }
         return {
             ...view,

@@ -1,6 +1,12 @@
 # Code Review — `szua_gridvibe-opt` → `szua_gridvibe_wrk-opt`
 
-**Status:** Review complete, 2026-08-20. No fixes applied.
+**Status:** Review complete, 2026-08-20. **Findings 1–5 verified and fixed,
+2026-08-20** — each re-confirmed against the code first, then fixed with a test
+that was checked to fail without the fix ([What was fixed](#what-was-fixed)).
+**Finding 6 is deferred by decision:** both its halves turn on landing an
+interaction inside a build window, which cannot be settled from the code, so it
+stays open until its [verification scenario](#verification-scenario) is run in a
+browser. Findings 7–15 remain open.
 **Range reviewed:** `origin/szua_gridvibe-opt` (`e9eb029`) … `szua_gridvibe_wrk-opt`
 (`db8d6f8`) — 11 commits, linear (the `-opt` tip *is* the merge base).
 **Scope:** Code only. `CHANGELOG.md`, `README.md`,
@@ -44,7 +50,9 @@ merge-base copy (291 → 302 top-level functions: 37 removed to `explorer-diff.j
 plus targeted Node executions of the DOM-free policies to confirm four specific
 behaviours.
 
-Baseline health on the branch tip:
+Baseline health on the branch tip, as it stood when the review was written and
+before any fix (see [Verification status](#verification-status) for the numbers
+after the Findings 1-5 fixes):
 
 ```
 python tests/run_tests.py   → Ran 1852 tests … OK (skipped=9)
@@ -55,33 +63,41 @@ python -m ruff check .      → All checks passed!
 
 ## Verdict summary
 
-| # | Finding | Severity | Confidence |
+| # | Finding | Severity | Status |
 |---|---|---|---|
-| 1 | Commit-diff view inherits the previous file's `large` tier, so its Find bar is present but inert **and** it suppresses the browser's own Ctrl+F | Medium | High — code path traced end to end |
-| 2 | Markdown Preview is fetched **twice** on every first visit; the first request is aborted by the second | Medium | High |
-| 3 | With an active find query, the first Preview visit reports **0 matches** — the lazy loader never re-applies the search | Medium | High |
-| 4 | The large-file tier silently **drops a blank line** at any chunk boundary that lands on one (`<pre>` swallows a leading newline) | Medium-low | High — boundary reproduced in Node; the DOM half is spec behaviour |
-| 5 | `resolveTabView()` leaks legacy `listScrollLeft/Top` past a revision mismatch, so a new directory listing restores the **previous** directory's scroll | Medium-low | High — reproduced in Node |
-| 6 | Source has no arrival-path scroll restore; the pending-content refusal exists for Preview but not for Source, in both directions | Low | Medium — timing-dependent; [verification scenario](#verification-scenario) below |
-| 7 | A highlight-worker failure caches a permanent "plain" miss for the open buffer, so that file stays wholly uncoloured (no fallback lexer, no re-render) | Low | High |
-| 8 | `explorerDiffWorkerCore()` is dereferenced without the optional chaining every other looked-up policy uses | Low | High |
-| 9 | Byte-triggered tier notice reads "**1 lines** rendered as plain text" on a minified single-line file | Low | High — reproduced in Node |
-| 10 | `explorerOverviewStoodDown()` still tests `aside.hidden`, which nothing sets any more | Low (info) | High |
-| 11 | `explorer-diff.js`'s header still claims a byte-for-byte move; 15 of its 44 functions have since changed | Low | High — verified mechanically |
-| 12 | Worker pool is never terminated and disables itself page-wide on one worker error; `terminate()`/`size` have no callers | Low (info) | High |
-| 13 | `_explorerLineRecordCache` is a 2-entry **global**: 3+ file panes thrash it, and it pins two whole documents for the page's life | Low (info) | High |
-| 14 | The lazy preview payload carries no revision, so Source and Preview can describe different bytes | Low (info) | High |
-| 15 | The editor underlay's "splice" path still allocates a whole row model per animation frame | Low (info) | High |
+| 1 | Commit-diff view inherits the previous file's `large` tier, so its Find bar is present but inert **and** it suppresses the browser's own Ctrl+F | Medium | **Confirmed · Fixed** |
+| 2 | Markdown Preview is fetched **twice** on every first visit; the first request is aborted by the second | Medium | **Confirmed · Fixed** |
+| 3 | With an active find query, the first Preview visit reports **0 matches** — the lazy loader never re-applies the search | Medium | **Confirmed · Fixed** |
+| 4 | The large-file tier silently **drops a blank line** at any chunk boundary that lands on one (`<pre>` swallows a leading newline) | Medium-low | **Confirmed · Fixed** |
+| 5 | `resolveTabView()` leaks legacy `listScrollLeft/Top` past a revision mismatch, so a new directory listing restores the **previous** directory's scroll | Medium-low | **Confirmed · Fixed** |
+| 6 | Source has no arrival-path scroll restore; the pending-content refusal exists for Preview but not for Source, in both directions | Low | **Deferred** — timing-dependent; [verification scenario](#verification-scenario) below |
+| 7 | A highlight-worker failure caches a permanent "plain" miss for the open buffer, so that file stays wholly uncoloured (no fallback lexer, no re-render) | Low | Open — confidence high |
+| 8 | `explorerDiffWorkerCore()` is dereferenced without the optional chaining every other looked-up policy uses | Low | Open — confidence high |
+| 9 | Byte-triggered tier notice reads "**1 lines** rendered as plain text" on a minified single-line file | Low | Open — confidence high, reproduced in Node |
+| 10 | `explorerOverviewStoodDown()` still tests `aside.hidden`, which nothing sets any more | Low (info) | Open — confidence high |
+| 11 | `explorer-diff.js`'s header still claims a byte-for-byte move; 15 of its 44 functions have since changed | Low | Open — confidence high, verified mechanically |
+| 12 | Worker pool is never terminated and disables itself page-wide on one worker error; `terminate()`/`size` have no callers | Low (info) | Open — confidence high |
+| 13 | `_explorerLineRecordCache` is a 2-entry **global**: 3+ file panes thrash it, and it pins two whole documents for the page's life | Low (info) | Open — confidence high |
+| 14 | The lazy preview payload carries no revision, so Source and Preview can describe different bytes | Low (info) | Open — confidence high |
+| 15 | The editor underlay's "splice" path still allocates a whole row model per animation frame | Low (info) | Open — confidence high |
 
 Nothing found rises to a security, durability, or data-loss defect. Findings 1–5
 are user-visible behaviour changes; 6–15 are robustness, resource and accuracy
 items.
+
+**Findings 1–5 are fixed.** Each was re-confirmed against the code before being
+touched — the three code-path findings by tracing every call site, the two
+Node-executed ones by re-running the reproduction against the real policy — and
+each fix carries a test that was checked to fail with the fix reverted. See
+[What was fixed](#what-was-fixed). Finding 6 is deferred by decision and
+Findings 7–15 remain open.
 
 ---
 
 ## Finding 1 — the commit-diff view inherits the previous file's tier, and its Find dies with it
 
 **Severity:** Medium · **Files:** `web/static/js/explorer-viewer.js`
+**Status: confirmed, fixed.** Both missing sites now reset the tier.
 
 `_explorerSourceTier` is a **pane**-level field, but only three of the five
 places that repoint a pane at new content maintain it:
@@ -134,11 +150,30 @@ in `loadExplorerPane()`'s directory branch). A stricter alternative is to make
 from a cached field, but the cache exists precisely because counting lines is
 `O(bytes)`; resetting at the two missing sites is the cheaper answer.
 
+**Fixed as suggested.** `applyExplorerSourceTier(pane, '')` now runs in
+`renderExplorerCommitDiffFile()` beside the other pane fields it repoints, and
+in `loadExplorerPane()`'s directory branch for the same reason — the field
+describes the buffer and the buffer is empty. The cached-field design is
+unchanged.
+
+*Confirmed before fixing.* All five repoint sites were read; the guard in
+`applyExplorerSearch()` and `focusExplorerSearch()`'s unconditional success on
+a present input were both traced, so the finding's two halves — an inert
+control *and* a suppressed browser find — were verified rather than assumed.
+
+*Test.* `tests/test_explorer_large_file_tier.py::test_a_commit_diff_does_not_inherit_the_previous_files_tier`
+runs the real `renderExplorerCommitDiffFile()` in Node against the harness's
+DOM stub, on a pane genuinely left at the `large` tier by a 40,000-line file.
+It asserts the pane refuses Find beforehand, that the header renders the bar,
+and that the bar it renders is one the find will answer. With the reset
+reverted it fails on `tierAfter == 'large'`.
+
 ---
 
 ## Finding 2 — the Markdown Preview is fetched twice on every first visit
 
 **Severity:** Medium · **Files:** `web/static/js/explorer-viewer.js`
+**Status: confirmed, fixed.** The preview loader now carries the same join.
 
 `loadExplorerDiff()` gained an explicit in-flight join for exactly this problem,
 with a comment naming it:
@@ -180,11 +215,33 @@ two costs this whole change set exists to remove. It also writes
 store `pane._explorerPreviewLoadInFlight = { path, promise }`, join a matching
 path, supersede a different one.
 
+**Fixed as suggested, with the identity widened by one field.** The record is
+`{ path, content, promise }` and a join requires both to match. Keying on the
+path alone would let an editor save — same path, different bytes — join the
+load it was meant to supersede, handing the reader a render of the bytes they
+had just replaced. The staleness check inside the loader already compares
+exactly this pair, so the join now agrees with it.
+
+*Confirmed before fixing.* The double entry was traced through both paths the
+finding names — `setExplorerFileView()` and `renderExplorerFile()` — and
+`applyExplorerSearch()` was re-read to confirm no `await` precedes its branch
+dispatch, so the second call really does land inside the first's flight. One
+correction to the finding's scope: the no-query `else` branch also reaches
+`restoreExplorerPreview()`, so this fired on every first Preview visit, not
+only on one with an active find.
+
+*Test.* `tests/test_explorer_scroll.py::test_the_first_preview_visit_costs_exactly_one_request`
+counts `fetch` calls across a real first Preview visit driven through the real
+loader. It asserts one request, that the second caller genuinely arrived and
+was joined rather than skipped, and that the join record is released when the
+load settles. It fails at two requests with the join reverted.
+
 ---
 
 ## Finding 3 — with a find query active, the first Preview visit reports 0 matches
 
 **Severity:** Medium · **Files:** `web/static/js/explorer-viewer.js`
+**Status: confirmed, fixed.** Preview now has the arrival hook Diff had.
 
 `loadExplorerDiff()` re-applies the find once its content arrives:
 
@@ -228,11 +285,25 @@ is run against the literal string `Rendering preview...`, so a query such as
 `activeExplorerFileView(index) === 'preview'`, call `applyExplorerSearch(index)`.
 Fixing Finding 2 first removes the second, redundant entry into this path.
 
+**Fixed as suggested**, in that order, with two conditions on the call. It is
+skipped when no query is typed, so an arrival never repaints a panel on behalf
+of a find nobody ran; and it passes `scroll: false`, because the reader did not
+ask to be moved — they switched panels, and the panel finished loading. The
+cosmetic sub-case goes with it: the marks over `Rendering preview...` are
+replaced along with the subtree that carried them.
+
+*Test.* `tests/test_explorer_scroll.py::test_an_active_find_is_re_applied_to_the_preview_that_arrives`
+asserts the query is re-applied exactly once after the paint, and that a panel
+with no query is left alone. It fails at zero re-applications with the hook
+reverted.
+
 ---
 
 ## Finding 4 — the large-file tier drops a blank line at a chunk boundary
 
 **Severity:** Medium-low · **Files:** `web/static/js/explorer-viewer.js`, `web/static/js/explorer-tiers.js`
+**Status: confirmed, fixed.** Sacrificial newline, and the test now measures
+the parsed text rather than the markup string.
 
 The tier's DOM unit is one `<pre>` per chunk:
 
@@ -283,11 +354,34 @@ with it.
 fixture with a blank line at a chunk boundary and assert on `textContent`, not on
 the markup string.
 
+**Fixed with the sacrificial newline**, not the `<div>`: `<pre>` is what the
+tier's CSS and its selection behaviour are built on, and the one-character
+change disturbs neither.
+
+*Confirmed before fixing.* The boundary was re-reproduced against the real
+`sourceChunks()` — a 12,000-line file with line 5000 blank cuts into four
+chunks, of which chunk 1 begins with the newline, and the join is still
+lossless. The parser half is the HTML Standard's `pre`/`listing`/`textarea`
+special case in the *in body* insertion mode, which `innerHTML` and
+`insertAdjacentHTML` both run.
+
+*Test.* The Node harness in `tests/test_explorer_large_file_tier.py` gained a
+`blanks` fixture that puts an empty line on **every** chunk cut, and its
+losslessness measure now applies that one parser rule to each chunk body before
+reassembling the file. This suite has no DOM to parse with, so the rule is
+modelled explicitly and named as such rather than left implied. The old
+markup-string measure survives as `losslessMarkup`, and the new case asserts it
+is now **false** while the parsed text is lossless — the markup deliberately no
+longer reproduces the file on its own, which is exactly the trap the original
+assertion fell into. Reverting the fix fails the case.
+
 ---
 
 ## Finding 5 — a new directory listing restores the previous directory's scroll
 
 **Severity:** Medium-low · **Files:** `web/static/js/explorer-scroll.js`, `web/static/js/explorer-viewer.js`
+**Status: confirmed, fixed.** Both spellings of the listing offset now drop
+together.
 
 The old `explorerMatchingTabView()` replaced the whole scroll state on a revision
 mismatch:
@@ -340,11 +434,40 @@ offset (clamped to the new extent). Before this branch the same path applied `0`
 in `resolveTabView()` (they describe the same scroller), or stop spreading
 `view.scroll` and build the result from the fields the policy actually validates.
 
+**Fixed with the first option.** The second is the better shape but a wider
+change: the spread also carries fields the policy does not name, and
+enumerating them turns a filter into an allowlist every future field has to be
+added to. The two legacy keys are deleted in the same branch that deletes
+`directory`, under a comment stating they are one scroller in two spellings.
+
+*Confirmed before fixing.* Re-reproduced against the real policy — a tab whose
+`directory` revision no longer matches returned `listScrollLeft: 42,
+listScrollTop: 1234` with `directory` correctly dropped. Both halves of the
+mechanism were re-read: `captureExplorerFileScroll()` writing the pair, and
+`restoreExplorerFileScroll()` falling back to it as an *exact* offset, which
+`applyScrollMetrics()` now prefers over a ratio.
+
+*Test.* `tests/test_explorer_scroll.py::test_a_new_listing_drops_both_spellings_of_the_old_listings_offset`
+runs the real `resolveTabView()` over a listing tab carrying both spellings,
+and asserts a matching revision keeps both while a new directory keeps neither.
+
 ---
 
 ## Finding 6 — Source has no arrival-path scroll restore, and the pending-content rule is applied in only one direction
 
 **Severity:** Low · **Files:** `web/static/js/explorer-scroll-adapter.js`, `web/static/js/explorer-viewer.js`
+**Status: deferred by decision, 2026-08-20.** Not fixed, and not dismissed.
+
+Both halves turn on landing an interaction inside a build window, which is a
+property of a running browser rather than of the code. The asymmetry described
+below is real and reads plainly in the source; whether it ever costs the reader
+anything cannot be settled from the source alone. Applying the symmetry fix
+blind would add guards and an arrival hook to the one part of this machinery
+whose ordering this review specifically checked and found sound, against a
+defect nobody has yet observed. It stays open until the
+[verification scenario](#verification-scenario) is run in a browser — and the
+sub-case at the end of this section, the deferred restore reasserting a view
+the reader has moved away from, is deferred with it.
 
 The design states that a panel whose content is still being built is neither
 captured from nor restored into. Three of the four halves implement it; one does
@@ -849,6 +972,58 @@ it.
 
 ---
 
+## What was fixed
+
+Applied 2026-08-20, after re-confirming each finding against the code. Every
+fix carries a test that was checked to **fail with the fix reverted** — a test
+added alongside a fix proves nothing until it has been seen to fail.
+
+| # | Change | File |
+|---|---|---|
+| 1 | `applyExplorerSourceTier(pane, '')` in `renderExplorerCommitDiffFile()` and in `loadExplorerPane()`'s directory branch | `explorer-viewer.js` |
+| 2 | `_explorerPreviewLoadInFlight = { path, content, promise }`; an identical load is joined, different bytes supersede | `explorer-viewer.js` |
+| 3 | After `paintExplorerPreview()`, re-apply an active find with `scroll: false` when Preview is the shown panel | `explorer-viewer.js` |
+| 4 | A sacrificial `\n` after the `<pre>` start tag in `explorerLargeSourceChunkHtml()` | `explorer-viewer.js` |
+| 5 | `resolveTabView()` deletes `listScrollLeft`/`listScrollTop` in the branch that deletes `directory` | `explorer-scroll.js` |
+
+Tests added — four cases, one harness fixture, one measure corrected:
+
+| Test | Covers |
+|---|---|
+| `test_explorer_large_file_tier.py::test_a_commit_diff_does_not_inherit_the_previous_files_tier` | 1 |
+| `test_explorer_scroll.py::test_the_first_preview_visit_costs_exactly_one_request` | 2 |
+| `test_explorer_scroll.py::test_an_active_find_is_re_applied_to_the_preview_that_arrives` | 3 |
+| `test_explorer_large_file_tier.py::test_a_blank_line_on_a_chunk_cut_survives_the_parser` | 4 |
+| `test_explorer_scroll.py::test_a_new_listing_drops_both_spellings_of_the_old_listings_offset` | 5 |
+
+Two harness changes support them. The large-file-tier harness gained a
+`blanks` fixture and a parsed-text losslessness measure beside the markup one
+(Finding 4), plus the DOM the commit-diff renderer needs (Finding 1). The
+scroll adapter harness gained a `fetch` **call counter** — the existing
+`fetches[]` queue is drained as each response resolves, so it cannot answer
+"how many requests did this path issue".
+
+No behaviour outside these five paths was changed, and no contract in
+`CLAUDE.md` moved: the read-only explorer contract, the tier ceilings, the
+persistence schema and the scroll policy's revision rules are all as they were.
+
+### One correction to the review
+
+Finding 2 states the double fetch happens "on every first visit"; the section's
+trace runs through the find. It is in fact wider than the trace shows — the
+no-query `else` branch of `applyExplorerSearch()` also calls
+`restoreExplorerPreview()`, so the second request went out whether or not a
+query was typed. The finding's headline was right and its trace was narrow.
+
+### What was deliberately not done
+
+* **Finding 6** — deferred by decision; see its section.
+* **Findings 7–15** — untouched and still open.
+* The **test gaps** listed under [Verification status](#verification-status)
+  are closed for Findings 1–5 only.
+
+---
+
 ## What was checked and found correct
 
 Recorded so a later reader does not re-derive it.
@@ -946,12 +1121,16 @@ Recorded so a later reader does not re-derive it.
 
 ## Verification status
 
+Re-run after the Findings 1–5 fixes (2026-08-20):
+
 | Check | Result |
 |---|---|
-| `python tests/run_tests.py` | 1852 tests, OK (9 skipped) |
+| `python tests/run_tests.py` | 1857 tests, OK (9 skipped) — was 1852 before the four new cases |
 | `python -m ruff check .` | clean |
+| `node --check` on both changed modules | clean |
+| Each new test with its fix reverted | fails — checked one at a time |
 | `node --check` on all new/changed JS | implicit — the Node-executed suites load and run every DOM-free module |
-| Live browser | **not run.** Findings 1–5 and 7–15 are code-path or Node-executed; Finding 6 is timing-dependent and is the one I would want confirmed in a browser before acting on it — Finding 6 carries a step-by-step **Verification scenario** with a console probe, a sized fixture and pass/fail criteria for each half. |
+| Live browser | **still not run**, and it is still only Finding 6 that needs it. Findings 1–5 were verified and are now regression-tested in Node; 7–15 are code-path. Finding 6 keeps its step-by-step **Verification scenario** with a console probe, a sized fixture and pass/fail criteria for each half. |
 
 New behavioural cover added on this branch: `test_explorer_tiers.py`,
 `test_explorer_large_file_tier.py`, `test_explorer_repaint.py`,
@@ -962,28 +1141,40 @@ two preview-route cases). The removals in `test_explorer_overview.py` and
 `test_explorer_source_frame.py` are source-text assertions replaced with
 behavioural ones, which is the direction `CLAUDE.md` asks for.
 
-Gaps worth closing alongside the fixes:
+Gaps worth closing alongside the fixes — **all three closed 2026-08-20**, see
+[What was fixed](#what-was-fixed):
 
-* No test observes the large tier's chunks through a parsed DOM (Finding 4), and
-  no fixture puts a blank line at a chunk boundary.
-* No test covers the Preview lazy-load path re-applying an active find
-  (Finding 3) or requesting exactly once (Finding 2).
-* No test covers the commit-diff view's find (Finding 1); `test_api.py`'s new
-  tier/find-bar case covers `renderExplorerFile()` only.
+* ~~No test observes the large tier's chunks through a parsed DOM (Finding 4),
+  and no fixture puts a blank line at a chunk boundary.~~ Closed: a `blanks`
+  fixture and a parsed-text measure. There is no DOM in this suite, so the one
+  parser rule is modelled explicitly rather than left implied.
+* ~~No test covers the Preview lazy-load path re-applying an active find
+  (Finding 3) or requesting exactly once (Finding 2).~~ Closed: both, driven
+  through the real loader in the scroll adapter harness.
+* ~~No test covers the commit-diff view's find (Finding 1); `test_api.py`'s new
+  tier/find-bar case covers `renderExplorerFile()` only.~~ Closed: the real
+  `renderExplorerCommitDiffFile()` now runs in the large-file-tier harness.
 
 ---
 
 ## Suggested order of work
 
-1. **Finding 1** — one line, removes a dead control and a suppressed Ctrl+F.
-2. **Findings 2 + 3** — same function; fix the in-flight join first, then the
-   re-apply, and add the two missing tests.
-3. **Finding 4** — one character in the markup, plus a DOM-level fixture.
-4. **Finding 5** — one line in `resolveTabView()`, plus a Node case asserting the
-   listing offset is dropped on a directory revision mismatch.
-5. **Finding 6** — run its verification scenario first (Scenario B before
-   Scenario A: B destroys the stored offset outright, A only applies it short),
-   then the symmetry fix.
-6. **Findings 7–15** — cleanups; 8, 10, 11 and 13 are each a small, isolated edit.
+1. ~~**Finding 1** — one line, removes a dead control and a suppressed Ctrl+F.~~
+   **Done.**
+2. ~~**Findings 2 + 3** — same function; fix the in-flight join first, then the
+   re-apply, and add the two missing tests.~~ **Done**, in that order.
+3. ~~**Finding 4** — one character in the markup, plus a DOM-level fixture.~~
+   **Done**; the fixture measures parsed text, modelling the parser rule
+   explicitly because this suite has no DOM.
+4. ~~**Finding 5** — one line in `resolveTabView()`, plus a Node case asserting
+   the listing offset is dropped on a directory revision mismatch.~~ **Done.**
+5. **Finding 6** — **deferred by decision.** Its verification scenario has not
+   been run, and no fix has been applied. When it is picked up: Scenario B
+   before Scenario A, because B destroys the stored offset outright while A
+   only applies it short. The symmetry fix follows the scenario, not the other
+   way round.
+6. **Findings 7–15** — **open.** Cleanups; 8, 10, 11 and 13 are each a small,
+   isolated edit.
 
-None of these blocks the branch. Findings 1–5 are the ones a user can hit.
+None of these blocks the branch. Findings 1–5 were the ones a user could hit,
+and they are fixed.

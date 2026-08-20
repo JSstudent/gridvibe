@@ -87,10 +87,23 @@ const runFrames = () => {
     return ran;
 };
 
+/* The commit-diff view's own two elements. It never builds source rows, so a
+   settable innerHTML and the handful of members it touches are the whole of
+   what it reads. */
+const viewer = { innerHTML: '', querySelector: () => null, querySelectorAll: () => [] };
+const list = {
+    id: 'explorer-list-0',
+    classList: { add() {}, remove() {}, contains: () => false, toggle: () => false },
+    querySelector: () => null,
+    querySelectorAll: () => []
+};
+
 const sandbox = {
     console,
     document: {
-        getElementById: id => (id === 'explorer-code-0' ? code : null),
+        getElementById: id => (
+            id === 'explorer-code-0' ? code : id === 'explorer-list-0' ? list : null
+        ),
         querySelector: () => null,
         querySelectorAll: () => [],
         addEventListener() {},
@@ -128,8 +141,15 @@ vm.createContext(sandbox);
 sandbox.window.GridVibeExplorerTiers = sandbox.GridVibeExplorerTiers;
 
 const lines = Number(process.argv[5]);
-const body = Array.from({ length: lines }, (_, i) => 'line ' + i).join(String.fromCharCode(10))
-    + String.fromCharCode(10);
+/* 'blanks' puts an empty line on every chunk cut. sourceChunks() cuts every
+   SOURCE_LARGE_CHUNK_LINES lines, so a blank line at a multiple of 5000 is the
+   first character of the following chunk — which is the one position a <pre>
+   start tag can eat. */
+const fixture = process.argv[6] || 'plain';
+const body = Array.from(
+    { length: lines },
+    (_, i) => (fixture === 'blanks' && i > 0 && i % 5000 === 0 ? '' : 'line ' + i)
+).join(String.fromCharCode(10)) + String.fromCharCode(10);
 
 const pane = {
     _explorerMode: 'file',
@@ -145,6 +165,45 @@ sandbox.renderExplorerSource(0);
 // paint took to finish.
 const beforeFrames = code.innerHTML;
 const frameCount = runFrames();
+
+if (fixture === 'commitdiff') {
+    /* Everything the commit-diff renderer collaborates with, stubbed to the
+       shape it expects. The renderer itself is the real one: the contract
+       under test is what it leaves on the pane, not what its neighbours do. */
+    /* Lives in terminal-icons.js, which the page loads beside the viewer. Its
+       top-level `const` does not cross a vm.runInContext boundary, so the
+       header template resolves the name through the sandbox global instead —
+       the header itself is the real one. */
+    sandbox.EXPLORER_LINE_WRAP_ICON = '<svg aria-hidden="true"></svg>';
+    sandbox.explorerEnsureViewerShell = () => viewer;
+    sandbox.explorerAssignOpenTab = () => ({ id: 'commit-tab' });
+    [
+        'clearExplorerDirectorySearchControls', 'cancelExplorerSearch',
+        'explorerCaptureActiveTabView', 'setExplorerFileWatchBaseline',
+        'renderExplorerPathBreadcrumb', 'wireExplorerLineWrapControl',
+        'wireExplorerSearchControls', 'applyExplorerEditorFontSize',
+        'applyExplorerSourceFontToElement', 'loadExplorerDiff',
+        'renderExplorerTabStrip', 'syncExplorerGitActiveRows'
+    ].forEach(name => { sandbox[name] = () => {}; });
+
+    const allowsFindOnTheLargeFile = sandbox.explorerPaneAllowsFind(pane);
+    const rendered = sandbox.renderExplorerCommitDiffFile(
+        0, 'src/app.js', '0123456789abcdef0123456789abcdef01234567'
+    );
+    console.log(JSON.stringify({
+        rendered,
+        allowsFindOnTheLargeFile,
+        tierBefore: 'large',
+        tierAfter: pane._explorerSourceTier,
+        allowsFindAfter: sandbox.explorerPaneAllowsFind(pane),
+        // The header renders the bar unconditionally, so the tier is the only
+        // thing standing between the reader and a control that does nothing.
+        rendersFindBar: viewer.innerHTML.includes('data-explorer-search-input="0"'),
+        mode: pane._explorerMode,
+        content: pane._explorerFileContent
+    }));
+    return;
+}
 
 const html = code.innerHTML;
 const chunkBodies = [...html.matchAll(
@@ -167,14 +226,30 @@ console.log(JSON.stringify({
     hasStatusRole: html.includes('<div class="explorer-source-tier-notice" role="status">'),
     notice: (html.match(/<div class="explorer-source-tier-notice"[\\s\\S]*?<\\/div>/) || [''])[0],
     // Chunks are escaped markup; unescape the one entity a plain log can grow.
-    lossless: chunkBodies.join('').replace(/&amp;/g, '&') === body
+    // What the *markup* carries. Not the contract — a chunk that reproduces
+    // the file as a string can still lose a line once parsed.
+    losslessMarkup: chunkBodies.join('').replace(/&amp;/g, '&') === body,
+    // What the pane actually shows. There is no DOM here to parse with, so the
+    // one parser rule that applies is modelled explicitly: the HTML fragment
+    // parser drops a single U+000A immediately after a `<pre>` start tag, and
+    // `innerHTML`/`insertAdjacentHTML` both run that algorithm. Every chunk is
+    // put through it before the file is reassembled.
+    lossless: chunkBodies
+        .map(chunkBody => (chunkBody.startsWith(String.fromCharCode(10))
+            ? chunkBody.slice(1)
+            : chunkBody))
+        .join('')
+        .replace(/&amp;/g, '&') === body,
+    chunksLeadingNewline: chunkBodies.filter(
+        chunkBody => chunkBody.startsWith(String.fromCharCode(10))
+    ).length
 }));
 """
 
 
 @unittest.skipUnless(NODE, "Node.js is required for large-file tier tests")
 class ExplorerLargeFileTierTestCase(unittest.TestCase):
-    def _render(self, lines: int):
+    def _render(self, lines: int, fixture: str = "plain"):
         with TemporaryDirectory() as temp_dir:
             script = Path(temp_dir) / "harness.js"
             script.write_text(HARNESS, encoding="utf-8")
@@ -186,6 +261,7 @@ class ExplorerLargeFileTierTestCase(unittest.TestCase):
                     str(VIEWER_JS),
                     str(TABS_JS),
                     str(lines),
+                    fixture,
                 ],
                 capture_output=True,
                 text=True,
@@ -204,7 +280,38 @@ class ExplorerLargeFileTierTestCase(unittest.TestCase):
         self.assertEqual(rendered["rowCount"], 0)
         self.assertEqual(rendered["linesBlocks"], 0)
         self.assertEqual(rendered["chunkCount"], 8)
-        self.assertTrue(rendered["lossless"], "the chunks must reproduce the file")
+        self.assertTrue(
+            rendered["lossless"], "the parsed chunks must reproduce the file"
+        )
+
+    def test_a_blank_line_on_a_chunk_cut_survives_the_parser(self):
+        """The one line a `<pre>` chunk can silently eat.
+
+        ``sourceChunks()`` cuts *after* a newline, so a chunk begins with the
+        next line's first character — and when that line is blank, the chunk
+        begins with a newline. The HTML fragment parser drops a single U+000A
+        immediately following a ``<pre>`` start tag, which is exactly where
+        that one lands, so the blank line disappeared from the pane and the
+        view stopped being byte-faithful to the file.
+
+        The cure is a sacrificial newline of our own for the parser to eat, so
+        the markup is deliberately *not* lossless while the parsed text is.
+        Asserting only on the markup string is what let this through.
+        """
+        rendered = self._render(40000, fixture="blanks")
+
+        self.assertEqual(rendered["tier"], "large")
+        self.assertEqual(rendered["chunkCount"], 8)
+        # The contract first: what the reader ends up looking at.
+        self.assertTrue(
+            rendered["lossless"],
+            "a blank line landing on a chunk cut must survive the parser",
+        )
+        # And the shape that buys it — every chunk carries the sacrificial
+        # newline, so the markup no longer reproduces the file on its own and
+        # must not be asserted to.
+        self.assertEqual(rendered["chunksLeadingNewline"], 8)
+        self.assertFalse(rendered["losslessMarkup"])
 
     def test_the_chunks_arrive_over_frames_behind_the_notice(self):
         """Not building rows is not the same as not blocking the thread.
@@ -239,6 +346,34 @@ class ExplorerLargeFileTierTestCase(unittest.TestCase):
         self.assertIn("Download and Edit still work.", notice)
         # A control that cannot answer is not offered.
         self.assertFalse(rendered["allowsFind"])
+
+    def test_a_commit_diff_does_not_inherit_the_previous_files_tier(self):
+        """The tier is a pane field, and a commit diff is `file` mode.
+
+        `renderExplorerCommitDiffFile()` clears the buffer and sets
+        `_explorerMode = 'file'`, but it used to leave the outgoing file's tier
+        standing — so a commit opened after a large file rendered its Find bar
+        (that header renders it unconditionally) over a `large` tier, and
+        `applyExplorerSearch()` then refused to serve it. The reader got a
+        control that marked nothing and moved no counter, *and* lost the
+        browser's own find with it: `focusExplorerSearch()` succeeds whenever
+        the input exists, so the global Ctrl+F handler still called
+        `preventDefault()`. It self-healed only on the next ordinary file open.
+        """
+        rendered = self._render(40000, fixture="commitdiff")
+
+        self.assertTrue(rendered["rendered"])
+        # The pane really was in the state that used to be inherited.
+        self.assertFalse(rendered["allowsFindOnTheLargeFile"])
+
+        # A commit diff has no buffer, so it is not a large file.
+        self.assertEqual(rendered["mode"], "file")
+        self.assertEqual(rendered["content"], "")
+        self.assertEqual(rendered["tierAfter"], "full")
+
+        # The bar this header always renders is now one the find will answer.
+        self.assertTrue(rendered["rendersFindBar"])
+        self.assertTrue(rendered["allowsFindAfter"])
 
     def test_below_the_tier_nothing_changes(self):
         rendered = self._render(500)

@@ -44,6 +44,27 @@ const tab = {
         }
     }
 };
+/* A browsed listing. captureExplorerFileScroll() writes the offset twice —
+   the `directory` metrics and the legacy top-level `listScrollLeft`/
+   `listScrollTop` — and restoreExplorerFileScroll() falls back to the legacy
+   pair whenever `directory` is absent. Both spellings describe the one
+   scroller, so a revision mismatch has to take both. */
+const listingTab = {
+    collapsedLines: new Set(),
+    view: {
+        mode: 'preview',
+        revisions: { directory: 'dir-one' },
+        scroll: {
+            activeView: 'preview',
+            listScrollLeft: 42,
+            listScrollTop: 1234,
+            directory: { scrollLeftRatio: 0.2, scrollTopRatio: 0.6, wasAtBottom: false },
+            panels: {},
+            sidebar: {}
+        }
+    }
+};
+
 const persisted = {
     view: { persistedRecord: { version: 2, intent: { mode: 'preview' } } }
 };
@@ -71,6 +92,8 @@ process.stdout.write(JSON.stringify({
             return { mode: record.intent.mode, scroll: { panels: {} } };
         }
     }),
+    listingSame: scroll.resolveTabView(listingTab, { directory: 'dir-one' }),
+    listingNew: scroll.resolveTabView(listingTab, { directory: 'dir-two' }),
     persistedArgs,
     short: attempts[0],
     final: attempts[attempts.length - 1],
@@ -178,6 +201,9 @@ const elements = new Map([
 ]);
 const raf = [];
 const fetches = [];
+// fetches[] is drained as each response is resolved, so the pending queue
+// cannot answer "how many requests did this path issue".
+let fetchCount = 0;
 const pane = {
     _explorerMode: 'file',
     _explorerFilePath: 'README.md',
@@ -222,7 +248,10 @@ const sandbox = {
     sessionIds: ['s0'],
     applyExplorerChangeMarks: () => {},
     escHtml: value => String(value == null ? '' : value),
-    fetch: () => new Promise(resolve => fetches.push(resolve))
+    fetch: () => {
+        fetchCount += 1;
+        return new Promise(resolve => fetches.push(resolve));
+    }
 };
 sandbox.globalThis = sandbox;
 vm.createContext(sandbox);
@@ -594,6 +623,70 @@ function resolvePreview(html) {
         search: searchPanel.scrollTop
     };
 
+    /* The lazy Preview request, counted. Every first entry into the panel asks
+       for it twice inside one frame: the caller starts the fetch, then the
+       find runs synchronously into restoreExplorerPreview(), which sees an
+       unloaded panel and asks again. The stub stands in for the real find's
+       preview branch, which is exactly that call. */
+    sandbox.terminals[0] = pane;
+    pane._explorerFilePath = 'lazy.md';
+    pane._explorerFileContent = '# lazy';
+    pane._explorerPreviewLoaded = false;
+    pane._explorerPreviewHtml = '';
+    pane._explorerPreviewLoadInFlight = null;
+    pane._explorerSearch = { query: 'needle' };
+    select('preview');
+    preview.scrollHeight = 300;
+    preview.scrollTop = 0;
+    fetches.length = 0;
+    fetchCount = 0;
+    let searchApplied = 0;
+    sandbox.applyExplorerSearch = () => {
+        searchApplied += 1;
+        sandbox.restoreExplorerPreview(0);
+    };
+    sandbox.setExplorerFileView(0, 'preview');
+    const requestsBeforeArrival = fetchCount;
+    const searchesBeforeArrival = searchApplied;
+    const paintsBeforeLazy = paints;
+    resolvePreview('<p>needle</p>');
+    // The fetch, its json(), the joined caller and the loader's own finally
+    // each cost a turn; drain generously rather than counting them.
+    for (let turn = 0; turn < 40; turn += 1) {
+        await Promise.resolve();
+    }
+    results.lazyPreviewRequest = {
+        requestsBeforeArrival,
+        requestsTotal: fetchCount,
+        searchesBeforeArrival,
+        // The find that ran against the loader's placeholder counted 0; the
+        // arrival has to re-run it over the document that turned up.
+        searchesAfterArrival: searchApplied - searchesBeforeArrival,
+        paints: paints - paintsBeforeLazy,
+        loaded: pane._explorerPreviewLoaded,
+        inFlightCleared: pane._explorerPreviewLoadInFlight == null
+    };
+
+    /* No query means nothing to re-apply: the arrival hook must not repaint a
+       panel on behalf of a find nobody typed. */
+    pane._explorerPreviewLoaded = false;
+    pane._explorerPreviewHtml = '';
+    pane._explorerPreviewLoadInFlight = null;
+    pane._explorerSearch = { query: '' };
+    fetches.length = 0;
+    fetchCount = 0;
+    searchApplied = 0;
+    sandbox.setExplorerFileView(0, 'preview');
+    resolvePreview('<p>quiet</p>');
+    for (let turn = 0; turn < 40; turn += 1) {
+        await Promise.resolve();
+    }
+    results.lazyPreviewQuiet = {
+        requestsTotal: fetchCount,
+        searchesAfterArrival: searchApplied - 1
+    };
+    sandbox.applyExplorerSearch = () => {};
+
     process.stdout.write(JSON.stringify(results));
 })();
 """
@@ -660,6 +753,31 @@ class ExplorerScrollPolicyTestCase(unittest.TestCase):
         self.assertEqual(self.results["changed"]["scroll"]["panels"], {})
         self.assertEqual(self.results["changed"]["scroll"]["sidebar"], {})
 
+    def test_a_new_listing_drops_both_spellings_of_the_old_listings_offset(self):
+        """Navigation starts at the top, and it takes two deletions to say so.
+
+        ``captureExplorerFileScroll()`` records the listing offset twice: the
+        ``directory`` metrics and the legacy top-level ``listScrollLeft`` /
+        ``listScrollTop`` pair, which ``restoreExplorerFileScroll()`` falls
+        back to whenever ``directory`` is absent. Filtering only ``directory``
+        on a revision mismatch therefore dropped nothing the restore could not
+        find another way — and since ``applyScrollMetrics()`` prefers an exact
+        offset to a ratio, the stale legacy number was applied verbatim, so
+        opening a subdirectory landed at the parent listing's position.
+        """
+        same = self.results["listingSame"]["scroll"]
+        # The listing is still the same listing: the reader keeps their place,
+        # in both spellings.
+        self.assertEqual(same["directory"]["scrollTopRatio"], 0.6)
+        self.assertEqual(same["listScrollTop"], 1234)
+        self.assertEqual(same["listScrollLeft"], 42)
+
+        # A genuinely new directory keeps neither.
+        new = self.results["listingNew"]["scroll"]
+        self.assertNotIn("directory", new)
+        self.assertNotIn("listScrollTop", new)
+        self.assertNotIn("listScrollLeft", new)
+
     def test_persisted_records_stay_owned_by_the_persistence_resolver(self):
         self.assertEqual(self.results["persisted"]["mode"], "preview")
         self.assertEqual(self.results["persistedArgs"]["current"], {"preview": "same"})
@@ -711,6 +829,53 @@ class ExplorerScrollAdapterTestCase(unittest.TestCase):
                 "afterArrival": 600,
             },
         )
+
+    def test_the_first_preview_visit_costs_exactly_one_request(self):
+        """The in-flight join `loadExplorerDiff()` already carried.
+
+        `_explorerPreviewLoaded` is set only once the response lands, so it
+        cannot answer for a load still in the air — and every first entry into
+        the panel asks twice inside one frame: the caller starts the fetch,
+        then `applyExplorerSearch()` runs synchronously into
+        `restoreExplorerPreview()`, which sees an unloaded panel and asks
+        again. The second ask aborted the first and refetched the identical
+        URL, so each first visit cost two requests and two server-side Markdown
+        renders — Flask does not cancel on client abort, so the abandoned one
+        still ran to completion.
+        """
+        lazy = self.results["lazyPreviewRequest"]
+
+        self.assertEqual(lazy["requestsBeforeArrival"], 1)
+        self.assertEqual(lazy["requestsTotal"], 1)
+        # The second caller really did arrive; it was joined, not skipped.
+        self.assertEqual(lazy["searchesBeforeArrival"], 1)
+        self.assertTrue(lazy["loaded"])
+        # And the join record is released once the load settles, so the next
+        # visit to a different file is not answered by this one.
+        self.assertTrue(lazy["inFlightCleared"])
+
+    def test_an_active_find_is_re_applied_to_the_preview_that_arrives(self):
+        """0/0 against the loader's placeholder is not an answer.
+
+        With a query already typed, the find's preview branch runs before the
+        fetch lands, so it marks the literal string `Rendering preview...` and
+        sets the counter to 0. `paintExplorerPreview()` then replaces that
+        whole subtree, and nothing re-ran the search — the reader had to retype
+        or step the query to get any marks at all. Diff has carried this
+        arrival hook all along; Preview now does too.
+        """
+        lazy = self.results["lazyPreviewRequest"]
+
+        self.assertEqual(lazy["searchesAfterArrival"], 1)
+        # The arrival painted before it re-ran the query, so the find had a
+        # rendered document to mark rather than the loader's placeholder.
+        self.assertGreaterEqual(lazy["paints"], 1)
+
+        # A panel nobody searched is left alone: the hook is for re-applying a
+        # query, not for repainting on every arrival.
+        quiet = self.results["lazyPreviewQuiet"]
+        self.assertEqual(quiet["requestsTotal"], 1)
+        self.assertEqual(quiet["searchesAfterArrival"], 0)
 
     def test_lazy_diagram_growth_never_overrides_a_reader_scroll(self):
         self.assertEqual(
