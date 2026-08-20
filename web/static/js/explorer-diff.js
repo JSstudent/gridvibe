@@ -9,14 +9,25 @@
    side-by-side fallback, the empty-diff fallback, the split toggle, and the
    bounded `git/diff` load itself.
 
-   A move, not a rewrite: every function below is byte-for-byte the one that
-   stood in explorer-viewer.js, including its four-space indentation, so the
-   diff reads as a relocation. Both files are plain classic scripts sharing one
-   global scope, so the split costs no accessor plumbing — the viewer still
-   calls renderExplorerDiff() and loadExplorerDiff(), explorer-overview.js
-   still calls explorerDiffChangeBlocks(), and this file still calls
-   applyExplorerSearch() exactly as before. Loaded directly after
-   explorer-viewer.js.
+   It *began* as a move, not a rewrite: at the extraction commit every function
+   below was byte-for-byte the one that stood in explorer-viewer.js, including
+   its four-space indentation, so that one diff read as a relocation and the
+   Diff-domain tests passed untouched — which is the standard guardrail 6 sets
+   for a pure move. That is history, not a description of the file: later
+   commits gave it the tiered renderers and the worker-backed large-diff parse,
+   so roughly a third of its top-level functions have changed in place and
+   several (explorerDiffTierBannerHtml, explorerDiffHunkStart,
+   renderExplorerLargeDiff, paintExplorerSideBySideDiff, the two worker
+   lookups) never stood in the viewer at all. Do not read a function here as
+   evidence of what the viewer used to do; read git history for that.
+
+   Both files are plain classic scripts sharing one global scope, so the split
+   costs no accessor plumbing — the viewer still calls renderExplorerDiff() and
+   loadExplorerDiff(), explorer-overview.js still calls
+   explorerDiffChangeBlocks(), and this file still calls applyExplorerSearch()
+   exactly as before. Loaded directly after explorer-viewer.js, and after
+   explorer-worker-core.js, whose parseSideBySideDiff() backs the fallback
+   renderer here (guarded — see explorerParsedDiffModel()).
 
    What deliberately stayed behind: explorerHasGitDiff(),
    explorerDiffCacheKey(), explorerDiffSidebarStatusHtml(),
@@ -826,6 +837,27 @@
         return (typeof window !== 'undefined' && window.GridVibeExplorerWorkerCore) || null;
     }
 
+    /* The handwritten side-by-side parse, wherever it runs on this thread. It
+       lives in explorer-worker-core.js so the worker and the page share one
+       implementation, which makes that module a dependency of the *fallback*
+       renderer — the path taken whenever Diff2Html is unavailable or the
+       worker failed. Dereferencing the lookup directly turned a page that
+       somehow loaded without it into a TypeError on the one path that exists
+       to survive a missing dependency, so it degrades here like every other
+       looked-up policy in this change set: null, and the callers paint the
+       empty-diff message instead of throwing. */
+    function explorerParsedDiffModel(diff) {
+        const core = explorerDiffWorkerCore();
+        return core ? core.parseSideBySideDiff(diff) : null;
+    }
+
+    /* Reuses the empty-diff surface rather than introducing a second one, but
+       says something different: there *is* a patch and this build cannot lay
+       it out. "No Git diff for selected file" would be a lie the reader would
+       act on by looking for changes that are there. */
+    const EXPLORER_DIFF_UNPARSEABLE_HTML =
+        '<span class="explorer-diff-empty">Diff view unavailable — the diff renderer failed to load. Reload the page to try again.</span>';
+
     function paintExplorerSideBySideDiff(index, code, banner, model) {
         code.innerHTML = banner + renderExplorerSideBySideDiffModel(index, model);
         wireExplorerDiffUndoControls(index, code);
@@ -852,7 +884,11 @@
                 pane._explorerDiffParsePending = null;
                 cancelExplorerRequestSlot(pane, 'diffParse');
             }
-            const model = explorerDiffWorkerCore().parseSideBySideDiff(diff);
+            const model = explorerParsedDiffModel(diff);
+            if (!model) {
+                code.innerHTML = banner + EXPLORER_DIFF_UNPARSEABLE_HTML;
+                return Promise.resolve(false);
+            }
             pane._explorerDiffModelCache = { diff, model };
             paintExplorerSideBySideDiff(index, code, banner, model);
             return Promise.resolve(true);
@@ -889,7 +925,11 @@
                 || document.getElementById(`explorer-diff-code-${index}`) !== code) {
                 return false;
             }
-            const model = explorerDiffWorkerCore().parseSideBySideDiff(diff);
+            const model = explorerParsedDiffModel(diff);
+            if (!model) {
+                code.innerHTML = banner + EXPLORER_DIFF_UNPARSEABLE_HTML;
+                return false;
+            }
             pane._explorerDiffModelCache = { diff, model };
             paintExplorerSideBySideDiff(index, code, banner, model);
             return true;
@@ -1005,10 +1045,10 @@
     }
 
     function renderExplorerSideBySideDiff(index, diff) {
-        return renderExplorerSideBySideDiffModel(
-            index,
-            explorerDiffWorkerCore().parseSideBySideDiff(diff)
-        );
+        const model = explorerParsedDiffModel(diff);
+        return model
+            ? renderExplorerSideBySideDiffModel(index, model)
+            : EXPLORER_DIFF_UNPARSEABLE_HTML;
     }
 
     /* Undoing the last hunk (or discarding the file's changes from the Git

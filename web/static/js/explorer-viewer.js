@@ -1058,10 +1058,15 @@
     }
 
     /* An explicit third state beside a token Map and the cached-null fallback:
-       the worker owns tokenization for this buffer, so the first paint is plain
+       a worker job is in flight for this buffer, so the first paint is plain
        escaped text. It must not fall through to the handwritten lexer — on a
        1.5 MiB minified line that lexer is another long main-thread task, which
-       would defeat moving Highlight.js away in the first place. */
+       would defeat moving Highlight.js away in the first place.
+
+       Strictly a *pending* state, never a resting one. A job that fails
+       resolves to real tokens on this thread (see the catch below) rather than
+       leaving the sentinel standing, because a sentinel that never lifts is a
+       file the reader watches stay grey for as long as it is open. */
     const EXPLORER_HIGHLIGHT_PENDING = Symbol('explorer-highlight-pending');
 
     function explorerWorkerClient() {
@@ -1112,7 +1117,11 @@
     function explorerHighlightLinesForRender(index, pane, content, normalizedLanguage) {
         const cache = pane ? pane._explorerHighlightCache : null;
         if (cache && cache.content === content && cache.language === normalizedLanguage) {
-            return cache.plain ? EXPLORER_HIGHLIGHT_PENDING : cache.lines;
+            // One cache shape, one meaning: a hit is the answer for this
+            // buffer, whether the worker produced it or this thread did. The
+            // failure path used to store a third state here — a "plain miss"
+            // that read back as the pending sentinel forever.
+            return cache.lines;
         }
         const previous = pane?._explorerHighlightPending;
         const grammar = EXPLORER_HLJS_LANGUAGE[normalizedLanguage];
@@ -1166,14 +1175,38 @@
                 return;
             }
             console.error('[GridVibe Sessions] Explorer highlight worker failed:', error);
-            /* The plain/fallback rows are already useful. Cache the miss so a
-               disabled worker does not turn every repaint into another job. */
-            pane._explorerHighlightCache = {
-                content,
-                language: normalizedLanguage,
-                lines: null,
-                plain: true
-            };
+            const currentLanguage = normalizeExplorerLanguage(
+                pane._explorerFilePlain ? '' : (pane._explorerFileLanguage || '')
+            );
+            if (pane._explorerFileContent !== content || currentLanguage !== normalizedLanguage) {
+                return;
+            }
+            /* Fall back to exactly what a page with no worker support does:
+               tokenize here, on this thread. Caching the miss instead left the
+               *open* buffer permanently uncoloured — the pending sentinel
+               renders plain escaped text and deliberately does not fall
+               through to the per-line lexer, and nothing re-rendered — while
+               the very next file recovered, because _failWorker() disables the
+               pool and canHighlight() then routes it down this same
+               synchronous path. One failure, two different answers for the
+               same file depending on when it was opened.
+
+               The size argument the pending sentinel is built on cannot fire
+               here: the gate above only offers a buffer to the worker when it
+               is *under* EXPLORER_PLAIN_PREVIEW_THRESHOLD, so anything
+               reaching this catch is already a file the synchronous path is
+               allowed to tokenize. The result is cached on the pane by the
+               shared helper, so a disabled worker still does not turn every
+               repaint into another pass. */
+            explorerHighlightDocumentLinesCached(pane, content, normalizedLanguage);
+            // Same staleness handshake as the success path: the content did
+            // not move, so the repaint policy would otherwise skip, and the
+            // record is kept rather than discarded so the recolour is not
+            // mistaken for a new document.
+            if (pane._explorerSourceRender) {
+                pane._explorerSourceRender.stale = true;
+            }
+            renderExplorerSource(index, explorerSourceSearchRangesOnScreen(index, pane));
         });
         return EXPLORER_HIGHLIGHT_PENDING;
     }
@@ -4769,10 +4802,44 @@
        whole point of the cache is that they are asked for repeatedly against
        the *same* buffer: a single find keystroke used to walk the document
        three times over — once for the decoration maps and twice more inside
-       the two row models — allocating a fresh record per line each pass. Two
-       entries, because the Source rows and the editor's draft are both live
-       during an edit and they are different strings. */
+       the two row models — allocating a fresh record per line each pass.
+
+       Sized against the live panes, not against a fixed 2. Two is the right
+       number *per pane* — the Source rows and the editor's draft are both live
+       during an edit and they are different strings — but the cache is
+       module-level and shared, so a flat 2 meant a workspace with three
+       explorer file panes evicted on every cross-pane call: the optimisation
+       stopped applying in exactly the configuration whose total cost is
+       highest. The ceiling keeps a pathological split from pinning a dozen
+       documents at once.
+
+       Emptied outright when the last explorer pane goes away (terminals.js).
+       Records are heavy — a 4 MiB file is ~100k objects, plus the string —
+       and an LRU only evicts on insert, so with nothing left to ask a question
+       the final entries were pinned for the life of the page. While panes are
+       open no such sweep is needed: a document nobody is looking at any more
+       falls out of an LRU sized to the panes that are, which is what an LRU is
+       for. */
+    const EXPLORER_LINE_RECORD_CACHE_PER_PANE = 2;
+    const EXPLORER_LINE_RECORD_CACHE_MAX = 8;
     const _explorerLineRecordCache = [];
+
+    function explorerReleaseLineRecordCache() {
+        _explorerLineRecordCache.length = 0;
+    }
+
+    function explorerLineRecordCacheLimit() {
+        let panes = 0;
+        for (const pane of terminals) {
+            if (pane?._explorerMode === 'file') {
+                panes += 1;
+            }
+        }
+        return Math.min(
+            Math.max(panes, 1) * EXPLORER_LINE_RECORD_CACHE_PER_PANE,
+            EXPLORER_LINE_RECORD_CACHE_MAX
+        );
+    }
 
     function explorerSourceLineRecords(content) {
         const source = String(content || '');
@@ -4783,7 +4850,9 @@
         }
         const records = explorerBuildSourceLineRecords(source);
         _explorerLineRecordCache.unshift({ source, records });
-        _explorerLineRecordCache.length = Math.min(_explorerLineRecordCache.length, 2);
+        _explorerLineRecordCache.length = Math.min(
+            _explorerLineRecordCache.length, explorerLineRecordCacheLimit()
+        );
         return records;
     }
 
@@ -5992,6 +6061,20 @@
                     || pane._explorerFilePath !== path
                     || pane._explorerFileContent !== content
                     || document.getElementById(`explorer-preview-${index}`) !== preview) {
+                    return null;
+                }
+                /* …and the *file* may have moved on, which the checks above
+                   cannot see: they compare the viewer against itself. Source
+                   and Preview are two reads now, so a write landing between
+                   them would put a render of the newer bytes beside Source's
+                   older ones. Left unloaded rather than painted or refetched:
+                   the open-file change listener is already going to notice the
+                   same revision move and reload the file, and this panel
+                   paints from that. A response with no token (an older server)
+                   is accepted as before. */
+                const previewRevision = data.state_revision || '';
+                const baseRevision = pane._explorerFileStateRevision || '';
+                if (previewRevision && baseRevision && previewRevision !== baseRevision) {
                     return null;
                 }
                 pane._explorerPreviewHtml = data.preview_html || '';

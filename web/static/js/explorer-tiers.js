@@ -144,6 +144,38 @@
         return String(count(value)).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
     }
 
+    /* Kept here rather than borrowed from the viewer's formatExplorerSize() so
+       the policy stays DOM-free and Node-executable. Same units, same
+       one-decimal rounding. */
+    function formatBytes(value) {
+        const bytes = count(value);
+        if (bytes >= 1024 * 1024) {
+            return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+        }
+        if (bytes >= 1024) {
+            return `${(bytes / 1024).toFixed(1)} KB`;
+        }
+        return `${formatCount(bytes)} bytes`;
+    }
+
+    /* Why *this* file is in the tier, in the reader's terms. The two ceilings
+       are independent, so reporting lines unconditionally described the wrong
+       file exactly when the byte ceiling was the one that fired: a 5 MiB
+       minified bundle is one line, and "1 lines rendered as plain text" is
+       both ungrammatical and an answer to a question nobody asked — the
+       reader's problem there is 5 MiB on one line. Lines are named first when
+       both ceilings are crossed, because the row count is what the reader can
+       see on screen. */
+    function sourceTierReason(metrics) {
+        const bytes = count(metrics && metrics.bytes);
+        const lines = count(metrics && metrics.lines);
+        const rows = count(metrics && (metrics.rows === undefined ? metrics.lines : metrics.rows));
+        if (rows > SOURCE_LARGE_MAX_LINES) {
+            return `${formatCount(lines)} ${lines === 1 ? 'line' : 'lines'}`;
+        }
+        return formatBytes(bytes);
+    }
+
     /* What the reader is told. Every capability the tier removes is named — an
        unexplained missing gutter reads as a bug, and a missing Find reads as a
        broken one.
@@ -170,7 +202,7 @@
         }
         return {
             title: 'Large file view',
-            detail: `${formatCount(lines)} lines rendered as plain text so the pane stays responsive.`,
+            detail: `${sourceTierReason(metrics || { bytes, lines })} rendered as plain text so the pane stays responsive.`,
             disabled: [
                 'syntax highlighting',
                 'line numbers',
@@ -306,6 +338,7 @@
         sourceMetrics,
         sourceTier,
         sourceTierForContent,
+        sourceTierReason,
         sourceTierNotice,
         sourceTierAllows,
         sourceChunks,

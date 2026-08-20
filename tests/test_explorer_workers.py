@@ -232,6 +232,69 @@ class ExplorerWorkerTestCase(unittest.TestCase):
             ["AbortError", "second-result", "third-result"],
         )
 
+    def test_one_worker_failure_is_survived_and_the_second_disables_the_pool(self):
+        """A dead worker is not proof the pool cannot work.
+
+        ``_failWorker`` catches two different things: a worker that could not
+        load its script — a missing first-party asset, permanent — and a worker
+        that died running one particular job, or a ``postMessage`` that threw.
+        Disabling page-wide on the first of those cost *every* pane its
+        offloading for the rest of the session, with no path back, on one
+        transient condition. So the first failure only spends a life and the
+        pool respawns; the second gives up, which is what keeps a genuinely
+        broken environment from respawning forever.
+        """
+        result = self._run_node(
+            "(async () => {\n"
+            "  const made = [];\n"
+            "  class FakeWorker {\n"
+            "    constructor() { this.message = null; made.push(this); }\n"
+            "    postMessage(message) { this.message = message; }\n"
+            "    terminate() {}\n"
+            "    die() { this.onerror({ message: 'worker died' }); }\n"
+            "    finish(value) {\n"
+            "      this.onmessage({ data: { id: this.message.id, ok: true, result: value } });\n"
+            "    }\n"
+            "  }\n"
+            "  const pool = new client.WorkerPool({ size: 1, createWorker: () => new FakeWorker() });\n"
+            "  const first = pool.request('diff', { diff: 'one' })\n"
+            "    .then(() => 'resolved', error => error.message);\n"
+            "  made[0].die();\n"
+            "  const availableAfterFirst = pool.available();\n"
+            "  // A whole file's worth of work still gets a worker.\n"
+            "  const second = pool.request('diff', { diff: 'two' })\n"
+            "    .then(value => value, error => error.message);\n"
+            "  const spawnedAfterFirst = made.length;\n"
+            "  made[1].finish('second-result');\n"
+            "  const third = pool.request('diff', { diff: 'three' })\n"
+            "    .then(() => 'resolved', error => error.message);\n"
+            "  made[1].die();  // reused — a worker that finished stays in the pool\n"
+            "  const availableAfterSecond = pool.available();\n"
+            "  const fourth = await pool.request('diff', { diff: 'four' })\n"
+            "    .then(() => 'resolved', error => error.message);\n"
+            "  emit({\n"
+            "    availableAfterFirst, availableAfterSecond, spawnedAfterFirst,\n"
+            "    spawnedTotal: made.length,\n"
+            "    results: [await first, await second, await third, fourth]\n"
+            "  });\n"
+            "})();\n"
+        )
+
+        # One dead worker: the job it was carrying still fails — the caller
+        # falls back on this thread — but the pool is intact and respawns.
+        self.assertEqual(result["results"][0], "worker died")
+        self.assertTrue(result["availableAfterFirst"])
+        self.assertEqual(result["spawnedAfterFirst"], 2)
+        self.assertEqual(result["results"][1], "second-result")
+
+        # The second failure is the pool conceding.
+        self.assertFalse(result["availableAfterSecond"])
+        self.assertEqual(result["results"][2], "worker died")
+        self.assertEqual(result["results"][3], "Explorer workers are unavailable")
+        # And a disabled pool builds nothing more: two workers ever, the
+        # respawn after the first death being the second.
+        self.assertEqual(result["spawnedTotal"], 2)
+
     def test_worker_url_keeps_the_page_cachebuster(self):
         result = self._run_node(
             "emit(client.workerUrlFrom(\n"
@@ -308,6 +371,80 @@ class ExplorerWorkerTestCase(unittest.TestCase):
         self.assertIn("old", result["final"])
         self.assertIn("new", result["final"])
         self.assertEqual(result["undoWires"], 1)
+
+    def test_a_missing_worker_core_degrades_the_diff_instead_of_throwing(self):
+        """The fallback renderer must survive its own dependency going missing.
+
+        ``parseSideBySideDiff`` lives in ``explorer-worker-core.js`` so the
+        worker and the page share one implementation — which quietly made that
+        module a dependency of the path taken whenever Diff2Html is
+        unavailable. Every other looked-up policy in this area degrades if its
+        module is absent; these three sites dereferenced the lookup directly,
+        so a page that loaded without the core turned the *fallback* into a
+        ``TypeError``. Both entry points are driven here with the core absent:
+        the large tier's no-worker branch, and the small-tier fallback that
+        runs when Diff2Html is not on the page either.
+        """
+        result = self._run_node(
+            "(async () => {\n"
+            "  const codeFor = () => ({\n"
+            "    raw: '', dataset: {},\n"
+            "    classList: { toggle() {} },\n"
+            "    querySelector: () => null, querySelectorAll: () => [],\n"
+            "    addEventListener() {},\n"
+            "    get innerHTML() { return this.raw; },\n"
+            "    set innerHTML(value) { this.raw = value; }\n"
+            "  });\n"
+            "  const code = codeFor();\n"
+            "  let tier = 'large';\n"
+            "  const sandbox = {\n"
+            "    console,\n"
+            "    // The whole point: no GridVibeExplorerWorkerCore, and no pool.\n"
+            "    window: {},\n"
+            "    document: { getElementById: id => id === 'explorer-diff-code-0' ? code : null },\n"
+            "    terminals: [{ _explorerDiffContent: '@@ -1 +1 @@\\n-old\\n+new' }],\n"
+            "    explorerTierPolicy: () => ({\n"
+            "      diffTierForContent: () => tier,\n"
+            "      diffTierNotice: () => null,\n"
+            "      diffTierConfigOverrides: () => ({})\n"
+            "    }),\n"
+            "    explorerLineWrapPreference: () => false,\n"
+            "    explorerRequestSignal: () => undefined,\n"
+            "    cancelExplorerRequestSlot() {},\n"
+            "    explorerIsAbortError: error => error && error.name === 'AbortError',\n"
+            "    normalizeExplorerLanguage: value => value || '',\n"
+            "    explorerCodeLanguage: () => '',\n"
+            "    highlightExplorerCode: value => String(value || ''),\n"
+            "    wireExplorerDiffUndoControls() {},\n"
+            "    escHtml: value => String(value == null ? '' : value)\n"
+            "      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'),\n"
+            "    setTimeout, clearTimeout, URLSearchParams, fetch: () => {}\n"
+            "  };\n"
+            "  sandbox.globalThis = sandbox;\n"
+            "  vm.createContext(sandbox);\n"
+            "  vm.runInContext(fs.readFileSync("
+            + json.dumps(str(DIFF_JS))
+            + ", 'utf8'), sandbox);\n"
+            "  const report = async label => {\n"
+            "    try { await sandbox.renderExplorerDiff(0); return { label, threw: null, painted: code.raw }; }\n"
+            "    catch (error) { return { label, threw: String(error), painted: code.raw }; }\n"
+            "  };\n"
+            "  const large = await report('large');\n"
+            "  tier = 'small';\n"
+            "  code.raw = '';\n"
+            "  const small = await report('small');\n"
+            "  emit({ large, small });\n"
+            "})();\n"
+        )
+
+        for branch in (result["large"], result["small"]):
+            self.assertIsNone(branch["threw"], branch["label"])
+            # Not "No Git diff for selected file" — there *is* a patch, and a
+            # reader told otherwise would go looking for changes that are
+            # there. The surface is the existing one; the sentence is not.
+            self.assertIn("explorer-diff-empty", branch["painted"])
+            self.assertIn("Diff view unavailable", branch["painted"])
+            self.assertNotIn("No Git diff", branch["painted"])
 
     def test_worker_entry_imports_only_same_origin_vendored_assets(self):
         body = WORKER_JS.read_text(encoding="utf-8")

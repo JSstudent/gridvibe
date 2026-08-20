@@ -302,9 +302,13 @@ function select(mode) {
     preview.hidden = mode !== 'preview';
 }
 
-function resolvePreview(html) {
+function resolvePreview(html, stateRevision) {
     const resolve = fetches.shift();
-    resolve({ ok: true, json: async () => ({ preview_html: html }) });
+    const body = { preview_html: html };
+    // Omitted entirely unless a case is about the token, so the other cases
+    // keep exercising the "older server, no token" shape.
+    if (stateRevision !== undefined) { body.state_revision = stateRevision; }
+    resolve({ ok: true, json: async () => body });
 }
 
 (async () => {
@@ -685,6 +689,36 @@ function resolvePreview(html) {
         requestsTotal: fetchCount,
         searchesAfterArrival: searchApplied - 1
     };
+    /* The *file* moving on, which the loader's own before/after checks cannot
+       see: they compare the viewer against itself. Source and Preview are two
+       reads now, so a write landing between them would put a render of the
+       newer bytes beside Source's older ones. */
+    const previewCase = async (revision, html) => {
+        pane._explorerPreviewLoaded = false;
+        pane._explorerPreviewHtml = '';
+        pane._explorerPreviewLoadInFlight = null;
+        pane._explorerSearch = { query: '' };
+        fetches.length = 0;
+        fetchCount = 0;
+        const paintsBefore = paints;
+        sandbox.setExplorerFileView(0, 'preview');
+        resolvePreview(html, revision);
+        for (let turn = 0; turn < 40; turn += 1) {
+            await Promise.resolve();
+        }
+        return {
+            loaded: pane._explorerPreviewLoaded,
+            html: pane._explorerPreviewHtml,
+            paints: paints - paintsBefore
+        };
+    };
+
+    pane._explorerFileStateRevision = '120:1700000000.000000';
+    results.lazyPreviewStale = await previewCase('188:1700000009.000000', '<p>newer</p>');
+    results.lazyPreviewMatched = await previewCase('120:1700000000.000000', '<p>same</p>');
+    // An older server sends no token at all; that must still work.
+    results.lazyPreviewUntokened = await previewCase(undefined, '<p>untokened</p>');
+
     sandbox.applyExplorerSearch = () => {};
 
     process.stdout.write(JSON.stringify(results));
@@ -876,6 +910,37 @@ class ExplorerScrollAdapterTestCase(unittest.TestCase):
         quiet = self.results["lazyPreviewQuiet"]
         self.assertEqual(quiet["requestsTotal"], 1)
         self.assertEqual(quiet["searchesAfterArrival"], 0)
+
+    def test_a_preview_describing_different_bytes_is_declined(self):
+        """The loader's own checks compare the viewer against itself.
+
+        Source and Preview used to come from a single read and were consistent
+        by construction. Splitting the preview out made them two reads, so a
+        write landing between them yields a render of newer bytes beside
+        Source's older ones — and the guard as written (same pane, same
+        session, same path, same buffer, same element) catches the *viewer*
+        moving on and cannot catch the *file* moving on.
+
+        Declined rather than painted or refetched: the open-file change
+        listener is already going to see the same revision move and reload the
+        file, and the panel paints from that.
+        """
+        stale = self.results["lazyPreviewStale"]
+        self.assertFalse(stale["loaded"])
+        self.assertEqual(stale["html"], "")
+        self.assertEqual(stale["paints"], 0)
+
+        # The ordinary case is unaffected: matching tokens paint as before.
+        matched = self.results["lazyPreviewMatched"]
+        self.assertTrue(matched["loaded"])
+        self.assertEqual(matched["html"], "<p>same</p>")
+        self.assertEqual(matched["paints"], 1)
+
+        # And a response carrying no token at all is accepted, so the check
+        # cannot turn an older server into a permanently blank panel.
+        untokened = self.results["lazyPreviewUntokened"]
+        self.assertTrue(untokened["loaded"])
+        self.assertEqual(untokened["html"], "<p>untokened</p>")
 
     def test_lazy_diagram_growth_never_overrides_a_reader_scroll(self):
         self.assertEqual(

@@ -162,6 +162,197 @@ process.stdout.write(JSON.stringify({
 """
 
 
+# A highlight job that rejects, driven through the real cache gate. The two
+# neighbours it reports to — the whole-document tokenizer and the re-render —
+# are spies, so what the failure path does is observable rather than inferred.
+HIGHLIGHT_FAILURE_HARNESS = """
+const fs = require('fs');
+const vm = require('vm');
+
+let rejectJob = null;
+const sandbox = {
+    console: { log: console.log, error() {} },
+    document: {
+        getElementById: () => null,
+        querySelector: () => null,
+        querySelectorAll: () => [],
+        addEventListener() {},
+        body: { dataset: {}, addEventListener() {} }
+    },
+    window: {
+        addEventListener() {},
+        setTimeout,
+        clearTimeout,
+        matchMedia: () => ({ matches: false }),
+        localStorage: { getItem: () => null, setItem() {}, removeItem() {} },
+        requestAnimationFrame: () => 0,
+        GridVibeExplorerWorkers: {
+            available: () => true,
+            // Above the worker floor by construction: the gate under test is
+            // what happens when the job fails, not when it is offered.
+            canHighlight: () => true,
+            highlight: () => new Promise((resolve, reject) => { rejectJob = reject; })
+        }
+    },
+    navigator: {},
+    AbortController,
+    setTimeout,
+    clearTimeout,
+    requestAnimationFrame: () => 0,
+    terminals: [],
+    sessionIds: [],
+    applyExplorerChangeMarks: () => {},
+    escHtml: value => String(value == null ? '' : value)
+};
+sandbox.globalThis = sandbox;
+vm.createContext(sandbox);
+vm.runInContext(fs.readFileSync(process.argv[2], 'utf8'), sandbox);
+
+const source = 'def spam():' + String.fromCharCode(10) + '    return 1' + String.fromCharCode(10);
+const colours = new Map([[1, [{ className: 'hljs-keyword', text: 'def', start: 0 }]]]);
+
+let tokenizeCalls = 0;
+let renderCalls = 0;
+sandbox.explorerHighlightDocumentLines = () => { tokenizeCalls += 1; return colours; };
+sandbox.renderExplorerSource = () => { renderCalls += 1; };
+sandbox.explorerSourceSearchRangesOnScreen = () => [];
+
+const pane = {
+    _explorerMode: 'file',
+    _explorerFilePath: 'app.py',
+    _explorerFileContent: source,
+    _explorerFileLanguage: 'python',
+    _explorerFilePlain: false,
+    _explorerSourceRender: { stale: false },
+    _explorerEdit: null
+};
+sandbox.terminals[0] = pane;
+
+const ask = () => sandbox.explorerHighlightLinesForRender(0, pane, source, 'python');
+
+// First paint: the worker owns this buffer, so the rows are deliberately plain
+// and nothing has been tokenized on this thread.
+const firstAsk = ask();
+const pendingAtFirst = typeof firstAsk === 'symbol';
+const tokenizeBeforeFailure = tokenizeCalls;
+
+rejectJob(new Error('worker exploded'));
+
+setTimeout(() => {
+    const afterFailure = ask();
+    process.stdout.write(JSON.stringify({
+        pendingAtFirst,
+        tokenizeBeforeFailure,
+        tokenizeAfterFailure: tokenizeCalls,
+        renderCalls,
+        markedStale: pane._explorerSourceRender.stale,
+        // What the *open* buffer gets from here on: real colours, not the
+        // pending sentinel forever.
+        stillPending: typeof afterFailure === 'symbol',
+        recolouredLines: afterFailure instanceof Map ? afterFailure.size : null,
+        // ...and asking again re-uses that answer rather than tokenizing anew
+        // or starting a second doomed job.
+        tokenizeAfterRepeat: (ask(), tokenizeCalls)
+    }));
+}, 0);
+"""
+
+
+# The line-record cache, driven through its one public entry point. Records are
+# identity-comparable per call, so "was this a hit?" is observable without
+# reaching inside the cache: a hit returns the very same array.
+LINE_RECORD_CACHE_HARNESS = """
+const fs = require('fs');
+const vm = require('vm');
+
+const sandbox = {
+    console,
+    document: {
+        getElementById: () => null,
+        querySelector: () => null,
+        querySelectorAll: () => [],
+        addEventListener() {},
+        body: { dataset: {}, addEventListener() {} }
+    },
+    window: {
+        addEventListener() {},
+        setTimeout,
+        clearTimeout,
+        matchMedia: () => ({ matches: false }),
+        localStorage: { getItem: () => null, setItem() {}, removeItem() {} },
+        requestAnimationFrame: () => 0
+    },
+    navigator: {},
+    setTimeout,
+    clearTimeout,
+    requestAnimationFrame: () => 0,
+    terminals: [],
+    sessionIds: [],
+    applyExplorerChangeMarks: () => {},
+    escHtml: value => String(value == null ? '' : value)
+};
+sandbox.globalThis = sandbox;
+vm.createContext(sandbox);
+vm.runInContext(fs.readFileSync(process.argv[2], 'utf8'), sandbox);
+
+const NL = String.fromCharCode(10);
+const doc = name => name + NL + name + ' second line' + NL;
+
+// One document per pane, plus the editor draft that is live beside it.
+const documents = ['a', 'b', 'c'].map(doc);
+const draft = doc('a') + 'draft' + NL;
+
+const openPanes = count => {
+    sandbox.terminals.length = 0;
+    for (let at = 0; at < count; at += 1) {
+        sandbox.terminals.push({
+            _explorerMode: 'file',
+            _explorerFileContent: documents[at],
+            _explorerEdit: null
+        });
+    }
+};
+
+// Ask about every document once, then ask about the first again. With the
+// cache big enough for the live panes that last ask is a hit; with a flat two
+// entries it has already been evicted by the panes beside it.
+const roundTrip = count => {
+    const live = documents.slice(0, count);
+    const first = live.map(source => sandbox.explorerSourceLineRecords(source));
+    return live.map(
+        (source, at) => sandbox.explorerSourceLineRecords(source) === first[at]
+    );
+};
+
+openPanes(1);
+const onePane = roundTrip(1);
+
+openPanes(3);
+const threePanes = roundTrip(3);
+
+// A pane editing its file holds two live buffers at once, and both must stay
+// resident or every keystroke re-walks the document it is not about.
+openPanes(3);
+sandbox.terminals[0]._explorerEdit = { draft };
+const sourceRecords = sandbox.explorerSourceLineRecords(documents[0]);
+const draftRecords = sandbox.explorerSourceLineRecords(draft);
+const editingKeepsBoth = (
+    sandbox.explorerSourceLineRecords(documents[0]) === sourceRecords
+    && sandbox.explorerSourceLineRecords(draft) === draftRecords
+);
+
+// Closing the last pane hands the documents back: nothing holds them, and an
+// LRU never evicts without an insert to evict on.
+const beforeRelease = sandbox.explorerSourceLineRecords(documents[0]) === sourceRecords;
+sandbox.explorerReleaseLineRecordCache();
+const afterRelease = sandbox.explorerSourceLineRecords(documents[0]) === sourceRecords;
+
+process.stdout.write(JSON.stringify({
+    onePane, threePanes, editingKeepsBoth, beforeRelease, afterRelease
+}));
+"""
+
+
 STALE_RANGE_HARNESS = r"""
 const fs = require('fs');
 const vm = require('vm');
@@ -495,6 +686,72 @@ class ExplorerSourceFrameTestCase(unittest.TestCase):
             "pane._explorerHighlightCache = { content, language: normalizedLanguage, lines };",
             cached,
         )
+
+    @unittest.skipUnless(NODE, "Node.js is required for highlight-failure tests")
+    def test_a_failed_highlight_job_recolours_the_buffer_that_was_open(self):
+        """A worker that dies must not leave one file grey for as long as it is open.
+
+        The pending sentinel is the deliberate first paint while a job runs:
+        plain escaped text, and pointedly *not* the per-line fallback lexer,
+        because on a 1.5 MiB minified line that lexer is the long main-thread
+        task the worker exists to avoid. On failure that sentinel used to be
+        cached as a resting state — nothing re-rendered, and every later ask
+        read the cached miss straight back as the sentinel — so the file that
+        was open when the worker died stayed wholly uncoloured. The next file
+        recovered, because the pool disables itself and ``canHighlight()`` then
+        routes it down the synchronous path: one failure, two different answers
+        for the same file depending on when it was opened.
+
+        The failure now resolves to real tokens on this thread — exactly what a
+        page with no worker support does — and the rows on screen are rebuilt
+        to show them.
+        """
+        failure = self._run_node(HIGHLIGHT_FAILURE_HARNESS)
+
+        # The first paint is still the plain sentinel, tokenizing nothing.
+        self.assertTrue(failure["pendingAtFirst"])
+        self.assertEqual(failure["tokenizeBeforeFailure"], 0)
+
+        # The failure tokenizes here, once, and rebuilds the rows to show it.
+        self.assertEqual(failure["tokenizeAfterFailure"], 1)
+        self.assertEqual(failure["renderCalls"], 1)
+        # The repaint policy would otherwise skip: the content did not move.
+        self.assertTrue(failure["markedStale"])
+
+        # The buffer is coloured from here on, and the answer is cached — no
+        # sentinel, no second tokenization, no second doomed job.
+        self.assertFalse(failure["stillPending"])
+        self.assertEqual(failure["recolouredLines"], 1)
+        self.assertEqual(failure["tokenizeAfterRepeat"], 1)
+
+    @unittest.skipUnless(NODE, "Node.js is required for line-record cache tests")
+    def test_line_record_cache_is_sized_by_the_panes_and_is_given_back(self):
+        """Two entries is right per pane, and the cache is shared by all of them.
+
+        The records exist so that a single find keystroke stops walking the
+        document three times over. Two slots is the correct number for *one*
+        pane — the Source rows and the editor's draft are both live during an
+        edit and they are different strings — but the cache is module-level, so
+        a flat two meant a workspace with three explorer file panes evicted on
+        every cross-pane call: the optimisation stopped applying in exactly the
+        configuration whose total cost is highest.
+
+        And an LRU only evicts on insert, so with the last pane closed there
+        was nothing left to ask a question and whichever documents it had last
+        answered about — for a 4 MiB file, ~100k record objects plus the
+        string — stayed resident for the life of the page.
+        """
+        cache = self._run_node(LINE_RECORD_CACHE_HARNESS)
+
+        # One pane, one document: a repeat ask is a hit, as it always was.
+        self.assertEqual(cache["onePane"][0], True)
+        # Three panes, three documents: every one of them is still a hit.
+        self.assertEqual(cache["threePanes"], [True, True, True])
+        # The pair a pane holds while editing survives the panes beside it.
+        self.assertTrue(cache["editingKeepsBoth"])
+        # Released on teardown, and only then.
+        self.assertTrue(cache["beforeRelease"])
+        self.assertFalse(cache["afterRelease"])
 
     def test_source_render_reuses_the_cached_token_map(self):
         viewer = self._viewer()

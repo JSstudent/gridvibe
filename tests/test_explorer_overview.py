@@ -132,6 +132,9 @@ const observe = label => {
         // collapse the reserved track beside it.
         leftTheLayout: aside.hidden === true,
         stoodDown: aside.classList.contains('is-empty'),
+        // What the module's own predicate answers, as opposed to what the
+        // writer wrote — the two must be the same question.
+        predicate: sandbox.explorerOverviewStoodDown(aside),
         ariaHidden: aside.getAttribute('aria-hidden'),
         painted: viewport.style.height !== undefined
     };
@@ -147,6 +150,13 @@ pane._explorerEdit = { draft: 'x' };
 states.push(observe('in-place editor'));
 pane._explorerEdit = null;
 states.push(observe('editor left'));
+/* `hidden` set behind the writer's back. Nothing in the app does this — the
+   markup stopped emitting it and setExplorerOverviewStoodDown() only toggles a
+   class — which is exactly why the predicate must not consult it: a second
+   input to a one-writer state is a state a reader cannot resolve. */
+aside.hidden = true;
+states.push(observe('hidden behind the writer'));
+aside.hidden = false;
 // A panel switched to Preview or Diff: the frame has no box, so every offset
 // inside it reads 0 and measuring there would cache a geometry describing
 // nothing.
@@ -505,6 +515,18 @@ class ExplorerOverviewColumnTestCase(unittest.TestCase):
         self.assertFalse(hidden_panel["painted"])
         self.assertFalse(hidden_panel["stoodDown"])
         self.assertFalse(hidden_panel["leftTheLayout"])
+
+        # One writer, one reader, one state. The predicate answers exactly what
+        # setExplorerOverviewStoodDown() wrote — in every state above, and in
+        # the one below where `hidden` is set behind the writer's back. It used
+        # to `return aside.hidden || …`, a term nothing has set since the
+        # markup stopped emitting it, so a reader of the predicate could not
+        # tell which of the two states the column was really in.
+        for label, state in states.items():
+            with self.subTest(state=label):
+                self.assertEqual(state["predicate"], state["stoodDown"])
+        self.assertTrue(states["hidden behind the writer"]["leftTheLayout"])
+        self.assertFalse(states["hidden behind the writer"]["predicate"])
         # Entering the in-place editor replaces the rows with a textarea, so
         # the same re-apply that drops the gutter marks stands the column down.
         editor = self._static("js/explorer-editor.js")

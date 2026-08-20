@@ -7,6 +7,11 @@
    that worker, because ignoring its eventual answer would still leave the CPU
    busy on content the user has already replaced.
 
+   Lazily created, and given back: terminals.js calls terminate() once no
+   explorer pane is left anywhere, so the threads and their resident
+   Highlight.js builds do not outlive the panes that wanted them. Termination
+   is not disablement — the next request respawns.
+
    DOM-free and require()-able. The browser instance is published as
    GridVibeExplorerWorkers; tests construct pools with fake workers. */
 (function (root, factory) {
@@ -22,6 +27,11 @@
     'use strict';
 
     const HIGHLIGHT_WORKER_MIN_CHARS = 64 * 1024;
+
+    /* See WorkerPool's constructor. One, deliberately: the pool is page-wide
+       and shared by every pane, so the cost of being wrong in the tolerant
+       direction is paid on every later job. */
+    const WORKER_FAILURES_TOLERATED = 1;
 
     function poolSizeFor(hardwareConcurrency) {
         const reported = Number(hardwareConcurrency);
@@ -47,6 +57,13 @@
             this.queue = [];
             this.nextId = 1;
             this.disabled = !this.createWorker;
+            /* Worker failures tolerated before the pool gives up for good. A
+               worker that cannot be *constructed* is a missing first-party
+               asset and disables the pool outright; a worker that dies while
+               running one job might have died of that job. One retry
+               distinguishes them without turning a permanently broken
+               environment into an endless respawn loop. */
+            this.failuresLeft = WORKER_FAILURES_TOLERATED;
         }
 
         available() {
@@ -185,11 +202,25 @@
                 job.workerRecord = null;
                 this._settle(job, 'reject', error);
             }
-            /* A worker load/runtime failure is normally a missing first-party
-               asset or an unsupported engine. Retrying it for every pane would
-               add console noise and repeated startup work, so this run falls
-               back to the synchronous/simplified render. */
-            this._disable(error);
+            /* A worker load failure is normally a missing first-party asset or
+               an unsupported engine, and retrying that for every pane would
+               add console noise and repeated startup work — so the pool gives
+               up and this run falls back to the synchronous/simplified render.
+
+               But this path also catches a postMessage throw and a worker that
+               died on one particular job, which are per-job conditions, and
+               disabling on the first of those cost every pane its offloading
+               for the rest of the session with no way back. So the first
+               failure only spends a life: the record is already gone from
+               this.workers, and _dispatch() below respawns to serve whatever
+               is still queued. The second failure disables, which is what
+               keeps a genuinely broken environment from respawning forever. */
+            this.failuresLeft -= 1;
+            if (this.failuresLeft < 0) {
+                this._disable(error);
+                return;
+            }
+            this._dispatch();
         }
 
         _disable(error) {
@@ -364,7 +395,6 @@
                 : null
         });
         return {
-            size: pool.limit,
             available: () => pool.available(),
             canHighlight: source => (
                 pool.available() && String(source || '').length >= HIGHLIGHT_WORKER_MIN_CHARS

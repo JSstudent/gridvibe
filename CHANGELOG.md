@@ -4,6 +4,20 @@ All notable changes to GridVibe will be documented in this file.
 
 ## Unreleased
 
+- **(fix) A file stays syntax-coloured even if the background highlighter dies.** Syntax colouring for larger files is handed to a background thread, and the file shows as plain text for the moment it takes. If that thread failed, the plain text was all you got — the file you had open stayed uncoloured for as long as it stayed open, while the very next file you opened came up coloured normally. GridVibe now finishes the colouring itself when the background attempt fails, which is what it already did for anyone whose browser cannot run it at all.
+
+- **(fix) The large-file notice says what actually made the file large.** A file is shown as plain text when it has too many lines *or* is simply too big — and a minified bundle, the case the size limit exists for, is often one enormous line. The notice reported lines regardless, so those files announced "1 lines rendered as plain text". It now reports whichever limit was reached, in lines or in megabytes.
+
+- **(fix) The Diff view explains itself instead of coming up blank.** If the diff renderer failed to load, the Diff panel threw an error behind the scenes and left nothing on screen. It now says the view is unavailable and suggests reloading — and no longer says "No Git diff for selected file", which sent you looking for changes that were there all along.
+
+- **(fix) Preview no longer shows a newer version of the file than Source.** Source text and the rendered Markdown preview are fetched separately, so a file edited outside GridVibe in the moment between the two could be shown half-old and half-new. The preview now checks that it describes the same version of the file as the text beside it, and waits for the two to agree.
+
+- **(perf) Several file panes open at once no longer slow each other down.** An internal cache shared by every explorer pane only had room for one pane's work, so with three file panes open they evicted each other's — making the arrangement that needs the speed-up most the one that got none of it. It is now sized for the panes that are actually open.
+
+- **(perf) Closing the last file explorer gives its memory and threads back.** The background threads used for syntax colouring, and the working data for the last files opened, stayed allocated for as long as the page was open, even after every explorer pane was closed. Both are now released once no explorer pane is left, and rebuilt if you open one again.
+
+- **(fix) One background hiccup no longer disables syntax colouring for the whole session.** A single failure in the background highlighter switched it off page-wide until you reloaded, even when the failure was specific to one job. It now retries once with a fresh thread and gives up only if the problem repeats.
+
 - **(fix) Find works again in a commit diff opened after a very large file.** A file big enough for the plain large-file view turns Find off, because that view has no per-line rows for it to point at. Clicking a commit in the Git sidebar afterwards carried that state over, even though a commit diff is not a large file — so the diff showed a Find box that marked nothing and never moved its counter, and, because the box was there, Ctrl+F kept going to it instead of falling through to the browser's own find. You had to open an ordinary file to get either back. The commit diff no longer inherits the previous file's verdict.
 
 - **(fix) The Markdown preview is fetched once per file instead of twice.** The first time you opened Preview for a file, GridVibe asked the server for the rendered document, then immediately asked again and cancelled the first request. The cancelled one still ran to completion on the server, so every first look at a Markdown file cost two renders, and the panel flashed "Rendering preview..." twice on the way. A second request for the document already on its way now waits for it rather than starting over.

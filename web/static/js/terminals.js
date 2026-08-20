@@ -609,6 +609,33 @@
         return terminal?._paneType === 'explorer';
     }
 
+    /* Two page-wide explorer caches are built lazily and were never given
+       back: the worker pool (explorer-worker-client.js) — up to four threads
+       with a Highlight.js build resident in each — and the line-record cache
+       in explorer-viewer.js, which pins whichever documents it last answered
+       about. Both outlived the last explorer pane for the life of the page.
+
+       Released only when *no* explorer pane is left anywhere — the visible
+       grid and every cached group. The predicate has to be that strict for the
+       pool: terminating mid-flight rejects the running jobs as superseded, so
+       a pane still on screen would sit on its plain first paint until
+       something else happened to repaint it. Neither cache is disabled by
+       this, only emptied — the pool respawns on the next request and the
+       records rebuild on the next render, so a reopened pane pays one worker
+       startup and one document walk. */
+    function releaseExplorerResourcesIfIdle() {
+        if (terminals.some(isExplorerPaneInstance)) {
+            return;
+        }
+        for (const cached of cachedGroupViews.values()) {
+            if ((cached.terminals || []).some(isExplorerPaneInstance)) {
+                return;
+            }
+        }
+        (typeof window !== 'undefined' && window.GridVibeExplorerWorkers)?.terminate?.();
+        explorerReleaseLineRecordCache();
+    }
+
     function isBrowserSession(session) {
         return session?.mode === 'wsl' && session?.startup_mode === 'browser';
     }
@@ -1116,6 +1143,7 @@
         });
         cachedGroupViews.delete(groupId);
         presentationController()?.forgetGroup(groupId);
+        releaseExplorerResourcesIfIdle();
     }
 
     /* Tell the backend which group this window has in front, so the workspace
@@ -4921,6 +4949,7 @@
         sessionIds = [];
         gridBuilt  = false;
         visibleGroupId = '';
+        releaseExplorerResourcesIfIdle();
     }
 
     /* ─────────────────────────────────────────────

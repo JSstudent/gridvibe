@@ -198,6 +198,44 @@ class SourceTierTestCase(ExplorerTierHarness):
         self.assertEqual(verdicts["belowTier"], "full")
         self.assertIsNone(verdicts["belowNotice"])
 
+    def test_the_notice_names_the_ceiling_that_actually_fired(self):
+        """Two independent ceilings, so the notice cannot always report lines.
+
+        The byte ceiling exists for the minified bundle, and the minified
+        bundle is the case where a line-only notice reads worst: one enormous
+        line reported as "1 lines rendered as plain text" — ungrammatical, and
+        an answer to a question nobody asked, since the reader's problem there
+        is 5 MiB on one line. Each trigger reports itself; lines win when both
+        fired, because the row count is what the reader can see on screen.
+        """
+        reported = self._run_node(
+            "const oneHugeLine = 'x'.repeat(5 * 1024 * 1024);"
+            "const manyShortLines = ('x' + NL).repeat(30000);"
+            "emit({"
+            "  byBytes: tiers.sourceTierNotice(tiers.sourceMetrics(oneHugeLine)).detail,"
+            "  byLines: tiers.sourceTierNotice(tiers.sourceMetrics(manyShortLines)).detail,"
+            "  byBoth: tiers.sourceTierNotice({"
+            "    bytes: 5 * 1024 * 1024, lines: 30000, rows: 30001"
+            "  }).detail,"
+            "  singular: tiers.sourceTierReason({ bytes: 10, lines: 1, rows: 1 }),"
+            "  kilobytes: tiers.sourceTierReason({ bytes: 700 * 1024, lines: 1, rows: 1 })"
+            "});"
+        )
+
+        # The byte-triggered file is described in bytes, not as "1 lines".
+        self.assertIn("5.0 MB", reported["byBytes"])
+        self.assertNotIn("line", reported["byBytes"])
+        # The line-triggered file is still described in lines, grouped.
+        self.assertIn("30,000 lines", reported["byLines"])
+        # Both ceilings crossed: the visible one is named.
+        self.assertIn("30,000 lines", reported["byBoth"])
+        # Either way the sentence still says what the tier did.
+        for detail in (reported["byBytes"], reported["byLines"]):
+            self.assertIn("rendered as plain text", detail)
+        # Pluralisation is real, and the byte side has its own units.
+        self.assertEqual(reported["singular"], "10 bytes")
+        self.assertEqual(reported["kilobytes"], "700.0 KB")
+
     def test_capability_predicate_agrees_with_the_notice(self):
         """One predicate, so the notice and the switch cannot promise different things."""
         allowed = self._run_node(

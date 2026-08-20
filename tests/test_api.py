@@ -8391,6 +8391,51 @@ class ApiRoutesTestCase(unittest.TestCase):
         # ...and the next lazy read reflects the write.
         self.assertIn("edited", self._preview_html(session_id, "README.md"))
 
+    def test_explorer_file_preview_carries_the_revision_source_was_read_at(self):
+        """Two reads need a token, or nobody can tell they disagree.
+
+        Source and Preview came from one read and were consistent by
+        construction; the lazy split made them two. The client's staleness
+        guard compares its own state before and after the flight, which catches
+        the *viewer* moving on and cannot catch the *file* moving on — so a
+        write landing between the two reads put a render of the newer bytes
+        beside Source's older ones. The preview now answers with the same
+        ``state_revision`` the file payload set as the change listener's
+        baseline, which is what makes the two comparable.
+        """
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        target = repo_dir / "README.md"
+        target.write_text("# Title\n\nbody\n", encoding="utf-8")
+        session_id = self._create_explorer_session(repo_dir)
+
+        file_payload = self.client.get(
+            f"/api/explorer/{session_id}/file",
+            query_string={"path": "README.md"},
+        ).get_json()
+        preview = self.client.get(
+            f"/api/explorer/{session_id}/file/preview",
+            query_string={"path": "README.md"},
+        ).get_json()
+
+        # Same token, same spelling: an unchanged file reads identically from
+        # both routes, so a matching pair is the ordinary case and not a
+        # coincidence the client has to interpret.
+        self.assertTrue(file_payload["state_revision"])
+        self.assertEqual(preview["state_revision"], file_payload["state_revision"])
+
+        # A write between the two reads is what the token exists to expose.
+        # The size moves, so this does not depend on mtime resolution.
+        target.write_text("# Title\n\nbody rewritten and longer\n", encoding="utf-8")
+        after = self.client.get(
+            f"/api/explorer/{session_id}/file/preview",
+            query_string={"path": "README.md"},
+        ).get_json()
+        self.assertNotEqual(after["state_revision"], file_payload["state_revision"])
+        # Still a read, and still the same bounded payload otherwise.
+        self.assertEqual(after["preview_type"], "markdown")
+        self.assertIn("rewritten", after["preview_html"])
+
     def test_explorer_file_preview_refuses_what_it_cannot_preview(self):
         """Same resolution and root confinement as every other bounded read."""
         repo_dir = Path(self.temp_dir.name) / "repo"

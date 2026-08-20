@@ -3438,11 +3438,20 @@ def get_explorer_file_preview_payload(backend: Any, requested_path: Any) -> Dict
     read, so the file explorer's read-only contract is unchanged; it exists so
     that opening a Markdown file in Source view stops paying for a preview
     nobody asked to see.
+
+    Carries ``state_revision`` for the same reason the file payload does, and
+    derived from the same single ``stat``. Source and Preview used to come from
+    one read and were consistent by construction; the lazy split made them two
+    reads, and with no token from the second the client can tell that the
+    *viewer* moved on but not that the *file* did — so a write landing between
+    the two showed a preview of newer bytes beside Source's older ones. The
+    client compares it against the baseline the file load set and declines a
+    preview that describes different bytes.
     """
     root_path, file_path = backend.resolve_file(requested_path)
     if not _is_markdown_file(file_path):
         raise ValueError("File has no Markdown preview")
-    size, _modified = backend.stat_file(file_path)
+    size, modified = backend.stat_file(file_path)
     preview = read_explorer_file_preview(
         backend,
         file_path,
@@ -3459,6 +3468,7 @@ def get_explorer_file_preview_payload(backend: Any, requested_path: Any) -> Dict
         "preview_type": "markdown",
         "preview_html": _render_markdown_preview(content) or "",
         "truncated": preview["truncated"],
+        "state_revision": _explorer_file_state_revision(size, modified),
     }
 
 

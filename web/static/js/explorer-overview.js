@@ -1010,8 +1010,12 @@ function setExplorerOverviewStoodDown(aside, stoodDown) {
     }
 }
 
+/* The reader of that one writer, and it reads exactly what the writer writes.
+   It also tested `aside.hidden`, which nothing has set since the markup stopped
+   emitting it — a term whose only effect was to make a reader of this function
+   wonder which of the two states is the real one. */
 function explorerOverviewStoodDown(aside) {
-    return aside.hidden || aside.classList.contains('is-empty');
+    return aside.classList.contains('is-empty');
 }
 
 function syncExplorerOverview(index) {

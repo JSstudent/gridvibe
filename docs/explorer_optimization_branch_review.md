@@ -6,7 +6,10 @@ that was checked to fail without the fix ([What was fixed](#what-was-fixed)).
 **Finding 6 is deferred by decision:** both its halves turn on landing an
 interaction inside a build window, which cannot be settled from the code, so it
 stays open until its [verification scenario](#verification-scenario) is run in a
-browser. Findings 7–15 remain open.
+browser. **Findings 7–15 verified and closed, 2026-08-20** — each re-confirmed
+against the code first, then fixed, with a test checked to fail without the fix
+([Findings 7–15](#findings-715)). Finding 15 asked for no
+change and got none; one claim in Finding 7 was wrong and is corrected there.
 **Range reviewed:** `origin/szua_gridvibe-opt` (`e9eb029`) … `szua_gridvibe_wrk-opt`
 (`db8d6f8`) — 11 commits, linear (the `-opt` tip *is* the merge base).
 **Scope:** Code only. `CHANGELOG.md`, `README.md`,
@@ -71,26 +74,30 @@ python -m ruff check .      → All checks passed!
 | 4 | The large-file tier silently **drops a blank line** at any chunk boundary that lands on one (`<pre>` swallows a leading newline) | Medium-low | **Confirmed · Fixed** |
 | 5 | `resolveTabView()` leaks legacy `listScrollLeft/Top` past a revision mismatch, so a new directory listing restores the **previous** directory's scroll | Medium-low | **Confirmed · Fixed** |
 | 6 | Source has no arrival-path scroll restore; the pending-content refusal exists for Preview but not for Source, in both directions | Low | **Deferred** — timing-dependent; [verification scenario](#verification-scenario) below |
-| 7 | A highlight-worker failure caches a permanent "plain" miss for the open buffer, so that file stays wholly uncoloured (no fallback lexer, no re-render) | Low | Open — confidence high |
-| 8 | `explorerDiffWorkerCore()` is dereferenced without the optional chaining every other looked-up policy uses | Low | Open — confidence high |
-| 9 | Byte-triggered tier notice reads "**1 lines** rendered as plain text" on a minified single-line file | Low | Open — confidence high, reproduced in Node |
-| 10 | `explorerOverviewStoodDown()` still tests `aside.hidden`, which nothing sets any more | Low (info) | Open — confidence high |
-| 11 | `explorer-diff.js`'s header still claims a byte-for-byte move; 15 of its 44 functions have since changed | Low | Open — confidence high, verified mechanically |
-| 12 | Worker pool is never terminated and disables itself page-wide on one worker error; `terminate()`/`size` have no callers | Low (info) | Open — confidence high |
-| 13 | `_explorerLineRecordCache` is a 2-entry **global**: 3+ file panes thrash it, and it pins two whole documents for the page's life | Low (info) | Open — confidence high |
-| 14 | The lazy preview payload carries no revision, so Source and Preview can describe different bytes | Low (info) | Open — confidence high |
-| 15 | The editor underlay's "splice" path still allocates a whole row model per animation frame | Low (info) | Open — confidence high |
+| 7 | A highlight-worker failure caches a permanent "plain" miss for the open buffer, so that file stays wholly uncoloured (no fallback lexer, no re-render) | Low | **Confirmed · Fixed** — one correction, see below |
+| 8 | `explorerDiffWorkerCore()` is dereferenced without the optional chaining every other looked-up policy uses | Low | **Confirmed · Fixed** |
+| 9 | Byte-triggered tier notice reads "**1 lines** rendered as plain text" on a minified single-line file | Low | **Confirmed · Fixed** — re-reproduced in Node |
+| 10 | `explorerOverviewStoodDown()` still tests `aside.hidden`, which nothing sets any more | Low (info) | **Confirmed · Fixed** — term dropped |
+| 11 | `explorer-diff.js`'s header still claims a byte-for-byte move; 15 of its 44 functions have since changed | Low | **Confirmed · Fixed** — re-verified mechanically |
+| 12 | Worker pool is never terminated and disables itself page-wide on one worker error; `terminate()`/`size` have no callers | Low (info) | **Confirmed · Fixed** — both halves |
+| 13 | `_explorerLineRecordCache` is a 2-entry **global**: 3+ file panes thrash it, and it pins two whole documents for the page's life | Low (info) | **Confirmed · Fixed** |
+| 14 | The lazy preview payload carries no revision, so Source and Preview can describe different bytes | Low (info) | **Confirmed · Fixed** |
+| 15 | The editor underlay's "splice" path still allocates a whole row model per animation frame | Low (info) | **Confirmed · No change** — the finding itself asks for none |
 
 Nothing found rises to a security, durability, or data-loss defect. Findings 1–5
 are user-visible behaviour changes; 6–15 are robustness, resource and accuracy
-items.
+items. Everything except Finding 6 is now closed.
 
 **Findings 1–5 are fixed.** Each was re-confirmed against the code before being
 touched — the three code-path findings by tracing every call site, the two
 Node-executed ones by re-running the reproduction against the real policy — and
 each fix carries a test that was checked to fail with the fix reverted. See
-[What was fixed](#what-was-fixed). Finding 6 is deferred by decision and
-Findings 7–15 remain open.
+[What was fixed](#what-was-fixed).
+
+**Findings 7–15 are closed too**, on the same standard and in a later pass —
+see [Findings 7–15](#findings-715). Eight were fixed and
+Finding 15 was confirmed as needing no change, which is what it asked for.
+Finding 6 remains deferred by decision.
 
 ---
 
@@ -739,6 +746,37 @@ survives with the `CLAUDE.md` sentence.
 
 ---
 
+**Fixed, and one claim in this finding is wrong.** The sentence attributed to
+`CLAUDE.md` — "worker failure leaves a usable fallback-coloured view" — is not
+in `CLAUDE.md`; that file says nothing about the worker at all, so there was no
+contract to reconcile. The code behaviour is real regardless, and the reasoning
+about *which* file recovers was right.
+
+The fix also drops the size condition the suggestion carried, because that
+condition cannot fire: the worker path is entered only when `source.length <=
+EXPLORER_PLAIN_PREVIEW_THRESHOLD`, so every buffer that can reach this `catch`
+is already one the synchronous path is allowed to tokenize. A failed job now
+does exactly what a page with no worker support does —
+`explorerHighlightDocumentLinesCached()` on this thread, the same staleness
+handshake the success path uses, one re-render. That removes the third cache
+state as well: with nothing writing `plain: true`, the read that mapped it back
+to the sentinel went with it, so a cache hit means one thing again.
+
+*Confirmed before fixing.* Both halves were traced — the write in the `catch`
+and the read returning `EXPLORER_HIGHLIGHT_PENDING` for it — and the recovery
+asymmetry was confirmed at its source: `_failWorker()` disables the pool, so
+`canHighlight()` routes the *next* file down the synchronous path while the open
+one keeps the cached miss.
+
+*Test.* `tests/test_explorer_source_frame.py::test_a_failed_highlight_job_recolours_the_buffer_that_was_open`
+rejects a real job through the real cache gate, with the whole-document
+tokenizer and the re-render as spies. It asserts the first paint is still the
+plain sentinel and tokenizes nothing, that the failure tokenizes once and
+re-renders once, and that every later ask returns colours rather than the
+sentinel. Reverted, it fails at zero tokenizations.
+
+---
+
 ## Finding 8 — `explorerDiffWorkerCore()` is dereferenced without a guard
 
 **Severity:** Low · **File:** `web/static/js/explorer-diff.js`
@@ -767,6 +805,25 @@ hard dependency of `explorer-diff.js` and drop the pretence of optionality.
 
 ---
 
+**Fixed with the guard, not the header note.** The suggestion's first option
+offered to "keep the old inline parse as the last resort" — there is no inline
+parse left to keep; it moved into `explorer-worker-core.js`, which is what made
+that module a dependency of the fallback in the first place. So
+`explorerParsedDiffModel()` wraps the lookup and returns `null`, and the three
+call sites paint an explicit message.
+
+The message reuses the existing `.explorer-diff-empty` rule (guardrail 7) but
+deliberately not its sentence: "No Git diff for selected file" would be a lie a
+reader acts on by going to look for changes that are there.
+
+*Test.* `tests/test_explorer_workers.py::test_a_missing_worker_core_degrades_the_diff_instead_of_throwing`
+drives both entry points — the large tier's no-worker branch and the small-tier
+fallback that runs when Diff2Html is absent too — with no core on the page.
+Reverted, it fails with exactly the predicted `TypeError: Cannot read properties
+of null (reading 'parseSideBySideDiff')`.
+
+---
+
 ## Finding 9 — "1 lines" in the byte-triggered tier notice
 
 **Severity:** Low · **File:** `web/static/js/explorer-tiers.js`
@@ -785,6 +842,22 @@ the reader's problem is 5 MiB on one line, not "1 line".
 **Suggested fix.** Report the trigger that fired: lines when `rows` crossed,
 size when `bytes` crossed (`formatExplorerSize()` already exists in the viewer, or
 inline the same arithmetic to keep the policy DOM-free). Pluralise either way.
+
+---
+
+**Fixed as suggested**, and re-reproduced first: `sourceTierNotice()` on a
+5 MiB single-line buffer really did read "1 lines rendered as plain text".
+
+`sourceTierReason()` names the ceiling that fired — lines when `rows` crossed,
+`formatBytes()` when only the byte ceiling did — and lines win when both
+crossed, because the row count is the one the reader can see on screen. The byte
+formatter is local to the policy rather than borrowed from the viewer's
+`formatExplorerSize()`, which would have made a DOM-free, Node-executable module
+depend on the page.
+
+*Test.* `tests/test_explorer_tiers.py::test_the_notice_names_the_ceiling_that_actually_fired`
+covers each trigger separately and both together, plus singular/plural and the
+byte units.
 
 ---
 
@@ -817,6 +890,19 @@ reader of this function today cannot tell which it is.
 
 **Suggested fix.** Either drop the `aside.hidden` term, or note in the function
 comment that it exists for a state nothing sets yet.
+
+---
+
+**Fixed with the first option** — the `aside.hidden` term is dropped, so the
+predicate reads exactly what its one writer writes. Guardrail 5 makes "who reads
+it" the test, and after this change nothing does. The CSS
+`.explorer-source-overview[hidden]` rule stays as the reserved state it
+documents; no JavaScript consults `hidden` any more.
+
+*Test.* The existing `STAND_DOWN_HARNESS` in `tests/test_explorer_overview.py`
+now records what the predicate answers beside what the writer wrote, asserts the
+two agree in every state it drives, and adds a state with `hidden` set behind
+the writer's back. Reverted, that last case fails.
 
 ---
 
@@ -857,6 +943,20 @@ and now owns the tiered renderers and the worker-backed large-diff parse.
 
 ---
 
+**Fixed as suggested**, after re-verifying the claim mechanically rather than
+taking the earlier count on trust. Comparing each top-level function against the
+merge-base `explorer-viewer.js`: 14 of 42 differ — 7 changed in place and 7 that
+never stood in the viewer at all. (This pass's extractor finds 42 functions
+where the original review found 44; the conclusion is the same either way, and
+the rewritten header no longer makes a claim that depends on the number.)
+
+The paragraph now says the file *began* as a pure move, marks that as history
+rather than description, and warns against reading a function here as evidence
+of what the viewer used to do. It also states the `explorer-worker-core.js`
+dependency Finding 8 exposed.
+
+---
+
 ## Finding 12 — the worker pool is never terminated and disables itself page-wide on one error
 
 **Severity:** Low (informational) · **File:** `web/static/js/explorer-worker-client.js`
@@ -879,6 +979,29 @@ Two related observations:
 close path in `terminals.js` already walks explorer panes) or delete the unused
 API; and consider distinguishing "the worker could not be constructed / could not
 import" (disable) from "one job failed" (retry once, then disable).
+
+---
+
+**Both halves fixed, each on its own terms.**
+
+*The unused API.* `terminate()` is wired up rather than deleted, because the
+threads it reclaims are real. `releaseExplorerResourcesIfIdle()` in
+`terminals.js` runs from `dropCachedGroupView()` and `teardownCurrentGrid()`,
+and fires only when no explorer pane is left in the visible grid **or** any
+cached group. The predicate has to be that strict: terminating mid-flight
+rejects the running jobs as superseded, so a pane still on screen would sit on
+its plain first paint until something else happened to repaint it. `size` had no
+such argument for existing and is deleted.
+
+*The page-wide disable.* `_failWorker()` now spends a life and `_dispatch()`
+respawns; the second failure disables. Construction failure still disables
+immediately through `_spawn()`'s own `catch`, which is the case the original
+comment actually justified.
+
+*Test.* `tests/test_explorer_workers.py::test_one_worker_failure_is_survived_and_the_second_disables_the_pool`
+kills a worker mid-job, asserts the pool stays available and serves the next
+request from a respawn, then kills again and asserts it concedes and builds
+nothing more.
 
 ---
 
@@ -906,6 +1029,29 @@ including after every explorer pane is closed.
 
 **Suggested fix.** Key the cache on the pane (`pane._explorerLineRecords`, plus one
 slot for the draft) rather than globally, which fixes both points at once.
+
+---
+
+**Fixed, in a simpler shape than suggested.** Keying the cache on the pane
+would have meant threading a `pane` through `explorerSourceRowModel()` and
+`explorerEditUnderlayLines()`, which are pure content functions today. Both
+symptoms come apart without that:
+
+* the limit is now `2 x live explorer file panes`, clamped to 8 — two is the
+  right number *per pane* (the Source rows and the editor's draft), and it was
+  only ever wrong as a global;
+* `explorerReleaseLineRecordCache()` empties the cache from the same teardown
+  hook Finding 12 added. While panes are open no sweep is needed: a document
+  nobody is looking at falls out of an LRU sized to the panes that are.
+
+An earlier attempt pruned non-live entries on every miss. It was dropped —
+within a single render a transient string would evict an entry the next call was
+about to ask for again, which is the thrash this finding is about.
+
+*Test.* `tests/test_explorer_source_frame.py::test_line_record_cache_is_sized_by_the_panes_and_is_given_back`
+observes hits by record identity: one pane, three panes, and a pane holding its
+draft beside its file. Reverted to the flat 2, the three-pane case fails
+`[False, False, False] != [True, True, True]` — the thrash, reproduced.
 
 ---
 
@@ -941,6 +1087,25 @@ leaving `_explorerPreviewLoaded` false) on a mismatch.
 
 ---
 
+**Fixed as suggested.** `get_explorer_file_preview_payload()` returns
+`state_revision` from the `stat` it already performs — the same token the file
+payload sets as the change listener's baseline, so the two are comparable by
+construction. `ensureExplorerPreviewLoaded()` compares it against
+`pane._explorerFileStateRevision` and declines a mismatch.
+
+Declined rather than refetched: the open-file change listener is going to see
+the same revision move and reload the file, and the panel paints from that. A
+response carrying no token is accepted, so the check cannot turn an older server
+into a permanently blank panel — and it is skipped when the pane holds no
+baseline, which is exactly the case where no watcher would arrive to resolve it.
+
+*Test.* `tests/test_api.py::test_explorer_file_preview_carries_the_revision_source_was_read_at`
+covers the payload; `tests/test_explorer_scroll.py::test_a_preview_describing_different_bytes_is_declined`
+drives the client through the real loader for all three cases — stale, matching,
+and no token at all.
+
+---
+
 ## Finding 15 — the editor underlay's splice still allocates a whole row model per frame
 
 **Severity:** Low (informational) · **File:** `web/static/js/explorer-edit-overlay.js`
@@ -969,6 +1134,14 @@ is ever pushed at larger buffers.
 model on the draft identity the way `explorerCachedSourceRowModel()` already does
 for the read-only view, and reuse `model.records` for `lines` instead of mapping
 it.
+
+---
+
+**Confirmed, and left alone — which is what this finding asks for.** The
+`O(document)` term is really there and is genuinely not a defect at the sizes
+this path runs at. Caching the row model on the draft identity would trade a
+measured non-problem for a second cache to keep coherent with a buffer that
+changes on every keystroke.
 
 ---
 
@@ -1017,10 +1190,57 @@ query was typed. The finding's headline was right and its trace was narrow.
 
 ### What was deliberately not done
 
-* **Finding 6** — deferred by decision; see its section.
-* **Findings 7–15** — untouched and still open.
+* **Finding 6** — deferred by decision; see its section. It is the only finding
+  in this review still open.
+* **Finding 15** — confirmed and left alone, which is what it asks for.
 * The **test gaps** listed under [Verification status](#verification-status)
-  are closed for Findings 1–5 only.
+  are closed.
+
+---
+
+## Findings 7–15
+
+Applied 2026-08-20, in a second pass, on the same standard as Findings 1–5:
+each finding re-confirmed against the code before anything was touched, and
+each fix carrying a test that was **checked to fail with the fix reverted**.
+Every finding held up. One claim inside Finding 7 did not, and is corrected in
+its section: the sentence it attributes to `CLAUDE.md` is not in `CLAUDE.md`.
+
+| # | Change | File |
+|---|---|---|
+| 7 | A failed highlight job tokenizes on this thread and re-renders, instead of caching a permanent "plain" miss; the third cache state goes with it | `explorer-viewer.js` |
+| 8 | `explorerParsedDiffModel()` guards the lookup; the three call sites paint an explicit "renderer failed to load" message rather than throwing | `explorer-diff.js` |
+| 9 | `sourceTierReason()` reports the ceiling that fired — lines or bytes — and pluralises | `explorer-tiers.js` |
+| 10 | The dead `aside.hidden` term dropped from `explorerOverviewStoodDown()` | `explorer-overview.js` |
+| 11 | Header rewritten: began as a pure move, since changed, and names its `explorer-worker-core.js` dependency | `explorer-diff.js` |
+| 12 | One per-job failure is survived and respawns; the second disables. `terminate()` wired into pane teardown, unused `size` deleted | `explorer-worker-client.js`, `terminals.js` |
+| 13 | Line-record cache sized at `2 x` live file panes (max 8) and released on teardown | `explorer-viewer.js`, `terminals.js` |
+| 14 | Preview payload carries `state_revision`; the client declines a preview describing other bytes | `explorer.py`, `explorer-viewer.js` |
+| 15 | None — confirmed as not a defect | — |
+
+Tests added — seven cases across five suites:
+
+| Test | Covers |
+|---|---|
+| `test_explorer_source_frame.py::test_a_failed_highlight_job_recolours_the_buffer_that_was_open` | 7 |
+| `test_explorer_workers.py::test_a_missing_worker_core_degrades_the_diff_instead_of_throwing` | 8 |
+| `test_explorer_tiers.py::test_the_notice_names_the_ceiling_that_actually_fired` | 9 |
+| `test_explorer_overview.py::test_overview_stands_down_without_leaving_the_layout` (extended) | 10 |
+| `test_explorer_workers.py::test_one_worker_failure_is_survived_and_the_second_disables_the_pool` | 12 |
+| `test_explorer_source_frame.py::test_line_record_cache_is_sized_by_the_panes_and_is_given_back` | 13 |
+| `test_api.py::test_explorer_file_preview_carries_the_revision_source_was_read_at` | 14 |
+| `test_explorer_scroll.py::test_a_preview_describing_different_bytes_is_declined` | 14 |
+
+Findings 11 and 15 carry no test by nature: 11 is a comment, and 15 is a
+decision not to change code. Finding 11 was verified mechanically instead, by
+re-running the per-function comparison against the merge base.
+
+Two guardrails came out of this pass and are written into the **Regression
+Guardrails** lists in `CLAUDE.md` and `AGENTS.md` — a page-wide lazy cache is
+sized for its consumers and released when they go (Findings 12 and 13 are the
+same defect twice), and one failed job is not a broken subsystem (Findings 7
+and 12). Per the note at the top of this document, those rules live there and
+are not cited back to this file.
 
 ---
 
@@ -1121,16 +1341,16 @@ Recorded so a later reader does not re-derive it.
 
 ## Verification status
 
-Re-run after the Findings 1–5 fixes (2026-08-20):
+Re-run after the Findings 7–15 fixes (2026-08-20):
 
 | Check | Result |
 |---|---|
-| `python tests/run_tests.py` | 1857 tests, OK (9 skipped) — was 1852 before the four new cases |
+| `python tests/run_tests.py` | 1864 tests, OK (9 skipped) — 1852 at review time, 1857 after Findings 1–5, 1864 after Findings 7–15 |
 | `python -m ruff check .` | clean |
-| `node --check` on both changed modules | clean |
+| `node --check` on every changed module | clean |
 | Each new test with its fix reverted | fails — checked one at a time |
 | `node --check` on all new/changed JS | implicit — the Node-executed suites load and run every DOM-free module |
-| Live browser | **still not run**, and it is still only Finding 6 that needs it. Findings 1–5 were verified and are now regression-tested in Node; 7–15 are code-path. Finding 6 keeps its step-by-step **Verification scenario** with a console probe, a sized fixture and pass/fail criteria for each half. |
+| Live browser | **still not run**, and it is still only Finding 6 that needs it. Findings 1–5 and 7–15 were verified against the code and are now regression-tested in Node. Finding 6 keeps its step-by-step **Verification scenario** with a console probe, a sized fixture and pass/fail criteria for each half. |
 
 New behavioural cover added on this branch: `test_explorer_tiers.py`,
 `test_explorer_large_file_tier.py`, `test_explorer_repaint.py`,
@@ -1173,8 +1393,13 @@ Gaps worth closing alongside the fixes — **all three closed 2026-08-20**, see
    before Scenario A, because B destroys the stored offset outright while A
    only applies it short. The symmetry fix follows the scenario, not the other
    way round.
-6. **Findings 7–15** — **open.** Cleanups; 8, 10, 11 and 13 are each a small,
-   isolated edit.
+6. ~~**Findings 7–15**~~ **Done**, in a second pass — see
+   [Findings 7–15](#findings-715). Eight fixed, Finding 15 confirmed as needing
+   no change. Two of them turned out to be the same defect in two places
+   (Findings 12 and 13, a page-wide cache sized for one consumer and never
+   released), which is the pairing the new guardrail records.
 
-None of these blocks the branch. Findings 1–5 were the ones a user could hit,
-and they are fixed.
+Nothing here blocks the branch. Findings 1–5 were the ones a user could hit and
+they are fixed; 7–15 were robustness, resource and accuracy items and are
+closed. Only Finding 6 is open, and it is open on purpose: it needs a browser,
+not a reading.
