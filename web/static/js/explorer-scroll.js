@@ -31,11 +31,27 @@
     }
 
     /* Durable view intent always returns, while each panel's content-bound
-       scroll returns only when that panel's own revision still matches. Diff
-       arrives asynchronously, so its temporarily absent revision must not
-       invalidate an independently matching Preview or Source offset.
-       Persisted v2 records already apply the same rule in
-       explorer-persistence.js, which remains the authority for them. */
+       scroll returns only when that panel's own revision still matches.
+
+       "Matches" has to account for a revision the incoming render cannot know
+       yet. Diff is fetched *after* the render, so at the moment a tab is
+       restored the pane can say what the file's bytes are but not what its
+       patch will be, and `current.diff` is simply absent. Absent is
+       undetermined, not different — reading it as a mismatch is what threw
+       the reader's Diff position away on every tab switch, and took the
+       sidebar's offsets with it, because the diff's "mismatch" also made the
+       whole view look changed. An undetermined Diff keeps its offset and
+       hands it to that panel's own identity-guarded arrival path, which is
+       the only thing that can actually tell whether the patch still matches.
+
+       Undetermined is not a licence, though: it applies only while every
+       revision the render *did* produce still matches. A file whose bytes
+       moved has a patch that moved with them, so there the Diff offset drops
+       with the rest rather than waiting to be told. And a revision that is
+       present and different is a plain mismatch, exactly as before.
+
+       Persisted v2 records apply the same rule in explorer-persistence.js,
+       which remains the authority for them. */
     function resolveTabView(tab, revisions, options) {
         const view = tab && tab.view;
         if (!view) {
@@ -49,17 +65,23 @@
                 : null;
         }
         const storedRevisions = view.revisions || {};
-        const matches = panel => !storedRevisions[panel]
+        const stated = panel => !storedRevisions[panel]
             || current[panel] === storedRevisions[panel];
+        // Every revision this render actually produced, and whether they all
+        // still match. This is also what the sidebar's offsets ride on: they
+        // describe the tree and the Git panel, which no unfetched patch can
+        // invalidate.
+        const same = Object.keys(storedRevisions)
+            .filter(panel => current[panel] !== undefined)
+            .every(stated);
+        const matches = panel => stated(panel)
+            || (panel === 'diff' && current.diff === undefined && same);
         const panels = {};
         Object.entries(view.scroll?.panels || {}).forEach(([panel, metrics]) => {
             if (matches(panel)) {
                 panels[panel] = metrics;
             }
         });
-        const same = Object.entries(storedRevisions).every(
-            ([panel, revision]) => !revision || current[panel] === revision
-        );
         const scroll = {
             ...(view.scroll || {}),
             activeView: view.mode,

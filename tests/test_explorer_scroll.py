@@ -19,6 +19,7 @@ PERSISTENCE_JS = STATIC_JS / "explorer-persistence.js"
 VIEWER_JS = STATIC_JS / "explorer-viewer.js"
 SCROLL_ADAPTER_JS = STATIC_JS / "explorer-scroll-adapter.js"
 TABS_JS = STATIC_JS / "explorer-tabs.js"
+TIERS_JS = STATIC_JS / "explorer-tiers.js"
 NODE = shutil.which("node")
 
 POLICY_HARNESS = r"""
@@ -39,7 +40,7 @@ const tab = {
         scroll: {
             activeView: 'preview',
             panels: { preview: metrics, diff: { ...metrics, scrollTop: 900 } },
-            sidebar: {}
+            sidebar: { tree: { scrollTop: 120 } }
         }
     }
 };
@@ -634,6 +635,31 @@ class ExplorerScrollPolicyTestCase(unittest.TestCase):
         self.assertEqual(self.results["changed"]["scroll"]["panels"], {})
         self.assertEqual(self.results["changed"]["folds"], [])
 
+    def test_a_diff_revision_the_render_cannot_know_yet_keeps_its_offset(self):
+        """Absent is undetermined, not different.
+
+        The patch is fetched after the render, so a tab restore knows the
+        file's bytes and not its diff. Reading that silence as a mismatch
+        discarded the reader's Diff position on every tab switch — and,
+        because it also made the whole view look changed, the Files tree and
+        Git sidebar offsets with it. The offset is kept and handed to the Diff
+        arrival path, which is the thing that can tell whether the patch still
+        matches.
+        """
+        matching = self.results["matching"]["scroll"]
+        self.assertEqual(matching["panels"]["diff"]["scrollTop"], 900)
+        self.assertEqual(matching["sidebar"], {"tree": {"scrollTop": 120}})
+
+        # Stated and different is still a plain mismatch: the patch moved, so
+        # the offset into it is meaningless.
+        self.assertNotIn("diff", self.results["partial"]["scroll"]["panels"])
+
+        # And undetermined is not a licence. A file whose bytes moved has a
+        # patch that moved with them, so the Diff offset drops with the rest
+        # rather than waiting to be told.
+        self.assertEqual(self.results["changed"]["scroll"]["panels"], {})
+        self.assertEqual(self.results["changed"]["scroll"]["sidebar"], {})
+
     def test_persisted_records_stay_owned_by_the_persistence_resolver(self):
         self.assertEqual(self.results["persisted"]["mode"], "preview")
         self.assertEqual(self.results["persistedArgs"]["current"], {"preview": "same"})
@@ -767,6 +793,395 @@ class ExplorerScrollAdapterTestCase(unittest.TestCase):
         self.assertEqual(outer["tree"], 220)
         self.assertEqual(outer["git"], 140)
         self.assertEqual(outer["search"], 60)
+
+
+LARGE_TIER_HARNESS = r"""
+const fs = require('fs');
+const vm = require('vm');
+
+/* The Source panel as far as scrolling is concerned: a scroller whose extent
+   is the sum of its children's heights, plus the browser behaviour the viewer
+   has to survive. Two pieces of that behaviour are what these tests are about.
+
+   A `scroll` event is dispatched a task after any offset changes — including
+   the clamp to 0 that collapsing a scrolled element's content produces — and
+   explorer-viewer.js listens for those in the CAPTURE phase on
+   #explorer-list-N, so an inner .explorer-source-view scroll reaches it.
+
+   And a frame is followed by a paint, so what the reader is actually shown is
+   sampled after every frame, not only at the end. */
+const LINE_HEIGHT = 20;
+const frames = [];
+const events = [];
+const captureListeners = [];
+const shown = [];
+
+function classList() {
+    const names = new Set();
+    return {
+        add: name => names.add(name),
+        remove: name => names.delete(name),
+        contains: name => names.has(name),
+        toggle() {}
+    };
+}
+
+function queueScroll(target) {
+    events.push(() => captureListeners.forEach(listener => listener({ target })));
+}
+
+/* One node per thing the panel can hold; `lines` is its height in rows. */
+function makeNode(kind, lines) {
+    return {
+        kind,
+        lines: lines || 0,
+        dataset: {},
+        classList: classList(),
+        addEventListener() {},
+        set innerHTML(value) {
+            this.lines = (value.match(/\n/g) || []).length + (value ? 1 : 0);
+            code.relayout();
+        },
+        get innerHTML() { return ''; },
+        insertAdjacentHTML(where, html) {
+            this.lines += (html.match(/\n/g) || []).length + 1;
+            code.relayout();
+        },
+        querySelector: () => null,
+        querySelectorAll: () => []
+    };
+}
+
+function parseMarkup(html) {
+    const text = String(html || '');
+    if (!text) return null;
+    if (text.indexOf('explorer-source-plain') !== -1) return makeNode('plain', 0);
+    if (text.indexOf('explorer-source-lines') !== -1) return makeNode('lines', 0);
+    if (text.indexOf('explorer-source-tier-notice') !== -1) return makeNode('notice', 1);
+    return makeNode('other', 0);
+}
+
+const code = {
+    id: 'explorer-code-0',
+    hidden: false,
+    dataset: {},
+    children: [],
+    top: 0,
+    scrollLeft: 0,
+    clientHeight: 400,
+    clientWidth: 300,
+    scrollWidth: 600,
+    scrollHeight: 400,
+    style: { setProperty() {}, removeProperty() {} },
+    classList: classList(),
+    addEventListener() {},
+    setAttribute() {},
+    get scrollTop() { return this.top; },
+    set scrollTop(value) {
+        const max = Math.max(0, this.scrollHeight - this.clientHeight);
+        const next = Math.max(0, Math.min(max, Number(value) || 0));
+        if (next !== this.top) { this.top = next; queueScroll(this); }
+    },
+    relayout() {
+        this.scrollHeight = Math.max(400,
+            this.children.reduce((total, child) => total + child.lines, 0) * LINE_HEIGHT);
+        const max = Math.max(0, this.scrollHeight - this.clientHeight);
+        if (this.top > max) { this.top = max; queueScroll(this); }
+    },
+    set innerHTML(value) {
+        this.children = [];
+        const text = String(value || '');
+        if (text.indexOf('explorer-source-tier-notice') !== -1) {
+            this.children.push(makeNode('notice', 1));
+        }
+        if (text.indexOf('explorer-source-plain') !== -1) {
+            const node = makeNode('plain', 0);
+            node.lines = (text.match(/\n/g) || []).length;
+            this.children.push(node);
+        }
+        if (text.indexOf('explorer-source-lines') !== -1) {
+            const node = makeNode('lines', 0);
+            node.lines = (text.match(/class="explorer-source-line"/g) || []).length;
+            this.children.push(node);
+        }
+        this.relayout();
+    },
+    get innerHTML() { return ''; },
+    appendChild(node) { this.children.push(node); this.relayout(); return node; },
+    replaceChild(next, previous) {
+        const at = this.children.indexOf(previous);
+        if (at === -1) throw new Error('replaceChild: not a child');
+        this.children[at] = next;
+        this.relayout();
+        return previous;
+    },
+    querySelector(selector) {
+        if (selector === '.explorer-source-plain') {
+            return this.children.find(child => child.kind === 'plain') || null;
+        }
+        if (selector === '.explorer-source-tier-notice') {
+            return this.children.find(child => child.kind === 'notice') || null;
+        }
+        if (selector === ':scope > .explorer-source-lines') {
+            return this.children.find(child => child.kind === 'lines') || null;
+        }
+        return null;
+    },
+    querySelectorAll: () => []
+};
+
+const sourcePanel = {
+    hidden: false,
+    dataset: { explorerFilePanel: 'source' },
+    querySelector: selector => (selector === '.explorer-source-view' ? code : null)
+};
+const sourceButton = {
+    dataset: { explorerFileView: 'source' },
+    attrs: { 'aria-selected': 'true' },
+    setAttribute(name, value) { this.attrs[name] = String(value); },
+    getAttribute(name) { return this.attrs[name]; }
+};
+const list = {
+    id: 'explorer-list-0',
+    dataset: {},
+    scrollTop: 0,
+    scrollLeft: 0,
+    scrollHeight: 300,
+    clientHeight: 300,
+    scrollWidth: 300,
+    clientWidth: 300,
+    classList: classList(),
+    addEventListener(type, listener, options) {
+        if (type === 'scroll' && options && options.capture) captureListeners.push(listener);
+    },
+    querySelector(selector) {
+        if (selector === '.explorer-editor-body') return { classList: classList() };
+        if (selector === '.explorer-editor-name') return { textContent: '', title: '' };
+        if (selector === '.explorer-editor-meta') return { textContent: '' };
+        if (selector === '[data-explorer-file-view][aria-selected="true"]') return sourceButton;
+        if (selector === '[data-explorer-file-panel]') return sourcePanel;
+        const panel = selector.match(/^\[data-explorer-file-panel="([^"]+)"\]$/);
+        if (panel) return panel[1] === 'source' ? sourcePanel : null;
+        return null;
+    },
+    querySelectorAll(selector) {
+        if (selector === '[data-explorer-file-view]') return [sourceButton];
+        if (selector === '[data-explorer-file-panel]') return [sourcePanel];
+        return [];
+    }
+};
+
+const elements = new Map([['explorer-list-0', list], ['explorer-code-0', code]]);
+const pane = {
+    _explorerMode: 'file',
+    _explorerFilePath: 'big.log',
+    _explorerFileContent: '',
+    _explorerFileLanguage: 'text',
+    _explorerLastFileView: 'source',
+    _explorerPreviewLoaded: false,
+    _explorerDiffLoaded: false,
+    _explorerDiffSplit: false,
+    _explorerActiveTabId: '__preview__',
+    _explorerRenderedTabId: '__preview__',
+    _explorerTabs: [{ id: '__preview__', pinned: false, path: 'big.log', name: 'big.log' }]
+};
+
+let clock = 0;
+const sandbox = {
+    console,
+    // Three milliseconds a call, so the 8 ms frame budget really does end a
+    // frame and the build spans several of them.
+    performance: { now: () => (clock += 3) },
+    document: {
+        getElementById: id => elements.get(id) || null,
+        querySelector: () => null,
+        querySelectorAll: () => [],
+        addEventListener() {},
+        createElement(tag) {
+            if (tag !== 'template') return makeNode('other', 0);
+            const template = { content: { firstElementChild: null } };
+            Object.defineProperty(template, 'innerHTML', {
+                set(value) { template.content.firstElementChild = parseMarkup(value); },
+                get() { return ''; }
+            });
+            return template;
+        },
+        body: { dataset: {}, addEventListener() {} }
+    },
+    window: {
+        addEventListener() {},
+        setTimeout: () => 0,
+        clearTimeout() {},
+        requestAnimationFrame: callback => frames.push(callback),
+        cancelAnimationFrame() {},
+        matchMedia: () => ({ matches: false }),
+        localStorage: { getItem: () => null, setItem() {}, removeItem() {} }
+    },
+    navigator: {},
+    setTimeout: () => 0,
+    clearTimeout() {},
+    requestAnimationFrame: callback => frames.push(callback),
+    terminals: [pane],
+    sessionIds: ['s0'],
+    escHtml: value => String(value == null ? '' : value),
+    fetch: () => new Promise(() => {})
+};
+sandbox.globalThis = sandbox;
+vm.createContext(sandbox);
+[process.argv[2], process.argv[3], process.argv[4]].forEach(file => {
+    vm.runInContext(fs.readFileSync(file, 'utf8'), sandbox);
+});
+sandbox.window.GridVibeExplorerTiers = sandbox.GridVibeExplorerTiers;
+sandbox.window.GridVibeExplorerScroll = sandbox.GridVibeExplorerScroll;
+sandbox.window.GridVibeExplorerPersistence = sandbox.GridVibeExplorerPersistence;
+[process.argv[5], process.argv[6], process.argv[7]].forEach(file => {
+    vm.runInContext(fs.readFileSync(file, 'utf8'), sandbox);
+});
+
+['applyExplorerLineWrapState', 'loadExplorerChangeMarks', 'applyExplorerEditorFontSize',
+ 'updateExplorerGitSummary', 'renderExplorerPathBreadcrumb', 'setExplorerEditChromeDisabled',
+ 'refreshExplorerEditControls', 'renderExplorerTabStrip', 'scheduleExplorerOccurrenceHighlight',
+ 'applyExplorerChangeMarks', 'cancelExplorerSearch', 'ensureExplorerPreviewLoaded',
+ 'restoreExplorerPreview', 'renderExplorerDiff', 'updateExplorerSearchControls',
+ 'wireExplorerContextMenu', 'notePanePresentationChanged'
+].forEach(name => { sandbox[name] = () => {}; });
+
+function flushEvents() { while (events.length) events.shift()(); }
+function settle(limit = 5000) {
+    let passes = 0;
+    while ((frames.length || events.length) && passes < limit) {
+        passes += 1;
+        if (frames.length) frames.shift()();
+        flushEvents();
+        shown.push(code.scrollTop);
+    }
+    return passes;
+}
+
+const content = Array.from({ length: 25000 }, (_, at) => 'line ' + at).join('\n');
+const appended = content + '\nline 25000';
+const results = {};
+
+sandbox.explorerEnsureViewerShell(0);
+results.captureListeners = captureListeners.length;
+sandbox.applyExplorerSourceTier(pane, content);
+pane._explorerFileContent = content;
+sandbox.renderExplorerSource(0);
+results.tier = pane._explorerSourceTier;
+results.openFrames = settle();
+results.scrollHeight = code.scrollHeight;
+
+code.scrollTop = 200000;
+flushEvents();
+results.readerAt = code.scrollTop;
+
+// ── the watcher's in-place refresh: a log file gaining one line ────────────
+shown.length = 0;
+const captured = sandbox.captureExplorerFileScroll(0);
+results.captured = captured.panels.source.scrollTop;
+results.applied = sandbox.updateExplorerFileInPlace(0, {
+    path: 'big.log',
+    name: 'big.log',
+    content: appended,
+    language: 'text',
+    preview_type: null,
+    editable: true,
+    git: null,
+    git_context: null
+}, captured);
+results.afterRenderReturned = code.scrollTop;
+results.refreshFrames = settle();
+results.shownDuringRefresh = [results.afterRenderReturned].concat(shown);
+results.restored = code.scrollTop;
+results.storedAfterRestore =
+    pane._explorerPanelScrollStore.panels.source.metrics.scrollTop;
+results.tabViewAfterRestore =
+    pane._explorerTabs[0].view.scroll.panels.source.scrollTop;
+
+/* A build can still collapse the panel it is replacing — a file crossing the
+   tier boundary swaps one kind of Source view for another — so a capture
+   taken while one is in flight must still stand on the stored offset rather
+   than on whatever the live element reports. */
+const other = Array.from({ length: 25000 }, (_, at) => 'other ' + at).join('\n');
+pane._explorerFileContent = other;
+sandbox.applyExplorerSourceTier(pane, other);
+sandbox.setExplorerPanelScrollState(0, {
+    activeView: 'source',
+    panels: { source: { scrollTop: 200000, scrollLeft: 0 } },
+    sidebar: {}
+});
+sandbox.renderExplorerSource(0);
+results.buildInFlight = Boolean(pane._explorerSourceRenderJob);
+code.top = 0;                                   // the collapse, with no reader
+const midBuild = sandbox.captureExplorerFileScroll(0);
+results.capturedMidBuild = midBuild.panels.source.scrollTop;
+results.storedMidBuild =
+    pane._explorerPanelScrollStore.panels.source.metrics.scrollTop;
+
+process.stdout.write(JSON.stringify(results));
+"""
+
+
+@unittest.skipUnless(NODE, "Node.js is required for explorer scroll tests")
+class ExplorerLargeSourceScrollTestCase(unittest.TestCase):
+    """A frame-sliced rebuild keeps the reader where they were, throughout."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.results = _run_node(
+            LARGE_TIER_HARNESS,
+            TIERS_JS,
+            SCROLL_JS,
+            PERSISTENCE_JS,
+            VIEWER_JS,
+            SCROLL_ADAPTER_JS,
+            TABS_JS,
+        )
+
+    def test_the_scenario_is_the_one_the_regression_needs(self):
+        """The harness must reproduce the conditions, or it proves nothing."""
+        self.assertEqual(self.results["tier"], "large")
+        # The paint really is spread over frames, not done in one pass.
+        self.assertGreater(self.results["openFrames"], 1)
+        self.assertGreater(self.results["refreshFrames"], 1)
+        # The page really is listening for scroll in the capture phase, so an
+        # inner scroller's event reaches captureExplorerFileScroll().
+        self.assertEqual(self.results["captureListeners"], 1)
+        self.assertEqual(self.results["readerAt"], 200000)
+        self.assertTrue(self.results["applied"])
+
+    def test_an_in_place_refresh_never_shows_the_reader_the_top_of_the_file(self):
+        """The rebuild is assembled off-screen, so nothing flashes.
+
+        Emptying the scroller first collapses the document under the reader,
+        which parks them at line 1 for every frame the rebuild lasts before
+        the restore snaps them home — a log file gaining a line did that on
+        every poll. The replacement is built detached and swapped in whole, so
+        every frame in between shows the position they were already at.
+        """
+        self.assertEqual(self.results["captured"], 200000)
+        self.assertEqual(
+            set(self.results["shownDuringRefresh"]),
+            {200000},
+            "the reader was shown a different offset mid-rebuild",
+        )
+        self.assertEqual(self.results["restored"], 200000)
+
+    def test_a_capture_taken_mid_build_stands_on_the_stored_offset(self):
+        """The rebuild's own reset is not the reader's position.
+
+        Where a build does still collapse what it replaces, the browser
+        reports that clamp as a scroll event a task later, and the
+        capture-phase listener answers it with a full capture. Storing it
+        would overwrite the offset the restore queued behind that same build
+        is about to apply.
+        """
+        self.assertTrue(self.results["buildInFlight"])
+        self.assertEqual(self.results["capturedMidBuild"], 200000)
+        self.assertEqual(self.results["storedMidBuild"], 200000)
+        # Neither the pane store nor the tab's saved view may carry a clamp.
+        self.assertEqual(self.results["storedAfterRestore"], 200000)
+        self.assertEqual(self.results["tabViewAfterRestore"], 200000)
 
 
 if __name__ == "__main__":

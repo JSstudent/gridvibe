@@ -157,15 +157,52 @@
         return `<pre class="explorer-source-chunk">${escHtml(chunk)}</pre>`;
     }
 
+    /* An element built outside the document, so a rebuild costs no layout
+       until the moment it is swapped in. Returns null for empty markup. */
+    function explorerDetachedElement(html) {
+        const template = document.createElement('template');
+        template.innerHTML = String(html || '');
+        return template.content.firstElementChild;
+    }
+
+    function explorerLargeSourceHost(code) {
+        return code ? code.querySelector('.explorer-source-plain') : null;
+    }
+
+    /* Put the finished chunks on screen in place of the ones the reader has
+       been looking at, holding their offset across the exchange. Both writes
+       are in one task, so the collapsed intermediate state is never painted. */
+    function explorerSwapLargeSourceHost(code, pane, previous, host) {
+        const top = code.scrollTop;
+        const left = code.scrollLeft;
+        const notice = code.querySelector('.explorer-source-tier-notice');
+        const nextNotice = explorerDetachedElement(explorerSourceTierNoticeHtml(pane));
+        if (notice && nextNotice) {
+            code.replaceChild(nextNotice, notice);
+        }
+        code.replaceChild(host, previous);
+        code.scrollTop = top;
+        code.scrollLeft = left;
+    }
+
     /* The large tier's paint, over frames.
 
        Not building one row per line is what the tier is for, but escaping ten
        megabytes and handing the parser a single string that size is the same
        uninterruptible task wearing a different shape — and it lands on exactly
        the files the tier exists to make openable. The chunks the policy
-       already cuts are the unit: the notice and an empty host go in first, and
-       the chunks follow under the same frame budget the row build uses, so the
-       file fills in from the top and the window keeps answering clicks.
+       already cuts are the unit, emitted under the same frame budget the row
+       build uses, so the window keeps answering clicks throughout.
+
+       Where those chunks are assembled depends on whether there is anything
+       to protect. The first paint has nothing on screen, so the notice and an
+       empty host go in and the file fills in from the top. A *replacement* —
+       a watcher refresh, a save — has the reader somewhere in the document,
+       and emptying the scroller under them collapses the content, which the
+       browser answers by putting them at the top for every frame the rebuild
+       lasts before the restore snaps them home at the end. A log file gaining
+       a line did that on every poll. So a replacement is assembled off-screen
+       and swapped in whole.
 
        Readers queued through whenExplorerSourceRendered() wait for the last
        chunk, exactly as they wait for the last row: a scroll restore that ran
@@ -182,7 +219,7 @@
         if (painted
             && painted.content === content
             && !pane._explorerSourceRenderJob
-            && code.querySelector('.explorer-source-plain') === painted.host) {
+            && explorerLargeSourceHost(code) === painted.host) {
             explorerFlushSourceRenderCallbacks(pane);
             return;
         }
@@ -191,19 +228,34 @@
         pane._explorerSourceRender = null;
         pane._explorerSourceModel = null;
         pane._explorerLargeSourceRender = null;
-        code.innerHTML = `${explorerSourceTierNoticeHtml(pane)}<div class="explorer-source-plain"></div>`;
-        const host = code.querySelector('.explorer-source-plain');
-        const paced = host
-            && chunks.length > 1
-            && typeof window.requestAnimationFrame === 'function';
-        if (!paced) {
-            const body = chunks.map(explorerLargeSourceChunkHtml).join('');
-            if (host) {
-                host.innerHTML = body;
-            } else {
-                code.innerHTML = `${explorerSourceTierNoticeHtml(pane)}<div class="explorer-source-plain">${body}</div>`;
+        // The host on screen, if this is a replacement rather than a first paint.
+        const replacing = explorerLargeSourceHost(code);
+        let host;
+        if (replacing) {
+            host = explorerDetachedElement('<div class="explorer-source-plain"></div>');
+        } else {
+            code.innerHTML = `${explorerSourceTierNoticeHtml(pane)}<div class="explorer-source-plain"></div>`;
+            host = explorerLargeSourceHost(code);
+        }
+        if (!host) {
+            code.innerHTML = `${explorerSourceTierNoticeHtml(pane)}`
+                + `<div class="explorer-source-plain">${chunks.map(explorerLargeSourceChunkHtml).join('')}</div>`;
+            pane._explorerLargeSourceRender = null;
+            explorerFlushSourceRenderCallbacks(pane);
+            return;
+        }
+        /* What the job must find on screen to know it is still wanted: the
+           host it is filling, or the one it is going to replace. */
+        const onScreen = replacing || host;
+        const commit = () => {
+            if (replacing) {
+                explorerSwapLargeSourceHost(code, pane, replacing, host);
             }
-            pane._explorerLargeSourceRender = host ? { content, host } : null;
+            pane._explorerLargeSourceRender = { content, host };
+        };
+        if (chunks.length <= 1 || typeof window.requestAnimationFrame !== 'function') {
+            host.innerHTML = chunks.map(explorerLargeSourceChunkHtml).join('');
+            commit();
             explorerFlushSourceRenderCallbacks(pane);
             return;
         }
@@ -217,7 +269,7 @@
             if (pane._explorerSourceRenderJob !== job) {
                 return;
             }
-            if (code.querySelector('.explorer-source-plain') !== host) {
+            if (explorerLargeSourceHost(code) !== onScreen) {
                 // Same standing-down rule as the row build above: a job that
                 // can never finish must not hold the pane's reader queue.
                 explorerAbandonSourceRenderJob(pane);
@@ -236,7 +288,7 @@
                 return;
             }
             pane._explorerSourceRenderJob = null;
-            pane._explorerLargeSourceRender = { content, host };
+            commit();
             explorerFlushSourceRenderCallbacks(pane);
         };
         job.step = step;
@@ -5098,13 +5150,30 @@
             && pane._explorerSourceRender.content === content
             ? { top: code.scrollTop, left: code.scrollLeft }
             : null;
+        const chunked = Boolean(chunking && chunking.chunked);
+        /* A frame-sliced rebuild assembles its rows off-screen when there are
+           rows on screen to protect, for the same reason the large tier does:
+           emptying the scroller first collapses the document under the reader,
+           so the browser parks them at the top for every frame the build lasts
+           and the offset is only handed back at the end. That is the flash the
+           syntax colours arriving used to cause on a big file, and the one a
+           save or a watcher refresh causes on any of them. A one-pass build
+           has no frames to flash across, and a first paint has nothing to keep
+           on screen, so both still go straight into the panel. */
+        const replacing = chunked ? explorerRenderedSourceContainer(code) : null;
         /* One string and one parse for a document that can afford it — which
            is nearly all of them, and is cheaper than any number of appends. */
-        code.innerHTML = chunking && chunking.chunked
+        const markup = chunked
             ? `${explorerSourceLinesOpenTag(model)}</div>`
             : `${explorerSourceLinesOpenTag(model)}${model.rows
                 .map(row => explorerSourceRowHtml(model, row, searchRanges)).join('')}</div>`;
-        const container = explorerRenderedSourceContainer(code);
+        let container;
+        if (replacing) {
+            container = explorerDetachedElement(markup);
+        } else {
+            code.innerHTML = markup;
+            container = explorerRenderedSourceContainer(code);
+        }
         /* The rows are identified by a token stamped on them rather than by a
            reference to the element: a pane that leaves file view would keep
            the whole detached row tree alive for as long as it held that
@@ -5115,18 +5184,35 @@
             container.dataset.explorerRender = token;
         }
         pane._explorerSourceRender = {
-            token, content, language, collapsedKey, ranges: searchRanges, keepScroll
+            token, content, language, collapsedKey, ranges: searchRanges, keepScroll,
+            /* While a swap build runs, the rows on screen still carry the
+               *previous* token — so "is this still my surface?" is asked about
+               the container this build is going to replace, not about the one
+               it is filling. A panel the editor or a tab switch took over
+               fails that check exactly as before. */
+            replacing: replacing || null
         };
 
-        if (!chunking || !chunking.chunked) {
+        if (!chunked) {
             explorerFinishSourceRender(index);
             return;
         }
-        /* Frame-sliced build: the file fills in from the top and the rest of
-           the app keeps painting. Everything that reads the rows the moment a
-           render "returns" goes through whenExplorerSourceRendered(), which is
-           immediate for the synchronous build above and queued for this one. */
+        /* Frame-sliced build: the rest of the app keeps painting throughout.
+           Everything that reads the rows the moment a render "returns" goes
+           through whenExplorerSourceRendered(), which is immediate for the
+           synchronous build above and queued for this one. */
         explorerRunSourceRenderJob(index, code, container, model, searchRanges, chunking.size);
+    }
+
+    /* Put the finished rows on screen in place of the ones the reader has been
+       looking at, holding their offset across the exchange. One task, so the
+       collapsed intermediate state is never painted. */
+    function explorerSwapRenderedSourceContainer(code, previous, container) {
+        const top = code.scrollTop;
+        const left = code.scrollLeft;
+        code.replaceChild(container, previous);
+        code.scrollTop = top;
+        code.scrollLeft = left;
     }
 
     function explorerSourceCollapsedKey(collapsedLines) {
@@ -5322,13 +5408,18 @@
         const pane = terminals[index];
         const job = { frame: 0, at: 0, suspended: false, step: null };
         pane._explorerSourceRenderJob = job;
+        /* Null for a first paint, which fills the panel directly; otherwise
+           the rows on screen that this build will replace when it finishes. */
+        const replacing = pane._explorerSourceRender?.replacing || null;
+        const onScreen = replacing || container;
         const step = () => {
             job.frame = 0;
             /* Two ways this build stops being the one that should finish: a
                newer render replaced it (identity, not a flag), or the panel it
-               was filling is no longer the panel on screen. Either way the
-               remaining rows are rows nobody asked for. A suspended job is
-               neither — it holds its position until the card is back. */
+               was filling — or the one it is going to swap itself into — is no
+               longer the panel on screen. Either way the remaining rows are
+               rows nobody asked for. A suspended job is neither — it holds its
+               position until the card is back. */
             if (job.suspended) {
                 return;
             }
@@ -5336,7 +5427,7 @@
                 // A newer build owns the pane and the queue with it.
                 return;
             }
-            if (explorerRenderedSourceContainer(code) !== container) {
+            if (explorerRenderedSourceContainer(code) !== onScreen) {
                 /* The panel this was filling was replaced by something that is
                    not a newer build — the in-place editor's textarea, the
                    large tier's chunks, a tab switch. No further slice may
@@ -5363,6 +5454,12 @@
                 return;
             }
             pane._explorerSourceRenderJob = null;
+            if (replacing) {
+                explorerSwapRenderedSourceContainer(code, replacing, container);
+                if (pane._explorerSourceRender) {
+                    pane._explorerSourceRender.replacing = null;
+                }
+            }
             explorerFinishSourceRender(index);
         };
         job.step = step;
@@ -5394,8 +5491,16 @@
             return false;
         }
         const container = explorerRenderedSourceContainer(code);
-        const sameSurface = Boolean(container)
-            && container.dataset.explorerRender === previous.token;
+        /* While a swap build is running, the rows on screen are the ones it is
+           about to replace and still carry the previous render's token. The
+           surface is theirs until the swap lands, so identity is asked about
+           that element; only once the swap has happened does the token on the
+           rendered rows answer for it again. Either way the question is the
+           same one — is what is on screen still this render's? — so a panel
+           the editor or a tab switch took over still fails it and rebuilds. */
+        const sameSurface = previous.replacing
+            ? container === previous.replacing
+            : Boolean(container) && container.dataset.explorerRender === previous.token;
         const previousRanges = previous.ranges || [];
         /* The overwhelmingly common repaint — no query before, no query now —
            needs no records, no maps and no plan: there is nothing a search
@@ -6757,13 +6862,37 @@
             const stored = explorerPanelScrollStoreMatches(pane, store)
                 ? store.panels?.[mode]?.metrics
                 : null;
-            /* A visible Preview can still be only its loader. Capturing that
-               tiny box during the render's presentation snapshot would write
-               0 (or its small clamp) over the offset waiting for the lazy
-               Markdown response. Hidden panels and an unloaded Preview both
-               retain the content-bound value already in the pane store. */
+            /* A panel that is still filling has no reader position to read.
+
+               Preview can be showing only its loader: capturing that tiny box
+               during the render's presentation snapshot would write 0 (or its
+               small clamp) over the offset waiting for the lazy Markdown
+               response.
+
+               Source has exactly the same hazard and it is not hypothetical.
+               A frame-sliced build empties the scroller before its first
+               slice lands, so the browser clamps the offset to 0 and — a task
+               later, while the remaining frames are still emitting — fires a
+               `scroll` event for it. The capture-phase listener in
+               explorerEnsureViewerShell() answers that event with this very
+               function, which would then store the clamp as the reader's
+               position and hand it to the restore queued behind the same
+               build. That is the whole of "a large file jumps to the top
+               after a save, a tab swap, or a watcher refresh": the position
+               was captured correctly and then overwritten by the rebuild's
+               own side effect a moment before it was due to be applied. A
+               synchronous build never showed it, because there the restore
+               has already run by the time the event is dispatched.
+
+               Hidden panels, an unloaded Preview and a Source build in flight
+               all retain the content-bound value already in the pane store.
+               The accepted cost is the same one the restore already carries:
+               a build owns where the file opens, so a reader who scrolls
+               inside the few frames a build lasts is returned to the offset
+               that build was restoring. */
             const contentPending = mode === 'preview'
-                && !pane?._explorerPreviewLoaded;
+                ? !pane?._explorerPreviewLoaded
+                : mode === 'source' && Boolean(pane?._explorerSourceRenderJob);
             const metrics = (panel.hidden || contentPending) && stored
                 ? { ...stored }
                 : captureScrollMetrics(scrollEl);

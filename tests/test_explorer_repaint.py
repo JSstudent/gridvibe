@@ -145,6 +145,13 @@ function makeSourcePanel(id) {
         addEventListener() {},
         setAttribute() {},
         appendChild() {},
+        /* A swap build hands its rows over as one element exchange. No layout
+           happens in between, so unlike an innerHTML write this does not
+           collapse the content and does not reset the offset. */
+        replaceChild(next, previous) {
+            if (block === previous) { block = next; }
+            return previous;
+        },
         get innerHTML() { return panel.raw; },
         set innerHTML(value) {
             panel.writes += 1;
@@ -174,12 +181,29 @@ function makeSandbox(nodes) {
             querySelector: selector => nodes[selector] || null,
             querySelectorAll: () => [],
             addEventListener() {},
-            createElement: () => ({
-                _html: '',
-                get innerHTML() { return this._html; },
-                set innerHTML(value) { this._html = value; this.children = parseRows(value); },
-                children: []
-            }),
+            createElement: tag => {
+                // A frame-sliced rebuild assembles its rows in a detached
+                // <template> so the ones on screen are never taken away first.
+                if (tag === 'template') {
+                    const template = { content: { firstElementChild: null } };
+                    Object.defineProperty(template, 'innerHTML', {
+                        set(value) {
+                            template.content.firstElementChild =
+                                String(value).includes('explorer-source-lines')
+                                    ? makeLinesBlock(value)
+                                    : null;
+                        },
+                        get() { return ''; }
+                    });
+                    return template;
+                }
+                return {
+                    _html: '',
+                    get innerHTML() { return this._html; },
+                    set innerHTML(value) { this._html = value; this.children = parseRows(value); },
+                    children: []
+                };
+            },
             createTextNode: text => ({ text: String(text) }),
             body: { dataset: {}, addEventListener() {} }
         },
