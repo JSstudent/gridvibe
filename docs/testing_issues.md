@@ -1,9 +1,82 @@
 # GridVibe Testing Issues
-Last updated: 2026-08-17
+Last updated: 2026-08-21
 
 ## Open Issues
 
-_None._
+### Issue ID: ISSUE-2026-044
+- Title: Opening a file explorer from a navigated terminal roots at the launch directory, not the current one
+- Priority: High
+- Status: Open
+- Area: `web/api.py`, `web/explorer.py`, `web/terminal_io.py`, `web/static/js/explorer-viewer.js`
+- Assignee: Unassigned
+- Tags: `explorer`, `terminal`, `git`, `session`
+- Reported: 2026-08-21
+
+Description:
+A terminal pane launched on a Default Working Directory, then navigated with `cd`
+to a subdirectory, opens its file explorer rooted at the *launch* directory. When
+that launch directory is above the repository — `…\Desktop` with the repo at
+`…\Desktop\gridvibe_colab` — the Git sidebar reports no worktree, and navigating
+into the repository through the Files tree does not bring it back, because the
+sidebar is anchored on the explorer root rather than on the directory being
+browsed. The behaviour is also intermittent: the live-cwd probe is a write into
+the interactive shell with a 0.75 s deadline, and a shell that is busy silently
+yields the launch directory instead.
+
+Steps to reproduce:
+1. Launch a Local Repository terminal pane with the Default Working Directory set
+   to a folder that *contains* a Git repository.
+2. In the pane, `cd` into the repository.
+3. Switch the pane to File Explorer mode.
+4. Observe the root, then expand the Git sidebar; navigate into the repository in
+   the Files tree and observe it again.
+
+Expected behavior:
+The explorer opens on the directory the shell is actually in, rooted so that the
+repository containing it is visible, and the Git sidebar shows that repository —
+whether it was the root at open time or was navigated into afterwards.
+
+Actual behavior / logs:
+Root-caused by code inspection; see `docs/working_directory_hardening.md` §2.1-2.3
+for the three independent mechanisms (`web/api.py:2929`, `web/explorer.py:99`,
+`web/explorer.py:2628`).
+
+### Proposed solution:
+`docs/working_directory_hardening.md`, stages 1, 2 and 4.
+
+### Issue ID: ISSUE-2026-045
+- Title: A saved workspace restores an agent pane at its launch directory, not the directory the agent was started in
+- Priority: High
+- Status: Open
+- Area: `web/terminal_io.py`, `web/runtime_state.py`, `web/static/js/terminals.js`, `sessions/manager.py`
+- Assignee: Unassigned
+- Tags: `session`, `workspace`, `persistence`, `terminal`
+- Reported: 2026-08-21
+
+Description:
+`_track_terminal_agent_input()` promotes a pane to agent mode when a registered
+agent binary is submitted at the prompt, updating `startup_mode`,
+`agent_selection` and `initial_command` — but not `directory`. Nothing else
+tracks a pane's working directory either, so Save Workspace captures the launch
+directory and a restart replays `cd <launch dir>` followed by the agent command.
+The pane returns in the right mode and the wrong place. The same stale value is
+what a pane split inherits.
+
+Steps to reproduce:
+1. Launch a terminal pane on a repository root.
+2. `cd` into a subdirectory and start an agent (`codex`).
+3. Save the workspace, restart GridVibe, and restore it.
+
+Expected behavior:
+The restored agent pane starts in the subdirectory the agent was started in.
+
+Actual behavior / logs:
+Root-caused by code inspection; see `docs/working_directory_hardening.md` §2.4
+(`web/terminal_io.py:895`, `web/runtime_state.py:152`,
+`web/static/js/terminals.js:2451`).
+
+### Proposed solution:
+`docs/working_directory_hardening.md`, stages 2 and 3.
 
 ## Closed Issues
 
