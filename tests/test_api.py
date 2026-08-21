@@ -6425,6 +6425,177 @@ class ApiRoutesTestCase(unittest.TestCase):
         reopened = api.session_manager.get_session(session_id)
         self.assertEqual(Path(reopened.explorer_root_directory), second.resolve())
 
+    def test_the_explorer_follows_a_shell_that_walked_back_up(self):
+        """The reported case, end to end.
+
+        Launch a terminal on a directory, `cd` into a repository below it and
+        open the explorer -- it roots on the repo. Go back to the terminal,
+        `cd` back up, and open the explorer again: it used to reopen on the
+        repo. The floor the widen-guard clamps to is the pane's *launch*
+        directory, and the mode switch had just rewritten that to the repo, so
+        walking up read as widening and was clamped straight back down.
+        """
+        workspace = Path(self.temp_dir.name) / "workspace"
+        repo_dir = workspace / "project"
+        repo_dir.mkdir(parents=True)
+        self._run_git(repo_dir, "init")
+        session_id = self._create_local_terminal_session(workspace).session_id
+
+        with patch.object(
+            web_terminal_io, "_resolve_live_terminal_cwd", return_value=str(repo_dir)
+        ), patch.object(api, "_close_ssh_connection"):
+            self.client.post(
+                f"/api/sessions/{session_id}/mode",
+                json={"startup_mode": "explorer", "refresh_cwd": True},
+            )
+
+        opened = api.session_manager.get_session(session_id)
+        self.assertEqual(Path(opened.explorer_root_directory), repo_dir.resolve())
+
+        with patch.object(api.socketio, "start_background_task"):
+            self.client.post(
+                f"/api/sessions/{session_id}/mode",
+                json={"startup_mode": "terminal", "directory": ""},
+            )
+
+        # The pane now *launches* in the repo as far as `directory` goes...
+        self.assertEqual(
+            Path(api.session_manager.get_session(session_id).directory),
+            repo_dir.resolve(),
+        )
+
+        with patch.object(
+            web_terminal_io, "_resolve_live_terminal_cwd", return_value=str(workspace)
+        ), patch.object(api, "_close_ssh_connection"):
+            self.client.post(
+                f"/api/sessions/{session_id}/mode",
+                json={"startup_mode": "explorer", "refresh_cwd": True},
+            )
+
+        # ...and the explorer still opens where the shell actually is.
+        reopened = api.session_manager.get_session(session_id)
+        self.assertEqual(Path(reopened.explorer_root_directory), workspace.resolve())
+
+    def test_the_explorer_follows_a_shell_above_its_launch_directory(self):
+        """The floor guards against widening, not against the user.
+
+        A pane launched inside `project/src` whose shell has walked up to
+        `project` is standing there on purpose. Clamping it back to `src` opens
+        the explorer on a directory the terminal beside it is not in.
+        """
+        repo_dir = Path(self.temp_dir.name) / "project"
+        nested = repo_dir / "src"
+        nested.mkdir(parents=True)
+        self._run_git(repo_dir, "init")
+        session_id = self._create_local_terminal_session(nested).session_id
+
+        with patch.object(
+            web_terminal_io, "_resolve_live_terminal_cwd", return_value=str(repo_dir)
+        ), patch.object(api, "_close_ssh_connection"):
+            self.client.post(
+                f"/api/sessions/{session_id}/mode",
+                json={"startup_mode": "explorer", "refresh_cwd": True},
+            )
+
+        updated = api.session_manager.get_session(session_id)
+        self.assertEqual(Path(updated.explorer_root_directory), repo_dir.resolve())
+
+    def test_the_widen_guard_still_holds_while_the_pane_is_inside_it(self):
+        """Walking *down* from the launch directory does not widen the root."""
+        repo_dir = Path(self.temp_dir.name) / "project"
+        nested = repo_dir / "src"
+        deeper = nested / "inner"
+        deeper.mkdir(parents=True)
+        self._run_git(repo_dir, "init")
+        session_id = self._create_local_terminal_session(nested).session_id
+
+        with patch.object(
+            web_terminal_io, "_resolve_live_terminal_cwd", return_value=str(deeper)
+        ), patch.object(api, "_close_ssh_connection"):
+            self.client.post(
+                f"/api/sessions/{session_id}/mode",
+                json={"startup_mode": "explorer", "refresh_cwd": True},
+            )
+
+        updated = api.session_manager.get_session(session_id)
+        # The repository root is above the directory the user picked, so the
+        # floor holds and the pane roots where it was launched.
+        self.assertEqual(Path(updated.directory), deeper.resolve())
+        self.assertEqual(Path(updated.explorer_root_directory), nested.resolve())
+
+    def test_a_mode_switch_never_moves_the_launch_directory(self):
+        """`directory` is rewritten by a switch; the floor read from it is not."""
+        workspace = Path(self.temp_dir.name) / "workspace"
+        nested = workspace / "project"
+        nested.mkdir(parents=True)
+        session_id = self._create_local_terminal_session(workspace).session_id
+
+        with patch.object(
+            web_terminal_io, "_resolve_live_terminal_cwd", return_value=str(nested)
+        ), patch.object(api, "_close_ssh_connection"):
+            self.client.post(
+                f"/api/sessions/{session_id}/mode",
+                json={"startup_mode": "explorer", "refresh_cwd": True},
+            )
+        with patch.object(api.socketio, "start_background_task"):
+            self.client.post(
+                f"/api/sessions/{session_id}/mode",
+                json={"startup_mode": "terminal", "directory": ""},
+            )
+
+        session = api.session_manager.get_session(session_id)
+        self.assertEqual(Path(session.directory), nested.resolve())
+        self.assertEqual(Path(session.launch_directory), workspace)
+
+    def test_an_unlabelled_root_is_configured_only_on_an_explorer_pane(self):
+        """What a launch config that does not state the flag means.
+
+        A root on an explorer pane is that pane's boundary and somebody chose
+        it. On a terminal pane it can only be one a terminal->explorer switch
+        derived and an older snapshot carried back, and calling that configured
+        is what pinned a restored pane to a directory nobody picked.
+        """
+        group = api.session_manager.create_group(
+            name="Local", connection_mode="wsl", layout="single", terminal_count=1
+        )
+        chosen = api.session_manager.create_session(
+            group_id=group.group_id,
+            host="Files",
+            directory="/srv/app",
+            startup_mode="explorer",
+            explorer_root_directory="/srv/app",
+        )
+        derived = api.session_manager.create_session(
+            group_id=group.group_id,
+            host="cmd",
+            directory="/srv/app/api",
+            startup_mode="terminal",
+            explorer_root_directory="/srv/app/api",
+        )
+        self.assertTrue(chosen.explorer_root_configured)
+        self.assertFalse(derived.explorer_root_configured)
+
+        # A stated flag is believed either way, and a non-boolean states
+        # nothing rather than pinning the pane through a truthy string.
+        stated = api.session_manager._session_launch_fields(
+            {
+                "directory": "/srv/app",
+                "startup_mode": "terminal",
+                "explorer_root_directory": "/srv/app",
+                "explorer_root_configured": True,
+            }
+        )
+        self.assertIs(stated["explorer_root_configured"], True)
+        malformed = api.session_manager._session_launch_fields(
+            {
+                "directory": "/srv/app",
+                "startup_mode": "terminal",
+                "explorer_root_directory": "/srv/app",
+                "explorer_root_configured": "yes",
+            }
+        )
+        self.assertIsNone(malformed["explorer_root_configured"])
+
     def test_a_configured_root_survives_the_round_trip_and_still_pins(self):
         """The other half of D2: a chosen root is not what stage 3 drops."""
         repo_dir = Path(self.temp_dir.name) / "repo"

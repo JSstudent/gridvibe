@@ -1,9 +1,11 @@
 # Working-Directory Hardening Plan
 
-Status: **stages 1-3 landed**; stage 4 proposed.
+Status: **stages 1-3 landed, plus stage 3.1**; stage 4 proposed and ready.
 Scope: ISSUE-2026-044 (explorer opens at the launch root, not the navigated
-directory) and ISSUE-2026-045 (a saved workspace restores an agent pane at the
-launch directory, not the one the agent was started in).
+directory), ISSUE-2026-045 (a saved workspace restores an agent pane at the
+launch directory, not the one the agent was started in), and ISSUE-2026-046
+(the explorer will not follow a shell back *up* -- the two pins stage 3.1
+removes).
 Last updated: 2026-08-21
 
 ---
@@ -784,21 +786,183 @@ nothing. Full suite green and `ruff` clean.
   not this stage.
 - D4 is still stage 4's.
 
+### Stage 3.1 — The two pins stages 1-3 left behind — **LANDED**
+
+Reported against the landed stages: a pane launched on a directory, `cd`-ed into
+a subdirectory and switched to the explorer opens on the subdirectory correctly;
+switching back to the terminal, `cd`-ing back *up* and switching again reopens it
+on the subdirectory. ISSUE-2026-046. Two independent mechanisms, each sufficient
+on its own, both confirmed against live state rather than by inspection.
+
+#### What was actually wrong
+
+**1. The widen-guard floor moves with the pane.** §4.3's clamp exists to stop a
+repository root widening the view above *the directory the user picked in the
+launcher*. The floor it was handed is `session.directory` (`web/api.py`), and
+every mode switch rewrites that to wherever the pane last was. So after one
+terminal → explorer → terminal round trip the floor *is* the subdirectory, a
+working directory above it reads as a strict ancestor, and the explorer is
+clamped straight back down — permanently, since nothing ever moves the floor
+back up. Reproduced directly against `_resolve_explorer_open_root()`: floor at
+the subdirectory gives the subdirectory, floor at the real launch directory
+gives the launch directory, and nothing else in the call differs.
+
+The clamp was also unconditional, which is the second half of the same mistake.
+A pane launched inside `repo/src` whose shell has walked up to `repo` is
+standing there on purpose; the guard is against a *repository root* widening the
+view, never against the user.
+
+**2. A derived root comes back from a snapshot as a configured one.** D2 made
+`explorer_root_configured` live-only and re-derived it in
+`TerminalSession.__post_init__` from the presence of a root, on the premise that
+"every construction path takes its root from a launch config, a preset or a
+snapshot, so a root present at build time is a chosen one". That premise is
+false for exactly the root the flag exists to disarm: the terminal → explorer
+switch **has** to store the root it derived, the snapshot carries
+`explorer_root_directory`, and `__post_init__` then called it chosen. The
+reporter's live workspace showed the end state — `startup_mode: "terminal"`, a
+root, and `explorer_root_configured: true`, which no in-run path can produce,
+because `explorer → terminal` writes `bool(root_path)` and `root_path` is `""`
+for a derived root. It was bootstrapped at construction, by the workspace
+restore. D2 recorded this as a residual and called it narrow; it is not.
+Pre-stage-3 snapshots back-filled a derived root into every pane that had ever
+visited the explorer, and going forward a pane snapshotted *while in explorer
+mode* with a derived root reaches the same state.
+
+#### What was done
+
+**`sessions/manager.py`**
+
+- `TerminalSession.launch_directory: Optional[str] = None` — where the pane was
+  *built*, and the one directory field nothing moves afterwards. It is not in
+  `to_dict()`, not in `update_session_metadata`'s allowlist and not in the
+  snapshot: no client reads it, and a writer would defeat the point.
+  `__post_init__` takes it from `directory` when unstated, so a restored pane's
+  floor is the directory it was restored into — which is where that pane starts.
+- `__post_init__`'s configured-root derivation now answers from the pane:
+  `bool(root) and startup_mode == "explorer"`. A root on an explorer pane is
+  that pane's boundary and somebody chose it; a root on a terminal, agent or
+  browser pane can only be a derived leftover from an older snapshot. Every
+  caller that *knows* states the flag instead of leaning on this.
+- `_session_launch_fields()` carries `explorer_root_configured` through, and
+  **type-checks it rather than coercing** — a non-boolean is "not stated", so a
+  malformed flag falls back to the pane's own answer instead of pinning it
+  through a truthy string.
+
+**`web/explorer.py`** — `_resolve_explorer_open_root()` gains one condition:
+the floor binds only while `contains(launch_directory, observed_cwd)`. Inside
+the floor the guard is exactly what it was; outside it, the shell has gone
+somewhere on purpose and the explorer follows.
+
+**`web/api.py`** — the mode switch's floor is `session.launch_directory`, and
+`split_session()` states `explorer_root_configured` explicitly rather than
+letting the clone's terminal `startup_mode` derive it away.
+
+**`web/runtime_state.py`** — `explorer_root_configured` joins
+`_SESSION_SNAPSHOT_FIELDS`. This is the persisted-shape change D2 avoided, and
+it is the right place to pay it: a root and whether anybody chose it are one
+fact, and splitting them across the restart loses the half that matters. A
+snapshot written before the field existed simply does not state it, and
+`__post_init__` answers from the pane — which is what makes the reporter's
+existing `runtime_state.json` come back unpinned rather than needing a migration.
+
+**Tests** — five in `tests/test_api.py` (the reported round trip end to end; a
+shell above its launch directory; the widen guard still holding while the pane
+is inside it; a mode switch never moving `launch_directory`; what an unlabelled
+root means per pane kind, including the malformed-flag case) and three in
+`tests/test_multi_workspace.py` (a derived root and a chosen root each surviving
+a restart as themselves; a legacy slot's root on a terminal pane read as
+derived). `test_switch_roundtrip_preserves_explorer_root_for_parent_navigation`,
+`test_switch_terminal_to_explorer_does_not_widen_root_above_launch_directory`
+and `tests/test_session_persistence_contract.py` pass untouched. Full suite
+green and `ruff` clean.
+
+One existing assertion moved, for the reason the stage exists:
+`test_a_runtime_promoted_agent_is_captured_where_it_was_started` asserted
+`assertNotIn("explorer_root_configured", captured)` — the shape that stage 3
+deliberately froze and that this stage deliberately changes. Its subject (the
+captured directory) is untouched, and `current_directory` is still asserted
+absent.
+
+#### Behaviour changes to be aware of
+
+- **The explorer follows the shell up as well as down.** A pane whose shell has
+  walked above the directory it launched in opens the explorer where the shell
+  is, rather than being clamped back down.
+- **A snapshot now records whether a root was chosen.** A workspace saved with a
+  pane in explorer mode on a *derived* root restores that pane confined to the
+  same root — unchanged — but switching it out to a terminal and back now
+  re-derives, instead of pinning.
+- **A pre-existing `runtime_state.json` heals on its own.** A legacy slot states
+  no flag, so a root on a non-explorer pane is read as derived and the pin is
+  gone on the next restore; the first capture after that writes the truth.
+
+#### D2, revisited
+
+D2's decision stands in shape — an explicit flag, not a naming convention — and
+its one stated cost is now paid rather than avoided. "Live-only, re-established
+from the presence of a root" was the cheap half, and it is what let a derived
+root re-enter the system as a configured one on every restart. The flag is
+persisted; the migration default that D2 feared turns out to be one expression
+(`root on an explorer pane`) and no file rewrite.
+
 ### Stage 4 — Decouple the Git anchor from the root
+
+*Anchors re-checked after stage 3.1; the line references below are current.*
 
 | Change | Files |
 | --- | --- |
-| One anchor helper; `git/repo` + `git/state` take the browsed path | `web/explorer.py:2628`, `web/api.py:1627-1663` |
-| The six mutation routes resolve the same anchor | `web/api.py:1664-1797` |
-| Anchor identity in the sidebar revision token | `web/explorer.py:2593` |
-| Sidebar names the repository it is anchored on; client sends the browsed path | `web/static/js/explorer-viewer.js:3574`, `web/static/js/explorer-git-watch.js:570` |
+| One anchor helper; `git/repo` + `git/state` take the browsed path | `_get_git_repo_state()` `web/explorer.py:2735`, `web/api.py:1642-1675` |
+| The **eight** mutation routes resolve the same anchor | `web/api.py:1679-1815` |
+| Anchor identity in the sidebar revision token | `_git_repo_revision()` `web/explorer.py:2702` |
+| Sidebar names the repository it is anchored on; client sends the browsed path | `web/static/js/explorer-viewer.js:3586` and `:3623`, `web/static/js/explorer-git-watch.js:570` |
+
+Three things about that table are not what the plan first assumed, and each is
+work rather than a note:
+
+- **Eight mutation routes, not six.** `unstage-all` landed after this plan was
+  written (`stage`, `unstage`, `stage-all`, `unstage-all`, `discard-all`,
+  `revert`, `commit`, `publish`). All eight resolve through
+  `backend.root_directory()` today and all eight have to move together, or the
+  sidebar and its buttons can address different repositories — which is the one
+  failure §3 rule 3 exists to prevent.
+- **Half the anchor plumbing already exists.** `_get_git_context(backend,
+  root_path, current_path)` has always taken a browsed path, and `_get_git_diff`
+  passes `backend.file_dirname(file_path)`; `_get_git_repo_state()` is the
+  caller that hard-codes `(root_path, root_path)`. `_resolve_git_worktree_root()`
+  (extracted in stage 1) is the single `rev-parse` the new helper builds on, so
+  stage 4 adds no second spelling of that question.
+- **Two client fetch sites, not one.** `explorer-viewer.js` calls `/git/repo`
+  from both `:3586` and `:3623`; both need the browsed path or the sidebar will
+  re-anchor differently depending on which path refreshed it.
 
 **Architecture trigger (`CLAUDE.md` guardrail 6): this is "the next substantial
 change to the Git sidebar", so it extracts `explorer-git-sidebar.js` as a pure
 move first** — to the same standard as `explorer-tabs.js` and
 `explorer-diff.js`: every extracted line byte-identical, `explorer-viewer.js` a
 pure deletion, existing tests passing on their existing assertions — and only
-then makes the behavioural change on top.
+then makes the behavioural change on top. The trigger has if anything got
+sharper: `explorer-viewer.js` is ~8.7k lines and is now the largest file in the
+repository, ahead of `terminals.js`.
+
+#### Readiness (checked after stage 3.1)
+
+Nothing blocks stage 4. Everything it names exists, the backend half is
+partly built already (above), and stage 3.1 changed nothing it depends on —
+the open-root resolution and the Git anchor are independent questions, which
+is why §4.4 was separable in the first place. Two things to carry in:
+
+- The regression set stage 4 must pass **untouched** is unchanged:
+  `test_switch_roundtrip_preserves_explorer_root_for_parent_navigation`,
+  `tests/test_session_persistence_contract.py`, and
+  `tests/test_multi_workspace.py` across the pure move. Stage 3.1 added cases
+  to the last of those; the pure-move standard applies to the file as it now
+  stands.
+- Stage 3.1 makes stage 4's residual case *narrower*, not different: an
+  explorer opened from a navigated terminal now roots on the repository
+  containing the shell more often than before, so the sidebar-less state is
+  reached mainly by opening an explorer deliberately above a repository —
+  which is exactly what §4.4 fixes and what keeps ISSUE-2026-044 open.
 
 ---
 
@@ -812,6 +976,12 @@ then makes the behavioural change on top.
   inheriting the live directory.
 - `tests/test_multi_workspace.py` — capture and restore of a runtime-promoted
   agent pane in a subdirectory, local and SSH.
+- The floor is a third axis on that matrix, added by stage 3.1: {cwd inside the
+  launch directory, at it, above it} × {the pane has round-tripped through
+  explorer mode, it has not}. A floor read from a field a mode switch rewrites
+  passes every row of the original matrix.
+- `tests/test_multi_workspace.py` — a derived root and a chosen root each
+  surviving a restart as themselves, and a legacy slot that states neither.
 - `tests/test_api.py` Git-route cases — the sidebar and the mutations resolve one
   anchor; a repo below the root produces a sidebar once browsed into.
 - Regression, must pass untouched:
@@ -830,6 +1000,13 @@ handing any stage back.
 `CLAUDE.md` and `AGENTS.md` (guardrail 4, Correctness), `README.md` has a
 **Shell integration** section under Configuration plus the new config key, and
 `CHANGELOG.md` carries the user-visible entry.*
+
+*Done for stage 3.1: the configured-versus-derived contract in `CLAUDE.md` and
+`AGENTS.md` now says the flag travels with the root through the snapshot and how
+an unstated one is read; guardrail 4 gained `launch_directory` and the rule that
+the widen-guard floor binds only while the pane is inside it; `CHANGELOG.md`
+carries the user-visible entry and `docs/testing_issues.md` closes
+ISSUE-2026-046.*
 
 *Done for stage 3: the configured-versus-derived amendment is in the
 explorer-presentation contract of both `CLAUDE.md` and `AGENTS.md`, guardrail 4
@@ -871,6 +1048,13 @@ ISSUE-2026-044 stays open: its second half — the Git anchor — is stage 4.*
   from the presence of a root, so no snapshot field and no migration are
   needed. `_resolve_pane_terminal_directory()` stops back-filling either way.
   That test passes untouched. See stage 3's *Open decisions, decided*.
+  **Amended (stage 3.1): the flag is persisted.** "Live-only" was the half that
+  did not survive contact — `__post_init__` re-derived it from the presence of a
+  root, and a snapshot carries the root the terminal→explorer switch was
+  obliged to store, so every restart turned a derived root back into a
+  configured one (ISSUE-2026-046). `explorer_root_configured` is now in
+  `_SESSION_SNAPSHOT_FIELDS`, and an unstated flag is answered from the pane
+  (`a root on an explorer pane is chosen`) rather than from the root alone.
 - **D3 — Does reconnect use the launch directory or the last observed one?
   DECIDED (stage 3): the observed one, falling back to the launch directory.**
   As recommended. `_startup_directories()` answers for both spawn paths, and

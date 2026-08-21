@@ -166,6 +166,10 @@ _SESSION_SNAPSHOT_FIELDS = (
     "use_powershell",
     "startup_mode",
     "explorer_root_directory",
+    # A root and whether anybody chose it are one fact, and splitting them
+    # across the restart loses the half that matters: a derived root came back
+    # indistinguishable from a configured one and pinned the pane for good.
+    "explorer_root_configured",
     "explorer_tree_open",
     "explorer_git_open",
     "explorer_search_open",
@@ -200,9 +204,14 @@ def _snapshot_session(session: Any) -> Dict[str, Any]:
     the OS read opens an exec channel on a remote pane and the probe types at
     its prompt, and neither slow nor network work belongs under a shared lock.
 
-    The persisted shape does not move -- there is no new key, and
-    `explorer_root_configured` is deliberately absent, because a root that
-    reaches a launch config *is* one somebody chose.
+    `explorer_root_configured` rides along beside the root it qualifies. It
+    was left out at first on the premise that a root reaching a launch config
+    is one somebody chose -- which is false for exactly the root this flag
+    exists to disarm: the terminal->explorer switch *has* to store the root it
+    derived, because the live explorer is confined to it, and a snapshot then
+    carried that root back as a configured one. A snapshot written before this
+    field existed simply does not state it, and `TerminalSession` answers from
+    the pane instead.
     """
     data = session if isinstance(session, dict) else session.to_dict()
     snapshot = {key: data.get(key) for key in _SESSION_SNAPSHOT_FIELDS}

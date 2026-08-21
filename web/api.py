@@ -2733,6 +2733,10 @@ def split_session(session_id: str):
         use_powershell=source.use_powershell,
         startup_mode=startup_mode,
         explorer_root_directory=root_directory,
+        # Stated rather than derived: the clone carries a root only when the
+        # source's was configured, so the new pane inherits that pin even
+        # though a terminal pane's own root would read as a derived one.
+        explorer_root_configured=bool(root_directory),
     )
     if not new_session:
         return jsonify({"error": "Session group not found"}), 404
@@ -2955,7 +2959,12 @@ def change_session_mode(session_id: str):
         cwd_probe = _refresh_pane_cwd(session_id, session, bool(data.get("refresh_cwd")))
         if cwd_probe["directory"]:
             requested_directory = cwd_probe["directory"]
-        launch_directory = session.directory
+        # The widen-guard floor is where the pane was *built*, never
+        # `session.directory` -- this switch rewrites that on its way out, so
+        # one round trip through explorer mode would leave the floor sitting at
+        # the subdirectory the pane last showed and the explorer could never
+        # follow the shell back up again.
+        launch_directory = session.launch_directory or session.directory
         next_directory = session.directory
         root_directory = ""
 

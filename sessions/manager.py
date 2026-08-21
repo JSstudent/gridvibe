@@ -57,6 +57,13 @@ class TerminalSession:
     # has actually observed it -- never a guess, and never written by a probe
     # that failed. Read it through `effective_directory()`, never directly.
     current_directory: Optional[str] = None
+    # The directory this pane was *built* on, and the one thing here that never
+    # moves afterwards. `directory` is rewritten to wherever the pane last was
+    # by every mode switch and by the shell switch, so it stops naming the
+    # launcher's choice after the first of those -- which is why the explorer's
+    # widen-guard floor (`_resolve_explorer_open_root`) reads this instead.
+    # `None` means "not stated"; __post_init__ takes it from `directory`.
+    launch_directory: Optional[str] = None
     username: str = "root"
     port: int = 22
     password: Optional[str] = field(default=None, repr=False)
@@ -79,10 +86,12 @@ class TerminalSession:
     # live explorer without ever becoming a pin the next switch obeys. Read it
     # through `_configured_explorer_root_directory()`, never directly.
     #
-    # `None` means "not stated": every *construction* path takes its root from
-    # a launch config, a preset or a snapshot, so a root present at build time
-    # is a chosen one and __post_init__ says so. A derived root only ever
-    # arrives later, through `update_session_metadata`, which states False.
+    # `None` means "not stated", and __post_init__ then reads the pane itself:
+    # a root on an *explorer* pane is the boundary that pane was built with, so
+    # it is configured, while a root on a terminal/agent/browser pane can only
+    # be a derived one left behind by an older snapshot -- the switch that
+    # derives one states False, and every path that knows better (the split,
+    # both mode switches, a snapshot written since) states the flag outright.
     explorer_root_configured: Optional[bool] = None
     explorer_tree_open: bool = False
     explorer_git_open: bool = False
@@ -109,11 +118,18 @@ class TerminalSession:
     error_message: Optional[str] = None
 
     def __post_init__(self):
-        """Resolve the unstated configured-root flag from the root itself."""
+        """Resolve the two fields that answer from the pane when unstated."""
+        if not str(self.launch_directory or "").strip():
+            self.launch_directory = self.directory
         if self.explorer_root_configured is None:
+            # A root that arrives unlabelled is a chosen one only on a pane
+            # that *is* an explorer. On any other pane it is the root a
+            # terminal->explorer switch derived and an older snapshot carried
+            # back, and calling that configured pins the pane to a directory
+            # nobody picked -- the failure this flag exists to prevent.
             self.explorer_root_configured = bool(
                 str(self.explorer_root_directory or "").strip()
-            )
+            ) and self.startup_mode == "explorer"
 
     def to_dict(self) -> dict:
         """Convert to dictionary."""
@@ -802,6 +818,12 @@ class SessionManager:
         ):
             config = {**config, "explorer_sidebar_width": None}
         presentation = normalize_pane_presentation_fields(config)
+        # Type-checked, never coerced: a non-boolean is "not stated" rather
+        # than a truthy string, so a malformed flag falls back to the pane's
+        # own answer instead of pinning it to a root nobody chose.
+        root_configured = config.get("explorer_root_configured")
+        if not isinstance(root_configured, bool):
+            root_configured = None
         fields = {
             "host": (
                 config.get("host")
@@ -826,6 +848,12 @@ class SessionManager:
             "use_powershell": bool(config.get("use_powershell")),
             "startup_mode": str(config.get("startup_mode") or "terminal"),
             "explorer_root_directory": config.get("explorer_root_directory"),
+            # Absent means "this launch config does not say", which is the
+            # normal case for the launcher and for a snapshot written before
+            # the flag was persisted; TerminalSession.__post_init__ then reads
+            # the pane. A caller that knows -- the split, a snapshot written
+            # since -- states it and is believed.
+            "explorer_root_configured": root_configured,
             "explorer_tree_open": False,
             "explorer_git_open": False,
             "explorer_search_open": False,

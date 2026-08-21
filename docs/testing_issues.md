@@ -43,14 +43,74 @@ for the three independent mechanisms (`web/api.py:2929`, `web/explorer.py:99`,
 
 ### Proposed solution:
 `docs/working_directory_hardening.md`, stages 1, 2 and 4.
-Stages 1 and 2 have landed: a pane's working directory is now observed
-rather than assumed, and an explorer opened from a navigated terminal roots
-on the repository containing it. The remaining half is stage 4 -- the Git
-sidebar is still anchored on the explorer root, so an explorer deliberately
-opened *above* a repository shows no worktree, and navigating into one does
-not bring it back.
+Stages 1, 2 and 3 have landed: a pane's working directory is now observed
+rather than assumed, an explorer opened from a navigated terminal roots on
+the repository containing it, and the observed directory is what a split, a
+preset and a workspace snapshot record. The remaining half is stage 4 -- the
+Git sidebar is still anchored on the explorer root, so an explorer
+deliberately opened *above* a repository shows no worktree, and navigating
+into one does not bring it back. See also ISSUE-2026-046, the two ways a
+pane could still be pinned to a directory nobody picked.
 
 ## Closed Issues
+
+### Issue ID: ISSUE-2026-046
+- Title: The explorer will not follow a shell that has walked back up out of a subdirectory
+- Priority: High
+- Status: Closed
+- Area: `web/explorer.py`, `web/api.py`, `web/runtime_state.py`, `sessions/manager.py`
+- Assignee: Unassigned
+- Tags: `explorer`, `terminal`, `session`, `persistence`
+- Reported: 2026-08-21
+- Closed: 2026-08-21
+
+Description:
+Reported after stages 1-3 landed: a pane launched on a directory, `cd`-ed into a
+subdirectory and switched to the explorer opens correctly on the subdirectory,
+but switching back to the terminal, `cd`-ing back up and switching to the
+explorer again reopens it on the subdirectory. Two independent mechanisms, both
+confirmed against live state:
+
+1. `_resolve_explorer_open_root()`'s widen-guard floor was `session.directory`,
+   which every mode switch rewrites to wherever the pane last was. After one
+   round trip the floor *is* the subdirectory, so a working directory above it
+   reads as a strict ancestor and is clamped straight back down. The guard also
+   applied unconditionally, so even with a stable floor a pane launched inside
+   `repo/src` could never open the explorer on `repo`.
+2. `explorer_root_configured` was live-only and re-derived in
+   `TerminalSession.__post_init__` from the presence of a root, on the premise
+   that a root reaching a launch config is one somebody chose. That premise is
+   false for exactly the root the flag exists to disarm: the terminal->explorer
+   switch has to store the root it derived, and a snapshot carried it back as a
+   configured one. A live pane in the reporter's workspace showed the end state
+   -- `startup_mode: "terminal"`, a root, and `explorer_root_configured: true`,
+   which no in-run code path can produce.
+
+Steps to reproduce:
+1. Launch a terminal pane on a directory that contains a Git repository.
+2. `cd` into the repository and switch the pane to File Explorer mode. It roots
+   on the repository, correctly.
+3. Switch back to a terminal, `cd` back up to the launch directory, and switch
+   to File Explorer mode again.
+
+Expected behavior:
+The explorer opens on the directory the shell is now in.
+
+Actual behavior / logs:
+It reopens on the repository below. Reproduced directly against
+`_resolve_explorer_open_root()`: with the floor at the subdirectory the result
+is the subdirectory, and with the floor at the real launch directory it is the
+launch directory.
+
+### Proposed solution:
+Landed. `TerminalSession.launch_directory` records where a pane was built and
+nothing moves it; the widen guard reads that instead of `directory`, and binds
+only while the pane is still inside it -- the guard is against a repository root
+widening the view, never against the user. `explorer_root_configured` joins
+`_SESSION_SNAPSHOT_FIELDS` so a root and whether anybody chose it survive the
+restart together, and a config that does not state the flag (the launcher, or a
+snapshot written before the field existed) is answered from the pane: a root on
+an explorer pane is configured, a root on any other pane is a derived leftover.
 
 ### Issue ID: ISSUE-2026-045
 - Title: A saved workspace restores an agent pane at its launch directory, not the directory the agent was started in

@@ -591,11 +591,10 @@ class MultiWorkspacePersistenceTestCase(unittest.TestCase):
         captured = slot["groups"][0]["sessions"][0]
 
         # The replayable launch config -- what a restore `cd`s to -- is where
-        # the agent was started, and the persisted shape gained no new key.
+        # the agent was started, and the observation itself stays out of it.
         self.assertEqual(captured["directory"], "/srv/app/api")
         self.assertEqual(captured["startup_mode"], "agent")
         self.assertNotIn("current_directory", captured)
-        self.assertNotIn("explorer_root_configured", captured)
 
     def test_a_pane_that_never_moved_is_captured_at_its_launch_directory(self):
         """An absent observation is not an excuse to invent one."""
@@ -633,6 +632,125 @@ class MultiWorkspacePersistenceTestCase(unittest.TestCase):
         self.assertEqual(restored.directory, "/srv/app/api")
         # A restored pane has been observed by nothing yet.
         self.assertIsNone(restored.current_directory)
+
+    def test_a_derived_root_does_not_come_back_configured_after_a_restart(self):
+        """The half of D2 the restart used to undo.
+
+        The terminal->explorer switch has to *store* the root it derived --
+        the live explorer is confined to it -- and the snapshot carries that
+        root because a restored explorer needs the same boundary. What used to
+        be lost across the restart is the one bit saying nobody chose it, so
+        the pane came back pinned and the explorer stopped following its shell.
+        """
+        self._group("group-a", self.WORKSPACE_A, "secret-a")
+        session = api.session_manager.get_group_sessions("group-a")[0]
+        api.session_manager.update_session_metadata(
+            session.session_id,
+            startup_mode="explorer",
+            explorer_root_directory="/srv/app/api",
+            explorer_root_configured=False,
+        )
+        web_runtime_state.capture_workspace(
+            api.session_manager, workspace_id=self.WORKSPACE_A, origin="manual"
+        )
+
+        slot = web_runtime_state.load_restorable_workspace(self.WORKSPACE_A)
+        captured = slot["groups"][0]["sessions"][0]
+        self.assertEqual(captured["explorer_root_directory"], "/srv/app/api")
+        self.assertIs(captured["explorer_root_configured"], False)
+
+        api.session_manager.reset_sessions()
+        api.session_manager.create_workspace("Alpha", self.WORKSPACE_A)
+        with patch.object(api.socketio, "start_background_task"):
+            response = api.app.test_client().post(
+                "/api/runtime-state/restore",
+                json={"workspace_ids": [self.WORKSPACE_A]},
+            )
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        group = api.session_manager.get_workspace_groups(self.WORKSPACE_A)[0]
+        restored = api.session_manager.get_group_sessions(group.group_id)[0]
+        # The boundary came back, and so did the fact that nothing chose it.
+        self.assertEqual(restored.explorer_root_directory, "/srv/app/api")
+        self.assertFalse(restored.explorer_root_configured)
+
+    def test_a_chosen_root_still_comes_back_configured_after_a_restart(self):
+        """The other half: a Local Repository pane keeps its pin."""
+        self._group("group-a", self.WORKSPACE_A, "secret-a")
+        session = api.session_manager.get_group_sessions("group-a")[0]
+        api.session_manager.update_session_metadata(
+            session.session_id,
+            startup_mode="explorer",
+            explorer_root_directory="/srv/app",
+            explorer_root_configured=True,
+        )
+        web_runtime_state.capture_workspace(
+            api.session_manager, workspace_id=self.WORKSPACE_A, origin="manual"
+        )
+
+        api.session_manager.reset_sessions()
+        api.session_manager.create_workspace("Alpha", self.WORKSPACE_A)
+        with patch.object(api.socketio, "start_background_task"):
+            api.app.test_client().post(
+                "/api/runtime-state/restore",
+                json={"workspace_ids": [self.WORKSPACE_A]},
+            )
+
+        group = api.session_manager.get_workspace_groups(self.WORKSPACE_A)[0]
+        restored = api.session_manager.get_group_sessions(group.group_id)[0]
+        self.assertTrue(restored.explorer_root_configured)
+
+    def test_a_legacy_slot_s_root_on_a_terminal_pane_is_read_as_derived(self):
+        """A snapshot written before the flag existed states nothing.
+
+        Only an explorer pane's root can be read back as a chosen one. A root
+        sitting on a *terminal* pane in a file that old is the one the old
+        explorer->terminal switch back-filled, and treating it as configured is
+        what pinned a restored pane to a directory nobody picked.
+        """
+        self.state_path.write_text(
+            json.dumps(
+                {
+                    "version": 2,
+                    "workspaces": {
+                        self.WORKSPACE_A: {
+                            "workspace_id": self.WORKSPACE_A,
+                            "label": "Alpha",
+                            "origin": "manual",
+                            "saved_at": 1000.0,
+                            "groups": [
+                                {
+                                    "group_id": "g1",
+                                    "connection_mode": "ssh",
+                                    "layout": "single",
+                                    "sessions": [
+                                        {
+                                            "host": "box.example",
+                                            "directory": "/srv/app/api",
+                                            "startup_mode": "terminal",
+                                            "explorer_root_directory": "/srv/app/api",
+                                        }
+                                    ],
+                                }
+                            ],
+                        }
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        with patch.object(api.socketio, "start_background_task"):
+            response = api.app.test_client().post(
+                "/api/runtime-state/restore",
+                json={"workspace_ids": [self.WORKSPACE_A]},
+            )
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        group = api.session_manager.get_workspace_groups(self.WORKSPACE_A)[0]
+        restored = api.session_manager.get_group_sessions(group.group_id)[0]
+        self.assertEqual(restored.explorer_root_directory, "/srv/app/api")
+        self.assertFalse(restored.explorer_root_configured)
 
     def test_a_legacy_v2_manual_slot_keeps_its_pin_through_migration(self):
         """Files written before the split only carry origin="manual"."""

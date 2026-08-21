@@ -159,6 +159,16 @@ def _resolve_explorer_open_root(
     ``contains(ancestor, path)`` is inclusive, so "strict ancestor" is
     ``contains(candidate, floor) and not contains(floor, candidate)`` and needs
     no separate equality predicate for either path flavour.
+
+    The floor binds only while the pane is still *inside* it. The guard is
+    against a repository root silently widening the view above the directory
+    the user picked, not against the user themselves: a shell that has walked
+    up out of the floor is standing somewhere on purpose, and clamping it back
+    down opens the explorer on a directory the terminal beside it is not in.
+    ``launch_directory`` is therefore ``TerminalSession.launch_directory``,
+    which nothing moves -- passing ``session.directory``, which every mode
+    switch rewrites, left the floor at the subdirectory the pane last showed
+    and the explorer could never follow the shell back up again.
     """
     if configured_root and contains(configured_root, observed_cwd):
         return configured_root
@@ -166,6 +176,7 @@ def _resolve_explorer_open_root(
     candidate = repo_root or observed_cwd
     if (
         launch_directory
+        and contains(launch_directory, observed_cwd)
         and contains(candidate, launch_directory)
         and not contains(launch_directory, candidate)
     ):
