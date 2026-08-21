@@ -2720,6 +2720,7 @@ def _git_repo_revision(git_context: Dict[str, Any], changes: List[Dict[str, Any]
     )
     canonical = json.dumps(
         {
+            "repo_path": git_context.get("repo_path") or "",
             "branch": git_context.get("branch"),
             "head": git_context.get("head"),
             "ahead": git_context.get("ahead"),
@@ -2733,27 +2734,55 @@ def _git_repo_revision(git_context: Dict[str, Any], changes: List[Dict[str, Any]
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:EXPLORER_GIT_REVISION_LENGTH]
 
 
-def _get_git_repo_state(backend: Any, root_path: str) -> Dict[str, Any]:
+def _git_repo_anchor_identity(backend: Any, root_path: str, repo_root: str) -> str:
+    """Return a stable explorer-root-relative identity for one repository.
+
+    A repository below the explorer root needs its relative path in the Git
+    revision so navigating between sibling repositories invalidates the
+    sidebar.  A repository containing the explorer root is the pane's implicit
+    repository and uses the empty identity.  Absolute paths never enter the
+    token, preserving local/SSH parity.
+    """
+    if not backend.path_inside_root(root_path, repo_root):
+        return ""
+    return _clean_git_path(backend.rel_explorer_path(root_path, repo_root))
+
+
+def _get_git_repo_state(
+    backend: Any,
+    root_path: str,
+    current_path: Optional[str] = None,
+) -> Dict[str, Any]:
     """Return the sidebar's semantic Git state without the commit graph."""
-    git_context, statuses = _get_git_context(backend, root_path, root_path)
+    anchor_path = current_path or root_path
+    git_context, statuses = _get_git_context(backend, root_path, anchor_path)
     if not git_context.get("available"):
         raise ValueError(git_context.get("error") or "Folder is not inside a Git worktree")
     repo_root = str(git_context["repo_root"])
+    git_context["repo_path"] = _git_repo_anchor_identity(backend, root_path, repo_root)
+    trimmed_repo_root = repo_root.rstrip("/\\") or repo_root
+    git_context["repo_name"] = backend.basename(trimmed_repo_root) or repo_root
     changes = _explorer_git_changed_files(backend, root_path, repo_root, statuses)
     return {
+        "anchor_path": backend.rel_explorer_path(root_path, anchor_path),
         "git": git_context,
         "changes": changes,
         "revision": _git_repo_revision(git_context, changes),
     }
 
 
-def _get_git_repo_summary(backend: Any, root_path: str) -> Dict[str, Any]:
-    """Return changed files and a bounded commit graph for an explorer root."""
-    state = _get_git_repo_state(backend, root_path)
+def _get_git_repo_summary(
+    backend: Any,
+    root_path: str,
+    current_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Return changed files and a bounded commit graph for the browsed path."""
+    anchor_path = current_path or root_path
+    state = _get_git_repo_state(backend, root_path, anchor_path)
     repo_root = str(state["git"]["repo_root"])
-    root_pathspec = backend.pathspec(repo_root, root_path)
-    commits = _bounded_git_graph_log(backend, repo_root, root_pathspec)
-    commit_files = _git_commit_files_log(backend, repo_root, root_pathspec)
+    anchor_pathspec = backend.pathspec(repo_root, anchor_path)
+    commits = _bounded_git_graph_log(backend, repo_root, anchor_pathspec)
+    commit_files = _git_commit_files_log(backend, repo_root, anchor_pathspec)
     return {
         **state,
         "commits": _attach_commit_files(
@@ -2811,9 +2840,17 @@ def _get_git_diff(
     }
 
 
-def _git_action_repo_root(backend: Any, root_path: str) -> str:
+def _git_action_repo_root(
+    backend: Any,
+    root_path: str,
+    current_path: Optional[str] = None,
+) -> str:
     """Return the repository root for an explorer git mutation, or raise."""
-    git_context, _statuses = _get_git_context(backend, root_path, root_path)
+    git_context, _statuses = _get_git_context(
+        backend,
+        root_path,
+        current_path or root_path,
+    )
     if not git_context.get("available"):
         raise ValueError(git_context.get("error") or "Folder is not inside a Git worktree")
     return str(git_context["repo_root"])
@@ -2828,9 +2865,14 @@ def _git_has_head(backend: Any, repo_root: str) -> bool:
     return result.returncode == 0
 
 
-def _git_stage_path(backend: Any, root_path: str, file_path: str) -> None:
+def _git_stage_path(
+    backend: Any,
+    root_path: str,
+    file_path: str,
+    current_path: Optional[str] = None,
+) -> None:
     """Stage one worktree path inside an explorer repository."""
-    repo_root = _git_action_repo_root(backend, root_path)
+    repo_root = _git_action_repo_root(backend, root_path, current_path)
     pathspec = backend.pathspec(repo_root, file_path)
     try:
         result = backend.run_git(["add", "--", pathspec], cwd=repo_root, write=True)
@@ -2840,9 +2882,14 @@ def _git_stage_path(backend: Any, root_path: str, file_path: str) -> None:
         raise ValueError(_decode_git_output(result.stderr) or "Git stage failed")
 
 
-def _git_unstage_path(backend: Any, root_path: str, file_path: str) -> None:
+def _git_unstage_path(
+    backend: Any,
+    root_path: str,
+    file_path: str,
+    current_path: Optional[str] = None,
+) -> None:
     """Unstage one path inside an explorer repository."""
-    repo_root = _git_action_repo_root(backend, root_path)
+    repo_root = _git_action_repo_root(backend, root_path, current_path)
     pathspec = backend.pathspec(repo_root, file_path)
     if _git_has_head(backend, repo_root):
         args = ["reset", "--quiet", "HEAD", "--", pathspec]
@@ -2856,14 +2903,18 @@ def _git_unstage_path(backend: Any, root_path: str, file_path: str) -> None:
         raise ValueError(_decode_git_output(result.stderr) or "Git unstage failed")
 
 
-def _git_stage_all_paths(backend: Any, root_path: str) -> None:
+def _git_stage_all_paths(
+    backend: Any,
+    root_path: str,
+    current_path: Optional[str] = None,
+) -> None:
     """Stage every working-tree change in an explorer repository.
 
     Bulk form of _git_stage_path (ISSUE-2026-032): runs ``git add --all``
     scoped to the repository root so modified, deleted, and untracked files
     all land in the index in one action.
     """
-    repo_root = _git_action_repo_root(backend, root_path)
+    repo_root = _git_action_repo_root(backend, root_path, current_path)
     try:
         result = backend.run_git(["add", "--all"], cwd=repo_root, write=True)
     except subprocess.TimeoutExpired as exc:
@@ -2872,7 +2923,11 @@ def _git_stage_all_paths(backend: Any, root_path: str) -> None:
         raise ValueError(_decode_git_output(result.stderr) or "Git stage all failed")
 
 
-def _git_unstage_all_paths(backend: Any, root_path: str) -> None:
+def _git_unstage_all_paths(
+    backend: Any,
+    root_path: str,
+    current_path: Optional[str] = None,
+) -> None:
     """Unstage every staged change in an explorer repository.
 
     Bulk form of _git_unstage_path: index-only, so the worktree is untouched
@@ -2880,7 +2935,7 @@ def _git_unstage_all_paths(backend: Any, root_path: str) -> None:
     there is no HEAD to reset against, so the same fallback the single-path
     helper uses applies -- ``git rm --cached -r`` over the repository root.
     """
-    repo_root = _git_action_repo_root(backend, root_path)
+    repo_root = _git_action_repo_root(backend, root_path, current_path)
     if _git_has_head(backend, repo_root):
         args = ["reset", "--quiet", "HEAD", "--", "."]
     else:
@@ -2896,7 +2951,12 @@ def _git_unstage_all_paths(backend: Any, root_path: str) -> None:
 _GIT_UNMERGED_STATUS_CODES = frozenset({"DD", "AU", "UD", "UA", "DU", "AA", "UU"})
 
 
-def _git_revert_path(backend: Any, root_path: str, file_path: str) -> None:
+def _git_revert_path(
+    backend: Any,
+    root_path: str,
+    file_path: str,
+    current_path: Optional[str] = None,
+) -> None:
     """Discard one file's unstaged worktree changes.
 
     Runs the equivalent of ``git restore --worktree -- <path>``, which restores
@@ -2906,7 +2966,7 @@ def _git_revert_path(backend: Any, root_path: str, file_path: str) -> None:
     files are refused. A file with no unstaged change is a clear error instead
     of a no-op that would look like a broken action.
     """
-    repo_root = _git_action_repo_root(backend, root_path)
+    repo_root = _git_action_repo_root(backend, root_path, current_path)
     pathspec = backend.pathspec(repo_root, file_path)
     try:
         status = backend.run_git(
@@ -3003,7 +3063,11 @@ def _git_discardable_worktree_paths(raw_status: str) -> List[str]:
     return paths
 
 
-def _git_discard_all_paths(backend: Any, root_path: str) -> None:
+def _git_discard_all_paths(
+    backend: Any,
+    root_path: str,
+    current_path: Optional[str] = None,
+) -> None:
     """Discard every tracked file's unstaged worktree changes.
 
     Bulk form of _git_revert_path (OD-1): restores only tracked,
@@ -3011,7 +3075,7 @@ def _git_discard_all_paths(backend: Any, root_path: str) -> None:
     staged content is preserved and untracked files are left in place —
     never ``git clean``.
     """
-    repo_root = _git_action_repo_root(backend, root_path)
+    repo_root = _git_action_repo_root(backend, root_path, current_path)
     try:
         status = backend.run_git(["status", "--porcelain", "-z"], cwd=repo_root, timeout=5.0)
     except subprocess.TimeoutExpired as exc:
@@ -3037,12 +3101,17 @@ def _git_discard_all_paths(backend: Any, root_path: str) -> None:
         )
 
 
-def _git_commit(backend: Any, root_path: str, message: str) -> None:
+def _git_commit(
+    backend: Any,
+    root_path: str,
+    message: str,
+    current_path: Optional[str] = None,
+) -> None:
     """Commit staged changes inside an explorer repository."""
     commit_message = str(message or "").strip()
     if not commit_message:
         raise ValueError("Commit message is required")
-    repo_root = _git_action_repo_root(backend, root_path)
+    repo_root = _git_action_repo_root(backend, root_path, current_path)
     try:
         result = backend.run_git(["commit", "-m", commit_message], cwd=repo_root, timeout=30.0, write=True)
     except subprocess.TimeoutExpired as exc:
@@ -3055,9 +3124,13 @@ def _git_commit(backend: Any, root_path: str, message: str) -> None:
         )
 
 
-def _git_publish(backend: Any, root_path: str) -> None:
+def _git_publish(
+    backend: Any,
+    root_path: str,
+    current_path: Optional[str] = None,
+) -> None:
     """Push the current branch of an explorer repository, setting upstream if needed."""
-    repo_root = _git_action_repo_root(backend, root_path)
+    repo_root = _git_action_repo_root(backend, root_path, current_path)
     try:
         upstream = backend.run_git(
             ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],

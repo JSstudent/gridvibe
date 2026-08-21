@@ -305,6 +305,7 @@ class ApiRoutesTestCase(unittest.TestCase):
             "js/explorer-worker-core.js",
             "js/explorer-worker-client.js",
             "js/explorer-viewer.js",
+            "js/explorer-git-sidebar.js",
             "js/explorer-diff.js",
             "js/explorer-tabs.js",
             "js/explorer-editor.js",
@@ -1323,7 +1324,12 @@ class ApiRoutesTestCase(unittest.TestCase):
         # the last `+`/`−` text buttons in the explorer: they took their weight
         # from the page font and sat beside SVG neighbours on the same row.
         # They share the same two icons rather than growing explorer-local ones.
-        viewer = self._static("js/explorer-viewer.js")
+        viewer = "\n".join(
+            (
+                self._static("js/explorer-viewer.js"),
+                self._static("js/explorer-git-sidebar.js"),
+            )
+        )
         for hook, icon in (
             ('aria-label="Stage changes"', "UI_PLUS_ICON"),
             ('aria-label="Unstage changes"', "UI_MINUS_ICON"),
@@ -2168,6 +2174,7 @@ class ApiRoutesTestCase(unittest.TestCase):
     def test_terminals_page_explorer_tabs_show_unstaged_git_status(self):
         """Open tabs mirror only the worktree/unstaged status column."""
         viewer = self._static("js/explorer-viewer.js")
+        sidebar = self._static("js/explorer-git-sidebar.js")
         tabs = self._static("js/explorer-tabs.js")
         css = self._static("css/terminals.css")
         helper = tabs[
@@ -2181,7 +2188,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         # rendered for; the sidebar sync and the badge itself live in the tabs.
         self.assertIn("assignedTab.git = data.git || null;", viewer)
         self.assertIn("renderedTab.git = data.git || null;", viewer)
-        self.assertIn("syncExplorerTabGitFromRepo(index, data);", viewer)
+        self.assertIn("syncExplorerTabGitFromRepo(index, data);", sidebar)
         self.assertIn("${gitBadge}", tabs)
         self.assertIn(".explorer-tab-main > .explorer-git-badge {", css)
 
@@ -7921,10 +7928,8 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn('class="explorer-diff-commit-file-dir"', html)
         # The badge trails the name and leads the inline actions; the full path
         # stays on the row.
-        row = html[
-            html.index('<div class="explorer-diff-commit-file" title='):
-            html.index("</div>\n            `;")
-        ]
+        row_start = html.index('<div class="explorer-diff-commit-file" title=')
+        row = html[row_start:html.index("</div>\n            `;", row_start)]
         self.assertIn("data-explorer-copy-path", row)
         self.assertLess(
             row.index('class="explorer-diff-commit-file-path"'),
@@ -13474,9 +13479,16 @@ class ExplorerGitRevisionTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 201)
         return response.get_json()["sessions"][0]["session_id"]
 
-    def _git_state(self, session_id: str, known: str = ""):
-        query = f"?known={known}" if known else ""
-        return self.client.get(f"/api/explorer/{session_id}/git/state{query}")
+    def _git_state(self, session_id: str, known: str = "", path: str = ""):
+        query = {}
+        if known:
+            query["known"] = known
+        if path:
+            query["path"] = path
+        return self.client.get(
+            f"/api/explorer/{session_id}/git/state",
+            query_string=query,
+        )
 
     # ── Revision helper ─────────────────────────────────────────────────────
 
@@ -13548,6 +13560,14 @@ class ExplorerGitRevisionTestCase(unittest.TestCase):
             web_explorer._git_repo_revision(other, changes),
         )
 
+    def test_revision_changes_when_the_nested_repository_anchor_changes(self):
+        context = self._base_context()
+
+        first = web_explorer._git_repo_revision({**context, "repo_path": "repo-a"}, [])
+        second = web_explorer._git_repo_revision({**context, "repo_path": "repo-b"}, [])
+
+        self.assertNotEqual(first, second)
+
     def test_equal_semantic_state_in_two_roots_shares_revision(self):
         first_repo = self._init_committed_repo("repo-a")
         second_repo = self._init_committed_repo("repo-b")
@@ -13578,6 +13598,39 @@ class ExplorerGitRevisionTestCase(unittest.TestCase):
         (sub_dir / "inside.txt").write_text("inside\n\nchanged\n", encoding="utf-8")
         after_inside = self._git_state(session_id).get_json()["revision"]
         self.assertNotEqual(baseline, after_inside)
+
+    def test_browsed_path_anchors_sidebar_on_a_repository_below_the_root(self):
+        repo_dir = self._init_committed_repo()
+        source_dir = repo_dir / "src"
+        source_dir.mkdir()
+        source_file = source_dir / "inside.txt"
+        source_file.write_text("inside\n", encoding="utf-8")
+        self._run_git(repo_dir, "add", ".")
+        self._run_git(repo_dir, "commit", "-m", "add source")
+        source_file.write_text("inside\nchanged\n", encoding="utf-8")
+        session_id = self._create_explorer_session(Path(self.temp_dir.name))
+
+        response = self.client.get(
+            f"/api/explorer/{session_id}/git/repo",
+            query_string={"path": "repo/src"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["anchor_path"].replace("\\", "/"), "repo/src")
+        self.assertEqual(payload["git"]["repo_path"].replace("\\", "/"), "repo")
+        self.assertEqual(payload["git"]["repo_name"], "repo")
+        self.assertEqual([item["path"].replace("\\", "/") for item in payload["changes"]], ["repo/src/inside.txt"])
+
+    def test_two_repositories_below_one_root_have_distinct_revisions(self):
+        self._init_committed_repo("repo-a")
+        self._init_committed_repo("repo-b")
+        session_id = self._create_explorer_session(Path(self.temp_dir.name))
+
+        first = self._git_state(session_id, path="repo-a").get_json()
+        second = self._git_state(session_id, path="repo-b").get_json()
+
+        self.assertNotEqual(first["revision"], second["revision"])
 
     # ── Route ───────────────────────────────────────────────────────────────
 
@@ -13706,6 +13759,53 @@ class ExplorerGitRevisionTestCase(unittest.TestCase):
         self.assertRegex(commit_revision, r"^[0-9a-f]{16}$")
         self.assertNotIn(commit_revision, {repo_revision, stage_revision})
         self.assertEqual(commit_revision, self._git_state(session_id).get_json()["revision"])
+
+    def test_all_git_mutations_resolve_the_browsed_path_as_their_anchor(self):
+        root = Path(self.temp_dir.name) / "root"
+        current = root / "nested"
+        current.mkdir(parents=True)
+        target = current / "file.txt"
+        target.write_text("content\n", encoding="utf-8")
+        session_id = self._create_explorer_session(root)
+        summary = {
+            "anchor_path": "nested",
+            "git": {},
+            "changes": [],
+            "commits": [],
+            "revision": "0123456789abcdef",
+        }
+        cases = (
+            ("stage", "_git_stage_path", {"path": "nested/file.txt"}),
+            ("unstage", "_git_unstage_path", {"path": "nested/file.txt"}),
+            ("stage-all", "_git_stage_all_paths", {}),
+            ("unstage-all", "_git_unstage_all_paths", {}),
+            ("discard-all", "_git_discard_all_paths", {}),
+            ("revert", "_git_revert_path", {"path": "nested/file.txt"}),
+            ("commit", "_git_commit", {"message": "message"}),
+            ("publish", "_git_publish", {}),
+        )
+
+        for endpoint, helper_name, body in cases:
+            with self.subTest(endpoint=endpoint), patch.object(
+                api, helper_name
+            ) as action, patch.object(
+                api, "_get_git_repo_summary", return_value=summary
+            ) as get_summary:
+                response = self.client.post(
+                    f"/api/explorer/{session_id}/git/{endpoint}",
+                    query_string={"path": "nested"},
+                    json=body,
+                )
+
+                self.assertEqual(response.status_code, 200)
+                action.assert_called_once()
+                self.assertEqual(action.call_args.args[1], str(root.resolve()))
+                self.assertEqual(action.call_args.args[-1], str(current.resolve()))
+                get_summary.assert_called_once()
+                self.assertEqual(
+                    get_summary.call_args.args[1:],
+                    (str(root.resolve()), str(current.resolve())),
+                )
 
 
 class ExplorerFileStateTestCase(unittest.TestCase):
@@ -13935,11 +14035,11 @@ class ExplorerGitWatchFrontendTestCase(unittest.TestCase):
         self.assertIn("performance.now()", watch)
 
     def test_quiet_refresh_helper_contract(self):
-        viewer = self._static("js/explorer-viewer.js")
-        self.assertIn("async function refreshExplorerGitRepoQuiet(index)", viewer)
-        quiet_fn = viewer[
-            viewer.index("async function refreshExplorerGitRepoQuiet"):
-            viewer.index("function applyExplorerGitRepoQuiet")
+        sidebar = self._static("js/explorer-git-sidebar.js")
+        self.assertIn("async function refreshExplorerGitRepoQuiet(index)", sidebar)
+        quiet_fn = sidebar[
+            sidebar.index("async function refreshExplorerGitRepoQuiet"):
+            sidebar.index("function applyExplorerGitRepoQuiet")
         ]
         # Forced + quiet: no invalidate (which would flash the Loading
         # placeholder), only a CSS class toggle on the existing panel.
@@ -13947,8 +14047,8 @@ class ExplorerGitWatchFrontendTestCase(unittest.TestCase):
         self.assertIn("git-refreshing", quiet_fn)
         self.assertNotIn("_explorerGitRepoLoading = true", quiet_fn)
         self.assertIn("cache: 'no-store'", quiet_fn)
-        self.assertIn("function applyExplorerGitRepoQuiet(index, data)", viewer)
-        self.assertIn("_explorerGitRevision", viewer)
+        self.assertIn("function applyExplorerGitRepoQuiet(index, data)", sidebar)
+        self.assertIn("_explorerGitRevision", sidebar)
         # Tab badges re-render only when the badge map actually changed — the
         # sync itself moved with the tab domain (explorer-tabs.js).
         self.assertIn("badgesChanged", self._static("js/explorer-tabs.js"))
@@ -13956,9 +14056,9 @@ class ExplorerGitWatchFrontendTestCase(unittest.TestCase):
         self.assertIn(".explorer-git-panel.git-refreshing", css)
 
     def test_suspended_watch_renders_muted_pause_line(self):
-        viewer = self._static("js/explorer-viewer.js")
-        self.assertIn("Live updates paused", viewer)
-        self.assertIn("_explorerGitWatchSuspended", viewer)
+        sidebar = self._static("js/explorer-git-sidebar.js")
+        self.assertIn("Live updates paused", sidebar)
+        self.assertIn("_explorerGitWatchSuspended", sidebar)
         css = self._static("css/terminals.css")
         self.assertIn(".explorer-git-watch-paused", css)
 
@@ -14004,7 +14104,7 @@ class ExplorerGitWatchFrontendTestCase(unittest.TestCase):
         self.assertIn("async function refreshExplorerOpenFileQuiet(index)", viewer)
         quiet_fn = viewer[
             viewer.index("async function refreshExplorerOpenFileQuiet"):
-            viewer.index("function applyExplorerGitRepoQuiet")
+            viewer.index("function explorerEntriesSignature")
         ]
         # Quiet: no loading placeholder, no tree/pane reload, and never against
         # an open editor buffer.
@@ -14024,7 +14124,8 @@ class ExplorerGitWatchFrontendTestCase(unittest.TestCase):
         watch = self._static("js/explorer-git-watch.js")
         # One request, two baselines: the listing/tree consumer rides the same
         # /git/state poll the sidebar uses rather than adding an endpoint.
-        self.assertEqual(watch.count("/git/state?known="), 1)
+        self.assertEqual(watch.count("explorerGitRequestUrl("), 1)
+        self.assertIn("'state'", watch)
         self.assertIn("function explorerFsWatchConsumer(pane)", watch)
         self.assertIn("_explorerFsWatchRevision", watch)
         self.assertIn("refreshExplorerFilesystemSurfacesQuiet(index)", watch)
@@ -14062,7 +14163,7 @@ class ExplorerGitWatchFrontendTestCase(unittest.TestCase):
                 self.assertIn(helper, viewer)
         quiet_fn = viewer[
             viewer.index("function explorerEntriesSignature(entries)"):
-            viewer.index("async function performExplorerGitAction")
+            viewer.index("function explorerResolveFileView")
         ]
         self.assertIn("cache: 'no-store'", quiet_fn)
         # Quiet: no loading placeholder, no tab/scroll/search reset, and never
@@ -15558,6 +15659,7 @@ class ExtractedFrontendAssetsTestCase(unittest.TestCase):
         self.assertIn(f"/static/js/terminal-icons.js?v={__version__}", terminals_html)
         self.assertIn(f"/static/js/voice-input.js?v={__version__}", terminals_html)
         self.assertIn(f"/static/js/explorer-viewer.js?v={__version__}", terminals_html)
+        self.assertIn(f"/static/js/explorer-git-sidebar.js?v={__version__}", terminals_html)
         self.assertIn(f"/static/js/explorer-editor.js?v={__version__}", terminals_html)
         self.assertIn(f"/static/js/explorer-fs.js?v={__version__}", terminals_html)
         self.assertIn(f"/static/js/terminals.js?v={__version__}", terminals_html)
@@ -15604,6 +15706,17 @@ class ExtractedFrontendAssetsTestCase(unittest.TestCase):
         self.assertLess(
             terminals_html.index("js/explorer-worker-client.js"),
             terminals_html.index("js/explorer-viewer.js"),
+        )
+        # explorer-git-sidebar.js is the Git domain lifted out of
+        # explorer-viewer.js by guardrail 6's standing extraction trigger.
+        self.assertNotIn("js/explorer-git-sidebar.js", launcher_html)
+        self.assertLess(
+            terminals_html.index("js/explorer-viewer.js"),
+            terminals_html.index("js/explorer-git-sidebar.js"),
+        )
+        self.assertLess(
+            terminals_html.index("js/explorer-git-sidebar.js"),
+            terminals_html.index("js/terminals.js"),
         )
         # explorer-diff.js is the Diff domain lifted out of explorer-viewer.js
         # by guardrail 6's extraction trigger, and loads directly after it.
@@ -17930,7 +18043,12 @@ class ExplorerDownloadTestCase(unittest.TestCase):
         # A format the viewer cannot render never reaches editor mode, so its
         # toolbar download button is unreachable: the right-click path section
         # downloads the row directly instead.
-        viewer_js = self._static("js/explorer-viewer.js")
+        viewer_js = "\n".join(
+            (
+                self._static("js/explorer-viewer.js"),
+                self._static("js/explorer-git-sidebar.js"),
+            )
+        )
         self.assertIn("label: 'Download file'", viewer_js)
         self.assertIn(
             "action: () => downloadExplorerFile(index, { path: downloadTargets[0].path })",

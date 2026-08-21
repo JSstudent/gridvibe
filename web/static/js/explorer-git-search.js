@@ -18,7 +18,7 @@
 
    DOM-free and require()-able from Node so the matching, the active-index
    clamping and the mark wrapping are executed by tests rather than asserted
-   as source text; the page's DOM adapter lives in explorer-viewer.js
+   as source text; the page's DOM adapter lives in explorer-git-sidebar.js
    (paintExplorerGitCommitSearch).
 
    markedSubjectHtml() paints the same <mark> as explorerMarkedEscHtml() in

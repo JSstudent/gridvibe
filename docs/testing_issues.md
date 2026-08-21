@@ -3,14 +3,19 @@ Last updated: 2026-08-21
 
 ## Open Issues
 
+None.
+
+## Closed Issues
+
 ### Issue ID: ISSUE-2026-044
 - Title: Opening a file explorer from a navigated terminal roots at the launch directory, not the current one
 - Priority: High
-- Status: Open
-- Area: `web/api.py`, `web/explorer.py`, `web/terminal_io.py`, `web/static/js/explorer-viewer.js`
+- Status: Closed
+- Area: `web/api.py`, `web/explorer.py`, `web/terminal_io.py`, `web/static/js/explorer-git-sidebar.js`, `web/static/js/explorer-git-watch.js`
 - Assignee: Unassigned
 - Tags: `explorer`, `terminal`, `git`, `session`
 - Reported: 2026-08-21
+- Closed: 2026-08-21
 
 Description:
 A terminal pane launched on a Default Working Directory, then navigated with `cd`
@@ -41,18 +46,17 @@ Root-caused by code inspection; see `docs/working_directory_hardening.md` §2.1-
 for the three independent mechanisms (`web/api.py:2929`, `web/explorer.py:99`,
 `web/explorer.py:2628`).
 
-### Proposed solution:
-`docs/working_directory_hardening.md`, stages 1, 2 and 4.
-Stages 1, 2 and 3 have landed: a pane's working directory is now observed
+Resolution:
+All stages in `docs/working_directory_hardening.md` have landed. A pane's
+working directory is now observed
 rather than assumed, an explorer opened from a navigated terminal roots on
 the repository containing it, and the observed directory is what a split, a
-preset and a workspace snapshot record. The remaining half is stage 4 -- the
-Git sidebar is still anchored on the explorer root, so an explorer
-deliberately opened *above* a repository shows no worktree, and navigating
-into one does not bring it back. See also ISSUE-2026-046, the two ways a
-pane could still be pinned to a directory nobody picked.
-
-## Closed Issues
+preset and a workspace snapshot record. The Git sidebar, its watcher, and all
+eight mutation routes now resolve the repository containing the browsed
+directory from the same confined request anchor. A root above one or several
+repositories therefore works, and the sidebar identifies which repository it
+will act on. See also ISSUE-2026-046, the two ways a pane could still be pinned
+to a directory nobody picked.
 
 ### Issue ID: ISSUE-2026-046
 - Title: The explorer will not follow a shell that has walked back up out of a subdirectory

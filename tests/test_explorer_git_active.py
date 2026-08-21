@@ -21,6 +21,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 STATIC_JS = REPO_ROOT / "web" / "static" / "js"
 GIT_ACTIVE_JS = STATIC_JS / "explorer-git-active.js"
 EXPLORER_VIEWER_JS = STATIC_JS / "explorer-viewer.js"
+EXPLORER_GIT_SIDEBAR_JS = STATIC_JS / "explorer-git-sidebar.js"
 TERMINALS_HTML = REPO_ROOT / "templates" / "terminals.html"
 
 NODE = shutil.which("node")
@@ -280,7 +281,7 @@ const sandbox = {
 };
 sandbox.globalThis = sandbox;
 vm.createContext(sandbox);
-[process.argv[2], process.argv[3], process.argv[4]].forEach(path => {
+[process.argv[2], process.argv[3], process.argv[4], process.argv[5]].forEach(path => {
     vm.runInContext(fs.readFileSync(path, 'utf8'), sandbox);
 });
 // In a browser `window` *is* the global; the sandbox keeps them apart, so the
@@ -322,7 +323,7 @@ const emit = value => console.log(JSON.stringify(value));
 
 @unittest.skipUnless(NODE, "Node.js is required for Git active-row tests")
 class ExplorerGitActiveAdapterTestCase(unittest.TestCase):
-    """The DOM half, executed against the real explorer-viewer.js."""
+    """The DOM half, executed against the real extracted sidebar adapter."""
 
     def _run_node(self, body: str):
         with TemporaryDirectory() as temp_dir:
@@ -335,6 +336,7 @@ class ExplorerGitActiveAdapterTestCase(unittest.TestCase):
                     str(ICONS_JS),
                     str(GIT_ACTIVE_JS),
                     str(EXPLORER_VIEWER_JS),
+                    str(EXPLORER_GIT_SIDEBAR_JS),
                 ],
                 capture_output=True,
                 text=True,
@@ -434,7 +436,7 @@ class ExplorerGitActiveWiringTestCase(unittest.TestCase):
     """The hooks the DOM adapter needs, which only exist as markup/registration."""
 
     def test_commit_file_rows_carry_their_own_diff_identity(self):
-        source = EXPLORER_VIEWER_JS.read_text(encoding="utf-8")
+        source = EXPLORER_GIT_SIDEBAR_JS.read_text(encoding="utf-8")
 
         self.assertIn("data-explorer-git-row-commit=", source)
         self.assertIn("data-explorer-git-row-mode=", source)
@@ -443,6 +445,7 @@ class ExplorerGitActiveWiringTestCase(unittest.TestCase):
         markup = TERMINALS_HTML.read_text(encoding="utf-8")
 
         self.assertIn("js/explorer-git-active.js", markup)
+        self.assertIn("js/explorer-git-sidebar.js", markup)
 
 
 if __name__ == "__main__":

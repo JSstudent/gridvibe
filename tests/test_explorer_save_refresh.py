@@ -8,7 +8,7 @@ filesystem revision the delete/move guards check moves with its mtime).
 Reloading the whole tree for that dropped every cached directory, flashed a
 near-empty panel, spent one request per expanded folder and left the reader
 scrolled back to the top of a tree they had navigated by hand. These tests run
-the real ``explorer-viewer.js`` in Node and pin the narrower contract: one
+the real viewer and extracted Git-sidebar scripts in Node and pin the narrower contract: one
 request, for one directory; every other folder keeps its cache and its
 expansion; the rows being re-read stay on screen for the round trip; and the
 panel's scroll survives the rebuild that follows.
@@ -26,6 +26,7 @@ STATIC_JS = Path(__file__).resolve().parent.parent / "web" / "static" / "js"
 # constants — the tree renders against the real ones rather than stand-ins.
 ICONS_JS = STATIC_JS / "terminal-icons.js"
 VIEWER_JS = STATIC_JS / "explorer-viewer.js"
+GIT_SIDEBAR_JS = STATIC_JS / "explorer-git-sidebar.js"
 NODE = shutil.which("node")
 
 HARNESS = """
@@ -95,7 +96,7 @@ const sandbox = {
 };
 sandbox.globalThis = sandbox;
 vm.createContext(sandbox);
-[process.argv[2], process.argv[3]].forEach(path => {
+[process.argv[2], process.argv[3], process.argv[4]].forEach(path => {
     vm.runInContext(fs.readFileSync(path, 'utf8'), sandbox);
 });
 
@@ -199,7 +200,13 @@ class ExplorerSaveTreeRefreshTestCase(unittest.TestCase):
             script_path = Path(script_dir) / "harness.js"
             script_path.write_text(HARNESS, encoding="utf-8")
             completed = subprocess.run(
-                [NODE, str(script_path), str(ICONS_JS), str(VIEWER_JS)],
+                [
+                    NODE,
+                    str(script_path),
+                    str(ICONS_JS),
+                    str(VIEWER_JS),
+                    str(GIT_SIDEBAR_JS),
+                ],
                 capture_output=True,
                 text=True,
                 check=False,

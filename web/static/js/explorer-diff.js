@@ -29,11 +29,11 @@
    explorer-worker-core.js, whose parseSideBySideDiff() backs the fallback
    renderer here (guarded — see explorerParsedDiffModel()).
 
-   What deliberately stayed behind: explorerHasGitDiff(),
+   What deliberately lives with the Git sidebar rather than here:
+   explorerHasGitDiff(),
    explorerDiffCacheKey(), explorerDiffSidebarStatusHtml(),
-   explorerGitOpenCommitDiff() and ensureExplorerDiffExpandedCommits() — those
-   name a diff but belong to the Git *sidebar*, whose own extraction is a
-   separate cut. */
+   explorerGitOpenCommitDiff() and ensureExplorerDiffExpandedCommits(). They
+   name a diff but belong to `explorer-git-sidebar.js`. */
 
     /* Diff2HtmlUI configuration.
        `matching: 'words'` + `diffStyle: 'char'` give character-level intraline

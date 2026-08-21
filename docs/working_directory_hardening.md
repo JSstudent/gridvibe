@@ -1,6 +1,7 @@
 # Working-Directory Hardening Plan
 
-Status: **stages 1-3 landed, plus stage 3.1**; stage 4 proposed and ready.
+Status: **complete — stages 1-4 landed, plus stage 3.1**. D4 is explicitly
+deferred because it would change the explorer's confinement boundary.
 Scope: ISSUE-2026-044 (explorer opens at the launch root, not the navigated
 directory), ISSUE-2026-045 (a saved workspace restores an agent pane at the
 launch directory, not the one the agent was started in), and ISSUE-2026-046
@@ -10,9 +11,10 @@ Last updated: 2026-08-21
 
 ---
 
-## 1. The single root cause
+## 1. The single root cause (closed)
 
-**GridVibe has no concept of a pane's *current* working directory.** It has a
+Before stage 2, **GridVibe had no concept of a pane's *current* working
+directory.** It had a
 *launch* directory — `TerminalSession.directory` (`sessions/manager.py:53`) —
 written when the pane is created and thereafter treated as though it were still
 true. A shell that `cd`s changes nothing GridVibe can see.
@@ -37,10 +39,9 @@ failure mode is silence, which is the flakiness in the report.
 
 ## 2. Evidence, per mechanism
 
-*Recorded against the code as it stood when this plan was written. §2.2 and the
-silent-failure half of §2.1 are closed by stage 1, and the rest of §2.1 by stage 2
-— the probe is now the last of three sources rather than the only one (see §5).
-§2.3 and §2.4 still stand.*
+*Recorded against the code as it stood when this plan was written. Every item
+in §2 is now closed: stages 1-2 closed §2.1-2.2, stage 3 closed §2.4, stage 3.1
+closed the two residual pins, and stage 4 closed §2.3.*
 
 ### 2.1 The cwd probe is a keystroke injection with a 0.75 s deadline
 
@@ -132,7 +133,7 @@ the right *mode* and the wrong *place*.
 
 ---
 
-## 3. The contract to establish
+## 3. The contract established
 
 > **A pane's launch directory is where it started. Its working directory is
 > where it is now. Everything that asks "where is this pane?" — opening an
@@ -154,7 +155,7 @@ Three supporting rules:
 
 ---
 
-## 4. Design
+## 4. Implemented design
 
 ### 4.1 Where the live value lives
 
@@ -906,67 +907,80 @@ root re-enter the system as a configured one on every restart. The flag is
 persisted; the migration default that D2 feared turns out to be one expression
 (`root on an explorer pane`) and no file rewrite.
 
-### Stage 4 — Decouple the Git anchor from the root
+### Stage 4 — Decouple the Git anchor from the root — **LANDED**
 
 *Anchors re-checked after stage 3.1; the line references below are current.*
 
 | Change | Files |
 | --- | --- |
-| One anchor helper; `git/repo` + `git/state` take the browsed path | `_get_git_repo_state()` `web/explorer.py:2735`, `web/api.py:1642-1675` |
-| The **eight** mutation routes resolve the same anchor | `web/api.py:1679-1815` |
-| Anchor identity in the sidebar revision token | `_git_repo_revision()` `web/explorer.py:2702` |
-| Sidebar names the repository it is anchored on; client sends the browsed path | `web/static/js/explorer-viewer.js:3586` and `:3623`, `web/static/js/explorer-git-watch.js:570` |
+| One confined anchor helper; `git/repo` + `git/state` take the browsed path | `_explorer_git_anchor_paths()` (`web/api.py`), `_get_git_repo_state()` (`web/explorer.py`) |
+| The **eight** mutation routes resolve the same anchor | `web/api.py` Git mutation routes |
+| Root-relative anchor identity in the sidebar revision token | `_git_repo_anchor_identity()` + `_git_repo_revision()` (`web/explorer.py`) |
+| Sidebar names the repository; every client request sends the browsed path | `explorer-git-sidebar.js`, `explorer-git-watch.js` |
 
-Three things about that table are not what the plan first assumed, and each is
-work rather than a note:
+Three implementation details differed from what the original plan assumed:
 
 - **Eight mutation routes, not six.** `unstage-all` landed after this plan was
   written (`stage`, `unstage`, `stage-all`, `unstage-all`, `discard-all`,
-  `revert`, `commit`, `publish`). All eight resolve through
-  `backend.root_directory()` today and all eight have to move together, or the
-  sidebar and its buttons can address different repositories — which is the one
-  failure §3 rule 3 exists to prevent.
+  `revert`, `commit`, `publish`). Before stage 4 all eight resolved from
+  `backend.root_directory()`; they now move together through the confined
+  browsed anchor, so the sidebar and its buttons cannot address different
+  repositories — the failure §3 rule 3 forbids.
 - **Half the anchor plumbing already exists.** `_get_git_context(backend,
   root_path, current_path)` has always taken a browsed path, and `_get_git_diff`
   passes `backend.file_dirname(file_path)`; `_get_git_repo_state()` is the
   caller that hard-codes `(root_path, root_path)`. `_resolve_git_worktree_root()`
   (extracted in stage 1) is the single `rev-parse` the new helper builds on, so
   stage 4 adds no second spelling of that question.
-- **Two client fetch sites, not one.** `explorer-viewer.js` calls `/git/repo`
-  from both `:3586` and `:3623`; both need the browsed path or the sidebar will
-  re-anchor differently depending on which path refreshed it.
+- **Two client fetch sites, not one.** The initial load and quiet refresh were
+  separate `/git/repo` calls in `explorer-viewer.js`. The extraction moved both
+  into `explorer-git-sidebar.js`, and both now use the same URL builder and
+  browsed path.
 
-**Architecture trigger (`CLAUDE.md` guardrail 6): this is "the next substantial
-change to the Git sidebar", so it extracts `explorer-git-sidebar.js` as a pure
-move first** — to the same standard as `explorer-tabs.js` and
-`explorer-diff.js`: every extracted line byte-identical, `explorer-viewer.js` a
-pure deletion, existing tests passing on their existing assertions — and only
-then makes the behavioural change on top. The trigger has if anything got
-sharper: `explorer-viewer.js` is ~8.7k lines and is now the largest file in the
-repository, ahead of `terminals.js`.
+#### What was done
 
-#### Readiness (checked after stage 3.1)
+**Architecture first.** `explorer-git-sidebar.js` was extracted before the
+behaviour changed. Git status presentation, repository loading and quiet
+repaint, graph/search/active-row painting, and every sidebar Git action moved
+byte-for-byte out of `explorer-viewer.js`; only the tests' source-of-truth path
+and the classic-script load order changed. The move-only regression set passed
+327 tests, including `test_session_persistence_contract.py` and all of
+`test_multi_workspace.py`.
 
-Nothing blocks stage 4. Everything it names exists, the backend half is
-partly built already (above), and stage 3.1 changed nothing it depends on —
-the open-root resolution and the Git anchor are independent questions, which
-is why §4.4 was separable in the first place. Two things to carry in:
+**Backend.** `git/repo`, `git/state`, and all eight mutation routes now resolve
+the `path` query with `_explorer_git_anchor_paths()`, which delegates to the
+backend's existing root-confined directory resolver. Single-file targets stay
+in the JSON body, so a target and the repository it belongs to cannot be
+confused. `_get_git_repo_state()` and `_get_git_repo_summary()` take that
+browsed directory; every mutation helper passes it to the same
+`_git_action_repo_root()` seam.
 
-- The regression set stage 4 must pass **untouched** is unchanged:
-  `test_switch_roundtrip_preserves_explorer_root_for_parent_navigation`,
-  `tests/test_session_persistence_contract.py`, and
-  `tests/test_multi_workspace.py` across the pure move. Stage 3.1 added cases
-  to the last of those; the pure-move standard applies to the file as it now
-  stands.
-- Stage 3.1 makes stage 4's residual case *narrower*, not different: an
-  explorer opened from a navigated terminal now roots on the repository
-  containing the shell more often than before, so the sidebar-less state is
-  reached mainly by opening an explorer deliberately above a repository —
-  which is exactly what §4.4 fixes and what keeps ISSUE-2026-044 open.
+`_git_repo_anchor_identity()` adds only the repository's explorer-root-relative
+path to `_git_repo_revision()` — never an absolute local or SSH path — so two
+sibling repositories with otherwise identical state still trigger a refresh.
+The payload also carries `repo_name` and normalized `anchor_path`.
+
+**Client.** `explorerGitRequestUrl()` is the one URL builder used by initial
+loads, quiet refreshes, the shared watcher poll, and mutations. A pane records
+which browsed path its cached sidebar describes, rejects a stale quiet response
+after navigation, and reloads an open sidebar when directory navigation changes
+the anchor. The repository bar now renders `repository · branch/status`, making
+the target of Stage All, Commit, Discard All, and Publish visible.
+
+**Tests.** Backend cases cover a repository below the explorer root, distinct
+revision identities for sibling repositories, and the common anchor passed to
+all eight mutation routes. `tests/test_explorer_git_sidebar.py` executes the
+real extracted module in Node and verifies read/mutation URLs, encoding, cached
+anchor state, and the repository label. ISSUE-2026-044 is closed.
 
 ---
 
 ## 6. Test plan (behavioural, per `CLAUDE.md`)
+
+**Implementation check:** every item below has landed. The stage 4 additions
+run the extracted client adapter in Node and exercise the shared anchor through
+all eight HTTP mutation routes; no expected failure or source-only substitute
+was added.
 
 - `tests/test_terminal_cwd.py` (new) — the OSC parser, executed against real byte
   streams including split sequences.
@@ -996,6 +1010,14 @@ handing any stage back.
 
 ## 7. Documentation to update on landing
 
+*Done for stage 4: the browsed-directory Git-anchor contract is in the
+Regression Guardrails of both `CLAUDE.md` and `AGENTS.md`; guardrail 6 records
+the completed `explorer-git-sidebar.js` pure move; `README.md` and
+`CHANGELOG.md` describe the user-visible repository-following behaviour;
+`docs/testing_issues.md` closes ISSUE-2026-044; and
+`docs/working_directory_hardening_smoke_test.md` carries the manual verification
+scenarios.*
+
 *Done for stage 2: the §3 contract is in the Regression Guardrails of both
 `CLAUDE.md` and `AGENTS.md` (guardrail 4, Correctness), `README.md` has a
 **Shell integration** section under Configuration plus the new config key, and
@@ -1012,7 +1034,8 @@ ISSUE-2026-046.*
 explorer-presentation contract of both `CLAUDE.md` and `AGENTS.md`, guardrail 4
 gained the persistence half of the rule, `CHANGELOG.md` carries the
 user-visible entry, and `docs/testing_issues.md` closes ISSUE-2026-045.
-ISSUE-2026-044 stays open: its second half — the Git anchor — is stage 4.*
+ISSUE-2026-044 stayed open at that point; stage 4 has now closed its Git-anchor
+half.*
 
 - `CLAUDE.md` **and** `AGENTS.md`: the §3 contract joins the Regression
   Guardrails — a new rule under *Correctness* ("a pane's working directory is
@@ -1063,8 +1086,38 @@ ISSUE-2026-044 stays open: its second half — the Git anchor — is stage 4.*
   cheaply from the server, and the shell is already standing in the right place
   to answer. A reconnect and a restore of the same pane now replay the same
   value, which is what deferring the decision to this stage was for.
-- **D4 — Should the explorer offer "Set root here"?** *(stage 4 — still open.)* Stage 4 makes the Git
-  sidebar follow the browsed directory, which removes most of the need. A
-  breadcrumb re-root would also give the user a way to *widen* a root, which is a
-  confinement-boundary change and needs its own argument. Recommendation: defer;
-  revisit after stage 4 ships.
+- **D4 — Should the explorer offer "Set root here"? DECIDED: deferred.** Stage
+  4 makes the Git sidebar follow the browsed directory, which removes most of
+  the need. A breadcrumb re-root would also let the user *widen* a root, which
+  is a confinement-boundary change and needs a separate design and security
+  argument. It is intentionally not part of this hardening work.
+
+---
+
+## 9. Completion audit
+
+Checked against the implementation after stage 4 landed:
+
+| Contract area | Result | Evidence owner |
+| --- | --- | --- |
+| Stop invented-root pinning and report an unresolved explicit probe | Implemented | `web/explorer.py`, `web/api.py`, mode-switch tests in `tests/test_api.py` |
+| Observe cwd from shell output, then OS, with the probe last and refused for agents | Implemented | `web/terminal_cwd.py`, `web/terminal_io.py`, `tests/test_terminal_cwd.py` |
+| Split, agent promotion, save, restore, reconnect and shell switch use the effective directory | Implemented | `web/api.py`, `web/terminal_io.py`, `web/runtime_state.py`, API/multi-workspace tests |
+| Configured and derived explorer roots remain distinct across live switches and snapshots | Implemented | `sessions/manager.py`, `web/session_presentation.py`, `web/runtime_state.py` |
+| The launch floor remains stable and stops pinning only while the pane is inside it | Implemented | `launch_directory`, `_resolve_explorer_open_root()`, stage 3.1 API tests |
+| Sidebar reads, watcher and all eight Git mutations use the browsed repository | Implemented | `web/api.py`, `web/explorer.py`, `explorer-git-sidebar.js`, `explorer-git-watch.js` |
+| Relative anchor identity invalidates sibling-repository switches without absolute-path tokens | Implemented | `_git_repo_anchor_identity()`, `_git_repo_revision()`, Git revision tests |
+| Maintained docs and issue ledger describe the shipped contract | Implemented | `README.md`, `CHANGELOG.md`, `CLAUDE.md`, `AGENTS.md`, `docs/testing_issues.md` |
+
+No implementation item in stages 1-4 or 3.1 remains. D4 is the sole deferred
+idea and is outside the contract rather than an unfinished stage.
+
+Verification on 2026-08-21: Ruff and `git diff --check` pass. The full runner
+executed 1,945 tests, and every working-directory, persistence, Git-anchor, and
+pure-move regression passed. The run itself was not green on this Windows /
+Python 3.14 host: two unchanged process-timeout fixtures failed independently
+of this work (`test_repo_git_timeout_bounds_a_remote_that_goes_quiet` left its
+temporary checkout locked, and
+`test_a_stalled_remote_returns_the_worker_thread_within_the_bound` saw Git exit
+instead of stall). The latter reproduces in isolation; neither failure exercises
+the stage 4 anchor paths.

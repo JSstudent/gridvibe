@@ -19,7 +19,7 @@
 
    DOM-free and require()-able from Node so the matching and the reveal
    decision are executed by tests rather than asserted as source text; the
-   page's DOM adapter lives in explorer-viewer.js. */
+   page's DOM adapter lives in explorer-git-sidebar.js. */
 (function (root, factory) {
     const api = factory();
     if (typeof module === 'object' && module.exports) module.exports = api;

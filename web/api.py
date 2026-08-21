@@ -11,7 +11,7 @@ import re
 import threading
 import time
 import uuid
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 from flask import jsonify, render_template, request, send_file, send_from_directory
 from flask_socketio import emit, join_room, leave_room
@@ -1639,6 +1639,11 @@ def _with_no_store(result: Any):
     return result
 
 
+def _explorer_git_anchor_paths(backend: Any) -> Tuple[str, str]:
+    """Resolve the browsed Git anchor through the explorer's root confinement."""
+    return backend.resolve_dir(request.args.get("path", ""))
+
+
 @app.route('/api/explorer/<session_id>/git/repo', methods=['GET'])
 def get_explorer_git_repo(session_id: str):
     """Return bounded read-only Git repository metadata for the diff sidebar."""
@@ -1647,8 +1652,8 @@ def get_explorer_git_repo(session_id: str):
         return jsonify({"error": "Session not found"}), 404
 
     def handler(backend: Any) -> Dict[str, Any]:
-        root_path = backend.root_directory()
-        summary = _get_git_repo_summary(backend, root_path)
+        root_path, current_path = _explorer_git_anchor_paths(backend)
+        summary = _get_git_repo_summary(backend, root_path, current_path)
         return {"root": root_path, **summary}
 
     return _explorer_route_response(session, handler)
@@ -1668,8 +1673,8 @@ def get_explorer_git_state(session_id: str):
     known = request.args.get("known", "")
 
     def handler(backend: Any) -> Dict[str, Any]:
-        root_path = backend.root_directory()
-        state = _get_git_repo_state(backend, root_path)
+        root_path, current_path = _explorer_git_anchor_paths(backend)
+        state = _get_git_repo_state(backend, root_path, current_path)
         revision = state["revision"]
         return {"revision": revision, "changed": revision != known}
 
@@ -1686,9 +1691,10 @@ def stage_explorer_git_file(session_id: str):
     requested_path = data.get("path", "")
 
     def handler(backend: Any) -> Dict[str, Any]:
-        root_path, file_path = backend.resolve_candidate(requested_path, allow_empty_root=False)
-        _git_stage_path(backend, root_path, file_path)
-        summary = _get_git_repo_summary(backend, root_path)
+        root_path, current_path = _explorer_git_anchor_paths(backend)
+        _target_root, file_path = backend.resolve_candidate(requested_path, allow_empty_root=False)
+        _git_stage_path(backend, root_path, file_path, current_path)
+        summary = _get_git_repo_summary(backend, root_path, current_path)
         return {"root": root_path, **summary}
 
     return _explorer_route_response(session, handler)
@@ -1704,9 +1710,10 @@ def unstage_explorer_git_file(session_id: str):
     requested_path = data.get("path", "")
 
     def handler(backend: Any) -> Dict[str, Any]:
-        root_path, file_path = backend.resolve_candidate(requested_path, allow_empty_root=False)
-        _git_unstage_path(backend, root_path, file_path)
-        summary = _get_git_repo_summary(backend, root_path)
+        root_path, current_path = _explorer_git_anchor_paths(backend)
+        _target_root, file_path = backend.resolve_candidate(requested_path, allow_empty_root=False)
+        _git_unstage_path(backend, root_path, file_path, current_path)
+        summary = _get_git_repo_summary(backend, root_path, current_path)
         return {"root": root_path, **summary}
 
     return _explorer_route_response(session, handler)
@@ -1720,9 +1727,9 @@ def stage_all_explorer_git(session_id: str):
         return jsonify({"error": "Session not found"}), 404
 
     def handler(backend: Any) -> Dict[str, Any]:
-        root_path = backend.root_directory()
-        _git_stage_all_paths(backend, root_path)
-        summary = _get_git_repo_summary(backend, root_path)
+        root_path, current_path = _explorer_git_anchor_paths(backend)
+        _git_stage_all_paths(backend, root_path, current_path)
+        summary = _get_git_repo_summary(backend, root_path, current_path)
         return {"root": root_path, **summary}
 
     return _explorer_route_response(session, handler)
@@ -1736,9 +1743,9 @@ def unstage_all_explorer_git(session_id: str):
         return jsonify({"error": "Session not found"}), 404
 
     def handler(backend: Any) -> Dict[str, Any]:
-        root_path = backend.root_directory()
-        _git_unstage_all_paths(backend, root_path)
-        summary = _get_git_repo_summary(backend, root_path)
+        root_path, current_path = _explorer_git_anchor_paths(backend)
+        _git_unstage_all_paths(backend, root_path, current_path)
+        summary = _get_git_repo_summary(backend, root_path, current_path)
         return {"root": root_path, **summary}
 
     return _explorer_route_response(session, handler)
@@ -1752,9 +1759,9 @@ def discard_all_explorer_git(session_id: str):
         return jsonify({"error": "Session not found"}), 404
 
     def handler(backend: Any) -> Dict[str, Any]:
-        root_path = backend.root_directory()
-        _git_discard_all_paths(backend, root_path)
-        summary = _get_git_repo_summary(backend, root_path)
+        root_path, current_path = _explorer_git_anchor_paths(backend)
+        _git_discard_all_paths(backend, root_path, current_path)
+        summary = _get_git_repo_summary(backend, root_path, current_path)
         return {"root": root_path, **summary}
 
     return _explorer_route_response(session, handler)
@@ -1770,9 +1777,10 @@ def revert_explorer_git_file(session_id: str):
     requested_path = data.get("path", "")
 
     def handler(backend: Any) -> Dict[str, Any]:
-        root_path, file_path = backend.resolve_candidate(requested_path, allow_empty_root=False)
-        _git_revert_path(backend, root_path, file_path)
-        summary = _get_git_repo_summary(backend, root_path)
+        root_path, current_path = _explorer_git_anchor_paths(backend)
+        _target_root, file_path = backend.resolve_candidate(requested_path, allow_empty_root=False)
+        _git_revert_path(backend, root_path, file_path, current_path)
+        summary = _get_git_repo_summary(backend, root_path, current_path)
         return {"root": root_path, **summary}
 
     return _explorer_route_response(session, handler)
@@ -1788,9 +1796,9 @@ def commit_explorer_git(session_id: str):
     message = data.get("message", "")
 
     def handler(backend: Any) -> Dict[str, Any]:
-        root_path = backend.root_directory()
-        _git_commit(backend, root_path, message)
-        summary = _get_git_repo_summary(backend, root_path)
+        root_path, current_path = _explorer_git_anchor_paths(backend)
+        _git_commit(backend, root_path, message, current_path)
+        summary = _get_git_repo_summary(backend, root_path, current_path)
         return {"root": root_path, **summary}
 
     return _explorer_route_response(session, handler)
@@ -1804,9 +1812,9 @@ def publish_explorer_git(session_id: str):
         return jsonify({"error": "Session not found"}), 404
 
     def handler(backend: Any) -> Dict[str, Any]:
-        root_path = backend.root_directory()
-        _git_publish(backend, root_path)
-        summary = _get_git_repo_summary(backend, root_path)
+        root_path, current_path = _explorer_git_anchor_paths(backend)
+        _git_publish(backend, root_path, current_path)
+        summary = _get_git_repo_summary(backend, root_path, current_path)
         return {"root": root_path, **summary}
 
     return _explorer_route_response(session, handler)

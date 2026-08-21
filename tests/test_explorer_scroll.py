@@ -17,6 +17,7 @@ STATIC_JS = Path(__file__).resolve().parent.parent / "web" / "static" / "js"
 SCROLL_JS = STATIC_JS / "explorer-scroll.js"
 PERSISTENCE_JS = STATIC_JS / "explorer-persistence.js"
 VIEWER_JS = STATIC_JS / "explorer-viewer.js"
+GIT_SIDEBAR_JS = STATIC_JS / "explorer-git-sidebar.js"
 SCROLL_ADAPTER_JS = STATIC_JS / "explorer-scroll-adapter.js"
 TABS_JS = STATIC_JS / "explorer-tabs.js"
 TIERS_JS = STATIC_JS / "explorer-tiers.js"
@@ -260,8 +261,9 @@ sandbox.window.GridVibeExplorerScroll = sandbox.GridVibeExplorerScroll;
 vm.runInContext(fs.readFileSync(process.argv[3], 'utf8'), sandbox);
 vm.runInContext(fs.readFileSync(process.argv[4], 'utf8'), sandbox);
 vm.runInContext(fs.readFileSync(process.argv[5], 'utf8'), sandbox);
-sandbox.window.GridVibeExplorerPersistence = sandbox.GridVibeExplorerPersistence;
 vm.runInContext(fs.readFileSync(process.argv[6], 'utf8'), sandbox);
+sandbox.window.GridVibeExplorerPersistence = sandbox.GridVibeExplorerPersistence;
+vm.runInContext(fs.readFileSync(process.argv[7], 'utf8'), sandbox);
 
 const realTabRuntime = {
     active: sandbox.explorerActiveTab,
@@ -839,6 +841,7 @@ class ExplorerScrollAdapterTestCase(unittest.TestCase):
             ADAPTER_HARNESS,
             SCROLL_JS,
             VIEWER_JS,
+            GIT_SIDEBAR_JS,
             SCROLL_ADAPTER_JS,
             PERSISTENCE_JS,
             TABS_JS,
@@ -1264,7 +1267,7 @@ vm.createContext(sandbox);
 sandbox.window.GridVibeExplorerTiers = sandbox.GridVibeExplorerTiers;
 sandbox.window.GridVibeExplorerScroll = sandbox.GridVibeExplorerScroll;
 sandbox.window.GridVibeExplorerPersistence = sandbox.GridVibeExplorerPersistence;
-[process.argv[5], process.argv[6], process.argv[7]].forEach(file => {
+[process.argv[5], process.argv[6], process.argv[7], process.argv[8]].forEach(file => {
     vm.runInContext(fs.readFileSync(file, 'utf8'), sandbox);
 });
 
@@ -1364,6 +1367,7 @@ class ExplorerLargeSourceScrollTestCase(unittest.TestCase):
             SCROLL_JS,
             PERSISTENCE_JS,
             VIEWER_JS,
+            GIT_SIDEBAR_JS,
             SCROLL_ADAPTER_JS,
             TABS_JS,
         )
