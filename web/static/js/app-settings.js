@@ -28,7 +28,8 @@
         terminal: Object.freeze({
             font_family: "Consolas, Monaco, 'Courier New', monospace",
             font_size: 14,
-            max_sessions: 4
+            max_sessions: 4,
+            shell_integration: true
         }),
         voice_input: Object.freeze({
             enabled: true,
@@ -205,6 +206,12 @@
             terminalMaxSessionsInput.value = Number.isFinite(maxSessions)
                 ? String(maxSessions)
                 : String(DEFAULT_APP_SETTINGS.terminal.max_sessions);
+        }
+        const shellIntegrationInput = document.getElementById('appTerminalShellIntegration');
+        if (shellIntegrationInput) {
+            /* Absent means on: the setting only exists to turn the prompt hook
+               off, so an older config that never mentioned it keeps working. */
+            shellIntegrationInput.checked = terminal.shell_integration !== false;
         }
         if (enabledInput) enabledInput.checked = Boolean(voice.enabled);
         if (engineInput) engineInput.value = voice.engine === 'whisper' ? 'whisper' : 'vosk';
@@ -555,6 +562,9 @@
                     || DEFAULT_APP_SETTINGS.terminal.font_size,
                 max_sessions: Number(document.getElementById('appTerminalMaxSessions')?.value)
                     || DEFAULT_APP_SETTINGS.terminal.max_sessions,
+                shell_integration: document.getElementById('appTerminalShellIntegration')
+                    ? Boolean(document.getElementById('appTerminalShellIntegration').checked)
+                    : DEFAULT_APP_SETTINGS.terminal.shell_integration,
                 /* OD-14: focused-session-only by default; the checkbox opts a
                    save into pushing font + size to every active session. */
                 apply_scope: document.getElementById('appTerminalApplyAll')?.checked ? 'all' : 'session'

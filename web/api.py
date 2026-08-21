@@ -236,6 +236,7 @@ from web.session_presentation import (
 from web.terminal_io import (  # noqa: F401 - re-exported for backwards compatibility
     _MAX_TRACKED_SOCKET_CLIENTS,
     _MAX_TRACKED_TERMINAL_COMMAND_LENGTH,
+    CWD_SOURCE_LAUNCH,
     LOCAL_SHELL_KINDS,
     SSH_STREAM_RECV_TIMEOUT,
     TERMINAL_OUTPUT_BUFFER_MAX_CHARS,
@@ -277,6 +278,7 @@ from web.terminal_io import (  # noqa: F401 - re-exported for backwards compatib
     _track_terminal_agent_input,
     client_joined_sessions,
     connection_lock,
+    effective_directory,
     session_output_buffers,
     ssh_connections,
 )
@@ -417,6 +419,7 @@ def _public_app_config() -> Dict[str, Any]:
             "font_family": settings.terminal_font_family,
             "font_size": settings.terminal_font_size,
             "max_sessions": settings.max_sessions,
+            "shell_integration": settings.terminal_shell_integration,
         },
         "voice_input": {
             "enabled": settings.voice_enabled,
@@ -525,6 +528,11 @@ def _normalize_app_config_update(data: Any) -> Dict[str, Any]:
     except (TypeError, ValueError):
         max_sessions = settings.max_sessions
     max_sessions = max(MAX_SESSIONS_MIN, min(MAX_SESSIONS_MAX, max_sessions))
+    shell_integration = terminal_settings.get(
+        "shell_integration", settings.terminal_shell_integration
+    )
+    if not isinstance(shell_integration, bool):
+        shell_integration = settings.terminal_shell_integration
 
     voice_input = payload.get("voice_input")
     if not isinstance(voice_input, dict):
@@ -562,6 +570,7 @@ def _normalize_app_config_update(data: Any) -> Dict[str, Any]:
             "font_family": font_family,
             "font_size": font_size,
             "max_sessions": max_sessions,
+            "shell_integration": shell_integration,
         },
         "voice_input": {
             "enabled": bool(voice_input.get("enabled", settings.voice_enabled)),
@@ -2809,13 +2818,19 @@ def change_session_shell(session_id: str):
         return jsonify(session.to_dict())
 
     next_directory = session.directory
-    probed_directory = _resolve_live_terminal_cwd(session_id, session)
-    if probed_directory and os.path.isdir(probed_directory):
-        next_directory = probed_directory
+    # The replacement shell starts where the pane is, not where it launched --
+    # and asks the observed sources first, so switching shells mid-build lands
+    # in the right directory instead of the one the probe could not confirm.
+    observed_directory, _ = effective_directory(session_id, session, allow_probe=True)
+    if observed_directory and os.path.isdir(observed_directory):
+        next_directory = observed_directory
 
     session_manager.update_session_metadata(
         session_id,
         directory=next_directory,
+        # The replacement shell has observed nothing yet, and the old shell's
+        # last report is not an observation of this one.
+        current_directory=None,
         distribution=distribution,
         use_wsl=use_wsl,
         use_powershell=use_powershell,
@@ -2843,35 +2858,39 @@ def change_session_shell(session_id: str):
 def _refresh_pane_cwd(session_id: str, session: Any, requested: bool) -> Dict[str, Any]:
     """Ask a live terminal where it is, and report whether it answered.
 
-    Observation is best effort, so the answer has to carry its own outcome: a
-    probe that could not run left the caller on an *assumed* directory, and
-    silently falling back to the launch directory is what makes the same
-    gesture open two different roots on two different days.
+    `effective_directory()` owns the order -- the shell-integration observation,
+    then the OS's own read of the pane's shell process, then the marker probe as
+    a last resort. Falling through to the launch directory is still an answer,
+    but it is an *assumed* one, and saying so is what stops the same gesture
+    opening two different roots on two different days.
 
-    An agent pane is never probed. The probe types a command into the pane's
-    shell, and on an agent pane there is no shell prompt to type it at -- the
-    line lands in the agent's input box instead.
+    An agent pane is still never probed: the probe types a command into the
+    pane's shell, and behind a running agent there is no prompt to type it at.
+    It is observed like any other pane, though, so a pane that reported its
+    directory before the agent started answers without a write.
     """
     outcome: Dict[str, Any] = {
         "requested": requested,
         "resolved": False,
         "reason": "",
         "directory": "",
+        "source": "",
     }
     if not requested:
         return outcome
 
-    if str(getattr(session, "startup_mode", "") or "") == "agent":
-        outcome["reason"] = "agent_pane"
-        return outcome
-
-    resolved = _resolve_live_terminal_cwd(session_id, session)
-    if not resolved:
-        outcome["reason"] = "probe_failed"
+    directory, source = effective_directory(session_id, session, allow_probe=True)
+    outcome["source"] = source
+    if source == CWD_SOURCE_LAUNCH:
+        outcome["reason"] = (
+            "agent_pane"
+            if str(getattr(session, "startup_mode", "") or "") == "agent"
+            else "probe_failed"
+        )
         return outcome
 
     outcome["resolved"] = True
-    outcome["directory"] = resolved
+    outcome["directory"] = directory
     return outcome
 
 
@@ -3028,6 +3047,7 @@ def change_session_mode(session_id: str):
                 "requested": True,
                 "resolved": False,
                 "reason": cwd_probe["reason"],
+                "source": cwd_probe["source"],
                 "directory": next_directory,
             }
         return jsonify(payload)

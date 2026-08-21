@@ -71,6 +71,10 @@ TERMINAL_FONT_FAMILY_MAX_LENGTH = 160
 MAX_SESSIONS_MIN = 1
 MAX_SESSIONS_MAX = 16
 DEFAULT_TERMINAL_FONT_FAMILY = "Consolas, Monaco, 'Courier New', monospace"
+# Shell integration is on by default: without it a pane's working directory can
+# only be answered by typing at its prompt, which is the failure mode
+# ISSUE-2026-044 reports.
+DEFAULT_TERMINAL_SHELL_INTEGRATION = True
 
 # Bounds for the workspace autosave interval (10.5 hardening). The App
 # Settings write path and RuntimeConfig.refresh() share these so a hand-edited
@@ -268,6 +272,7 @@ class RuntimeConfigState:
     max_sessions: int
     terminal_font_size: int
     terminal_font_family: str
+    terminal_shell_integration: bool
     app_theme: str
     app_surface_mode: str
     multi_workspace_enabled: bool
@@ -323,6 +328,13 @@ def _build_runtime_state(app_config: Dict[str, Any]) -> RuntimeConfigState:
     terminal_font_family = str(
         terminal_config.get("font_family", DEFAULT_TERMINAL_FONT_FAMILY)
     ).strip() or DEFAULT_TERMINAL_FONT_FAMILY
+    # The prompt hook that reports a pane's working directory mutates the
+    # user's prompt, so it gets a real off switch rather than a constant.
+    terminal_shell_integration = terminal_config.get(
+        "shell_integration", DEFAULT_TERMINAL_SHELL_INTEGRATION
+    )
+    if not isinstance(terminal_shell_integration, bool):
+        terminal_shell_integration = DEFAULT_TERMINAL_SHELL_INTEGRATION
 
     appearance_config = app_config.get("appearance", {})
     app_theme = str(appearance_config.get("theme", "system")).strip().lower()
@@ -372,6 +384,7 @@ def _build_runtime_state(app_config: Dict[str, Any]) -> RuntimeConfigState:
         max_sessions=max_sessions,
         terminal_font_size=terminal_font_size,
         terminal_font_family=terminal_font_family,
+        terminal_shell_integration=terminal_shell_integration,
         app_theme=app_theme,
         app_surface_mode=_normalize_surface_mode(workspace_config.get("surface_mode")),
         multi_workspace_enabled=multi_workspace_enabled,

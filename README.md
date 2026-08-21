@@ -206,7 +206,7 @@ Drag the dividers between panes to resize them.
 
 ## Configuration
 
-Everything lives in **App Settings** — same dialog from the gear on the launcher *or* the session window, so settings never need a trip back to the launcher. It covers theme, surface mode, terminal font and size, max sessions, workspace autosave interval, SSH host-key policy, and all voice options. The one exception is **Multiple workspaces**: it changes what every launch does, so its switch sits in the launcher's Workspaces card instead of the dialog.
+Everything lives in **App Settings** — same dialog from the gear on the launcher *or* the session window, so settings never need a trip back to the launcher. It covers theme, surface mode, terminal font and size, max sessions, shell integration, workspace autosave interval, SSH host-key policy, and all voice options. The one exception is **Multiple workspaces**: it changes what every launch does, so its switch sits in the launcher's Workspaces card instead of the dialog.
 
 On disk, settings load from `config.json` (git-ignored) falling back to `default_config.json`:
 
@@ -214,7 +214,7 @@ On disk, settings load from `config.json` (git-ignored) falling back to `default
 {
   "server": { "host": "127.0.0.1", "port": 5050 },
   "appearance": { "theme": "dark" },
-  "terminal": { "max_sessions": 16, "font_size": 14 },
+  "terminal": { "max_sessions": 16, "font_size": 14, "shell_integration": true },
   "workspace": { "surface_mode": "normal", "autosave_interval_minutes": 5, "multi_workspace_enabled": false },
   "ssh": { "host_key_policy": "auto-add" },
   "explorer_search": { "max_files": 2000, "max_matches": 5000, "timeout_seconds": 20 }
@@ -222,6 +222,16 @@ On disk, settings load from `config.json` (git-ignored) falling back to `default
 ```
 
 GridVibe generates a Flask session signing key at startup unless `GRIDVIBE_SECRET_KEY`, `SECRET_KEY`, or `security.secret_key` is set.
+
+### Shell integration
+
+`terminal.shell_integration` (on by default) is what lets GridVibe follow the directory a terminal is *in*, rather than the one it was launched in — which is what the file explorer opens on when you switch a pane over to it.
+
+It adds an invisible escape sequence to the shell's prompt carrying the current directory (`OSC 7` for bash/zsh/WSL and remote shells, `OSC 9;9` for PowerShell and cmd), then reads that out of the terminal's own output. It never types at your prompt to ask, so the answer is still right while a build, a pager, a TUI, or an agent is running — and a pane running an agent reports the directory the agent was started in.
+
+A **local** shell is handed the hook when GridVibe starts it — cmd through its `PROMPT` environment variable, bash through `PROMPT_COMMAND` (forwarded into WSL with `WSLENV`), PowerShell as a `-Command` argument — so nothing is typed and nothing appears in the pane. A **remote** shell cannot be handed anything (`sshd` forwards only what its `AcceptEnv` allows, and writing a file to your server is not something a terminal should do), so SSH panes are sent one short line at startup, which the shell echoes like any other command.
+
+What it costs, stated plainly: that one echoed line on SSH panes; an existing bash/zsh prompt hook is kept and appended to, and PowerShell's `prompt` function is wrapped rather than replaced, but **cmd's `PROMPT` is replaced** with the default `$P$G` plus the sequence. On a local shell whose own startup files set `PROMPT_COMMAND` themselves, the inherited hook is overwritten and GridVibe falls back to reading the OS. Turn the setting off in App Settings to leave every prompt untouched — GridVibe still reads the sequence if your own shell configuration happens to emit it, and otherwise falls back to asking the shell directly when it is idle.
 
 ## Security
 

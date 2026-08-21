@@ -52,6 +52,11 @@ class TerminalSession:
     group_id: str
     host: str
     directory: str
+    # Where the pane *started*. `current_directory` is where it is now, observed
+    # from the shell's own output (web/terminal_cwd.py) and None until something
+    # has actually observed it -- never a guess, and never written by a probe
+    # that failed. Read it through `effective_directory()`, never directly.
+    current_directory: Optional[str] = None
     username: str = "root"
     port: int = 22
     password: Optional[str] = field(default=None, repr=False)
@@ -98,6 +103,7 @@ class TerminalSession:
             "group_id": self.group_id,
             "host": self.host,
             "directory": self.directory,
+            "current_directory": self.current_directory,
             "username": self.username,
             "port": self.port,
             "initial_command": self.initial_command,
@@ -947,6 +953,7 @@ class SessionManager:
         allowed_fields = {
             "host",
             "directory",
+            "current_directory",
             "username",
             "port",
             "password",

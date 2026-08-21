@@ -1,6 +1,6 @@
 # Working-Directory Hardening Plan
 
-Status: **stage 1 landed**; stages 2-4 proposed.
+Status: **stages 1-2 landed**; stages 3-4 proposed.
 Scope: ISSUE-2026-044 (explorer opens at the launch root, not the navigated
 directory) and ISSUE-2026-045 (a saved workspace restores an agent pane at the
 launch directory, not the one the agent was started in).
@@ -36,8 +36,9 @@ failure mode is silence, which is the flakiness in the report.
 ## 2. Evidence, per mechanism
 
 *Recorded against the code as it stood when this plan was written. §2.2 and the
-silent-failure half of §2.1 are closed by stage 1 (see §5); §2.3 and §2.4 still
-stand.*
+silent-failure half of §2.1 are closed by stage 1, and the rest of §2.1 by stage 2
+— the probe is now the last of three sources rather than the only one (see §5).
+§2.3 and §2.4 still stand.*
 
 ### 2.1 The cwd probe is a keystroke injection with a 0.75 s deadline
 
@@ -407,7 +408,7 @@ the-cwd` candidate instead of `repo_root or observed_cwd`.
   repository still has no sidebar. Stage 1 only stops the explorer from being
   opened above one by accident.
 
-### Stage 2 — Live working-directory tracking
+### Stage 2 — Live working-directory tracking — **LANDED**
 
 | Change | Files |
 | --- | --- |
@@ -426,6 +427,179 @@ and a bounded residue buffer that a hostile stream cannot grow.
 
 Guardrail note: the replay buffer stays **verbatim** — parsing observes the
 stream, it does not filter it (the mouse-reporting contract in `CLAUDE.md`).
+
+#### What was done
+
+**`web/terminal_cwd.py`** (new, ~230 lines — past the ~150 the table made the
+condition, so it is its own module rather than more of `terminal_io.py`). Pure
+text-in/values-out, no `web` imports, so its tests execute it.
+
+- `parse_cwd_events(chunk, residue)` → `(events, residue)`. Reads OSC 7
+  (`file://<host><path>`), OSC 9;9 (a native path) and GridVibe's own
+  `OSC 777 ; gridvibe-pid ; <n>`, each with a BEL **or** ST terminator. A
+  payload may contain neither BEL nor ESC, so the pattern cannot run away
+  across a chunk looking for a close.
+- The residue is bounded **by construction, not by a trailing check**: the
+  search for a still-arriving sequence only looks inside the last
+  `CWD_RESIDUE_MAX_CHARS` (2048) characters, so a stream that opens
+  `ESC ] 7 ;` and never closes it has its fragment dropped rather than carried,
+  and the next real sequence is still read. Scanning starts from `ESC ]`
+  occurrences rather than every ESC, so an ESC-dense TUI chunk costs a `find`
+  loop and not a quadratic walk.
+- `decode_osc7_target()` percent-decodes the URL form and accepts a bare path;
+  `normalize_observed_cwd(cwd, shell_kind, *, on_windows)` does the two
+  translations (`/mnt/c/…` → `C:\…` for a WSL pane, and the leading slash the
+  `file:///C:/…` form requires). `on_windows` is a parameter rather than a read
+  of `os.name` so both sides are testable from either host, and
+  `_normalize_probed_local_cwd()` now delegates to it — one implementation, not
+  two spellings.
+- **A hook is only *typed* at a shell that cannot be handed one.** A typed
+  line is echoed into the pane — twice, when it is sent before the shell has
+  drawn its first prompt — so a pane GridVibe starts itself is given its hook
+  at spawn: `shell_integration_environment()` returns `PROMPT` for cmd and
+  `PROMPT_COMMAND` for bash (plus the `WSLENV` entry `wsl.exe` needs in order
+  to forward it, appended to any the user already has), and
+  `shell_integration_arguments()` returns PowerShell's `-NoExit -Command`,
+  which is an argument rather than input and so is not echoed either. Nothing
+  appears in a local pane at all. Only `remote_shell_integration_command()` is
+  typed, because `sshd` forwards only what its `AcceptEnv` allows and writing
+  an rc file to the remote host is not a thing a terminal gets to do; that line
+  opens with a space (out of history), appends to an existing `PROMPT_COMMAND`,
+  covers zsh's `precmd_functions`, reports the pid once, and is 202 characters
+  rather than the 400 the first attempt typed.
+- **Nothing GridVibe holds is interpolated into any of these strings** —
+  `$PWD`, `$$`, `$P` and the PowerShell provider path are the shell's own
+  values — so guardrail 4's shell-quoting rule is met by having nothing to
+  quote, not by quoting carefully.
+
+Every mechanism was run against the real thing rather than reasoned about:
+`bash` 5.2 and Git's `sh` take `PROMPT_COMMAND` from the environment (and an
+interactive bash keeps it through its rc files), `cmd.exe` takes `PROMPT` from
+the environment, PowerShell started with the hook as a `-Command` argument
+emits `ESC ] 9 ; 9 ; <path> ST` **and still renders the original prompt**
+through the copied `_GridVibePrompt`, and the remote line installs in `bash`
+while preserving an existing `PROMPT_COMMAND` (`_gv;echo mine`).
+`PtyProcess.spawn` in the pinned pywinpty (3.0.5) takes the `env` the local
+path now passes it. What is *not* proven here is whether ConPTY/WinPTY forwards
+an unknown OSC back to us on a local Windows pane; if it does not, that pane
+observes nothing and falls back to the probe exactly as it did before stage 2.
+
+**`web/terminal_io.py`**
+
+- `_observe_terminal_output_cwd(session_id, connection, output)` — source A,
+  called from `_stream_ssh_output` and from all three branches of
+  `_stream_local_output`, directly after the chunk is cached and **before** the
+  emit. It takes **no lock**: the pane's pump thread is the only writer of that
+  connection's residue, and a per-chunk regex scan under `connection_lock`
+  would sit in front of every other pane's output (guardrail 2). It bails on
+  the first character when the chunk holds no ESC and no residue is pending.
+  The chunk is still cached and replayed **verbatim** — this observes the
+  stream, it does not filter it.
+- Only a *changed* directory writes metadata and broadcasts. The hook fires on
+  every prompt, so without that check an idle Enter would be a broadcast.
+- `_local_process_cwd()` / `_remote_process_cwd()` / `_process_reported_cwd()`
+  — source B. A local POSIX pane reads `/proc/<pid>/cwd` off the `Popen` it
+  already owns. A remote pane runs `readlink /proc/<pid>/cwd` on a **second
+  exec channel** of its own transport, never the interactive one, so it is safe
+  while an agent is running; the **drain** carries the bound rather than a
+  `| head -c` pipeline, which would report head's exit status and turn a failed
+  remote command into an empty successful one. The pid comes from the one-shot
+  `gridvibe-pid` sequence the POSIX hook emits for an SSH pane only.
+- `effective_directory(session_id, session, *, allow_probe=False)` →
+  `(directory, source)` with `CWD_SOURCE_SHELL_INTEGRATION` / `_PROCESS` /
+  `_PROBE` / `_LAUNCH`. The launch directory is still an answer — it is just
+  labelled as an assumption, which is the whole point of §3's rule 2. The probe
+  is refused for an agent pane **here as well as inside the probe**, so a
+  caller that opts in cannot type into an agent's input box by accident.
+- `_local_shell_integration()` folds the hook into a local shell's argv and
+  environment at spawn (`_connect_local_session` passes the result to both the
+  WinPty and the POSIX branch), and `_run_startup_sequence()` types a line only
+  for an **SSH** connection — before the `cd`, so the first prompt after it
+  already reports where the pane ended up. Both paths are gated on
+  `runtime_config.terminal_shell_integration`.
+
+**`sessions/manager.py`** — `current_directory: Optional[str] = None` on
+`TerminalSession`, in `to_dict()` and in `update_session_metadata`'s allowlist,
+with a comment saying it is read through `effective_directory()` and never
+directly. Deliberately **not** in `_SESSION_SNAPSHOT_FIELDS`: stage 3 is what
+writes `effective_directory()` into the snapshot's existing `directory` slot,
+so the persisted shape still does not move.
+
+**`web/config.py`, `default_config.json`, `web/api.py`,
+`templates/partials/app_settings_modal.html`, `web/static/js/app-settings.js`**
+— `terminal.shell_integration` (bool, default `true`) joins `RuntimeConfigState`
+and the `/api/app-config` read/normalize pair, with a checkbox in App Settings.
+It gates **installing** the hook, not reading it: a user whose own shell
+configuration already emits OSC 7 is still followed with the setting off, and
+an older `config.json` that never mentions the key keeps working (absent means
+on, on the client too).
+
+**`web/api.py`** — `_refresh_pane_cwd()` now asks `effective_directory(…,
+allow_probe=True)` and reports the `source` it got, so `reason` is
+`"probe_failed"`/`"agent_pane"` only when *nothing* answered. The `/shell`
+route asks the same question instead of probing directly (switching shells
+mid-build now lands where the pane is) and clears `current_directory` when it
+restarts the pane, because the old shell's last report is not an observation of
+the new one.
+
+**Tests** — `tests/test_terminal_cwd.py` (28 cases: both sequence forms, both
+terminators, a sequence split across a read boundary *and* one split inside its
+terminator, a completed sequence reported once, malformed input ignored, the
+residue bound against a hostile stream, the pid line, both path translations,
+and each shell family's installed line, including a round trip over what bash
+and cmd actually emit). Eleven more in `tests/test_api.py`: the observer records
+without a write, a split chunk still reports, an unchanged directory is not
+rebroadcast, an agent pane is *observed* though never probed, the four
+`effective_directory()` precedence cases, an agent pane's explorer switch now
+opening on the observed directory, hook-before-`cd` ordering, pid only on a
+remote pane, and the kill switch. Full suite green (1913 tests) and `ruff`
+clean.
+
+#### Two existing tests were adjusted (and why)
+
+- The eleven `patch.object(api, "_resolve_live_terminal_cwd", …)` sites became
+  `patch.object(web_terminal_io, …)`. The probe is no longer called from
+  `web/api.py`'s namespace but from inside `effective_directory()`, so the old
+  patch target stopped intercepting it. Every assertion is unchanged; only the
+  module the mock is installed on moved.
+- The six `_run_startup_sequence` cases that pin the exact `cd` a shell family
+  gets now run with `terminal_shell_integration` patched off. Their subject is
+  the `cd` and its pacing, not the line in front of it, and the hook has its own
+  cases beside them — including the one that pins the ordering.
+
+#### Behaviour changes to be aware of
+
+- **An SSH pane echoes one extra line at startup.** It is echoed *twice*, like
+  the `cd` beside it has always been, because both are written before the shell
+  has drawn its first prompt — the terminal echoes the characters as they
+  arrive and the shell's own line editor redraws them once the prompt is up.
+  That doubling is pre-existing and is not addressed here; the fix would be to
+  wait for the shell to settle before writing, which changes every SSH pane's
+  startup timing and is its own change.
+- **Local panes echo nothing**, because their hook is installed at spawn.
+- **cmd's `PROMPT` is replaced** with the default `$P$G` plus the sequence; a
+  `PROMPT` set through AutoRun is lost for that pane. bash/zsh keep their
+  existing hook when the line is typed (SSH), but a **local** shell whose own
+  rc file assigns `PROMPT_COMMAND` overwrites the inherited one, and that pane
+  falls back to `/proc` or the probe.
+- **An agent pane can now answer "where are you?"** without being probed, so
+  switching one to the explorer opens on the directory the agent was started
+  in. `reason: "agent_pane"` now means "nothing was ever observed on this
+  pane", not "we refuse to ask".
+- **`session_status` payloads carry `current_directory`**, and a pane that
+  changes directory broadcasts once. Nothing on the client reads the field yet
+  — stage 3 is its consumer (`buildWorkspaceTerminalEntry()` and the pane
+  header).
+
+#### Deliberately *not* done in stage 2
+
+- Nothing is persisted from the new value: `_snapshot_session()`, Save
+  Workspace, split, and runtime agent promotion all still read
+  `session.directory`. That is stage 3, and ISSUE-2026-045 stays open until it
+  lands.
+- The Git anchor is still the explorer root (stage 4), so an explorer
+  deliberately opened *above* a repository still has no sidebar.
+- No `psutil` and no `ctypes` PEB read — see D1, now decided.
 
 ### Stage 3 — Persist the place
 
@@ -485,6 +659,15 @@ handing any stage back.
 
 ## 7. Documentation to update on landing
 
+*Done for stage 2: the §3 contract is in the Regression Guardrails of both
+`CLAUDE.md` and `AGENTS.md` (guardrail 4, Correctness), `README.md` has a
+**Shell integration** section under Configuration plus the new config key, and
+`CHANGELOG.md` carries the user-visible entry. `docs/testing_issues.md` is
+untouched: ISSUE-2026-044's second half is stage 4 and ISSUE-2026-045 is stage
+3, so neither is resolved yet. The configured-versus-derived amendment to the
+explorer-presentation contract waits for stage 3, which is where the
+distinction becomes real.*
+
 - `CLAUDE.md` **and** `AGENTS.md`: the §3 contract joins the Regression
   Guardrails — a new rule under *Correctness* ("a pane's working directory is
   observed, never assumed; observation never writes to the shell") and an
@@ -500,12 +683,15 @@ handing any stage back.
 
 ## 8. Open decisions
 
-- **D1 — Windows local panes.** Source B is unavailable without `psutil`
-  (a C extension, currently not a dependency). Options: rely on source A alone on
-  Windows; add `psutil` as a Windows-only requirement; or read the PEB through
-  `ctypes`. Recommendation: source A alone — cmd and PowerShell both support the
-  prompt hook — with source C as the fallback.
-- **D2 — How "configured root" is recorded.** Either a new
+- **D1 — Windows local panes. DECIDED (stage 2): source A alone.** No
+  `psutil`, no `ctypes` PEB read. `_local_process_cwd()` returns "" on Windows
+  with a comment saying why, so a Windows pane rests on the prompt hook and
+  falls back to the probe. Both Windows shells install a hook (cmd through the
+  `prompt` builtin, PowerShell by wrapping `prompt`), and PowerShell's was
+  verified emitting against a real shell; adding a C extension to the
+  dependency set to corroborate a source that already answers is not a trade
+  worth making. If it turns out to be, the seam is one function.
+- **D2 — How "configured root" is recorded.** *(stage 3 — still open.)* Either a new
   `explorer_root_configured: bool` beside `explorer_root_directory` (explicit;
   needs a snapshot field and a migration default of `False` for existing
   records), or the convention that `explorer_root_directory` is written **only**
@@ -515,12 +701,17 @@ handing any stage back.
   that test re-expressed against the new rule if — and only if — the round-trip
   behaviour it protects is genuinely preserved.
 - **D3 — Does reconnect use the launch directory or the last observed one?**
+  *(deferred to stage 3, deliberately: `_run_startup_sequence` sends the same
+  `cd` for a reconnect and for a restore, and stage 3 is where the persisted
+  directory changes. Deciding it now would put half the rule in place and leave
+  a reconnect and a restore of the same pane disagreeing about which directory
+  they replay.)*
   Today `_run_startup_sequence` `cd`s to `directory`. Reconnecting a dropped SSH
   pane into the directory the user was working in is almost certainly wanted;
   reconnecting into a directory that no longer exists is a new failure mode.
   Recommendation: the observed directory, falling back to the launch directory
   when it no longer resolves.
-- **D4 — Should the explorer offer "Set root here"?** Stage 4 makes the Git
+- **D4 — Should the explorer offer "Set root here"?** *(stage 4 — still open.)* Stage 4 makes the Git
   sidebar follow the browsed directory, which removes most of the need. A
   breadcrumb re-root would also give the user a way to *widen* a root, which is a
   confinement-boundary change and needs its own argument. Recommendation: defer;

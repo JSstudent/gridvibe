@@ -5585,7 +5585,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         session = self._create_local_terminal_session(repo_dir, initial_command="claude")
 
         with patch.object(api.os, "name", "nt"), patch.object(
-            api, "_resolve_live_terminal_cwd", return_value=None
+            web_terminal_io, "_resolve_live_terminal_cwd", return_value=None
         ), patch.object(api, "_close_ssh_connection") as close_connection, patch.object(
             api.socketio, "start_background_task"
         ) as start_task:
@@ -5614,7 +5614,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         session = self._create_local_terminal_session(repo_dir, use_powershell=True, host="PowerShell")
 
         with patch.object(api.os, "name", "nt"), patch.object(
-            api, "_resolve_live_terminal_cwd", return_value=None
+            web_terminal_io, "_resolve_live_terminal_cwd", return_value=None
         ), patch.object(api, "_close_ssh_connection"), patch.object(
             api.socketio, "start_background_task"
         ):
@@ -5638,7 +5638,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         )
 
         with patch.object(api.os, "name", "nt"), patch.object(
-            api, "_resolve_live_terminal_cwd", return_value=None
+            web_terminal_io, "_resolve_live_terminal_cwd", return_value=None
         ), patch.object(api, "_close_ssh_connection"), patch.object(
             api.socketio, "start_background_task"
         ):
@@ -5661,7 +5661,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         session = self._create_local_terminal_session(repo_dir)
 
         with patch.object(api.os, "name", "nt"), patch.object(
-            api, "_resolve_live_terminal_cwd", return_value=str(nested_dir)
+            web_terminal_io, "_resolve_live_terminal_cwd", return_value=str(nested_dir)
         ), patch.object(api, "_close_ssh_connection"), patch.object(
             api.socketio, "start_background_task"
         ):
@@ -5680,7 +5680,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         session = self._create_local_terminal_session(repo_dir)
 
         with patch.object(api.os, "name", "nt"), patch.object(
-            api, "_resolve_live_terminal_cwd", return_value="/home/dev/project"
+            web_terminal_io, "_resolve_live_terminal_cwd", return_value="/home/dev/project"
         ), patch.object(api, "_close_ssh_connection"), patch.object(
             api.socketio, "start_background_task"
         ):
@@ -5851,7 +5851,7 @@ class ApiRoutesTestCase(unittest.TestCase):
             explorer_root_directory=str(repo_dir),
         )
 
-        with patch.object(api, "_resolve_live_terminal_cwd", return_value=str(outside_dir)) as resolve_cwd, patch.object(
+        with patch.object(web_terminal_io, "_resolve_live_terminal_cwd", return_value=str(outside_dir)) as resolve_cwd, patch.object(
             api,
             "_close_ssh_connection",
         ):
@@ -6024,7 +6024,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         self._run_git(repo_dir, "init")
         session_id = self._create_local_terminal_session(desktop).session_id
 
-        with patch.object(api, "_resolve_live_terminal_cwd", return_value=str(nested)), patch.object(
+        with patch.object(web_terminal_io, "_resolve_live_terminal_cwd", return_value=str(nested)), patch.object(
             api, "_close_ssh_connection"
         ):
             response = self.client.post(
@@ -6047,7 +6047,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         self._run_git(repo_dir, "init")
         session_id = self._create_local_terminal_session(nested).session_id
 
-        with patch.object(api, "_resolve_live_terminal_cwd", return_value=str(nested)), patch.object(
+        with patch.object(web_terminal_io, "_resolve_live_terminal_cwd", return_value=str(nested)), patch.object(
             api, "_close_ssh_connection"
         ):
             response = self.client.post(
@@ -6066,7 +6066,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         (desktop / "project").mkdir(parents=True)
         session_id = self._create_local_terminal_session(desktop).session_id
 
-        with patch.object(api, "_resolve_live_terminal_cwd", return_value=None), patch.object(
+        with patch.object(web_terminal_io, "_resolve_live_terminal_cwd", return_value=None), patch.object(
             api, "_close_ssh_connection"
         ):
             response = self.client.post(
@@ -6090,7 +6090,7 @@ class ApiRoutesTestCase(unittest.TestCase):
             desktop, startup_mode="agent", initial_command_mode="agent"
         ).session_id
 
-        with patch.object(api, "_resolve_live_terminal_cwd") as probe, patch.object(
+        with patch.object(web_terminal_io, "_resolve_live_terminal_cwd") as probe, patch.object(
             api, "_close_ssh_connection"
         ):
             response = self.client.post(
@@ -6116,6 +6116,230 @@ class ApiRoutesTestCase(unittest.TestCase):
         with patch.object(api, "_send_connection_input") as send_input:
             self.assertIsNone(api._resolve_live_terminal_cwd(session_id, session))
         send_input.assert_not_called()
+
+    def test_terminal_output_reports_the_working_directory_without_a_write(self):
+        """Source A: read out of output the shell was going to produce anyway."""
+        desktop = Path(self.temp_dir.name) / "desktop"
+        desktop.mkdir(parents=True)
+        session_id = self._create_local_terminal_session(desktop).session_id
+        connection = {"kind": "local", "shell_kind": "posix"}
+
+        with patch.object(web_terminal_io, "_send_connection_input") as send_input:
+            web_terminal_io._observe_terminal_output_cwd(
+                session_id,
+                connection,
+                "\x1b]7;file://box/srv/app/src\x1b\\dev@box:~$ ",
+            )
+
+        send_input.assert_not_called()
+        self.assertEqual(
+            api.session_manager.get_session(session_id).current_directory,
+            "/srv/app/src",
+        )
+
+    def test_a_sequence_split_across_two_reads_still_reports(self):
+        """A read boundary is not an observation the pane gets to lose."""
+        desktop = Path(self.temp_dir.name) / "desktop"
+        desktop.mkdir(parents=True)
+        session_id = self._create_local_terminal_session(desktop).session_id
+        connection = {"kind": "local", "shell_kind": "posix"}
+
+        web_terminal_io._observe_terminal_output_cwd(session_id, connection, "\x1b]7;file://box/srv/a")
+        self.assertIsNone(api.session_manager.get_session(session_id).current_directory)
+        web_terminal_io._observe_terminal_output_cwd(session_id, connection, "pp\x1b\\$ ")
+
+        self.assertEqual(
+            api.session_manager.get_session(session_id).current_directory,
+            "/srv/app",
+        )
+
+    def test_an_unchanged_directory_is_not_rebroadcast(self):
+        """The hook fires on every prompt; only a move is news."""
+        desktop = Path(self.temp_dir.name) / "desktop"
+        desktop.mkdir(parents=True)
+        session_id = self._create_local_terminal_session(desktop).session_id
+        connection = {"kind": "local", "shell_kind": "posix"}
+        prompt = "\x1b]7;file://box/srv/app\x1b\\$ "
+
+        with patch.object(web_terminal_io, "_broadcast_session_status") as broadcast:
+            web_terminal_io._observe_terminal_output_cwd(session_id, connection, prompt)
+            web_terminal_io._observe_terminal_output_cwd(session_id, connection, prompt)
+            web_terminal_io._observe_terminal_output_cwd(session_id, connection, prompt)
+
+        broadcast.assert_called_once_with(session_id)
+
+    def test_an_agent_pane_is_observed_even_though_it_is_never_probed(self):
+        """The shell reported where it was before the agent took the terminal."""
+        desktop = Path(self.temp_dir.name) / "desktop"
+        desktop.mkdir(parents=True)
+        session_id = self._create_local_terminal_session(
+            desktop, startup_mode="agent", initial_command_mode="agent"
+        ).session_id
+        connection = {"kind": "local", "shell_kind": "posix"}
+
+        web_terminal_io._observe_terminal_output_cwd(
+            session_id, connection, "\x1b]7;file://box/srv/app/api\x1b\\"
+        )
+        session = api.session_manager.get_session(session_id)
+
+        with patch.object(web_terminal_io, "_resolve_live_terminal_cwd") as probe:
+            directory, source = api.effective_directory(
+                session_id, session, allow_probe=True
+            )
+
+        probe.assert_not_called()
+        self.assertEqual(directory, "/srv/app/api")
+        self.assertEqual(source, web_terminal_io.CWD_SOURCE_SHELL_INTEGRATION)
+
+    def test_effective_directory_prefers_the_observation_over_the_probe(self):
+        desktop = Path(self.temp_dir.name) / "desktop"
+        desktop.mkdir(parents=True)
+        session_id = self._create_local_terminal_session(desktop).session_id
+        api.session_manager.update_session_metadata(
+            session_id, current_directory="/srv/app/src"
+        )
+        session = api.session_manager.get_session(session_id)
+
+        with patch.object(web_terminal_io, "_resolve_live_terminal_cwd") as probe:
+            directory, source = api.effective_directory(
+                session_id, session, allow_probe=True
+            )
+
+        probe.assert_not_called()
+        self.assertEqual(directory, "/srv/app/src")
+        self.assertEqual(source, web_terminal_io.CWD_SOURCE_SHELL_INTEGRATION)
+
+    def test_effective_directory_reports_the_launch_directory_as_an_assumption(self):
+        """Nothing observed and nothing probed is still an answer -- a labelled one."""
+        desktop = Path(self.temp_dir.name) / "desktop"
+        desktop.mkdir(parents=True)
+        session_id = self._create_local_terminal_session(desktop).session_id
+        session = api.session_manager.get_session(session_id)
+
+        with patch.object(
+            web_terminal_io, "_resolve_live_terminal_cwd", return_value=None
+        ) as probe:
+            directory, source = api.effective_directory(
+                session_id, session, allow_probe=True
+            )
+
+        probe.assert_called_once_with(session_id, session)
+        self.assertEqual(directory, str(desktop))
+        self.assertEqual(source, web_terminal_io.CWD_SOURCE_LAUNCH)
+
+    def test_effective_directory_leaves_the_probe_alone_unless_asked(self):
+        desktop = Path(self.temp_dir.name) / "desktop"
+        desktop.mkdir(parents=True)
+        session_id = self._create_local_terminal_session(desktop).session_id
+        session = api.session_manager.get_session(session_id)
+
+        with patch.object(web_terminal_io, "_resolve_live_terminal_cwd") as probe:
+            directory, source = api.effective_directory(session_id, session)
+
+        probe.assert_not_called()
+        self.assertEqual(directory, str(desktop))
+        self.assertEqual(source, web_terminal_io.CWD_SOURCE_LAUNCH)
+
+    def test_switch_agent_pane_to_explorer_opens_on_the_observed_directory(self):
+        """ISSUE-2026-044 on the pane stage 1 could only answer with a refusal."""
+        desktop = Path(self.temp_dir.name) / "desktop"
+        nested = desktop / "project"
+        nested.mkdir(parents=True)
+        session_id = self._create_local_terminal_session(
+            desktop, startup_mode="agent", initial_command_mode="agent"
+        ).session_id
+        api.session_manager.update_session_metadata(
+            session_id, current_directory=str(nested)
+        )
+
+        with patch.object(web_terminal_io, "_resolve_live_terminal_cwd") as probe, patch.object(
+            api, "_close_ssh_connection"
+        ):
+            response = self.client.post(
+                f"/api/sessions/{session_id}/mode",
+                json={"startup_mode": "explorer", "refresh_cwd": True},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        probe.assert_not_called()
+        payload = response.get_json()
+        self.assertNotIn("cwd_probe", payload)
+        self.assertEqual(Path(payload["explorer_root_directory"]), nested.resolve())
+
+    def test_a_local_pane_is_never_typed_at(self):
+        """A typed hook is echoed into the pane; a local shell is handed one."""
+        session = SimpleNamespace(directory="", initial_command="npm run dev")
+
+        for shell_kind in ("cmd", "powershell", "wsl", "posix"):
+            with self.subTest(shell_kind=shell_kind):
+                with patch.object(web_terminal_io, "_send_connection_input") as send_input:
+                    api._run_startup_sequence(
+                        {"kind": "local", "shell_kind": shell_kind}, session
+                    )
+
+                self.assertEqual(
+                    [call.args[1] for call in send_input.call_args_list],
+                    ["npm run dev\n"],
+                )
+
+    def test_a_local_shell_is_handed_its_hook_at_spawn(self):
+        """cmd and bash read their prompt hook from the environment."""
+        command, environment = web_terminal_io._local_shell_integration("cmd", ["cmd.exe"], {})
+        self.assertEqual(command, ["cmd.exe"])
+        self.assertIn("]9;9;", environment["PROMPT"])
+
+        command, environment = web_terminal_io._local_shell_integration("posix", ["/bin/bash"], {})
+        self.assertEqual(command, ["/bin/bash"])
+        self.assertIn("]7;file://", environment["PROMPT_COMMAND"])
+
+    def test_a_wsl_shell_forwards_its_hook_through_wslenv(self):
+        """wsl.exe only passes the variables WSLENV names, and keeps the rest."""
+        _, environment = web_terminal_io._local_shell_integration(
+            "wsl", ["wsl.exe"], {"WSLENV": "MY_VAR/p"}
+        )
+
+        self.assertIn("]7;file://", environment["PROMPT_COMMAND"])
+        self.assertEqual(environment["WSLENV"], "MY_VAR/p:PROMPT_COMMAND")
+
+    def test_powershell_takes_its_hook_as_an_argument(self):
+        """PowerShell cannot take a function through the environment."""
+        command, environment = web_terminal_io._local_shell_integration(
+            "powershell", ["powershell.exe", "-NoLogo"], {}
+        )
+
+        self.assertEqual(command[:3], ["powershell.exe", "-NoLogo", "-NoExit"])
+        self.assertEqual(command[3], "-Command")
+        self.assertIn("]9;9;", command[4])
+        self.assertEqual(environment, {})
+
+    def test_only_a_remote_shell_is_sent_a_line(self):
+        """`sshd` forwards only what AcceptEnv allows, so this one is typed."""
+        session = SimpleNamespace(directory="", initial_command="")
+
+        with patch.object(web_terminal_io, "_send_connection_input") as send_input:
+            api._run_startup_sequence({"kind": "ssh", "shell_kind": "posix"}, session)
+
+        sent = [call.args[1] for call in send_input.call_args_list]
+        self.assertEqual(len(sent), 1)
+        self.assertIn("]7;file://", sent[0])
+        self.assertIn("gridvibe-pid", sent[0])
+
+    def test_the_shell_integration_setting_leaves_the_prompt_alone(self):
+        """The hook mutates the user's prompt, so the switch is a real one."""
+        session = SimpleNamespace(directory="", initial_command="npm run dev")
+
+        with patch.object(
+            web_config.runtime_config, "terminal_shell_integration", False
+        ), patch.object(web_terminal_io, "_send_connection_input") as send_input:
+            api._run_startup_sequence({"kind": "ssh", "shell_kind": "posix"}, session)
+            command, environment = web_terminal_io._local_shell_integration("cmd", ["cmd.exe"], {})
+
+        self.assertEqual(
+            [call.args[1] for call in send_input.call_args_list],
+            ["npm run dev\n"],
+        )
+        self.assertEqual(command, ["cmd.exe"])
+        self.assertEqual(environment, {})
 
     def test_local_stream_shutdown_after_explorer_switch_does_not_mark_error(self):
         repo_dir = Path(self.temp_dir.name) / "repo"
@@ -6243,7 +6467,7 @@ class ApiRoutesTestCase(unittest.TestCase):
             }
         )
 
-        with patch.object(api, "_resolve_live_terminal_cwd", return_value="/opt/tools") as resolve_cwd, patch.object(
+        with patch.object(web_terminal_io, "_resolve_live_terminal_cwd", return_value="/opt/tools") as resolve_cwd, patch.object(
             web_explorer,
             "_open_ssh_sftp",
             return_value=(MagicMock(), fake_sftp),
@@ -16976,6 +17200,24 @@ class HostKeyPolicyTestCase(unittest.TestCase):
         )
         self.assertEqual(response.get_json()["ssh"]["host_key_policy"], "strict")
 
+    def test_app_config_endpoint_round_trips_shell_integration(self):
+        response = self.client.get("/api/app-config")
+        self.assertTrue(response.get_json()["terminal"]["shell_integration"])
+
+        response = self.client.post(
+            "/api/app-config", json={"terminal": {"shell_integration": False}}
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.get_json()["terminal"]["shell_integration"])
+        self.assertFalse(api.load_config()["terminal"]["shell_integration"])
+        self.assertFalse(api.runtime_config.terminal_shell_integration)
+
+        # A non-boolean keeps the stored value rather than coercing one.
+        response = self.client.post(
+            "/api/app-config", json={"terminal": {"shell_integration": "sure"}}
+        )
+        self.assertFalse(response.get_json()["terminal"]["shell_integration"])
+
     def test_launcher_ships_host_key_policy_select(self):
         html = self.client.get("/").get_data(as_text=True)
         self.assertIn('id="appSshHostKeyPolicy"', html)
@@ -18906,12 +19148,16 @@ class SettingsLauncherConfigTestCase(unittest.TestCase):
             agent_selection="claude",
             agent_auto_mode=True,
         )
-        with patch.object(web_terminal_io, "_send_connection_input") as send:
+        with patch.object(
+            web_config.runtime_config, "terminal_shell_integration", False
+        ), patch.object(web_terminal_io, "_send_connection_input") as send:
             web_terminal_io._run_startup_sequence(connection, session)
         send.assert_called_once_with(connection, "claude --permission-mode auto\n")
 
         session.agent_auto_mode = False
-        with patch.object(web_terminal_io, "_send_connection_input") as send:
+        with patch.object(
+            web_config.runtime_config, "terminal_shell_integration", False
+        ), patch.object(web_terminal_io, "_send_connection_input") as send:
             web_terminal_io._run_startup_sequence(connection, session)
         send.assert_called_once_with(connection, "claude\n")
 

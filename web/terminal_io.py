@@ -37,6 +37,16 @@ from web.explorer import (
     _is_explorer_session,
 )
 from web.hostkeys import _apply_host_key_policy
+from web.terminal_cwd import (
+    CWD_EVENT_DIRECTORY,
+    CWD_EVENT_SHELL_PID,
+    latest_event,
+    normalize_observed_cwd,
+    parse_cwd_events,
+    remote_shell_integration_command,
+    shell_integration_arguments,
+    shell_integration_environment,
+)
 from web.workspaces import DEFAULT_WORKSPACE_ID, normalize_workspace_id, workspace_room
 
 try:
@@ -365,13 +375,176 @@ def _extract_terminal_cwd_from_buffer(buffer: str, marker_start: str, marker_end
 
 def _normalize_probed_local_cwd(cwd: str, shell_kind: str) -> str:
     """Translate a probed shell cwd into the local filesystem form explorer expects."""
-    if os.name == "nt" and shell_kind == "wsl":
-        mount_match = re.match(r"^/mnt/([A-Za-z])(?:/(.*))?$", cwd)
-        if mount_match:
-            drive = mount_match.group(1).upper()
-            remainder = (mount_match.group(2) or "").replace("/", "\\")
-            return f"{drive}:\\" + remainder if remainder else f"{drive}:\\"
-    return cwd
+    return normalize_observed_cwd(cwd, shell_kind, on_windows=os.name == "nt")
+
+
+#: Where an answer to "where is this pane now" came from. Reported alongside the
+#: directory, because a caller that cannot tell an observation from an
+#: assumption is exactly what made one gesture open two different roots on two
+#: different days.
+CWD_SOURCE_SHELL_INTEGRATION = "shell_integration"
+CWD_SOURCE_PROCESS = "process"
+CWD_SOURCE_PROBE = "probe"
+CWD_SOURCE_LAUNCH = "launch"
+
+#: Bounds for the corroboration read on a remote pane's own transport.
+REMOTE_CWD_READ_TIMEOUT = 3.0
+REMOTE_CWD_MAX_OUTPUT_BYTES = 4096
+
+
+def _observe_terminal_output_cwd(
+    session_id: str,
+    connection: Dict[str, Any],
+    output: str,
+) -> None:
+    """Read a pane's working directory out of the output it just produced.
+
+    Source A of the three: the prompt hook installed at startup emits the cwd on
+    every prompt, so the value is already known when a route asks, no write ever
+    goes to the shell, and a pane running an agent keeps reporting the directory
+    the agent was started in (the shell emits nothing while the agent holds the
+    terminal).
+
+    This runs on the pane's own pump thread -- the only writer of the residue --
+    and deliberately takes no lock: a per-chunk scan under ``connection_lock``
+    would sit in front of every other pane's output (guardrail 2). The chunk is
+    still cached and replayed verbatim; this only observes it.
+    """
+    residue = str(connection.get("cwd_residue") or "")
+    if "\x1b" not in output and not residue:
+        return
+
+    events, residue = parse_cwd_events(output, residue)
+    connection["cwd_residue"] = residue
+    if not events:
+        return
+
+    shell_pid = latest_event(events, CWD_EVENT_SHELL_PID)
+    if shell_pid:
+        connection["shell_pid"] = shell_pid
+
+    reported = latest_event(events, CWD_EVENT_DIRECTORY)
+    if not reported:
+        return
+
+    directory = normalize_observed_cwd(
+        reported,
+        str(connection.get("shell_kind") or ""),
+        # A remote pane's paths are the remote host's, whatever this host is.
+        on_windows=connection.get("kind") != "ssh" and os.name == "nt",
+    )
+    if not directory:
+        return
+
+    session = session_manager.get_session(session_id)
+    if session is None or str(getattr(session, "current_directory", "") or "") == directory:
+        return
+
+    session_manager.update_session_metadata(session_id, current_directory=directory)
+    _broadcast_session_status(session_id)
+
+
+def _local_process_cwd(connection: Dict[str, Any]) -> str:
+    """Read a local pane's cwd from the OS, when the OS can answer (source B)."""
+    if os.name == "nt":
+        # No /proc, and reading a Windows process's PEB needs a dependency
+        # GridVibe does not carry, so a Windows pane rests on source A (D1).
+        return ""
+    process = connection.get("process")
+    pid = getattr(process, "pid", None)
+    if not pid:
+        return ""
+    try:
+        return os.readlink(f"/proc/{pid}/cwd")
+    except OSError:
+        return ""
+
+
+def _remote_process_cwd(connection: Dict[str, Any]) -> str:
+    """Read a remote pane's cwd over a second exec channel (source B).
+
+    Never on the interactive channel, so it stays safe while an agent is
+    running. The *drain* carries the bound rather than a ``| head -c`` pipeline,
+    which would report head's exit status and turn a failed remote command into
+    an empty successful one.
+    """
+    pid = str(connection.get("shell_pid") or "")
+    client = connection.get("client")
+    if not pid.isdigit() or client is None:
+        return ""
+
+    transport = client.get_transport()
+    if transport is None or not transport.is_active():
+        return ""
+
+    channel = None
+    try:
+        channel = transport.open_session(timeout=REMOTE_CWD_READ_TIMEOUT)
+        channel.settimeout(REMOTE_CWD_READ_TIMEOUT)
+        channel.exec_command(f"readlink /proc/{pid}/cwd")
+        chunks = []
+        total = 0
+        while total < REMOTE_CWD_MAX_OUTPUT_BYTES:
+            data = channel.recv(min(4096, REMOTE_CWD_MAX_OUTPUT_BYTES - total))
+            if not data:
+                break
+            chunks.append(data)
+            total += len(data)
+        if channel.exit_status_ready() and channel.recv_exit_status() != 0:
+            return ""
+        return b"".join(chunks).decode("utf-8", errors="ignore").strip()
+    except Exception as exc:
+        logger.debug("Unable to read the remote working directory: %s", exc)
+        return ""
+    finally:
+        if channel is not None:
+            try:
+                channel.close()
+            except Exception:
+                pass
+
+
+def _process_reported_cwd(connection: Dict[str, Any]) -> str:
+    """Return the OS's own answer for one pane's shell process, or ""."""
+    if connection.get("kind") == "ssh":
+        return _remote_process_cwd(connection)
+    return _local_process_cwd(connection)
+
+
+def effective_directory(
+    session_id: str,
+    session: Any,
+    *,
+    allow_probe: bool = False,
+) -> Tuple[str, str]:
+    """Answer "where is this pane now", and say where the answer came from.
+
+    Sources in order: the shell-integration observation (A), the OS's own read
+    of the pane's shell process (B), and -- only when the caller explicitly
+    allows it -- the marker probe (C), which types at the prompt and is refused
+    on an agent pane. The launch directory is the last answer and is reported as
+    ``CWD_SOURCE_LAUNCH``, so a caller can tell it apart from an observation
+    instead of silently presenting an assumption as a fact.
+    """
+    observed = str(getattr(session, "current_directory", "") or "").strip()
+    if observed:
+        return observed, CWD_SOURCE_SHELL_INTEGRATION
+
+    with connection_lock:
+        connection = ssh_connections.get(session_id)
+    if connection is not None:
+        # Outside the lock: a remote read opens a channel, and no network work
+        # belongs inside a shared lock.
+        process_cwd = _process_reported_cwd(connection).strip()
+        if process_cwd:
+            return process_cwd, CWD_SOURCE_PROCESS
+
+    if allow_probe and str(getattr(session, "startup_mode", "") or "") != "agent":
+        probed = _resolve_live_terminal_cwd(session_id, session)
+        if probed:
+            return probed, CWD_SOURCE_PROBE
+
+    return str(getattr(session, "directory", "") or ""), CWD_SOURCE_LAUNCH
 
 
 def _resolve_live_terminal_cwd(session_id: str, session: Any, timeout: float = 0.75) -> Optional[str]:
@@ -502,6 +675,20 @@ def _run_startup_sequence(connection: Dict[str, Any], session: Any):
     if shell_kind == "wsl":
         time.sleep(0.25)
 
+    # Only a *remote* shell is sent the hook: a local pane was handed it at
+    # spawn (`_local_shell_integration`), where nothing is echoed into the pane.
+    # `sshd` forwards only the environment its `AcceptEnv` allows, so there is
+    # no equivalent here -- and the line is typed before the shell has drawn its
+    # first prompt, which is why it is short. `terminal.shell_integration` is a
+    # real kill switch because the hook mutates the user's prompt; observation
+    # itself stays on either way, so a shell that emits OSC 7 from the user's
+    # own configuration is still read.
+    if connection.get("kind") == "ssh" and runtime_config.terminal_shell_integration:
+        _send_connection_input(
+            connection, f"{remote_shell_integration_command()}{newline}"
+        )
+        time.sleep(0.15)
+
     if session.directory and not connection.get("launch_cwd_applied"):
         target_directory = _normalize_local_directory(session.directory, shell_kind)
         if shell_kind == "cmd":
@@ -566,6 +753,7 @@ def _stream_ssh_output(session_id: str):
 
             output = data.decode("utf-8", errors="ignore")
             _cache_terminal_output(session_id, output)
+            _observe_terminal_output_cwd(session_id, connection, output)
             # Emit outside connection_lock: a slow client write must not stall
             # every other terminal's pump behind the global lock.
             socketio.emit(
@@ -620,6 +808,7 @@ def _stream_local_output(session_id: str):
 
                 if output:
                     _cache_terminal_output(session_id, output)
+                    _observe_terminal_output_cwd(session_id, connection, output)
                     socketio.emit(
                         'terminal_output',
                         {'session_id': session_id, 'data': output},
@@ -643,6 +832,7 @@ def _stream_local_output(session_id: str):
                         output = os.read(master_fd, 4096).decode("utf-8", errors="ignore")
                         if output:
                             _cache_terminal_output(session_id, output)
+                            _observe_terminal_output_cwd(session_id, connection, output)
                             socketio.emit(
                                 'terminal_output',
                                 {'session_id': session_id, 'data': output},
@@ -667,6 +857,7 @@ def _stream_local_output(session_id: str):
             if output:
                 chunk = output.decode("utf-8", errors="ignore")
                 _cache_terminal_output(session_id, chunk)
+                _observe_terminal_output_cwd(session_id, connection, chunk)
                 socketio.emit(
                     'terminal_output',
                     {'session_id': session_id, 'data': chunk},
@@ -804,6 +995,31 @@ def _build_local_command(
 
     shell = os.environ.get("SHELL") or "/bin/bash"
     return [shell, "-i"]
+
+
+def _local_shell_integration(
+    shell_kind: str,
+    command: List[str],
+    environment: Dict[str, str],
+) -> Tuple[List[str], Dict[str, str]]:
+    """Fold the prompt hook into a local shell's own argv and environment.
+
+    A pane GridVibe starts itself never has the hook *typed* at it: a typed line
+    is echoed into the pane -- twice, when it is sent before the shell has drawn
+    its first prompt -- and a startup that prints a paragraph of shell at the
+    reader is worse than the problem it solves. cmd and bash take their prompt
+    hook from the environment and PowerShell takes it as a `-Command` argument,
+    so nothing appears in the pane at all.
+
+    Returns the command and environment to spawn with, unchanged when the
+    setting is off or the shell family has no hook.
+    """
+    if not runtime_config.terminal_shell_integration:
+        return command, environment
+
+    updated_environment = dict(environment)
+    updated_environment.update(shell_integration_environment(shell_kind, environment))
+    return command + shell_integration_arguments(shell_kind), updated_environment
 
 
 def _sanitize_terminal_input(connection: Dict[str, Any], input_data: Any) -> str:
@@ -1069,6 +1285,9 @@ def _connect_local_session(session_id: str, session: Any):
             startup_directory=wsl_startup_directory,
         )
         launch_cwd = _resolve_local_launch_cwd(session.directory, shell_kind)
+        command, shell_environment = _local_shell_integration(
+            shell_kind, command, dict(os.environ)
+        )
         logger.info(f"[{session_id}] local command: {command}")
 
         if os.name == "nt":
@@ -1079,7 +1298,7 @@ def _connect_local_session(session_id: str, session: Any):
                 )
 
             command_line = subprocess.list2cmdline(command)
-            process = WinPtyProcess.spawn(command_line, cwd=launch_cwd)
+            process = WinPtyProcess.spawn(command_line, cwd=launch_cwd, env=shell_environment)
             connection = {
                 "kind": "local",
                 "pty_process": process,
@@ -1090,7 +1309,7 @@ def _connect_local_session(session_id: str, session: Any):
             if pty is None:
                 raise RuntimeError("PTY support is unavailable on this system")
             master_fd, slave_fd = pty.openpty()
-            env = os.environ.copy()
+            env = dict(shell_environment)
             env.setdefault("TERM", "xterm-256color")
             process = subprocess.Popen(
                 command,
