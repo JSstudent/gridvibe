@@ -30,7 +30,7 @@ import time
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, BinaryIO, Dict, List, Optional, Tuple
+from typing import Any, BinaryIO, Callable, Dict, List, Optional, Tuple
 
 from web.config import runtime_config
 from web.hostkeys import (  # noqa: F401 - _load_persistent_host_keys re-exported
@@ -103,6 +103,68 @@ def _explorer_root_directory(session: Any) -> str:
         or getattr(session, "directory", "")
         or ""
     ).strip()
+
+
+def _configured_explorer_root_directory(session: Any) -> str:
+    """Return only a root the pane actually carries -- never a derived one.
+
+    A derived root is not a configured root: `_explorer_root_directory()` falls
+    back to `session.directory`, which for a pane launched as a *terminal*
+    manufactures a root nobody chose and then pins the explorer to it. Anything
+    deciding *where an explorer opens* asks this instead, so the pin belongs to
+    a root that was really configured.
+    """
+    return str(getattr(session, "explorer_root_directory", "") or "").strip()
+
+
+def _local_path_inside(root_path: str, candidate: str) -> bool:
+    """Return whether a local path is the root or sits underneath it."""
+    if not root_path or not candidate:
+        return False
+    try:
+        common_path = os.path.commonpath([root_path, candidate])
+    except ValueError:
+        return False
+    return os.path.normcase(common_path) == os.path.normcase(root_path)
+
+
+def _resolve_explorer_open_root(
+    configured_root: str,
+    observed_cwd: str,
+    launch_directory: str,
+    repo_root: Optional[str],
+    *,
+    contains: Callable[[str, str], bool],
+) -> str:
+    """Choose the root an explorer pane opens on.
+
+    A pane's launch directory is where it started; its working directory is
+    where it is now. The explorer opens *at* the working directory and roots:
+
+    - on the configured root, whenever one was really chosen and still holds
+      the working directory;
+    - otherwise on the Git worktree containing the working directory, so a repo
+      below the launch directory gets a Git sidebar and can still be navigated
+      up to its own root;
+    - otherwise on the working directory itself.
+
+    The candidate is clamped so it never widens the root *above* the launch
+    directory the user picked: a strict ancestor of that floor yields the floor.
+    ``contains(ancestor, path)`` is inclusive, so "strict ancestor" is
+    ``contains(candidate, floor) and not contains(floor, candidate)`` and needs
+    no separate equality predicate for either path flavour.
+    """
+    if configured_root and contains(configured_root, observed_cwd):
+        return configured_root
+
+    candidate = repo_root or observed_cwd
+    if (
+        launch_directory
+        and contains(candidate, launch_directory)
+        and not contains(launch_directory, candidate)
+    ):
+        return launch_directory
+    return candidate
 
 
 def _default_explorer_candidate_path(session: Any, root_path: str) -> str:
@@ -2201,12 +2263,14 @@ def _explorer_backend(session: Any):
         yield _LocalExplorerBackend(session)
 
 
-def _get_git_context(
-    backend: Any,
-    root_path: str,
-    current_path: str,
-) -> Tuple[Dict[str, Any], Dict[str, Dict[str, Any]]]:
-    """Return repository metadata and path statuses for an explorer directory."""
+def _resolve_git_worktree_root(backend: Any, current_path: str) -> Tuple[Optional[str], Optional[str]]:
+    """Return the Git worktree root containing a path, plus a probe error.
+
+    ``(None, None)`` means the path is simply not inside a worktree;
+    ``(None, "...")`` means the probe itself could not answer. Both the sidebar
+    context and the explorer's open-root resolution ask the same question, so
+    they ask it through one implementation.
+    """
     try:
         rev_parse = backend.run_git(
             ["rev-parse", "--show-toplevel", "--is-inside-work-tree"],
@@ -2214,20 +2278,47 @@ def _get_git_context(
             timeout=2.0,
         )
     except FileNotFoundError:
-        return _empty_explorer_git_context("Git executable was not found"), {}
+        return None, "Git executable was not found"
     except (subprocess.TimeoutExpired, TimeoutError):
-        return _empty_explorer_git_context("Git repository detection timed out"), {}
+        return None, "Git repository detection timed out"
     except Exception as exc:
-        return _empty_explorer_git_context(str(exc)), {}
+        return None, str(exc)
 
     if rev_parse.returncode != 0:
-        return _empty_explorer_git_context(), {}
+        return None, None
 
     rev_lines = _decode_git_output(rev_parse.stdout).splitlines()
     if len(rev_lines) < 2 or rev_lines[1].lower() != "true":
-        return _empty_explorer_git_context(), {}
+        return None, None
 
-    repo_root = backend.canonical_repo_root(rev_lines[0])
+    return backend.canonical_repo_root(rev_lines[0]), None
+
+
+def _explorer_cwd_repo_root(backend: Any, current_path: str) -> Optional[str]:
+    """Return the worktree root of an explorer's working directory, or None.
+
+    Used only to choose where the pane opens, so a probe that cannot answer is
+    not an error -- the caller falls back to the working directory itself.
+    """
+    if not current_path:
+        return None
+    try:
+        repo_root, _error = _resolve_git_worktree_root(backend, current_path)
+    except Exception:
+        return None
+    return repo_root or None
+
+
+def _get_git_context(
+    backend: Any,
+    root_path: str,
+    current_path: str,
+) -> Tuple[Dict[str, Any], Dict[str, Dict[str, Any]]]:
+    """Return repository metadata and path statuses for an explorer directory."""
+    repo_root, detect_error = _resolve_git_worktree_root(backend, current_path)
+    if repo_root is None:
+        return _empty_explorer_git_context(detect_error), {}
+
     validation_error = backend.validate_repo_paths(repo_root, root_path, current_path)
     if validation_error:
         return _empty_explorer_git_context(validation_error), {}

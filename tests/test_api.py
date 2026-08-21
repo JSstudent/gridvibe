@@ -6010,6 +6010,113 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(parent_payload["path"], "")
         self.assertEqual(parent_payload["parent_path"], "")
 
+    def test_switch_terminal_to_explorer_roots_on_repo_below_launch_directory(self):
+        """The reported case: launch above a repo, cd into it, open the explorer.
+
+        The root becomes the *repository*, not the launch directory and not the
+        bare working directory -- so the Git sidebar has an anchor and the
+        reader can still navigate up to the repository root.
+        """
+        desktop = Path(self.temp_dir.name) / "desktop"
+        repo_dir = desktop / "project"
+        nested = repo_dir / "src"
+        nested.mkdir(parents=True)
+        self._run_git(repo_dir, "init")
+        session_id = self._create_local_terminal_session(desktop).session_id
+
+        with patch.object(api, "_resolve_live_terminal_cwd", return_value=str(nested)), patch.object(
+            api, "_close_ssh_connection"
+        ):
+            response = self.client.post(
+                f"/api/sessions/{session_id}/mode",
+                json={"startup_mode": "explorer", "refresh_cwd": True},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertNotIn("cwd_probe", payload)
+        updated = api.session_manager.get_session(session_id)
+        self.assertEqual(Path(updated.directory), nested.resolve())
+        self.assertEqual(Path(updated.explorer_root_directory), repo_dir.resolve())
+
+    def test_switch_terminal_to_explorer_does_not_widen_root_above_launch_directory(self):
+        """A pane launched inside a repository subdirectory keeps that floor."""
+        repo_dir = Path(self.temp_dir.name) / "project"
+        nested = repo_dir / "src"
+        nested.mkdir(parents=True)
+        self._run_git(repo_dir, "init")
+        session_id = self._create_local_terminal_session(nested).session_id
+
+        with patch.object(api, "_resolve_live_terminal_cwd", return_value=str(nested)), patch.object(
+            api, "_close_ssh_connection"
+        ):
+            response = self.client.post(
+                f"/api/sessions/{session_id}/mode",
+                json={"startup_mode": "explorer", "refresh_cwd": True},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        updated = api.session_manager.get_session(session_id)
+        self.assertEqual(Path(updated.directory), nested.resolve())
+        self.assertEqual(Path(updated.explorer_root_directory), nested.resolve())
+
+    def test_switch_terminal_to_explorer_reports_a_failed_cwd_probe(self):
+        """A probe that cannot answer is reported, not silently swallowed."""
+        desktop = Path(self.temp_dir.name) / "desktop"
+        (desktop / "project").mkdir(parents=True)
+        session_id = self._create_local_terminal_session(desktop).session_id
+
+        with patch.object(api, "_resolve_live_terminal_cwd", return_value=None), patch.object(
+            api, "_close_ssh_connection"
+        ):
+            response = self.client.post(
+                f"/api/sessions/{session_id}/mode",
+                json={"startup_mode": "explorer", "refresh_cwd": True},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        probe = response.get_json()["cwd_probe"]
+        self.assertTrue(probe["requested"])
+        self.assertFalse(probe["resolved"])
+        self.assertEqual(probe["reason"], "probe_failed")
+        # It names the directory the pane actually opened on.
+        self.assertEqual(Path(probe["directory"]), desktop.resolve())
+
+    def test_switch_agent_pane_to_explorer_never_probes_the_shell(self):
+        """The probe types at a prompt, and an agent pane has no prompt."""
+        desktop = Path(self.temp_dir.name) / "desktop"
+        desktop.mkdir(parents=True)
+        session_id = self._create_local_terminal_session(
+            desktop, startup_mode="agent", initial_command_mode="agent"
+        ).session_id
+
+        with patch.object(api, "_resolve_live_terminal_cwd") as probe, patch.object(
+            api, "_close_ssh_connection"
+        ):
+            response = self.client.post(
+                f"/api/sessions/{session_id}/mode",
+                json={"startup_mode": "explorer", "refresh_cwd": True},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        probe.assert_not_called()
+        self.assertEqual(response.get_json()["cwd_probe"]["reason"], "agent_pane")
+
+    def test_live_terminal_cwd_probe_refuses_an_agent_pane(self):
+        """The refusal lives at the probe too, not only at its one caller."""
+        desktop = Path(self.temp_dir.name) / "desktop"
+        desktop.mkdir(parents=True)
+        session_id = self._create_local_terminal_session(
+            desktop, startup_mode="agent", initial_command_mode="agent"
+        ).session_id
+        session = api.session_manager.get_session(session_id)
+        with api.connection_lock:
+            api.ssh_connections[session_id] = {"kind": "local", "shell_kind": "powershell"}
+
+        with patch.object(api, "_send_connection_input") as send_input:
+            self.assertIsNone(api._resolve_live_terminal_cwd(session_id, session))
+        send_input.assert_not_called()
+
     def test_local_stream_shutdown_after_explorer_switch_does_not_mark_error(self):
         repo_dir = Path(self.temp_dir.name) / "repo"
         repo_dir.mkdir()
@@ -6071,7 +6178,11 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(updated.host, "example.com")
         self.assertEqual(updated.username, "ubuntu")
         self.assertEqual(updated.directory, "/srv/app/src")
-        self.assertEqual(updated.explorer_root_directory, "/srv/app")
+        # A terminal pane carries no *configured* explorer root, so /srv/app was
+        # never a root anyone chose -- it was the launch directory wearing one.
+        # The pane now roots where it actually is, clamped so it can never widen
+        # above the launch directory.
+        self.assertEqual(updated.explorer_root_directory, "/srv/app/src")
         self.assertEqual(updated.startup_mode, "explorer")
         self.assertEqual(updated.status, api.SessionStatus.CONNECTED)
         client.close.assert_called_once()

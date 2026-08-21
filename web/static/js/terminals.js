@@ -6338,6 +6338,45 @@
         return replaced;
     }
 
+    /* A cwd probe that could not answer left the explorer on an assumed
+       directory. Report it in the pane rather than swallowing it: the silent
+       fallback to the launch directory is what made the same gesture open two
+       different roots on two different days. Informational, so it carries a
+       Dismiss and no retry -- the switch itself succeeded. */
+    function showExplorerCwdNotice(index, probe) {
+        const surface = document.getElementById(`explorer-${index}`);
+        const bar = surface?.querySelector('.explorer-bar');
+        if (!surface || !bar) {
+            return;
+        }
+        document.getElementById(`explorer-cwd-bar-${index}`)?.remove();
+
+        const notice = document.createElement('div');
+        notice.id = `explorer-cwd-bar-${index}`;
+        notice.className = 'explorer-cwd-bar';
+
+        const message = document.createElement('span');
+        message.className = 'explorer-fs-bar-message';
+        message.setAttribute('role', 'status');
+        const opened = String(probe?.directory || '');
+        message.textContent = probe?.reason === 'agent_pane'
+            ? `This pane is running an agent, so its current directory was not read. Opened at ${opened}.`
+            : `The terminal did not answer where it is. Opened at ${opened}.`;
+        notice.appendChild(message);
+
+        const actions = document.createElement('span');
+        actions.className = 'explorer-fs-bar-actions';
+        const dismiss = document.createElement('button');
+        dismiss.type = 'button';
+        dismiss.className = 'explorer-fs-bar-action';
+        dismiss.textContent = 'Dismiss';
+        dismiss.addEventListener('click', () => notice.remove());
+        actions.appendChild(dismiss);
+        notice.appendChild(actions);
+
+        bar.insertAdjacentElement('afterend', notice);
+    }
+
     async function switchSessionPaneMode(index) {
         const sessionId = sessionIds[index];
         const terminal = terminals[index];
@@ -6371,6 +6410,8 @@
 
             if (!replaceSessionPaneMode(index, data)) {
                 await initialLoad();
+            } else if (data.cwd_probe && data.cwd_probe.resolved === false) {
+                showExplorerCwdNotice(index, data.cwd_probe);
             }
         } catch (error) {
             console.error('[GridVibe Sessions] switchSessionPaneMode failed:', error);

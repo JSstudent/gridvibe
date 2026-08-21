@@ -375,7 +375,21 @@ def _normalize_probed_local_cwd(cwd: str, shell_kind: str) -> str:
 
 
 def _resolve_live_terminal_cwd(session_id: str, session: Any, timeout: float = 0.75) -> Optional[str]:
-    """Probe an active terminal shell for its current working directory."""
+    """Probe an active terminal shell for its current working directory.
+
+    Best effort by construction: the probe *types* a marker command at the
+    pane's prompt and reads the marker back out of the rolling output buffer,
+    so it answers only while the shell is idle. A caller that cannot act on
+    "unknown" must not use it.
+
+    An agent pane is refused outright. There is no shell prompt behind a
+    running agent, so the probe line would be typed into the agent's own input
+    box -- observation must never write something the user did not ask for.
+    """
+    if str(getattr(session, "startup_mode", "") or "") == "agent":
+        logger.debug("Skipping terminal cwd probe for agent pane %s", session_id)
+        return None
+
     with connection_lock:
         connection = ssh_connections.get(session_id)
 

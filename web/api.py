@@ -95,10 +95,12 @@ from web.explorer import (  # noqa: F401 - some names re-exported for backwards 
     _append_deleted_git_entries,
     _attach_git_status_to_entries,
     _clean_git_entry_status,
+    _configured_explorer_root_directory,
     _evict_all_pooled_ssh_clients,
     _evict_pooled_ssh_client,
     _explorer_backend,
     _explorer_content_looks_binary,
+    _explorer_cwd_repo_root,
     _explorer_image_mimetype,
     _explorer_root_directory,
     _fs_root_revision,
@@ -121,6 +123,8 @@ from web.explorer import (  # noqa: F401 - some names re-exported for backwards 
     _is_markdown_file,
     _is_remote_explorer_session,
     _is_tail_preview_file,
+    _local_path_inside,
+    _LocalExplorerBackend,
     _release_ssh_sftp,
     _remote_explorer_root_directory,
     _remote_is_directory,
@@ -128,9 +132,11 @@ from web.explorer import (  # noqa: F401 - some names re-exported for backwards 
     _remote_path_inside,
     _render_markdown_preview,
     _resolve_explorer_candidate_path,
+    _resolve_explorer_open_root,
     _resolve_pane_terminal_directory,
     _resolve_remote_explorer_candidate_path,
     _sftp_request_error_types,
+    _SftpExplorerBackend,
     get_explorer_file_payload,
     get_explorer_file_preview_payload,
     get_explorer_file_state_payload,
@@ -2834,6 +2840,41 @@ def change_session_shell(session_id: str):
     return jsonify(session_manager.get_session(session_id).to_dict())
 
 
+def _refresh_pane_cwd(session_id: str, session: Any, requested: bool) -> Dict[str, Any]:
+    """Ask a live terminal where it is, and report whether it answered.
+
+    Observation is best effort, so the answer has to carry its own outcome: a
+    probe that could not run left the caller on an *assumed* directory, and
+    silently falling back to the launch directory is what makes the same
+    gesture open two different roots on two different days.
+
+    An agent pane is never probed. The probe types a command into the pane's
+    shell, and on an agent pane there is no shell prompt to type it at -- the
+    line lands in the agent's input box instead.
+    """
+    outcome: Dict[str, Any] = {
+        "requested": requested,
+        "resolved": False,
+        "reason": "",
+        "directory": "",
+    }
+    if not requested:
+        return outcome
+
+    if str(getattr(session, "startup_mode", "") or "") == "agent":
+        outcome["reason"] = "agent_pane"
+        return outcome
+
+    resolved = _resolve_live_terminal_cwd(session_id, session)
+    if not resolved:
+        outcome["reason"] = "probe_failed"
+        return outcome
+
+    outcome["resolved"] = True
+    outcome["directory"] = resolved
+    return outcome
+
+
 @app.route('/api/sessions/<session_id>/mode', methods=['POST'])
 def change_session_mode(session_id: str):
     """Switch one pane between terminal, file explorer, and browser modes."""
@@ -2881,8 +2922,10 @@ def change_session_mode(session_id: str):
 
     if target_mode == "explorer":
         requested_directory = data.get("directory")
-        if data.get("refresh_cwd"):
-            requested_directory = _resolve_live_terminal_cwd(session_id, session) or requested_directory
+        cwd_probe = _refresh_pane_cwd(session_id, session, bool(data.get("refresh_cwd")))
+        if cwd_probe["directory"]:
+            requested_directory = cwd_probe["directory"]
+        launch_directory = session.directory
         next_directory = session.directory
         root_directory = ""
 
@@ -2890,7 +2933,7 @@ def change_session_mode(session_id: str):
             if requested_directory:
                 next_directory = _remote_path_clean(requested_directory)
             next_directory = _remote_path_clean(next_directory or "/")
-            root_candidate = _remote_explorer_root_directory(session) or next_directory
+            configured_root = _remote_path_clean(_configured_explorer_root_directory(session))
             client = None
             sftp = None
             try:
@@ -2898,14 +2941,25 @@ def change_session_mode(session_id: str):
                 next_directory = sftp.normalize(next_directory)
                 if not _remote_is_directory(sftp, next_directory):
                     raise ValueError("Explorer root directory does not exist")
-                try:
-                    root_directory = sftp.normalize(root_candidate)
-                    root_is_valid = _remote_is_directory(sftp, root_directory)
-                except OSError:
-                    root_directory = next_directory
-                    root_is_valid = False
-                if not root_is_valid or not _remote_path_inside(root_directory, next_directory):
-                    root_directory = next_directory
+                if configured_root:
+                    try:
+                        configured_root = sftp.normalize(configured_root)
+                        if not _remote_is_directory(sftp, configured_root):
+                            configured_root = ""
+                    except OSError:
+                        configured_root = ""
+                repo_root = None
+                if not (configured_root and _remote_path_inside(configured_root, next_directory)):
+                    repo_root = _explorer_cwd_repo_root(
+                        _SftpExplorerBackend(session, client, sftp), next_directory
+                    )
+                root_directory = _resolve_explorer_open_root(
+                    configured_root,
+                    next_directory,
+                    _remote_path_clean(launch_directory or ""),
+                    repo_root,
+                    contains=_remote_path_inside,
+                )
             except ValueError as exc:
                 return jsonify({"error": str(exc)}), 400
             except _sftp_request_error_types() as exc:
@@ -2926,18 +2980,28 @@ def change_session_mode(session_id: str):
             if not next_directory or not os.path.isdir(next_directory):
                 return jsonify({"error": "Explorer root directory does not exist"}), 400
 
-            root_directory = _explorer_root_directory(session) or next_directory
-            root_directory = os.path.realpath(os.path.abspath(os.path.expanduser(root_directory)))
             next_directory = os.path.realpath(os.path.abspath(os.path.expanduser(next_directory)))
-            try:
-                common_path = os.path.commonpath([root_directory, next_directory])
-            except ValueError:
-                common_path = ""
-            if (
-                not os.path.isdir(root_directory)
-                or os.path.normcase(common_path) != os.path.normcase(root_directory)
-            ):
-                root_directory = next_directory
+            configured_root = _configured_explorer_root_directory(session)
+            if configured_root:
+                configured_root = os.path.realpath(
+                    os.path.abspath(os.path.expanduser(configured_root))
+                )
+                if not os.path.isdir(configured_root):
+                    configured_root = ""
+            if launch_directory:
+                launch_directory = os.path.realpath(
+                    os.path.abspath(os.path.expanduser(str(launch_directory)))
+                )
+            repo_root = None
+            if not (configured_root and _local_path_inside(configured_root, next_directory)):
+                repo_root = _explorer_cwd_repo_root(_LocalExplorerBackend(session), next_directory)
+            root_directory = _resolve_explorer_open_root(
+                configured_root,
+                next_directory,
+                str(launch_directory or ""),
+                repo_root,
+                contains=_local_path_inside,
+            )
 
             session_manager.update_session_metadata(
                 session_id,
@@ -2955,7 +3019,18 @@ def change_session_mode(session_id: str):
         session_manager.update_session_status(session_id, SessionStatus.CONNECTED)
         _close_ssh_connection(session_id, clear_buffer=True)
         _broadcast_session_status(session_id)
-        return jsonify(session_manager.get_session(session_id).to_dict())
+        payload = session_manager.get_session(session_id).to_dict()
+        if cwd_probe["requested"] and not cwd_probe["resolved"]:
+            # The probe could not answer, so the pane opened on an assumed
+            # directory. Say so, and say which one: the silent fallback to the
+            # launch directory is the flakiness ISSUE-2026-044 reports.
+            payload["cwd_probe"] = {
+                "requested": True,
+                "resolved": False,
+                "reason": cwd_probe["reason"],
+                "directory": next_directory,
+            }
+        return jsonify(payload)
 
     if not (_is_explorer_session(session) or _is_browser_session(session)):
         return jsonify(session.to_dict())

@@ -1,6 +1,6 @@
 # Working-Directory Hardening Plan
 
-Status: proposed — nothing in this document is implemented yet.
+Status: **stage 1 landed**; stages 2-4 proposed.
 Scope: ISSUE-2026-044 (explorer opens at the launch root, not the navigated
 directory) and ISSUE-2026-045 (a saved workspace restores an agent pane at the
 launch directory, not the one the agent was started in).
@@ -34,6 +34,10 @@ failure mode is silence, which is the flakiness in the report.
 ---
 
 ## 2. Evidence, per mechanism
+
+*Recorded against the code as it stood when this plan was written. §2.2 and the
+silent-failure half of §2.1 are closed by stage 1 (see §5); §2.3 and §2.4 still
+stand.*
 
 ### 2.1 The cwd probe is a keystroke injection with a 0.75 s deadline
 
@@ -243,6 +247,10 @@ of `floor`, else `candidate`. Three consequences, all intended:
   root above the directory the user selected in the launcher.
 - A cwd that has left the launch directory entirely re-roots exactly as today.
 
+*Stage 1 implements this resolution in
+`_resolve_explorer_open_root()` (`web/explorer.py`), for both the local and the
+SSH half of the mode switch.*
+
 `configured_root` requires distinguishing an explicit root from a derived one.
 Today `explorer_root_directory` is `None` for a terminal pane and is filled in by
 every explorer→terminal round trip (`_resolve_pane_terminal_directory`,
@@ -278,7 +286,7 @@ and this fixes the residual one — an explorer deliberately opened above a repo
 Each stage is independently shippable and independently valuable. Stage 1 alone
 closes the flakiness; stage 2 is the machinery; stages 3-4 finish the contract.
 
-### Stage 1 — Stop pinning, stop lying (no new machinery)
+### Stage 1 — Stop pinning, stop lying (no new machinery) — **LANDED**
 
 | Change | Files |
 | --- | --- |
@@ -292,6 +300,112 @@ is a repo below the launch directory roots at the repo; a pane with a configured
 root still pins (`test_switch_roundtrip_preserves_explorer_root_for_parent_navigation`
 must pass untouched); a failed probe returns an observable outcome instead of a
 silent launch-directory root.
+
+#### What was done
+
+**`web/explorer.py`**
+
+- `_configured_explorer_root_directory(session)` — reads **only**
+  `explorer_root_directory`, with no fallback to `session.directory`. This is the
+  split: `_explorer_root_directory()` keeps its fallback (an explorer pane
+  resolving paths still needs one), while everything deciding *where an explorer
+  opens* asks the configured-only accessor, so a pin belongs to a root someone
+  really chose.
+- `_local_path_inside(root, candidate)` — the `commonpath` + `normcase`
+  containment check that was written inline in the mode switch, extracted so both
+  path flavours are one predicate each (`_remote_path_inside` is the remote one).
+- `_resolve_explorer_open_root(configured_root, observed_cwd, launch_directory,
+  repo_root, *, contains)` — §4.3 as one path-flavour-agnostic policy function.
+  The clamp is expressed as `contains(candidate, floor) and not contains(floor,
+  candidate)`, so an inclusive `contains` gives "strict ancestor" without a
+  second equality predicate per flavour.
+- `_resolve_git_worktree_root(backend, path)` — the `rev-parse --show-toplevel
+  --is-inside-work-tree` half of `_get_git_context()`, lifted out and returning
+  `(repo_root | None, probe_error | None)`. `_get_git_context()` now calls it, so
+  the sidebar's anchor question and the open-root question have one
+  implementation rather than two spellings of the same `rev-parse`.
+- `_explorer_cwd_repo_root(backend, path)` — the open-root caller's wrapper: a
+  probe that cannot answer is not an error here, it just means "no repo", so the
+  caller falls back to the working directory.
+
+**`web/api.py`**
+
+- `_refresh_pane_cwd(session_id, session, requested)` — one helper that both
+  performs the probe and reports its outcome (`requested` / `resolved` /
+  `reason`). An agent pane returns `reason="agent_pane"` **without probing**.
+- `change_session_mode()`'s explorer branch, both the SSH and the local half,
+  now resolve `configured_root` → validate it exists → probe for the cwd's
+  worktree root **only when no configured root holds the cwd** (so the common
+  pinned case costs no `git`, and the SSH case costs no extra exec channel) →
+  `_resolve_explorer_open_root(...)`. The old
+  `_explorer_root_directory(session) or next_directory` expression and its
+  inline containment check are gone from both halves.
+- The response is now `to_dict()` **plus** `cwd_probe` when a requested probe did
+  not resolve, carrying the reason and the directory the pane actually opened on.
+
+**`web/terminal_io.py`**
+
+- `_resolve_live_terminal_cwd()` refuses an agent pane at the top and logs at
+  DEBUG. The refusal lives at the probe, not only at its caller, because the
+  probe *types into the pane* — on an agent pane the marker command would land in
+  the agent's input box.
+
+**`web/static/js/terminals.js` + `web/static/css/terminals.css`**
+
+- `showExplorerCwdNotice(index, probe)` paints a dismissible in-pane bar under
+  the explorer bar naming the directory the pane opened on. Informational, so it
+  carries a Dismiss and no retry — the mode switch itself succeeded. It is a
+  `role="status"` element in the pane, never `showGridVibeNotice()`.
+- `.explorer-cwd-bar` joins the `.explorer-fs-bar` selector list and restates
+  nothing but its tone (`--explorer-text` instead of `--gv-danger`), per the
+  styling guardrail on reusing a rule rather than copying its declarations.
+
+**`tests/test_api.py`** — five new cases:
+`…roots_on_repo_below_launch_directory` (the reported case: launch above a repo,
+cd into `repo/src`, root becomes `repo`),
+`…does_not_widen_root_above_launch_directory` (launched inside `repo/src`, the
+root stays `repo/src`), `…reports_a_failed_cwd_probe`,
+`…switch_agent_pane_to_explorer_never_probes_the_shell`, and
+`test_live_terminal_cwd_probe_refuses_an_agent_pane`. Full suite green (1873
+tests) and `ruff` clean.
+
+#### Behaviour change to be aware of
+
+One existing expectation moved, and it is the intended consequence of §4.3
+rather than an incidental one:
+`test_switch_ssh_terminal_pane_to_explorer_preserves_host` asserted that a
+terminal pane launched at `/srv/app` and switched to the explorer at
+`/srv/app/src` rooted at `/srv/app`. That root was the launch directory wearing a
+root's clothes — exactly the manufactured pin this stage removes — so the pane
+now roots at `/srv/app/src`. The test's own subject (host/username preservation)
+is untouched; only the root assertion changed, with a comment saying why.
+
+The cost, stated rather than hidden: when the working directory is **not** in a
+repository, the root is the working directory itself, so the reader cannot
+navigate up to the launch directory the way they could before. §4.3 chose this
+deliberately (the repo-root case is what preserves upward navigation where it
+matters), but it is the one place where stage 1 takes something away. If that
+turns out to be the wrong trade, the fix is local: give
+`_resolve_explorer_open_root()` a `repo_root or launch-directory-if-it-contains-
+the-cwd` candidate instead of `repo_root or observed_cwd`.
+
+#### Deliberately *not* done in stage 1
+
+- No `current_directory` field, no OSC parsing, no prompt hook — the probe is
+  still the marker-injection one, still best effort, and still the only source.
+  It is now *honest* about failing rather than silent, which is what closes the
+  flakiness; stage 2 is what removes the failure mode.
+- `_explorer_root_directory()` and `_remote_explorer_root_directory()` keep their
+  fallback to `session.directory`, because every other explorer consumer resolves
+  paths for a pane that *is* an explorer, where the fallback is right.
+- D2 is still open. Stage 1's `configured_root` is "the pane carries a non-empty
+  `explorer_root_directory`", which is true for a Local Repository pane and for
+  any pane that has round-tripped explorer → terminal → explorer. Distinguishing
+  a *user-chosen* root from one back-filled by `_resolve_pane_terminal_directory()`
+  is still stage 3's job.
+- Stage 4's Git anchor is untouched: an explorer deliberately opened **above** a
+  repository still has no sidebar. Stage 1 only stops the explorer from being
+  opened above one by accident.
 
 ### Stage 2 — Live working-directory tracking
 
