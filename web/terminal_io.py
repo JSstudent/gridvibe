@@ -661,6 +661,28 @@ def _drain_until_prompt(
         time.sleep(0.1)
 
 
+def _startup_directories(session: Any) -> Tuple[str, str]:
+    """Return ``(target, fallback)`` for the startup sequence's ``cd``.
+
+    D3: a pane comes back where it *was*, not where it started. A reconnected
+    SSH pane whose shell dropped, and a restored one whose snapshot already
+    carries the observed directory, both replay the same value -- deciding it
+    only for one of them would leave a reconnect and a restore of the same pane
+    disagreeing about which directory they replay.
+
+    A directory that no longer resolves is the new failure mode this trade
+    buys, so the launch directory rides along as the fallback and the ``cd``
+    itself is written to try the second when the first fails. ``fallback`` is
+    empty when there is nothing to fall back to -- either the pane was never
+    observed, or the observation is the launch directory anyway.
+    """
+    launch_directory = str(getattr(session, "directory", "") or "")
+    observed = str(getattr(session, "current_directory", "") or "").strip()
+    if not observed or observed == launch_directory:
+        return launch_directory, ""
+    return observed, launch_directory
+
+
 def _run_startup_sequence(connection: Dict[str, Any], session: Any):
     """Change into the target directory and optionally run an initial command."""
     shell_kind = connection.get("shell_kind")
@@ -689,18 +711,38 @@ def _run_startup_sequence(connection: Dict[str, Any], session: Any):
         )
         time.sleep(0.15)
 
-    if session.directory and not connection.get("launch_cwd_applied"):
-        target_directory = _normalize_local_directory(session.directory, shell_kind)
+    startup_directory, fallback_directory = _startup_directories(session)
+    if startup_directory and not connection.get("launch_cwd_applied"):
+        target_directory = _normalize_local_directory(startup_directory, shell_kind)
+        fallback_target = (
+            _normalize_local_directory(fallback_directory, shell_kind)
+            if fallback_directory
+            else ""
+        )
         if shell_kind == "cmd":
             escaped_directory = target_directory.replace('"', '""')
-            _send_connection_input(connection, f'cd /d "{escaped_directory}"{newline}')
+            command = f'cd /d "{escaped_directory}"'
+            if fallback_target:
+                escaped_fallback = fallback_target.replace('"', '""')
+                command = f'{command} 2>nul || cd /d "{escaped_fallback}"'
         elif shell_kind == "powershell":
-            _send_connection_input(
-                connection,
-                f"Set-Location -LiteralPath {_powershell_single_quote(target_directory)}{newline}",
-            )
+            quoted = _powershell_single_quote(target_directory)
+            command = f"Set-Location -LiteralPath {quoted}"
+            if fallback_target:
+                # `Test-Path` rather than a trailing `-ErrorAction`: a failed
+                # Set-Location writes a red error into the pane before the
+                # fallback runs, and the pane's first line should not look
+                # like the reconnect broke.
+                command = (
+                    f"if (Test-Path -LiteralPath {quoted}) {{ {command} }}"
+                    f" else {{ Set-Location -LiteralPath"
+                    f" {_powershell_single_quote(fallback_target)} }}"
+                )
         else:
-            _send_connection_input(connection, f"cd {shlex.quote(target_directory)}{newline}")
+            command = f"cd {shlex.quote(target_directory)}"
+            if fallback_target:
+                command = f"{command} 2>/dev/null || cd {shlex.quote(fallback_target)}"
+        _send_connection_input(connection, f"{command}{newline}")
         time.sleep(0.15)
 
     startup_command = _compose_agent_startup_command(session)
@@ -1127,6 +1169,18 @@ def _track_terminal_agent_input(
         if not detected:
             continue
         agent_selection, initial_command = detected
+        # Promotion is the one moment GridVibe knows where the agent is being
+        # started: the shell is still at its prompt, and a beat later the agent
+        # owns the terminal and emits no prompt of its own. Stamp the observed
+        # directory into the observation slot -- never the launch slot, which
+        # keeps meaning "where this pane started" -- so a Save Workspace taken
+        # while the agent runs restores it in the directory it was started in
+        # (ISSUE-2026-045). The probe is deliberately not allowed: it types at
+        # a prompt the agent is about to take over.
+        observed_directory, observed_source = effective_directory(session_id, session)
+        promotion_updates: Dict[str, Any] = {}
+        if observed_source != CWD_SOURCE_LAUNCH and observed_directory:
+            promotion_updates["current_directory"] = observed_directory
         updated = session_manager.update_session_metadata(
             session_id,
             startup_mode="agent",
@@ -1134,6 +1188,7 @@ def _track_terminal_agent_input(
             agent_selection=agent_selection,
             custom_agent="",
             initial_command=initial_command,
+            **promotion_updates,
         )
         if updated:
             logger.info(
@@ -1275,16 +1330,21 @@ def _connect_local_session(session_id: str, session: Any):
     try:
         resolved_distribution = _resolve_wsl_distribution(session)
         shell_kind = _local_shell_kind(session)
+        # D3: a restarted local pane comes back where it was, not where it
+        # started. Both spawn paths take the same answer, and a directory that
+        # has since disappeared falls through to `_run_startup_sequence`, whose
+        # `cd` carries the launch directory as its fallback.
+        startup_directory, _fallback_directory = _startup_directories(session)
         wsl_startup_directory = ""
-        if shell_kind == "wsl" and session.directory:
-            wsl_startup_directory = _normalize_local_directory(session.directory, shell_kind)
+        if shell_kind == "wsl" and startup_directory:
+            wsl_startup_directory = _normalize_local_directory(startup_directory, shell_kind)
 
         command = _build_local_command(
             session,
             resolved_distribution=resolved_distribution,
             startup_directory=wsl_startup_directory,
         )
-        launch_cwd = _resolve_local_launch_cwd(session.directory, shell_kind)
+        launch_cwd = _resolve_local_launch_cwd(startup_directory, shell_kind)
         command, shell_environment = _local_shell_integration(
             shell_kind, command, dict(os.environ)
         )

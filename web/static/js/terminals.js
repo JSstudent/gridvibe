@@ -2447,9 +2447,15 @@
         const commandMode = startupMode === 'agent'
             ? 'agent'
             : (startupMode === 'explorer' || startupMode === 'browser' ? startupMode : 'command');
+        /* Where the pane *is*, not where it started: `current_directory` is the
+           observed value (null until something actually observed it), and a
+           saved preset that replays the launch directory is what brought an
+           agent back in the wrong place. An explorer pane keeps answering with
+           its root, which is the boundary a relaunch has to reproduce. */
+        const liveDirectory = session.current_directory || session.directory || '';
         const selectedDirectory = startupMode === 'explorer'
-            ? (session.explorer_root_directory || session.directory || '')
-            : (session.directory || '');
+            ? (session.explorer_root_directory || liveDirectory)
+            : liveDirectory;
         const explorerSlot = startupMode === 'explorer' && terminal ? terminals.indexOf(terminal) : -1;
         if (explorerSlot !== -1) {
             /* Fold the shown tab's live mode + scroll into its record so the

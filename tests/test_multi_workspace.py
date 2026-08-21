@@ -557,6 +557,83 @@ class MultiWorkspacePersistenceTestCase(unittest.TestCase):
         stored = json.loads(self.state_path.read_text(encoding="utf-8"))["workspaces"]
         self.assertIn(self.WORKSPACE_A, stored)
 
+    def test_a_runtime_promoted_agent_is_captured_where_it_was_started(self):
+        """ISSUE-2026-045: the mode came back right and the place came back wrong.
+
+        The pane launched at ``/srv/app``, the user ``cd``ed into ``api`` and
+        typed ``codex``. Promotion is the one moment the shell is still at a
+        prompt, so that is where the working directory is stamped -- and the
+        snapshot replays it instead of the launch directory.
+        """
+        self._group("group-a", self.WORKSPACE_A, "secret-a")
+        session = api.session_manager.get_group_sessions("group-a")[0]
+        connection = {"kind": "ssh", "shell_kind": "posix"}
+
+        # The prompt hook reported the new directory before the agent took over.
+        web_terminal_io._observe_terminal_output_cwd(
+            session.session_id, connection, "\x1b]7;file://box/srv/app/api\x1b\\"
+        )
+        with patch.object(web_terminal_io, "_broadcast_session_status"):
+            web_terminal_io._track_terminal_agent_input(
+                session.session_id, connection, "codex\r"
+            )
+
+        promoted = api.session_manager.get_session(session.session_id)
+        self.assertEqual(promoted.startup_mode, "agent")
+        # The launch slot still says where the pane started.
+        self.assertEqual(promoted.directory, "/srv/app")
+        self.assertEqual(promoted.current_directory, "/srv/app/api")
+
+        web_runtime_state.capture_workspace(
+            api.session_manager, workspace_id=self.WORKSPACE_A, origin="manual"
+        )
+        slot = web_runtime_state.load_restorable_workspace(self.WORKSPACE_A)
+        captured = slot["groups"][0]["sessions"][0]
+
+        # The replayable launch config -- what a restore `cd`s to -- is where
+        # the agent was started, and the persisted shape gained no new key.
+        self.assertEqual(captured["directory"], "/srv/app/api")
+        self.assertEqual(captured["startup_mode"], "agent")
+        self.assertNotIn("current_directory", captured)
+        self.assertNotIn("explorer_root_configured", captured)
+
+    def test_a_pane_that_never_moved_is_captured_at_its_launch_directory(self):
+        """An absent observation is not an excuse to invent one."""
+        self._group("group-a", self.WORKSPACE_A, "secret-a")
+
+        web_runtime_state.capture_workspace(
+            api.session_manager, workspace_id=self.WORKSPACE_A, origin="manual"
+        )
+
+        slot = web_runtime_state.load_restorable_workspace(self.WORKSPACE_A)
+        self.assertEqual(slot["groups"][0]["sessions"][0]["directory"], "/srv/app")
+
+    def test_a_restored_pane_comes_back_in_the_directory_it_was_captured_in(self):
+        """The whole round trip, not just the half the capture owns."""
+        self._group("group-a", self.WORKSPACE_A, "secret-a")
+        session = api.session_manager.get_group_sessions("group-a")[0]
+        api.session_manager.update_session_metadata(
+            session.session_id, current_directory="/srv/app/api"
+        )
+        web_runtime_state.capture_workspace(
+            api.session_manager, workspace_id=self.WORKSPACE_A, origin="manual"
+        )
+        api.session_manager.reset_sessions()
+        api.session_manager.create_workspace("Alpha", self.WORKSPACE_A)
+
+        with patch.object(api.socketio, "start_background_task"):
+            response = api.app.test_client().post(
+                "/api/runtime-state/restore",
+                json={"workspace_ids": [self.WORKSPACE_A]},
+            )
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        group = api.session_manager.get_workspace_groups(self.WORKSPACE_A)[0]
+        restored = api.session_manager.get_group_sessions(group.group_id)[0]
+        self.assertEqual(restored.directory, "/srv/app/api")
+        # A restored pane has been observed by nothing yet.
+        self.assertIsNone(restored.current_directory)
+
     def test_a_legacy_v2_manual_slot_keeps_its_pin_through_migration(self):
         """Files written before the split only carry origin="manual"."""
         self.state_path.write_text(

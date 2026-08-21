@@ -1,6 +1,6 @@
 # Working-Directory Hardening Plan
 
-Status: **stages 1-2 landed**; stages 3-4 proposed.
+Status: **stages 1-3 landed**; stage 4 proposed.
 Scope: ISSUE-2026-044 (explorer opens at the launch root, not the navigated
 directory) and ISSUE-2026-045 (a saved workspace restores an agent pane at the
 launch directory, not the one the agent was started in).
@@ -601,7 +601,7 @@ clean.
   deliberately opened *above* a repository still has no sidebar.
 - No `psutil` and no `ctypes` PEB read — see D1, now decided.
 
-### Stage 3 — Persist the place
+### Stage 3 — Persist the place — **LANDED**
 
 | Change | Files |
 | --- | --- |
@@ -616,6 +616,173 @@ subdirectory captures and restores there; `tests/test_api.py` — a split of a
 navigated terminal starts in the navigated directory;
 `tests/test_session_persistence_contract.py` must pass untouched, because the
 persisted shape does not change.
+
+#### What was done
+
+**`sessions/manager.py`**
+
+- `TerminalSession.explorer_root_configured: Optional[bool] = None` plus a
+  `__post_init__` that resolves an unstated flag from the root itself. That is
+  what makes D2 hold at the seam rather than at one caller: every
+  *construction* path — the launcher, a saved preset, a restored snapshot, and
+  `create_session()` called directly — takes its root from a launch config, so
+  a root present at build time is a chosen one. A **derived** root only ever
+  arrives later, through `update_session_metadata`, which states `False`
+  explicitly. Deriving it in `_session_launch_fields()` instead would have left
+  every other construction path silently answering "not configured", which is
+  exactly the bug the flag exists to prevent.
+- The flag is in `to_dict()` and the metadata allowlist, and deliberately
+  **not** in `_SESSION_SNAPSHOT_FIELDS` — see the snapshot note below.
+- `merge_browser_tabs()` clears `current_directory`. The pane's shell is
+  closing behind that switch, so its last report stops being an observation of
+  anything live, and a browser pane never navigates the filesystem, so nothing
+  would replace it.
+
+**`web/explorer.py`**
+
+- `_configured_explorer_root_directory()` now answers only when the flag is
+  set. Its docstring names both ways a root can be manufactured: the
+  `session.directory` fallback stage 1 removed, and the resolved root the mode
+  switch has to *store* because the live explorer needs a confinement
+  boundary — which is the one this stage closes.
+- `_resolve_pane_terminal_directory()` stops back-filling. A pane leaving
+  explorer or browser mode is handed the root it was confined to only when that
+  root was configured; otherwise it leaves with none, and the next switch
+  re-derives from where the pane actually is. It still hands back the
+  *resolved* form of a configured root rather than the raw stored string, so
+  the value a round trip stores does not change shape.
+
+**`web/api.py`**
+
+- Both halves of the terminal→explorer switch record `explorer_root_configured`
+  alongside the root they store: `bool(configured_root)`, so a pin belongs to
+  the resolution that pinned rather than to the fact that a root got written.
+- The explorer/browser→terminal switch stores the configured root and its flag
+  together.
+- Every mode switch clears `current_directory`. Nothing is lost — the directory
+  the observation named is what `directory` now holds — and leaving it set would
+  put a dead shell's report into the next snapshot's `directory` slot.
+- `split_session()` clones where the pane *is*: `effective_directory()` for a
+  terminal pane, and the existing `_resolve_pane_terminal_directory()` branch
+  for an explorer or browser pane. It inherits the source pane's root only when
+  that root was configured. The probe is not allowed — a split must not type at
+  the pane it is cloning.
+- `_refresh_pane_cwd()`'s `requested` now gates the **probe**, not the
+  question. Reading an observation the pane already produced costs nothing and
+  writes nothing, so a mode switch that did not ask for a refresh no longer
+  falls back to an assumption it had no reason to prefer. Only `requested`
+  outcomes are reported to the client, so the payload is unchanged.
+
+**`web/terminal_io.py`**
+
+- `_track_terminal_agent_input()` stamps the observed directory at promotion.
+  That is the one moment GridVibe knows where the agent is being started: the
+  shell is still at its prompt, and a beat later the agent owns the terminal
+  and emits no prompt of its own. It writes `current_directory`, never
+  `directory` — the launch slot keeps meaning "where this pane started" (§4.1)
+  — and it writes nothing at all when the source is `CWD_SOURCE_LAUNCH`, because
+  an assumption is not an observation. The probe is not allowed, for the same
+  reason as the split.
+- `_startup_directories(session)` → `(target, fallback)` is D3, and both spawn
+  paths take it: `_run_startup_sequence()`'s `cd` and `_connect_local_session`'s
+  spawn `cwd`. The `cd` is written to try the second when the first fails —
+  `cd A 2>/dev/null || cd B` for POSIX, `cd /d "A" 2>nul || cd /d "B"` for cmd,
+  and a `Test-Path` branch for PowerShell rather than a trailing
+  `-ErrorAction`, because a failed `Set-Location` writes a red error into the
+  pane before the fallback runs and the first line of a reconnect should not
+  look like the reconnect broke. `fallback` is empty when there is nothing to
+  fall back to, so an unobserved pane sends exactly the line it always did.
+
+**`web/runtime_state.py`**
+
+- `_snapshot_session()` writes the observed directory into the existing
+  `directory` slot. It reads **only** `current_directory`, not
+  `effective_directory()`: this runs inside the runtime-state lock hold, and
+  the other two sources are an SSH exec channel and a keystroke at a prompt —
+  neither slow nor network work belongs under a shared lock (guardrail 2). An
+  absent observation falls back to the launch value exactly as before.
+- The persisted shape does not move: no new key, and
+  `explorer_root_configured` is deliberately absent, because a root that
+  reaches a launch config *is* one somebody chose and `__post_init__` says so
+  on the way back in. `tests/test_session_persistence_contract.py` passes
+  untouched.
+
+**`web/static/js/terminals.js`**
+
+- `buildWorkspaceTerminalEntry()` reads `session.current_directory ||
+  session.directory`. An explorer pane still answers with its root, which is
+  the boundary a relaunch has to reproduce.
+
+**Tests** — three in `tests/test_multi_workspace.py` (the ISSUE-2026-045 round
+trip end to end: hook reports `/srv/app/api`, `codex` promotes the pane, the
+capture replays `api` and not `app`, the persisted shape gains no key, and a
+restore lands there; plus an unobserved pane still captured at its launch
+directory). Ten in `tests/test_api.py`: a split of a navigated terminal and of
+an unobserved one, both halves of D2 (a derived root re-derives on the next
+switch, a configured root survives the round trip and still pins), the mode
+switch dropping a dead shell's report, three D3 cases including each Windows
+shell family's fallback form, and agent promotion both stamping and inventing
+nothing. Full suite green and `ruff` clean.
+
+#### Open decisions, decided
+
+- **D2 — recorded, with the recommendation's own proviso applied.** The
+  recommendation was the second option — the convention that
+  `explorer_root_directory` is written only when the user chose it, with no new
+  field — *"if and only if the round-trip behaviour it protects is genuinely
+  preserved"*. It is not, and the reason is structural rather than incidental:
+  the terminal→explorer switch **has** to store the root it resolved, because
+  the live explorer is confined to it, and once stored nothing downstream can
+  tell that root from one the user picked in the launcher. Dropping it on the
+  way out costs the launched-explorer round trip its root
+  (`test_switch_roundtrip_preserves_explorer_root_for_parent_navigation`);
+  keeping it re-manufactures exactly the pin stage 1 removed, one round trip
+  later. So the flag is explicit, as in the first option — but its stated cost
+  (a snapshot field and a migration default) is not paid: it is **live-only**,
+  and `__post_init__` re-establishes it from the presence of a root at every
+  construction. The persisted shape does not move and nothing needs migrating.
+  The residual, stated rather than hidden: a derived root that survives a
+  restart comes back configured, because a root carried through a snapshot is
+  one the workspace deliberately carries and re-deriving it would need the
+  pane's shell to be back and observed first, which it is not at launch time.
+- **D3 — the observed directory, falling back to the launch directory**, as
+  recommended, and the fallback is expressed in the `cd` itself rather than
+  checked beforehand: a remote path cannot be stat'd cheaply from here, and the
+  shell is already standing in the right place to answer. A reconnect and a
+  restore of the same pane now replay the same value, which is what deferring
+  the decision to this stage was for.
+
+#### Behaviour changes to be aware of
+
+- **A split of a navigated terminal starts in the navigated directory.** So
+  does a restored one, and a saved preset records it. This is the point of the
+  stage, and it is what closes ISSUE-2026-045.
+- **A terminal pane that round-trips through explorer mode no longer carries a
+  root out.** Switching it back to the explorer re-derives from where the pane
+  is, instead of pinning to wherever it was the first time. A pane launched as
+  a Local Repository or SSH explorer is unaffected — its root is configured and
+  still pins.
+- **A reconnected SSH pane `cd`s to the directory it was in.** If that
+  directory has since been removed, the same line falls back to the launch
+  directory rather than leaving the shell wherever `sshd` dropped it.
+- **A WSL pane's baked-in startup directory has no fallback.** `--cd` is an
+  argument, not a command, so `launch_cwd_applied` suppresses the `cd` that
+  carries the `||`. A WSL pane whose observed directory has vanished therefore
+  starts wherever `wsl.exe` decides to. Narrow, and the fix — dropping the
+  baked-in `--cd` for the observed case — would change every WSL pane's startup
+  timing, so it is deliberately not made here.
+
+#### Deliberately *not* done in stage 3
+
+- Stage 4's Git anchor is untouched, so an explorer deliberately opened *above*
+  a repository still has no sidebar. ISSUE-2026-044 stays open for that half;
+  ISSUE-2026-045 is closed.
+- `test_terminals_page_exposes_session_menu_actions` still asserts against
+  source text; its one touched line was re-expressed against the new
+  derivation rather than converted, because `buildWorkspaceTerminalEntry()` is
+  DOM-bound and a genuine behavioural conversion is the `terminals.js` split,
+  not this stage.
+- D4 is still stage 4's.
 
 ### Stage 4 — Decouple the Git anchor from the root
 
@@ -662,11 +829,13 @@ handing any stage back.
 *Done for stage 2: the §3 contract is in the Regression Guardrails of both
 `CLAUDE.md` and `AGENTS.md` (guardrail 4, Correctness), `README.md` has a
 **Shell integration** section under Configuration plus the new config key, and
-`CHANGELOG.md` carries the user-visible entry. `docs/testing_issues.md` is
-untouched: ISSUE-2026-044's second half is stage 4 and ISSUE-2026-045 is stage
-3, so neither is resolved yet. The configured-versus-derived amendment to the
-explorer-presentation contract waits for stage 3, which is where the
-distinction becomes real.*
+`CHANGELOG.md` carries the user-visible entry.*
+
+*Done for stage 3: the configured-versus-derived amendment is in the
+explorer-presentation contract of both `CLAUDE.md` and `AGENTS.md`, guardrail 4
+gained the persistence half of the rule, `CHANGELOG.md` carries the
+user-visible entry, and `docs/testing_issues.md` closes ISSUE-2026-045.
+ISSUE-2026-044 stays open: its second half — the Git anchor — is stage 4.*
 
 - `CLAUDE.md` **and** `AGENTS.md`: the §3 contract joins the Regression
   Guardrails — a new rule under *Correctness* ("a pane's working directory is
@@ -691,26 +860,25 @@ distinction becomes real.*
   verified emitting against a real shell; adding a C extension to the
   dependency set to corroborate a source that already answers is not a trade
   worth making. If it turns out to be, the seam is one function.
-- **D2 — How "configured root" is recorded.** *(stage 3 — still open.)* Either a new
-  `explorer_root_configured: bool` beside `explorer_root_directory` (explicit;
-  needs a snapshot field and a migration default of `False` for existing
-  records), or the convention that `explorer_root_directory` is written **only**
-  when the user chose it, with `_resolve_pane_terminal_directory()` no longer
-  back-filling it on the way out of explorer mode (no new field, but it changes a
-  round trip `tests/test_api.py:5972` pins). Recommendation: the second, with
-  that test re-expressed against the new rule if — and only if — the round-trip
-  behaviour it protects is genuinely preserved.
-- **D3 — Does reconnect use the launch directory or the last observed one?**
-  *(deferred to stage 3, deliberately: `_run_startup_sequence` sends the same
-  `cd` for a reconnect and for a restore, and stage 3 is where the persisted
-  directory changes. Deciding it now would put half the rule in place and leave
-  a reconnect and a restore of the same pane disagreeing about which directory
-  they replay.)*
-  Today `_run_startup_sequence` `cd`s to `directory`. Reconnecting a dropped SSH
-  pane into the directory the user was working in is almost certainly wanted;
-  reconnecting into a directory that no longer exists is a new failure mode.
-  Recommendation: the observed directory, falling back to the launch directory
-  when it no longer resolves.
+- **D2 — How "configured root" is recorded. DECIDED (stage 3): an explicit
+  live-only flag.** The recommendation was the no-new-field convention, under
+  the proviso that the round trip `tests/test_api.py:5972` pins stays genuinely
+  preserved — and it cannot be, because the terminal→explorer switch must store
+  the root it resolved for the live explorer to be confined to, after which
+  nothing can tell it from a chosen one. So `explorer_root_configured` is
+  explicit, as the first option had it; its stated cost is avoided by keeping
+  it **live-only** and re-establishing it in `TerminalSession.__post_init__`
+  from the presence of a root, so no snapshot field and no migration are
+  needed. `_resolve_pane_terminal_directory()` stops back-filling either way.
+  That test passes untouched. See stage 3's *Open decisions, decided*.
+- **D3 — Does reconnect use the launch directory or the last observed one?
+  DECIDED (stage 3): the observed one, falling back to the launch directory.**
+  As recommended. `_startup_directories()` answers for both spawn paths, and
+  the fallback is expressed in the `cd` itself (`cd A || cd B`, per shell
+  family) rather than checked beforehand — a remote path cannot be stat'd
+  cheaply from the server, and the shell is already standing in the right place
+  to answer. A reconnect and a restore of the same pane now replay the same
+  value, which is what deferring the decision to this stage was for.
 - **D4 — Should the explorer offer "Set root here"?** *(stage 4 — still open.)* Stage 4 makes the Git
   sidebar follow the browsed directory, which removes most of the need. A
   breadcrumb re-root would also give the user a way to *widen* a root, which is a

@@ -2682,8 +2682,15 @@ def split_session(session_id: str):
         }), 400
 
     host = source.host
-    directory = source.directory
-    root_directory = source.explorer_root_directory
+    # A terminal pane clones where it *is*, not where it started: splitting a
+    # navigated shell used to hand the new pane the launch directory. An
+    # explorer or browser pane falls into the branch below, which resolves the
+    # directory it is currently showing instead.
+    directory, _cwd_source = effective_directory(session_id, source)
+    directory = directory or source.directory
+    root_directory = (
+        source.explorer_root_directory if source.explorer_root_configured else ""
+    )
     startup_mode = source.startup_mode
 
     if _is_explorer_session(source) or _is_browser_session(source):
@@ -2868,6 +2875,12 @@ def _refresh_pane_cwd(session_id: str, session: Any, requested: bool) -> Dict[st
     pane's shell, and behind a running agent there is no prompt to type it at.
     It is observed like any other pane, though, so a pane that reported its
     directory before the agent started answers without a write.
+
+    ``requested`` gates the *probe*, not the question. Reading an observation
+    the pane already produced costs nothing and writes nothing, so a caller
+    that did not ask for a refresh still gets one rather than falling back to
+    an assumption it had no reason to prefer; only ``requested`` outcomes are
+    reported back to the client.
     """
     outcome: Dict[str, Any] = {
         "requested": requested,
@@ -2876,10 +2889,8 @@ def _refresh_pane_cwd(session_id: str, session: Any, requested: bool) -> Dict[st
         "directory": "",
         "source": "",
     }
-    if not requested:
-        return outcome
 
-    directory, source = effective_directory(session_id, session, allow_probe=True)
+    directory, source = effective_directory(session_id, session, allow_probe=requested)
     outcome["source"] = source
     if source == CWD_SOURCE_LAUNCH:
         outcome["reason"] = (
@@ -2989,7 +3000,16 @@ def change_session_mode(session_id: str):
             session_manager.update_session_metadata(
                 session_id,
                 directory=next_directory,
+                # The shell this pane was reading is being closed, so its last
+                # report is no longer an observation of anything live. The
+                # directory it named is what `directory` now holds.
+                current_directory=None,
                 explorer_root_directory=root_directory,
+                # The live explorer needs a confinement boundary either way, so
+                # the resolved root is always stored. The flag is what keeps a
+                # *derived* one from pinning the next switch to a directory
+                # nobody chose.
+                explorer_root_configured=bool(configured_root),
                 initial_command="",
                 startup_mode="explorer",
             )
@@ -3026,7 +3046,9 @@ def change_session_mode(session_id: str):
                 session_id,
                 host="File Explorer",
                 directory=next_directory,
+                current_directory=None,
                 explorer_root_directory=root_directory,
+                explorer_root_configured=bool(configured_root),
                 username="",
                 port=22,
                 password=None,
@@ -3067,7 +3089,15 @@ def change_session_mode(session_id: str):
 
     updates = {
         "directory": next_directory,
+        # A fresh shell starts at `next_directory`; whatever the pane's last
+        # shell reported is not an observation of this one.
+        "current_directory": None,
+        # `_resolve_pane_terminal_directory()` hands back the *configured* root
+        # or nothing at all, so a pane that never had a chosen root leaves
+        # explorer mode without one and the next switch re-derives from where
+        # the pane actually is.
         "explorer_root_directory": root_path,
+        "explorer_root_configured": bool(root_path),
         "initial_command": "",
         "initial_command_mode": "command",
         "startup_mode": "terminal",

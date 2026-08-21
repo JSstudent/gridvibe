@@ -72,6 +72,18 @@ class TerminalSession:
     use_powershell: bool = False
     startup_mode: str = "terminal"
     explorer_root_directory: Optional[str] = None
+    # True only when `explorer_root_directory` names a root somebody chose --
+    # a Local Repository/SSH explorer pane launched with one, a saved preset,
+    # or a restored snapshot. A root the terminal->explorer switch *derived*
+    # from where the pane happened to be sets this False, so it confines the
+    # live explorer without ever becoming a pin the next switch obeys. Read it
+    # through `_configured_explorer_root_directory()`, never directly.
+    #
+    # `None` means "not stated": every *construction* path takes its root from
+    # a launch config, a preset or a snapshot, so a root present at build time
+    # is a chosen one and __post_init__ says so. A derived root only ever
+    # arrives later, through `update_session_metadata`, which states False.
+    explorer_root_configured: Optional[bool] = None
     explorer_tree_open: bool = False
     explorer_git_open: bool = False
     explorer_search_open: bool = False
@@ -96,6 +108,13 @@ class TerminalSession:
     connected_at: Optional[float] = None
     error_message: Optional[str] = None
 
+    def __post_init__(self):
+        """Resolve the unstated configured-root flag from the root itself."""
+        if self.explorer_root_configured is None:
+            self.explorer_root_configured = bool(
+                str(self.explorer_root_directory or "").strip()
+            )
+
     def to_dict(self) -> dict:
         """Convert to dictionary."""
         return {
@@ -118,6 +137,7 @@ class TerminalSession:
             "use_powershell": self.use_powershell,
             "startup_mode": self.startup_mode,
             "explorer_root_directory": self.explorer_root_directory,
+            "explorer_root_configured": self.explorer_root_configured,
             "explorer_tree_open": self.explorer_tree_open,
             "explorer_git_open": self.explorer_git_open,
             "explorer_search_open": self.explorer_search_open,
@@ -968,6 +988,7 @@ class SessionManager:
             "use_powershell",
             "startup_mode",
             "explorer_root_directory",
+            "explorer_root_configured",
             "explorer_tree_open",
             "explorer_git_open",
             "explorer_search_open",
@@ -1042,6 +1063,12 @@ class SessionManager:
             session.username = ""
             session.port = 22
             session.password = None
+            # The pane's shell is closing behind this switch, so its last cwd
+            # report stops being an observation of anything live -- and a
+            # browser pane never navigates the filesystem, so nothing replaces
+            # it. Leaving it set would put a dead shell's directory into the
+            # snapshot's `directory` slot.
+            session.current_directory = None
             session.initial_command = resolved_url
             session.initial_command_mode = "browser"
             session.startup_mode = "browser"

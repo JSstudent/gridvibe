@@ -43,15 +43,24 @@ for the three independent mechanisms (`web/api.py:2929`, `web/explorer.py:99`,
 
 ### Proposed solution:
 `docs/working_directory_hardening.md`, stages 1, 2 and 4.
+Stages 1 and 2 have landed: a pane's working directory is now observed
+rather than assumed, and an explorer opened from a navigated terminal roots
+on the repository containing it. The remaining half is stage 4 -- the Git
+sidebar is still anchored on the explorer root, so an explorer deliberately
+opened *above* a repository shows no worktree, and navigating into one does
+not bring it back.
+
+## Closed Issues
 
 ### Issue ID: ISSUE-2026-045
 - Title: A saved workspace restores an agent pane at its launch directory, not the directory the agent was started in
 - Priority: High
-- Status: Open
+- Status: Closed
 - Area: `web/terminal_io.py`, `web/runtime_state.py`, `web/static/js/terminals.js`, `sessions/manager.py`
 - Assignee: Unassigned
 - Tags: `session`, `workspace`, `persistence`, `terminal`
 - Reported: 2026-08-21
+- Closed: 2026-08-21
 
 Description:
 `_track_terminal_agent_input()` promotes a pane to agent mode when a registered
@@ -75,10 +84,31 @@ Root-caused by code inspection; see `docs/working_directory_hardening.md` §2.4
 (`web/terminal_io.py:895`, `web/runtime_state.py:152`,
 `web/static/js/terminals.js:2451`).
 
-### Proposed solution:
+### Resolution:
 `docs/working_directory_hardening.md`, stages 2 and 3.
 
-## Closed Issues
+Stage 2 gave a pane a working directory it *observes* rather than assumes:
+`current_directory`, read out of an OSC 7 / OSC 9;9 prompt hook in the pane's
+own output (`web/terminal_cwd.py`), which keeps answering while an agent holds
+the terminal because the value stored is the one the shell reported just before
+the agent started.
+
+Stage 3 persisted it. `_track_terminal_agent_input()` stamps the observed
+directory at promotion -- the one moment the shell is still at a prompt --
+writing `current_directory` and never `directory`, which keeps meaning "where
+this pane started". `_snapshot_session()` writes that observation into the
+snapshot's existing `directory` slot, so a restore replays it and the persisted
+shape gained no new key. `buildWorkspaceTerminalEntry()` reads the same pair for
+Save Workspace, and `split_session()` clones where the pane is instead of where
+it started. D3 settled the matching reconnect question: a dropped pane
+reconnects into the observed directory with the launch directory carried as the
+`cd`'s own fallback, so a reconnect and a restore of the same pane replay the
+same value.
+
+Covered by `tests/test_multi_workspace.py`
+(`test_a_runtime_promoted_agent_is_captured_where_it_was_started` and the
+restore round trip beside it) and the split, promotion and reconnect cases in
+`tests/test_api.py`.
 
 ### Issue ID: ISSUE-2026-038
 - Title: A crashed TUI leaves mouse tracking on and types escape sequences at the prompt

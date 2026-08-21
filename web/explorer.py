@@ -106,14 +106,20 @@ def _explorer_root_directory(session: Any) -> str:
 
 
 def _configured_explorer_root_directory(session: Any) -> str:
-    """Return only a root the pane actually carries -- never a derived one.
+    """Return only a root somebody chose -- never a derived one.
 
-    A derived root is not a configured root: `_explorer_root_directory()` falls
-    back to `session.directory`, which for a pane launched as a *terminal*
-    manufactures a root nobody chose and then pins the explorer to it. Anything
-    deciding *where an explorer opens* asks this instead, so the pin belongs to
-    a root that was really configured.
+    A derived root is not a configured root, and there are two ways one can be
+    manufactured. `_explorer_root_directory()` falls back to
+    `session.directory`, which for a pane launched as a *terminal* invents a
+    root nobody picked; and the terminal->explorer switch has to *store* the
+    root it resolved, because the live explorer needs a confinement boundary,
+    which would otherwise let that resolved root pin the next switch. So the
+    stored root answers here only when `explorer_root_configured` says it came
+    from a launch config -- the launcher's own field, a saved preset, or a
+    restored snapshot. Anything deciding *where an explorer opens* asks this.
     """
+    if not getattr(session, "explorer_root_configured", False):
+        return ""
     return str(getattr(session, "explorer_root_directory", "") or "").strip()
 
 
@@ -3474,14 +3480,21 @@ def _resolve_pane_terminal_directory(session: Any, requested_directory: Any = ""
     splitting one of those panes into a terminal: both need the directory the
     pane is currently showing, resolved through the same root containment rules.
 
-    Returns ``(directory, explorer_root_directory)``. Raises ``ValueError`` for a
-    path the caller should report as a 400; SFTP/connection failures surface as
-    the types in ``_sftp_request_error_types()``.
+    Returns ``(directory, explorer_root_directory)``. The root handed back is
+    the *configured* one and never the root the pane was confined to: a pane
+    that never had a chosen root must not acquire one on the way out, or the
+    root the terminal->explorer switch derived from where the pane happened to
+    be would pin every later switch to a directory nobody picked. Raises
+    ``ValueError`` for a path the caller should report as a 400;
+    SFTP/connection failures surface as the types in
+    ``_sftp_request_error_types()``.
     """
+    configured = bool(_configured_explorer_root_directory(session))
+
     if _is_browser_session(session):
         # A browser pane never navigates the filesystem, so its recorded
         # directory is already the one the shell should start in.
-        return getattr(session, "directory", ""), _explorer_root_directory(session)
+        return getattr(session, "directory", ""), _configured_explorer_root_directory(session)
 
     if _is_remote_explorer_session(session):
         client = None
@@ -3495,12 +3508,12 @@ def _resolve_pane_terminal_directory(session: Any, requested_directory: Any = ""
             )
         finally:
             _release_ssh_sftp(session, client, sftp)
-        return selected_directory, root_path
+        return selected_directory, (root_path if configured else "")
 
     root_path, selected_directory = _resolve_explorer_candidate_path(session, requested_directory)
     if not os.path.isdir(selected_directory):
         raise ValueError("Selected explorer path is not a directory")
-    return selected_directory, root_path
+    return selected_directory, (root_path if configured else "")
 
 
 def _resolve_remote_explorer_paths(sftp: Any, session: Any, requested_path: Any = "") -> Tuple[str, str]:

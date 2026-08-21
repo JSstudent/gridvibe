@@ -186,9 +186,30 @@ _SESSION_SNAPSHOT_FIELDS = (
 
 
 def _snapshot_session(session: Any) -> Dict[str, Any]:
-    """Return the replayable launch config for one live session."""
+    """Return the replayable launch config for one live session.
+
+    The `directory` slot carries where the pane *is*, not where it started:
+    a restore replays a `cd`, and replaying the launch directory is what
+    brought an agent back in the wrong place (ISSUE-2026-045). The observation
+    is `current_directory`, written only by the shell-integration reader and by
+    agent promotion, so an absent one falls back to the launch value exactly as
+    before.
+
+    Only that already-known value is read. This runs inside the runtime-state
+    lock hold, so the other `effective_directory()` sources are off limits:
+    the OS read opens an exec channel on a remote pane and the probe types at
+    its prompt, and neither slow nor network work belongs under a shared lock.
+
+    The persisted shape does not move -- there is no new key, and
+    `explorer_root_configured` is deliberately absent, because a root that
+    reaches a launch config *is* one somebody chose.
+    """
     data = session if isinstance(session, dict) else session.to_dict()
-    return {key: data.get(key) for key in _SESSION_SNAPSHOT_FIELDS}
+    snapshot = {key: data.get(key) for key in _SESSION_SNAPSHOT_FIELDS}
+    observed = str(data.get("current_directory") or "").strip()
+    if observed:
+        snapshot["directory"] = observed
+    return snapshot
 
 
 def _snapshot_group(group: Any, sessions: List[Any]) -> Dict[str, Any]:

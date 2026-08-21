@@ -784,7 +784,11 @@ class ApiRoutesTestCase(unittest.TestCase):
         entry_end = html.index("function buildActiveWorkspaceSessionConfig(groupId = activeGroupId)", entry_start)
         entry_html = html[entry_start:entry_end]
         self.assertIn("session_id: session.session_id || ''", entry_html)
-        self.assertIn("session.explorer_root_directory || session.directory", entry_html)
+        # Where the pane *is*, not where it started -- and an explorer pane
+        # still answers with the root, which is the boundary a relaunch has to
+        # reproduce.
+        self.assertIn("session.current_directory || session.directory", entry_html)
+        self.assertIn("session.explorer_root_directory || liveDirectory", entry_html)
         self.assertNotIn("terminal?._explorerPath", entry_html)
         self.assertIn("Boolean(terminal?._explorerTreeSidebarOpen)", entry_html)
         self.assertIn("Boolean(terminal?._explorerGitSidebarOpen)", entry_html)
@@ -6340,6 +6344,232 @@ class ApiRoutesTestCase(unittest.TestCase):
         )
         self.assertEqual(command, ["cmd.exe"])
         self.assertEqual(environment, {})
+
+    def test_splitting_a_navigated_terminal_starts_where_the_pane_is(self):
+        """A terminal pane clones where it *is*, not where it started."""
+        launch_dir = Path(self.temp_dir.name) / "desktop"
+        navigated = launch_dir / "project"
+        navigated.mkdir(parents=True)
+        source = self._create_local_terminal_session(launch_dir)
+        api.session_manager.update_session_metadata(
+            source.session_id, current_directory=str(navigated)
+        )
+
+        with patch.object(api.socketio, "start_background_task"):
+            response = self.client.post(f"/api/sessions/{source.session_id}/split")
+
+        self.assertEqual(response.status_code, 201, response.get_json())
+        self.assertEqual(response.get_json()["session"]["directory"], str(navigated))
+
+    def test_splitting_an_unobserved_terminal_still_starts_at_its_launch_directory(self):
+        """Nothing observed is not a reason to hand the new pane nothing."""
+        launch_dir = Path(self.temp_dir.name) / "desktop"
+        launch_dir.mkdir(parents=True)
+        source = self._create_local_terminal_session(launch_dir)
+
+        with patch.object(web_terminal_io, "_resolve_live_terminal_cwd") as probe, patch.object(
+            api.socketio, "start_background_task"
+        ):
+            response = self.client.post(f"/api/sessions/{source.session_id}/split")
+
+        self.assertEqual(response.status_code, 201, response.get_json())
+        # A split must not type at the pane it is cloning.
+        probe.assert_not_called()
+        self.assertEqual(response.get_json()["session"]["directory"], str(launch_dir))
+
+    def test_a_derived_root_does_not_pin_the_next_explorer_switch(self):
+        """D2: a root nobody chose confines the live explorer and pins nothing.
+
+        Terminal -> explorer derives a root from where the pane is. Going back
+        to terminal and `cd`ing somewhere else must re-derive: before stage 3
+        the derived root came back out of explorer mode looking configured, and
+        the second switch pinned to a directory the user never picked.
+        """
+        desktop = Path(self.temp_dir.name) / "desktop"
+        first = desktop / "one"
+        second = desktop / "two"
+        first.mkdir(parents=True)
+        second.mkdir(parents=True)
+        session_id = self._create_local_terminal_session(desktop).session_id
+
+        with patch.object(
+            web_terminal_io, "_resolve_live_terminal_cwd", return_value=str(first)
+        ), patch.object(api, "_close_ssh_connection"):
+            self.client.post(
+                f"/api/sessions/{session_id}/mode",
+                json={"startup_mode": "explorer", "refresh_cwd": True},
+            )
+
+        opened = api.session_manager.get_session(session_id)
+        self.assertEqual(Path(opened.explorer_root_directory), first.resolve())
+        # The live explorer is confined to it; nothing chose it.
+        self.assertFalse(opened.explorer_root_configured)
+
+        with patch.object(api.socketio, "start_background_task"):
+            self.client.post(
+                f"/api/sessions/{session_id}/mode",
+                json={"startup_mode": "terminal", "directory": ""},
+            )
+
+        back = api.session_manager.get_session(session_id)
+        self.assertEqual(back.explorer_root_directory, "")
+
+        with patch.object(
+            web_terminal_io, "_resolve_live_terminal_cwd", return_value=str(second)
+        ), patch.object(api, "_close_ssh_connection"):
+            self.client.post(
+                f"/api/sessions/{session_id}/mode",
+                json={"startup_mode": "explorer", "refresh_cwd": True},
+            )
+
+        reopened = api.session_manager.get_session(session_id)
+        self.assertEqual(Path(reopened.explorer_root_directory), second.resolve())
+
+    def test_a_configured_root_survives_the_round_trip_and_still_pins(self):
+        """The other half of D2: a chosen root is not what stage 3 drops."""
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        nested = repo_dir / "src"
+        nested.mkdir(parents=True)
+        session_id = self._create_explorer_session(repo_dir)
+        self.assertTrue(
+            api.session_manager.get_session(session_id).explorer_root_configured
+        )
+
+        with patch.object(api.socketio, "start_background_task"):
+            self.client.post(
+                f"/api/sessions/{session_id}/mode",
+                json={"startup_mode": "terminal", "directory": "src"},
+            )
+
+        back = api.session_manager.get_session(session_id)
+        self.assertEqual(Path(back.explorer_root_directory), repo_dir.resolve())
+        self.assertTrue(back.explorer_root_configured)
+
+        # ...and it still pins, even though the pane is now sitting in `src`.
+        with patch.object(
+            web_terminal_io, "_resolve_live_terminal_cwd", return_value=str(nested)
+        ), patch.object(api, "_close_ssh_connection"):
+            self.client.post(
+                f"/api/sessions/{session_id}/mode",
+                json={"startup_mode": "explorer", "refresh_cwd": True},
+            )
+
+        reopened = api.session_manager.get_session(session_id)
+        self.assertEqual(Path(reopened.explorer_root_directory), repo_dir.resolve())
+
+    def test_a_mode_switch_drops_the_dead_shell_s_last_report(self):
+        """The pane that reported it is being closed; the report is not live."""
+        desktop = Path(self.temp_dir.name) / "desktop"
+        nested = desktop / "project"
+        nested.mkdir(parents=True)
+        session_id = self._create_local_terminal_session(desktop).session_id
+        api.session_manager.update_session_metadata(
+            session_id, current_directory=str(nested)
+        )
+
+        with patch.object(api, "_close_ssh_connection"):
+            response = self.client.post(
+                f"/api/sessions/{session_id}/mode", json={"startup_mode": "explorer"}
+            )
+
+        self.assertEqual(response.status_code, 200)
+        switched = api.session_manager.get_session(session_id)
+        self.assertIsNone(switched.current_directory)
+        # Nothing was lost: the directory it named is what `directory` holds.
+        self.assertEqual(Path(switched.directory), nested.resolve())
+
+    def test_a_reconnect_returns_to_the_observed_directory(self):
+        """D3: a pane comes back where it was, with the launch dir as fallback."""
+        session = SimpleNamespace(
+            directory="/srv/app", current_directory="/srv/app/api", initial_command=""
+        )
+
+        with patch.object(
+            web_config.runtime_config, "terminal_shell_integration", False
+        ), patch.object(web_terminal_io, "_send_connection_input") as send_input:
+            api._run_startup_sequence({"kind": "ssh", "shell_kind": "posix"}, session)
+
+        self.assertEqual(
+            [call.args[1] for call in send_input.call_args_list],
+            ["cd /srv/app/api 2>/dev/null || cd /srv/app\n"],
+        )
+
+    def test_a_reconnect_with_nothing_observed_carries_no_fallback(self):
+        """No observation means no second directory to try."""
+        session = SimpleNamespace(
+            directory="/srv/app", current_directory=None, initial_command=""
+        )
+
+        with patch.object(
+            web_config.runtime_config, "terminal_shell_integration", False
+        ), patch.object(web_terminal_io, "_send_connection_input") as send_input:
+            api._run_startup_sequence({"kind": "ssh", "shell_kind": "posix"}, session)
+
+        self.assertEqual(
+            [call.args[1] for call in send_input.call_args_list], ["cd /srv/app\n"]
+        )
+
+    def test_each_windows_shell_family_gets_its_own_fallback_form(self):
+        """`||` is cmd's; PowerShell tests the path so no red error is drawn."""
+        session = SimpleNamespace(
+            directory="C:\\repo", current_directory="C:\\repo\\src", initial_command=""
+        )
+
+        sent = {}
+        for shell_kind in ("cmd", "powershell"):
+            with patch.object(
+                web_config.runtime_config, "terminal_shell_integration", False
+            ), patch.object(web_terminal_io, "_send_connection_input") as send_input:
+                api._run_startup_sequence(
+                    {"kind": "local", "shell_kind": shell_kind}, session
+                )
+            sent[shell_kind] = send_input.call_args_list[0].args[1]
+
+        self.assertIn('cd /d "C:\\repo\\src" 2>nul || cd /d "C:\\repo"', sent["cmd"])
+        self.assertIn("Test-Path -LiteralPath 'C:\\repo\\src'", sent["powershell"])
+        self.assertIn("Set-Location -LiteralPath 'C:\\repo'", sent["powershell"])
+
+    def test_agent_promotion_stamps_where_the_agent_was_started(self):
+        """The one moment the shell is still at a prompt (ISSUE-2026-045)."""
+        desktop = Path(self.temp_dir.name) / "desktop"
+        desktop.mkdir(parents=True)
+        session_id = self._create_local_terminal_session(desktop).session_id
+        connection = {"kind": "local", "shell_kind": "posix"}
+
+        with patch.object(
+            web_terminal_io, "_process_reported_cwd", return_value="/srv/app/api"
+        ), patch.object(web_terminal_io, "_broadcast_session_status"), patch.object(
+            web_terminal_io, "_resolve_live_terminal_cwd"
+        ) as probe:
+            with api.connection_lock:
+                api.ssh_connections[session_id] = connection
+            web_terminal_io._track_terminal_agent_input(
+                session_id, connection, "codex\r"
+            )
+
+        # Promotion must not type at a prompt the agent is about to take over.
+        probe.assert_not_called()
+        promoted = api.session_manager.get_session(session_id)
+        self.assertEqual(promoted.startup_mode, "agent")
+        self.assertEqual(promoted.current_directory, "/srv/app/api")
+        # The launch slot still says where the pane started.
+        self.assertEqual(Path(promoted.directory), desktop)
+
+    def test_agent_promotion_invents_nothing_when_nothing_answers(self):
+        """A launch-directory answer is an assumption, not an observation."""
+        desktop = Path(self.temp_dir.name) / "desktop"
+        desktop.mkdir(parents=True)
+        session_id = self._create_local_terminal_session(desktop).session_id
+        connection = {"kind": "local", "shell_kind": "posix"}
+
+        with patch.object(web_terminal_io, "_broadcast_session_status"):
+            web_terminal_io._track_terminal_agent_input(
+                session_id, connection, "codex\r"
+            )
+
+        promoted = api.session_manager.get_session(session_id)
+        self.assertEqual(promoted.startup_mode, "agent")
+        self.assertIsNone(promoted.current_directory)
 
     def test_local_stream_shutdown_after_explorer_switch_does_not_mark_error(self):
         repo_dir = Path(self.temp_dir.name) / "repo"
