@@ -246,6 +246,9 @@
             const explorer = pane.explorer;
             entry.explorer_tree_open = Boolean(explorer.treeOpen);
             entry.explorer_git_open = Boolean(explorer.gitOpen);
+            entry.explorer_git_follow_browsing = Boolean(explorer.gitFollowBrowsing);
+            entry.explorer_git_pin_active = Boolean(explorer.gitPinActive);
+            entry.explorer_git_pinned_path = String(explorer.gitPinnedPath || '');
             entry.explorer_search_open = Boolean(explorer.searchOpen);
             entry.explorer_sidebar_width = Number.isInteger(explorer.sidebarWidth)
                 ? explorer.sidebarWidth

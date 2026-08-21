@@ -485,6 +485,9 @@ class GroupPresentationPayloadTestCase(_NodeHarnessMixin, unittest.TestCase):
         "explorer": {
             "treeOpen": True,
             "gitOpen": False,
+            "gitFollowBrowsing": True,
+            "gitPinActive": True,
+            "gitPinnedPath": "repo/src",
             "searchOpen": True,
             "sidebarWidth": 312,
             "sidebarScroll": {"tree": {"x": 0, "y": 0.4}},
@@ -542,6 +545,9 @@ class GroupPresentationPayloadTestCase(_NodeHarnessMixin, unittest.TestCase):
                 "session_id": "explorer-1",
                 "explorer_tree_open": True,
                 "explorer_git_open": False,
+                "explorer_git_follow_browsing": True,
+                "explorer_git_pin_active": True,
+                "explorer_git_pinned_path": "repo/src",
                 "explorer_search_open": True,
                 "explorer_sidebar_width": 312,
                 "explorer_sidebar_scroll": {"tree": {"x": 0, "y": 0.4}},
@@ -705,6 +711,9 @@ class PresentationWiringTestCase(_NodeHarnessMixin, unittest.TestCase):
                         "explorer": {
                             "treeOpen": True,
                             "gitOpen": True,
+                            "gitFollowBrowsing": True,
+                            "gitPinActive": True,
+                            "gitPinnedPath": "nested/repo",
                             "searchOpen": False,
                             "openTabs": ["docs/new.md"],
                             "activeTab": "docs/new.md",
@@ -759,6 +768,9 @@ class PresentationWiringTestCase(_NodeHarnessMixin, unittest.TestCase):
         self.assertEqual(stored["Files"]["explorer_open_tabs"], ["docs/new.md"])
         self.assertEqual(stored["Files"]["explorer_theme"], "light")
         self.assertTrue(stored["Files"]["explorer_git_open"])
+        self.assertTrue(stored["Files"]["explorer_git_follow_browsing"])
+        self.assertTrue(stored["Files"]["explorer_git_pin_active"])
+        self.assertEqual(stored["Files"]["explorer_git_pinned_path"], "nested/repo")
         self.assertEqual(
             stored["Preview"]["browser_tabs"],
             ["http://127.0.0.1:3000", "http://127.0.0.1:8080"],

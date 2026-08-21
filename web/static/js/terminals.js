@@ -2284,6 +2284,11 @@
                 explorer: {
                     treeOpen: Boolean(terminal?._explorerTreeSidebarOpen),
                     gitOpen: Boolean(terminal?._explorerGitSidebarOpen),
+                    gitFollowBrowsing: Boolean(terminal?._explorerGitFollowBrowsing),
+                    gitPinActive: typeof terminal?._explorerGitPinnedPath === 'string',
+                    gitPinnedPath: typeof terminal?._explorerGitPinnedPath === 'string'
+                        ? terminal._explorerGitPinnedPath
+                        : '',
                     searchOpen: Boolean(terminal?._explorerSearchSidebarOpen),
                     sidebarWidth: sidebar.width,
                     sidebarScroll: sidebar.scroll,
@@ -2499,6 +2504,15 @@
             agent_auto_mode: commandMode === 'agent' ? Boolean(session.agent_auto_mode) : false,
             explorer_tree_open: startupMode === 'explorer' ? Boolean(terminal?._explorerTreeSidebarOpen) : false,
             explorer_git_open: startupMode === 'explorer' ? Boolean(terminal?._explorerGitSidebarOpen) : false,
+            explorer_git_follow_browsing: startupMode === 'explorer'
+                ? Boolean(terminal?._explorerGitFollowBrowsing)
+                : false,
+            explorer_git_pin_active: startupMode === 'explorer'
+                && typeof terminal?._explorerGitPinnedPath === 'string',
+            explorer_git_pinned_path: startupMode === 'explorer'
+                && typeof terminal?._explorerGitPinnedPath === 'string'
+                ? terminal._explorerGitPinnedPath
+                : '',
             explorer_search_open: startupMode === 'explorer' ? Boolean(terminal?._explorerSearchSidebarOpen) : false,
             explorer_sidebar_width: explorerSidebar.width,
             explorer_sidebar_scroll: explorerSidebar.scroll,
@@ -4969,6 +4983,11 @@
                 _attached: false,
                 _explorerTreeSidebarOpen: Boolean(session.explorer_tree_open),
                 _explorerGitSidebarOpen: Boolean(session.explorer_git_open),
+                _explorerGitFollowBrowsing: Boolean(session.explorer_git_follow_browsing),
+                _explorerGitPinnedPath: session.explorer_git_pin_active
+                    ? String(session.explorer_git_pinned_path || '')
+                    : undefined,
+                _explorerPath: explorerPersistedPreviewDirectory(session) ?? undefined,
                 _explorerSearchSidebarOpen: Boolean(session.explorer_search_open),
                 _explorerSidebarWidth: Number(session.explorer_sidebar_width) || 260,
                 _explorerSidebarScroll: session.explorer_sidebar_scroll || {},
@@ -6133,6 +6152,11 @@
             _attached: false,
             _explorerTreeSidebarOpen: Boolean(session.explorer_tree_open),
             _explorerGitSidebarOpen: Boolean(session.explorer_git_open),
+            _explorerGitFollowBrowsing: Boolean(session.explorer_git_follow_browsing),
+            _explorerGitPinnedPath: session.explorer_git_pin_active
+                ? String(session.explorer_git_pinned_path || '')
+                : undefined,
+            _explorerPath: explorerPersistedPreviewDirectory(session) ?? undefined,
             _explorerSearchSidebarOpen: Boolean(session.explorer_search_open),
             _explorerSidebarWidth: Number(session.explorer_sidebar_width) || 260,
             _explorerSidebarScroll: session.explorer_sidebar_scroll || {},
@@ -6501,6 +6525,11 @@
                     type: 'explorer',
                     explorer_tree_open: Boolean(pane._explorerTreeSidebarOpen),
                     explorer_git_open: Boolean(pane._explorerGitSidebarOpen),
+                    explorer_git_follow_browsing: Boolean(pane._explorerGitFollowBrowsing),
+                    explorer_git_pin_active: typeof pane._explorerGitPinnedPath === 'string',
+                    explorer_git_pinned_path: typeof pane._explorerGitPinnedPath === 'string'
+                        ? pane._explorerGitPinnedPath
+                        : '',
                     explorer_search_open: Boolean(pane._explorerSearchSidebarOpen),
                     explorer_sidebar_width: sidebar.width,
                     explorer_sidebar_scroll: sidebar.scroll,
@@ -7322,6 +7351,9 @@
                     if (snapshot.type === 'explorer') {
                         entry.explorer_tree_open = snapshot.explorer_tree_open;
                         entry.explorer_git_open = snapshot.explorer_git_open;
+                        entry.explorer_git_follow_browsing = snapshot.explorer_git_follow_browsing;
+                        entry.explorer_git_pin_active = snapshot.explorer_git_pin_active;
+                        entry.explorer_git_pinned_path = snapshot.explorer_git_pinned_path;
                         entry.explorer_search_open = snapshot.explorer_search_open;
                         entry.explorer_sidebar_width = snapshot.explorer_sidebar_width;
                         entry.explorer_sidebar_scroll = snapshot.explorer_sidebar_scroll;

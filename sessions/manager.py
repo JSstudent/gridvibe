@@ -95,6 +95,9 @@ class TerminalSession:
     explorer_root_configured: Optional[bool] = None
     explorer_tree_open: bool = False
     explorer_git_open: bool = False
+    explorer_git_follow_browsing: bool = False
+    explorer_git_pin_active: bool = False
+    explorer_git_pinned_path: str = ""
     explorer_search_open: bool = False
     explorer_sidebar_width: int = 260
     explorer_sidebar_scroll: Dict[str, Any] = field(default_factory=dict)
@@ -156,6 +159,9 @@ class TerminalSession:
             "explorer_root_configured": self.explorer_root_configured,
             "explorer_tree_open": self.explorer_tree_open,
             "explorer_git_open": self.explorer_git_open,
+            "explorer_git_follow_browsing": self.explorer_git_follow_browsing,
+            "explorer_git_pin_active": self.explorer_git_pin_active,
+            "explorer_git_pinned_path": self.explorer_git_pinned_path,
             "explorer_search_open": self.explorer_search_open,
             "explorer_sidebar_width": self.explorer_sidebar_width,
             "explorer_sidebar_scroll": copy.deepcopy(self.explorer_sidebar_scroll),
@@ -856,6 +862,9 @@ class SessionManager:
             "explorer_root_configured": root_configured,
             "explorer_tree_open": False,
             "explorer_git_open": False,
+            "explorer_git_follow_browsing": False,
+            "explorer_git_pin_active": False,
+            "explorer_git_pinned_path": "",
             "explorer_search_open": False,
             "explorer_sidebar_width": 260,
             "explorer_sidebar_scroll": {},
@@ -1019,6 +1028,9 @@ class SessionManager:
             "explorer_root_configured",
             "explorer_tree_open",
             "explorer_git_open",
+            "explorer_git_follow_browsing",
+            "explorer_git_pin_active",
+            "explorer_git_pinned_path",
             "explorer_search_open",
             "explorer_sidebar_width",
             "explorer_sidebar_scroll",

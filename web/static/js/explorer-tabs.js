@@ -60,6 +60,26 @@
         return pane._explorerTabs.find(tab => tab.id === EXPLORER_PREVIEW_TAB_ID) || pane._explorerTabs[0];
     }
 
+    /* Seed consumers that must know the restored browsing directory before the
+       async tab restore runs (notably a Git sidebar restored in Follow mode).
+       `null` means no directory was persisted; an empty string is a real saved
+       explorer-root directory. */
+    function explorerPersistedPreviewDirectory(session) {
+        const rawViews = session?.explorer_tab_views;
+        if (!rawViews || typeof rawViews !== 'object') {
+            return null;
+        }
+        const rawPreview = rawViews[EXPLORER_PREVIEW_TAB_ID];
+        if (
+            !rawPreview
+            || typeof rawPreview !== 'object'
+            || !Object.prototype.hasOwnProperty.call(rawPreview, 'dir')
+        ) {
+            return null;
+        }
+        return explorerNormalizeTabPath(rawPreview.dir);
+    }
+
     function explorerFindTab(pane, id) {
         ensureExplorerTabState(pane);
         return pane._explorerTabs.find(tab => tab.id === id) || null;
@@ -995,14 +1015,9 @@
         const savedPreviewPath = explorerNormalizeTabPath(
             rawPreviewView && typeof rawPreviewView === 'object' ? rawPreviewView.path : ''
         );
-        const savedPreviewDir = explorerNormalizeTabPath(
-            rawPreviewView && typeof rawPreviewView === 'object' ? rawPreviewView.dir : ''
-        );
-        const hasSavedPreviewDir = Boolean(
-            rawPreviewView
-            && typeof rawPreviewView === 'object'
-            && Object.prototype.hasOwnProperty.call(rawPreviewView, 'dir')
-        );
+        const persistedPreviewDir = explorerPersistedPreviewDirectory(session);
+        const savedPreviewDir = persistedPreviewDir === null ? '' : persistedPreviewDir;
+        const hasSavedPreviewDir = persistedPreviewDir !== null;
         if (hasSavedPreviewDir) {
             previewTab.dirPath = savedPreviewDir;
         } else if (!savedPreviewPath) {

@@ -72,6 +72,9 @@ PANE_PRESENTATION_FIELDS = frozenset(
     {
         "explorer_tree_open",
         "explorer_git_open",
+        "explorer_git_follow_browsing",
+        "explorer_git_pin_active",
+        "explorer_git_pinned_path",
         "explorer_search_open",
         "explorer_sidebar_width",
         "explorer_sidebar_scroll",
@@ -96,11 +99,18 @@ _BROWSER_FIELDS = frozenset(
     field for field in PANE_PRESENTATION_FIELDS if field.startswith("browser_")
 )
 _EXPLORER_BOOL_FIELDS = frozenset(
-    {"explorer_tree_open", "explorer_git_open", "explorer_search_open"}
+    {
+        "explorer_tree_open",
+        "explorer_git_open",
+        "explorer_git_follow_browsing",
+        "explorer_git_pin_active",
+        "explorer_search_open",
+    }
 )
 _EXPLORER_STRING_FIELDS = frozenset(
     {
         "explorer_active_tab",
+        "explorer_git_pinned_path",
         "explorer_md_preset",
         "explorer_md_font",
         "explorer_source_font",
@@ -911,6 +921,10 @@ def normalize_pane_presentation(data: Any) -> Dict[str, Any]:
     if "explorer_theme" in data:
         normalized["explorer_theme"] = _normalize_explorer_theme(
             data["explorer_theme"]
+        )
+    if "explorer_git_pinned_path" in data:
+        normalized["explorer_git_pinned_path"] = _normalize_explorer_tab_path(
+            data["explorer_git_pinned_path"]
         )
 
     if "browser_tabs" in data:

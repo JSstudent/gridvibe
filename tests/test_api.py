@@ -793,6 +793,8 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertNotIn("terminal?._explorerPath", entry_html)
         self.assertIn("Boolean(terminal?._explorerTreeSidebarOpen)", entry_html)
         self.assertIn("Boolean(terminal?._explorerGitSidebarOpen)", entry_html)
+        self.assertIn("Boolean(terminal?._explorerGitFollowBrowsing)", entry_html)
+        self.assertIn("terminal._explorerGitPinnedPath", entry_html)
         cache_state_start = html.index("function captureCachedPaneUiState()")
         cache_state_end = html.index("function restoreCachedPaneUiState", cache_state_start)
         cache_state_html = html[cache_state_start:cache_state_end]
@@ -801,6 +803,11 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("function restoreExplorerSidebarState(index)", html)
         self.assertIn("_explorerTreeSidebarOpen: Boolean(session.explorer_tree_open)", html)
         self.assertIn("_explorerGitSidebarOpen: Boolean(session.explorer_git_open)", html)
+        self.assertIn(
+            "_explorerGitFollowBrowsing: Boolean(session.explorer_git_follow_browsing)",
+            html,
+        )
+        self.assertIn("_explorerGitPinnedPath: session.explorer_git_pin_active", html)
         self.assertIn("_explorerSearchSidebarOpen: Boolean(session.explorer_search_open)", html)
         self.assertIn("workspace_only: true", save_handler_html)
         self.assertIn("source_saved_session_id: saveTarget.id || undefined", save_handler_html)
@@ -819,6 +826,9 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("agent_selection: resolvedStartupMode === 'agent'", html)
         self.assertIn("data-explorer-tree-open=", html)
         self.assertIn("data-explorer-git-open=", html)
+        self.assertIn("data-explorer-git-follow-browsing=", html)
+        self.assertIn("data-explorer-git-pin-active=", html)
+        self.assertIn("data-explorer-git-pinned-path=", html)
         self.assertIn("data-explorer-search-open=", html)
         self.assertIn("explorer_tree_open: resolvedStartupMode === 'explorer'", html)
         self.assertIn("explorer_git_open: resolvedStartupMode === 'explorer'", html)
@@ -10892,6 +10902,9 @@ class ApiRoutesTestCase(unittest.TestCase):
                             "startup_mode": "explorer",
                             "explorer_tree_open": True,
                             "explorer_git_open": True,
+                            "explorer_git_follow_browsing": True,
+                            "explorer_git_pin_active": True,
+                            "explorer_git_pinned_path": "nested/repo",
                             "explorer_search_open": True,
                             "explorer_open_tabs": ["README.md"],
                             "explorer_active_tab": "README.md",
@@ -10916,6 +10929,9 @@ class ApiRoutesTestCase(unittest.TestCase):
         reopened = api.session_manager.get_session(session.session_id)
         self.assertTrue(reopened.explorer_tree_open)
         self.assertTrue(reopened.explorer_git_open)
+        self.assertTrue(reopened.explorer_git_follow_browsing)
+        self.assertTrue(reopened.explorer_git_pin_active)
+        self.assertEqual(reopened.explorer_git_pinned_path, "nested/repo")
         self.assertTrue(reopened.explorer_search_open)
         self.assertEqual(reopened.explorer_open_tabs, ["README.md"])
         self.assertEqual(reopened.explorer_active_tab, "README.md")

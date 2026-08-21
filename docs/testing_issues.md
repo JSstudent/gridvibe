@@ -58,8 +58,10 @@ eight mutation routes now share one selected anchor. That anchor is the explorer
 root by default; the Graph header's per-pane pin can capture the current folder
 as a fixed scope, while the independent Follow browsed folder toggle opts all
 reads, watcher polls, and actions into the live confined directory together.
-Disabling follow returns to the pin, if present. The sidebar identifies which
-repository it will act on. See also
+Disabling follow returns to the pin, if present. The two control states and the
+root-relative pin path travel through pane presentation, so Save Workspace and
+restart restore the same Git scope. The sidebar identifies which repository it
+will act on. See also
 ISSUE-2026-046, the two ways a pane could still be pinned to a directory nobody
 picked.
 

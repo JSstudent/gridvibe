@@ -488,6 +488,7 @@
         }
         pane._explorerGitFollowBrowsing = !Boolean(pane._explorerGitFollowBrowsing);
         invalidateExplorerGitRepo(index);
+        notePanePresentationChanged(index);
         await loadExplorerGitRepo(index);
         return true;
     }
@@ -503,6 +504,7 @@
             pane._explorerGitPinnedPath = String(pane._explorerPath || '');
         }
         invalidateExplorerGitRepo(index);
+        notePanePresentationChanged(index);
         await loadExplorerGitRepo(index);
         return true;
     }

@@ -266,9 +266,9 @@ distinction; D2 holds the two ways to do it.
 
 ### 4.4 What the Git sidebar does with it
 
-The sidebar is anchored on the **explorer root by default**. Two runtime-only,
-per-pane controls sit beside the Graph search magnifier: the pin captures the
-current folder as a fixed scope, and the independent chain opts into the
+The sidebar is anchored on the **explorer root by default**. Two per-pane
+controls sit beside the Graph search magnifier: the pin captures the current
+folder as a fixed scope, and the independent chain opts into the
 worktree containing the live browsed directory:
 
 - `GET .../git/repo` and `GET .../git/state` ignore a bare `path`; only
@@ -288,7 +288,9 @@ worktree containing the live browsed directory:
 This keeps a root chosen in the launcher — or derived from the terminal's cwd at
 the mode switch — stable while the Files view navigates. A pin can replace that
 fixed Git scope without changing explorer confinement. Follow overrides the
-fixed root/pin while enabled and returns to it when disabled.
+fixed root/pin while enabled and returns to it when disabled. The toggle states,
+pin-active bit, and root-relative pin path use the revisioned pane-presentation
+transaction, so workspace/preset save and restart restore the same scope.
 
 ---
 
@@ -969,8 +971,9 @@ The payload also carries `repo_name` and normalized `anchor_path`.
 
 **Client.** `explorerGitRequestUrl()` is the one URL builder used by initial
 loads, quiet refreshes, the shared watcher poll, and mutations. The Graph
-header's pin captures a runtime-only fixed path, and its independent chain
-toggles live follow. With follow off, the cached anchor is the fixed pin or the
+header's pin captures a fixed path, and its independent chain toggles live
+follow. Both controls and the pin path use the existing pane-presentation
+transaction. With follow off, the cached anchor is the fixed pin or the
 explorer root and navigation causes no Git reload. With follow on, a pane records
 which browsed path its cached sidebar describes, rejects a stale quiet response
 after navigation, and reloads the open sidebar when that path changes. Turning

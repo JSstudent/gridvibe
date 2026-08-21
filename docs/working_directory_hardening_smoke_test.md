@@ -62,18 +62,20 @@ instead of failing to start.
 1. In the explorer rooted directly on `repo-a`, open the Git sidebar and
    navigate the main Files view into `src`.
 2. In the parent-root File Explorer, navigate into `repo-a`, open the Git
-   sidebar, and press the pin beside the Graph search magnifier. Navigate into
-   `repo-a/src`, then enable the chain button and navigate back to the parent
-   and into `repo-b/src`.
+    sidebar, and press the pin beside the Graph search magnifier. Navigate into
+    `repo-a/src`, then enable the chain button and navigate back to the parent
+    and into `repo-b/src`. Save the workspace, exit GridVibe, restart, and restore
+    the workspace before disabling follow and clearing the pin.
 
 Expected: the directly rooted pane continues to show all of `repo-a` while its
 Files view moves into `src`. The parent-root pane does not acquire a repository
 merely by navigation while both controls are off. Pinning at `repo-a` makes Git
 name `repo-a`, and later navigation inside it does not narrow the graph. Once
 follow is enabled, Git changes to `repo-b` without closing the sidebar. Turning
-follow off returns to the `repo-a` pin; clearing the pin returns to parent-root
-scope. The followed repository must change even when both repositories have
-identical branch names, HEADs, and clean status.
+follow off after restore returns to the `repo-a` pin; clearing the pin returns to
+parent-root scope. The restored sidebar must not briefly or permanently fall
+back to that non-Git root. The followed repository must change even when both
+repositories have identical branch names, HEADs, and clean status.
 
 ### 5. Every Git action stays on the named repository
 

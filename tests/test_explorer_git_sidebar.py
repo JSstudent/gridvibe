@@ -17,6 +17,7 @@ const fs = require('fs');
 const vm = require('vm');
 
 const calls = [];
+let presentationChanges = 0;
 const pane = {
     _explorerPath: 'repo one/src',
     _explorerMode: 'file',
@@ -75,6 +76,7 @@ vm.runInContext(fs.readFileSync(process.argv[2], 'utf8'), sandbox);
 // successful response.
 sandbox.renderExplorerGitPanels = () => {};
 sandbox.syncExplorerTabGitFromRepo = () => {};
+sandbox.notePanePresentationChanged = () => { presentationChanges += 1; };
 sandbox.escHtml = value => String(value == null ? '' : value);
 sandbox.wireExplorerCopyPathMenu = () => {};
 
@@ -114,6 +116,7 @@ sandbox.wireExplorerCopyPathMenu = () => {};
         anchorPath: pane._explorerGitAnchorPath,
         following: Boolean(pane._explorerGitFollowBrowsing),
         pinned: typeof pane._explorerGitPinnedPath === 'string',
+        presentationChanges,
         errorMarkup: errorPanel.innerHTML
     }));
 })().catch(error => {
@@ -166,6 +169,7 @@ class ExplorerGitSidebarRequestTestCase(unittest.TestCase):
         self.assertEqual(payload["anchorPath"], "")
         self.assertFalse(payload["following"])
         self.assertFalse(payload["pinned"])
+        self.assertEqual(payload["presentationChanges"], 4)
         self.assertIn('data-explorer-git-pin-toggle', payload["errorMarkup"])
         self.assertIn('data-explorer-git-follow-toggle', payload["errorMarkup"])
         self.assertIn('aria-pressed="false"', payload["errorMarkup"])
