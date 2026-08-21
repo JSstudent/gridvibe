@@ -13490,12 +13490,21 @@ class ExplorerGitRevisionTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 201)
         return response.get_json()["sessions"][0]["session_id"]
 
-    def _git_state(self, session_id: str, known: str = "", path: str = ""):
+    def _git_state(
+        self,
+        session_id: str,
+        known: str = "",
+        path: str = "",
+        *,
+        path_scope: bool = False,
+    ):
         query = {}
         if known:
             query["known"] = known
         if path:
             query["path"] = path
+        if path_scope:
+            query["scope"] = "path"
         return self.client.get(
             f"/api/explorer/{session_id}/git/state",
             query_string=query,
@@ -13610,7 +13619,7 @@ class ExplorerGitRevisionTestCase(unittest.TestCase):
         after_inside = self._git_state(session_id).get_json()["revision"]
         self.assertNotEqual(baseline, after_inside)
 
-    def test_browsed_path_anchors_sidebar_on_a_repository_below_the_root(self):
+    def test_browsed_path_only_changes_git_scope_when_following_is_enabled(self):
         repo_dir = self._init_committed_repo()
         source_dir = repo_dir / "src"
         source_dir.mkdir()
@@ -13621,11 +13630,16 @@ class ExplorerGitRevisionTestCase(unittest.TestCase):
         source_file.write_text("inside\nchanged\n", encoding="utf-8")
         session_id = self._create_explorer_session(Path(self.temp_dir.name))
 
-        response = self.client.get(
+        root_scoped = self.client.get(
             f"/api/explorer/{session_id}/git/repo",
             query_string={"path": "repo/src"},
         )
+        response = self.client.get(
+            f"/api/explorer/{session_id}/git/repo",
+            query_string={"scope": "path", "path": "repo/src"},
+        )
 
+        self.assertEqual(root_scoped.status_code, 400)
         self.assertEqual(response.status_code, 200)
         payload = response.get_json()
         self.assertEqual(payload["anchor_path"].replace("\\", "/"), "repo/src")
@@ -13633,13 +13647,45 @@ class ExplorerGitRevisionTestCase(unittest.TestCase):
         self.assertEqual(payload["git"]["repo_name"], "repo")
         self.assertEqual([item["path"].replace("\\", "/") for item in payload["changes"]], ["repo/src/inside.txt"])
 
+    def test_navigation_does_not_narrow_a_root_scoped_git_tree(self):
+        repo_dir = self._init_committed_repo()
+        source_dir = repo_dir / "src"
+        source_dir.mkdir()
+        source_file = source_dir / "inside.txt"
+        source_file.write_text("inside\n", encoding="utf-8")
+        self._run_git(repo_dir, "add", ".")
+        self._run_git(repo_dir, "commit", "-m", "add source")
+        (repo_dir / "README.md").write_text("# Project\n\nroot change\n", encoding="utf-8")
+        source_file.write_text("inside\nsource change\n", encoding="utf-8")
+        session_id = self._create_explorer_session(repo_dir)
+
+        root_scoped = self.client.get(
+            f"/api/explorer/{session_id}/git/repo",
+            query_string={"path": "src"},
+        ).get_json()
+        followed = self.client.get(
+            f"/api/explorer/{session_id}/git/repo",
+            query_string={"scope": "path", "path": "src"},
+        ).get_json()
+
+        self.assertEqual(root_scoped["anchor_path"], "")
+        self.assertEqual(
+            {item["path"].replace("\\", "/") for item in root_scoped["changes"]},
+            {"README.md", "src/inside.txt"},
+        )
+        self.assertEqual(followed["anchor_path"].replace("\\", "/"), "src")
+        self.assertEqual(
+            [item["path"].replace("\\", "/") for item in followed["changes"]],
+            ["src/inside.txt"],
+        )
+
     def test_two_repositories_below_one_root_have_distinct_revisions(self):
         self._init_committed_repo("repo-a")
         self._init_committed_repo("repo-b")
         session_id = self._create_explorer_session(Path(self.temp_dir.name))
 
-        first = self._git_state(session_id, path="repo-a").get_json()
-        second = self._git_state(session_id, path="repo-b").get_json()
+        first = self._git_state(session_id, path="repo-a", path_scope=True).get_json()
+        second = self._git_state(session_id, path="repo-b", path_scope=True).get_json()
 
         self.assertNotEqual(first["revision"], second["revision"])
 
@@ -13771,7 +13817,7 @@ class ExplorerGitRevisionTestCase(unittest.TestCase):
         self.assertNotIn(commit_revision, {repo_revision, stage_revision})
         self.assertEqual(commit_revision, self._git_state(session_id).get_json()["revision"])
 
-    def test_all_git_mutations_resolve_the_browsed_path_as_their_anchor(self):
+    def test_all_git_mutations_share_the_selected_root_or_followed_anchor(self):
         root = Path(self.temp_dir.name) / "root"
         current = root / "nested"
         current.mkdir(parents=True)
@@ -13779,7 +13825,7 @@ class ExplorerGitRevisionTestCase(unittest.TestCase):
         target.write_text("content\n", encoding="utf-8")
         session_id = self._create_explorer_session(root)
         summary = {
-            "anchor_path": "nested",
+            "anchor_path": "",
             "git": {},
             "changes": [],
             "commits": [],
@@ -13796,27 +13842,32 @@ class ExplorerGitRevisionTestCase(unittest.TestCase):
             ("publish", "_git_publish", {}),
         )
 
-        for endpoint, helper_name, body in cases:
-            with self.subTest(endpoint=endpoint), patch.object(
-                api, helper_name
-            ) as action, patch.object(
-                api, "_get_git_repo_summary", return_value=summary
-            ) as get_summary:
-                response = self.client.post(
-                    f"/api/explorer/{session_id}/git/{endpoint}",
-                    query_string={"path": "nested"},
-                    json=body,
-                )
+        scopes = (
+            ("root", {"path": "nested"}, root.resolve()),
+            ("follow", {"scope": "path", "path": "nested"}, current.resolve()),
+        )
+        for scope, query, expected_anchor in scopes:
+            for endpoint, helper_name, body in cases:
+                with self.subTest(scope=scope, endpoint=endpoint), patch.object(
+                    api, helper_name
+                ) as action, patch.object(
+                    api, "_get_git_repo_summary", return_value=summary
+                ) as get_summary:
+                    response = self.client.post(
+                        f"/api/explorer/{session_id}/git/{endpoint}",
+                        query_string=query,
+                        json=body,
+                    )
 
-                self.assertEqual(response.status_code, 200)
-                action.assert_called_once()
-                self.assertEqual(action.call_args.args[1], str(root.resolve()))
-                self.assertEqual(action.call_args.args[-1], str(current.resolve()))
-                get_summary.assert_called_once()
-                self.assertEqual(
-                    get_summary.call_args.args[1:],
-                    (str(root.resolve()), str(current.resolve())),
-                )
+                    self.assertEqual(response.status_code, 200)
+                    action.assert_called_once()
+                    self.assertEqual(action.call_args.args[1], str(root.resolve()))
+                    self.assertEqual(action.call_args.args[-1], str(expected_anchor))
+                    get_summary.assert_called_once()
+                    self.assertEqual(
+                        get_summary.call_args.args[1:],
+                        (str(root.resolve()), str(expected_anchor)),
+                    )
 
 
 class ExplorerFileStateTestCase(unittest.TestCase):

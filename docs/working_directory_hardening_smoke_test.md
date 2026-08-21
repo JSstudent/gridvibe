@@ -57,23 +57,30 @@ Expected: the split, reconnect, and restored agent all use `repo-a/src`. If the
 folder is removed before reconnect, the pane falls back to its launch directory
 instead of failing to start.
 
-### 4. An explorer above repositories follows the browsed repository
+### 4. Git can pin an inner repository or follow browsing
 
-1. In the parent-root File Explorer, navigate the main Files view into
-   `repo-a/src` and open the Git sidebar.
-2. Navigate back to the parent and into `repo-b/src`.
+1. In the explorer rooted directly on `repo-a`, open the Git sidebar and
+   navigate the main Files view into `src`.
+2. In the parent-root File Explorer, navigate into `repo-a`, open the Git
+   sidebar, and press the pin beside the Graph search magnifier. Navigate into
+   `repo-a/src`, then enable the chain button and navigate back to the parent
+   and into `repo-b/src`.
 
-Expected: Git becomes available after entering `repo-a`, the Git bar names
-`repo-a`, then changes to `repo-b` without closing the sidebar. It must change
-even when both repositories have identical branch names, HEADs, and clean
-status.
+Expected: the directly rooted pane continues to show all of `repo-a` while its
+Files view moves into `src`. The parent-root pane does not acquire a repository
+merely by navigation while both controls are off. Pinning at `repo-a` makes Git
+name `repo-a`, and later navigation inside it does not narrow the graph. Once
+follow is enabled, Git changes to `repo-b` without closing the sidebar. Turning
+follow off returns to the `repo-a` pin; clearing the pin returns to parent-root
+scope. The followed repository must change even when both repositories have
+identical branch names, HEADs, and clean status.
 
 ### 5. Every Git action stays on the named repository
 
-Make different scratch edits in both repositories. While the Files view is
-inside `repo-b`, exercise Stage, Unstage, Stage All, Unstage All, Revert,
-Discard All, and Commit. Complete Publish against the disposable remote, or
-cancel at its confirmation if no remote was prepared.
+Make different scratch edits in both repositories. With Follow browsed folder
+enabled and the Files view inside `repo-b`, exercise Stage, Unstage, Stage All,
+Unstage All, Revert, Discard All, and Commit. Complete Publish against the
+disposable remote, or cancel at its confirmation if no remote was prepared.
 
 Expected: only `repo-b` changes, the Git bar continues to name `repo-b`, and
 `repo-a` is untouched. Repeat one single-file action after navigating back to

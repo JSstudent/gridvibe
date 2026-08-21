@@ -566,18 +566,23 @@
             const known = (sidebarConsumer
                 ? pane._explorerGitRevision
                 : pane._explorerFsWatchRevision) || '';
+            const scopePath = explorerGitScopePath(pane);
             const response = await fetch(
                 explorerGitRequestUrl(
                     sessionId,
                     'state',
-                    pane._explorerPath || '',
+                    scopePath,
                     { known }
                 ),
                 { cache: 'no-store' }
             );
             // Stale results are discarded: the pane/session identity must
             // survive every await or the response belongs to another pane.
-            if (terminals[index] !== pane || sessionIds[index] !== sessionId) {
+            if (
+                terminals[index] !== pane
+                || sessionIds[index] !== sessionId
+                || explorerGitScopePath(pane) !== scopePath
+            ) {
                 return;
             }
             if (!response.ok) {
@@ -586,7 +591,11 @@
                 return;
             }
             const data = await response.json();
-            if (terminals[index] !== pane || sessionIds[index] !== sessionId) {
+            if (
+                terminals[index] !== pane
+                || sessionIds[index] !== sessionId
+                || explorerGitScopePath(pane) !== scopePath
+            ) {
                 return;
             }
             pane._explorerGitWatchFailures = 0;

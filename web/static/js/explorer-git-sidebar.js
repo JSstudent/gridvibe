@@ -7,14 +7,28 @@
    stood in explorer-viewer.js; both files remain classic scripts sharing one
    global scope. Loaded directly after explorer-viewer.js. */
 
-    function explorerGitRequestUrl(sessionId, endpoint, browsedPath, extra = {}) {
-        const params = new URLSearchParams({ path: String(browsedPath || '') });
+    function explorerGitRequestUrl(sessionId, endpoint, scopePath, extra = {}) {
+        const params = new URLSearchParams();
+        if (scopePath !== null && scopePath !== undefined) {
+            params.set('scope', 'path');
+            params.set('path', String(scopePath || ''));
+        }
         Object.entries(extra || {}).forEach(([key, value]) => {
             if (value !== null && value !== undefined && String(value) !== '') {
                 params.set(key, String(value));
             }
         });
-        return `/api/explorer/${encodeURIComponent(sessionId)}/git/${endpoint}?${params.toString()}`;
+        const query = params.toString();
+        return `/api/explorer/${encodeURIComponent(sessionId)}/git/${endpoint}${query ? `?${query}` : ''}`;
+    }
+
+    function explorerGitScopePath(pane) {
+        if (pane?._explorerGitFollowBrowsing) {
+            return String(pane._explorerPath || '');
+        }
+        return typeof pane?._explorerGitPinnedPath === 'string'
+            ? pane._explorerGitPinnedPath
+            : null;
     }
 
     function explorerGitStatusLabel(git) {
@@ -467,6 +481,32 @@
         target?.focus();
     }
 
+    async function toggleExplorerGitFollowBrowsing(index) {
+        const pane = terminals[index];
+        if (!pane || pane._explorerGitActionBusy || pane._explorerGitRepoLoading) {
+            return false;
+        }
+        pane._explorerGitFollowBrowsing = !Boolean(pane._explorerGitFollowBrowsing);
+        invalidateExplorerGitRepo(index);
+        await loadExplorerGitRepo(index);
+        return true;
+    }
+
+    async function toggleExplorerGitPinnedScope(index) {
+        const pane = terminals[index];
+        if (!pane || pane._explorerGitActionBusy || pane._explorerGitRepoLoading) {
+            return false;
+        }
+        if (typeof pane._explorerGitPinnedPath === 'string') {
+            delete pane._explorerGitPinnedPath;
+        } else {
+            pane._explorerGitPinnedPath = String(pane._explorerPath || '');
+        }
+        invalidateExplorerGitRepo(index);
+        await loadExplorerGitRepo(index);
+        return true;
+    }
+
     function renderExplorerGitPanel(index) {
         const pane = terminals[index];
         const panel = document.getElementById(`explorer-git-panel-${index}`);
@@ -479,7 +519,29 @@
             return;
         }
         if (pane._explorerGitRepoError && !pane._explorerGitRepo) {
-            panel.innerHTML = `<div class="explorer-diff-sidebar-error">${escHtml(pane._explorerGitRepoError)}</div>`;
+            const following = Boolean(pane._explorerGitFollowBrowsing);
+            const pinned = typeof pane._explorerGitPinnedPath === 'string';
+            const pinTitle = pinned
+                ? 'Clear pinned Git folder'
+                : 'Pin Git to the current folder';
+            panel.innerHTML = `
+                <div class="explorer-diff-sidebar-error">${escHtml(pane._explorerGitRepoError)}</div>
+                <div class="explorer-diff-sidebar-section">
+                    <div class="explorer-diff-sidebar-title explorer-git-section-title">
+                        <span>Graph</span>
+                        <span class="explorer-git-section-actions">
+                            <button type="button" class="explorer-search-btn explorer-git-pin-toggle" data-explorer-git-pin-toggle aria-pressed="${pinned ? 'true' : 'false'}" title="${pinTitle}" aria-label="${pinTitle}">${EXPLORER_GIT_PIN_ICON}</button>
+                            <button type="button" class="explorer-search-btn explorer-git-follow-toggle" data-explorer-git-follow-toggle aria-pressed="${following ? 'true' : 'false'}" title="${following ? 'Use fixed Git folder' : 'Follow browsed folder for Git'}" aria-label="${following ? 'Use fixed Git folder' : 'Follow browsed folder for Git'}">${EXPLORER_GIT_FOLLOW_ICON}</button>
+                            <button type="button" class="explorer-search-btn explorer-git-commit-search-toggle" disabled title="Search commit messages" aria-label="Search commit messages">${EXPLORER_GIT_SEARCH_ICON}</button>
+                        </span>
+                    </div>
+                </div>`;
+            panel.querySelector('[data-explorer-git-pin-toggle]')?.addEventListener('click', () => {
+                toggleExplorerGitPinnedScope(index);
+            });
+            panel.querySelector('[data-explorer-git-follow-toggle]')?.addEventListener('click', () => {
+                toggleExplorerGitFollowBrowsing(index);
+            });
             return;
         }
 
@@ -506,6 +568,11 @@
         const hasUpstream = git.ahead !== null && git.ahead !== undefined;
         const publishLabel = hasUpstream ? 'Push' : 'Publish branch';
         const repoBranchText = explorerGitRepoLabel(git);
+        const following = Boolean(pane._explorerGitFollowBrowsing);
+        const pinned = typeof pane._explorerGitPinnedPath === 'string';
+        const pinTitle = pinned
+            ? 'Clear pinned Git folder'
+            : 'Pin Git to the current folder';
         const commitSearch = ensureExplorerGitCommitSearchState(pane);
         const searchPolicy = window.GridVibeExplorerGitSearch;
         const searchPlan = searchPolicy
@@ -579,6 +646,8 @@
                 <div class="explorer-diff-sidebar-title explorer-git-section-title">
                     <span>Graph</span>
                     <span class="explorer-git-section-actions">
+                        <button type="button" class="explorer-search-btn explorer-git-pin-toggle" data-explorer-git-pin-toggle aria-pressed="${pinned ? 'true' : 'false'}" ${busy ? 'disabled' : ''} title="${pinTitle}" aria-label="${pinTitle}">${EXPLORER_GIT_PIN_ICON}</button>
+                        <button type="button" class="explorer-search-btn explorer-git-follow-toggle" data-explorer-git-follow-toggle aria-pressed="${following ? 'true' : 'false'}" ${busy ? 'disabled' : ''} title="${following ? 'Use fixed Git folder' : 'Follow browsed folder for Git'}" aria-label="${following ? 'Use fixed Git folder' : 'Follow browsed folder for Git'}">${EXPLORER_GIT_FOLLOW_ICON}</button>
                         <button type="button" class="explorer-search-btn explorer-git-commit-search-toggle" data-explorer-git-commit-search-toggle aria-expanded="${commitSearch.open ? 'true' : 'false'}" title="Search commit messages" aria-label="Search commit messages">${EXPLORER_GIT_SEARCH_ICON}</button>
                     </span>
                 </div>
@@ -627,6 +696,12 @@
         }
         panel.querySelector('[data-explorer-git-commit-search-toggle]')?.addEventListener('click', () => {
             setExplorerGitCommitSearchOpen(index, 'toggle');
+        });
+        panel.querySelector('[data-explorer-git-follow-toggle]')?.addEventListener('click', () => {
+            toggleExplorerGitFollowBrowsing(index);
+        });
+        panel.querySelector('[data-explorer-git-pin-toggle]')?.addEventListener('click', () => {
+            toggleExplorerGitPinnedScope(index);
         });
         panel.querySelector('[data-explorer-git-commit-search-prev]')?.addEventListener('click', () => {
             stepExplorerGitCommitSearch(index, -1);
@@ -835,8 +910,9 @@
     async function loadExplorerGitRepo(index) {
         const pane = terminals[index];
         const sessionId = sessionIds[index];
-        const browsedPath = String(pane?._explorerPath || '');
-        const loadedForPath = pane?._explorerGitAnchorPath === browsedPath;
+        const scopePath = explorerGitScopePath(pane);
+        const requestedAnchorPath = scopePath === null ? '' : scopePath;
+        const loadedForPath = pane?._explorerGitAnchorPath === requestedAnchorPath;
         if (!pane || !sessionId || (pane._explorerGitRepoLoaded && loadedForPath) || pane._explorerGitRepoLoading) {
             renderExplorerGitPanels(index);
             return;
@@ -847,11 +923,18 @@
         renderExplorerGitPanels(index);
         try {
             const response = await fetch(
-                explorerGitRequestUrl(sessionId, 'repo', browsedPath)
+                explorerGitRequestUrl(sessionId, 'repo', scopePath)
             );
             const data = await response.json();
             if (!response.ok) {
                 throw new Error(data.error || 'Failed to load Git repository');
+            }
+            if (
+                terminals[index] !== pane
+                || sessionIds[index] !== sessionId
+                || explorerGitScopePath(pane) !== scopePath
+            ) {
+                return;
             }
             pane._explorerGitRepoLoaded = true;
             pane._explorerGitRepo = data;
@@ -861,11 +944,25 @@
             pane._explorerGitWatchSuspended = false;
             syncExplorerTabGitFromRepo(index, data);
         } catch (error) {
-            console.error('[GridVibe Sessions] Explorer Git repository failed:', error);
-            pane._explorerGitRepoError = error.message || 'Failed to load Git repository.';
+            if (
+                terminals[index] === pane
+                && sessionIds[index] === sessionId
+                && explorerGitScopePath(pane) === scopePath
+            ) {
+                console.error('[GridVibe Sessions] Explorer Git repository failed:', error);
+                pane._explorerGitRepoError = error.message || 'Failed to load Git repository.';
+            }
         } finally {
             pane._explorerGitRepoLoading = false;
-            renderExplorerGitPanels(index);
+            if (terminals[index] === pane && sessionIds[index] === sessionId) {
+                renderExplorerGitPanels(index);
+                if (
+                    pane._explorerGitSidebarOpen
+                    && explorerGitScopePath(pane) !== scopePath
+                ) {
+                    loadExplorerGitRepo(index);
+                }
+            }
         }
     }
 
@@ -879,7 +976,7 @@
            the pane keeps its last good _explorerGitRepo either way. */
         const pane = terminals[index];
         const sessionId = sessionIds[index];
-        const browsedPath = String(pane?._explorerPath || '');
+        const scopePath = explorerGitScopePath(pane);
         if (!pane || !sessionId || pane._explorerGitRepoLoading || pane._explorerGitRepoRefreshing) {
             return null;
         }
@@ -888,7 +985,7 @@
         panel?.classList.add('git-refreshing');
         try {
             const response = await fetch(
-                explorerGitRequestUrl(sessionId, 'repo', browsedPath),
+                explorerGitRequestUrl(sessionId, 'repo', scopePath),
                 { cache: 'no-store' }
             );
             const data = await response.json();
@@ -898,7 +995,7 @@
             if (
                 terminals[index] !== pane
                 || sessionIds[index] !== sessionId
-                || String(pane._explorerPath || '') !== browsedPath
+                || explorerGitScopePath(pane) !== scopePath
             ) {
                 return null;
             }
@@ -951,7 +1048,7 @@
     async function performExplorerGitAction(index, endpoint, body) {
         const pane = terminals[index];
         const sessionId = sessionIds[index];
-        const browsedPath = String(pane?._explorerPath || '');
+        const scopePath = explorerGitScopePath(pane);
         if (!pane || !sessionId || pane._explorerGitActionBusy) {
             return false;
         }
@@ -960,7 +1057,7 @@
         renderExplorerGitPanels(index);
         let succeeded = false;
         try {
-            const response = await fetch(explorerGitRequestUrl(sessionId, endpoint, browsedPath), {
+            const response = await fetch(explorerGitRequestUrl(sessionId, endpoint, scopePath), {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(body || {}),

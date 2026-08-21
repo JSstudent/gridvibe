@@ -1,7 +1,8 @@
 # Working-Directory Hardening Plan
 
-Status: **complete — stages 1-4 landed, plus stage 3.1**. D4 is explicitly
-deferred because it would change the explorer's confinement boundary.
+Status: **complete — stages 1-4 landed, plus stage 3.1 and the root-scope
+correction**. D4 is explicitly deferred because it would change the explorer's
+confinement boundary.
 Scope: ISSUE-2026-044 (explorer opens at the launch root, not the navigated
 directory), ISSUE-2026-045 (a saved workspace restores an agent pane at the
 launch directory, not the one the agent was started in), and ISSUE-2026-046
@@ -149,9 +150,11 @@ Three supporting rules:
    from output the shell already produces, or from the OS, never by typing at a
    prompt the user may be using. The existing probe survives only as an
    explicit, last-resort fallback on a pane with no other source.
-3. **The Git anchor is a property of the directory being browsed, and one
-   anchor serves the whole sidebar.** Whatever repository the sidebar displays
-   is the repository *Commit*, *Stage All*, *Discard All* and *Publish* act on.
+3. **The Git anchor is the explorer root unless another folder is explicitly
+   pinned or following is enabled, and one anchor serves the whole sidebar.**
+   Directory navigation alone never changes the graph or action target.
+   Whatever repository the sidebar displays is the repository *Commit*, *Stage
+   All*, *Discard All* and *Publish* act on.
 
 ---
 
@@ -263,11 +266,14 @@ distinction; D2 holds the two ways to do it.
 
 ### 4.4 What the Git sidebar does with it
 
-The sidebar's anchor becomes the **worktree containing the browsed directory**,
-resolved by one helper and echoed back on every Git payload:
+The sidebar is anchored on the **explorer root by default**. Two runtime-only,
+per-pane controls sit beside the Graph search magnifier: the pin captures the
+current folder as a fixed scope, and the independent chain opts into the
+worktree containing the live browsed directory:
 
-- `GET .../git/repo` and `GET .../git/state` take the browsed `path` (already
-  known to the client as `pane._explorerPath`) and anchor on it.
+- `GET .../git/repo` and `GET .../git/state` ignore a bare `path`; only
+  `scope=path` activates an explicitly selected root-confined path, whether it
+  came from the pin or live follow.
 - Every mutating route resolves the anchor **the same way from the same
   parameter**, so the sidebar and its buttons can never address different
   repositories.
@@ -279,9 +285,10 @@ resolved by one helper and echoed back on every Git payload:
   construction, and `_explorer_git_changed_files()` keeps filtering visible
   changes to inside the root.
 
-This is read-side plumbing plus an identical change to six mutation routes. It is
-deliberately the last stage, because §4.3 alone already fixes the reported case
-and this fixes the residual one — an explorer deliberately opened above a repo.
+This keeps a root chosen in the launcher — or derived from the terminal's cwd at
+the mode switch — stable while the Files view navigates. A pin can replace that
+fixed Git scope without changing explorer confinement. Follow overrides the
+fixed root/pin while enabled and returns to it when disabled.
 
 ---
 
@@ -907,25 +914,26 @@ root re-enter the system as a configured one on every restart. The flag is
 persisted; the migration default that D2 feared turns out to be one expression
 (`root on an explorer pane`) and no file rewrite.
 
-### Stage 4 — Decouple the Git anchor from the root — **LANDED**
+### Stage 4 — Selectable Git scope — **LANDED, ROOT DEFAULT CORRECTED**
 
 *Anchors re-checked after stage 3.1; the line references below are current.*
 
 | Change | Files |
 | --- | --- |
-| One confined anchor helper; `git/repo` + `git/state` take the browsed path | `_explorer_git_anchor_paths()` (`web/api.py`), `_get_git_repo_state()` (`web/explorer.py`) |
+| One confined anchor helper; `git/repo` + `git/state` use the root unless `scope=path` | `_explorer_git_anchor_paths()` (`web/api.py`), `_get_git_repo_state()` (`web/explorer.py`) |
 | The **eight** mutation routes resolve the same anchor | `web/api.py` Git mutation routes |
 | Root-relative anchor identity in the sidebar revision token | `_git_repo_anchor_identity()` + `_git_repo_revision()` (`web/explorer.py`) |
-| Sidebar names the repository; every client request sends the browsed path | `explorer-git-sidebar.js`, `explorer-git-watch.js` |
+| Sidebar names the repository; Graph pin/follow controls select one scope for every request | `explorer-git-sidebar.js`, `explorer-git-watch.js` |
 
 Three implementation details differed from what the original plan assumed:
 
 - **Eight mutation routes, not six.** `unstage-all` landed after this plan was
   written (`stage`, `unstage`, `stage-all`, `unstage-all`, `discard-all`,
   `revert`, `commit`, `publish`). Before stage 4 all eight resolved from
-  `backend.root_directory()`; they now move together through the confined
-  browsed anchor, so the sidebar and its buttons cannot address different
-  repositories — the failure §3 rule 3 forbids.
+  `backend.root_directory()`; they now move together through either that root or
+  the explicitly selected confined browsed anchor, so the sidebar and its
+  buttons cannot address different repositories — the failure §3 rule 3
+  forbids.
 - **Half the anchor plumbing already exists.** `_get_git_context(backend,
   root_path, current_path)` has always taken a browsed path, and `_get_git_diff`
   passes `backend.file_dirname(file_path)`; `_get_git_repo_state()` is the
@@ -935,7 +943,7 @@ Three implementation details differed from what the original plan assumed:
 - **Two client fetch sites, not one.** The initial load and quiet refresh were
   separate `/git/repo` calls in `explorer-viewer.js`. The extraction moved both
   into `explorer-git-sidebar.js`, and both now use the same URL builder and
-  browsed path.
+  selected scope.
 
 #### What was done
 
@@ -948,12 +956,11 @@ and the classic-script load order changed. The move-only regression set passed
 `test_multi_workspace.py`.
 
 **Backend.** `git/repo`, `git/state`, and all eight mutation routes now resolve
-the `path` query with `_explorer_git_anchor_paths()`, which delegates to the
-backend's existing root-confined directory resolver. Single-file targets stay
-in the JSON body, so a target and the repository it belongs to cannot be
-confused. `_get_git_repo_state()` and `_get_git_repo_summary()` take that
-browsed directory; every mutation helper passes it to the same
-`_git_action_repo_root()` seam.
+one scope with `_explorer_git_anchor_paths()`. It returns the explorer root by
+default and delegates to the existing root-confined directory resolver only for
+an explicit `scope=path`. Single-file targets stay in the JSON body, so a target
+and the repository it belongs to cannot be confused. Every mutation helper
+passes the selected scope to the same `_git_action_repo_root()` seam.
 
 `_git_repo_anchor_identity()` adds only the repository's explorer-root-relative
 path to `_git_repo_revision()` — never an absolute local or SSH path — so two
@@ -961,17 +968,23 @@ sibling repositories with otherwise identical state still trigger a refresh.
 The payload also carries `repo_name` and normalized `anchor_path`.
 
 **Client.** `explorerGitRequestUrl()` is the one URL builder used by initial
-loads, quiet refreshes, the shared watcher poll, and mutations. A pane records
+loads, quiet refreshes, the shared watcher poll, and mutations. The Graph
+header's pin captures a runtime-only fixed path, and its independent chain
+toggles live follow. With follow off, the cached anchor is the fixed pin or the
+explorer root and navigation causes no Git reload. With follow on, a pane records
 which browsed path its cached sidebar describes, rejects a stale quiet response
-after navigation, and reloads an open sidebar when directory navigation changes
-the anchor. The repository bar now renders `repository · branch/status`, making
-the target of Stage All, Commit, Discard All, and Publish visible.
+after navigation, and reloads the open sidebar when that path changes. Turning
+follow off returns to the pin. The repository bar renders
+`repository · branch/status`, making the target of Stage All, Commit, Discard
+All, and Publish visible.
 
-**Tests.** Backend cases cover a repository below the explorer root, distinct
-revision identities for sibling repositories, and the common anchor passed to
-all eight mutation routes. `tests/test_explorer_git_sidebar.py` executes the
-real extracted module in Node and verifies read/mutation URLs, encoding, cached
-anchor state, and the repository label. ISSUE-2026-044 is closed.
+**Tests.** Backend cases cover root scope ignoring navigation, an explicitly
+scoped repository below the explorer root, distinct revision identities for
+followed sibling repositories, and the common selected anchor passed to all
+eight mutation routes. `tests/test_explorer_git_sidebar.py` executes the real
+extracted module in Node and verifies the root default, fixed pin, live follow,
+their combined fallback, request URLs, cached anchor state, and repository
+label. ISSUE-2026-044 is closed.
 
 ---
 
@@ -997,7 +1010,8 @@ was added.
 - `tests/test_multi_workspace.py` — a derived root and a chosen root each
   surviving a restart as themselves, and a legacy slot that states neither.
 - `tests/test_api.py` Git-route cases — the sidebar and the mutations resolve one
-  anchor; a repo below the root produces a sidebar once browsed into.
+  selected anchor; a repo below the root produces a sidebar after either that
+  folder is pinned or Follow browsed folder is enabled.
 - Regression, must pass untouched:
   `test_switch_roundtrip_preserves_explorer_root_for_parent_navigation`,
   `tests/test_session_persistence_contract.py`, and
@@ -1010,7 +1024,7 @@ handing any stage back.
 
 ## 7. Documentation to update on landing
 
-*Done for stage 4: the browsed-directory Git-anchor contract is in the
+*Done for stage 4: the selectable Git-anchor contract is in the
 Regression Guardrails of both `CLAUDE.md` and `AGENTS.md`; guardrail 6 records
 the completed `explorer-git-sidebar.js` pure move; `README.md` and
 `CHANGELOG.md` describe the user-visible repository-following behaviour;
@@ -1087,8 +1101,8 @@ half.*
   to answer. A reconnect and a restore of the same pane now replay the same
   value, which is what deferring the decision to this stage was for.
 - **D4 — Should the explorer offer "Set root here"? DECIDED: deferred.** Stage
-  4 makes the Git sidebar follow the browsed directory, which removes most of
-  the need. A breadcrumb re-root would also let the user *widen* a root, which
+  4 can make the Git sidebar follow the browsed directory on demand, which
+  removes most of the need. A breadcrumb re-root would also let the user *widen* a root, which
   is a confinement-boundary change and needs a separate design and security
   argument. It is intentionally not part of this hardening work.
 
@@ -1105,19 +1119,19 @@ Checked against the implementation after stage 4 landed:
 | Split, agent promotion, save, restore, reconnect and shell switch use the effective directory | Implemented | `web/api.py`, `web/terminal_io.py`, `web/runtime_state.py`, API/multi-workspace tests |
 | Configured and derived explorer roots remain distinct across live switches and snapshots | Implemented | `sessions/manager.py`, `web/session_presentation.py`, `web/runtime_state.py` |
 | The launch floor remains stable and stops pinning only while the pane is inside it | Implemented | `launch_directory`, `_resolve_explorer_open_root()`, stage 3.1 API tests |
-| Sidebar reads, watcher and all eight Git mutations use the browsed repository | Implemented | `web/api.py`, `web/explorer.py`, `explorer-git-sidebar.js`, `explorer-git-watch.js` |
-| Relative anchor identity invalidates sibling-repository switches without absolute-path tokens | Implemented | `_git_repo_anchor_identity()`, `_git_repo_revision()`, Git revision tests |
+| Sidebar reads, watcher and all eight Git mutations use one root, fixed pin, or live-follow scope together | Implemented | `web/api.py`, `web/explorer.py`, `explorer-git-sidebar.js`, `explorer-git-watch.js` |
+| Relative anchor identity invalidates opted-in sibling-repository switches without absolute-path tokens | Implemented | `_git_repo_anchor_identity()`, `_git_repo_revision()`, Git revision tests |
 | Maintained docs and issue ledger describe the shipped contract | Implemented | `README.md`, `CHANGELOG.md`, `CLAUDE.md`, `AGENTS.md`, `docs/testing_issues.md` |
 
 No implementation item in stages 1-4 or 3.1 remains. D4 is the sole deferred
 idea and is outside the contract rather than an unfinished stage.
 
 Verification on 2026-08-21: Ruff and `git diff --check` pass. The full runner
-executed 1,945 tests, and every working-directory, persistence, Git-anchor, and
-pure-move regression passed. The run itself was not green on this Windows /
-Python 3.14 host: two unchanged process-timeout fixtures failed independently
+executed 1,946 tests, and every working-directory, persistence, Git-anchor, and
+pure-move regression passed. The run itself was not green on this Windows host:
+two unchanged process-timeout fixtures failed independently
 of this work (`test_repo_git_timeout_bounds_a_remote_that_goes_quiet` left its
 temporary checkout locked, and
-`test_a_stalled_remote_returns_the_worker_thread_within_the_bound` saw Git exit
-instead of stall). The latter reproduces in isolation; neither failure exercises
-the stage 4 anchor paths.
+`test_a_stalled_remote_returns_the_worker_thread_within_the_bound` left its
+worker alive past the eight-second bound). Neither failure exercises the stage 4
+anchor paths.

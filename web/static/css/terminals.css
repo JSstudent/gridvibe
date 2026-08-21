@@ -4340,10 +4340,10 @@
             display: none;
         }
 
-        /* The magnifier in the Graph header. Same 22px box as the Stage All /
-           Discard All controls in the sections above it, and it takes the same
-           accent while the bar it opened is on screen as the other explorer
-           toggles do. */
+        /* The Graph header's fixed-scope pin, follow toggle, and magnifier.
+           Same 22px box as the Stage All / Discard All controls above. */
+        .explorer-git-pin-toggle,
+        .explorer-git-follow-toggle,
         .explorer-git-commit-search-toggle {
             display: inline-flex;
             align-items: center;
@@ -4355,12 +4355,18 @@
             color: var(--explorer-open-folder-text);
         }
 
+        .explorer-git-pin-toggle .explorer-btn-icon,
+        .explorer-git-follow-toggle .explorer-btn-icon,
         .explorer-git-commit-search-toggle .explorer-btn-icon {
             display: block;
             width: 14px;
             height: 14px;
         }
 
+        .explorer-git-pin-toggle:hover,
+        .explorer-git-pin-toggle:focus-visible,
+        .explorer-git-follow-toggle:hover,
+        .explorer-git-follow-toggle:focus-visible,
         .explorer-git-commit-search-toggle:hover,
         .explorer-git-commit-search-toggle:focus-visible {
             background: var(--explorer-open-folder-hover-bg);
@@ -4368,6 +4374,13 @@
         }
 
         .explorer-git-commit-search-toggle[aria-expanded="true"] {
+            border-color: var(--t-accent);
+            color: var(--t-accent);
+            background: var(--explorer-row-active);
+        }
+
+        .explorer-git-pin-toggle[aria-pressed="true"],
+        .explorer-git-follow-toggle[aria-pressed="true"] {
             border-color: var(--t-accent);
             color: var(--t-accent);
             background: var(--explorer-row-active);

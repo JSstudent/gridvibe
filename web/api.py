@@ -1640,7 +1640,10 @@ def _with_no_store(result: Any):
 
 
 def _explorer_git_anchor_paths(backend: Any) -> Tuple[str, str]:
-    """Resolve the browsed Git anchor through the explorer's root confinement."""
+    """Resolve the Git scope, rooted on the pane unless a path is explicit."""
+    root_path = backend.root_directory()
+    if request.args.get("scope") != "path":
+        return root_path, root_path
     return backend.resolve_dir(request.args.get("path", ""))
 
 

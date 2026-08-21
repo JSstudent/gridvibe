@@ -38,8 +38,10 @@ Steps to reproduce:
 
 Expected behavior:
 The explorer opens on the directory the shell is actually in, rooted so that the
-repository containing it is visible, and the Git sidebar shows that repository —
-whether it was the root at open time or was navigated into afterwards.
+repository containing it is visible, and the Git sidebar stays attached to that
+root. An explorer deliberately launched above repositories may pin its current
+folder as a fixed Git scope or follow the browsed folder after the user enables
+the respective option.
 
 Actual behavior / logs:
 Root-caused by code inspection; see `docs/working_directory_hardening.md` §2.1-2.3
@@ -52,11 +54,14 @@ working directory is now observed
 rather than assumed, an explorer opened from a navigated terminal roots on
 the repository containing it, and the observed directory is what a split, a
 preset and a workspace snapshot record. The Git sidebar, its watcher, and all
-eight mutation routes now resolve the repository containing the browsed
-directory from the same confined request anchor. A root above one or several
-repositories therefore works, and the sidebar identifies which repository it
-will act on. See also ISSUE-2026-046, the two ways a pane could still be pinned
-to a directory nobody picked.
+eight mutation routes now share one selected anchor. That anchor is the explorer
+root by default; the Graph header's per-pane pin can capture the current folder
+as a fixed scope, while the independent Follow browsed folder toggle opts all
+reads, watcher polls, and actions into the live confined directory together.
+Disabling follow returns to the pin, if present. The sidebar identifies which
+repository it will act on. See also
+ISSUE-2026-046, the two ways a pane could still be pinned to a directory nobody
+picked.
 
 ### Issue ID: ISSUE-2026-046
 - Title: The explorer will not follow a shell that has walked back up out of a subdirectory
