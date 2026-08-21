@@ -12367,11 +12367,19 @@ class ApiRoutesTestCase(unittest.TestCase):
                                     api._connect_local_session("abc123", session)
 
         winpty.spawn.assert_called_once()
-        command_line = winpty.spawn.call_args.args[0]
-        self.assertIn("wsl.exe", command_line)
-        self.assertIn("--distribution Debian", command_line)
-        self.assertIn("--user devuser", command_line)
-        self.assertIn('--cd /mnt/c/repo', command_line)
+        command_args = winpty.spawn.call_args.args[0]
+        self.assertEqual(
+            command_args,
+            [
+                "wsl.exe",
+                "--distribution",
+                "Debian",
+                "--user",
+                "devuser",
+                "--cd",
+                "/mnt/c/repo",
+            ],
+        )
 
     def test_connect_local_session_uses_powershell_when_requested(self):
         session = SimpleNamespace(
@@ -12395,9 +12403,12 @@ class ApiRoutesTestCase(unittest.TestCase):
                                 api._connect_local_session("abc123", session)
 
         winpty.spawn.assert_called_once()
-        command_line = winpty.spawn.call_args.args[0]
-        self.assertIn("powershell.exe", command_line)
-        self.assertIn("-NoLogo", command_line)
+        command_args = winpty.spawn.call_args.args[0]
+        self.assertEqual(command_args[:4], ["powershell.exe", "-NoLogo", "-NoExit", "-Command"])
+        self.assertEqual(
+            command_args[4],
+            web_terminal_io.shell_integration_arguments("powershell")[2],
+        )
 
     def test_connect_local_session_requires_pywinpty_on_windows(self):
         session = SimpleNamespace(

@@ -1357,8 +1357,7 @@ def _connect_local_session(session_id: str, session: Any):
                     "Install core dependencies with `pip install -r requirements.txt`."
                 )
 
-            command_line = subprocess.list2cmdline(command)
-            process = WinPtyProcess.spawn(command_line, cwd=launch_cwd, env=shell_environment)
+            process = WinPtyProcess.spawn(command, cwd=launch_cwd, env=shell_environment)
             connection = {
                 "kind": "local",
                 "pty_process": process,
