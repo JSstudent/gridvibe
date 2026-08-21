@@ -4,6 +4,10 @@ All notable changes to GridVibe will be documented in this file.
 
 ## Unreleased
 
+- **(feat) Unstage All in the Git sidebar.** The **Changes** header has had a Stage All button for a while, but the only way back out was to unstage each file in turn. **Staged Changes** now carries the mirror control — a `−` in its header that empties the index in one action, disabled when nothing is staged. It touches the index only: every file on disk keeps exactly the contents it had, and Stage All puts it all straight back, so unlike Discard All beside it there is no confirmation to click through. It also works before a repository's first commit, where there is no `HEAD` to reset against.
+
+- **(fix) Repository search no longer highlights a result you never picked.** Ctrl+Shift+F left the first line of the first file marked as the selected result the moment the results arrived, pointing at a location the pane was not showing — and it stayed marked whatever you did next. It also meant the first Enter jumped past that hit to the second one. Nothing is selected now until you click a result or step onto one with Enter or the arrow keys, and clicking a result moves the highlight to it.
+
 - **(fix) A file stays syntax-coloured even if the background highlighter dies.** Syntax colouring for larger files is handed to a background thread, and the file shows as plain text for the moment it takes. If that thread failed, the plain text was all you got — the file you had open stayed uncoloured for as long as it stayed open, while the very next file you opened came up coloured normally. GridVibe now finishes the colouring itself when the background attempt fails, which is what it already did for anyone whose browser cannot run it at all.
 
 - **(fix) The large-file notice says what actually made the file large.** A file is shown as plain text when it has too many lines *or* is simply too big — and a minified bundle, the case the size limit exists for, is often one enormous line. The notice reported lines regardless, so those files announced "1 lines rendered as plain text". It now reports whichever limit was reached, in lines or in megabytes.

@@ -7005,6 +7005,64 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertIn("worktree", response.get_json()["error"].lower())
 
+    def test_explorer_git_unstage_all_clears_the_index_without_touching_the_worktree(self):
+        # Bulk form of the per-row Unstage: every staged change moves back to
+        # the worktree, and the files on disk are left exactly as they were.
+        repo_dir = self._init_committed_repo()
+        (repo_dir / "second.txt").write_text("second\n", encoding="utf-8")
+        self._run_git(repo_dir, "add", "second.txt")
+        self._run_git(repo_dir, "commit", "-m", "second file")
+        (repo_dir / "README.md").write_text("# Project\nchanged\n", encoding="utf-8")
+        (repo_dir / "second.txt").unlink()
+        (repo_dir / "new.txt").write_text("new\n", encoding="utf-8")
+        self._run_git(repo_dir, "add", "--all")
+        session_id = self._create_explorer_session(repo_dir)
+
+        response = self.client.post(f"/api/explorer/{session_id}/git/unstage-all", json={})
+
+        self.assertEqual(response.status_code, 200)
+        changes = {change["path"]: change for change in response.get_json()["changes"]}
+        self.assertEqual(changes["README.md"]["git"]["index_status"], ".")
+        self.assertEqual(changes["README.md"]["git"]["worktree_status"], "M")
+        self.assertEqual(changes["second.txt"]["git"]["index_status"], ".")
+        self.assertEqual(changes["second.txt"]["git"]["worktree_status"], "D")
+        self.assertEqual(changes["new.txt"]["git"]["status"], "untracked")
+        # Index-only: the worktree is untouched, so nothing edited is lost.
+        self.assertEqual(
+            (repo_dir / "README.md").read_text(encoding="utf-8"),
+            "# Project\nchanged\n",
+        )
+        self.assertEqual((repo_dir / "new.txt").read_text(encoding="utf-8"), "new\n")
+        self.assertFalse((repo_dir / "second.txt").exists())
+
+    def test_explorer_git_unstage_all_before_the_first_commit(self):
+        # No HEAD to reset against: the same `rm --cached` fallback the
+        # single-path unstage uses has to carry the bulk form too.
+        repo_dir = Path(self.temp_dir.name) / "fresh"
+        repo_dir.mkdir()
+        self._run_git(repo_dir, "init")
+        (repo_dir / "new.txt").write_text("new\n", encoding="utf-8")
+        self._run_git(repo_dir, "add", "--all")
+        session_id = self._create_explorer_session(repo_dir)
+
+        response = self.client.post(f"/api/explorer/{session_id}/git/unstage-all", json={})
+
+        self.assertEqual(response.status_code, 200)
+        changes = {change["path"]: change for change in response.get_json()["changes"]}
+        self.assertEqual(changes["new.txt"]["git"]["status"], "untracked")
+        self.assertEqual((repo_dir / "new.txt").read_text(encoding="utf-8"), "new\n")
+
+    def test_explorer_git_unstage_all_requires_a_repository(self):
+        plain_dir = Path(self.temp_dir.name) / "plain-unstage"
+        plain_dir.mkdir()
+        (plain_dir / "file.txt").write_text("hello\n", encoding="utf-8")
+        session_id = self._create_explorer_session(plain_dir)
+
+        response = self.client.post(f"/api/explorer/{session_id}/git/unstage-all", json={})
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("worktree", response.get_json()["error"].lower())
+
     def test_explorer_git_discard_all_restores_tracked_worktree_changes(self):
         # Wave 3 / 1.c (OD-1): bulk discard restores modified + deleted tracked
         # files while untracked files are left in place (never git clean).
@@ -7101,6 +7159,19 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("title: 'Discard all changes?'", html)
         self.assertIn(".explorer-git-section-title", html)
         self.assertIn(".explorer-git-section-actions", html)
+        # The Staged Changes header carries the mirror control: index-only,
+        # so it takes no confirm, and it is disabled with an empty index.
+        self.assertIn("data-explorer-git-unstage-all", html)
+        self.assertIn("function explorerGitUnstageAll(index)", html)
+        self.assertIn("performExplorerGitAction(index, 'unstage-all', {})", html)
+        unstage_all_button = html[
+            html.index("data-explorer-git-unstage-all"):
+        ][:200]
+        self.assertIn("(busy || !staged.length) ? 'disabled'", unstage_all_button)
+        unstage_all = html[
+            html.index("function explorerGitUnstageAll(index)"):
+        ][:200]
+        self.assertNotIn("openGenericConfirmModal", unstage_all)
 
     def test_terminals_page_git_change_rows_lead_with_the_file_name(self):
         # Change rows read "name — muted directory" with the status badge on the
@@ -7138,7 +7209,10 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         html = self._page_html(response)
         self.assertIn("const EXPLORER_GIT_WORKTREE_ENDPOINTS = new Set([", html)
-        self.assertIn("'stage', 'unstage', 'revert', 'commit', 'stage-all', 'discard-all',", html)
+        self.assertIn(
+            "'stage', 'unstage', 'revert', 'commit', 'stage-all', 'unstage-all', 'discard-all',",
+            html,
+        )
         self.assertIn("EXPLORER_GIT_WORKTREE_ENDPOINTS.has(endpoint)", html)
         self.assertIn("async function refreshExplorerAfterGitAction(index, actionPath)", html)
         refresh_fn = html[
@@ -13418,6 +13492,42 @@ class ExplorerSourceSelectionHighlightTestCase(unittest.TestCase):
         # Consumed once, so paging through matches is not dragged back.
         self.assertIn("state.seekOffset = null;", resolve)
         self.assertIn("state.activeIndex = explorerResolveSearchActiveIndex(state, ranges);", viewer)
+
+    def test_repo_search_highlights_the_picked_hit_and_nothing_before_that(self):
+        # The panel's `active` row means "this is the location you are looking
+        # at". Arriving results used to select hit 0, so a permanent highlight
+        # sat on the first line of the first file the reader had never opened
+        # — and it made the first Enter step to the *second* hit.
+        search = self._static("js/explorer-search.js")
+        arrival = search[
+            search.index("state.payload = data;"):
+            search.index("} catch (error) {")
+        ]
+        self.assertIn("state.activeHit = -1;", arrival)
+        self.assertNotIn("state.activeHit = files.length ? 0 : -1;", search)
+        # Clicking a hit is what makes it active, resolved by path:line against
+        # the same flattened list Enter/Arrow stepping walks.
+        self.assertIn("function explorerRepoSearchHitIndex(state, path, line)", search)
+        self.assertIn("hit.path === path && Number(hit.line) === Number(line)", search)
+        click = search[
+            search.index("results.querySelectorAll('[data-explorer-search-path]')"):
+            search.index("results.querySelector('[data-explorer-search-retry]')")
+        ]
+        self.assertIn("const hitIndex = explorerRepoSearchHitIndex(state, path, line);", click)
+        self.assertIn("state.activeHit = hitIndex;", click)
+        self.assertLess(
+            click.index("state.activeHit = hitIndex;"),
+            click.index("activateExplorerSearchHit(index, path, line, {"),
+        )
+        # With nothing selected, Enter and the arrows open hit 0 rather than
+        # skipping it.
+        keys = search[
+            search.index("function handleExplorerRepoSearchKeydown(index, event)"):
+            search.index("async function activateExplorerSearchHit(")
+        ]
+        self.assertIn("state.activeHit < 0", keys)
+        # A new query, a cleared panel and an error all deselect.
+        self.assertNotIn("state.activeHit = 0;", search)
 
     def test_repo_search_hit_uses_exact_source_line_without_local_find(self):
         search = self._static("js/explorer-search.js")

@@ -83,6 +83,15 @@
         return (file?.matches || []).find(match => Number(match.line) === Number(line)) || null;
     }
 
+    /* Position of one hit in the flattened list -- what makes a clicked hit
+       the active one, so the panel highlight follows the reader's selection
+       instead of an arbitrary first row. */
+    function explorerRepoSearchHitIndex(state, path, line) {
+        return explorerRepoSearchHits(state).findIndex(
+            hit => hit.path === path && Number(hit.line) === Number(line)
+        );
+    }
+
     function explorerRepoSearchParams(index, state) {
         const pane = terminals[index];
         const params = new URLSearchParams();
@@ -153,7 +162,12 @@
             state.collapsed = files.length > EXPLORER_REPO_SEARCH_EXPAND_MAX_FILES
                 ? new Set(files.map(file => file.path))
                 : new Set();
-            state.activeHit = files.length ? 0 : -1;
+            /* Nothing is active until the reader picks a hit. Pre-selecting
+               the first one drew a permanent highlight on a line nobody had
+               opened, which reads as "you are here" for a file the pane is
+               not showing -- and it made the first Enter skip to the second
+               hit. -1 also lets Enter activate hit 0. */
+            state.activeHit = -1;
         } catch (error) {
             if (error?.name === 'AbortError' || state.requestSeq !== requestSeq) {
                 return;
@@ -317,6 +331,11 @@
             button.addEventListener('click', event => {
                 const path = button.dataset.explorerSearchPath || '';
                 const line = Number(button.dataset.explorerSearchLine || 0);
+                const hitIndex = explorerRepoSearchHitIndex(state, path, line);
+                if (hitIndex !== state.activeHit) {
+                    state.activeHit = hitIndex;
+                    renderExplorerSearchResults(index);
+                }
                 activateExplorerSearchHit(index, path, line, {
                     pinned: Boolean(event.ctrlKey || event.metaKey),
                     match: explorerRepoSearchMatchAt(state, path, line)

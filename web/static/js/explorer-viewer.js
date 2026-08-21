@@ -2330,7 +2330,12 @@
                 <button type="button" class="explorer-git-publish-btn" data-explorer-git-publish ${busy ? 'disabled' : ''} title="Push the current branch to its remote">${escHtml(publishLabel)}</button>
             </div>
             <div class="explorer-diff-sidebar-section">
-                <div class="explorer-diff-sidebar-title">Staged Changes</div>
+                <div class="explorer-diff-sidebar-title explorer-git-section-title">
+                    <span>Staged Changes</span>
+                    <span class="explorer-git-section-actions">
+                        <button type="button" class="explorer-search-btn explorer-git-unstage-btn explorer-git-unstage-all-btn" data-explorer-git-unstage-all ${(busy || !staged.length) ? 'disabled' : ''} title="Unstage all changes" aria-label="Unstage all changes">${UI_MINUS_ICON}</button>
+                    </span>
+                </div>
                 <div class="explorer-diff-commit-files explorer-git-change-list">
                     ${renderExplorerGitFileRows(index, staged, { emptyText: 'No staged changes.', action: 'unstage' })}
                 </div>
@@ -2438,6 +2443,10 @@
         const stageAllButton = panel.querySelector('[data-explorer-git-stage-all]');
         if (stageAllButton) {
             stageAllButton.addEventListener('click', () => explorerGitStageAll(index));
+        }
+        const unstageAllButton = panel.querySelector('[data-explorer-git-unstage-all]');
+        if (unstageAllButton) {
+            unstageAllButton.addEventListener('click', () => explorerGitUnstageAll(index));
         }
         const discardAllButton = panel.querySelector('[data-explorer-git-discard-all]');
         if (discardAllButton) {
@@ -3973,7 +3982,7 @@
     /* Git actions that change working-tree or index state — publish only talks
        to the remote, so it never needs the ISSUE-2026-034 refresh below. */
     const EXPLORER_GIT_WORKTREE_ENDPOINTS = new Set([
-        'stage', 'unstage', 'revert', 'commit', 'stage-all', 'discard-all',
+        'stage', 'unstage', 'revert', 'commit', 'stage-all', 'unstage-all', 'discard-all',
     ]);
 
     /* ISSUE-2026-034: after a mutating Git action the Files tree and the open
@@ -4037,6 +4046,13 @@
             return;
         }
         performExplorerGitAction(index, 'unstage', { path });
+    }
+
+    /* Bulk form of the per-row Unstage: index-only, so nothing in the
+       worktree moves and Stage All puts it straight back — no confirm, unlike
+       the irreversible Discard All beside it. */
+    function explorerGitUnstageAll(index) {
+        performExplorerGitAction(index, 'unstage-all', {});
     }
 
     /* Discarding working-tree edits is irreversible, so it goes through the

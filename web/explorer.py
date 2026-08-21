@@ -2764,6 +2764,27 @@ def _git_stage_all_paths(backend: Any, root_path: str) -> None:
         raise ValueError(_decode_git_output(result.stderr) or "Git stage all failed")
 
 
+def _git_unstage_all_paths(backend: Any, root_path: str) -> None:
+    """Unstage every staged change in an explorer repository.
+
+    Bulk form of _git_unstage_path: index-only, so the worktree is untouched
+    and nothing the reader has edited can be lost. Before the first commit
+    there is no HEAD to reset against, so the same fallback the single-path
+    helper uses applies -- ``git rm --cached -r`` over the repository root.
+    """
+    repo_root = _git_action_repo_root(backend, root_path)
+    if _git_has_head(backend, repo_root):
+        args = ["reset", "--quiet", "HEAD", "--", "."]
+    else:
+        args = ["rm", "--cached", "-r", "--quiet", "--", "."]
+    try:
+        result = backend.run_git(args, cwd=repo_root, write=True)
+    except subprocess.TimeoutExpired as exc:
+        raise ValueError("Git unstage all timed out") from exc
+    if result.returncode != 0:
+        raise ValueError(_decode_git_output(result.stderr) or "Git unstage all failed")
+
+
 _GIT_UNMERGED_STATUS_CODES = frozenset({"DD", "AU", "UD", "UA", "DU", "AA", "UU"})
 
 

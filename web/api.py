@@ -113,6 +113,7 @@ from web.explorer import (  # noqa: F401 - some names re-exported for backwards 
     _git_stage_all_paths,
     _git_stage_path,
     _git_status_for_entry,
+    _git_unstage_all_paths,
     _git_unstage_path,
     _is_browser_session,
     _is_explorer_image_file,
@@ -1706,6 +1707,22 @@ def stage_all_explorer_git(session_id: str):
     def handler(backend: Any) -> Dict[str, Any]:
         root_path = backend.root_directory()
         _git_stage_all_paths(backend, root_path)
+        summary = _get_git_repo_summary(backend, root_path)
+        return {"root": root_path, **summary}
+
+    return _explorer_route_response(session, handler)
+
+
+@app.route('/api/explorer/<session_id>/git/unstage-all', methods=['POST'])
+def unstage_all_explorer_git(session_id: str):
+    """Unstage every staged change in an explorer Git repository (index only)."""
+    session = session_manager.get_session(session_id)
+    if session is None:
+        return jsonify({"error": "Session not found"}), 404
+
+    def handler(backend: Any) -> Dict[str, Any]:
+        root_path = backend.root_directory()
+        _git_unstage_all_paths(backend, root_path)
         summary = _get_git_repo_summary(backend, root_path)
         return {"root": root_path, **summary}
 

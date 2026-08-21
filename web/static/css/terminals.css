@@ -4299,8 +4299,9 @@
             text-transform: uppercase;
         }
 
-        /* Section headers that carry bulk actions (Stage All / Discard All)
-           keep the title text left and the compact buttons right. */
+        /* Section headers that carry bulk actions (Unstage All on Staged
+           Changes; Stage All / Discard All on Changes) keep the title text
+           left and the compact buttons right. */
         .explorer-git-section-title {
             display: flex;
             align-items: center;
