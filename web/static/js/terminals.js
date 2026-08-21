@@ -4987,7 +4987,7 @@
                 _explorerGitPinnedPath: session.explorer_git_pin_active
                     ? String(session.explorer_git_pinned_path || '')
                     : undefined,
-                _explorerPath: explorerPersistedPreviewDirectory(session) ?? undefined,
+                _explorerPath: explorerInitialPreviewDirectory(session),
                 _explorerSearchSidebarOpen: Boolean(session.explorer_search_open),
                 _explorerSidebarWidth: Number(session.explorer_sidebar_width) || 260,
                 _explorerSidebarScroll: session.explorer_sidebar_scroll || {},
@@ -6156,7 +6156,7 @@
             _explorerGitPinnedPath: session.explorer_git_pin_active
                 ? String(session.explorer_git_pinned_path || '')
                 : undefined,
-            _explorerPath: explorerPersistedPreviewDirectory(session) ?? undefined,
+            _explorerPath: explorerInitialPreviewDirectory(session),
             _explorerSearchSidebarOpen: Boolean(session.explorer_search_open),
             _explorerSidebarWidth: Number(session.explorer_sidebar_width) || 260,
             _explorerSidebarScroll: session.explorer_sidebar_scroll || {},

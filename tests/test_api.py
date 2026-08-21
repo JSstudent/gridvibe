@@ -5565,6 +5565,11 @@ class ApiRoutesTestCase(unittest.TestCase):
         selected_dir = repo_dir / "src"
         selected_dir.mkdir(parents=True)
         session_id = self._create_explorer_session(repo_dir)
+        api.session_manager.update_session_metadata(
+            session_id,
+            explorer_git_pin_active=True,
+            explorer_git_pinned_path="src",
+        )
 
         with patch.object(api.socketio, "start_background_task") as start_task:
             response = self.client.post(
@@ -5578,8 +5583,13 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(session.startup_mode, "terminal")
         self.assertEqual(Path(session.directory), selected_dir.resolve())
         self.assertEqual(Path(session.explorer_root_directory), repo_dir.resolve())
+        self.assertFalse(session.explorer_git_pin_active)
+        self.assertEqual(session.explorer_git_pinned_path, "")
         self.assertEqual(session.status, api.SessionStatus.PENDING)
-        self.assertEqual(response.get_json()["startup_mode"], "terminal")
+        payload = response.get_json()
+        self.assertEqual(payload["startup_mode"], "terminal")
+        self.assertFalse(payload["explorer_git_pin_active"])
+        self.assertEqual(payload["explorer_git_pinned_path"], "")
 
     def _create_local_terminal_session(self, directory: Path, **overrides):
         """One connected Local Repo terminal pane running cmd by default."""
@@ -6056,6 +6066,9 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         payload = response.get_json()
         self.assertNotIn("cwd_probe", payload)
+        # The client must open where the terminal is now, not reuse a Preview
+        # path captured relative to the explorer's previous root.
+        self.assertEqual(payload["explorer_open_path"], "src")
         updated = api.session_manager.get_session(session_id)
         self.assertEqual(Path(updated.directory), nested.resolve())
         self.assertEqual(Path(updated.explorer_root_directory), repo_dir.resolve())

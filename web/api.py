@@ -125,6 +125,8 @@ from web.explorer import (  # noqa: F401 - some names re-exported for backwards 
     _is_tail_preview_file,
     _local_path_inside,
     _LocalExplorerBackend,
+    _relative_explorer_path,
+    _relative_remote_explorer_path,
     _release_ssh_sftp,
     _remote_explorer_root_directory,
     _remote_is_directory,
@@ -2978,6 +2980,7 @@ def change_session_mode(session_id: str):
         launch_directory = session.launch_directory or session.directory
         next_directory = session.directory
         root_directory = ""
+        open_path = ""
 
         if session.mode == "ssh":
             if requested_directory:
@@ -3010,6 +3013,7 @@ def change_session_mode(session_id: str):
                     repo_root,
                     contains=_remote_path_inside,
                 )
+                open_path = _relative_remote_explorer_path(root_directory, next_directory)
             except ValueError as exc:
                 return jsonify({"error": str(exc)}), 400
             except _sftp_request_error_types() as exc:
@@ -3061,6 +3065,7 @@ def change_session_mode(session_id: str):
                 repo_root,
                 contains=_local_path_inside,
             )
+            open_path = _relative_explorer_path(root_directory, next_directory)
 
             session_manager.update_session_metadata(
                 session_id,
@@ -3081,6 +3086,12 @@ def change_session_mode(session_id: str):
         _close_ssh_connection(session_id, clear_buffer=True)
         _broadcast_session_status(session_id)
         payload = session_manager.get_session(session_id).to_dict()
+        # Presentation paths are relative to the root they were captured under.
+        # A live terminal -> explorer switch may have just derived a different
+        # root, so the saved Preview directory is not a valid opening target.
+        # This transient field names the observed cwd under the freshly resolved
+        # root; it is response-only and never joins the durable pane shape.
+        payload["explorer_open_path"] = open_path
         if cwd_probe["requested"] and not cwd_probe["resolved"]:
             # The probe could not answer, so the pane opened on an assumed
             # directory. Say so, and say which one: the silent fallback to the
@@ -3118,6 +3129,12 @@ def change_session_mode(session_id: str):
         # the pane actually is.
         "explorer_root_directory": root_path,
         "explorer_root_configured": bool(root_path),
+        # A fixed Git pin is relative to the explorer root it was captured
+        # under. Once this pane becomes a terminal it can move anywhere, so the
+        # next explorer must start from its newly resolved root/current folder
+        # rather than reinterpret a pin belonging to the previous root.
+        "explorer_git_pin_active": False,
+        "explorer_git_pinned_path": "",
         "initial_command": "",
         "initial_command_mode": "command",
         "startup_mode": "terminal",

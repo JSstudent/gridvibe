@@ -80,6 +80,18 @@
         return explorerNormalizeTabPath(rawPreview.dir);
     }
 
+    /* A mode-switch response carries the terminal's freshly resolved cwd
+       relative to its freshly resolved explorer root. That path must win over
+       the saved Preview directory, whose relative value belongs to the root the
+       explorer used before the terminal moved. Initial page/workspace restores
+       carry no transient override and continue restoring their saved view. */
+    function explorerInitialPreviewDirectory(session) {
+        if (session && Object.prototype.hasOwnProperty.call(session, 'explorer_open_path')) {
+            return explorerNormalizeTabPath(session.explorer_open_path);
+        }
+        return explorerPersistedPreviewDirectory(session) ?? undefined;
+    }
+
     function explorerFindTab(pane, id) {
         ensureExplorerTabState(pane);
         return pane._explorerTabs.find(tab => tab.id === id) || null;
