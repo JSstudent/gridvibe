@@ -461,103 +461,218 @@ unchanged.
 
 ## Stage 3 — What typing in a large file costs
 
-**Findings:** F5 (Medium), F6 (Medium)
-**Risk:** medium. Frontend-only, well bounded by the tier, and directly felt by the user.
+**Findings:** F6 (Medium); F5 (Medium — verified real, **deferred**, see below)
+**Risk:** medium. Frontend-only, bounded by the presentation tier, and directly felt by the
+user.
+
+> **This stage was re-aimed on 2026-08-22, before implementation.** It originally led with F5
+> (the underlay's renumber loop). Two manual runs against the real app moved the target, and
+> the code review that followed found two of F5's fix instructions to be wrong. The
+> measurement is recorded first, because the conclusion is only as good as it.
+
+### What was measured
+
+The original manual test asked for ten Enters at the top of a 15,000-line file, predicting a
+dropped frame per keypress. Observed instead: barely perceptible and intermittent — *"not
+really, only if I hit at the right time or something; it does get better with holding longer,
+like it needs to catch up."*
+
+A second run isolated it. With the caret at the **end** of the file the splice lands at the
+tail, so the renumber loop walks ~1 row instead of ~15,000 while everything else in the frame
+is unchanged. It hitched the same — and the hitch arrived **half a second to a second after
+the keypress**, which is not a dropped frame at all.
+
+That delay is the **settle pass**, and its pipeline accounts for the whole interval:
+
+| Step | Where | Cost |
+| --- | --- | --- |
+| Enter → rAF splice | `paintExplorerEditUnderlay()` | a full `explorerSourceRowModel()` (15k records + 15k row objects), the `.map()`, and `lineSplicePlan()` — O(document) even on the "cheap" path |
+| debounce | `scheduleExplorerEditUnderlaySettle()`, `explorer-edit-overlay.js:349` | **180 ms** |
+| tokenize | `workers.highlight(draft, …)` — 315 KB through Highlight.js | a few hundred ms, **off**-thread |
+| repaint | `.then` → `paintExplorerEditUnderlay(index, { full: true, runs })` | **on** the main thread: `explorerSourceRowModel()` *again*, 15k row HTML strings, a join into a multi-MB string, an `innerHTML` parse of ~45k nodes, then `repaintExplorerEditFind()` over the whole draft |
+
+The intermittence has the same root. Every keystroke calls `cancelExplorerEditHighlight()`,
+aborting the in-flight worker job, so at roughly one keypress per second on a file this size
+the settle sometimes completes and sometimes is cancelled — "only if I hit at the right time."
+Holding a key re-arms the 180 ms debounce every frame, so it never fires at all: that is the
+"better when held", and the one settle on release is the "catch up".
+
+**Conclusion:** the felt cost of editing a large file is the settle's whole-document rebuild,
+not the renumber loop. This stage targets the rebuild.
 
 ### Problem
 
-The in-place editor's underlay was reworked so a keystroke no longer re-tokenizes the whole
-document — that part landed and works. Two whole-document costs stayed behind.
+**F6 — the underlay walks the whole document several times per edit.** Per rAF while typing,
+`paintExplorerEditUnderlay()` builds `explorerSourceRowModel()` (a record object *and* a row
+object per line), then `model.records.map(r => r.text)` for a second full array, then
+`lineSplicePlan()` compares line strings across the untouched part of the document. The miss
+then `unshift`s into the page-wide `_explorerLineRecordCache`, whose limit is
+`min(max(panes, 1) × 2, 8)` — so with a **single** explorer pane it is **2 slots**, and every
+typing frame evicts both the previous draft and the pane's own file records.
 
-**F5.** `explorer-edit-overlay.js`, `spliceExplorerEditUnderlayRows()`:
-
-```js
-if (plan.inserted !== plan.removed) {
-    for (let at = plan.start + plan.inserted; at < container.children.length; at += 1) {
-        row.dataset.explorerLine = String(at + 1);
-        gutter.textContent = String(at + 1);
-    }
-}
-```
-
-Plain typing keeps the counts equal and costs nothing. **Enter, backspace-join, and any paste
-containing a newline** walk from the splice point to the end of the document — two DOM writes
-per row. Enter near the top of a 20,000-row file is ~40,000 writes inside one animation frame,
-which is the shape of cost the splice exists to remove.
-
-**F6.** Per rAF while typing, `paintExplorerEditUnderlay()` still does a full pass four times
-over: `explorerSourceRowModel()` builds a record object and a row object per line;
-`model.records.map(r => r.text)` builds a second full array; `lineSplicePlan()`'s prefix scan
-compares every line string for an edit near the end of the file; and the miss `unshift`s into
-the page-wide `_explorerLineRecordCache`, whose 8 slots then fill with dead intermediate
-drafts and evict every read-only pane's records.
+**The settle repaints 15,000 rows to change their colour.** `settleExplorerEditUnderlay()`
+already establishes that the draft has not moved since the rows were painted (it returns early
+when `pane._explorerEdit.draft !== draft`). So the document is the same document and the row
+set is identical; the only thing the repaint changes is the **colour** of the code cells —
+from the per-line fallback lexer the splice painted to the real Highlight.js runs the worker
+returned. It expresses that as a full `innerHTML` replacement of the entire underlay. That is
+the "a repaint is not a rebuild" guardrail, applied to every Source surface *except* this one.
 
 ### Fix
 
-**F5 — number the gutter positionally.** The underlay is the one place where this is safe, and
-the reason matters: it renders with `foldControls: false` and an empty `collapsedLines` set, so
-its rows are contiguous `1..N` with nothing hidden. The read-only Source view **omits** rows
-inside collapsed Markdown sections, so a DOM-order counter there would number wrongly — do not
-generalise this.
+**Repaint the code cells whose colour actually changed.** For a keystroke that does not change
+block structure, Highlight.js re-tokenizes the whole document and produces byte-identical
+output for every line but the edited one, so the delta is 1–3 rows. For a structure-changing
+edit — typing a `"` or a `/*` — the tail genuinely recolours, the delta blows the existing
+repaint ceiling, and the plan correctly falls back to today's full rebuild.
 
 | Where | Change |
 | --- | --- |
-| `terminals.css` | `counter-reset` on `.explorer-edit-underlay .explorer-source-lines`, `counter-increment` per `.explorer-source-line`, and `content: counter(…)` on `.explorer-source-line-number`. Scope every selector under `.explorer-edit-underlay` so the Source view keeps its rendered numbers. |
-| `explorer-edit-find.js:102`, `:440`, `:502` | These are the only readers of `data-explorer-line` inside the underlay. Replace the attribute lookups with positional indexing (`container.children[line - 1]`, and `indexOf.call(container.children, row) + 1` for the upward read), which the contiguity above guarantees. |
-| `explorer-edit-overlay.js` `spliceExplorerEditUnderlayRows()` | The renumber loop then deletes entirely. |
+| `explorer-repaint.js` | Add `highlightRepaintPlan({ previousKeys, nextKeys, rowCount, maxRepaintRows })` → `{ mode: 'skip' \| 'repaint' \| 'full', lines }`, reusing the existing `repaintCeiling()` so the ceiling scales with the document exactly as `sourceRenderPlan()`'s does. DOM-free and Node-tested, like everything else in this module. |
+| `explorer-worker-client.js` | Expose a per-line run key off `HighlightLines` computed from the **decoded typed arrays** — `lineRunStarts[line] … lineRunStarts[line + 1]` indexing `classIds` and `lengths` — materializing no run objects and no substrings. Materializing 15k lines to compare them would cost what this stage is removing; the CLAUDE.md contract that results are materialized one line at a time must survive. |
+| `explorer-edit-overlay.js` `paintExplorerEditUnderlay()` | On the `full: true, runs` path, when the row set is unchanged, replace only the `<code>` cell of each line the plan names, through the existing `explorerSourceRowCodeHtml()` primitive, instead of writing `underlay.innerHTML`. Keep the whole-underlay write for `mode: 'full'` and for every path that is not a settle (mount, a failed splice, a wide paste). |
+| `explorer-edit-overlay.js` | Hold the run map the rows are **currently painted with** on the pane (`pane._explorerEditUnderlayRuns`). Seed it at mount from `explorerEditMountRuns()` (either the viewer's cached runs, or `null` for the fallback-coloured start), set it on every full paint, and clear it in `teardownExplorerEditOverlay()` beside the other overlay slots. |
+| `explorer-edit-overlay.js` | Cache the row model between the splice frame and the settle frame, keyed on draft identity. Today `explorerSourceRowModel()` runs twice per edit over the same draft — once for the splice, once for the settle — for 60k object allocations where 30k would do. |
+| `explorer-viewer.js` `explorerSourceLineRecords()` | Give the editor a pane-local cache slot instead of the shared LRU, so transient drafts stop evicting the read-only panes' records. Simplest shape: an optional `cache` argument, with the overlay passing `pane._explorerEditRecordCache`. Worth doing on its own merits — it is a cross-pane defect independent of everything above. |
+| `explorer-edit-overlay.js` | Drop `model.records.map(record => record.text)`: hold the record objects and have `lineSplicePlan()` compare `record.text` in place. |
 
-Comment the contiguity precondition where the counter is declared — it is the whole reason the
-change is legal.
+**A partial repaint must still call `repaintExplorerEditFind(index)`**, exactly as the full one
+does. Every replaced `<code>` cell detaches the live Ranges the find and the occurrence tint
+had painted onto it, while ranges on rows the repaint did *not* touch survive. Re-deriving all
+of them is one scan of the draft and is what the tail of `paintExplorerEditUnderlay()` already
+does — do not "optimise" it into a partial re-derivation to match the partial paint.
 
-**F6 — stop walking the document four times.**
+#### Why comparing colours cheaply is legal here
 
-| Where | Change |
-| --- | --- |
-| `explorer-edit-overlay.js` | Keep the record array from the previous frame on the pane and derive `lines` from `model.records` once (it is already `model.records`; the extra `.map()` is what to drop — hold the record objects and compare `record.text` in place). |
-| `explorer-viewer.js` `explorerSourceLineRecords()` | Give the editor a pane-local slot instead of the shared LRU, so transient drafts stop evicting the read-only panes' records. The simplest shape: an optional `cache` argument, with the overlay passing `pane._explorerEditRecordCache`. |
-| `explorer-repaint.js` `lineSplicePlan()` | Optional, measure first: the prefix scan is O(document) for an edit near the end of the file. If the profile shows it, bound it — the plan already refuses anything wider than `MAX_SPLICE_ROWS`, so a prefix walk beyond `document − MAX_SPLICE_ROWS` from the tail cannot change the answer. |
+Decoded runs carry **absolute** content offsets (`decodeHighlightResult()` validates
+`start + length > text.length`, and `explorerRenderHighlightedRuns()` passes `run.start` into
+`explorerCodeSpan()`). Inserting one character therefore shifts every offset below it, and a
+naive comparison would report that every line changed.
+
+It does not matter, because **the underlay always renders with empty search ranges** —
+`explorerEditUnderlayHtml()` passes `[]`, `spliceExplorerEditUnderlayRows()` passes `[]`, and
+the find paints through the CSS Custom Highlight API rather than into the markup. With no
+ranges to intersect, `run.start` never reaches the output: a row's code cell is a pure function
+of its text and its runs' `(className, length)` sequence, which is shift-invariant.
+
+That is the whole precondition, and it is narrow — **comment it where the key is built.** The
+read-only Source view *does* render search ranges into its markup, so the same key would be
+wrong there.
+
+Also worth checking while implementing: at this file size the worker is routinely cancelled
+before it finishes, so the 180 ms debounce may be tuned for small files and simply be spending
+worker starts on large ones. That is tuning, not part of the fix — measure before touching it.
+
+### F5 — verified real, deferred
+
+`spliceExplorerEditUnderlayRows()` walks from the splice point to the end of the document
+writing `row.dataset.explorerLine` and the gutter's `textContent`, so Enter near the top of a
+20,000-row file is ~40,000 DOM writes in one frame. The finding is real and the code is
+unchanged. It is deferred because it is **below the perception threshold on this machine at
+15,000 lines** — the original manual test failed to reproduce its own prediction, and the
+end-of-file run hitched identically with the loop effectively switched off.
+
+Recording what the review found, so none of it is re-derived wrongly later:
+
+- **The proposed CSS-counter fix is legal but unmeasured.** Contiguity holds:
+    `explorerSourceRowHtml()` forces `headingLevel` to `0` when `foldControls === false`, so
+    `allowMarkdownCollapse` is false and the underlay never omits a row. But inserting a row
+    invalidates the counter for every following sibling, so the O(n) moves from JS into style
+    recalc rather than disappearing. Profile it before choosing it.
+- **Two of the three named call sites are wrong.** Only `explorer-edit-find.js:102`
+    (`explorerEditSpanRanges`, whose `root` is `explorerEditUnderlayFor(...)`) reads
+    `data-explorer-line` inside the underlay. `:440` is `explorerSourceSelectionCarry()` and
+    `:502` is `restoreExplorerSourceSelection()` — both called from `explorer-editor.js` (`:263`
+    and `:466`) against the **read-only Source view**, where collapsed Markdown sections omit
+    rows and positional indexing would number wrongly. That is precisely the defect the old
+    step 8 was written to catch. The editor's own counterparts,
+    `explorerEditorSelectionCarry()` / `restoreExplorerEditorSelection()`, work off
+    `textarea.value` and touch no row at all.
+- **Stale attributes would be left behind.** `explorerSourceRowHtml()` is shared, so underlay
+    rows keep emitting `data-explorer-line`; dropping the renumber loop leaves every row below a
+    splice carrying a wrong one, and `explorer-search.js:583` / `:664` query
+    `[data-explorer-line]` scoped to the **card**, which contains the underlay during an edit.
+    Suppress the attribute in the underlay rather than leaving it stale.
+- **The counter half is not Node-testable.** The old plan's test — *"the row at line 12,000
+    still reports 12,001 to the find, proving the positional read and the counter agree"* — can
+    only prove the positional read; the counter is CSS and the stub DOM cannot evaluate it.
+    `tests/test_explorer_repaint.py:1075` currently asserts on `row.dataset.explorerLine` and
+    `row.firstElementChild.textContent`, and both assertions would have to change.
+
+**If F5 is ever picked up, the low-risk shape is not the counter:** convert `:102` alone to
+positional indexing (which also removes a `querySelector` scan of the whole row list per
+distinct line), stop emitting `data-explorer-line` on underlay rows, and drop **only** the
+attribute write from the loop. That halves the writes and removes the attribute-mutation style
+invalidation — the more expensive of the two — with no CSS gamble and no shared-renderer
+change.
+
+### Also corrected from the original plan
+
+- F6 named the wrong half of `lineSplicePlan()`: the **prefix** scan is O(document) for an edit
+    near the end, but the **suffix** scan is the O(document) half for an edit near the start,
+    which is what the original manual test at line 5 actually exercised.
+- **The proposed bound on `lineSplicePlan()` is wrong — do not implement it.** Under-counting
+    the prefix by `d` inflates `removed + inserted` by `2d`. Capping the prefix walk at
+    `document − MAX_SPLICE_ROWS` makes an edit at the very end compute ≈400 against a ceiling of
+    200, answering `mode: 'full'` and rebuilding the whole document on every keystroke there —
+    the opposite of the intent. There is no sound early-out without knowing the suffix first,
+    and the scan is a plain array walk dominated by the record build that follows it. Leave it.
 
 **Tests to add**
 
-- `tests/test_explorer_repaint.py` / a new overlay test: after a splice that changes the line
-    count, the row at the old line 12,000 still reports line 12,001 to the find — proving the
-    positional read and the counter agree.
-- `tests/test_explorer_edit_find.py`: find still resolves a match's line number with the
-    attribute gone.
+- `tests/test_explorer_repaint.py`: `highlightRepaintPlan()` answers `skip` for identical run
+    keys, `repaint` with exactly the changed lines for a one-line colour change, and `full` once
+    the delta passes the document-scaled ceiling.
+- A Node overlay test: a settle whose runs differ on one line replaces exactly one `<code>`
+    cell and leaves every other row node identical (compare node identity, as the existing
+    splice tests do), and still re-derives the find.
+- A settle test for the structure-changing case: runs differing across the tail fall back to the
+    whole-underlay write.
 - A cache test: painting the underlay N times does not evict a second pane's line records.
 
 ### Manual verification
 
-Generate a real file to type in:
+Reuse `typing.js` from the Stage 2 scaffolding (15,000 lines, ~315 KB — deliberately *under*
+the large-file tier so the underlay is active, and above `HIGHLIGHT_WORKER_MIN_CHARS` so the
+worker path is the one under test):
 
 ```bash
 seq 1 15000 | sed 's/^/const value/; s/$/ = 1;/' > /c/Users/SasoPC/Desktop/Projects/gv-diff/typing.js
 ```
 
-1. Open an explorer pane on `C:\Users\SasoPC\Desktop\Projects\gv-diff`, open `typing.js`, click **Edit** (✏️).
-2. Put the caret at the **end of line 5** and hold a letter key down for ~3 seconds. Both before
-    and after the fix this should feel smooth — it is the control, and it must not regress.
-3. Now put the caret at the end of **line 5** and press **Enter** ten times, about one per second.
+1. Open an explorer pane on `C:\Users\SasoPC\Desktop\Projects\gv-diff`, open `typing.js`,
+    click **Edit** (✏️).
+2. Put the caret at the **end of the last line** and press **Enter** once. Then wait, watching
+    the pane rather than the caret.
 
-    - **Before the fix:** each Enter drops a visible frame — the caret and the gutter lag the
-        keypress by a beat. - ME: while testing in desktop native mode(and browser after); not really only if i hit a at the right time or something, it does get better with holding longer, like it needs to catch up
-    - **After the fix:** Enter is indistinguishable from typing a letter.
+    - **Before the fix:** roughly half a second to a second later the pane hitches and the
+        syntax colours visibly flip. The keypress itself is fine; the cost arrives after it.
+    - **After the fix:** the colours still arrive, without the hitch.
 
-4. Select 200 lines from the middle, cut (`Ctrl+X`), then paste (`Ctrl+V`) at the top.
-    Both operations should land in one frame.
-5. Scroll to the bottom of the file and confirm the **last gutter number is 15,001** (a trailing
-    newline opens a final empty line) and that the numbers are continuous across the edit you
-    made — this is what proves the CSS counter is numbering correctly, not just cheaply.
-6. `Ctrl+F` inside the editor, search for `value14000`, and press Enter. The match must be found
-    and scrolled to — this is the positional-index path from the fix.
-7. `Esc` to cancel the edit (do **not** save), then re-open `typing.js` and confirm the Source
-    view's line numbers are unchanged — the counter must not have leaked out of the underlay.
-8. Open any `.md` file in the same pane, collapse a heading, and confirm the Source view's numbers
-    still **skip** the hidden lines.
+3. Repeat at the **end of line 5**. Same result in both builds — the position of the edit is
+    not what this stage changes, which is the point.
+4. **The delta must not under-repaint.** Put the caret at the very start of line 1 and type
+    `/*`. Within about a second the **whole file** must turn comment-coloured, top to bottom.
+    Delete the `/*` and confirm it all returns. This is the structure-changing edit that has to
+    exceed the ceiling and fall back to the full rebuild; a partial repaint here would leave the
+    file half-commented.
+5. Hold a letter key down for ~3 seconds at the end of line 5, then release. Typing stays smooth
+    (it is the control and must not regress) and the colours settle in once after release.
+6. Scroll to the bottom and confirm the last gutter number is **15,001** (a trailing newline
+    opens a final empty line) and that the numbers are continuous across every edit made above.
+7. `Ctrl+F` inside the editor, search `value14000`, press Enter — the match is found and
+    scrolled to. Now type a character somewhere and let the settle fire: the find's marks and
+    counter must survive it. This is what the mandatory `repaintExplorerEditFind()` call buys.
+8. `Esc` to cancel the edit (do **not** save), re-open `typing.js`, and confirm the Source view
+    renders normally.
 
-Step 8 is the one that catches an over-generalised counter: the read-only Source view omits the
-rows inside a collapsed section, so a DOM-order counter would renumber them 1..N and hide the
-gap.
+Step 4 is the one that catches an over-narrow delta, and step 7 the one that catches a partial
+repaint that forgot the detached Ranges. Neither has a cheap automated equivalent in a stub DOM.
+
+**If DevTools is to hand**, the clearest evidence is a Performance recording across step 2:
+before the fix there is a long task ~0.5–1 s after the keypress containing
+`renderExplorerSourceLines` and an `innerHTML` parse; after it, that task is gone and only a
+handful of code cells are written.
 
 ### Documentation
 
@@ -565,17 +680,24 @@ gap.
 
 - **`CHANGELOG.md`** (Unreleased):
 
-    > **(perf) Pressing Enter in a large file no longer stutters.** Typing in the in-place editor
-    > was made cheap a while back, but anything that changed the number of lines — Enter, joining
-    > two lines with backspace, pasting — still renumbered every line below the edit on the spot.
-    > Near the top of a very long file that was tens of thousands of updates inside a single frame,
-    > so the caret arrived a beat after the key. Line numbers now follow the document on their own
-    > and only the lines that actually changed are rebuilt.
+    > **(perf) Editing a large file no longer stalls a moment after you stop typing.** Typing in
+    > the in-place editor was made cheap a while back: only the lines you actually changed are
+    > rebuilt. But the pass that fills the real syntax colours back in — which runs a beat after
+    > the last keystroke — still rebuilt every line in the file to do it, so a long file hitched
+    > about a second after each edit, just as the colours arrived. Only the lines whose colours
+    > genuinely changed are repainted now, which for an ordinary keystroke is one of them.
+
+    The entry deliberately does **not** name Enter. The original draft (*"Pressing Enter in a
+    large file no longer stutters"*) was written against F5 and would over-claim: Enter is not
+    what was measured, and F5 is not what ships.
 
 - **`README.md`** — no change. Nothing it claims changes.
 
-- **Guardrails** — none. Add the contiguity precondition as a code comment where the counter is
-    declared instead; it is a local invariant, not a repo-wide rule.
+- **Guardrails** — none new. The rule this stage applies, *a repaint is not a rebuild*, is
+    already written in §3; the settle was a missing call site against it. Add the shift-invariant
+    key's precondition (the underlay renders with empty search ranges, so `run.start` never
+    reaches the output) as a code comment where the key is built — it is a local invariant, and a
+    dangerous one to generalise to the read-only Source view.
 
 ---
 
@@ -836,6 +958,6 @@ build short enough to get away with.
 | --- | --- | --- | --- | --- | --- |
 | 1 · Explorer root & launch floor ✅ | F1, F2, F15 | High | folded into 1 existing entry | 3 edits | 2 clauses |
 | 2 · Large-content fidelity ✅ | F3; F10 non-issue | Medium | 1 entry | — | 1 clause |
-| 3 · Typing cost in a large file | F5, F6 | Medium | 1 entry | — | — |
+| 3 · Underlay settle repaint | F6; F5 deferred | Medium | 1 entry | — | — |
 | 4 · Work that outlives its pane | F11, F12, F4 | Low-medium | 1 entry | — | — |
 | 5 · Loose ends & docs | F7, F8, F9, F13, F14, §4 | Low | 3 entries | 5 edits | — |
