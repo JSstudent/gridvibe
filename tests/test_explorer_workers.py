@@ -192,6 +192,88 @@ class ExplorerWorkerTestCase(unittest.TestCase):
         self.assertIsNone(rows[4]["left"])
         self.assertEqual(rows[4]["right"]["text"], "inserted")
 
+    def test_large_diff_parser_keeps_content_that_looks_like_file_headers(self):
+        rows = self._run_node(
+            "const NL = String.fromCharCode(10);\n"
+            "const diff = [\n"
+            "  'diff --git a/a.txt b/a.txt',\n"
+            "  'index 1111111..2222222 100644',\n"
+            "  '--- a/a.txt', '+++ b/a.txt',\n"
+            "  '@@ -5,3 +5,3 @@',\n"
+            "  '---legacy-flag', '-line 6', '-line 7',\n"
+            "  '+LINE 5', '+++counter;', '+LINE 7'\n"
+            "].join(NL);\n"
+            "emit(core.parseSideBySideDiff(diff).rows);\n"
+        )
+
+        self.assertEqual(
+            [
+                {
+                    "left": (row["left"] or {}).get("number"),
+                    "leftText": (row["left"] or {}).get("text"),
+                    "right": (row["right"] or {}).get("number"),
+                    "rightText": (row["right"] or {}).get("text"),
+                }
+                for row in rows[1:]
+            ],
+            [
+                {
+                    "left": 5,
+                    "leftText": "--legacy-flag",
+                    "right": 5,
+                    "rightText": "LINE 5",
+                },
+                {
+                    "left": 6,
+                    "leftText": "line 6",
+                    "right": 6,
+                    "rightText": "++counter;",
+                },
+                {
+                    "left": 7,
+                    "leftText": "line 7",
+                    "right": 7,
+                    "rightText": "LINE 7",
+                },
+            ],
+        )
+
+    def test_large_diff_parser_discards_each_files_headers(self):
+        rows = self._run_node(
+            "const NL = String.fromCharCode(10);\n"
+            "const diff = [\n"
+            "  'diff --git a/one.txt b/one.txt',\n"
+            "  'index 1111111..2222222 100644',\n"
+            "  '--- a/one.txt', '+++ b/one.txt',\n"
+            "  '@@ -1 +1 @@', '-old one', '+new one',\n"
+            "  'diff --git a/two.txt b/two.txt',\n"
+            "  'index 3333333..4444444 100644',\n"
+            "  '--- a/two.txt', '+++ b/two.txt',\n"
+            "  '@@ -8,2 +8,2 @@', '-old two', '+new two', ' context'\n"
+            "].join(NL);\n"
+            "emit(core.parseSideBySideDiff(diff).rows);\n"
+        )
+
+        self.assertEqual(len(rows), 5)
+        self.assertEqual(
+            [
+                (row["left"] or {}).get("text")
+                for row in rows
+                if row["left"] and row["left"].get("type") != "hunk"
+            ],
+            ["old one", "old two", "context"],
+        )
+        self.assertEqual(
+            [
+                (row["right"] or {}).get("text")
+                for row in rows
+                if row["right"]
+            ],
+            ["new one", "new two", "context"],
+        )
+        self.assertEqual(rows[3]["left"]["number"], 8)
+        self.assertEqual(rows[3]["right"]["number"], 8)
+
     def test_pool_is_lazy_bounded_and_terminates_a_superseded_job(self):
         result = self._run_node(
             "(async () => {\n"

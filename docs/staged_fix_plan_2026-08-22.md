@@ -301,11 +301,11 @@ a different defect from F1's mislabelling.
 
 ---
 
-## Stage 2 — Large-content rendering fidelity
+## Stage 2 — Large-content rendering fidelity ✅
 
-**Findings:** F3 (Medium), F10 (Low)
-**Risk:** high consequence, low blast radius. F3 shows content that is silently wrong; both
-fixes are small and local.
+**Findings:** F3 (Medium), F10 (validated non-issue)
+**Risk:** high consequence, low blast radius. F3 showed content that was silently wrong; its
+fix is small and local.
 
 ### Problem
 
@@ -335,19 +335,20 @@ C/C++/Java/JS. The guard is a pure move from `explorer-viewer.js`, but the `larg
 promoted this parser from "Diff2Html fallback" to the primary renderer above 160 KiB /
 2,500 lines, so a latent bug became a routine one.
 
-**F10.** `explorerLargeSourceChunkHtml()` correctly prepends a `\n` (the HTML parser eats one
-LF after `<pre>`, so the chunk's first character survives). But a chunk that *ends* with `\n`
-— which every newline-aligned cut does — renders a trailing empty line inside its own `<pre>`
-before the next block box starts, so a spurious blank row appears every ~5,000 lines /
-256 KiB.
+**F10 — non-issue.** The original finding inferred that the source newline at the end of a
+chunk creates an empty final line box inside its `<pre>`. Browser layout does not work that
+way: the newline remains in `textContent`, but no extra final row is painted. Manual native and
+browser checks showed `L5000` / `L5001` and later boundaries directly adjacent. Focused
+Chromium and Edge checks using GridVibe's exact adjacent chunk markup and CSS measured two
+two-line chunks as 40 px each at a 20 px line height, an 80 px host, and exactly one selected
+newline across the boundary. No renderer change is warranted.
 
 ### Fix
 
 | Where | Change |
 | --- | --- |
 | `explorer-worker-core.js` `parseSideBySideDiff()` | Drop both `startsWith('---')` / `startsWith('+++')` guards, leaving `if (line.startsWith('-'))` and `if (line.startsWith('+'))`. A `---`/`+++` header only ever appears **before** the first `@@`, and the parser already discards everything there with `if (!oldLine && !newLine) return;`. Inside a hunk, `-`/`+` is unambiguous. **Verified:** this exact edit, run over the patch produced by the manual repro below, restores both lines with correct numbering and still emits no header rows. |
-| Same function | While there: a multi-file patch restarts at a new `diff --git` header, which today falls through as an unrecognised line. Reset `oldLine`/`newLine` to `0` on a line matching `^diff --git ` so a second file's headers are discarded the same way the first file's were, rather than being parsed as content. |
-| `explorer-viewer.js` `explorerLargeSourceChunkHtml()` | Strip one trailing `\n` from the chunk when emitting. The chunker's losslessness contract in `explorer-tiers.js` is untouched — this is a rendering concern, not a content one. |
+| Same function | A multi-file patch restarts at a new `diff --git` header. Flush unmatched deletions and reset `oldLine`/`newLine` to `0` there so every file's pre-hunk `---`/`+++`/`index` metadata is discarded rather than parsed as content. |
 
 **Tests to add**
 
@@ -356,9 +357,6 @@ before the next block box starts, so a spurious blank row appears every ~5,000 l
   asserting both rows survive **and** that the rows after them keep their numbers — the
   numbering is the half that actually shows the corruption. Run through the real module in Node.
 - A two-file patch, asserting the second file's `---`/`+++`/`index` headers do not become rows.
-- `tests/test_explorer_large_file_tier.py`: the chunk boundary is seamless — joining the
-  rendered chunks' text reproduces the source with no inserted blank line. Keep the existing
-  "the chunks are lossless" assertion; this is the rendering half of it.
 
 ### Manual verification
 
@@ -409,7 +407,7 @@ git add -A
 4. Scroll to the bottom and confirm the last visible numbers on both sides still agree with each
    other — the truncation banner will say the patch was cut, which is expected and unrelated.
 
-**Part B — the large file (F10).** Generate a numbered file so the boundary is visible:
+**Part B — the large file (F10 validation).** Generate a numbered file so the boundary is visible:
 
 ```bash
 seq 1 25000 | sed 's/^/L/' > /c/Users/SasoPC/Desktop/Projects/gv-diff/huge.txt
@@ -419,15 +417,16 @@ seq 1 25000 | sed 's/^/L/' > /c/Users/SasoPC/Desktop/Projects/gv-diff/huge.txt
 2. `Ctrl+F` is unavailable in this tier by design, so scroll to roughly 20 % of the file and
    find the `L5000` / `L5001` pair (the first chunk boundary — 5,000 lines).
 
-   - **Before the fix:** a blank line sits between `L5000` and `L5001`. ME: Could not reproduce on testing native/browser mode, no empty line, looks ok on C:\Users\SasoPC\Desktop\Projects\gv-diff\huge.txt
-   - **After the fix:** `L5001` follows `L5000` directly. Check `L10000`/`L10001` too.
+   - **Observed before any renderer change:** `L5001` follows `L5000` directly in both native
+     and browser mode. The same is true at `L10000`/`L10001`.
 
 3. Select from `L4995` to `L5005`, copy, and paste into a text editor — the eleven lines must
    come out with nothing between them.
 
 ### Documentation
 
-**User-facing — yes**, for both.
+**User-facing — yes**, for F3. F10 gets no changelog entry because it was a non-issue and no
+behavior changed.
 
 - **`CHANGELOG.md`** (Unreleased):
 
@@ -439,17 +438,21 @@ seq 1 25000 | sed 's/^/L/' > /c/Users/SasoPC/Desktop/Projects/gv-diff/huge.txt
   > against each other. This only affected diffs large enough for the plain side-by-side view,
   > which is exactly where it is hardest to spot.
 
-  > **(fix) The large-file view no longer inserts a blank line every few thousand lines.** Very
-  > large files are painted in blocks, and each block's last line break was drawn as an extra
-  > empty row before the next block began — a stray blank line roughly every 5,000 lines, in the
-  > pane and in anything you copied out of it.
-
 - **`README.md`** — no change. The **Very large files & diffs** row already describes the tiers
   correctly; this stage makes them behave as described.
 
 - **Guardrails** (`CLAUDE.md` + `AGENTS.md`, §4 Correctness): add —
   *inside a hunk, a diff line's leading `-`/`+` is the marker and nothing else; never
   disambiguate a header from content by prefix, because `--`/`++` are ordinary line content.*
+
+### Status — landed 2026-08-22 ✅
+
+`make check` equivalent: **1952 tests OK** (1950 before the stage + 2 Node-executed parser
+regressions; 9 platform skips), ruff clean. Part A was verified in the real app: both special
+content lines survive, the following rows retain their correct numbers, and the last visible
+numbers agree. Part B established that F10 is a non-issue in native and browser mode, backed by
+focused Chromium and Edge geometry/selection checks; `explorerLargeSourceChunkHtml()` was left
+unchanged.
 
 ---
 
@@ -826,7 +829,7 @@ build short enough to get away with.
 | Stage | Findings | Risk | CHANGELOG | README | Guardrails |
 | --- | --- | --- | --- | --- | --- |
 | 1 · Explorer root & launch floor ✅ | F1, F2, F15 | High | folded into 1 existing entry | 3 edits | 2 clauses |
-| 2 · Large-content fidelity | F3, F10 | Medium-high | 2 entries | — | 1 clause |
+| 2 · Large-content fidelity ✅ | F3; F10 non-issue | Medium | 1 entry | — | 1 clause |
 | 3 · Typing cost in a large file | F5, F6 | Medium | 1 entry | — | — |
 | 4 · Work that outlives its pane | F11, F12, F4 | Low-medium | 1 entry | — | — |
 | 5 · Loose ends & docs | F7, F8, F9, F13, F14, §4 | Low | 3 entries | 5 edits | — |

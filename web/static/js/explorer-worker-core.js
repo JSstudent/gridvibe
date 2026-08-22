@@ -188,6 +188,12 @@
         };
 
         source.split(/\r?\n/).forEach(line => {
+            if (/^diff --git /.test(line)) {
+                flushDeletes();
+                oldLine = 0;
+                newLine = 0;
+                return;
+            }
             const hunk = line.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@(.*)$/);
             if (hunk) {
                 flushDeletes();
@@ -202,7 +208,7 @@
             if (line.startsWith('\\ No newline')) {
                 return;
             }
-            if (line.startsWith('-') && !line.startsWith('---')) {
+            if (line.startsWith('-')) {
                 pendingDeletes.push({
                     type: 'delete',
                     number: oldLine,
@@ -211,7 +217,7 @@
                 oldLine += 1;
                 return;
             }
-            if (line.startsWith('+') && !line.startsWith('+++')) {
+            if (line.startsWith('+')) {
                 const right = {
                     type: 'add',
                     number: newLine,

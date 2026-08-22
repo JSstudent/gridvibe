@@ -262,16 +262,22 @@ the preview was rendering — Refresh" instead of returning silently.
 
 ---
 
-### F10 · Low — the large tier shows a blank line at every chunk boundary
+### F10 · **Non-issue** — a chunk's trailing newline does not paint an extra row
 
-`explorerLargeSourceChunkHtml()` correctly prepends a `\n` (the HTML parser eats one LF
-after `<pre>`, so the chunk's own first character survives). But a chunk that *ends* with
-`\n` — which every newline-aligned cut does — renders a trailing empty line inside its own
-`<pre>` before the next block box begins. The result is one spurious blank row every
-~5,000 lines / 256 KiB in a large log or minified file.
+The original finding inferred an extra line box from the text stored in each `<pre>`:
+`explorerLargeSourceChunkHtml()` prepends one sacrificial `\n` for the HTML parser and a
+newline-aligned chunk normally ends with the source's own `\n`. That inference does not match
+browser layout. A final preserved newline remains in `textContent`, but it does not instantiate
+another empty line box after the last non-empty line.
 
-**Fix:** strip one trailing `\n` per chunk when emitting (the chunker's losslessness
-contract is unaffected — it is a rendering concern, not a content one).
+Manual checks in both native/WebView2 and browser mode showed `L5000` followed directly by
+`L5001` (and the same at later 5,000-line cuts). A focused reproduction using GridVibe's exact
+adjacent `<pre class="explorer-source-chunk">` structure and CSS agreed in Chromium and Edge:
+at a 20 px line height each two-line chunk measured 40 px, the two-chunk host measured 80 px,
+and selection across the boundary produced exactly one newline between `L5000` and `L5001`.
+
+**Resolution:** no code change. Stripping the newline would change faithful DOM text to solve a
+row that neither engine paints and neither manual mode shows.
 
 ---
 
@@ -475,7 +481,7 @@ is accurate.
 | 3 | **F2** | Two-field persistence change; needs a snapshot-round-trip test. |
 | 4 | **F11 + F12** | One shared teardown call site. |
 | 5 | **F5** | CSS counters make the splice do what it claims. |
-| 6 | **F4, F13, F10, F8, F9** | Small, independent. |
+| 6 | **F4, F13, F8, F9** | Small, independent. F10 was validated as a non-issue. |
 | 7 | **F6, F7, F16, F14** | Design/consistency work, not defects. |
 
 Everything above is analysis only — no code was changed.
