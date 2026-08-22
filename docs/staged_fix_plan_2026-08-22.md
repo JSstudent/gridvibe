@@ -10,8 +10,14 @@ a manual test **you** run in the real app.
 2. `make check` (Windows without `make`: `python tests/run_tests.py` && `python -m ruff check .`).
    Baseline before any of this work: 1947 tests OK, ruff clean — a stage is not done until
    it is back there.
-3. Run the **Manual verification**. Every stage's test states what you see *before* the fix,
-   so run it once on the current build first if you want the contrast.
+3. Run the **Manual verification**. Every stage's test states what you see *before* the fix, so
+   run it once on the current build first if you want the contrast. Any shell block inside a
+   stage is setup, not verification — build it in Git Bash before you launch the pane, per
+   [Test scaffolding](#test-scaffolding) below.
+
+   Stages 1 and 2 split their verification into **Part A** and **Part B**. Each Part is a
+   self-contained run-through and its steps start again at 1 — so a "step 3" always belongs to
+   the Part it sits under, never to the stage as a whole.
 4. Apply the **Documentation** items, then commit the stage.
 
 One commit per stage keeps the audit traceable. Stages 1–4 are independent of each other;
@@ -20,6 +26,97 @@ Stage 5 assumes Stage 1 has landed (its README paragraphs describe Stage 1's beh
 > **Note on `CLAUDE.md` / `AGENTS.md`:** both are in `.gitignore`, so guardrail edits below
 > will not show up in the diff you are tracking. Make them anyway — they are what stops the
 > rule being re-broken — but do not expect git to record them.
+
+## Test scaffolding
+
+The manual tests build three throwaway folders under `C:\Users\SasoPC\Desktop\Projects`, beside
+your real work, so the launcher's Local Repo picker can reach them without a detour:
+
+| Folder | Used by | Must be |
+| --- | --- | --- |
+| `gv-check\deep` | Stage 1 Part A | **Not** a Git repository — the test turns on the explorer failing to find a worktree. `Projects` itself is not inside one, so a plain `mkdir` is enough. |
+| `gv-diff` | Stages 2, 3, 4, 5 | Its own Git repo (`git init`). Holds `big.txt`, `huge.txt` and `typing.js` — build it once in Stage 2 and reuse it. |
+| `gv 100%done` | Stage 5 | Any directory; the `%` in the name is the whole point. |
+
+### Where and how to run the setup commands
+
+**Run them outside GridVibe, in their own window, before you launch the pane a stage asks for.**
+The launcher's directory field only accepts a folder that already exists, and generating a file
+inside the pane you are currently testing sets the explorer's change watcher off in the middle
+of the test.
+
+Every setup block in this document is written for **Git Bash**, which is installed here at
+`C:\Program Files\Git\git-bash.exe`. Two ways in:
+
+- **Start menu → "Git Bash"**, then `cd /c/Users/SasoPC/Desktop/Projects`.
+- **File Explorer** → right-click the `Projects` folder → **Open Git Bash here** (Windows 11:
+  *Show more options* first). This drops you straight into the right directory.
+
+Paste each block as written. `seq`, `sed -i` and `git` all behave as the blocks assume.
+
+> **Expected noise:** `core.autocrlf` is `true` on this machine, so `git add` prints
+> `warning: … LF will be replaced by CRLF the next time Git touches it`. That is correct and
+> changes nothing about the tests — Git normalizes both sides of every diff identically.
+
+<details>
+<summary><b>If you would rather stay in PowerShell</b> — all three setups, verified equivalents</summary>
+
+```powershell
+$Projects = "C:\Users\SasoPC\Desktop\Projects"
+
+# Stage 1 Part A — a plain, non-Git folder with a subfolder
+New-Item -ItemType Directory -Force "$Projects\gv-check\deep" | Out-Null
+
+# Stage 5 — the folder whose name contains a percent sign
+New-Item -ItemType Directory -Force "$Projects\gv 100%done" | Out-Null
+
+# Stage 2 — the test repository, plus the files Stages 3 and 4 reuse
+$GV = "$Projects\gv-diff"
+New-Item -ItemType Directory -Force $GV | Out-Null
+Set-Location $GV
+git init
+
+# big.txt — the diff repro. Line 5 starts with `--` in the base commit,
+# line 6 starts with `++` in the working copy: one trap for each guard.
+1..3000 | ForEach-Object { "line $_" } | Set-Content big.txt
+$l = Get-Content big.txt; $l[4] = '--legacy-flag'; Set-Content big.txt $l
+git add -A; git commit -m base
+1..3000 | ForEach-Object { "LINE $_" } | Set-Content big.txt
+$l = Get-Content big.txt; $l[5] = '++counter;'; Set-Content big.txt $l
+git add -A
+
+# huge.txt — 25,001 rows, so the large-file tier fires on the row count
+1..25000 | ForEach-Object { "L$_" } | Set-Content huge.txt
+
+# typing.js — 15,001 rows, deliberately *under* the tier so the editor
+# underlay is still active (that is what Stage 3 measures)
+1..15000 | ForEach-Object { "const value$_ = 1;" } | Set-Content typing.js
+```
+
+Two later blocks have PowerShell forms too — Stage 5's F7 setup:
+
+```powershell
+Set-Location "$Projects\gv-diff"; git add -A; git commit -m huge
+$l = Get-Content huge.txt; $l[99] = 'CHANGED-ONE'; $l[199] = 'CHANGED-TWO'; Set-Content huge.txt $l
+```
+
+</details>
+
+**WSL** works too — Ubuntu-22.04 is installed. The commands are identical; only the path
+changes, to `/mnt/c/Users/SasoPC/Desktop/Projects/...`.
+
+### Cleaning up
+
+`gv-diff` is a real repository, so it will appear anywhere GridVibe lists local repos until you
+remove it. When you are done with all five stages:
+
+```bash
+cd /c/Users/SasoPC/Desktop/Projects
+rm -rf gv-check gv-diff "gv 100%done"
+```
+
+Close any GridVibe pane rooted on those folders first — an explorer pane holds its root open,
+and a workspace saved while one is live will try to restore it after you delete it.
 
 ---
 
@@ -83,13 +180,13 @@ configured root. Leave it.
 ### Manual verification
 
 **Part A — the derived root must not pin (F1).** Prepare a plain, **non-Git** folder with a
-subfolder, e.g. `C:\Temp\gv-check\deep`.
+subfolder, e.g. `C:\Users\SasoPC\Desktop\Projects\gv-check\deep`.
 
 1. Launcher → 1 terminal, connection **Local Repo**, command mode **File Explorer**,
    directory `C:\Users\SasoPC\Desktop\Projects\gridvibe_main`. Launch.
-2. In the pane, click **📁 ⇄ 💻** to go to the terminal. Run `cd C:\Temp\gv-check`.
+2. In the pane, click **📁 ⇄ 💻** to go to the terminal. Run `cd C:\Users\SasoPC\Desktop\Projects\gv-check`.
 3. Click **📁 ⇄ 💻** back to the explorer. It opens on `gv-check` — expected either way.
-4. **📁 ⇄ 💻** to the terminal again. Run `cd C:\Temp\gv-check\deep`.
+4. **📁 ⇄ 💻** to the terminal again. Run `cd C:\Users\SasoPC\Desktop\Projects\gv-check\deep`.
 5. **📁 ⇄ 💻** back to the explorer and read the breadcrumb.
 
    - **Before the fix:** the root is `gv-check`, and **⬆️** can still step up to it — the
@@ -226,7 +323,8 @@ copy needs one starting with `++` (so its *addition* reads `+++…`) — that is
 guards.
 
 ```bash
-mkdir -p /c/Temp/gv-diff && cd /c/Temp/gv-diff && git init
+GV=/c/Users/SasoPC/Desktop/Projects/gv-diff
+mkdir -p "$GV" && cd "$GV" && git init
 seq 1 3000 | sed 's/^/line /' > big.txt
 sed -i '5s/.*/--legacy-flag/' big.txt
 git add -A && git commit -m base
@@ -235,7 +333,7 @@ sed -i '6s#.*#++counter;#' big.txt
 git add -A
 ```
 
-1. Open a GridVibe explorer pane rooted on `C:\Temp\gv-diff`.
+1. Open a GridVibe explorer pane rooted on `C:\Users\SasoPC\Desktop\Projects\gv-diff`.
 2. Open `big.txt` and switch to the **Diff** tab. The patch is ~6,000 lines, so the pane shows
    the **Very large diff** notice (and the truncation banner above it) — that is the tier this
    parser now serves.
@@ -266,17 +364,17 @@ git add -A
 **Part B — the large file (F10).** Generate a numbered file so the boundary is visible:
 
 ```bash
-seq 1 25000 | sed 's/^/L/' > /c/Temp/gv-diff/huge.txt
+seq 1 25000 | sed 's/^/L/' > /c/Users/SasoPC/Desktop/Projects/gv-diff/huge.txt
 ```
 
-4. Open `huge.txt` in the same pane. The **Large file view** notice appears.
-5. `Ctrl+F` is unavailable in this tier by design, so scroll to roughly 20 % of the file and
+1. Open `huge.txt` in the same pane you used for Part A. The **Large file view** notice appears.
+2. `Ctrl+F` is unavailable in this tier by design, so scroll to roughly 20 % of the file and
    find the `L5000` / `L5001` pair (the first chunk boundary — 5,000 lines).
 
    - **Before the fix:** a blank line sits between `L5000` and `L5001`.
    - **After the fix:** `L5001` follows `L5000` directly. Check `L10000`/`L10001` too.
 
-6. Select from `L4995` to `L5005`, copy, and paste into a text editor — the eleven lines must
+3. Select from `L4995` to `L5005`, copy, and paste into a text editor — the eleven lines must
    come out with nothing between them.
 
 ### Documentation
@@ -379,16 +477,16 @@ change is legal.
 Generate a real file to type in:
 
 ```bash
-seq 1 15000 | sed 's/^/const value/; s/$/ = 1;/' > /c/Temp/gv-diff/typing.js
+seq 1 15000 | sed 's/^/const value/; s/$/ = 1;/' > /c/Users/SasoPC/Desktop/Projects/gv-diff/typing.js
 ```
 
-1. Open an explorer pane on `C:\Temp\gv-diff`, open `typing.js`, click **Edit** (✏️).
+1. Open an explorer pane on `C:\Users\SasoPC\Desktop\Projects\gv-diff`, open `typing.js`, click **Edit** (✏️).
 2. Put the caret at the **end of line 5** and hold a letter key down for ~3 seconds. Both before
    and after the fix this should feel smooth — it is the control, and it must not regress.
 3. Now put the caret at the end of **line 5** and press **Enter** ten times, about one per second.
 
    - **Before the fix:** each Enter drops a visible frame — the caret and the gutter lag the
-     keypress by a beat.
+     keypress by a beat. - ME: while testing in desktop native mode; not really only if i hit a at the right time or something
    - **After the fix:** Enter is indistinguishable from typing a letter.
 
 4. Select 200 lines from the middle, cut (`Ctrl+X`), then paste (`Ctrl+V`) at the top.
@@ -479,7 +577,7 @@ the same thing.
 
 F12 has no clean manual test on its own; it rides on step 3 below and on the automated test.
 
-1. Open an explorer pane on `C:\Temp\gv-diff` and open `huge.txt` (the 25,000-line file from
+1. Open an explorer pane on `C:\Users\SasoPC\Desktop\Projects\gv-diff` and open `huge.txt` (the 25,000-line file from
    Stage 2). Let it finish painting.
 2. Open DevTools → **Performance**, start recording, and immediately click **📁 ⇄ 💻** to switch
    that pane to a terminal. Stop after ~3 seconds.
@@ -592,7 +690,7 @@ one that pins a source literal down to its trailing comma. `tests/test_api.py` n
    lines so it has a small worktree diff:
 
    ```bash
-   cd /c/Temp/gv-diff && git add -A && git commit -m huge
+   cd /c/Users/SasoPC/Desktop/Projects/gv-diff && git add -A && git commit -m huge
    sed -i '100s/.*/CHANGED-ONE/; 200s/.*/CHANGED-TWO/' huge.txt
    ```
 
@@ -610,8 +708,8 @@ one that pins a source literal down to its trailing comma. `tests/test_api.py` n
    - **After the fix:** it says the file changed and offers **Retry**, which loads the new
      content. (If the timing is hard to hit, throttle DevTools → Network to *Slow 3G* first.)
 
-3. **F13.** Create `C:\Temp\gv 100%done` (or `/tmp/100%done` on a remote host), `cd` into it from
-   a terminal pane, then click **📁 ⇄ 💻**.
+3. **F13.** Create `C:\Users\SasoPC\Desktop\Projects\gv 100%done` (or `/tmp/100%done` on a
+   remote host), `cd` into it from a terminal pane, then click **📁 ⇄ 💻**.
    - **Before the fix:** the explorer opens on the wrong directory, or the pane shows the
      "could not tell where the terminal was" notice.
    - **After the fix:** it opens on `gv 100%done`.
