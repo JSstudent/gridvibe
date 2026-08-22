@@ -8,16 +8,19 @@ a manual test **you** run in the real app.
 
 1. Implement the **Fix** items, including the automated test named in each.
 2. `make check` (Windows without `make`: `python tests/run_tests.py` && `python -m ruff check .`).
-   Baseline before any of this work: 1947 tests OK, ruff clean — a stage is not done until
-   it is back there.
+    Baseline before any of this work: 1947 tests OK, ruff clean — a stage is not done until
+    it is back there.
 3. Run the **Manual verification**. Every stage's test states what you see *before* the fix, so
-   run it once on the current build first if you want the contrast. Any shell block inside a
-   stage is setup, not verification — build it in Git Bash before you launch the pane, per
-   [Test scaffolding](#test-scaffolding) below.
+    run it once on the current build first if you want the contrast. Any shell block inside a
+    stage is setup, not verification — build it in Git Bash before you launch the pane, per
+    [Test scaffolding](#test-scaffolding) below.
 
-   Stages 1 and 2 split their verification into **Part A** and **Part B**. Each Part is a
-   self-contained run-through and its steps start again at 1 — so a "step 3" always belongs to
-   the Part it sits under, never to the stage as a whole.
+    Stages 1 and 2 split their verification into **Part A** and **Part B**. Each Part is a
+    self-contained run-through and its steps start again at 1 — so a "step 3" always belongs to
+    the Part it sits under, never to the stage as a whole. **Stages 3, 4 and 5 are not split**:
+    each is one run-through numbered straight through, so a "step 7" there is the seventh step
+    of that stage's single list.
+
 4. Apply the **Documentation** items, then commit the stage.
 
 One commit per stage keeps the audit traceable. Stages 1–4 are independent of each other;
@@ -50,7 +53,7 @@ Every setup block in this document is written for **Git Bash**, which is install
 
 - **Start menu → "Git Bash"**, then `cd /c/Users/SasoPC/Desktop/Projects`.
 - **File Explorer** → right-click the `Projects` folder → **Open Git Bash here** (Windows 11:
-  *Show more options* first). This drops you straight into the right directory.
+    *Show more options* first). This drops you straight into the right directory.
 
 Paste each block as written. `seq`, `sed -i` and `git` all behave as the blocks assume.
 
@@ -169,13 +172,13 @@ configured root. Leave it.
 **Tests to add**
 
 - The F15 gap: a sibling to `test_a_configured_root_survives_the_round_trip_and_still_pins`
-  (`tests/test_api.py:6628`) that drives the pane's shell **outside** the configured root and
-  asserts `explorer_root_configured is False` with the derived root stored. This is the only
-  branch where the two values disagree, which is why F1 shipped green.
+    (`tests/test_api.py:6628`) that drives the pane's shell **outside** the configured root and
+    asserts `explorer_root_configured is False` with the derived root stored. This is the only
+    branch where the two values disagree, which is why F1 shipped green.
 - A `_snapshot_session()` round trip: a session launched at `C:\repo`, observed into
-  `C:\repo\a\b`, snapshotted and rebuilt, still reports `launch_directory == C:\repo`.
+    `C:\repo\a\b`, snapshotted and rebuilt, still reports `launch_directory == C:\repo`.
 - One end-to-end: restore-then-switch-to-explorer roots on the repository, not on the
-  subdirectory the pane was restored into.
+    subdirectory the pane was restored into.
 
 ### Manual verification
 
@@ -183,35 +186,35 @@ configured root. Leave it.
 subfolder, e.g. `C:\Users\SasoPC\Desktop\Projects\gv-check\deep`.
 
 1. Launcher → 1 terminal, connection **Local Repo**, command mode **File Explorer**,
-   directory `C:\Users\SasoPC\Desktop\Projects\gridvibe_main`. Launch.
+    directory `C:\Users\SasoPC\Desktop\Projects\gridvibe_main`. Launch.
 2. In the pane, click **📁 ⇄ 💻** to go to the terminal. Run `cd C:\Users\SasoPC\Desktop\Projects\gv-check`.
 3. Click **📁 ⇄ 💻** back to the explorer. It opens on `gv-check` — expected either way.
 4. **📁 ⇄ 💻** to the terminal again. Run `cd C:\Users\SasoPC\Desktop\Projects\gv-check\deep`.
 5. **📁 ⇄ 💻** back to the explorer and read the breadcrumb.
 
-   - **Before the fix:** the root is `gv-check`, and **⬆️** can still step up to it — the
-     derived root from step 3 pinned the pane.
-   - **After the fix:** the root is `deep`, and **⬆️** is unavailable at it — the pane opens
-     where the shell actually is.
+    - **Before the fix:** the root is `gv-check`, and **⬆️** can still step up to it — the
+        derived root from step 3 pinned the pane.
+    - **After the fix:** the root is `deep`, and **⬆️** is unavailable at it — the pane opens
+        where the shell actually is.
 
 **Part B — the floor must survive a restart (F2).** Use a real Git repo; `gridvibe_main`
 works.
 
 1. Launcher → **2** terminals, connection **Local Repo**, command mode **Command** (a plain
-   terminal, not the explorer), both with directory
-   `C:\Users\SasoPC\Desktop\Projects\gridvibe_main`. Launch.
+    terminal, not the explorer), both with directory
+    `C:\Users\SasoPC\Desktop\Projects\gridvibe_main`. Launch.
 2. In **both** panes run `cd web`.
 3. In pane 1, click **📁 ⇄ 💻**. The explorer opens rooted on **`gridvibe_main`** (the Git
-   worktree), with `web` selected. This is the control — note it.
+    worktree), with `web` selected. This is the control — note it.
 4. Top bar → **Workspace ▸ Save Workspace**.
 5. Restart GridVibe (launcher → the restart button, *Save workspace & restart*), then restore
-   the workspace.
+    the workspace.
 6. Pane 2 comes back sitting in `...\gridvibe_main\web`. Click **📁 ⇄ 💻** on it.
 
-   - **Before the fix:** it roots on **`web`** — you cannot navigate up to the repository,
-     and the Git sidebar is scoped to `web`. Different from step 3 for the same pane in the
-     same directory.
-   - **After the fix:** it roots on **`gridvibe_main`**, exactly as pane 1 did in step 3.
+    - **Before the fix:** it roots on **`web`** — you cannot navigate up to the repository,
+        and the Git sidebar is scoped to `web`. Different from step 3 for the same pane in the
+        same directory.
+    - **After the fix:** it roots on **`gridvibe_main`**, exactly as pane 1 did in step 3.
 
 ### Documentation
 
@@ -219,37 +222,37 @@ works.
 
 - **`CHANGELOG.md`** (Unreleased, two entries in the existing voice):
 
-  > **(fix) An explorer root GridVibe worked out for you no longer becomes a pin.** Switching
-  > a terminal to the file explorer picks a root from where the shell is, and that root has to
-  > be remembered while the explorer is open because it is what confines it. GridVibe recorded
-  > it as though you had chosen it whenever the pane had ever been given a root of its own, so
-  > the folder it happened to open in once became the folder it opened in forever. The
-  > distinction is now recorded against the root actually stored, so a root you chose still
-  > pins and a root GridVibe worked out is let go after that one explorer.
+    > **(fix) An explorer root GridVibe worked out for you no longer becomes a pin.** Switching
+    > a terminal to the file explorer picks a root from where the shell is, and that root has to
+    > be remembered while the explorer is open because it is what confines it. GridVibe recorded
+    > it as though you had chosen it whenever the pane had ever been given a root of its own, so
+    > the folder it happened to open in once became the folder it opened in forever. The
+    > distinction is now recorded against the root actually stored, so a root you chose still
+    > pins and a root GridVibe worked out is let go after that one explorer.
 
-  > **(fix) A restart no longer moves the folder the explorer refuses to widen past.** The
-  > explorer will not open above the directory you launched a pane in. That directory was not
-  > saved with the workspace, so after a restart GridVibe took wherever the pane had ended up
-  > as the place it had started — and a pane restored inside a subfolder could no longer open
-  > on its repository. Where a pane was launched is now saved alongside where it is, so the
-  > same pane in the same folder opens the same explorer before and after a restart.
+    > **(fix) A restart no longer moves the folder the explorer refuses to widen past.** The
+    > explorer will not open above the directory you launched a pane in. That directory was not
+    > saved with the workspace, so after a restart GridVibe took wherever the pane had ended up
+    > as the place it had started — and a pane restored inside a subfolder could no longer open
+    > on its repository. Where a pane was launched is now saved alongside where it is, so the
+    > same pane in the same folder opens the same explorer before and after a restart.
 
 - **`README.md`** — audit §4 gaps 2 and 3 become true only once this stage lands, so write
-  them here:
-  - **File Explorer** intro (line ~128): after "same directory, no re-navigation", say the
-    explorer roots on the Git repository containing that directory and never widens above the
-    folder the pane was launched in.
-  - **Sessions & Workspace ▸ Save & restore** (line ~119): "directories" → say panes come back
-    in the directory they were *working in*, falling back to the one they launched in if it is
-    gone.
-  - **Icons & Shortcuts ▸ 🪟** (line ~170): a split clones where the pane *is*, not where it
-    started.
+    them here:
+    - **File Explorer** intro (line ~128): after "same directory, no re-navigation", say the
+        explorer roots on the Git repository containing that directory and never widens above the
+        folder the pane was launched in.
+    - **Sessions & Workspace ▸ Save & restore** (line ~119): "directories" → say panes come back
+        in the directory they were *working in*, falling back to the one they launched in if it is
+        gone.
+    - **Icons & Shortcuts ▸ 🪟** (line ~170): a split clones where the pane *is*, not where it
+        started.
 
 - **Guardrails** (`CLAUDE.md` + `AGENTS.md`, Regression Guardrails §4): extend the existing
-  `explorer_root_configured` bullet with the two rules this stage buys —
-  *a flag that qualifies a stored value is computed from the value actually stored, never from
-  the candidate it was chosen among*, and *a floor that is only meaningful across a restart is
-  persisted, or it is not a floor*.
+    `explorer_root_configured` bullet with the two rules this stage buys —
+    *a flag that qualifies a stored value is computed from the value actually stored, never from
+    the candidate it was chosen among*, and *a floor that is only meaningful across a restart is
+    persisted, or it is not a floor*.
 
 ### Status — landed 2026-08-22 ✅
 
@@ -353,9 +356,9 @@ newline across the boundary. No renderer change is warranted.
 **Tests to add**
 
 - `tests/test_explorer_workers.py` (or `test_explorer_tiers.py`, wherever the parser is
-  exercised): a patch containing a deletion of `--legacy-flag` and an addition of `++counter;`,
-  asserting both rows survive **and** that the rows after them keep their numbers — the
-  numbering is the half that actually shows the corruption. Run through the real module in Node.
+    exercised): a patch containing a deletion of `--legacy-flag` and an addition of `++counter;`,
+    asserting both rows survive **and** that the rows after them keep their numbers — the
+    numbering is the half that actually shows the corruption. Run through the real module in Node.
 - A two-file patch, asserting the second file's `---`/`+++`/`index` headers do not become rows.
 
 ### Manual verification
@@ -381,31 +384,31 @@ git add -A
 
 1. Open a GridVibe explorer pane rooted on `C:\Users\SasoPC\Desktop\Projects\gv-diff`.
 2. Open `big.txt` and switch to the **Diff** tab. The patch is ~6,000 lines, so the pane shows
-   the **Very large diff** notice (and the truncation banner above it) — that is the tier this
-   parser now serves.
+    the **Very large diff** notice (and the truncation banner above it) — that is the tier this
+    parser now serves.
 3. Look at the **top** of the diff, lines 3–9. Read the *text* against the *numbers*, not just
-   whether rows are present.
+    whether rows are present.
 
-   - **Before the fix** (this is the real current output):
+    - **Before the fix** (this is the real current output):
 
-     ```
-     5   line 6          |  5   LINE 5
-     6   line 7          |  6   LINE 7
-     ```
+        ```
+        5   line 6          |  5   LINE 5
+        6   line 7          |  6   LINE 7
+        ```
 
-     `--legacy-flag` and `++counter;` are gone, every line below is labelled one too low on the
-     side that lost a line, and left 5 (`line 6`) is sitting opposite right 5 (`LINE 5`).
+        `--legacy-flag` and `++counter;` are gone, every line below is labelled one too low on the
+        side that lost a line, and left 5 (`line 6`) is sitting opposite right 5 (`LINE 5`).
 
-   - **After the fix:**
+    - **After the fix:**
 
-     ```
-     5   --legacy-flag   |  5   LINE 5
-     6   line 6          |  6   ++counter;
-     7   line 7          |  7   LINE 7
-     ```
+        ```
+        5   --legacy-flag   |  5   LINE 5
+        6   line 6          |  6   ++counter;
+        7   line 7          |  7   LINE 7
+        ```
 
 4. Scroll to the bottom and confirm the last visible numbers on both sides still agree with each
-   other — the truncation banner will say the patch was cut, which is expected and unrelated.
+    other — the truncation banner will say the patch was cut, which is expected and unrelated.
 
 **Part B — the large file (F10 validation).** Generate a numbered file so the boundary is visible:
 
@@ -415,13 +418,13 @@ seq 1 25000 | sed 's/^/L/' > /c/Users/SasoPC/Desktop/Projects/gv-diff/huge.txt
 
 1. Open `huge.txt` in the same pane you used for Part A. The **Large file view** notice appears.
 2. `Ctrl+F` is unavailable in this tier by design, so scroll to roughly 20 % of the file and
-   find the `L5000` / `L5001` pair (the first chunk boundary — 5,000 lines).
+    find the `L5000` / `L5001` pair (the first chunk boundary — 5,000 lines).
 
-   - **Observed before any renderer change:** `L5001` follows `L5000` directly in both native
-     and browser mode. The same is true at `L10000`/`L10001`.
+    - **Observed before any renderer change:** `L5001` follows `L5000` directly in both native
+        and browser mode. The same is true at `L10000`/`L10001`.
 
 3. Select from `L4995` to `L5005`, copy, and paste into a text editor — the eleven lines must
-   come out with nothing between them.
+    come out with nothing between them.
 
 ### Documentation
 
@@ -430,20 +433,20 @@ behavior changed.
 
 - **`CHANGELOG.md`** (Unreleased):
 
-  > **(fix) Very large diffs no longer misread lines that look like a file header.** A changed
-  > line whose text begins with `--` or `++` — a `---` rule or front-matter marker in Markdown, a
-  > `--flag`, a `++i;` — was mistaken for the `---`/`+++` header at the top of a patch and left
-  > out. Worse than the missing line, everything below it kept the numbering it would have had,
-  > so the rest of the file was shown under the wrong line numbers with unrelated lines paired
-  > against each other. This only affected diffs large enough for the plain side-by-side view,
-  > which is exactly where it is hardest to spot.
+    > **(fix) Very large diffs no longer misread lines that look like a file header.** A changed
+    > line whose text begins with `--` or `++` — a `---` rule or front-matter marker in Markdown, a
+    > `--flag`, a `++i;` — was mistaken for the `---`/`+++` header at the top of a patch and left
+    > out. Worse than the missing line, everything below it kept the numbering it would have had,
+    > so the rest of the file was shown under the wrong line numbers with unrelated lines paired
+    > against each other. This only affected diffs large enough for the plain side-by-side view,
+    > which is exactly where it is hardest to spot.
 
 - **`README.md`** — no change. The **Very large files & diffs** row already describes the tiers
-  correctly; this stage makes them behave as described.
+    correctly; this stage makes them behave as described.
 
 - **Guardrails** (`CLAUDE.md` + `AGENTS.md`, §4 Correctness): add —
-  *inside a hunk, a diff line's leading `-`/`+` is the marker and nothing else; never
-  disambiguate a header from content by prefix, because `--`/`++` are ordinary line content.*
+    *inside a hunk, a diff line's leading `-`/`+` is the marker and nothing else; never
+    disambiguate a header from content by prefix, because `--`/`++` are ordinary line content.*
 
 ### Status — landed 2026-08-22 ✅
 
@@ -517,10 +520,10 @@ change is legal.
 **Tests to add**
 
 - `tests/test_explorer_repaint.py` / a new overlay test: after a splice that changes the line
-  count, the row at the old line 12,000 still reports line 12,001 to the find — proving the
-  positional read and the counter agree.
+    count, the row at the old line 12,000 still reports line 12,001 to the find — proving the
+    positional read and the counter agree.
 - `tests/test_explorer_edit_find.py`: find still resolves a match's line number with the
-  attribute gone.
+    attribute gone.
 - A cache test: painting the underlay N times does not evict a second pane's line records.
 
 ### Manual verification
@@ -533,25 +536,28 @@ seq 1 15000 | sed 's/^/const value/; s/$/ = 1;/' > /c/Users/SasoPC/Desktop/Proje
 
 1. Open an explorer pane on `C:\Users\SasoPC\Desktop\Projects\gv-diff`, open `typing.js`, click **Edit** (✏️).
 2. Put the caret at the **end of line 5** and hold a letter key down for ~3 seconds. Both before
-   and after the fix this should feel smooth — it is the control, and it must not regress.
+    and after the fix this should feel smooth — it is the control, and it must not regress.
 3. Now put the caret at the end of **line 5** and press **Enter** ten times, about one per second.
 
-   - **Before the fix:** each Enter drops a visible frame — the caret and the gutter lag the
-     keypress by a beat. - ME: while testing in desktop native mode(and browser after); not really only if i hit a at the right time or something, it does get better with holding longer, like it needs to catch up
-   - **After the fix:** Enter is indistinguishable from typing a letter.
+    - **Before the fix:** each Enter drops a visible frame — the caret and the gutter lag the
+        keypress by a beat. - ME: while testing in desktop native mode(and browser after); not really only if i hit a at the right time or something, it does get better with holding longer, like it needs to catch up
+    - **After the fix:** Enter is indistinguishable from typing a letter.
 
 4. Select 200 lines from the middle, cut (`Ctrl+X`), then paste (`Ctrl+V`) at the top.
-   Both operations should land in one frame.
+    Both operations should land in one frame.
 5. Scroll to the bottom of the file and confirm the **last gutter number is 15,001** (a trailing
-   newline opens a final empty line) and that the numbers are continuous across the edit you
-   made — this is what proves the CSS counter is numbering correctly, not just cheaply.
+    newline opens a final empty line) and that the numbers are continuous across the edit you
+    made — this is what proves the CSS counter is numbering correctly, not just cheaply.
 6. `Ctrl+F` inside the editor, search for `value14000`, and press Enter. The match must be found
-   and scrolled to — this is the positional-index path from the fix.
-7. `Esc` to cancel the edit (do **not** save), then re-open the file and confirm the Source view's
-   line numbers are unchanged, including a Markdown file with a collapsed section (open any
-   `.md` file, collapse a heading, and confirm the numbers still skip the hidden lines).
+    and scrolled to — this is the positional-index path from the fix.
+7. `Esc` to cancel the edit (do **not** save), then re-open `typing.js` and confirm the Source
+    view's line numbers are unchanged — the counter must not have leaked out of the underlay.
+8. Open any `.md` file in the same pane, collapse a heading, and confirm the Source view's numbers
+    still **skip** the hidden lines.
 
-Step 7 is the one that catches an over-generalised counter.
+Step 8 is the one that catches an over-generalised counter: the read-only Source view omits the
+rows inside a collapsed section, so a DOM-order counter would renumber them 1..N and hide the
+gap.
 
 ### Documentation
 
@@ -559,17 +565,17 @@ Step 7 is the one that catches an over-generalised counter.
 
 - **`CHANGELOG.md`** (Unreleased):
 
-  > **(perf) Pressing Enter in a large file no longer stutters.** Typing in the in-place editor
-  > was made cheap a while back, but anything that changed the number of lines — Enter, joining
-  > two lines with backspace, pasting — still renumbered every line below the edit on the spot.
-  > Near the top of a very long file that was tens of thousands of updates inside a single frame,
-  > so the caret arrived a beat after the key. Line numbers now follow the document on their own
-  > and only the lines that actually changed are rebuilt.
+    > **(perf) Pressing Enter in a large file no longer stutters.** Typing in the in-place editor
+    > was made cheap a while back, but anything that changed the number of lines — Enter, joining
+    > two lines with backspace, pasting — still renumbered every line below the edit on the spot.
+    > Near the top of a very long file that was tens of thousands of updates inside a single frame,
+    > so the caret arrived a beat after the key. Line numbers now follow the document on their own
+    > and only the lines that actually changed are rebuilt.
 
 - **`README.md`** — no change. Nothing it claims changes.
 
 - **Guardrails** — none. Add the contiguity precondition as a code comment where the counter is
-  declared instead; it is a local invariant, not a repo-wide rule.
+    declared instead; it is a local invariant, not a repo-wide rule.
 
 ---
 
@@ -618,39 +624,39 @@ the same thing.
 **Tests to add**
 
 - `tests/test_explorer_source_frame.py`: a frame-sliced build whose panel is replaced by a
-  *non-explorer* surface stops on its next slice and flushes its queued readers.
+    *non-explorer* surface stops on its next slice and flushes its queued readers.
 - A pane-teardown test asserting every request slot is aborted.
 - `tests/test_api.py`: assert the input handler's call order — this is one place a behavioural
-  assertion is awkward, so if it has to be a source-order check, keep it to the two call names
-  and not their arguments (see F14 in Stage 5).
+    assertion is awkward, so if it has to be a source-order check, keep it to the two call names
+    and not their arguments (see F14 in Stage 5).
 
 ### Manual verification
 
 F12 has no clean manual test on its own; it rides on step 3 below and on the automated test.
 
 1. Open an explorer pane on `C:\Users\SasoPC\Desktop\Projects\gv-diff` and open `huge.txt` (the 25,000-line file from
-   Stage 2). Let it finish painting.
+    Stage 2). Let it finish painting.
 2. Open DevTools → **Performance**, start recording, and immediately click **📁 ⇄ 💻** to switch
-   that pane to a terminal. Stop after ~3 seconds.
+    that pane to a terminal. Stop after ~3 seconds.
 
-   - **Before the fix:** frames after the mode-switch response still show
-     `explorerAppendSourceRows` / `insertAdjacentHTML` work — the build is filling a tree that is
-     no longer on screen.
-   - **After the fix:** that work stops at the switch.
+    - **Before the fix:** frames after the mode-switch response still show
+        `explorerAppendSourceRows` / `insertAdjacentHTML` work — the build is filling a tree that is
+        no longer on screen.
+    - **After the fix:** that work stops at the switch.
 
 3. In the same recording, check the **worker** tracks (DevTools → Performance, or Sources ▸
-   Threads). After the switch no explorer worker should still be running a highlight job for the
-   file you just left.
+    Threads). After the switch no explorer worker should still be running a highlight job for the
+    file you just left.
 
 4. **F4 — SSH input.** On an SSH pane with **Shell integration** on (App Settings), type `claude`
-   and press Enter.
+    and press Enter.
 
-   - Enter must echo immediately in both builds. The defect needs a remote shell that reported
-     its pid but never emitted a directory, which is hard to force deliberately — so this step is
-     a *no-regression* check, and the fix's real evidence is the reordered call plus its test.
-   - Confirm the pane still promotes to an agent pane (the header title and the 🔄 dropdown change
-     as before) and that a **Save Workspace** taken while the agent runs still restores it in the
-     directory the agent was started in. That is the behaviour the reorder must not break.
+    - Enter must echo immediately in both builds. The defect needs a remote shell that reported
+        its pid but never emitted a directory, which is hard to force deliberately — so this step is
+        a *no-regression* check, and the fix's real evidence is the reordered call plus its test.
+    - Confirm the pane still promotes to an agent pane (the header title and the 🔄 dropdown change
+        as before) and that a **Save Workspace** taken while the agent runs still restores it in the
+        directory the agent was started in. That is the behaviour the reorder must not break.
 
 ### Documentation
 
@@ -659,11 +665,11 @@ F12 is internal.
 
 - **`CHANGELOG.md`** (Unreleased), one combined entry:
 
-  > **(perf) Switching a pane away from a large file stops the work it was doing.** A file big
-  > enough to be painted over several frames kept painting after you switched the pane to a
-  > terminal or a browser preview, into a view nobody could see and in competition with the one
-  > that had just replaced it. Background syntax colouring for that file kept running too. Both
-  > now stop when the pane does.
+    > **(perf) Switching a pane away from a large file stops the work it was doing.** A file big
+    > enough to be painted over several frames kept painting after you switched the pane to a
+    > terminal or a browser preview, into a view nobody could see and in competition with the one
+    > that had just replaced it. Background syntax colouring for that file kept running too. Both
+    > now stop when the pane does.
 
 - **`README.md`** — no change.
 - **Guardrails** — none new; F11 is a missing call site against the rule that is already written.
@@ -730,41 +736,41 @@ one that pins a source literal down to its trailing comma. `tests/test_api.py` n
 **Tests to add**
 
 - F7: the find predicate answers `true` for `diff` while the source tier is `large`, and
-  `false` for `source` and `preview`.
+    `false` for `source` and `preview`.
 - F8: a revision mismatch leaves a retry affordance rather than the loader text.
 - F13: `tests/test_terminal_cwd.py` — a directory containing `%` round-trips through the hook
-  and the parser unchanged.
+    and the parser unchanged.
 
 ### Manual verification
 
 1. **F7.** In the Stage 2 scratch repo, commit `huge.txt` and then change a handful of its
-   lines so it has a small worktree diff:
+    lines so it has a small worktree diff:
 
-   ```bash
-   cd /c/Users/SasoPC/Desktop/Projects/gv-diff && git add -A && git commit -m huge
-   sed -i '100s/.*/CHANGED-ONE/; 200s/.*/CHANGED-TWO/' huge.txt
-   ```
+    ```bash
+    cd /c/Users/SasoPC/Desktop/Projects/gv-diff && git add -A && git commit -m huge
+    sed -i '100s/.*/CHANGED-ONE/; 200s/.*/CHANGED-TWO/' huge.txt
+    ```
 
-   Open `huge.txt` in an explorer pane — the **Large file view** notice appears — then switch to
-   its **Diff** tab and press `Ctrl+F`, searching for `CHANGED`.
-   - **Before the fix:** no find bar at all — the file's own diff inherits the large file's
-     verdict, even though the patch is four lines long.
-   - **After the fix:** the find bar appears, marks both matches, and the counter steps.
-   - Then switch back to **Source** and confirm `Ctrl+F` is still unavailable there and the tier
-     notice still says so — the Source half must not change.
+    Open `huge.txt` in an explorer pane — the **Large file view** notice appears — then switch to
+    its **Diff** tab and press `Ctrl+F`, searching for `CHANGED`.
+    - **Before the fix:** no find bar at all — the file's own diff inherits the large file's
+        verdict, even though the patch is four lines long.
+    - **After the fix:** the find bar appears, marks both matches, and the counter steps.
+    - Then switch back to **Source** and confirm `Ctrl+F` is still unavailable there and the tier
+        notice still says so — the Source half must not change.
 
 2. **F8.** Open a Markdown file, switch to the **Preview** tab, and while it says "Rendering
-   preview…" modify the file on disk from another terminal (`echo x >> file.md`).
-   - **Before the fix:** the panel can be left on "Rendering preview…" indefinitely.
-   - **After the fix:** it says the file changed and offers **Retry**, which loads the new
-     content. (If the timing is hard to hit, throttle DevTools → Network to *Slow 3G* first.)
+    preview…" modify the file on disk from another terminal (`echo x >> file.md`).
+    - **Before the fix:** the panel can be left on "Rendering preview…" indefinitely.
+    - **After the fix:** it says the file changed and offers **Retry**, which loads the new
+        content. (If the timing is hard to hit, throttle DevTools → Network to *Slow 3G* first.)
 
 3. **F13.** Create `C:\Users\SasoPC\Desktop\Projects\gv 100%done` (or `/tmp/100%done` on a
-   remote host), `cd` into it from a terminal pane, then click **📁 ⇄ 💻**.
-   - **Before the fix:** the explorer opens on the wrong directory, or the pane shows the
-     "could not tell where the terminal was" notice.
-	ME: could not replicate the issue, could open on the gv 100%done with no problem, albe it its empty so i see directory is empty on preview
-   - **After the fix:** it opens on `gv 100%done`.
+    remote host), `cd` into it from a terminal pane, then click **📁 ⇄ 💻**.
+    - **Before the fix:** the explorer opens on the wrong directory, or the pane shows the
+        "could not tell where the terminal was" notice.
+        ME: could not replicate the issue, could open on the gv 100%done with no problem, albe it its empty so i see directory is empty on preview
+    - **After the fix:** it opens on `gv 100%done`.
 
 4. **F9 / F14.** No manual test — `make check` is the verification.
 
@@ -774,37 +780,37 @@ one that pins a source literal down to its trailing comma. `tests/test_api.py` n
 
 - **`CHANGELOG.md`** (Unreleased):
 
-  > **(fix) Find works in a very large file's own diff.** A file big enough for the plain
-  > large-file view turns Find off, because that view has no per-line rows to point at. That
-  > verdict was applied to the whole pane, so the file's Diff tab — a patch of a few lines, and
-  > bounded however large the file is — had no find box either. This was already fixed for a
-  > commit diff opened from the Git sidebar; the file's own diff now behaves the same way.
-  > Source and the Markdown preview of such a file still have Find off, and still say so.
+    > **(fix) Find works in a very large file's own diff.** A file big enough for the plain
+    > large-file view turns Find off, because that view has no per-line rows to point at. That
+    > verdict was applied to the whole pane, so the file's Diff tab — a patch of a few lines, and
+    > bounded however large the file is — had no find box either. This was already fixed for a
+    > commit diff opened from the Git sidebar; the file's own diff now behaves the same way.
+    > Source and the Markdown preview of such a file still have Find off, and still say so.
 
-  > **(fix) The Markdown preview says so when it gives up.** If the file changed in the moment
-  > between GridVibe reading its text and rendering its preview, the panel was left showing
-  > "Rendering preview…" with nothing to click. It now says what happened and offers Retry.
+    > **(fix) The Markdown preview says so when it gives up.** If the file changed in the moment
+    > between GridVibe reading its text and rendering its preview, the panel was left showing
+    > "Rendering preview…" with nothing to click. It now says what happened and offers Retry.
 
-  > **(fix) A folder with a `%` in its name no longer breaks directory tracking.** The sequence
-  > each terminal's prompt uses to report where it is treated a `%` in the path as a formatting
-  > instruction, so panes sitting in such a folder reported nothing usable — and the explorer
-  > opened somewhere else, or said it could not tell.
+    > **(fix) A folder with a `%` in its name no longer breaks directory tracking.** The sequence
+    > each terminal's prompt uses to report where it is treated a `%` in the path as a formatting
+    > instruction, so panes sitting in such a folder reported nothing usable — and the explorer
+    > opened somewhere else, or said it could not tell.
 
 - **`README.md`** — the remaining audit §4 items, none of which depend on this stage's code:
-  - **Line 274 is wrong today.** "**Both** JSON state files are written the same careful way…"
-    — there are **three** durable stores through `web/state_files.py`: `runtime_state.json`,
-    `saved_sessions.json`, **and `config.json`** (`web/config.py:211`). The Local Files table two
-    lines above already lists all three. Change to "Each of these JSON state files…".
-  - **Git row** (line ~134): the fixed pin is cleared when the pane becomes a terminal. The
-    sentence "Both settings survive Save Workspace and restart" currently over-promises; add the
-    one case where the pin is deliberately dropped, and that follow-browsing is unaffected.
-  - **Git row**: name **Unstage All**, and that unlike Discard All beside it there is no
-    confirmation because it touches the index only.
-  - **File Explorer** section: the in-pane notice when the pane's directory could not be read
-    ("The terminal did not answer where it is. Opened at …" / the agent-pane variant) is a
-    user-facing surface with no mention anywhere.
-  - *Optional:* **Search** row — repository search no longer preselects the first hit. The row
-    makes no claim either way, so add a line only if the changed feel is worth calling out.
+    - **Line 274 is wrong today.** "**Both** JSON state files are written the same careful way…"
+        — there are **three** durable stores through `web/state_files.py`: `runtime_state.json`,
+        `saved_sessions.json`, **and `config.json`** (`web/config.py:211`). The Local Files table two
+        lines above already lists all three. Change to "Each of these JSON state files…".
+    - **Git row** (line ~134): the fixed pin is cleared when the pane becomes a terminal. The
+        sentence "Both settings survive Save Workspace and restart" currently over-promises; add the
+        one case where the pin is deliberately dropped, and that follow-browsing is unaffected.
+    - **Git row**: name **Unstage All**, and that unlike Discard All beside it there is no
+        confirmation because it touches the index only.
+    - **File Explorer** section: the in-pane notice when the pane's directory could not be read
+        ("The terminal did not answer where it is. Opened at …" / the agent-pane variant) is a
+        user-facing surface with no mention anywhere.
+    - *Optional:* **Search** row — repository search no longer preselects the first hit. The row
+        makes no claim either way, so add a line only if the changed feel is worth calling out.
 
 - **Guardrails** — none.
 
