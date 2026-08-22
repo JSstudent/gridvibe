@@ -3032,8 +3032,14 @@ def change_session_mode(session_id: str):
                 # The live explorer needs a confinement boundary either way, so
                 # the resolved root is always stored. The flag is what keeps a
                 # *derived* one from pinning the next switch to a directory
-                # nobody chose.
-                explorer_root_configured=bool(configured_root),
+                # nobody chose -- so it describes the root actually stored, not
+                # the candidate it was chosen among. Holding *a* configured root
+                # is not the same as having opened on it:
+                # `_resolve_explorer_open_root()` returns it only while it still
+                # holds the observed cwd, and a shell that has walked outside it
+                # gets a derived root that used to be stored wearing this flag.
+                explorer_root_configured=bool(configured_root)
+                and root_directory == configured_root,
                 initial_command="",
                 startup_mode="explorer",
             )
@@ -3073,7 +3079,10 @@ def change_session_mode(session_id: str):
                 directory=next_directory,
                 current_directory=None,
                 explorer_root_directory=root_directory,
-                explorer_root_configured=bool(configured_root),
+                # Same rule as the SSH branch above: the flag qualifies the root
+                # being stored, so a derived root never pins the pane.
+                explorer_root_configured=bool(configured_root)
+                and root_directory == configured_root,
                 username="",
                 port=22,
                 password=None,

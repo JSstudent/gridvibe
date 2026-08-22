@@ -120,7 +120,7 @@ and a workspace saved while one is live will try to restore it after you delete 
 
 ---
 
-## Stage 1 — The explorer root and the launch floor
+## Stage 1 — The explorer root and the launch floor ✅ *landed*
 
 **Findings:** F1 (High), F2 (High), F15 (test gap)
 **Risk:** highest. Both defects write wrong values into `runtime_state.json`, so every hour
@@ -251,6 +251,54 @@ works.
   the candidate it was chosen among*, and *a floor that is only meaningful across a restart is
   persisted, or it is not a floor*.
 
+### Status — landed 2026-08-22 ✅
+
+`make check`: **1950 tests OK** (1947 baseline + the 3 below), ruff clean. Both manual Parts
+verified in the real app: Part A roots on `deep` with **⬆️** unavailable, Part B brings pane 2
+back rooted on `gridvibe_main` exactly as pane 1 in step 3.
+
+**Code — as planned, with one naming correction.**
+
+| Where | What landed |
+| --- | --- |
+| `web/api.py:3042` (SSH), `:3085` (local) | `explorer_root_configured=bool(configured_root) and root_directory == configured_root`, with the comment saying *why*: the flag describes the root actually stored, not the candidate it was chosen among. |
+| `sessions/manager.py` `to_dict()` | `"launch_directory": self.launch_directory` beside `"directory"`. |
+| `web/runtime_state.py:163` `_SESSION_SNAPSHOT_FIELDS` | `"launch_directory"`, commented as the second directory field and why both are needed. |
+| `sessions/manager.py` `_session_launch_fields()` | `"launch_directory": config.get("launch_directory")`. **The plan called this `install_group()`'s `fields` dict; no such method exists** — `_session_launch_fields()` is the one that builds it, for `create_sessions()` and `install_session_group()` alike. |
+
+`split_session` was left alone as the plan says, and it is still correct: it passes no
+`launch_directory`, so a split keeps cloning where the pane *is*.
+
+**Tests — all three added, and each verified to fail against the pre-fix code** (temporarily
+reverting the relevant edit, then restoring it):
+
+| Test (`tests/test_api.py`, `ApiRoutesTestCase`) | Pre-fix failure |
+| --- | --- |
+| `test_a_shell_outside_the_configured_root_stores_a_derived_one` (F15) | `True is not false` — the derived root was stored wearing the configured flag. Also asserts the derived root does not pin the *next* switch. |
+| `test_a_snapshot_round_trip_keeps_where_the_pane_was_launched` | `launch_directory` came back as `repo/a/b` instead of `repo`. |
+| `test_a_restored_pane_still_opens_the_explorer_on_its_repository` | The rebuilt pane rooted on `web` instead of `repo`. |
+
+The last two rebuild the pane through the real path — `_snapshot_session()` →
+`_validate_session()` → `_session_launch_fields()`. One thing worth knowing for Stages 2–5:
+`mode` is **not** a captured snapshot field, so a test that rebuilds a pane must supply it the
+way `_prepare_launch_sessions()` does (from the group's connection mode) or the pane comes back
+as SSH and the explorer switch answers `500`.
+
+**Documentation.** README's three edits and the two guardrail clauses landed as written
+(`CLAUDE.md` + `AGENTS.md`, gitignored as the note at the top of this document says).
+
+The CHANGELOG went in differently, on purpose. The plan's two entries were written as new ones,
+but Unreleased already carried **"The file explorer follows the terminal back *up*, not only
+down"**, which claimed both halves this stage actually completes — it said GridVibe "now
+remembers where a pane was actually launched" and "records alongside a saved root whether
+anybody picked it", which was true within a session and false across a restart. Three adjacent
+entries describing one behaviour, one of them over-claiming, is worse than one true entry, and
+these all ship in the same release anyway. So both new entries were **folded into that one**,
+which now names the floor not being saved with the workspace and the flag being recorded against
+the root actually stored. The neighbouring **"An explorer root you never chose no longer follows
+the pane around"** was left as it is: it describes the switch letting a derived root go, which is
+a different defect from F1's mislabelling.
+
 ---
 
 ## Stage 2 — Large-content rendering fidelity
@@ -371,7 +419,7 @@ seq 1 25000 | sed 's/^/L/' > /c/Users/SasoPC/Desktop/Projects/gv-diff/huge.txt
 2. `Ctrl+F` is unavailable in this tier by design, so scroll to roughly 20 % of the file and
    find the `L5000` / `L5001` pair (the first chunk boundary — 5,000 lines).
 
-   - **Before the fix:** a blank line sits between `L5000` and `L5001`.
+   - **Before the fix:** a blank line sits between `L5000` and `L5001`. ME: Could not reproduce on testing native/browser mode, no empty line, looks ok on C:\Users\SasoPC\Desktop\Projects\gv-diff\huge.txt
    - **After the fix:** `L5001` follows `L5000` directly. Check `L10000`/`L10001` too.
 
 3. Select from `L4995` to `L5005`, copy, and paste into a text editor — the eleven lines must
@@ -486,7 +534,7 @@ seq 1 15000 | sed 's/^/const value/; s/$/ = 1;/' > /c/Users/SasoPC/Desktop/Proje
 3. Now put the caret at the end of **line 5** and press **Enter** ten times, about one per second.
 
    - **Before the fix:** each Enter drops a visible frame — the caret and the gutter lag the
-     keypress by a beat. - ME: while testing in desktop native mode; not really only if i hit a at the right time or something
+     keypress by a beat. - ME: while testing in desktop native mode(and browser after); not really only if i hit a at the right time or something, it does get better with holding longer, like it needs to catch up
    - **After the fix:** Enter is indistinguishable from typing a letter.
 
 4. Select 200 lines from the middle, cut (`Ctrl+X`), then paste (`Ctrl+V`) at the top.
@@ -712,6 +760,7 @@ one that pins a source literal down to its trailing comma. `tests/test_api.py` n
    remote host), `cd` into it from a terminal pane, then click **📁 ⇄ 💻**.
    - **Before the fix:** the explorer opens on the wrong directory, or the pane shows the
      "could not tell where the terminal was" notice.
+	ME: could not replicate the issue, could open on the gv 100%done with no problem, albe it its empty so i see directory is empty on preview
    - **After the fix:** it opens on `gv 100%done`.
 
 4. **F9 / F14.** No manual test — `make check` is the verification.
@@ -776,7 +825,7 @@ build short enough to get away with.
 
 | Stage | Findings | Risk | CHANGELOG | README | Guardrails |
 | --- | --- | --- | --- | --- | --- |
-| 1 · Explorer root & launch floor | F1, F2, F15 | High | 2 entries | 3 edits | 2 clauses |
+| 1 · Explorer root & launch floor ✅ | F1, F2, F15 | High | folded into 1 existing entry | 3 edits | 2 clauses |
 | 2 · Large-content fidelity | F3, F10 | Medium-high | 2 entries | — | 1 clause |
 | 3 · Typing cost in a large file | F5, F6 | Medium | 1 entry | — | — |
 | 4 · Work that outlives its pane | F11, F12, F4 | Low-medium | 1 entry | — | — |

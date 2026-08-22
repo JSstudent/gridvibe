@@ -153,6 +153,14 @@ def normalize_native_zoom_factor(value: Any) -> Optional[float]:
 _SESSION_SNAPSHOT_FIELDS = (
     "host",
     "directory",
+    # A second directory field, and both are needed: `directory` answers "where
+    # is this pane" (`_snapshot_session()` writes the *observed* directory into
+    # it, so a restore replays a `cd` to where the pane was), while
+    # `launch_directory` answers "what may the explorer not widen past".
+    # Rebuilding the second from the first moved the floor to wherever the pane
+    # happened to be, so the same pane in the same directory opened a different
+    # explorer root before and after a restart.
+    "launch_directory",
     "username",
     "port",
     "initial_command",

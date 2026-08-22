@@ -6658,6 +6658,134 @@ class ApiRoutesTestCase(unittest.TestCase):
         reopened = api.session_manager.get_session(session_id)
         self.assertEqual(Path(reopened.explorer_root_directory), repo_dir.resolve())
 
+    def test_a_shell_outside_the_configured_root_stores_a_derived_one(self):
+        """F15: the one branch where the flag and the root disagree.
+
+        `_resolve_explorer_open_root()` answers with the configured root only
+        while it still holds the observed cwd. A shell that has walked outside
+        it gets a *derived* root -- which still has to be stored, because the
+        live explorer is confined to it, but must not come back as a pin.
+        """
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        outside = Path(self.temp_dir.name) / "outside"
+        deeper = outside / "deep"
+        deeper.mkdir(parents=True)
+        session_id = self._create_explorer_session(repo_dir)
+        self.assertTrue(
+            api.session_manager.get_session(session_id).explorer_root_configured
+        )
+
+        with patch.object(api.socketio, "start_background_task"):
+            self.client.post(
+                f"/api/sessions/{session_id}/mode",
+                json={"startup_mode": "terminal", "directory": ""},
+            )
+        with patch.object(
+            web_terminal_io, "_resolve_live_terminal_cwd", return_value=str(outside)
+        ), patch.object(api, "_close_ssh_connection"):
+            self.client.post(
+                f"/api/sessions/{session_id}/mode",
+                json={"startup_mode": "explorer", "refresh_cwd": True},
+            )
+
+        switched = api.session_manager.get_session(session_id)
+        self.assertEqual(Path(switched.explorer_root_directory), outside.resolve())
+        # The root stored is not the configured one, so the flag that qualifies
+        # it must not say it was chosen.
+        self.assertFalse(switched.explorer_root_configured)
+
+        # ...and because it does not, it does not pin the next switch either.
+        with patch.object(api.socketio, "start_background_task"):
+            self.client.post(
+                f"/api/sessions/{session_id}/mode",
+                json={"startup_mode": "terminal", "directory": ""},
+            )
+        with patch.object(
+            web_terminal_io, "_resolve_live_terminal_cwd", return_value=str(deeper)
+        ), patch.object(api, "_close_ssh_connection"):
+            self.client.post(
+                f"/api/sessions/{session_id}/mode",
+                json={"startup_mode": "explorer", "refresh_cwd": True},
+            )
+
+        reopened = api.session_manager.get_session(session_id)
+        self.assertEqual(Path(reopened.explorer_root_directory), deeper.resolve())
+        self.assertFalse(reopened.explorer_root_configured)
+
+    def test_a_snapshot_round_trip_keeps_where_the_pane_was_launched(self):
+        """The floor is only meaningful across a restart, so it is persisted.
+
+        `_snapshot_session()` deliberately writes the *observed* directory into
+        the snapshot's `directory` slot, so rebuilding the floor from it moves
+        the floor to wherever the pane happened to be.
+        """
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        nested = repo_dir / "a" / "b"
+        nested.mkdir(parents=True)
+        session = self._create_local_terminal_session(repo_dir)
+        api.session_manager.update_session_metadata(
+            session.session_id, current_directory=str(nested)
+        )
+
+        snapshot = web_runtime_state._snapshot_session(
+            api.session_manager.get_session(session.session_id)
+        )
+        # The snapshot survives the file's own read-side allowlist...
+        restored = web_runtime_state._validate_session(snapshot)
+        self.assertIsNotNone(restored)
+        rebuilt = api.session_manager.create_session(
+            group_id=session.group_id,
+            **api.session_manager._session_launch_fields(restored),
+        )
+
+        # ...and the pane comes back *in* the subdirectory it was working in,
+        # while still remembering the directory it was launched in.
+        self.assertEqual(Path(rebuilt.directory), nested)
+        self.assertEqual(Path(rebuilt.launch_directory), repo_dir)
+
+    def test_a_restored_pane_still_opens_the_explorer_on_its_repository(self):
+        """End to end: the same pane in the same directory, after a restart.
+
+        Before the floor was persisted this pane came back rooted on `web`,
+        with no way to navigate up to the repository it belongs to.
+        """
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        nested = repo_dir / "web"
+        nested.mkdir(parents=True)
+        self._run_git(repo_dir, "init")
+        session = self._create_local_terminal_session(repo_dir)
+        api.session_manager.update_session_metadata(
+            session.session_id, current_directory=str(nested)
+        )
+
+        restored = web_runtime_state._validate_session(
+            web_runtime_state._snapshot_session(
+                api.session_manager.get_session(session.session_id)
+            )
+        )
+        # `mode` is not a captured field: a restore takes it from the group's
+        # connection mode, exactly as `_prepare_launch_sessions()` does.
+        rebuilt = api.session_manager.create_session(
+            group_id=session.group_id,
+            **api.session_manager._session_launch_fields({**restored, "mode": "wsl"}),
+        )
+        api.session_manager.update_session_status(
+            rebuilt.session_id, api.SessionStatus.CONNECTED
+        )
+
+        with patch.object(
+            web_terminal_io, "_resolve_live_terminal_cwd", return_value=str(nested)
+        ), patch.object(api, "_close_ssh_connection"):
+            response = self.client.post(
+                f"/api/sessions/{rebuilt.session_id}/mode",
+                json={"startup_mode": "explorer", "refresh_cwd": True},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        reopened = api.session_manager.get_session(rebuilt.session_id)
+        self.assertEqual(Path(reopened.explorer_root_directory), repo_dir.resolve())
+
     def test_a_mode_switch_drops_the_dead_shell_s_last_report(self):
         """The pane that reported it is being closed; the report is not live."""
         desktop = Path(self.temp_dir.name) / "desktop"

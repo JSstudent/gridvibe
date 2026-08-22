@@ -142,6 +142,11 @@ class TerminalSession:
             "host": self.host,
             "directory": self.directory,
             "current_directory": self.current_directory,
+            # Two directory fields, deliberately: `directory` answers "where is
+            # this pane", `launch_directory` answers "what may the explorer not
+            # widen past". The second only differs from the first once a mode
+            # switch has rewritten `directory`, which is exactly when it matters.
+            "launch_directory": self.launch_directory,
             "username": self.username,
             "port": self.port,
             "initial_command": self.initial_command,
@@ -839,6 +844,13 @@ class SessionManager:
                 or "WSL"
             ),
             "directory": config.get("directory", ""),
+            # `None` means "not stated" and __post_init__ then falls back to
+            # `directory`, so a snapshot written before this field existed keeps
+            # working. A snapshot written since carries the real floor, which is
+            # the point: `_snapshot_session()` writes the *observed* directory
+            # into the `directory` slot, so rebuilding the floor from it moved
+            # the floor to wherever the pane happened to be.
+            "launch_directory": config.get("launch_directory"),
             "username": config.get("username", "root" if mode == "ssh" else ""),
             "port": config.get("port", 22),
             "password": config.get("password"),

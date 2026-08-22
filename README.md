@@ -116,7 +116,7 @@ Browser mode is the most reliable for microphone permissions. Settings apply liv
 | --- | --- |
 | **Session tabs** | Keep related panes together in draggable tabs. Use `Alt+1`–`Alt+9` to switch, middle-click to close, or broadcast typing to every pane in the active tab. |
 | **Saved sessions** | Save a setup as a reusable preset, import one later, or choose **New Session** for a clean start. Stored SSH passwords are encrypted. |
-| **Save & restore** | GridVibe autosaves your workspace and also offers **Save Workspace**. After a restart, restore the same tabs, pane layouts, directories, commands, active group, and explorer presentation; passwords are never written to the workspace snapshot. Lowering `max_sessions` does not truncate wider stored presets or rewrite their split geometry; a group that no longer fits is refused with the number to raise the setting to, and the stored preset and snapshot are left untouched. A snapshot damaged outside GridVibe fails as a whole tab rather than restoring one pane short, so the restore chooser's counts always match what a restore starts; window chrome such as top-bar visibility and Markdown appearance falls back to its default instead. |
+| **Save & restore** | GridVibe autosaves your workspace and also offers **Save Workspace**. After a restart, restore the same tabs, pane layouts, commands, active group, and explorer presentation; each pane comes back in the directory it was *working in*, falling back to the one it was launched in if that directory is gone. Passwords are never written to the workspace snapshot. Lowering `max_sessions` does not truncate wider stored presets or rewrite their split geometry; a group that no longer fits is refused with the number to raise the setting to, and the stored preset and snapshot are left untouched. A snapshot damaged outside GridVibe fails as a whole tab rather than restoring one pane short, so the restore chooser's counts always match what a restore starts; window chrome such as top-bar visibility and Markdown appearance falls back to its default instead. |
 | **Close & restart** | Voluntary close, manual restart, and update restart share one in-page choice: continue without saving, save every open workspace, or save every open session preset and then every workspace. GridVibe waits for each live workspace window to flush its current presentation; if a requested save fails, GridVibe stays open and leaves the same three choices available. |
 | **Multiple workspaces** | Optionally keep separate projects in separate windows, move tabs between them without restarting terminals, and switch with `Alt+W` / `Alt+Shift+W` — including from the launcher, where `Alt+W` goes back to the workspace that opened it. |
 | **Updates** | **Check for updates** fast-forwards a Git clone, then uses the same save-or-restart choices as a manual restart. |
@@ -125,7 +125,7 @@ Closing a workspace ends its terminals but keeps it available to restore. **Clos
 
 ## File Explorer
 
-Swap any pane between a terminal and a file explorer with one button — same directory, no re-navigation. Works on a local repo folder or a remote host over SFTP.
+Swap any pane between a terminal and a file explorer with one button — same directory, no re-navigation. The explorer roots on the Git repository containing that directory, so its sidebar works and you can navigate up to the repository's own root, and it never widens above the folder the pane was launched in unless the shell has itself walked out of it. Works on a local repo folder or a remote host over SFTP.
 
 | | |
 | --- | --- |
@@ -167,7 +167,7 @@ GridVibe does not proxy pages or bypass `X-Frame-Options`/CSP, so sites that blo
 | 🔄 | Reset the view and replay recent output (reloads explorer and browser panes). On a Local Repo terminal it opens a dropdown: **Reset view** plus a **Shell** section that restarts the pane in cmd, PowerShell, or a WSL distro |
 | 📁 ⇄ 💻 | Swap between terminal and file explorer at the current directory |
 | 🌐 ⇄ 💻 | Swap a Local Repo pane between terminal and browser preview |
-| 🪟 | Split side-by-side or stacked. A terminal clones its connection; an explorer or browser pane splits off a terminal instead — for both SSH and Local Repo — rooted where the explorer is currently browsing |
+| 🪟 | Split side-by-side or stacked. A terminal clones its connection and opens the new pane where it *is*, not where it started; an explorer or browser pane splits off a terminal instead — for both SSH and Local Repo — rooted where the explorer is currently browsing |
 | 🧹 | Clear the display and purge the replay buffer |
 | 🎙️ | Start/stop voice input (when enabled) |
 | 🌙 ⇄ ☀️ | Toggle an explorer pane between dark and light |
