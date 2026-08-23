@@ -1132,10 +1132,12 @@
         }
         clearSessionRoutes(cached.sessionIds || []);
         (cached.terminals || []).forEach(terminal => {
-            /* Closed while suspended: the build will never resume, so its
-               queued readers are flushed here rather than stranded. */
-            if (terminal && isExplorerPaneInstance(terminal)) {
-                explorerAbandonSourceRenderJob(terminal);
+            /* Closed while suspended: the build will never resume. The pane
+               is being discarded, not handed back, so the queue is dropped
+               rather than flushed — global `terminals` belongs to the visible
+               group here, and those readers re-read `terminals[index]`. */
+            if (isExplorerPaneInstance(terminal)) {
+                explorerReleasePaneWork(terminal);
             }
             if (terminal?.term) {
                 try { terminal.term.dispose(); } catch (_) {}
@@ -4957,6 +4959,14 @@
         disconnectObservers(resizeObservers);
         // Dispose xterm instances to free memory
         terminals.forEach(t => {
+            /* Every close and every non-caching group switch lands here, so
+               this is where an explorer pane's outstanding work is given
+               back: a frame-sliced Source build would otherwise keep
+               appending rows into a detached tree, and its queued readers
+               would run against whatever fills the slot next. */
+            if (isExplorerPaneInstance(t)) {
+                explorerReleasePaneWork(t);
+            }
             if (t && t.term) {
                 try { t.term.dispose(); } catch (_) {}
             }
@@ -6354,6 +6364,18 @@
     }
 
     function replaceSessionPaneMode(index, session) {
+        /* Each replacement function refuses a card or wrapper that is not
+           there, and that refusal leaves the pane on screen exactly as it was
+           — so the same precondition is checked here, before anything is
+           released. Past it the outgoing explorer pane is being discarded,
+           not suspended: it is about to leave `terminals[index]`, taking its
+           frame-sliced build and its in-flight requests with it. */
+        if (!document.getElementById(`tc-${index}`) || !document.getElementById(`tw-${index}`)) {
+            return false;
+        }
+        if (isExplorerPaneInstance(terminals[index])) {
+            explorerReleasePaneWork(terminals[index]);
+        }
         const replaced = isBrowserSession(session)
             ? replacePaneWithBrowser(index, session)
             : (isExplorerSession(session)

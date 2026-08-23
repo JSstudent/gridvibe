@@ -80,6 +80,23 @@
         delete slots[slot];
     }
 
+    /* Every slot at once, for a pane that is going away. The two worker-backed
+       slots (`highlight`, `editHighlight`) genuinely stop the thread — the
+       pool terminates the worker running an aborted job — so this is not just
+       a dropped callback. Every caller already guards `AbortError`, because
+       supersession within a slot aborts the same way, so cancelling here can
+       never surface as a console line (guardrail 9). */
+    function cancelExplorerRequestSlots(pane) {
+        const slots = pane?._explorerRequestAborters;
+        if (!slots) {
+            return;
+        }
+        Object.keys(slots).forEach(slot => {
+            slots[slot]?.abort();
+        });
+        delete pane._explorerRequestAborters;
+    }
+
     /* A deliberate abort is not a failure and must not reach the console
        (guardrail 9) — otherwise every fast file switch writes a red line.
        `AbortError` is the fetch contract; the legacy numeric ABORT_ERR code
@@ -4404,6 +4421,29 @@
     function explorerAbandonSourceRenderJob(pane) {
         explorerCancelSourceRenderJob(pane);
         explorerFlushSourceRenderCallbacks(pane);
+    }
+
+    /* The whole pane is being discarded — closed with its grid, replaced by
+       another mode in place, or dropped with its cached group.
+
+       This is deliberately *not* explorerAbandonSourceRenderJob(): that one
+       belongs to a pane that stays live, where the rows are final by some
+       other route and the queued readers are still owed an answer. Here there
+       is no reader left to satisfy, and running the queue would be actively
+       wrong — the callbacks close over `index` and re-read global
+       `terminals[index]`, which by then holds the pane that replaced this one
+       (or, for a cached-group close, another group's pane in the same slot).
+
+       The frame stops, the queue is dropped unexecuted, and every in-flight
+       request goes with it so a pane nobody can see stops holding a fetch or
+       a worker. */
+    function explorerReleasePaneWork(pane) {
+        if (!pane) {
+            return;
+        }
+        explorerCancelSourceRenderJob(pane);
+        pane._explorerSourceRenderCallbacks = [];
+        cancelExplorerRequestSlots(pane);
     }
 
     /* The unit a frame emits rows in, and how long a frame may spend emitting

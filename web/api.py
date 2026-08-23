@@ -3487,8 +3487,19 @@ def handle_terminal_input(data):
         sanitized_input = _sanitize_terminal_input(connection, input_data)
         if not sanitized_input:
             return
-        _track_terminal_agent_input(session_id, connection, sanitized_input)
+        # Send first, track after. The tracker's agent-promotion branch calls
+        # effective_directory(), which for a remote pane with a known shell pid
+        # and no shell-integration observation opens a fresh exec channel and
+        # waits up to the bounded remote-CWD timeout — between the user's Enter
+        # and the shell receiving it, on the handler thread. Socket.IO's default
+        # async_handlers=True runs later events for the same client on separate
+        # threads, so newer input could overtake the blocked keystroke.
+        # Nothing in the tracker feeds the send (it only reads the sanitized
+        # text), so the order is otherwise behaviour-preserving. One deliberate
+        # change: if the send raises, the tracker no longer runs, so a promotion
+        # cannot be recorded for input the shell never received.
         _send_connection_input(connection, sanitized_input)
+        _track_terminal_agent_input(session_id, connection, sanitized_input)
     except Exception as e:
         logger.error(f"Error sending input: {e}")
         emit('terminal_output', {

@@ -805,15 +805,18 @@ and 7 (the find surviving a settle) are the two with no automated equivalent.
 
 ---
 
-## Stage 4 — Work that outlives the moment it was for
+## Stage 4 — Work that outlives the moment it was for ✅ *landed*
 
 **Findings:** F11 (Low), F12 (Low), F4 (Medium)
-**Risk:** low. Three small, independent cleanups; none changes a contract.
+**Risk:** low-to-medium. The input reorder is small. The explorer cleanup must distinguish
+discarding a pane from abandoning one render surface inside a pane that remains live; getting
+that distinction wrong can run a closed pane's queued readers against another visible pane.
 
 ### Problem
 
 **F11.** `explorerRunSourceRenderJob()` captures `pane` and the `code` element. A group switch
-suspends the job and a closed cached group abandons it — both covered. But a **single pane
+suspends the job, and a cached-group close at least stops its frames (although it currently uses
+the wrong callback-flushing operation). But a **single pane
 replaced in place** (`replaceSessionPaneMode` at `terminals.js:6356`, and pane close) never
 clears `_explorerSourceRenderJob`. The captured `code` is detached, so
 `explorerRenderedSourceContainer(code) !== onScreen` stays false and the stand-down branch never
@@ -821,26 +824,30 @@ fires; the build runs to completion appending rows into a tree nobody can see, c
 frames with the pane that just replaced it.
 
 **F12.** `explorerRequestSignal(pane, slot)` stores one `AbortController` per slot on
-`pane._explorerRequestAborters` and nothing clears the map on teardown. Six slots are in use
-(`file`, `preview`, `diffParse`, `highlight`, `editHighlight`, `changeMarks`). The memory is
-trivial; what matters is that a pane torn down mid-flight leaves its worker job running, so a
-closed pane can still hold a pool worker on a document nobody is looking at.
+`pane._explorerRequestAborters` and no pane-disposal path clears the whole map. Seven slots are
+in use (`file`, `preview`, `diff`, `diffParse`, `highlight`, `editHighlight`, `changeMarks`). The
+memory is trivial; what matters is that a pane torn down mid-flight leaves fetches running and
+can leave its worker job running, so a closed pane can still hold resources on a document nobody
+is looking at. `releaseExplorerResourcesIfIdle()` sometimes masks the worker half by terminating
+the whole pool when no explorer pane remains anywhere, but it does not abort fetches and it does
+nothing when another visible or cached explorer pane keeps the shared pool alive.
 
-**F4.** `web/api.py:3481` runs `_track_terminal_agent_input(...)` **before**
+**F4.** `web/api.py:3490` runs `_track_terminal_agent_input(...)` **before**
 `_send_connection_input(...)`. Its agent-promotion branch calls `effective_directory()`, which
 for a remote pane with a known `shell_pid` and no shell-integration observation falls through to
 `_remote_process_cwd()` — `transport.open_session(timeout=3.0)` plus a bounded `recv` on a fresh
 exec channel. That sits between the user pressing Enter on `claude` and Enter reaching the shell,
-on the `async_mode="threading"` handler thread that also serves that pane's later input. Lock
-discipline is already correct; only the ordering is wrong.
+on an `async_mode="threading"` handler thread. Python Socket.IO defaults `async_handlers=True`,
+so later events for the same client can run in separate threads rather than waiting behind this
+one: at minimum the submitted Enter is delayed, and a later input handler can overtake it and
+write newer input first. Lock discipline is already correct; only the ordering is wrong.
 
 ### Re-verified against the code — 2026-08-23
 
-All three findings still reproduce, and the mechanisms are exactly as described. Four
-corrections, none of which changes the shape of a fix:
+All three findings still reproduce. The implementation shape needs the corrections below.
 
 **F11 — real, and the plan's call-site list is incomplete.** `explorerRunSourceRenderJob()`
-(`explorer-viewer.js:4419`) captures `pane` and `code`; its stand-down branch asks
+(`explorer-viewer.js:4420`) captures `pane` and `code`; its stand-down branch asks
 `explorerRenderedSourceContainer(code) !== onScreen`, and a **detached but intact** subtree still
 answers with the same container — so the branch cannot fire for a pane that was replaced whole,
 exactly as the finding says. But a pane close does not reach `closeTerminalPane()`'s own body:
@@ -850,34 +857,40 @@ group switch that does not cache. It disposes the xterm instances and never touc
 `_explorerSourceRenderJob`. So the two call sites are **`teardownCurrentGrid()` and
 `replaceSessionPaneMode()`**, not `replaceSessionPaneMode()` and a pane-close path.
 
-Two neighbouring paths are already right and must be left alone: a group switch that *caches* the
-outgoing group **suspends** rather than abandons (`terminals.js:904`/`:920` — the job resumes with
-its readers intact), and the cached-group **close** at `terminals.js:1138` already abandons.
+One neighbouring path is already right and must be left alone: a group switch that *caches* the
+outgoing group **suspends** rather than discards (`terminals.js:904`/`:920`), so the job resumes
+with its position and queued readers intact. The cached-group **close** at `terminals.js:1138`
+does need to change: it abandons the render job, which executes queued readers, when this path is
+actually discarding the whole pane.
 
-**F12 — real, and there are seven slots, not six.** The plan misses `diff`
+**F12 — real, and there are seven slots, not six.** The original draft missed `diff`
 (`explorer-diff.js:1163`) beside `diffParse` (`:902`); the full set is `file`, `preview`, `diff`,
 `diffParse`, `highlight`, `editHighlight`, `changeMarks`. A `cancelExplorerRequestSlots(pane)`
-that walks the map catches all of them regardless, so only the test changes. Two checks that make
-the fix safe both pass: `_explorerRequestAborters` really is cleared nowhere (one grep, no other
-reader), and **every one of the seven callers already handles `AbortError`** — there are seven
+that walks the map catches all of them regardless. Two checks that make the fix safe both pass:
+no disposal path walks and clears the whole `_explorerRequestAborters` map (only individual slots
+are deleted), and **every one of the seven callers already handles `AbortError`** — there are seven
 `explorerIsAbortError()` guards, one per slot — because `explorerRequestSignal()` already aborts
 the previous controller on supersession. So cancelling every slot at teardown cannot produce an
 unhandled rejection or a console line (guardrail 9). Aborting `highlight`/`editHighlight` does
 genuinely stop the thread: `WorkerPool._abort()` terminates the worker running that job.
 
-`terminals.js:1138` needs this too — it abandons the render job but leaves the pane's workers
-running — and so does `teardownCurrentGrid()`.
+`releaseExplorerResourcesIfIdle()` does terminate the whole worker pool when the last explorer
+pane disappears, so the worker leak is not unconditional. It is not a pane cleanup, though: it
+does not abort fetches, and a visible or cached sibling explorer pane keeps the pool alive. The
+three explicit disposal paths still need per-pane cancellation.
 
-**F4 — real, verbatim; only the line number moved.** It is `web/api.py:3490`/`:3491` now, not
-`:3481`. The chain is unchanged: `_track_terminal_agent_input()` → the promotion branch →
+**F4 — real; the concurrency explanation needed correction.** It is
+`web/api.py:3490`/`:3491`. The chain is unchanged: `_track_terminal_agent_input()` → the promotion branch →
 `effective_directory(session_id, session)` → `_process_reported_cwd()` → `_remote_process_cwd()`,
 which is `transport.open_session(timeout=REMOTE_CWD_READ_TIMEOUT)` with
 `REMOTE_CWD_READ_TIMEOUT = 3.0` plus a bounded `recv` loop, all on the handler thread between the
-keystroke and the shell. The reorder is behaviour-preserving as claimed — `_send_connection_input()`
-reads nothing the tracker produces, and the tracker takes `connection_lock` on its own while the
-send takes no lock, so the order has no locking consequence. **One deliberate change to state
-rather than discover:** if the send raises, the tracker no longer runs, so a promotion can no
-longer be recorded for input that never reached the shell. That is more correct, not less.
+keystroke and the shell. `async_mode="threading"` does not serialize later events behind that
+handler: Python Socket.IO's default `async_handlers=True` runs them in separate threads, so newer
+input can overtake the blocked Enter. The reorder is behaviour-preserving where the send succeeds
+— `_send_connection_input()` reads nothing the tracker produces, and the tracker takes
+`connection_lock` on its own while the send takes no lock, so the order has no locking
+consequence. **One deliberate change to state:** if the send raises, the tracker no longer runs,
+so a promotion cannot be recorded for input that never reached the shell. That is more correct.
 
 **Two testability corrections.**
 
@@ -890,10 +903,9 @@ longer be recorded for input that never reached the shell. That is more correct,
     `test_api.py`.
 
     The shape that avoids both problems: put the teardown in `explorer-viewer.js` as **one**
-    exported function — `explorerReleasePaneWork(pane)` = `explorerAbandonSourceRenderJob(pane)` +
-    `cancelExplorerRequestSlots(pane)` — and have `terminals.js` call that single name from
-    `teardownCurrentGrid()`, `replaceSessionPaneMode()` and the cached-group close. F11 and F12
-    then land as one call site instead of two, the behaviour is Node-testable in
+    exported function, `explorerReleasePaneWork(pane)`, and have `terminals.js` call that single
+    name from `teardownCurrentGrid()`, `replaceSessionPaneMode()` and the cached-group close. F11
+    and F12 then land as one call per disposal site, the behaviour is Node-testable in
     `test_explorer_repaint.py`'s existing `ChunkedSourceBuildTestCase` harness (which already
     drives `explorerAbandonSourceRenderJob`), and the `terminals.js` side needs only a cheap
     contract-level check for the call.
@@ -902,79 +914,89 @@ longer be recorded for input that never reached the shell. That is more correct,
     `api._send_connection_input` and `api._track_terminal_agent_input` to append to a list, stub one
     `ssh_connections` entry, and call `api.handle_terminal_input({...})` directly — the order is
     then *observed at runtime* rather than read out of the source. The existing agent-promotion
-    tests (`test_api.py:12350` onward) already call these functions directly, so the harness is
-    there.
+    tests (`test_api.py:12350` onward) already provide the surrounding session setup.
 
-**One decision the plan does not settle.** `explorerAbandonSourceRenderJob()` **flushes** the
-queued readers, and those readers close over `index` and re-read `terminals[index]`. On a teardown
-that discards the pane there is nothing to strand — but flushing *after* `terminals = []` runs
-callbacks against a pane that no longer exists, and flushing *before* runs them against a
-half-built document. Call it while `terminals[index]` is still the outgoing explorer pane, which
-is what `enterExplorerEditMode()` and the cached-group close already do. Cancelling without
-flushing is the other defensible answer; pick one deliberately rather than by call placement.
+**Queued-reader disposition — settled.** `explorerAbandonSourceRenderJob()` **executes** queued
+readers. Those readers close over `index` and later re-read global `terminals[index]`. A cached
+group close runs while `terminals` belongs to a different visible group, so flushing there can
+apply a closed pane's scroll/search work to an unrelated pane in the same slot. A pane that is
+being discarded has no reader left to satisfy. `explorerReleasePaneWork(pane)` must therefore
+cancel the frame and **clear the callback queue without invoking it**, then abort and remove every
+request controller. `explorerAbandonSourceRenderJob()` remains the live-pane operation for the
+editor, tab, large-tier and other surface replacements whose pane survives and whose readers do
+still need to run.
 
 ### Fix
 
 | Where | Change |
 | --- | --- |
-| `terminals.js` `teardownCurrentGrid()` and `replaceSessionPaneMode()` | Before the pane object is replaced, call `explorerAbandonSourceRenderJob(terminals[index])` for an explorer pane — the same call `enterExplorerEditMode()` already makes for the same reason. |
-| `explorer-viewer.js` | Add `cancelExplorerRequestSlots(pane)` that aborts and clears every slot in `pane._explorerRequestAborters` (there are **seven**), and pair it with the abandon above behind one exported `explorerReleasePaneWork(pane)` so both land at the same call sites — including the cached-group close at `terminals.js:1138`, which today abandons the render job and leaves the workers running. |
+| `explorer-viewer.js` | Add `cancelExplorerRequestSlots(pane)` that aborts every controller in `pane._explorerRequestAborters` and removes the map. Add exported `explorerReleasePaneWork(pane)` for **pane disposal**: cancel `_explorerSourceRenderJob`, clear `_explorerSourceRenderCallbacks` without executing them, then cancel all seven request slots. Do not implement this helper with `explorerAbandonSourceRenderJob()`, whose callback-flush semantics belong to a live pane. |
+| `terminals.js` `teardownCurrentGrid()` | Release each outgoing explorer pane before clearing `terminals`/`sessionIds`. |
+| `terminals.js` `replaceSessionPaneMode()` | First verify the target card and wrapper exist; only then release the outgoing explorer pane, immediately before dispatching to the replacement function. A failed precondition must leave the still-visible pane's work intact. |
+| `terminals.js` `dropCachedGroupView()` | Replace the cached explorer pane's `explorerAbandonSourceRenderJob()` call with `explorerReleasePaneWork()`. This path discards rather than restores the pane, and global `terminals[index]` belongs to another group. |
 | `web/api.py:3490` | Send first, track after: `_send_connection_input(...)` then `_track_terminal_agent_input(...)`. Nothing in the tracker feeds the send — it only reads the sanitized text — so the swap is behaviour-preserving for everything except the latency and the failure case noted above. |
 
-Note on F4's alternative: an "observation only, no I/O" flag on `effective_directory()` would
-also work and is arguably more honest about what the promotion path wants. The reorder is
-smaller and fixes the symptom completely; take the flag only if a second caller turns up wanting
-the same thing.
+F4's former "observation only, no I/O" alternative is **not equivalent**. It would remove the
+latency, but in the exact remote fallback case it would also discard the only observed directory
+available when the agent starts, weakening Save Workspace restore accuracy. Keep the send-first
+reorder unless losing that observation becomes an explicit product decision.
 
 **Tests to add**
 
 - `tests/test_explorer_repaint.py` (`ChunkedSourceBuildTestCase`, which already drives
     `explorerAbandonSourceRenderJob`): releasing a pane's work stops a frame-sliced build on the
-    spot and flushes its queued readers, and aborts every one of the seven request slots. **Not**
-    `test_explorer_source_frame.py`, and not "stops on its next slice" — see the re-verification
-    above.
+    spot, removes its queued readers **without executing them**, and aborts every one of the seven
+    request slots. **Not** `test_explorer_source_frame.py`, and not "stops on its next slice" —
+    see the re-verification above.
 - `tests/test_api.py`: a contract-level check that `terminals.js` releases the outgoing explorer
-    pane's work from both teardown points. This one is a served-asset assertion because no Node
-    harness loads `terminals.js`; keep it to the call name, per F14.
+    pane's work from **all three** disposal paths: `teardownCurrentGrid()`,
+    `replaceSessionPaneMode()` and `dropCachedGroupView()`. This one is a served-asset assertion
+    because no Node harness loads `terminals.js`; keep it to the call name, per F14.
 - `tests/test_api.py`: the input handler's call order, **observed at runtime** — patch
     `api._send_connection_input` and `api._track_terminal_agent_input` to record into a list, stub
     one `ssh_connections` entry, call `api.handle_terminal_input(...)`, assert the order. No
-    source-order check needed.
+    source-order check needed. Add the failure case too: when send raises, tracking is not called
+    and no promotion is recorded for input the shell never received.
 
 ### Manual verification
 
-F12 has no clean manual test on its own; it rides on step 3 below and on the automated test.
+F12 is timing-sensitive manually; the automated controller test is its primary evidence.
 
-1. Open an explorer pane on `C:\Users\SasoPC\Desktop\Projects\gv-diff` and open `huge.txt` (the 25,000-line file from
-    Stage 2). Let it finish painting.
-2. Open DevTools → **Performance**, start recording, and immediately click **📁 ⇄ 💻** to switch
-    that pane to a terminal. Stop after ~3 seconds.
+1. Open an explorer pane on `C:\Users\SasoPC\Desktop\Projects\gv-diff`, open DevTools →
+    **Performance**, and start recording **before** opening `typing.js` (the 15,001-line,
+    below-large-tier file from the scaffolding). Use CPU throttling if the paint and highlight job
+    finish too quickly to catch.
+2. Open `typing.js` and immediately use the pane's mode button to switch to a terminal — do **not**
+    let the file finish painting first. Stop after ~3 seconds.
 
     - **Before the fix:** frames after the mode-switch response still show
-        `explorerAppendSourceRows` / `insertAdjacentHTML` work — the build is filling a tree that is
-        no longer on screen.
-    - **After the fix:** that work stops at the switch.
+        `explorerAppendSourceRows` / `insertAdjacentHTML` work, and a highlight worker can remain
+        occupied — the pane is filling and colouring a tree that is no longer on screen.
+    - **After the fix:** the row build stops at the switch and no explorer worker remains on that
+        document.
 
-3. In the same recording, check the **worker** tracks (DevTools → Performance, or Sources ▸
-    Threads). After the switch no explorer worker should still be running a highlight job for the
-    file you just left.
+3. Optional second render-path check: repeat with `huge.txt`, again switching before it finishes.
+    That file takes the plain large-tier chunk pacer, so expect `insertAdjacentHTML` work but no
+    syntax-highlight worker. It verifies that the shared source-render job is cancelled for both
+    row and plain-chunk builds; it is not the F12 worker test.
 
 4. **F4 — SSH input.** On an SSH pane with **Shell integration** on (App Settings), type `claude`
     and press Enter.
 
-    - Enter must echo immediately in both builds. The defect needs a remote shell that reported
-        its pid but never emitted a directory, which is hard to force deliberately — so this step is
-        a *no-regression* check, and the fix's real evidence is the reordered call plus its test.
+    - After the fix, Enter must echo immediately. The exact defect needs a remote shell that
+        reported its pid but never emitted a directory, which is hard to force deliberately — so
+        an ordinary shell-integration run is a *no-regression* check, and the fix's primary evidence
+        is the behavioural call-order test.
     - Confirm the pane still promotes to an agent pane (the header title and the 🔄 dropdown change
         as before) and that a **Save Workspace** taken while the agent runs still restores it in the
         directory the agent was started in. That is the behaviour the reorder must not break.
 
 ### Documentation
 
-**User-facing — marginally.** F11 is a visible stutter on a mode switch; F4 is an input delay.
+**User-facing — yes.** F11 is a visible stutter on a mode switch; F4 is an input delay.
 F12 is internal.
 
-- **`CHANGELOG.md`** (Unreleased), one combined entry:
+- **`CHANGELOG.md`** (Unreleased), two entries because the changes are unrelated:
 
     > **(perf) Switching a pane away from a large file stops the work it was doing.** A file big
     > enough to be painted over several frames kept painting after you switched the pane to a
@@ -982,8 +1004,76 @@ F12 is internal.
     > that had just replaced it. Background syntax colouring for that file kept running too. Both
     > now stop when the pane does.
 
+    > **SSH agent commands reach the shell before fallback directory observation.** When shell
+    > integration had reported a remote shell pid but not its directory, recognizing a manually
+    > started agent could spend up to the bounded remote-CWD timeout before forwarding Enter, and
+    > a later input handler could overtake it. GridVibe now sends the input first, then records the
+    > agent metadata; successful promotion and Save Workspace directory restore are unchanged.
+
 - **`README.md`** — no change.
-- **Guardrails** — none new; F11 is a missing call site against the rule that is already written.
+- **`AGENTS.md` / `CLAUDE.md` guardrail wording** — no new guardrail, but correct the existing
+    Source-build rule: a cached group switch suspends/resumes and retains readers; a surface
+    replacement inside a pane that remains live abandons and executes its readers; disposal of
+    the whole pane cancels its work and drops its queued readers without executing them.
+
+
+### Status — landed 2026-08-23 ✅
+
+`make check` equivalent: **1965 tests OK** (1960 before the stage + 5 below; 9 platform skips),
+ruff clean. All three findings were re-checked against the code before implementing and all three
+held, including the two corrections this section had already recorded: the disposal choke point is
+`teardownCurrentGrid()` (which `closeTerminalPane()` reaches through `initialLoad()` →
+`buildGrid()`) and not a pane-close body of its own, and there are **seven** request slots, not
+six. Two preconditions for cancelling every slot were re-confirmed: no path walks and clears the
+whole `_explorerRequestAborters` map, and all seven callers already guard `explorerIsAbortError()`,
+so blanket cancellation cannot produce a console line (guardrail 9).
+
+**Code — as planned.**
+
+| Where | What landed |
+| --- | --- |
+| `explorer-viewer.js` | `cancelExplorerRequestSlots(pane)` — aborts every controller in `pane._explorerRequestAborters` and drops the map. |
+| `explorer-viewer.js` | `explorerReleasePaneWork(pane)` — pane **disposal**: cancel the frame, clear `_explorerSourceRenderCallbacks` **without executing them**, then cancel all seven slots. Written out longhand rather than on top of `explorerAbandonSourceRenderJob()`, whose callback-flush semantics belong to a pane that stays live. |
+| `terminals.js` `teardownCurrentGrid()` | Releases each outgoing explorer pane inside the existing dispose loop, before `terminals`/`sessionIds` are cleared. |
+| `terminals.js` `replaceSessionPaneMode()` | Card/wrapper precondition checked first — the same one each `replacePaneWith*()` already refuses on — then the outgoing explorer pane released, then the dispatch. A failed precondition still returns `false` and leaves the visible pane's work untouched, exactly as before. |
+| `terminals.js` `dropCachedGroupView()` | `explorerAbandonSourceRenderJob()` → `explorerReleasePaneWork()`. |
+| `web/api.py` | Send first, track after, with the reason and the one deliberate state change recorded in a comment at the call site. |
+
+`captureCachedPaneUiState()`'s `explorerSuspendSourceRenderJob()` was left alone, as the
+re-verification required: a cached switch is not a disposal.
+
+**Tests — five added, each verified to fail against the pre-fix code.**
+
+| Test | Pre-fix failure |
+| --- | --- |
+| `test_explorer_repaint.py::ChunkedSourceBuildTestCase::test_releasing_a_pane_drops_its_readers_and_aborts_its_requests` | n/a — `explorerReleasePaneWork` did not exist |
+| `test_api.py::ExplorerPaneDisposalTestCase::test_all_three_disposal_paths_release_the_outgoing_explorer_pane` | n/a — the call name did not exist |
+| `…::test_a_cached_group_switch_still_suspends_rather_than_releases` | passes either way — it pins the neighbouring path the fix must not touch |
+| `test_api.py::TerminalInputSendOrderTestCase::test_input_is_sent_before_agent_tracking_runs` | observed `['track', 'send']` |
+| `…::test_a_failed_send_records_no_agent_promotion` | the tracker ran before the failing send, so a promotion was recorded for input the shell never received |
+
+The Node test runs against real `AbortController`s (added to the existing `ChunkedSourceBuildTestCase`
+sandbox), so "was this slot aborted" is the signal's own answer rather than a stub's bookkeeping.
+
+**One pre-existing assertion changed.**
+`test_api.py::test_terminals_page_caches_group_views_across_switches` asserted
+`explorerAbandonSourceRenderJob(terminal);` in `dropCachedGroupView()` — the behaviour this stage
+deliberately replaces. It now asserts `explorerReleasePaneWork(terminal);`, with the comment above
+it rewritten to say why a cached-group *close* is disposal while a cached-group *switch* is not.
+No other existing assertion moved.
+
+**Documentation.** Both CHANGELOG entries landed; the second was reworded slightly against the
+draft above — "bounded remote-directory timeout" rather than naming the constant, and "a later
+keystroke could overtake it" rather than describing handler threads, since neither detail is
+visible to the reader. README unchanged. No new guardrail: the existing §3 bullet **"Work that
+belongs to a detached pane is suspended"** ended with a two-case rule that this stage makes
+incomplete, so it was rewritten in `CLAUDE.md` and `AGENTS.md` (both gitignored, per the note at
+the top of this document) to state the three cases separately — suspend/resume retains the queue,
+a live-pane surface replacement abandons and executes it, and disposal cancels the work and drops
+the queue unexecuted — and to record why disposal must also abort the request slots.
+
+**Manual verification: pending.** The four steps below have not been run yet. F12's primary
+evidence is the automated controller test, as this section already noted.
 
 ---
 
@@ -1148,5 +1238,5 @@ build short enough to get away with.
 | 1 · Explorer root & launch floor ✅ | F1, F2, F15 | High | folded into 1 existing entry | 3 edits | 2 clauses |
 | 2 · Large-content fidelity ✅ | F3; F10 non-issue | Medium | 1 entry | — | 1 clause |
 | 3 · Underlay settle repaint ✅ | F6; F5 deferred | Medium | 1 entry | — | 1 clause extended |
-| 4 · Work that outlives its pane | F11, F12, F4 | Low-medium | 1 entry | — | — |
+| 4 · Work that outlives its pane ✅ | F11, F12, F4 | Low-medium | 2 entries | — | 1 clause corrected |
 | 5 · Loose ends & docs | F7, F8, F9, F13, F14, §4 | Low | 3 entries | 5 edits | — |

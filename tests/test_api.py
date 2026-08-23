@@ -3817,11 +3817,13 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("captureCachedPaneUiState();", html)
         self.assertIn("restoreCachedPaneUiState({", html)
         # A frame-sliced Source build belongs to the card, not to the window:
-        # it is suspended on the way out, resumed on the way back, and its
-        # queued readers are flushed if the group is closed while suspended.
+        # it is suspended on the way out and resumed on the way back. Closing
+        # the group while it is suspended discards the pane rather than handing
+        # it back, so its work is released and its queued readers dropped —
+        # they re-read terminals[index], which belongs to the visible group.
         self.assertIn("explorerSuspendSourceRenderJob(terminal);", html)
         self.assertIn("explorerResumeSourceRenderJob(terminal);", html)
-        self.assertIn("explorerAbandonSourceRenderJob(terminal);", html)
+        self.assertIn("explorerReleasePaneWork(terminal);", html)
         self.assertIn("restoreTerminalViewports: false", html)
         self.assertIn("clearTerminalViewports: false", html)
 
@@ -16849,6 +16851,91 @@ class AgentInputTrackingLockTestCase(unittest.TestCase):
         self.assertEqual(updated.startup_mode, "agent")
         self.assertEqual(updated.agent_selection, "claude")
         self.assertEqual(connection["_gridvibe_input_line"], "")
+
+
+class ExplorerPaneDisposalTestCase(unittest.TestCase):
+    """Every path that discards an explorer pane gives its work back.
+
+    The behaviour itself is executed in tests/test_explorer_repaint.py; this is
+    a served-asset check because no Node harness loads terminals.js, and it is
+    kept to the call name for that reason.
+    """
+
+    DISPOSAL_PATHS = (
+        ("function teardownCurrentGrid()", "function createPaneInstance(session)"),
+        ("function replaceSessionPaneMode(index, session)", "function showExplorerCwdNotice("),
+        ("function dropCachedGroupView(groupId)", "let reportedActiveGroupId"),
+    )
+
+    def setUp(self):
+        api.app.config["TESTING"] = True
+        self.client = api.app.test_client()
+
+    def test_all_three_disposal_paths_release_the_outgoing_explorer_pane(self):
+        response = self.client.get("/static/js/terminals.js")
+        self.assertEqual(response.status_code, 200)
+        terminals_js = response.get_data(as_text=True)
+        response.close()
+
+        for start, end in self.DISPOSAL_PATHS:
+            with self.subTest(path=start):
+                body = terminals_js[
+                    terminals_js.index(start):terminals_js.index(end)
+                ]
+                self.assertIn("explorerReleasePaneWork(", body)
+                # Disposal must not use the live-pane operation: that one
+                # executes the queued readers, which re-read terminals[index].
+                self.assertNotIn("explorerAbandonSourceRenderJob(", body)
+
+    def test_a_cached_group_switch_still_suspends_rather_than_releases(self):
+        """Suspension is not disposal — the pane comes back with its position
+        and its queued readers intact."""
+        response = self.client.get("/static/js/terminals.js")
+        terminals_js = response.get_data(as_text=True)
+        response.close()
+        capture = terminals_js[
+            terminals_js.index("function captureCachedPaneUiState()"):
+            terminals_js.index("function restoreCachedPaneUiState(")
+        ]
+
+        self.assertIn("explorerSuspendSourceRenderJob(terminal);", capture)
+        self.assertNotIn("explorerReleasePaneWork(", capture)
+
+
+class TerminalInputSendOrderTestCase(unittest.TestCase):
+    """The keystroke reaches the shell before anything observes the pane.
+
+    The tracker's agent-promotion branch can fall through to a fresh remote
+    exec channel and a bounded wait; sitting that between Enter and the shell
+    delayed the keystroke and let a later input handler (Socket.IO runs them on
+    separate threads) overtake it.
+    """
+
+    def setUp(self):
+        api.session_manager.reset_sessions()
+        self.addCleanup(api.session_manager.reset_sessions)
+        self.session_id = "send-order-session"
+        api.ssh_connections[self.session_id] = {"kind": "ssh"}
+        self.addCleanup(api.ssh_connections.pop, self.session_id, None)
+
+    def test_input_is_sent_before_agent_tracking_runs(self):
+        calls = []
+
+        with patch.object(api, "_send_connection_input", side_effect=lambda *a: calls.append("send")), \
+                patch.object(api, "_track_terminal_agent_input", side_effect=lambda *a: calls.append("track")):
+            api.handle_terminal_input({"session_id": self.session_id, "data": "claude\r"})
+
+        self.assertEqual(calls, ["send", "track"])
+
+    def test_a_failed_send_records_no_agent_promotion(self):
+        """Nothing reached the shell, so nothing may be recorded as started."""
+        with patch.object(api, "_send_connection_input", side_effect=OSError("socket closed")), \
+                patch.object(api, "_track_terminal_agent_input") as track, \
+                patch.object(api, "emit") as emit:
+            api.handle_terminal_input({"session_id": self.session_id, "data": "claude\r"})
+
+        track.assert_not_called()
+        emit.assert_called_once()
 
 
 class RuntimeConfigExtractionTestCase(unittest.TestCase):

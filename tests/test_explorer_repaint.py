@@ -918,6 +918,9 @@ class ChunkedSourceBuildTestCase(NodeHarnessMixin, unittest.TestCase):
             const vm = require('vm');
             const panel = makeSourcePanel('explorer-code-0');
             const sandbox = makeSandbox({ 'explorer-code-0': panel });
+            // Real controllers, so "was this slot aborted" is the signal's own
+            // answer rather than a stub's bookkeeping.
+            sandbox.AbortController = AbortController;
             const frames = [];
             sandbox.window.requestAnimationFrame = run => frames.push(run);
             sandbox.window.cancelAnimationFrame = () => {};
@@ -1066,6 +1069,58 @@ class ChunkedSourceBuildTestCase(NodeHarnessMixin, unittest.TestCase):
         # And nothing lands afterwards: the abandoned job is no longer the
         # pane's, so a frame still in the queue paints nothing.
         self.assertEqual(result["final"], result["partial"])
+
+    def test_releasing_a_pane_drops_its_readers_and_aborts_its_requests(self):
+        """Discarding the pane is not the same operation as abandoning one
+        surface inside a pane that stays live.
+
+        The queued readers close over `index` and re-read `terminals[index]`,
+        which by then holds whatever replaced this pane — so they are dropped
+        unexecuted rather than flushed. Every in-flight request goes too, so a
+        pane nobody can see stops holding a fetch or a highlight worker.
+        """
+        slots = (
+            "file", "preview", "diff", "diffParse",
+            "highlight", "editHighlight", "changeMarks",
+        )
+        result = self._build(
+            "const seen = [];"
+            "sandbox.renderExplorerSource(0);"
+            "sandbox.whenExplorerSourceRendered(0, () => seen.push('reader'));"
+            "frames.shift()();"
+            "const partial = rowCount();"
+            "const slots = " + json.dumps(list(slots)) + ";"
+            "const signals = slots.map("
+            "  slot => sandbox.explorerRequestSignal(pane, slot)"
+            ");"
+            "const abortedBefore = signals.filter(signal => signal.aborted).length;"
+            "sandbox.explorerReleasePaneWork(pane);"
+            "drain();"
+            "sandbox.whenExplorerSourceRendered(0, () => seen.push('late'));"
+            "console.log(JSON.stringify({"
+            "  partial,"
+            "  seen,"
+            "  final: rowCount(),"
+            "  abortedBefore,"
+            "  aborted: signals.filter(signal => signal.aborted).length,"
+            "  slotsCleared: pane._explorerRequestAborters === undefined,"
+            "  queued: (pane._explorerSourceRenderCallbacks || []).length"
+            "}));"
+        )
+
+        self.assertGreater(result["partial"], 0)
+        self.assertLess(result["partial"], 9001)
+        # The build stops on the spot: no frame still in the queue paints.
+        self.assertEqual(result["final"], result["partial"])
+        # The reader queued against the discarded build never runs...
+        self.assertEqual(result["abortedBefore"], 0)
+        self.assertEqual(result["queued"], 0)
+        # ...but the job is cleared with it, so a later reader is not stranded
+        # behind a build nothing will finish — it runs immediately.
+        self.assertEqual(result["seen"], ["late"])
+        # Every one of the seven slots, including the two worker-backed ones.
+        self.assertEqual(result["aborted"], len(slots))
+        self.assertTrue(result["slotsCleared"])
 
 
 @unittest.skipUnless(NODE, "Node.js is required for explorer repaint tests")

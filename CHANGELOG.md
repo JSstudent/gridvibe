@@ -4,6 +4,10 @@ All notable changes to GridVibe will be documented in this file.
 
 ## Unreleased
 
+- **(perf) Switching a pane away from a large file stops the work it was doing.** A file big enough to be painted over several frames kept painting after you switched the pane to a terminal or a browser preview, into a view nobody could see and in competition with the one that had just replaced it. Background syntax colouring for that file kept running too. Both now stop when the pane does.
+
+- **(fix) SSH agent commands reach the shell before fallback directory observation.** When shell integration had reported a remote shell pid but not its directory, recognizing a manually started agent could spend up to the bounded remote-directory timeout before forwarding Enter, and a later keystroke could overtake it. GridVibe now sends the input first, then records the agent metadata; successful promotion and Save Workspace directory restore are unchanged.
+
 - **(perf) Editing a large file no longer stalls a moment after you stop typing.** Typing in the in-place editor was made cheap a while back: only the lines you actually changed are rebuilt. But the pass that fills the real syntax colours back in — which runs a beat after the last keystroke — still rebuilt every line in the file to do it, so a long file hitched about a second after each edit, just as the colours arrived. Only the lines whose colours genuinely changed are repainted now, which for an ordinary keystroke is one of them.
 
 - **(fix) Very large diffs no longer misread lines that look like a file header.** A changed line whose text begins with `--` or `++` — a `---` rule or front-matter marker in Markdown, a `--flag`, a `++i;` — was mistaken for the `---`/`+++` header at the top of a patch and left out. Worse than the missing line, everything below it kept the numbering it would have had, so the rest of the file was shown under the wrong line numbers with unrelated lines paired against each other. This only affected diffs large enough for the plain side-by-side view, which is exactly where it is hardest to spot.
