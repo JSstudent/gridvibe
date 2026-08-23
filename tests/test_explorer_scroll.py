@@ -151,6 +151,19 @@ const sourcePanel = {
 const preview = scroller('explorer-preview-0', 300);
 preview.hidden = true;
 preview.dataset.explorerFilePanel = 'preview';
+/* The give-up status paints a Refresh button into the panel's own subtree and
+   wires it there, so the stub has to be able to hand it back. */
+const previewRefresh = {
+    disabled: false,
+    listeners: [],
+    addEventListener(type, listener) {
+        if (type === 'click') this.listeners.push(listener);
+    },
+    click() { this.listeners.forEach(listener => listener({})); }
+};
+preview.querySelector = selector => (
+    String(selector).startsWith('[data-explorer-preview-refresh') ? previewRefresh : null
+);
 
 function button(mode, selected) {
     return {
@@ -703,6 +716,9 @@ function resolvePreview(html, stateRevision) {
         fetches.length = 0;
         fetchCount = 0;
         const paintsBefore = paints;
+        preview.innerHTML = '';
+        previewRefresh.listeners.length = 0;
+        previewRefresh.disabled = false;
         sandbox.setExplorerFileView(0, 'preview');
         resolvePreview(html, revision);
         for (let turn = 0; turn < 40; turn += 1) {
@@ -711,12 +727,52 @@ function resolvePreview(html, stateRevision) {
         return {
             loaded: pane._explorerPreviewLoaded,
             html: pane._explorerPreviewHtml,
-            paints: paints - paintsBefore
+            paints: paints - paintsBefore,
+            panelHtml: preview.innerHTML,
+            wired: previewRefresh.listeners.length
         };
     };
 
     pane._explorerFileStateRevision = '120:1700000000.000000';
     results.lazyPreviewStale = await previewCase('188:1700000009.000000', '<p>newer</p>');
+
+    /* The retry. It runs the whole-file refresh, never a second Preview-only
+       fetch: Source still carries the revision the response disagreed with, so
+       refetching the preview alone would be declined for the same reason. */
+    const realQuietRefresh = sandbox.refreshExplorerOpenFileQuiet;
+    let quietRefreshes = 0;
+    let quietAnswer = true;
+    sandbox.refreshExplorerOpenFileQuiet = async () => {
+        quietRefreshes += 1;
+        return quietAnswer;
+    };
+    fetchCount = 0;
+    previewRefresh.click();
+    const disabledWhileRunning = previewRefresh.disabled;
+    for (let turn = 0; turn < 10; turn += 1) {
+        await Promise.resolve();
+    }
+    results.lazyPreviewStaleRetry = {
+        refreshes: quietRefreshes,
+        previewFetches: fetchCount,
+        disabledWhileRunning,
+        usableAfter: previewRefresh.disabled === false
+    };
+
+    // A refresh that fails leaves the affordance standing rather than
+    // trading one dead end for another.
+    quietAnswer = false;
+    previewRefresh.click();
+    for (let turn = 0; turn < 10; turn += 1) {
+        await Promise.resolve();
+    }
+    results.lazyPreviewStaleRetryFailed = {
+        refreshes: quietRefreshes,
+        usableAfter: previewRefresh.disabled === false,
+        panelHtml: preview.innerHTML
+    };
+    sandbox.refreshExplorerOpenFileQuiet = realQuietRefresh;
+
     results.lazyPreviewMatched = await previewCase('120:1700000000.000000', '<p>same</p>');
     // An older server sends no token at all; that must still work.
     results.lazyPreviewUntokened = await previewCase(undefined, '<p>untokened</p>');
@@ -932,6 +988,42 @@ class ExplorerScrollAdapterTestCase(unittest.TestCase):
         self.assertFalse(stale["loaded"])
         self.assertEqual(stale["html"], "")
         self.assertEqual(stale["paints"], 0)
+
+    def test_a_declined_preview_says_so_and_offers_a_retry(self):
+        """"Rendering preview…" is not a state anything on screen can leave.
+
+        Declining silently relied on the open-file change listener to notice
+        the same revision move — but that watcher suspends itself after
+        repeated failures, and nothing else repaints this panel while the
+        reader stays on it. Guardrail 8: name what happened, and give it
+        something to click.
+        """
+        stale = self.results["lazyPreviewStale"]
+        self.assertIn(
+            "The file changed while the preview was rendering.", stale["panelHtml"]
+        )
+        self.assertIn("Refresh", stale["panelHtml"])
+        self.assertEqual(stale["wired"], 1)
+
+    def test_the_preview_retry_refreshes_the_file_not_the_preview(self):
+        """A second Preview-only fetch would be declined for the same reason.
+
+        Source still carries the revision the response disagreed with, so the
+        recovery has to re-read the file and establish one new revision; the
+        active Preview path then renders against that.
+        """
+        retry = self.results["lazyPreviewStaleRetry"]
+        self.assertEqual(retry["refreshes"], 1)
+        self.assertEqual(retry["previewFetches"], 0)
+        # Busy state is the button's own disabled flag, not rewritten markup.
+        self.assertTrue(retry["disabledWhileRunning"])
+        self.assertTrue(retry["usableAfter"])
+
+    def test_a_failed_preview_retry_leaves_the_affordance_standing(self):
+        failed = self.results["lazyPreviewStaleRetryFailed"]
+        self.assertEqual(failed["refreshes"], 2)
+        self.assertTrue(failed["usableAfter"])
+        self.assertIn("Refresh", failed["panelHtml"])
 
         # The ordinary case is unaffected: matching tokens paint as before.
         matched = self.results["lazyPreviewMatched"]

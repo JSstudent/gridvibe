@@ -3321,7 +3321,13 @@
             color: var(--t-accent);
         }
 
-        .explorer-line-wrap-btn[hidden] {
+        /* Two header controls that stand down for the panel on screen: the
+           wrap toggle where wrapping means nothing, and the find shell on a
+           panel whose tier cannot answer a query. Both carry a `display` of
+           their own, which beats the UA's `[hidden]` rule, so both need this
+           one — joined rather than restated beside each. */
+        .explorer-line-wrap-btn[hidden],
+        .explorer-editor-search[hidden] {
             display: none;
         }
 
@@ -4203,7 +4209,11 @@
            turned off. The notice is sticky because it is the only explanation
            for a missing gutter, missing marks and a missing find — scrolling it
            away leaves the reader looking at what reads like a broken pane. */
-        .explorer-source-tier-notice {
+        /* The Preview panel's give-up notice joins it rather than restating a
+           second in-pane role="status" surface beside it: same class of thing,
+           same treatment, one palette literal. */
+        .explorer-source-tier-notice,
+        .explorer-preview-status {
             position: sticky;
             top: 0;
             z-index: 1;
@@ -4213,6 +4223,21 @@
             color: var(--explorer-muted);
             background: var(--explorer-bar-bg);
             border-bottom: 1px solid var(--explorer-border);
+        }
+
+        .explorer-preview-status {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        /* The retry takes .explorer-search-btn's border, radius and palette as
+           they stand; only the fixed 28px square has to go, because this one
+           carries a word rather than a glyph. */
+        .explorer-preview-refresh-btn {
+            width: auto;
+            padding: 0 10px;
+            height: 24px;
         }
 
         .explorer-source-plain {

@@ -3105,11 +3105,18 @@ def change_session_mode(session_id: str):
             # The probe could not answer, so the pane opened on an assumed
             # directory. Say so, and say which one: the silent fallback to the
             # launch directory is the flakiness ISSUE-2026-044 reports.
+            #
+            # Only the three fields a reader has: `resolved` is what
+            # terminals.js branches on, `reason` and `directory` are what the
+            # notice says. `requested` was always `true` here -- the guard
+            # above is what puts the object in the payload at all -- and
+            # `source` names an internal provenance nothing on the client
+            # distinguishes. Both stay inside `_refresh_pane_cwd()`, where they
+            # drive the probe and the launch-fallback verdict; neither crosses
+            # the HTTP boundary as a field nothing reads (guardrail 5).
             payload["cwd_probe"] = {
-                "requested": True,
                 "resolved": False,
                 "reason": cwd_probe["reason"],
-                "source": cwd_probe["source"],
                 "directory": next_directory,
             }
         return jsonify(payload)

@@ -1604,13 +1604,12 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("capped: ranges.length >= maxMatches,", html)
         self.assertIn("count.title = capped ? `Showing first ${matchCount} matches` : '';", html)
         # Cached ranges are reused only for the same query *and* the same
-        # buffer they were resolved against: they are absolute offsets into
-        # one exact string. Pinned as the two conditions rather than as one
-        # spelling of them; the drift this prevents is executed in
-        # tests/test_explorer_source_frame.py.
-        self.assertIn("state.resultQuery === query", html)
-        self.assertIn("explorerSearchRangesMatchContent(state, pane)", html)
-        self.assertIn("state.resultContent = scanned;", html)
+        # buffer they were resolved against — they are absolute offsets into
+        # one exact string. Executed, not spelled out here:
+        # tests/test_explorer_source_frame.py's
+        # test_search_ranges_never_outlive_the_buffer_they_address runs a
+        # buffer out from under a cached result set and watches them be
+        # rescanned.
         self.assertIn("state.matchCapped = capped;", html)
 
     def test_terminals_page_explorer_directory_search_filters_current_entries(self):
@@ -1766,16 +1765,19 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("engine.highlight(source, { language: grammar, ignoreIllegal: true })", html)
         # Source rendering prefers the whole-document pass, falling back per line.
         self.assertIn(": explorerHighlightDocumentLines(content, normalizedLanguage);", html)
-        self.assertIn("? explorerRenderHighlightedRuns(model.runs.get(record.number), searchRanges)", html)
-        self.assertIn("model.highlightPending", html)
-        self.assertIn(": highlightExplorerCode(record.text, model.language, searchRanges, record.start));", html)
+        # Which of those two a row gets — the cached token map or the per-line
+        # fallback — is executed rather than spelled out here:
+        # tests/test_explorer_source_frame.py renders with and without a token
+        # map and with a failed highlight job.
+        #
         # Non-trivial buffers start as plain escaped rows while the shared,
-        # bounded worker pool tokenizes. The transferred result is compact —
-        # typed arrays and a class dictionary, not a cloned Map of run objects.
+        # bounded worker pool tokenizes; the transferred result is compact
+        # (typed arrays and a class dictionary, never a cloned Map of run
+        # objects), which tests/test_explorer_workers.py round-trips. The
+        # threshold below is the one part with no executable seam — it is a
+        # documented number, so the named constant stays.
         self.assertIn("/static/js/explorer-worker-client.js", html)
-        self.assertIn("function explorerHighlightLinesForRender(", html)
-        self.assertIn("const HIGHLIGHT_WORKER_MIN_CHARS = 64 * 1024;", html)
-        self.assertIn("function decodeHighlightResult(source, result)", html)
+        self.assertIn("HIGHLIGHT_WORKER_MIN_CHARS = 64 * 1024", html)
         # The oversized-file guard is preserved for the highlighter.
         self.assertIn("if (source.length > EXPLORER_PLAIN_PREVIEW_THRESHOLD) {", html)
         # Explorer-scoped token palette for both themes, shared by the Source
@@ -1821,11 +1823,10 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertNotIn("ui.highlightCode();", html)
         # Diff2Html remains synchronous for small/medium patches. The large
         # tier's handwritten parse goes through the shared worker and only its
-        # DOM adapter stays on the page, preserving both undo affordances.
-        self.assertIn("if (tier === 'large') {", html)
-        self.assertIn("return renderExplorerLargeDiff(index, pane, code, diff, banner);", html)
-        self.assertIn("pending.promise = workers.parseDiff(diff, {", html)
-        self.assertIn("function renderExplorerSideBySideDiffModel(index, model)", html)
+        # DOM adapter stays on the page, preserving both undo affordances —
+        # which tests/test_explorer_workers.py drives end to end
+        # (test_large_diff_paints_a_status_then_the_worker_model_with_undo)
+        # rather than reading the branch out of this file.
         self.assertIn("code.innerHTML = banner + renderExplorerSideBySideDiff(index, diff);", html)
         self.assertIn("function renderExplorerSideBySideDiff(index, diff)", html)
         # Truncation is captured from the API and surfaced without blocking.
@@ -2317,9 +2318,10 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("if (segment.includes(':')) {", html)
         # One paint serves every preview path — first render, in-place refresh,
         # restore and the lazy first visit to the Preview tab all go through
-        # paintExplorerPreview(), so the wiring happens exactly once.
+        # paintExplorerPreview(), so the wiring happens exactly once. The count
+        # is the contract; that the paint exists is executed in
+        # tests/test_explorer_scroll.py, which counts its paints per path.
         self.assertEqual(html.count("wireExplorerMarkdownLinks(index, preview);"), 1)
-        self.assertIn("function paintExplorerPreview(index)", html)
 
     def test_terminals_page_explorer_persists_open_tabs(self):
         """ISSUE-2026-015: open tabs serialize into and restore from a session."""
@@ -3413,10 +3415,16 @@ class ApiRoutesTestCase(unittest.TestCase):
         viewer = self._static("js/explorer-viewer.js")
 
         applied = viewer.index("applyExplorerSourceTier(pane, pane._explorerFileContent);")
-        decided = viewer.index("const findAvailable = explorerPaneAllowsFind(pane);")
+        decided = viewer.index("const findAvailable = explorerFileOffersFind(pane,")
         rendered = viewer.index("${findAvailable ?")
         self.assertLess(applied, decided)
         self.assertLess(decided, rendered)
+
+        # Which *panel* it is offered on is not a header decision: the header
+        # is not rebuilt on a panel switch, so one stable shell is rendered
+        # whenever any panel could answer and one owner hides or shows it.
+        # Executed in tests/test_explorer_find_availability.py.
+        self.assertIn(".explorer-editor-search[hidden]", self._static("css/terminals.css"))
 
         # An in-place refresh across the boundary is a different header, so it
         # hands back to a full rebuild rather than updating around a control
@@ -3604,8 +3612,11 @@ class ApiRoutesTestCase(unittest.TestCase):
         # rejoins it so the server resends that one session's buffer. Both
         # emits now go through GridVibeTerminalModes, which owns the ordering
         # the mouse-reporting teardown needs (ISSUE-2026-038).
+        # The call boundary is the contract terminals.js has no Node harness
+        # for; what happens on the other side of it — the teardown landing
+        # after the replayed buffer, once, and still landing when the rejoin is
+        # never acked — is executed in tests/test_terminal_modes.py.
         self.assertIn("GridVibeTerminalModes.rejoinAndResetAfterReplay({", refresh_body)
-        self.assertIn("sessionId,", refresh_body)
 
     def test_terminals_page_uses_updated_session_action_labels_and_styles(self):
         response = self.client.get("/terminals")
@@ -6112,11 +6123,15 @@ class ApiRoutesTestCase(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         probe = response.get_json()["cwd_probe"]
-        self.assertTrue(probe["requested"])
         self.assertFalse(probe["resolved"])
         self.assertEqual(probe["reason"], "probe_failed")
         # It names the directory the pane actually opened on.
         self.assertEqual(Path(probe["directory"]), desktop.resolve())
+        # And carries nothing else. `requested` was always true here -- the
+        # object is only emitted for a requested, unresolved probe -- and
+        # `source` names an internal provenance no client distinguishes. Both
+        # remain inside _refresh_pane_cwd(); neither crosses the boundary.
+        self.assertEqual(set(probe), {"resolved", "reason", "directory"})
 
     def test_switch_agent_pane_to_explorer_never_probes_the_shell(self):
         """The probe types at a prompt, and an agent pane has no prompt."""
@@ -6326,7 +6341,7 @@ class ApiRoutesTestCase(unittest.TestCase):
 
         command, environment = web_terminal_io._local_shell_integration("posix", ["/bin/bash"], {})
         self.assertEqual(command, ["/bin/bash"])
-        self.assertIn("]7;file://", environment["PROMPT_COMMAND"])
+        self.assertIn("]9;9;", environment["PROMPT_COMMAND"])
 
     def test_a_wsl_shell_forwards_its_hook_through_wslenv(self):
         """wsl.exe only passes the variables WSLENV names, and keeps the rest."""
@@ -6334,7 +6349,7 @@ class ApiRoutesTestCase(unittest.TestCase):
             "wsl", ["wsl.exe"], {"WSLENV": "MY_VAR/p"}
         )
 
-        self.assertIn("]7;file://", environment["PROMPT_COMMAND"])
+        self.assertIn("]9;9;", environment["PROMPT_COMMAND"])
         self.assertEqual(environment["WSLENV"], "MY_VAR/p:PROMPT_COMMAND")
 
     def test_powershell_takes_its_hook_as_an_argument(self):
@@ -6357,7 +6372,7 @@ class ApiRoutesTestCase(unittest.TestCase):
 
         sent = [call.args[1] for call in send_input.call_args_list]
         self.assertEqual(len(sent), 1)
-        self.assertIn("]7;file://", sent[0])
+        self.assertIn("]9;9;", sent[0])
         self.assertIn("gridvibe-pid", sent[0])
 
     def test_the_shell_integration_setting_leaves_the_prompt_alone(self):

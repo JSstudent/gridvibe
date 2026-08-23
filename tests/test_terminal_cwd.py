@@ -6,6 +6,7 @@ it against real byte streams rather than by reading its source. The stream side
 covered by ``tests/test_api.py``.
 """
 
+import re
 import sys
 import unittest
 from pathlib import Path
@@ -186,14 +187,14 @@ class ShellIntegrationInstallTestCase(unittest.TestCase):
         environment = shell_integration_environment("posix")
 
         self.assertEqual(list(environment), ["PROMPT_COMMAND"])
-        self.assertIn("]7;file://", environment["PROMPT_COMMAND"])
+        self.assertIn("]9;9;", environment["PROMPT_COMMAND"])
         self.assertIn("$PWD", environment["PROMPT_COMMAND"])
 
     def test_a_wsl_shell_adds_its_variable_to_an_existing_wslenv(self):
         environment = shell_integration_environment("wsl", {"WSLENV": "MY_VAR/p"})
 
         self.assertEqual(environment["WSLENV"], "MY_VAR/p:PROMPT_COMMAND")
-        self.assertIn("]7;file://", environment["PROMPT_COMMAND"])
+        self.assertIn("]9;9;", environment["PROMPT_COMMAND"])
 
     def test_a_wsl_shell_does_not_repeat_a_variable_wslenv_already_names(self):
         environment = shell_integration_environment(
@@ -233,11 +234,35 @@ class ShellIntegrationInstallTestCase(unittest.TestCase):
         self.assertIn('PROMPT_COMMAND="_gv${PROMPT_COMMAND:+;$PROMPT_COMMAND}"', command)
         self.assertIn("gridvibe-pid", command)
 
+    def test_the_posix_hooks_never_expand_the_path_into_a_printf_format(self):
+        """`%` is a legal path character, and printf's format argument eats it.
+
+        Expanding `$PWD` into the format made a directory named
+        `/srv/100%done` a conversion specification: bash rendered the sequence
+        as `/srv/1000one` and the pane reported a directory that does not
+        exist. The path is a data argument in both POSIX hooks, so `%s` is the
+        only conversion either format carries for it -- which is also why every
+        format here is single-quoted, keeping the shell out of it entirely.
+        """
+        for name, hook in (
+            ("local", shell_integration_environment("posix")["PROMPT_COMMAND"]),
+            ("remote", remote_shell_integration_command()),
+        ):
+            with self.subTest(hook=name):
+                formats = re.findall(r"'([^']*)'", hook)
+                self.assertTrue(formats, "no single-quoted printf format found")
+                for candidate in formats:
+                    self.assertNotIn("$PWD", candidate)
+                self.assertIn("]9;9;%s", hook)
+                self.assertIn('"$PWD"', hook)
+
 
 class ShellIntegrationRoundTripTestCase(unittest.TestCase):
     """What a real shell would emit from the installed hook, read back."""
 
     def test_a_bash_prompt_emission_round_trips(self):
+        # GridVibe's own POSIX hooks emit OSC 9;9, but a shell that arrives
+        # with its own OSC 7 hook installed is still read:
         # printf '\033]7;file://%s%s\033\\' "$HOSTNAME" "$PWD"
         emitted = f"{ESC}]7;file://buildbox/home/dev/project{ST}dev@buildbox:~/project$ "
 
@@ -245,6 +270,48 @@ class ShellIntegrationRoundTripTestCase(unittest.TestCase):
 
         self.assertEqual(latest_event(events, CWD_EVENT_DIRECTORY), "/home/dev/project")
         self.assertEqual(residue, "")
+
+    def test_the_posix_hooks_emission_round_trips(self):
+        # printf '\033]9;9;%s\033\\' "$PWD"
+        emitted = f"{ESC}]9;9;/home/dev/project{ST}dev@buildbox:~/project$ "
+
+        events, residue = parse_cwd_events(emitted)
+
+        self.assertEqual(latest_event(events, CWD_EVENT_DIRECTORY), "/home/dev/project")
+        self.assertEqual(residue, "")
+
+    def test_a_percent_in_the_path_survives_the_posix_hook(self):
+        """The whole point of F13: `/srv/100%done` reaches the parser intact."""
+        emitted = f"{ESC}]9;9;/srv/100%done{ST}dev@box:/srv/100%done$ "
+
+        events, residue = parse_cwd_events(emitted)
+
+        self.assertEqual(latest_event(events, CWD_EVENT_DIRECTORY), "/srv/100%done")
+        self.assertEqual(residue, "")
+
+    def test_a_raw_path_sequence_is_never_percent_decoded(self):
+        """A directory literally named `literal%2Fname` is not two segments.
+
+        OSC 7 is a URL and its reader has to decode; OSC 9;9 carries a path,
+        and decoding it would invent a separator the filesystem never had.
+        `test_a_file_url_is_percent_decoded` still protects the URL side.
+        """
+        events, _ = parse_cwd_events(osc9("/srv/literal%2Fname"))
+
+        self.assertEqual(
+            latest_event(events, CWD_EVENT_DIRECTORY), "/srv/literal%2Fname"
+        )
+
+    def test_a_wsl_emission_still_translates_to_its_windows_path(self):
+        """The sequence changed; what the WSL translation reads did not."""
+        events, _ = parse_cwd_events(osc9("/mnt/c/Users/dev/gv 100%done"))
+
+        self.assertEqual(
+            normalize_observed_cwd(
+                latest_event(events, CWD_EVENT_DIRECTORY), "wsl", on_windows=True
+            ),
+            "C:\\Users\\dev\\gv 100%done",
+        )
 
     def test_a_cmd_prompt_emission_round_trips(self):
         # PROMPT=$e]9;9;$P$e\$P$G

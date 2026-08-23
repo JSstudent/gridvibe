@@ -4,6 +4,12 @@ All notable changes to GridVibe will be documented in this file.
 
 ## Unreleased
 
+- **(fix) Find works in a very large file's own diff.** A file big enough for the plain large-file view turns Find off, because that view has no per-line rows to point at. That verdict was applied to the whole pane, so the file's **Diff** tab — a patch of a few lines, and bounded however large the file is — had no find box either. This was already fixed for a commit diff opened from the Git sidebar; the file's own diff now behaves the same way. Source and the Markdown preview of such a file still have Find off, and still say so — and on those two panels `Ctrl+F` now falls through to your browser's own find instead of being swallowed by a box that could not answer.
+
+- **(fix) The Markdown preview says so when it gives up.** If the file changed in the moment between GridVibe reading its text and rendering its preview, the panel was left showing "Rendering preview…" with nothing to click. It now says what happened and offers **Refresh**, which reloads Source and Preview together.
+
+- **(fix) A folder with a `%` in its name no longer breaks directory tracking.** The sequence a POSIX terminal's prompt uses to report where it is treated a `%` in the path as a formatting instruction, so bash/zsh/WSL and SSH panes sitting in such a folder reported nothing usable — and the explorer opened somewhere else, or said it could not tell. A folder whose name contains a literal `%2F` was misread as two folders for a related reason. PowerShell and Command Prompt used a different sequence and were unaffected; a shell that emits its own directory sequence is still read exactly as before.
+
 - **(perf) Switching a pane away from a large file stops the work it was doing.** A file big enough to be painted over several frames kept painting after you switched the pane to a terminal or a browser preview, into a view nobody could see and in competition with the one that had just replaced it. Background syntax colouring for that file kept running too. Both now stop when the pane does.
 
 - **(fix) SSH agent commands reach the shell before fallback directory observation.** When shell integration had reported a remote shell pid but not its directory, recognizing a manually started agent could spend up to the bounded remote-directory timeout before forwarding Enter, and a later keystroke could overtake it. GridVibe now sends the input first, then records the agent metadata; successful promotion and Save Workspace directory restore are unchanged.

@@ -135,15 +135,66 @@
         return pane?._explorerSourceTier || 'full';
     }
 
-    /* Find is a capability of the tier, not of the view: the one input in the
-       header serves Source, Preview and Diff, so leaving it live while the
-       view it is pointed at cannot answer would hand the reader a control that
-       silently does nothing. The tier's notice says so in as many words. */
-    function explorerPaneAllowsFind(pane) {
+    /* Find is a capability of the *panel on screen*, decided from the tier for
+       the two panels the tier describes. One input in the header serves all
+       three, so leaving it live while the panel it is pointed at cannot answer
+       would hand the reader a control that silently does nothing — and the
+       tier's notice says so in as many words.
+
+       Source is what the tier is about: above the ceiling there are no
+       per-line rows for a find to address. Preview shares the verdict for a
+       different reason — the render of a 4 MiB Markdown file is itself
+       enormous and the preview find walks its whole subtree unbounded, which
+       is the freeze the tier exists to remove.
+
+       Diff is not the file. Its patch is capped by the backend's
+       EXPLORER_GIT_DIFF_MAX_BYTES however large the file is, so it can always
+       answer, and applying one file's size to it took Find away from a
+       four-line patch. This is the remaining half of the same fix that resets
+       the tier when a *commit* diff opens; the file's own worktree diff used
+       to inherit the verdict. */
+    function explorerPaneAllowsFind(pane, view = 'source') {
+        if (view === 'diff') {
+            return true;
+        }
         const policy = explorerTierPolicy();
         return policy
             ? policy.sourceTierAllows(explorerPaneSourceTier(pane), 'find')
             : true;
+    }
+
+    /* True while any panel this file can show could answer a find — which is
+       what decides whether the search shell is *rendered* at all. Rendering it
+       per-view would mean rebuilding the header on every panel switch, and
+       setExplorerFileView() deliberately does not touch the header. One stable
+       shell, hidden and shown by syncExplorerFindAvailability(). */
+    function explorerFileOffersFind(pane, { hasGitDiff = false } = {}) {
+        return explorerPaneAllowsFind(pane, 'source')
+            || explorerPaneAllowsFind(pane, 'preview')
+            || (hasGitDiff && explorerPaneAllowsFind(pane, 'diff'));
+    }
+
+    /* The one owner of "is the find control offered right now". Header
+       visibility, Ctrl+F and applyExplorerSearch() all read the same verdict,
+       so a hidden control can never claim the shortcut and suppress the
+       browser's own find while refusing to serve the query.
+
+       The query itself is left alone: a find typed on Diff stays in the state
+       and in the input while Source hides the shell, and comes back with it. */
+    function syncExplorerFindAvailability(index, view = null) {
+        const pane = terminals[index];
+        /* Answered before the shell is looked up, and never *from* it: a
+           browsed listing has its own find control in the toolbar and no file
+           header at all, so "there is no shell here" is not the same answer as
+           "Find is unavailable". */
+        const allowed = !pane
+            || pane._explorerMode !== 'file'
+            || explorerPaneAllowsFind(pane, view || activeExplorerFileView(index));
+        const shell = document.querySelector(`[data-explorer-search="${index}"]`);
+        if (shell) {
+            shell.hidden = !allowed;
+        }
+        return allowed;
     }
 
     /* The tier's in-pane notice. Deliberately *not* showGridVibeNotice(): that
@@ -3111,6 +3162,11 @@
             panel.hidden = panel.dataset.explorerFilePanel !== selectedMode;
         });
         applyExplorerLineWrapState(index, selectedMode);
+        /* Find is a property of the panel now on screen, and this is the only
+           path that changes which one that is — the header is not rebuilt
+           here, so the shell has to be hidden or shown before the query below
+           is applied against it. */
+        syncExplorerFindAvailability(index, selectedMode);
         // First visit to Preview is where the render cost now lands; later
         // visits reuse the pane's cached HTML and are instant.
         if (selectedMode === 'preview') {
@@ -4980,6 +5036,49 @@
        Reuses the pane's cached HTML on every later visit, so the pause lands
        once. Failures paint the message in the panel rather than anywhere
        global: this is one panel's content, not an app-level event. */
+
+    /* The dead end the lazy loader could otherwise leave behind: the render
+       described bytes Source no longer holds, so it cannot be painted, and
+       "Rendering preview…" is not a state anything on screen can leave.
+
+       The action is the whole-file refresh, deliberately not a second
+       Preview-only fetch: Source still carries the revision the response
+       disagreed with, so refetching the preview alone would be declined again
+       for exactly the same reason. Re-reading the file installs one new
+       revision — and updateExplorerFileInPlace() then requests the preview
+       against it, because Preview is the panel on screen. A refresh that fails
+       changes nothing, which is why the affordance is left standing. */
+    function paintExplorerPreviewStale(index, preview) {
+        if (!preview) {
+            return null;
+        }
+        preview.innerHTML = `
+            <div class="explorer-preview-status" role="status">
+                <span>The file changed while the preview was rendering.</span>
+                <button
+                    type="button"
+                    class="explorer-search-btn explorer-preview-refresh-btn"
+                    data-explorer-preview-refresh="${index}"
+                >Refresh</button>
+            </div>
+        `;
+        const button = preview.querySelector(`[data-explorer-preview-refresh="${index}"]`);
+        button?.addEventListener('click', () => {
+            if (button.disabled) {
+                return;
+            }
+            button.disabled = true;
+            Promise.resolve(refreshExplorerOpenFileQuiet(index))
+                .catch(() => false)
+                .then(() => {
+                    // A success has already replaced this subtree; only a
+                    // failure still has a button to hand back.
+                    button.disabled = false;
+                });
+        });
+        return preview;
+    }
+
     async function ensureExplorerPreviewLoaded(index) {
         const pane = terminals[index];
         const sessionId = sessionIds[index];
@@ -5041,15 +5140,18 @@
                    cannot see: they compare the viewer against itself. Source
                    and Preview are two reads now, so a write landing between
                    them would put a render of the newer bytes beside Source's
-                   older ones. Left unloaded rather than painted or refetched:
-                   the open-file change listener is already going to notice the
-                   same revision move and reload the file, and this panel
-                   paints from that. A response with no token (an older server)
-                   is accepted as before. */
+                   older ones. Still never painted and never refetched from
+                   here — but no longer *silently* declined: the open-file
+                   change listener this used to lean on suspends itself after
+                   repeated failures, and nothing else repaints the panel while
+                   the reader stays on it, so the loader's placeholder could be
+                   the last thing they ever saw. Guardrail 8: say what happened
+                   and give it a retry. A response with no token (an older
+                   server) is accepted as before. */
                 const previewRevision = data.state_revision || '';
                 const baseRevision = pane._explorerFileStateRevision || '';
                 if (previewRevision && baseRevision && previewRevision !== baseRevision) {
-                    return null;
+                    return paintExplorerPreviewStale(index, preview);
                 }
                 pane._explorerPreviewHtml = data.preview_html || '';
                 pane._explorerPreviewLoaded = true;
@@ -5419,11 +5521,14 @@
         }
 
         /* The tier that removed the rows removed the find with them, and the
-           header renders no search bar — so there is no query to apply and
+           header hides the search bar — so there is no query to apply and
            nothing to repaint. Returning here rather than falling through keeps
            a restored search state (a tab reopened at a now-larger file) from
-           driving a repaint against rows that do not exist. */
-        if (pane._explorerMode === 'file' && !explorerPaneAllowsFind(pane)) {
+           driving a repaint against rows that do not exist. Asked of the panel
+           on screen, not of the pane: the same large file's Diff panel is
+           bounded and answers perfectly well. */
+        if (pane._explorerMode === 'file'
+            && !explorerPaneAllowsFind(pane, activeExplorerFileView(index))) {
             return;
         }
 
@@ -5630,6 +5735,14 @@
         }
         const input = document.querySelector(`[data-explorer-search-input="${index}"]`);
         if (!input) {
+            return false;
+        }
+        /* The third capability boundary, and the one that costs the reader
+           something when it is wrong: a control that is on screen but cannot
+           serve the query still swallows Ctrl+F, so the browser's own find
+           never opens either. Refuse before focusing, from the same verdict
+           the header and applyExplorerSearch() read. */
+        if (!syncExplorerFindAvailability(index)) {
             return false;
         }
         /* Seeding the query with the current editor selection mirrors the
@@ -7022,8 +7135,13 @@
            the outgoing file's tier put one on a large file opened after a small
            one. updateExplorerFileInPlace() treats a change in this value the
            way it treats a change in `hasPreview` — the header is not the same
-           header, so it hands back to a full rebuild. */
-        const findAvailable = explorerPaneAllowsFind(pane);
+           header, so it hands back to a full rebuild.
+
+           "Any panel could answer", not "the opening panel can": the shell is
+           rendered once and then hidden or shown per view by
+           syncExplorerFindAvailability(), because setExplorerFileView() moves
+           between panels without rebuilding this header. */
+        const findAvailable = explorerFileOffersFind(pane, { hasGitDiff });
         // Not fetched yet — the panel exists from here, its content arrives the
         // first time it is shown. The flag, not the string, is what says so:
         // an empty Markdown file renders an empty preview, legitimately.
@@ -7167,6 +7285,9 @@
         }
         wireExplorerEditorZoomControls(index);
         wireExplorerSearchControls(index);
+        // The shell exists for whichever panel could answer; this decides
+        // whether the one now on screen is that panel.
+        syncExplorerFindAvailability(index, initialFileView);
         refreshExplorerEditControls(index);
         /* A rebuild is a repaint, not a navigation: the restore on the next
            line owns where this file opens. Letting the find scroll here put
@@ -7405,6 +7526,10 @@
         });
         wireExplorerLineWrapControl(index);
         wireExplorerSearchControls(index);
+        // Always allowed here — the tier was reset above and this view is a
+        // bounded patch — but through the one owner, so there is no second
+        // answer to "is Find offered" to drift from the first.
+        syncExplorerFindAvailability(index, 'diff');
         applyExplorerEditorFontSize(index);
         applyExplorerSourceFontToElement(
             document.getElementById(`explorer-diff-code-${index}`), explorerMarkdownAppearance()

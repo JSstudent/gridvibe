@@ -41,9 +41,11 @@ CWD_EVENT_SHELL_PID = "pid"
 CWD_RESIDUE_MAX_CHARS = 2048
 
 #: The three sequences GridVibe reads. OSC 7 is the de-facto POSIX convention
-#: (``file://<host><path>``); OSC 9;9 is the Windows one (a native path); the
-#: OSC 777 line is GridVibe's own, emitted exactly once per SSH shell so the
-#: ``/proc/<pid>/cwd`` corroboration source has a pid to read.
+#: (``file://<host><path>``), still accepted from any shell that emits it on its
+#: own; OSC 9;9 carries a raw, unencoded path and is what *GridVibe's own* hooks
+#: emit, for every shell family; the OSC 777 line is GridVibe's own too, emitted
+#: exactly once per SSH shell so the ``/proc/<pid>/cwd`` corroboration source has
+#: a pid to read.
 _OSC7_HEAD = "\x1b]7;"
 _OSC9_HEAD = "\x1b]9;9;"
 _OSC_PID_HEAD = "\x1b]777;gridvibe-pid;"
@@ -196,8 +198,16 @@ def normalize_observed_cwd(cwd: str, shell_kind: str, *, on_windows: bool) -> st
 
 #: bash reads `PROMPT_COMMAND` from its environment, so this needs no typing and
 #: no function. It is evaluated at every prompt, which is when `$PWD` expands.
-#: The empty host keeps it short: `file:///srv/app` parses to `/srv/app`.
-_POSIX_PROMPT_COMMAND = 'printf "\\033]7;file://$PWD\\033\\\\"'
+#:
+#: `$PWD` is a printf *argument* and never part of the format string, and the
+#: sequence is OSC 9;9 rather than OSC 7 so what travels is raw path text.
+#: Neither half is cosmetic. Expanding `$PWD` into the format made a `%` in a
+#: directory name a conversion specification, so a pane sitting in
+#: `/srv/100%done` reported `/srv/1000one`. And OSC 7 is a URL, so its reader
+#: has to percent-decode -- which turns a directory literally named `a%2Fb` into
+#: the two-segment path `a/b`. A raw path in a data argument is unambiguous for
+#: `%`, `%2F`, `?` and `#` alike, with no encoder to run at every prompt.
+_POSIX_PROMPT_COMMAND = 'printf \'\\033]9;9;%s\\033\\\\\' "$PWD"'
 
 #: cmd reads `PROMPT` from its environment. `$e` is ESC, `$P` the path, `$G` the
 #: `>`; unlike the other two shells cmd has no seam to wrap, so the default
@@ -227,7 +237,7 @@ _POWERSHELL_HOOK = (
 #: once so `/proc/<pid>/cwd` has something to read on a shell (zsh, a login
 #: shell with its own hook) where the prompt hook does not take.
 _REMOTE_HOOK = (
-    " _gv(){ printf \"\\033]7;file://$PWD\\033\\\\\"; }; "
+    " _gv(){ printf '\\033]9;9;%s\\033\\\\' \"$PWD\"; }; "
     "[ -n \"$ZSH_VERSION\" ] && precmd_functions+=(_gv) || "
     "PROMPT_COMMAND=\"_gv${PROMPT_COMMAND:+;$PROMPT_COMMAND}\"; _gv; "
     "printf '\\033]777;gridvibe-pid;%s\\033\\\\' $$"

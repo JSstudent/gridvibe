@@ -39,7 +39,7 @@ your real work, so the launcher's Local Repo picker can reach them without a det
 | --- | --- | --- |
 | `gv-check\deep` | Stage 1 Part A | **Not** a Git repository — the test turns on the explorer failing to find a worktree. `Projects` itself is not inside one, so a plain `mkdir` is enough. |
 | `gv-diff` | Stages 2, 3, 4, 5 | Its own Git repo (`git init`). Holds `big.txt`, `huge.txt` and `typing.js` — build it once in Stage 2 and reuse it. |
-| `gv 100%done` | Stage 5 | Any directory; the `%` in the name is the whole point. |
+| `gv 100%done` | Stage 5 | Any directory, but enter it from a **WSL or SSH POSIX pane** for F13; PowerShell/cmd use the unaffected hook. The `%` in the name is the point. |
 
 ### Where and how to run the setup commands
 
@@ -1077,25 +1077,39 @@ evidence is the automated controller test, as this section already noted.
 
 ---
 
-## Stage 5 — Loose ends and documentation reconciliation
+## Stage 5 — Loose ends and documentation reconciliation ✅ *landed*
 
 **Findings:** F7 (Low/Medium), F8 (Low), F9 (Low), F13 (Low), F14 (Low), plus the whole of
 audit §4.
-**Risk:** lowest. Five unrelated small items; do them in any order, or drop any one.
+**Risk:** low to medium. The findings are independent, but they are not all documentation-sized:
+F7 has to keep a persistent header control synchronized across panel switches, F8's retry must
+refresh Source and Preview as one revision, and F13 changes a cross-shell reporting protocol.
+F9, F14 and the documentation reconciliation remain low-risk cleanup. Do the findings in any
+order, or drop any one, but do not treat F7/F8/F13 as literal one-line substitutions.
 
 ### Problem
 
 **F7 — Find is disabled on a large file's own Diff panel.**
 `explorerPaneAllowsFind()` keys only on `explorerPaneSourceTier(pane)`, and it gates both the
-header render (`explorer-viewer.js:6970`) and the search itself (`:5370`). One find input serves
+header render (`explorer-viewer.js:7026`) and the search itself (`:5426`). One find input serves
 all three panels, so a file large enough for the plain view also takes Find away from the
 **Diff** panel — whose content is capped at 256 KiB by `EXPLORER_GIT_DIFF_MAX_BYTES` and could
 answer perfectly well. The tier notice explains it, but the notice is painted in Source and the
 reader who switches to Diff sees only a dead control.
 
+**Re-verified 2026-08-23 — the finding is real, but the former two-call-site fix is
+incomplete.** The Find markup is built only when the file header is rendered. A later
+`setExplorerFileView()` changes tabs and panels without rebuilding that header. Passing `view`
+only at header construction therefore gives two wrong transitions: Source → Diff still has no
+input to reveal, while a restored Diff → Source keeps the input that was rendered for Diff.
+`focusExplorerSearch()` is a third capability boundary as well: if a hidden or stale input
+remains, it can claim `Ctrl+F` and suppress browser Find even though `applyExplorerSearch()`
+refuses the query. Header visibility, keyboard focus and query application must all read the same
+active-view verdict, and that verdict must be synchronized on every panel switch.
+
 This is the *remaining* half of the already-shipped "Find works again in a commit diff opened
 after a very large file" fix, which reset the tier when a **commit** diff opens
-(`applyExplorerSourceTier(pane, '')` at `explorer-viewer.js:7287`). A large file's own worktree
+(`applyExplorerSourceTier(pane, '')` at `explorer-viewer.js:7343`). A large file's own worktree
 diff still inherits its verdict. **Preview is a separate question and should stay as it is** —
 the preview of a 4 MiB Markdown file is itself enormous and the Preview find walks its whole
 subtree unbounded, which is the freeze the tier exists to remove.
@@ -1103,15 +1117,27 @@ subtree unbounded, which is the freeze the tier exists to remove.
 **F8 — the lazy Markdown preview can dead-end on "Rendering preview…".**
 `ensureExplorerPreviewLoaded()` paints the loader, then returns `null` without repainting when
 `data.state_revision` disagrees with `pane._explorerFileStateRevision`. It relies on the
-open-file change listener to notice and reload — but `explorer-git-watch.js` suspends itself
-after repeated failures, and nothing else repaints that panel. Guardrail 8 wants a retry
-affordance.
+open-file change listener to notice and reload — but the independent open-file watcher in
+`explorer-git-watch.js` sets `_explorerFileWatchSuspended` after repeated failures, and nothing
+else repaints that panel while the reader stays on it. Switching tabs or pressing Refresh can
+recover indirectly, but the loader itself says neither. Guardrail 8 wants a retry affordance.
 
-**F9 — dead payload fields.** `payload["cwd_probe"]["source"]` and `["requested"]`
-(`web/api.py:3097`) are never read — `terminals.js:6443` reads `resolved`, and
+**Re-verified 2026-08-23 — the existing Node test pins the dead end.**
+`test_a_preview_describing_different_bytes_is_declined` expects the stale response to leave
+`loaded == false`, an empty cached HTML string and zero paints. A retry that merely clears
+`_explorerPreviewLoaded` and calls `ensureExplorerPreviewLoaded()` is not a fix: Source still
+carries the old revision, so the next Preview response is rejected for the same mismatch. The
+recovery action has to refresh the open file first, establishing one new Source revision, and
+only then render Preview from that revision.
+
+**F9 — dead response fields.** `payload["cwd_probe"]["source"]` and `["requested"]`
+(`web/api.py:3108`) are never read — `terminals.js:6465` reads `resolved`, and
 `showExplorerCwdNotice()` reads `reason` and `directory`. `requested` is additionally always
 `true` in the emitted object. `CWD_SOURCE_PROCESS` and `CWD_SOURCE_PROBE` are produced but no
-caller ever distinguishes them from each other.
+caller currently distinguishes them from each other. Keep that internal provenance vocabulary:
+`effective_directory()` documents where an observation came from, and collapsing meaningful
+return values buys nothing for the response cleanup. F9 is only the two dead fields crossing the
+HTTP boundary.
 
 **F13 — `printf` format-string exposure in the POSIX prompt hooks.** `web/terminal_cwd.py`
 expands `$PWD` **into printf's format argument**, so a directory containing `%`
@@ -1120,27 +1146,56 @@ Not a security issue — nothing GridVibe holds is interpolated — but `%` is a
 character. Adjacent asymmetry: `decode_osc7_target()` calls `unquote()` unconditionally, so a
 path containing a literal `%2F` decodes to `/`.
 
+**Re-verified 2026-08-23 — real, and the original Windows reproduction targeted the wrong
+shell.** Bash renders the current format as `file:///srv/1000one` for `/srv/100%done`; the `%s`
+form renders `file:///srv/100%done`. PowerShell and cmd do not execute either vulnerable string:
+they report through their OSC 9;9 hooks, which is why creating the Windows folder and testing it
+from a normal PowerShell/cmd pane succeeds. The Windows folder is a reproduction only from a WSL
+pane (`/mnt/c/.../gv 100%done`); an SSH Bash/zsh pane is the other direct case.
+
+The former suggestion to emit a raw OSC 7 path and drop `unquote()` is not safe. The parser also
+accepts conventional percent-encoded OSC 7 produced outside GridVibe, and
+`test_a_file_url_is_percent_decoded` deliberately protects that behaviour. Use the raw-path form
+the parser already owns instead: GridVibe's POSIX hooks should emit OSC 9;9 with `$PWD` passed as
+a `%s` argument. Keep OSC 7 decoding unchanged for externally produced URL payloads. That makes
+literal `%`, `%2F`, `?` and `#` path text unambiguous without adding an encoder process to every
+prompt. README's shell-integration protocol sentence must change with it.
+
 **F14 — 10 new source-text assertions.** The working rules ask the legacy
 `assertIn("function …")` pattern to shrink when touched; this branch added ten more, including
 one that pins a source literal down to its trailing comma. `tests/test_api.py` now carries 231.
+
+**Re-verified 2026-08-23.** The count is still 231 and the cited assertions remain. Keep this
+cleanup scoped to the original redundant assertions; do not mechanically target every source
+contract. In particular, Stage 4 intentionally added call-name-only checks for the three
+`terminals.js` disposal boundaries because no Node harness loads that file. Markup, `data-*`,
+`aria-*`, asset-presence and other text-only contracts remain legitimate under the working rules.
 
 ### Fix
 
 | Finding | Change |
 | --- | --- |
-| **F7** | Make Find a property of the shown panel. `explorerPaneAllowsFind(pane, view)` consults the tier for `source` **and `preview`**, and always allows `diff` (bounded by `EXPLORER_GIT_DIFF_MAX_BYTES`). Both call sites — the header render at `:6970` and `applyExplorerSearch()`'s early return at `:5370` — pass the active view, so they still cannot promise different things. The `sourceTierAllows()` contract in `explorer-tiers.js` is unchanged; it remains the answer for Source. |
-| **F8** | Replace the silent `return null` with a one-line in-panel message and a retry: *"The file changed while the preview was rendering."* plus a **Retry** button that clears `_explorerPreviewLoaded` and calls the loader again. Reuse the existing error-bar styling rather than adding a surface. |
-| **F9** | Drop `source` and `requested` from the emitted `cwd_probe` object (`web/api.py:3097`) — the client reads neither, and the server only emits the object when both would be constant. Keep `CWD_SOURCE_PROCESS`/`CWD_SOURCE_PROBE` if the log lines use them; otherwise collapse them. Guardrail 5. |
-| **F13** | `printf '\033]7;file://%s\033\\' "$PWD"` in `_POSIX_PROMPT_COMMAND` and in `_REMOTE_HOOK`'s `_gv`. Then decide the encoding question once: either percent-encode on the way out and keep `unquote()`, or emit raw and stop unquoting. Emitting raw and dropping the unconditional `unquote()` is the smaller change and matches what the shells actually emit; whichever you pick, both ends must agree, and `tests/test_terminal_cwd.py` should pin it. |
-| **F14** | Convert the ten new assertions to behavioural or contract-level checks where practical (several already have a Node-executed module to run instead), and leave the rest. This is cleanup, not a blocker — if any resists conversion, leave it and note why. |
+| **F7** | Make Find a property of the shown panel. `explorerPaneAllowsFind(pane, view)` consults the tier for `source` **and `preview`**, and always allows `diff` (bounded by `EXPLORER_GIT_DIFF_MAX_BYTES`). Render one stable search shell whenever any panel on the file can support Find, then add one `syncExplorerFindAvailability(index, view)` owner that hides or shows it from the active-view verdict. Call the sync after header construction and from `setExplorerFileView()` before applying the query. `applyExplorerSearch()` passes the active view to the same predicate, and `focusExplorerSearch()` refuses when that predicate is false or the shell is hidden, so `Ctrl+F` is never stolen by an unavailable control. Keep the query state while hidden so switching to Diff can resume it. `sourceTierAllows()` remains Source/Preview's tier answer. |
+| **F8** | Replace the silent revision-mismatch return with an in-panel status: *"The file changed while the preview was rendering."* plus **Refresh**. The button runs the existing quiet open-file refresh, not the Preview loader: re-read Source, install its new `state_revision`, and let the active Preview path request HTML against that revision. Preserve the status and button if either refresh fails; a successful refresh already re-arms the file-watch baseline. Reuse the existing in-panel error styling rather than adding a global surface. |
+| **F9** | Drop only `source` and `requested` from the emitted `cwd_probe` object (`web/api.py:3108`). The client reads neither, and the server emits the object only for a requested unresolved result. Keep `requested` and `source` inside `_refresh_pane_cwd()` where they drive the probe and launch-fallback verdict, and keep all four `CWD_SOURCE_*` values. Guardrail 5 applies to the response, not to useful internal provenance. |
+| **F13** | Change GridVibe's `_POSIX_PROMPT_COMMAND` and `_REMOTE_HOOK` `_gv` function to `printf '\033]9;9;%s\033\\' "$PWD"`: the path is a data argument rather than a format string, and OSC 9;9 carries it as raw path text. Leave `decode_osc7_target()` and its percent-decoding test unchanged so externally produced OSC 7 URLs continue to work. Update README's protocol sentence from POSIX=OSC 7 to GridVibe hooks=OSC 9;9 with external OSC 7 still accepted. |
+| **F14** | Inventory the original ten redundant source assertions, convert those already covered by Node-executed modules to behavioural checks (or delete them when the behaviour is already pinned), and leave legitimate markup/asset contracts plus Stage 4's deliberate `terminals.js` call-boundary checks. This is cleanup, not a blocker — if any original assertion has no executable seam, keep the narrowest contract and note why. |
 
 **Tests to add**
 
 - F7: the find predicate answers `true` for `diff` while the source tier is `large`, and
-    `false` for `source` and `preview`.
-- F8: a revision mismatch leaves a retry affordance rather than the loader text.
-- F13: `tests/test_terminal_cwd.py` — a directory containing `%` round-trips through the hook
-    and the parser unchanged.
+    `false` for `source` and `preview`; the DOM-free/DOM-stub path then switches Source → Diff →
+    Preview and observes the search shell hidden → visible → hidden, with `focusExplorerSearch()`
+    returning false → true → false and Diff actually applying the retained query.
+- F8: extend `tests/test_explorer_scroll.py`'s existing stale-preview case. The mismatch paints
+    the status and **Refresh** button; clicking it invokes the whole-file refresh rather than a
+    second Preview-only fetch, and a successful refresh paints Preview from the new matching
+    revision. A failed refresh leaves the affordance usable.
+- F9: update the failed-probe route test to assert that `resolved`, `reason` and `directory`
+    remain, while `requested` and `source` are absent; the client notice test remains unchanged.
+- F13: `tests/test_terminal_cwd.py` — both generated POSIX hook strings use `%s` with `$PWD` as a
+    separate argument and OSC 9;9 payloads containing `100%done` and literal `%2F` round-trip
+    unchanged. Keep `test_a_file_url_is_percent_decoded` to protect external OSC 7 support.
 
 ### Manual verification
 
@@ -1157,21 +1212,35 @@ one that pins a source literal down to its trailing comma. `tests/test_api.py` n
     - **Before the fix:** no find bar at all — the file's own diff inherits the large file's
         verdict, even though the patch is four lines long.
     - **After the fix:** the find bar appears, marks both matches, and the counter steps.
-    - Then switch back to **Source** and confirm `Ctrl+F` is still unavailable there and the tier
-        notice still says so — the Source half must not change.
+    - Then switch back to **Source** and confirm the GridVibe Find box hides, the tier notice still
+        says Find is unavailable, and `Ctrl+F` is not claimed by the hidden control — the Source
+        half must not change.
 
 2. **F8.** Open a Markdown file, switch to the **Preview** tab, and while it says "Rendering
     preview…" modify the file on disk from another terminal (`echo x >> file.md`).
     - **Before the fix:** the panel can be left on "Rendering preview…" indefinitely.
-    - **After the fix:** it says the file changed and offers **Retry**, which loads the new
-        content. (If the timing is hard to hit, throttle DevTools → Network to *Slow 3G* first.)
+    - **After the fix:** it says the file changed and offers **Refresh**. Clicking it refreshes
+        Source first and then loads Preview from the same revision. (If the timing is hard to hit,
+        throttle DevTools → Network to *Slow 3G* first.)
 
-3. **F13.** Create `C:\Users\SasoPC\Desktop\Projects\gv 100%done` (or `/tmp/100%done` on a
-    remote host), `cd` into it from a terminal pane, then click **📁 ⇄ 💻**.
+3. **F13.** This is POSIX-only; PowerShell and cmd use a different hook and are expected to pass.
+    Confirm `terminal.shell_integration` is enabled, open a **new WSL pane**, then create and enter
+    the Windows folder through its WSL path:
+
+    ```bash
+    mkdir -p '/mnt/c/Users/SasoPC/Desktop/Projects/gv 100%done'
+    cd '/mnt/c/Users/SasoPC/Desktop/Projects/gv 100%done'
+    ```
+
+    Wait for the next prompt so the hook runs, then click **📁 ⇄ 💻**. The equivalent SSH case is
+    `mkdir -p '/tmp/gv 100%done' && cd '/tmp/gv 100%done'` in a Bash/zsh pane.
     - **Before the fix:** the explorer opens on the wrong directory, or the pane shows the
         "could not tell where the terminal was" notice.
-        ME: could not replicate the issue, could open on the gv 100%done with no problem, albe it its empty so i see directory is empty on preview
-    - **After the fix:** it opens on `gv 100%done`.
+    - **Why the first attempt passed:** opening `C:\...\gv 100%done` from PowerShell/cmd exercises
+        OSC 9;9, not the vulnerable POSIX `printf`; seeing **Directory is empty** means it opened
+        the correct empty folder.
+    - **After the fix:** WSL/SSH opens on `gv 100%done`. Repeat with a folder literally named
+        `literal%2Fname` and confirm it does not become a nested `literal/name` path.
 
 4. **F9 / F14.** No manual test — `make check` is the verification.
 
@@ -1190,14 +1259,19 @@ one that pins a source literal down to its trailing comma. `tests/test_api.py` n
 
     > **(fix) The Markdown preview says so when it gives up.** If the file changed in the moment
     > between GridVibe reading its text and rendering its preview, the panel was left showing
-    > "Rendering preview…" with nothing to click. It now says what happened and offers Retry.
+    > "Rendering preview…" with nothing to click. It now says what happened and offers Refresh,
+    > which reloads Source and Preview together.
 
     > **(fix) A folder with a `%` in its name no longer breaks directory tracking.** The sequence
-    > each terminal's prompt uses to report where it is treated a `%` in the path as a formatting
-    > instruction, so panes sitting in such a folder reported nothing usable — and the explorer
-    > opened somewhere else, or said it could not tell.
+    > a POSIX terminal's prompt uses to report where it is treated a `%` in the path as a
+    > formatting instruction, so Bash/zsh/WSL panes sitting in such a folder reported nothing
+    > usable — and the explorer opened somewhere else, or said it could not tell. PowerShell and
+    > Command Prompt used a different sequence and were unaffected.
 
-- **`README.md`** — the remaining audit §4 items, none of which depend on this stage's code:
+- **`README.md`** — F13's protocol correction plus the remaining audit §4 items:
+    - **Shell integration** (line ~230): GridVibe's own prompt hooks now use raw-path OSC 9;9 for
+        every supported shell. Externally produced, percent-encoded OSC 7 is still accepted. Keep
+        this distinction explicit so the README does not claim the POSIX hooks emit OSC 7.
     - **Line 274 is wrong today.** "**Both** JSON state files are written the same careful way…"
         — there are **three** durable stores through `web/state_files.py`: `runtime_state.json`,
         `saved_sessions.json`, **and `config.json`** (`web/config.py:211`). The Local Files table two
@@ -1214,6 +1288,80 @@ one that pins a source literal down to its trailing comma. `tests/test_api.py` n
         makes no claim either way, so add a line only if the changed feel is worth calling out.
 
 - **Guardrails** — none.
+
+### Status — landed 2026-08-23 ✅
+
+`make check` equivalent: **1981 tests OK** (1973 before the stage + 8 below; 9 platform skips),
+ruff clean. All five findings were re-checked against the code before implementing and all five
+held, including every correction this section had already recorded.
+
+**Two things the re-check added to the plan.**
+
+1. **F7 has a fourth boundary the plan did not name: the browsed listing.** A directory listing
+    renders its find control in the toolbar (`renderExplorerDirectorySearchControls()`) and has no
+    file header at all, so `[data-explorer-search="N"]` does not exist there. A sync owner that
+    answered "unavailable" from a missing shell would have taken `Ctrl+F` away from every browsed
+    listing in the app. `syncExplorerFindAvailability()` therefore computes the verdict **before**
+    it looks the shell up, and only toggles a shell it finds.
+2. **F13's new hook shape was verified against a real bash**, not only reasoned about. In
+    `/c/.../100%done`, the old format renders `…/1000one`; the new one renders the path intact.
+    The remote hook's whole line was run the same way, `literal%2Fname` included.
+
+**Code — as planned.**
+
+| Where | What landed |
+| --- | --- |
+| `explorer-viewer.js` (F7) | `explorerPaneAllowsFind(pane, view)` — `diff` always allowed, `source`/`preview` from the tier. `explorerFileOffersFind(pane, {hasGitDiff})` decides whether the shell is *rendered*. `syncExplorerFindAvailability(index, view)` is the one owner that hides/shows it, read by the header, `setExplorerFileView()`, `applyExplorerSearch()` and `focusExplorerSearch()`. |
+| `terminals.css` (F7) | `.explorer-editor-search[hidden]` **joined** to the existing `.explorer-line-wrap-btn[hidden]` rule — the shell carries `display: inline-flex`, which beats the UA `[hidden]` rule. |
+| `explorer-viewer.js` (F8) | `paintExplorerPreviewStale(index, preview)` replaces the silent `return null`. Its button runs `refreshExplorerOpenFileQuiet()`, whose `updateExplorerFileInPlace()` already re-requests Preview against the new revision — no new plumbing. |
+| `terminals.css` (F8) | `.explorer-preview-status` joined to the `.explorer-source-tier-notice` rule; one `.explorer-preview-refresh-btn` override so `.explorer-search-btn`'s fixed 28px square can hold a word. |
+| `web/api.py` (F9) | `cwd_probe` emits `{resolved, reason, directory}`. `requested`/`source` stay inside `_refresh_pane_cwd()`; all four `CWD_SOURCE_*` values kept. |
+| `web/terminal_cwd.py` (F13) | Both POSIX hooks are now `printf '\033]9;9;%s\033\\' "$PWD"`. `decode_osc7_target()` and its percent-decoding test are untouched. |
+
+**Tests — eight added in one new file, plus three extended cases.**
+
+| Test | Pre-fix failure |
+| --- | --- |
+| `test_explorer_find_availability.py` (8 cases, new — Node against the real viewer) | n/a — `explorerFileOffersFind` did not exist, and the predicate answered `false` for `diff` |
+| `test_explorer_scroll.py::test_a_declined_preview_says_so_and_offers_a_retry` | the panel's markup was empty and nothing was wired |
+| `…::test_the_preview_retry_refreshes_the_file_not_the_preview` | n/a — there was no retry |
+| `…::test_a_failed_preview_retry_leaves_the_affordance_standing` | n/a — there was no retry |
+| `test_terminal_cwd.py::test_the_posix_hooks_never_expand_the_path_into_a_printf_format` | `$PWD` was inside the format string |
+| `…::test_a_percent_in_the_path_survives_the_posix_hook` + 3 more round trips | the hooks emitted OSC 7 |
+| `test_api.py` — the failed-probe route case | `requested`/`source` were present |
+
+The new file drives the **real** `setExplorerFileView()` Source → Diff → Preview against a DOM
+stub and observes the shell hidden → visible → hidden, `focusExplorerSearch()` false → true →
+false with exactly one focus call, and the retained query counted only on Diff. The existing
+`test_a_preview_describing_different_bytes_is_declined` assertions are unchanged: the response is
+still never painted and never refetched from the loader.
+
+**F14 — fifteen assertions removed, two narrowed, and why.** Every removal is backed by an
+executed test elsewhere: the search-range/buffer pair by
+`test_explorer_source_frame.py::test_search_ranges_never_outlive_the_buffer_they_address`, the
+highlight render branch by that file's token-map cases, the worker helpers and the large-diff tier
+by `test_explorer_workers.py`, and `paintExplorerPreview` by `test_explorer_scroll.py`'s paint
+counts. `HIGHLIGHT_WORKER_MIN_CHARS = 64 * 1024` was **kept** — it is a documented threshold with
+no executable seam, and a named constant is fair game under the working rules. Kept for the same
+reason: `syncExplorerTabGitFromRepo(index, data);` (a cross-file call boundary with no Node
+harness) and Stage 4's three `terminals.js` disposal call names. The trailing-comma assertion the
+plan flagged (`assertIn("sessionId,")`) is gone; the call boundary beside it stands.
+
+**One pre-existing assertion changed.** `test_api.py::test_terminals_page_find_bar_follows_the_
+incoming_file_tier` asserted `const findAvailable = explorerPaneAllowsFind(pane);`. It now asserts
+`explorerFileOffersFind(pane,` and carries a note that *which panel* Find is offered on is not a
+header decision. Its ordering contract (tier applied → decided → rendered) is unchanged.
+
+**Documentation.** Three CHANGELOG entries landed, the Find one extended to say that `Ctrl+F` now
+falls through to the browser on the panels that cannot answer. README: the shell-integration
+protocol sentence rewritten (GridVibe hooks emit OSC 9;9; external OSC 7 still accepted and why),
+"Both JSON state files" → the three named files, the Git row given the pin-cleared-on-terminal
+case and the Stage All / Unstage All no-confirm rule, and the File Explorer section given the
+could-not-tell-where-the-terminal-was bar. The optional Search-row line was **not** added — the
+row makes no claim either way, which is what the plan said to weigh. No guardrail changes.
+
+**Manual verification: pending.** The four steps above have not been run yet; F9 and F14 have no
+manual step by design.
 
 ---
 
@@ -1239,4 +1387,4 @@ build short enough to get away with.
 | 2 · Large-content fidelity ✅ | F3; F10 non-issue | Medium | 1 entry | — | 1 clause |
 | 3 · Underlay settle repaint ✅ | F6; F5 deferred | Medium | 1 entry | — | 1 clause extended |
 | 4 · Work that outlives its pane ✅ | F11, F12, F4 | Low-medium | 2 entries | — | 1 clause corrected |
-| 5 · Loose ends & docs | F7, F8, F9, F13, F14, §4 | Low | 3 entries | 5 edits | — |
+| 5 · Loose ends & docs ✅ | F7, F8, F9, F13, F14, §4 | Low-medium | 3 entries | 5 edits | — |
