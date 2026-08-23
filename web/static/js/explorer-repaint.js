@@ -249,6 +249,51 @@
         return { mode: 'splice', start: prefix, removed, inserted };
     }
 
+    /* The settle pass's decision: the underlay's rows already show this draft,
+       so all a real Highlight.js answer can change is their *colour*.
+
+       `previousKeys` describes the rows currently in the DOM — one entry per
+       row, in row order, `null` where the row was painted by the per-line
+       fallback lexer and its real colour is therefore unknown. `nextKeys`
+       describes what the answer would paint. For an ordinary keystroke
+       Highlight.js re-tokenizes the whole document and emits byte-identical
+       runs for every line but the edited one, so the delta is the one or two
+       rows the splice inserted.
+
+       `full` for a delta that covers every row, because repainting m cells one
+       at a time is only worth it against one parse of the whole document — at
+       m = every row the bulk write is strictly cheaper. Above the
+       document-scaled ceiling (`repaintCeiling`, shared with the Source view's
+       decoration repaint) the same trade tips the same way: typing a `/*` at
+       the top recolours the tail and rebuilds in one pass, exactly as it does
+       today. Anything that cannot be compared — a missing or wrong-length key
+       array — is `full` as well, which is the renderer the caller already had. */
+    function highlightRepaintPlan(input) {
+        const options = input || {};
+        const previous = options.previousKeys;
+        const next = options.nextKeys;
+        const rows = Number(options.rowCount);
+        if (!Array.isArray(previous) || !Array.isArray(next)
+            || !Number.isFinite(rows) || rows <= 0
+            || previous.length !== rows || next.length !== rows) {
+            return { mode: 'full', lines: [] };
+        }
+        const lines = [];
+        for (let at = 0; at < rows; at += 1) {
+            const before = previous[at];
+            if (before === null || before === undefined || before !== next[at]) {
+                lines.push(at + 1);
+            }
+        }
+        if (!lines.length) {
+            return { mode: 'skip', lines: [] };
+        }
+        if (lines.length >= rows || lines.length > repaintCeiling(options)) {
+            return { mode: 'full', lines: [] };
+        }
+        return { mode: 'repaint', lines };
+    }
+
     /* How a full build is paced. Above the floor the rows are emitted in
        frame-sized slices so the file fills in from the top while the rest of
        the app keeps painting; below it the build stays one synchronous pass,
@@ -279,6 +324,7 @@
         decorationDelta,
         sourceRenderPlan,
         lineSplicePlan,
+        highlightRepaintPlan,
         chunkPlan
     };
 }));

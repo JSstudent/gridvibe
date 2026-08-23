@@ -3759,8 +3759,24 @@
         );
     }
 
-    function explorerSourceLineRecords(content) {
+    /* `cache` is an optional caller-owned single slot, for content that has no
+       business in the page-wide LRU. The in-place editor's draft is the case:
+       it moves on every keystroke so it never *hits*, but it did `unshift` —
+       and with one explorer pane open the limit is two slots, so every typing
+       frame evicted both the previous draft and that pane's own file records.
+       A pane-local slot keeps the draft's records for the two passes that want
+       them (the splice frame and the settle frame) and leaves the shared cache
+       to the panes that are reading files. */
+    function explorerSourceLineRecords(content, cache) {
         const source = String(content || '');
+        if (cache) {
+            if (cache.records && cache.source === source) {
+                return cache.records;
+            }
+            cache.source = source;
+            cache.records = explorerBuildSourceLineRecords(source);
+            return cache.records;
+        }
         for (let at = 0; at < _explorerLineRecordCache.length; at += 1) {
             if (_explorerLineRecordCache[at].source === source) {
                 return _explorerLineRecordCache[at].records;
@@ -3875,7 +3891,7 @@
        row built in bulk. */
     function explorerSourceRowModel(content, language, collapsedLines = new Set(), highlightedLines, options = {}) {
         const normalizedLanguage = normalizeExplorerLanguage(language);
-        const records = explorerSourceLineRecords(content);
+        const records = explorerSourceLineRecords(content, options && options.recordCache);
         const languageClass = explorerLanguageClass(language);
         const codeClass = languageClass ? ` language-${languageClass}` : '';
         const markdownDocument = normalizedLanguage === 'markdown';

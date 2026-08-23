@@ -394,6 +394,51 @@ class RepaintPolicyTestCase(NodeHarnessMixin, unittest.TestCase):
         self.assertEqual(plans["firstPaint"]["mode"], "full")
         self.assertEqual(plans["pastedWide"]["mode"], "full")
 
+    def test_a_settle_repaints_only_the_rows_whose_colour_moved(self):
+        """The settle pass establishes that the draft has not moved since the
+        rows were painted, so the only thing a real Highlight.js answer can
+        change is their colour. For an ordinary keystroke that is the one row
+        the splice inserted; for a structure-changing edit it is the tail, and
+        one bulk write is then the cheaper renderer.
+        """
+        plans = self._policy(
+            "const keys = n => Array.from({ length: n }, (_, i) => 'k' + i);"
+            "const base = keys(1000);"
+            "const oneMoved = base.slice(); oneMoved[41] = 'other';"
+            "const twoUnknown = base.slice(); twoUnknown[7] = null; twoUnknown[8] = null;"
+            "const tail = base.map((key, i) => (i >= 200 ? 'comment' : key));"
+            "const plan = (previous, next, extra) => repaint.highlightRepaintPlan("
+            "  Object.assign({ previousKeys: previous, nextKeys: next, rowCount: next.length }, extra)"
+            ");"
+            "emit({"
+            "  identical: plan(base, base.slice()),"
+            "  oneLine: plan(base, oneMoved),"
+            "  unknownRows: plan(twoUnknown, base),"
+            "  structural: plan(base, tail),"
+            "  everyRow: plan(keys(4), ['a', 'b', 'c', 'd']),"
+            "  noPreviousKeys: plan(null, base),"
+            "  wrongLength: plan(keys(999), base)"
+            "});"
+        )
+
+        # Nothing to paint that is not already on screen.
+        self.assertEqual(plans["identical"]["mode"], "skip")
+        # The keystroke's row, and no other.
+        self.assertEqual(plans["oneLine"]["mode"], "repaint")
+        self.assertEqual(plans["oneLine"]["lines"], [42])
+        # A row the splice rebuilt carries the unknown sentinel and repaints
+        # whatever its run shape looks like — it is standing in fallback colour.
+        self.assertEqual(plans["unknownRows"]["mode"], "repaint")
+        self.assertEqual(plans["unknownRows"]["lines"], [8, 9])
+        # Typing `/*` at the top recolours the tail: past the document-scaled
+        # ceiling one bulk write beats hundreds of per-row parses.
+        self.assertEqual(plans["structural"]["mode"], "full")
+        # A delta covering every row is the same trade at its limit.
+        self.assertEqual(plans["everyRow"]["mode"], "full")
+        # Nothing comparable: the caller falls back to the renderer it had.
+        self.assertEqual(plans["noPreviousKeys"]["mode"], "full")
+        self.assertEqual(plans["wrongLength"]["mode"], "full")
+
     def test_only_a_document_worth_chunking_is_chunked(self):
         plans = self._policy(
             "emit({"
@@ -1027,7 +1072,8 @@ class ChunkedSourceBuildTestCase(NodeHarnessMixin, unittest.TestCase):
 class EditUnderlayRepaintTestCase(NodeHarnessMixin, unittest.TestCase):
     """The editor's underlay: replace the rows the keystroke moved."""
 
-    def _type(self, script: str):
+    def _type(self, script: str, *, language: str = "python",
+              lines: str = "['one', 'two', 'three', 'four']"):
         return self._run_node(
             DOM_STUB
             + """
@@ -1054,27 +1100,59 @@ class EditUnderlayRepaintTestCase(NodeHarnessMixin, unittest.TestCase):
             sandbox.EXPLORER_PLAIN_PREVIEW_THRESHOLD = 2 * 1024 * 1024;
 
             const NL = String.fromCharCode(10);
-            const draft = ['one', 'two', 'three', 'four'].join(NL);
+            const draft = LINES.join(NL);
             const pane = {
                 _explorerFileContent: draft,
-                _explorerFileLanguage: 'python',
+                _explorerFileLanguage: LANGUAGE,
                 _explorerFilePlain: false,
                 _explorerEdit: { draft }
             };
             sandbox.terminals[0] = pane;
-            // The underlay as the mount left it, plus the line list the mount
-            // records so the first keystroke is already a splice.
-            underlay.innerHTML = sandbox.explorerEditUnderlayHtml(draft, 'python', null);
-            pane._explorerEditOverlayDraft = draft;
-            pane._explorerEditOverlayLines = sandbox.explorerEditUnderlayLines(draft);
+
+            let findRepaints = 0;
+            sandbox.window.repaintExplorerEditFind = () => { findRepaints += 1; };
+
+            /* One run per line, so a per-line class is expressible and the run
+               key is `length:className`. `styled` names the class for a line. */
+            const runsFor = (text, styled) => {
+                const map = new Map();
+                let offset = 0;
+                text.split(NL).forEach((line, at) => {
+                    map.set(at + 1, [{
+                        className: styled ? (styled(at + 1) || '') : '',
+                        text: line,
+                        start: offset
+                    }]);
+                    offset += line.length + 1;
+                });
+                return map;
+            };
+
+            /* The underlay as mountExplorerEditOverlay() leaves it: the rows,
+               the line list a splice compares against, and the paint keys
+               saying what those rows are actually coloured with. */
+            const mount = runs => {
+                const current = String(pane._explorerEdit.draft);
+                const model = sandbox.explorerSourceRowModel(
+                    current, LANGUAGE, new Set(), runs, { foldControls: false }
+                );
+                underlay.innerHTML = sandbox.explorerEditUnderlayRowsHtml(model);
+                pane._explorerEditOverlayDraft = current;
+                pane._explorerEditOverlayLines = model.records.map(record => record.text);
+                pane._explorerEditUnderlayPaintKeys =
+                    sandbox.explorerEditUnderlayPaintKeys(model);
+            };
+            mount(null);
 
             let tokenized = 0;
             sandbox.explorerHighlightDocumentLines = () => { tokenized += 1; return null; };
             const rowIds = () => underlay.block.rows.map(row => row.nodeId);
+            const cellWrites = () => underlay.block.rows.map(row => row.cell.writes);
+            const cellText = () => underlay.block.rows.map(row => row.cell.innerHTML);
             const numbers = () => underlay.block.rows.map(row => [
                 row.dataset.explorerLine, row.firstElementChild.textContent
             ]);
-            """
+            """.replace("LANGUAGE", json.dumps(language)).replace("LINES", lines)
             + script,
             str(REPAINT_JS),
             str(VIEWER_JS),
@@ -1147,6 +1225,202 @@ class EditUnderlayRepaintTestCase(NodeHarnessMixin, unittest.TestCase):
         self.assertEqual(result["tokenized"], 1)
         # A full paint is the settled state; nothing is left pending behind it.
         self.assertFalse(result["settleArmed"])
+
+    def test_a_settle_replaces_only_the_code_cells_whose_colour_moved(self):
+        """The settle pass has already established that the draft has not moved
+        since the rows were painted, so the row set is identical and the only
+        thing the worker's answer changes is colour. Rewriting the whole
+        underlay to say that was the last Source surface still rebuilding where
+        it could repaint — and on a 15,000-line file it is a whole-document row
+        build and an innerHTML parse, arriving about a second after the
+        keystroke that asked for it.
+        """
+        result = self._type(
+            "mount(runsFor(draft, () => ''));"
+            "const mountedWrites = underlay.writes;"
+            "const next = ['one', 'twoX', 'three', 'four'].join(NL);"
+            "pane._explorerEdit.draft = next;"
+            "sandbox.paintExplorerEditUnderlay(0);"
+            "const spliced = rowIds();"
+            "const findsAfterSplice = findRepaints;"
+            "const writesAfterSplice = cellWrites();"
+            "sandbox.paintExplorerEditUnderlay(0, {"
+            "  full: true, runs: runsFor(next, line => (line === 2 ? 'hljs-string' : ''))"
+            "});"
+            "console.log(JSON.stringify({"
+            "  underlayWrites: underlay.writes, mountedWrites,"
+            "  sameRows: rowIds().every((id, at) => id === spliced[at]),"
+            "  writeDelta: cellWrites().map((count, at) => count - writesAfterSplice[at]),"
+            "  second: cellText()[1],"
+            "  findsAfterSplice, findRepaints"
+            "}));"
+        )
+
+        # No whole-underlay write beyond the two mounts.
+        self.assertEqual(result["underlayWrites"], result["mountedWrites"])
+        # Every row is the same node it was, so the reader's selection, the
+        # change marks and their marker buttons survive the settle.
+        self.assertTrue(result["sameRows"])
+        self.assertEqual(result["writeDelta"], [0, 1, 0, 0])
+        self.assertIn("hljs-string", result["second"])
+        # A replaced cell detaches the Ranges the find had on it, so the find
+        # is re-derived exactly as it is after a full paint.
+        self.assertGreater(result["findRepaints"], result["findsAfterSplice"])
+
+    def test_an_edit_whose_run_shape_did_not_move_still_repaints_its_row(self):
+        """The previous side of the comparison is what is *painted*, not the
+        previous draft's runs. A splice paints its rebuilt rows through the
+        per-line fallback lexer and leaves the rest of the Highlight.js DOM
+        standing, so the surface is a hybrid — and replacing one identifier
+        character with another leaves the run shape identical while the row on
+        screen is still in its temporary fallback markup.
+        """
+        result = self._type(
+            "mount(runsFor(draft, line => (line === 2 ? 'hljs-string' : '')));"
+            "const mountedWrites = underlay.writes;"
+            "const next = ['one', 'twx', 'three', 'four'].join(NL);"
+            "pane._explorerEdit.draft = next;"
+            "sandbox.paintExplorerEditUnderlay(0);"
+            "const afterSplice = cellText()[1];"
+            "const writesAfterSplice = cellWrites();"
+            "sandbox.paintExplorerEditUnderlay(0, {"
+            "  full: true, runs: runsFor(next, line => (line === 2 ? 'hljs-string' : ''))"
+            "});"
+            "console.log(JSON.stringify({"
+            "  underlayWrites: underlay.writes, mountedWrites, afterSplice,"
+            "  writeDelta: cellWrites().map((count, at) => count - writesAfterSplice[at]),"
+            "  second: cellText()[1]"
+            "}));"
+        )
+
+        # 'two' and 'twx' are both one three-character string run, so a
+        # run-shape comparison alone would call this row unchanged.
+        self.assertNotIn("hljs-string", result["afterSplice"])
+        self.assertEqual(result["writeDelta"], [0, 1, 0, 0])
+        self.assertIn("hljs-string", result["second"])
+        self.assertIn("twx", result["second"])
+        self.assertEqual(result["underlayWrites"], result["mountedWrites"])
+
+    def test_an_inserted_line_shifts_the_preserved_keys_with_their_nodes(self):
+        """A splice moves the suffix's nodes down a line. Its keys move with
+        them, or every row below an Enter would look changed against the line
+        numbers it used to hold and the settle would rebuild the document.
+        """
+        result = self._type(
+            "mount(runsFor(draft, line => (line === 3 ? 'hljs-title' : '')));"
+            "const mountedWrites = underlay.writes;"
+            "const next = ['one', 'tw', 'o', 'three', 'four'].join(NL);"
+            "pane._explorerEdit.draft = next;"
+            "sandbox.paintExplorerEditUnderlay(0);"
+            "const spliced = rowIds();"
+            "const writesAfterSplice = cellWrites();"
+            "sandbox.paintExplorerEditUnderlay(0, {"
+            "  full: true, runs: runsFor(next, line => (line === 4 ? 'hljs-title' : ''))"
+            "});"
+            "console.log(JSON.stringify({"
+            "  underlayWrites: underlay.writes, mountedWrites,"
+            "  sameRows: rowIds().every((id, at) => id === spliced[at]),"
+            "  writeDelta: cellWrites().map((count, at) => count - writesAfterSplice[at]),"
+            "  fourth: cellText()[3], numbers: numbers()"
+            "}));"
+        )
+
+        self.assertEqual(result["underlayWrites"], result["mountedWrites"])
+        self.assertTrue(result["sameRows"])
+        # Only the two rows the splice built. 'three' kept its node, its
+        # colour and — one line lower — its key.
+        self.assertEqual(result["writeDelta"], [0, 1, 1, 0, 0])
+        self.assertIn("hljs-title", result["fourth"])
+        self.assertEqual(
+            result["numbers"],
+            [["1", "1"], ["2", "2"], ["3", "3"], ["4", "4"], ["5", "5"]],
+        )
+
+    def test_a_markdown_row_repaints_when_only_its_heading_level_moved(self):
+        """explorerSourceRowCodeHtml() wraps a heading row, so a run key alone
+        does not describe the cell's markup. Opening a fence above a heading
+        takes its heading level away without touching a character of its text.
+        """
+        result = self._type(
+            "mount(runsFor(draft, () => ''));"
+            "const beforeSettle = cellText();"
+            "const mountedWrites = underlay.writes;"
+            "const next = ['```', 'alpha', '# beta', 'gamma'].join(NL);"
+            "pane._explorerEdit.draft = next;"
+            "sandbox.paintExplorerEditUnderlay(0);"
+            "const spliced = rowIds();"
+            "const writesAfterSplice = cellWrites();"
+            "sandbox.paintExplorerEditUnderlay(0, { full: true, runs: runsFor(next, () => '') });"
+            "console.log(JSON.stringify({"
+            "  underlayWrites: underlay.writes, mountedWrites,"
+            "  sameRows: rowIds().every((id, at) => id === spliced[at]),"
+            "  writeDelta: cellWrites().map((count, at) => count - writesAfterSplice[at]),"
+            "  headingBefore: beforeSettle[1], headingAfter: cellText()[2]"
+            "}));",
+            language="markdown",
+            lines="['alpha', '# beta', 'gamma']",
+        )
+
+        self.assertIn("explorer-md-source-heading", result["headingBefore"])
+        self.assertEqual(result["underlayWrites"], result["mountedWrites"])
+        self.assertTrue(result["sameRows"])
+        # The fence row the splice built, and the heading row that stopped
+        # being one. 'alpha' and 'gamma' are untouched.
+        self.assertEqual(result["writeDelta"], [1, 0, 1, 0])
+        self.assertNotIn("explorer-md-source-heading", result["headingAfter"])
+        self.assertIn("# beta", result["headingAfter"])
+
+    def test_a_structure_changing_edit_still_rebuilds_the_whole_underlay(self):
+        """Typing a `/*` at the top recolours the tail. Past the ceiling one
+        bulk write beats a per-row parse for every line in the file, and a
+        partial repaint here would leave the document half-commented.
+        """
+        result = self._type(
+            "mount(runsFor(draft, () => ''));"
+            "const mountedWrites = underlay.writes;"
+            "const next = ['one', '/*twoX', 'three', 'four'].join(NL);"
+            "pane._explorerEdit.draft = next;"
+            "sandbox.paintExplorerEditUnderlay(0);"
+            "sandbox.paintExplorerEditUnderlay(0, {"
+            "  full: true, runs: runsFor(next, () => 'hljs-comment')"
+            "});"
+            "console.log(JSON.stringify({"
+            "  underlayWrites: underlay.writes, mountedWrites, tokenized,"
+            "  last: cellText()[3], settleArmed: Boolean(pane._explorerEditOverlaySettle)"
+            "}));"
+        )
+
+        self.assertEqual(result["underlayWrites"], result["mountedWrites"] + 1)
+        self.assertIn("hljs-comment", result["last"])
+        # The answer was handed in; nothing was tokenized on this thread.
+        self.assertEqual(result["tokenized"], 0)
+        self.assertFalse(result["settleArmed"])
+
+    def test_typing_does_not_evict_another_panes_line_records(self):
+        """The draft moves on every keystroke, so its records never hit the
+        page-wide LRU — but they did `unshift`, and with one explorer pane open
+        the limit is two slots. Every typing frame evicted the previous draft
+        *and* the pane's own file records.
+        """
+        result = self._type(
+            "pane._explorerMode = 'file';"
+            "sandbox.terminals[1] = { _explorerMode: 'file' };"
+            "const other = ['a', 'b', 'c'].join(NL);"
+            "const otherRecords = sandbox.explorerSourceLineRecords(other);"
+            "for (let at = 0; at < 12; at += 1) {"
+            "  pane._explorerEdit.draft = ['one', 'two' + at, 'three', 'four'].join(NL);"
+            "  sandbox.paintExplorerEditUnderlay(0);"
+            "}"
+            "console.log(JSON.stringify({"
+            "  kept: sandbox.explorerSourceLineRecords(other) === otherRecords,"
+            "  rows: underlay.block.rows.length,"
+            "  last: cellText()[1]"
+            "}));"
+        )
+
+        self.assertTrue(result["kept"])
+        self.assertEqual(result["rows"], 4)
+        self.assertIn("two11", result["last"])
 
     def test_the_settle_pass_uses_the_worker_for_an_eligible_draft(self):
         result = self._type(

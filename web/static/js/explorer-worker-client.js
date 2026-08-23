@@ -285,6 +285,30 @@
             return Number.isInteger(at) && at >= 1 && at <= this.size;
         }
 
+        /* This line's runs as a value that compares across two answers, read
+           straight off the typed arrays: no run objects, no substrings and
+           nothing added to the cache, so `materialized` is unmoved and the
+           one-line-at-a-time contract survives being asked for every key.
+
+           The class *name* goes in, never the numeric id.
+           compactHighlightMarkup() assigns ids in first-encounter order, so an
+           edit that changes which class appears first renumbers them all: two
+           answers may give the same name different ids, or the same id
+           different names. */
+        lineKey(line) {
+            if (!this.has(line)) {
+                return '';
+            }
+            const at = Number(line);
+            const from = Number(this._lineRunStarts[at - 1]);
+            const to = Number(this._lineRunStarts[at]);
+            let key = '';
+            for (let run = from; run < to; run += 1) {
+                key += `${Number(this._lengths[run])}:${this._classes[Number(this._classIds[run])]}|`;
+            }
+            return key;
+        }
+
         get(line) {
             if (!this.has(line)) {
                 return undefined;

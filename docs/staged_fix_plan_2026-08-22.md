@@ -459,7 +459,7 @@ unchanged.
 
 ---
 
-## Stage 3 — What typing in a large file costs
+## Stage 3 — What typing in a large file costs ✅
 
 **Findings:** F6 (Medium); F5 (Medium — verified real, **deferred**, see below)
 **Risk:** medium. Frontend-only, bounded by the presentation tier, and directly felt by the
@@ -529,9 +529,9 @@ repaint ceiling, and the plan correctly falls back to today's full rebuild.
 | Where | Change |
 | --- | --- |
 | `explorer-repaint.js` | Add `highlightRepaintPlan({ previousKeys, nextKeys, rowCount, maxRepaintRows })` → `{ mode: 'skip' \| 'repaint' \| 'full', lines }`, reusing the existing `repaintCeiling()` so the ceiling scales with the document exactly as `sourceRenderPlan()`'s does. DOM-free and Node-tested, like everything else in this module. |
-| `explorer-worker-client.js` | Expose a per-line run key off `HighlightLines` computed from the **decoded typed arrays** — `lineRunStarts[line] … lineRunStarts[line + 1]` indexing `classIds` and `lengths` — materializing no run objects and no substrings. Materializing 15k lines to compare them would cost what this stage is removing; the CLAUDE.md contract that results are materialized one line at a time must survive. |
+| `explorer-worker-client.js` | Expose a per-line run key off `HighlightLines` computed from the **decoded typed arrays** — `lineRunStarts[line] … lineRunStarts[line + 1]` indexing `classIds` and `lengths` — materializing no run objects and no substrings. A numeric `classId` is local to one worker answer because `compactHighlightMarkup()` assigns ids in first-encounter order, so it is **not comparable across two drafts**: the key must use `classes[classIds[run]]` plus the run length (or an equivalently canonical class-name representation), never the id itself. Materializing 15k lines to compare them would cost what this stage is removing; the CLAUDE.md contract that results are materialized one line at a time must survive. |
 | `explorer-edit-overlay.js` `paintExplorerEditUnderlay()` | On the `full: true, runs` path, when the row set is unchanged, replace only the `<code>` cell of each line the plan names, through the existing `explorerSourceRowCodeHtml()` primitive, instead of writing `underlay.innerHTML`. Keep the whole-underlay write for `mode: 'full'` and for every path that is not a settle (mount, a failed splice, a wide paste). |
-| `explorer-edit-overlay.js` | Hold the run map the rows are **currently painted with** on the pane (`pane._explorerEditUnderlayRuns`). Seed it at mount from `explorerEditMountRuns()` (either the viewer's cached runs, or `null` for the fallback-coloured start), set it on every full paint, and clear it in `teardownExplorerEditOverlay()` beside the other overlay slots. |
+| `explorer-edit-overlay.js` | Hold a paint-key array aligned with the rows **currently in the DOM** on the pane (`pane._explorerEditUnderlayPaintKeys`), not the previous draft's run map. Seed it at mount from the runs actually painted (a normal `Map` is already materialized; `HighlightLines` uses the compact key above), or with an unknown/fallback sentinel when no real runs were painted. Apply every successful `lineSplicePlan()` to this array as well as the DOM: preserve the prefix and shifted suffix, and insert the sentinel for every rebuilt row. A failed splice or full fallback paint makes every row unknown. Unknown rows always repaint at settle; after a successful partial or full settle, publish the complete next-key array. Clear it in `teardownExplorerEditOverlay()` beside the other overlay slots. This is what represents the real hybrid surface — fallback-coloured rows beside preserved Highlight.js rows — and prevents a same-length edit or an inserted line being skipped merely because its old and new run shapes match. |
 | `explorer-edit-overlay.js` | Cache the row model between the splice frame and the settle frame, keyed on draft identity. Today `explorerSourceRowModel()` runs twice per edit over the same draft — once for the splice, once for the settle — for 60k object allocations where 30k would do. |
 | `explorer-viewer.js` `explorerSourceLineRecords()` | Give the editor a pane-local cache slot instead of the shared LRU, so transient drafts stop evicting the read-only panes' records. Simplest shape: an optional `cache` argument, with the overlay passing `pane._explorerEditRecordCache`. Worth doing on its own merits — it is a cross-pane defect independent of everything above. |
 | `explorer-edit-overlay.js` | Drop `model.records.map(record => record.text)`: hold the record objects and have `lineSplicePlan()` compare `record.text` in place. |
@@ -542,18 +542,37 @@ had painted onto it, while ranges on rows the repaint did *not* touch survive. R
 of them is one scan of the draft and is what the tail of `paintExplorerEditUnderlay()` already
 does — do not "optimise" it into a partial re-derivation to match the partial paint.
 
-#### Why comparing colours cheaply is legal here
+#### What a paint key is allowed to compare
+
+The key for a row is the canonical `(className, length)` sequence from its runs **plus that
+row's Markdown `headingLevel`**. `explorerSourceRowCodeHtml()` uses the heading level to add the
+`explorer-md-source-heading-*` wrapper even though the underlay disables fold controls, so a run
+key alone does not describe the code-cell HTML. The numeric worker `classId` is also deliberately
+absent: two answers may assign different ids to the same class name, or the same id to different
+class names, when an earlier edit changes first-encounter order.
+
+The previous side of the comparison is `pane._explorerEditUnderlayPaintKeys`, not a run map for
+the previous draft. A splice paints its inserted rows through the fallback lexer and leaves the
+rest of the old Highlight.js DOM standing; it therefore inserts unknown keys for exactly those
+new nodes while shifting the preserved suffix's keys with their nodes. This preserves what the
+screen actually contains. In particular, replacing one identifier character with another can
+leave the Highlight.js class/length shape unchanged, but the edited row is still unknown and so
+must be repainted out of its temporary fallback markup.
+
+#### Why ignoring absolute offsets is legal here
 
 Decoded runs carry **absolute** content offsets (`decodeHighlightResult()` validates
 `start + length > text.length`, and `explorerRenderHighlightedRuns()` passes `run.start` into
 `explorerCodeSpan()`). Inserting one character therefore shifts every offset below it, and a
 naive comparison would report that every line changed.
 
-It does not matter, because **the underlay always renders with empty search ranges** —
+It does not matter for a preserved row, because **the underlay always renders with empty search ranges** —
 `explorerEditUnderlayHtml()` passes `[]`, `spliceExplorerEditUnderlayRows()` passes `[]`, and
 the find paints through the CSS Custom Highlight API rather than into the markup. With no
-ranges to intersect, `run.start` never reaches the output: a row's code cell is a pure function
-of its text and its runs' `(className, length)` sequence, which is shift-invariant.
+ranges to intersect, `run.start` never reaches the output. A preserved row's text has not moved
+with respect to its own DOM node, so its settle output is determined by that text, its canonical
+`(className, length)` sequence and its Markdown heading level; the last two are the paint key.
+Rows whose text was rebuilt by the splice carry the unknown sentinel and repaint unconditionally.
 
 That is the whole precondition, and it is narrow — **comment it where the key is built.** The
 read-only Source view *does* render search ranges into its markup, so the same key would be
@@ -574,11 +593,14 @@ end-of-file run hitched identically with the loop effectively switched off.
 
 Recording what the review found, so none of it is re-derived wrongly later:
 
-- **The proposed CSS-counter fix is legal but unmeasured.** Contiguity holds:
-    `explorerSourceRowHtml()` forces `headingLevel` to `0` when `foldControls === false`, so
-    `allowMarkdownCollapse` is false and the underlay never omits a row. But inserting a row
-    invalidates the counter for every following sibling, so the O(n) moves from JS into style
-    recalc rather than disappearing. Profile it before choosing it.
+- **The proposed CSS-counter fix is legal but unmeasured.** Contiguity holds because
+    `explorerSourceRowModel()` computes `allowMarkdownCollapse` as
+    `markdownDocument && foldControls`; the underlay passes `foldControls: false`, so it never
+    omits a row. The row's `headingLevel` is still preserved for the code-cell wrapper — only the
+    fold control passed to `explorerSourceLineNumberHtml()` is suppressed — which is why Stage
+    3's paint key includes it. But inserting a row invalidates the counter for every following
+    sibling, so the O(n) moves from JS into style recalc rather than disappearing. Profile it
+    before choosing it.
 - **Two of the three named call sites are wrong.** Only `explorer-edit-find.js:102`
     (`explorerEditSpanRanges`, whose `root` is `explorerEditUnderlayFor(...)`) reads
     `data-explorer-line` inside the underlay. `:440` is `explorerSourceSelectionCarry()` and
@@ -623,9 +645,19 @@ change.
 - `tests/test_explorer_repaint.py`: `highlightRepaintPlan()` answers `skip` for identical run
     keys, `repaint` with exactly the changed lines for a one-line colour change, and `full` once
     the delta passes the document-scaled ceiling.
+- `tests/test_explorer_workers.py`: two `HighlightLines` answers whose class dictionaries assign
+    different numeric ids to the same class names produce equal per-line run keys; the same id
+    naming different classes produces different keys. Asking for the keys does not increase
+    `materialized`, so the lazy per-line-run contract remains true.
 - A Node overlay test: a settle whose runs differ on one line replaces exactly one `<code>`
     cell and leaves every other row node identical (compare node identity, as the existing
     splice tests do), and still re-derives the find.
+- A Node overlay test for the hybrid surface: a same-length edit whose old and new Highlight.js
+    run shapes are identical still repaints the edited row because its splice inserted an
+    unknown key; an inserted line shifts the preserved suffix's keys with its DOM nodes rather
+    than comparing those nodes against the previous line numbers.
+- A Markdown case where only a row's `headingLevel` changes repaints that code cell even when its
+    Highlight.js run key does not.
 - A settle test for the structure-changing case: runs differing across the tail fall back to the
     whole-underlay write.
 - A cache test: painting the underlay N times does not evict a second pane's line records.
@@ -699,6 +731,78 @@ handful of code cells are written.
     reaches the output) as a code comment where the key is built — it is a local invariant, and a
     dangerous one to generalise to the read-only Source view.
 
+### Status — landed 2026-08-23 ✅
+
+`make check` equivalent: **1960 tests OK** (1952 before the stage + 8 below; 9 platform skips),
+ruff clean. Every claim in the plan was re-checked against the code before implementing, and all
+of them held: `paintExplorerEditUnderlay()` really did build a whole row model per animation
+frame and `.map()` a second whole-document array; the shared line-record LRU really is
+`min(max(panes, 1) × 2, 8)`, so **2 slots** with one explorer pane open; `explorerMarkedEscHtml()`
+really does return `escHtml(value)` outright on empty ranges, which is the precondition the
+shift-invariant key rests on; `explorerSourceRowCodeHtml()` really does add the heading wrapper
+independently of `foldControls`; and `explorer-worker-core.js` really does assign class ids in
+first-encounter order, so the key uses class **names**.
+
+**Code — as planned, minus two items (below).**
+
+| Where | What landed |
+| --- | --- |
+| `explorer-worker-client.js` | `HighlightLines.lineKey(line)` — the `(length, className)` sequence read straight off the typed arrays. No run objects, no substrings, nothing added to the cache, so `materialized` is unmoved. |
+| `explorer-repaint.js` | `highlightRepaintPlan({ previousKeys, nextKeys, rowCount, maxRepaintRows })` → `skip` / `repaint` / `full`, reusing `repaintCeiling()`. It also answers `full` when the delta covers **every** row: m per-row parses can never beat one bulk write at m = all, and that rule is what keeps the small-file settle behaving exactly as before. |
+| `explorer-edit-overlay.js` | `pane._explorerEditUnderlayPaintKeys` — seeded at mount from the runs actually painted, spliced with the rows (unknown sentinel for what the splice built, preserved keys shifted with their nodes), republished after every paint, cleared on teardown. `repaintExplorerEditUnderlayColours()` replaces only the named `<code>` cells, through the existing `explorerSourceRowCodeHtml()`. |
+| `explorer-edit-overlay.js` | `paintExplorerEditUnderlay()` now builds **one** model instead of two on the full path, and `full` means "this paint may use real runs" rather than "rebuild everything". |
+| `explorer-viewer.js` | `explorerSourceLineRecords(content, cache)` — optional caller-owned slot; the overlay passes `pane._explorerEditRecordCache`, so a moving draft neither hits the shared LRU nor evicts the panes that do. |
+
+Two follow-on cleanups the plan did not name: `explorerEditUnderlayHtml()` and
+`explorerEditUnderlayLines()` both became unreachable once the mount and the paint emit rows from
+a model they already hold, so they were removed (Guardrail 5) and their documentation folded into
+`explorerEditUnderlayModel()` / `explorerEditUnderlayRowsHtml()`.
+
+**Two plan items deliberately not implemented.**
+
+- **"Cache the row model between the splice frame and the settle frame, keyed on draft
+    identity."** The two frames build models with *different* token maps — null for the splice, the
+    worker's answer for the settle — so a draft-keyed model cache misses every time. The expensive
+    half of that model is the line records, which is exactly what the pane-local record cache now
+    holds, so this item collapses into that one.
+- **"Drop `model.records.map(record => record.text)`."** Implementing it means changing
+    `lineSplicePlan()`'s DOM-free contract (its Node tests pass string arrays) and adding a
+    per-element branch to a hot comparison loop, to save one array of *existing string
+    references* per frame. Poor trade against the rest of the stage; left alone.
+
+**F5 remains deferred**, exactly as this stage's re-aiming concluded.
+
+**Tests — all eight added, and each verified to fail against the pre-fix code** (by temporarily
+disabling the relevant edit, then restoring it):
+
+| Test | Pre-fix failure |
+| --- | --- |
+| `test_explorer_repaint.py::RepaintPolicyTestCase::test_a_settle_repaints_only_the_rows_whose_colour_moved` | n/a — new policy function |
+| `test_explorer_workers.py::test_a_line_key_compares_across_answers_without_materializing_runs` | n/a — new method |
+| `…::EditUnderlayRepaintTestCase::test_a_settle_replaces_only_the_code_cells_whose_colour_moved` | the whole underlay was rewritten; every row node replaced |
+| `…::test_an_edit_whose_run_shape_did_not_move_still_repaints_its_row` | same |
+| `…::test_an_inserted_line_shifts_the_preserved_keys_with_their_nodes` | same |
+| `…::test_a_markdown_row_repaints_when_only_its_heading_level_moved` | same |
+| `…::test_a_structure_changing_edit_still_rebuilds_the_whole_underlay` | passes either way — it pins the fallback the ceiling must keep |
+| `…::test_typing_does_not_evict_another_panes_line_records` | the other pane's records were evicted by the draft churn |
+
+The existing `EditUnderlayRepaintTestCase` harness grew a `mount(runs)` helper (the underlay as
+`mountExplorerEditOverlay()` leaves it, paint keys included) and optional `language` / `lines`
+parameters. Its four pre-existing tests pass on their original assertions.
+
+**Documentation.** The CHANGELOG entry landed as written in the plan — deliberately not naming
+Enter, since Enter is not what was measured. README unchanged. The plan said "Guardrails — none
+new", and that is still right in the sense that no new *rule* was invented; but the existing §3
+bullet **"The in-place editor's underlay does not tokenize per frame"** ended with "and repaints
+in full once through a one-shot settle debounce after typing stops", which this stage makes false.
+It has been extended in `CLAUDE.md` and `AGENTS.md` (both gitignored, per the note at the top of
+this document) to name the settle as a repaint and to record the three preconditions the key rests
+on — what the previous side of the comparison is, what the key describes, and why ignoring
+absolute offsets is legal here and nowhere else.
+
+**Manual verification: pending.** The eight steps below have not been run yet; steps 4 (the `/*`)
+and 7 (the find surviving a settle) are the two with no automated equivalent.
+
 ---
 
 ## Stage 4 — Work that outlives the moment it was for
@@ -730,13 +834,92 @@ exec channel. That sits between the user pressing Enter on `claude` and Enter re
 on the `async_mode="threading"` handler thread that also serves that pane's later input. Lock
 discipline is already correct; only the ordering is wrong.
 
+### Re-verified against the code — 2026-08-23
+
+All three findings still reproduce, and the mechanisms are exactly as described. Four
+corrections, none of which changes the shape of a fix:
+
+**F11 — real, and the plan's call-site list is incomplete.** `explorerRunSourceRenderJob()`
+(`explorer-viewer.js:4419`) captures `pane` and `code`; its stand-down branch asks
+`explorerRenderedSourceContainer(code) !== onScreen`, and a **detached but intact** subtree still
+answers with the same container — so the branch cannot fire for a pane that was replaced whole,
+exactly as the finding says. But a pane close does not reach `closeTerminalPane()`'s own body:
+it goes `closeTerminalPane()` → `initialLoad()` → `buildGrid()` → **`teardownCurrentGrid()`**
+(`terminals.js:4945`), which is the real choke point and also covers the last-pane close and every
+group switch that does not cache. It disposes the xterm instances and never touches
+`_explorerSourceRenderJob`. So the two call sites are **`teardownCurrentGrid()` and
+`replaceSessionPaneMode()`**, not `replaceSessionPaneMode()` and a pane-close path.
+
+Two neighbouring paths are already right and must be left alone: a group switch that *caches* the
+outgoing group **suspends** rather than abandons (`terminals.js:904`/`:920` — the job resumes with
+its readers intact), and the cached-group **close** at `terminals.js:1138` already abandons.
+
+**F12 — real, and there are seven slots, not six.** The plan misses `diff`
+(`explorer-diff.js:1163`) beside `diffParse` (`:902`); the full set is `file`, `preview`, `diff`,
+`diffParse`, `highlight`, `editHighlight`, `changeMarks`. A `cancelExplorerRequestSlots(pane)`
+that walks the map catches all of them regardless, so only the test changes. Two checks that make
+the fix safe both pass: `_explorerRequestAborters` really is cleared nowhere (one grep, no other
+reader), and **every one of the seven callers already handles `AbortError`** — there are seven
+`explorerIsAbortError()` guards, one per slot — because `explorerRequestSignal()` already aborts
+the previous controller on supersession. So cancelling every slot at teardown cannot produce an
+unhandled rejection or a console line (guardrail 9). Aborting `highlight`/`editHighlight` does
+genuinely stop the thread: `WorkerPool._abort()` terminates the worker running that job.
+
+`terminals.js:1138` needs this too — it abandons the render job but leaves the pane's workers
+running — and so does `teardownCurrentGrid()`.
+
+**F4 — real, verbatim; only the line number moved.** It is `web/api.py:3490`/`:3491` now, not
+`:3481`. The chain is unchanged: `_track_terminal_agent_input()` → the promotion branch →
+`effective_directory(session_id, session)` → `_process_reported_cwd()` → `_remote_process_cwd()`,
+which is `transport.open_session(timeout=REMOTE_CWD_READ_TIMEOUT)` with
+`REMOTE_CWD_READ_TIMEOUT = 3.0` plus a bounded `recv` loop, all on the handler thread between the
+keystroke and the shell. The reorder is behaviour-preserving as claimed — `_send_connection_input()`
+reads nothing the tracker produces, and the tracker takes `connection_lock` on its own while the
+send takes no lock, so the order has no locking consequence. **One deliberate change to state
+rather than discover:** if the send raises, the tracker no longer runs, so a promotion can no
+longer be recorded for input that never reached the shell. That is more correct, not less.
+
+**Two testability corrections.**
+
+- The plan's F11 target — *"`tests/test_explorer_source_frame.py`: a frame-sliced build whose
+    panel is replaced by a non-explorer surface stops on its next slice"* — describes a mechanism
+    the fix does not use. The fix stands the job down **eagerly**, when the pane is replaced; the
+    slice-time branch it describes already exists and is already covered. That file also loads only
+    `explorer-viewer.js`, `explorer-tiers.js`, `explorer-repaint.js` and `explorer-tabs.js` — and
+    **no Node harness anywhere loads `terminals.js`**, which is only ever asserted as source text in
+    `test_api.py`.
+
+    The shape that avoids both problems: put the teardown in `explorer-viewer.js` as **one**
+    exported function — `explorerReleasePaneWork(pane)` = `explorerAbandonSourceRenderJob(pane)` +
+    `cancelExplorerRequestSlots(pane)` — and have `terminals.js` call that single name from
+    `teardownCurrentGrid()`, `replaceSessionPaneMode()` and the cached-group close. F11 and F12
+    then land as one call site instead of two, the behaviour is Node-testable in
+    `test_explorer_repaint.py`'s existing `ChunkedSourceBuildTestCase` harness (which already
+    drives `explorerAbandonSourceRenderJob`), and the `terminals.js` side needs only a cheap
+    contract-level check for the call.
+
+- **F4's test can be behavioural, so F14's tension does not arise.** Patch
+    `api._send_connection_input` and `api._track_terminal_agent_input` to append to a list, stub one
+    `ssh_connections` entry, and call `api.handle_terminal_input({...})` directly — the order is
+    then *observed at runtime* rather than read out of the source. The existing agent-promotion
+    tests (`test_api.py:12350` onward) already call these functions directly, so the harness is
+    there.
+
+**One decision the plan does not settle.** `explorerAbandonSourceRenderJob()` **flushes** the
+queued readers, and those readers close over `index` and re-read `terminals[index]`. On a teardown
+that discards the pane there is nothing to strand — but flushing *after* `terminals = []` runs
+callbacks against a pane that no longer exists, and flushing *before* runs them against a
+half-built document. Call it while `terminals[index]` is still the outgoing explorer pane, which
+is what `enterExplorerEditMode()` and the cached-group close already do. Cancelling without
+flushing is the other defensible answer; pick one deliberately rather than by call placement.
+
 ### Fix
 
 | Where | Change |
 | --- | --- |
-| `terminals.js` `replaceSessionPaneMode()` (and the pane-close path) | Before the pane object is replaced, call `explorerAbandonSourceRenderJob(terminals[index])` for an explorer pane — the same call `enterExplorerEditMode()` already makes for the same reason. |
-| `explorer-viewer.js` | Add `cancelExplorerRequestSlots(pane)` that aborts and clears every slot in `pane._explorerRequestAborters`, and call it from the same teardown point. |
-| `web/api.py:3481` | Send first, track after: `_send_connection_input(...)` then `_track_terminal_agent_input(...)`. Nothing in the tracker feeds the send — it only reads the sanitized text — so the swap is behaviour-preserving for everything except the latency. |
+| `terminals.js` `teardownCurrentGrid()` and `replaceSessionPaneMode()` | Before the pane object is replaced, call `explorerAbandonSourceRenderJob(terminals[index])` for an explorer pane — the same call `enterExplorerEditMode()` already makes for the same reason. |
+| `explorer-viewer.js` | Add `cancelExplorerRequestSlots(pane)` that aborts and clears every slot in `pane._explorerRequestAborters` (there are **seven**), and pair it with the abandon above behind one exported `explorerReleasePaneWork(pane)` so both land at the same call sites — including the cached-group close at `terminals.js:1138`, which today abandons the render job and leaves the workers running. |
+| `web/api.py:3490` | Send first, track after: `_send_connection_input(...)` then `_track_terminal_agent_input(...)`. Nothing in the tracker feeds the send — it only reads the sanitized text — so the swap is behaviour-preserving for everything except the latency and the failure case noted above. |
 
 Note on F4's alternative: an "observation only, no I/O" flag on `effective_directory()` would
 also work and is arguably more honest about what the promotion path wants. The reorder is
@@ -745,12 +928,18 @@ the same thing.
 
 **Tests to add**
 
-- `tests/test_explorer_source_frame.py`: a frame-sliced build whose panel is replaced by a
-    *non-explorer* surface stops on its next slice and flushes its queued readers.
-- A pane-teardown test asserting every request slot is aborted.
-- `tests/test_api.py`: assert the input handler's call order — this is one place a behavioural
-    assertion is awkward, so if it has to be a source-order check, keep it to the two call names
-    and not their arguments (see F14 in Stage 5).
+- `tests/test_explorer_repaint.py` (`ChunkedSourceBuildTestCase`, which already drives
+    `explorerAbandonSourceRenderJob`): releasing a pane's work stops a frame-sliced build on the
+    spot and flushes its queued readers, and aborts every one of the seven request slots. **Not**
+    `test_explorer_source_frame.py`, and not "stops on its next slice" — see the re-verification
+    above.
+- `tests/test_api.py`: a contract-level check that `terminals.js` releases the outgoing explorer
+    pane's work from both teardown points. This one is a served-asset assertion because no Node
+    harness loads `terminals.js`; keep it to the call name, per F14.
+- `tests/test_api.py`: the input handler's call order, **observed at runtime** — patch
+    `api._send_connection_input` and `api._track_terminal_agent_input` to record into a list, stub
+    one `ssh_connections` entry, call `api.handle_terminal_input(...)`, assert the order. No
+    source-order check needed.
 
 ### Manual verification
 
@@ -958,6 +1147,6 @@ build short enough to get away with.
 | --- | --- | --- | --- | --- | --- |
 | 1 · Explorer root & launch floor ✅ | F1, F2, F15 | High | folded into 1 existing entry | 3 edits | 2 clauses |
 | 2 · Large-content fidelity ✅ | F3; F10 non-issue | Medium | 1 entry | — | 1 clause |
-| 3 · Underlay settle repaint | F6; F5 deferred | Medium | 1 entry | — | — |
+| 3 · Underlay settle repaint ✅ | F6; F5 deferred | Medium | 1 entry | — | 1 clause extended |
 | 4 · Work that outlives its pane | F11, F12, F4 | Low-medium | 1 entry | — | — |
 | 5 · Loose ends & docs | F7, F8, F9, F13, F14, §4 | Low | 3 entries | 5 edits | — |

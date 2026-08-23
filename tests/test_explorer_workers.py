@@ -153,6 +153,61 @@ class ExplorerWorkerTestCase(unittest.TestCase):
         # frame that happens to paint that line.
         self.assertIn("invalid highlight run", result["threw"])
 
+    def test_a_line_key_compares_across_answers_without_materializing_runs(self):
+        """The editor's settle pass compares what is painted against what the
+        answer would paint, one key per row, for every row in the document — so
+        the key must cost nothing to ask for and must mean the same thing in
+        two different answers.
+
+        The numeric class id cannot: compactHighlightMarkup() assigns ids in
+        first-encounter order, so an edit that changes which class appears
+        first renumbers them all. Two answers may give the same name different
+        ids, or the same id different names, for byte-identical markup.
+        """
+        result = self._run_node(
+            "const NL = String.fromCharCode(10);\n"
+            "const source = ['abcdefgh', 'xyz'].join(NL);\n"
+            "const answer = (classes, ids, lengths) => client.decodeHighlightResult(source, {\n"
+            "  classes,\n"
+            "  starts: Uint32Array.from([0, 5, 9]),\n"
+            "  lengths: Uint32Array.from(lengths),\n"
+            "  classIds: Uint16Array.from(ids),\n"
+            "  lineRunStarts: Uint32Array.from([0, 2, 3])\n"
+            "});\n"
+            "// Same markup, opposite dictionary order: run 0 is a keyword and\n"
+            "// run 1 a string in both, but the ids naming them are swapped.\n"
+            "const first = answer(['hljs-keyword', 'hljs-string'], [0, 1, 1], [5, 3, 3]);\n"
+            "const reordered = answer(['hljs-string', 'hljs-keyword'], [1, 0, 0], [5, 3, 3]);\n"
+            "// Same ids, different names: the colours genuinely moved.\n"
+            "const recoloured = answer(['hljs-comment', 'hljs-string'], [0, 1, 1], [5, 3, 3]);\n"
+            "// Same class, different length: the run genuinely grew.\n"
+            "const grown = answer(['hljs-keyword', 'hljs-string'], [0, 1, 1], [5, 3, 2]);\n"
+            "const keys = lines => [lines.lineKey(1), lines.lineKey(2)];\n"
+            "const firstKeys = keys(first);\n"
+            "emit({\n"
+            "  firstKeys,\n"
+            "  reordered: keys(reordered),\n"
+            "  recoloured: keys(recoloured),\n"
+            "  grown: keys(grown),\n"
+            "  outOfRange: first.lineKey(3),\n"
+            "  materialized: first.materialized\n"
+            "});\n"
+        )
+
+        # A renumbered dictionary describes the same markup, so the keys agree
+        # and the settle repaints nothing.
+        self.assertEqual(result["reordered"], result["firstKeys"])
+        # A class name that really changed, and a run that really shrank, each
+        # move the key for the line they are on and no other.
+        self.assertNotEqual(result["recoloured"][0], result["firstKeys"][0])
+        self.assertEqual(result["recoloured"][1], result["firstKeys"][1])
+        self.assertEqual(result["grown"][0], result["firstKeys"][0])
+        self.assertNotEqual(result["grown"][1], result["firstKeys"][1])
+        self.assertEqual(result["outOfRange"], "")
+        # The whole point: asking for every key builds no run object and no
+        # substring, so the one-line-at-a-time contract survives it.
+        self.assertEqual(result["materialized"], 0)
+
     def test_compact_markup_preserves_crlf_and_empty_lines(self):
         result = self._run_node(
             "const source = 'one' + String.fromCharCode(13, 10)"
