@@ -230,6 +230,12 @@ from web.selfupdate import (  # noqa: F401 - perform_self_update re-exported for
     perform_app_update,
     perform_self_update,
 )
+from web.session_modes import (  # noqa: F401 - re-exported for backwards compatibility
+    ModeTransitionEffects,
+    ModeTransitionError,
+    _refresh_pane_cwd,
+    apply_pane_mode_change,
+)
 from web.session_presentation import (
     PresentationValidationError,
     apply_group_presentation,
@@ -588,10 +594,11 @@ def _normalize_app_config_update(data: Any) -> Dict[str, Any]:
     }
 
 
+_default_terminal_count = min(4, runtime_config.snapshot().max_sessions)
 active_launch_options: Dict[str, Any] = {
     "connection_mode": "ssh",
-    "layout": _normalize_layout("grid", min(4, runtime_config.max_sessions)),
-    "terminal_count": min(4, runtime_config.max_sessions),
+    "layout": _normalize_layout("grid", _default_terminal_count),
+    "terminal_count": _default_terminal_count,
 }
 
 
@@ -2687,11 +2694,13 @@ def split_session(session_id: str):
         return jsonify({"error": "Session group not found"}), 404
 
     group_sessions = session_manager.get_group_sessions(group.group_id)
-    if len(group_sessions) >= runtime_config.max_sessions:
+    # One captured limit for the verdict and for the sentence that quotes it:
+    # reading it twice let a refresh between them refuse against one cap and
+    # then tell the user to raise a different one.
+    max_sessions = runtime_config.snapshot().max_sessions
+    if len(group_sessions) >= max_sessions:
         return jsonify({
-            "error": capacity_refusal(
-                len(group_sessions) + 1, runtime_config.max_sessions
-            )
+            "error": capacity_refusal(len(group_sessions) + 1, max_sessions)
         }), 400
 
     host = source.host
@@ -2879,297 +2888,31 @@ def change_session_shell(session_id: str):
     return jsonify(session_manager.get_session(session_id).to_dict())
 
 
-def _refresh_pane_cwd(session_id: str, session: Any, requested: bool) -> Dict[str, Any]:
-    """Ask a live terminal where it is, and report whether it answered.
-
-    `effective_directory()` owns the order -- the shell-integration observation,
-    then the OS's own read of the pane's shell process, then the marker probe as
-    a last resort. Falling through to the launch directory is still an answer,
-    but it is an *assumed* one, and saying so is what stops the same gesture
-    opening two different roots on two different days.
-
-    An agent pane is still never probed: the probe types a command into the
-    pane's shell, and behind a running agent there is no prompt to type it at.
-    It is observed like any other pane, though, so a pane that reported its
-    directory before the agent started answers without a write.
-
-    ``requested`` gates the *probe*, not the question. Reading an observation
-    the pane already produced costs nothing and writes nothing, so a caller
-    that did not ask for a refresh still gets one rather than falling back to
-    an assumption it had no reason to prefer; only ``requested`` outcomes are
-    reported back to the client.
-    """
-    outcome: Dict[str, Any] = {
-        "requested": requested,
-        "resolved": False,
-        "reason": "",
-        "directory": "",
-        "source": "",
-    }
-
-    directory, source = effective_directory(session_id, session, allow_probe=requested)
-    outcome["source"] = source
-    if source == CWD_SOURCE_LAUNCH:
-        outcome["reason"] = (
-            "agent_pane"
-            if str(getattr(session, "startup_mode", "") or "") == "agent"
-            else "probe_failed"
-        )
-        return outcome
-
-    outcome["resolved"] = True
-    outcome["directory"] = directory
-    return outcome
-
-
 @app.route('/api/sessions/<session_id>/mode', methods=['POST'])
 def change_session_mode(session_id: str):
-    """Switch one pane between terminal, file explorer, and browser modes."""
-    session = session_manager.get_session(session_id)
-    if not session:
-        return jsonify({"error": "Session not found"}), 404
+    """Switch one pane between terminal, file explorer, and browser modes.
 
-    if session.mode not in {"ssh", "wsl"}:
-        return jsonify({"error": "Pane mode switching is only available for SSH and Local Repo sessions"}), 400
-
-    data = request.get_json(silent=True) or {}
-    target_mode = _normalize_startup_mode(data.get("startup_mode"), session.mode)
-    if target_mode not in {"terminal", "explorer", "browser"}:
-        return jsonify({"error": "startup_mode must be 'terminal', 'explorer', or 'browser'"}), 400
-
-    if target_mode == "browser":
-        if session.mode != "wsl":
-            return jsonify({"error": "Browser mode is only available for Local Repo sessions"}), 400
-        # Mode transitions only. A live pane's tab strip is presentation state
-        # and belongs to the ordered, revisioned `/api/session-presentation`
-        # transaction — this route used to accept a whole strip as well, which
-        # made it a second, unordered writer for the same field.
-        try:
-            requested_browser_url = data.get("url") or data.get("initial_command")
-            browser_url = (
-                _normalize_browser_url(requested_browser_url)
-                if requested_browser_url
-                else None
-            )
-            browser_snapshot = session_manager.merge_browser_tabs(
-                session_id,
-                browser_url=browser_url,
-                browser_active_tab=data.get("active_tab"),
-                default_browser_url=DEFAULT_BROWSER_URL,
-            )
-            if browser_snapshot is None:
-                return jsonify({"error": "Session not found"}), 404
-        except ValueError as exc:
-            return jsonify({"error": str(exc)}), 400
-
-        session_manager.update_session_status(session_id, SessionStatus.CONNECTED)
-        _close_ssh_connection(session_id, clear_buffer=True)
-        _broadcast_session_status(session_id)
-        return jsonify(browser_snapshot)
-
-    if target_mode == "explorer":
-        requested_directory = data.get("directory")
-        cwd_probe = _refresh_pane_cwd(session_id, session, bool(data.get("refresh_cwd")))
-        if cwd_probe["directory"]:
-            requested_directory = cwd_probe["directory"]
-        # The widen-guard floor is where the pane was *built*, never
-        # `session.directory` -- this switch rewrites that on its way out, so
-        # one round trip through explorer mode would leave the floor sitting at
-        # the subdirectory the pane last showed and the explorer could never
-        # follow the shell back up again.
-        launch_directory = session.launch_directory or session.directory
-        next_directory = session.directory
-        root_directory = ""
-        open_path = ""
-
-        if session.mode == "ssh":
-            if requested_directory:
-                next_directory = _remote_path_clean(requested_directory)
-            next_directory = _remote_path_clean(next_directory or "/")
-            configured_root = _remote_path_clean(_configured_explorer_root_directory(session))
-            client = None
-            sftp = None
-            try:
-                client, sftp = _acquire_ssh_sftp(session)
-                next_directory = sftp.normalize(next_directory)
-                if not _remote_is_directory(sftp, next_directory):
-                    raise ValueError("Explorer root directory does not exist")
-                if configured_root:
-                    try:
-                        configured_root = sftp.normalize(configured_root)
-                        if not _remote_is_directory(sftp, configured_root):
-                            configured_root = ""
-                    except OSError:
-                        configured_root = ""
-                repo_root = None
-                if not (configured_root and _remote_path_inside(configured_root, next_directory)):
-                    repo_root = _explorer_cwd_repo_root(
-                        _SftpExplorerBackend(session, client, sftp), next_directory
-                    )
-                root_directory = _resolve_explorer_open_root(
-                    configured_root,
-                    next_directory,
-                    _remote_path_clean(launch_directory or ""),
-                    repo_root,
-                    contains=_remote_path_inside,
-                )
-                open_path = _relative_remote_explorer_path(root_directory, next_directory)
-            except ValueError as exc:
-                return jsonify({"error": str(exc)}), 400
-            except _sftp_request_error_types() as exc:
-                return jsonify({"error": str(exc)}), 500
-            finally:
-                _release_ssh_sftp(session, client, sftp)
-
-            session_manager.update_session_metadata(
-                session_id,
-                directory=next_directory,
-                # The shell this pane was reading is being closed, so its last
-                # report is no longer an observation of anything live. The
-                # directory it named is what `directory` now holds.
-                current_directory=None,
-                explorer_root_directory=root_directory,
-                # The live explorer needs a confinement boundary either way, so
-                # the resolved root is always stored. The flag is what keeps a
-                # *derived* one from pinning the next switch to a directory
-                # nobody chose -- so it describes the root actually stored, not
-                # the candidate it was chosen among. Holding *a* configured root
-                # is not the same as having opened on it:
-                # `_resolve_explorer_open_root()` returns it only while it still
-                # holds the observed cwd, and a shell that has walked outside it
-                # gets a derived root that used to be stored wearing this flag.
-                explorer_root_configured=bool(configured_root)
-                and root_directory == configured_root,
-                initial_command="",
-                startup_mode="explorer",
-            )
-        else:
-            if requested_directory:
-                next_directory = os.path.abspath(os.path.expanduser(str(requested_directory)))
-            if not next_directory or not os.path.isdir(next_directory):
-                return jsonify({"error": "Explorer root directory does not exist"}), 400
-
-            next_directory = os.path.realpath(os.path.abspath(os.path.expanduser(next_directory)))
-            configured_root = _configured_explorer_root_directory(session)
-            if configured_root:
-                configured_root = os.path.realpath(
-                    os.path.abspath(os.path.expanduser(configured_root))
-                )
-                if not os.path.isdir(configured_root):
-                    configured_root = ""
-            if launch_directory:
-                launch_directory = os.path.realpath(
-                    os.path.abspath(os.path.expanduser(str(launch_directory)))
-                )
-            repo_root = None
-            if not (configured_root and _local_path_inside(configured_root, next_directory)):
-                repo_root = _explorer_cwd_repo_root(_LocalExplorerBackend(session), next_directory)
-            root_directory = _resolve_explorer_open_root(
-                configured_root,
-                next_directory,
-                str(launch_directory or ""),
-                repo_root,
-                contains=_local_path_inside,
-            )
-            open_path = _relative_explorer_path(root_directory, next_directory)
-
-            session_manager.update_session_metadata(
-                session_id,
-                host="File Explorer",
-                directory=next_directory,
-                current_directory=None,
-                explorer_root_directory=root_directory,
-                # Same rule as the SSH branch above: the flag qualifies the root
-                # being stored, so a derived root never pins the pane.
-                explorer_root_configured=bool(configured_root)
-                and root_directory == configured_root,
-                username="",
-                port=22,
-                password=None,
-                initial_command="",
-                startup_mode="explorer",
-                browser_tabs=[],
-                browser_active_tab=0,
-            )
-        session_manager.update_session_status(session_id, SessionStatus.CONNECTED)
-        _close_ssh_connection(session_id, clear_buffer=True)
-        _broadcast_session_status(session_id)
-        payload = session_manager.get_session(session_id).to_dict()
-        # Presentation paths are relative to the root they were captured under.
-        # A live terminal -> explorer switch may have just derived a different
-        # root, so the saved Preview directory is not a valid opening target.
-        # This transient field names the observed cwd under the freshly resolved
-        # root; it is response-only and never joins the durable pane shape.
-        payload["explorer_open_path"] = open_path
-        if cwd_probe["requested"] and not cwd_probe["resolved"]:
-            # The probe could not answer, so the pane opened on an assumed
-            # directory. Say so, and say which one: the silent fallback to the
-            # launch directory is the flakiness ISSUE-2026-044 reports.
-            #
-            # Only the three fields a reader has: `resolved` is what
-            # terminals.js branches on, `reason` and `directory` are what the
-            # notice says. `requested` was always `true` here -- the guard
-            # above is what puts the object in the payload at all -- and
-            # `source` names an internal provenance nothing on the client
-            # distinguishes. Both stay inside `_refresh_pane_cwd()`, where they
-            # drive the probe and the launch-fallback verdict; neither crosses
-            # the HTTP boundary as a field nothing reads (guardrail 5).
-            payload["cwd_probe"] = {
-                "resolved": False,
-                "reason": cwd_probe["reason"],
-                "directory": next_directory,
-            }
-        return jsonify(payload)
-
-    if not (_is_explorer_session(session) or _is_browser_session(session)):
-        return jsonify(session.to_dict())
-
+    HTTP adaptation only: the transition itself lives in
+    `web/session_modes.py`. The three side effects are resolved here rather
+    than imported there because they belong to this module's Socket.IO server
+    and connection registry — and looking them up in this body is what keeps
+    them the same patch points they have always been.
+    """
     try:
-        next_directory, root_path = _resolve_pane_terminal_directory(
-            session,
-            data.get("directory", ""),
+        payload = apply_pane_mode_change(
+            session_id,
+            request.get_json(silent=True) or {},
+            ModeTransitionEffects(
+                close_connection=_close_ssh_connection,
+                broadcast_status=_broadcast_session_status,
+                start_connector=lambda pane_session_id: socketio.start_background_task(
+                    _connect_session, pane_session_id
+                ),
+            ),
         )
-    except ValueError as exc:
-        return jsonify({"error": str(exc)}), 400
-    except _sftp_request_error_types() as exc:
-        return jsonify({"error": str(exc)}), 500
-
-    updates = {
-        "directory": next_directory,
-        # A fresh shell starts at `next_directory`; whatever the pane's last
-        # shell reported is not an observation of this one.
-        "current_directory": None,
-        # `_resolve_pane_terminal_directory()` hands back the *configured* root
-        # or nothing at all, so a pane that never had a chosen root leaves
-        # explorer mode without one and the next switch re-derives from where
-        # the pane actually is.
-        "explorer_root_directory": root_path,
-        "explorer_root_configured": bool(root_path),
-        # A fixed Git pin is relative to the explorer root it was captured
-        # under. Once this pane becomes a terminal it can move anywhere, so the
-        # next explorer must start from its newly resolved root/current folder
-        # rather than reinterpret a pin belonging to the previous root.
-        "explorer_git_pin_active": False,
-        "explorer_git_pinned_path": "",
-        "initial_command": "",
-        "initial_command_mode": "command",
-        "startup_mode": "terminal",
-        # A pane leaving browser mode drops its tab strip; a stale strip would
-        # otherwise be re-persisted and reopen browser tabs on a shell pane.
-        "browser_tabs": [],
-        "browser_active_tab": 0,
-    }
-    if session.mode == "wsl":
-        updates["host"] = _local_shell_display_name(
-            use_wsl=session.use_wsl,
-            use_powershell=session.use_powershell,
-            distribution=session.distribution,
-        )
-    session_manager.update_session_metadata(session_id, **updates)
-    session_manager.update_session_status(session_id, SessionStatus.PENDING)
-    _broadcast_session_status(session_id)
-    socketio.start_background_task(_connect_session, session_id)
-    return jsonify(session_manager.get_session(session_id).to_dict())
+    except ModeTransitionError as exc:
+        return jsonify({"error": exc.message}), exc.status_code
+    return jsonify(payload)
 
 
 @app.route('/api/sessions/<session_id>', methods=['DELETE'])
@@ -3542,9 +3285,13 @@ def handle_terminal_resize(data):
 
 def _broadcast_voice_install_finished(state: Dict[str, Any]) -> None:
     """Tell open windows that voice availability changed after an install."""
+    # One captured generation names the engine and answers whether it is
+    # available: reading the setting twice could report one engine's name
+    # beside another engine's availability.
+    engine = runtime_config.snapshot().voice_engine
     socketio.emit('voice_availability_updated', {
-        'engine': runtime_config.voice_engine,
-        'engine_available': _voice_engine_available(runtime_config.voice_engine),
+        'engine': engine,
+        'engine_available': _voice_engine_available(engine),
         'engines_available': _voice_engines_available(),
         'install': state,
         'timestamp': int(time.time() * 1000),
@@ -3556,8 +3303,12 @@ def voice_status_endpoint():
     """Check voice input availability and service status."""
     settings = runtime_config.snapshot()
     if settings.voice_engine == "vosk":
-        service_running: Optional[bool] = _vosk_service_reachable(timeout=1.0)
+        # Probe the endpoint this response is about to name, not whichever one
+        # is live by the time the handshake runs.
         service_url = settings.vosk_service_url
+        service_running: Optional[bool] = _vosk_service_reachable(
+            timeout=1.0, service_url=service_url
+        )
     else:
         service_running = None
         service_url = ""
@@ -3643,7 +3394,11 @@ def handle_voice_start(data):
     """
     logger.info("voice_start requested by client %s for session %s",
                 request.sid, data.get('session_id'))  # type: ignore[arg-type]
-    if not runtime_config.voice_enabled:
+    # One captured generation decides both whether voice may start and which
+    # engine starts: a refresh between the two reads could let a disabled
+    # config through, or start the engine the previous generation named.
+    voice_settings = runtime_config.snapshot()
+    if not voice_settings.voice_enabled:
         emit('voice_status', {'status': 'error',
                               'message': 'Voice input is disabled in config'})
         return
@@ -3653,7 +3408,7 @@ def handle_voice_start(data):
         emit('voice_status', {'status': 'error', 'message': 'Missing session_id'})
         return
 
-    engine = 'whisper' if runtime_config.voice_engine == 'whisper' else 'vosk'
+    engine = 'whisper' if voice_settings.voice_engine == 'whisper' else 'vosk'
     register_voice_session(request.sid, session_id, engine)  # type: ignore[arg-type]
 
     if engine == 'whisper':

@@ -2,7 +2,7 @@
 
 Date: 2026-08-24
 
-Updated after Stage 2 implementation, automated acceptance, and manual acceptance on 2026-08-24
+Updated after Stage 3 implementation, automated acceptance, and manual acceptance on 2026-08-24 — all three stages complete
 
 Scope: H-3, the branch-scoped part of H-2, plus M-1 through M-3 and L-1
 
@@ -19,7 +19,8 @@ The validation pass changes what belongs in a pre-merge fix:
 | H-3 | Resolved in Stage 1 | Bulk mutations now obey the selected Git scope, and narrowed Commit refuses hidden staged paths. Automated and manual acceptance passed. |
 | M-1 | Resolved in Stage 1 | Bounded runners now distinguish completion from truncation; structural reads and mutations reject incomplete results, while search/diff retain explicit partial-result contracts. |
 | M-2 | Resolved in Stage 2 | Every post-`await` write in Reset view and in the explorer Git actions names the pane, session and scope it captured; a stale completion is discarded and followed by a fresh load. |
-| M-3, L-1 | Confirmed | Retain as scoped correctness/architecture work in descending change-risk order. |
+| M-3 | Resolved in Stage 3 | Every listed operation captures one `runtime_config.snapshot()` at its start; a refusal, a log line and the value it acted on now come from one generation. |
+| L-1 | Resolved in Stage 3 | The pane-mode transition moved verbatim into `web/session_modes.py`; `web/api.py` keeps request parsing and status mapping. No behavior change. |
 
 Do not reintroduce H-1 into this plan without a new reliable reproduction. Do not describe H-2 bullets 1–3 as regressions introduced by this branch.
 
@@ -31,7 +32,7 @@ Resolve the actionable branch concerns in three stages ordered by **implementati
 | --- | --- | --- | --- | --- |
 | 1 | **Complete — accepted 2026-08-24** | Highest | H-3, M-1 | Changes destructive Git mutation scope and the completion semantics consumed by every local/SSH Git caller. |
 | 2 | **Complete — accepted 2026-08-24** | Moderate | H-2, branch-scoped symptom only; M-2 | Adds identity checks at backend/frontend asynchronous publication boundaries without redesigning connection registration. |
-| 3 | Pending | Lowest when constrained as described | M-3, L-1 | Snapshot adoption is mechanical. The API extraction is characterization-first and behavior-neutral; redesign is excluded. |
+| 3 | **Complete — accepted 2026-08-24** | Lowest when constrained as described | M-3, L-1 | Snapshot adoption is mechanical. The API extraction is characterization-first and behavior-neutral; redesign is excluded. |
 
 Each stage is independently reviewable and must leave its focused tests green before the next stage starts. The validated baseline is already green: two consecutive full runs reported 1,983 tests passing with 9 skipped. A fix must preserve that baseline.
 
@@ -352,11 +353,91 @@ Manual verification is not expected to prove the three deferred pre-existing con
 
 ---
 
-## Stage 3 — Atomic config reads and bounded mode-service extraction
+## Stage 3 — Atomic config reads and bounded mode-service extraction — Complete
 
 Risk: lowest only if the extraction remains mechanical
 
 Findings: M-3 and L-1
+
+### Completion record — 2026-08-24
+
+Status: **implemented, automatically accepted, manually accepted, and documented.**
+
+Findings re-validated before implementation: every M-3 site still read the singleton more than
+once, and `change_session_mode()` still spanned 236 lines owning validation, cwd/root
+resolution, presentation cleanup, teardown, mutation, restart and response mapping.
+
+Delivered code:
+
+- Operation-scoped snapshots in `web/terminal_io.py` (SSH connect timeout + keepalive, captured
+  **before** the slow open), `web/api.py` (split capacity verdict and refusal text, voice start
+  `enabled` + `engine`, the install broadcast's engine name and availability answer, and the
+  module-level launch defaults), and `web/workspaces.py` (launch capacity verdict, log line and
+  refusal text).
+- One adjacent case converted with them, found in the same focused audit: `_ensure_vosk_service()`
+  read its startup timeout three times and probed one endpoint while logging another. It now
+  captures one generation, and `_vosk_service_reachable()`/`_wait_for_vosk_ready()` take an
+  optional `service_url` so a caller that captured a generation probes the endpoint it is about
+  to name. `voice_status_endpoint()` had the same split and passes its own captured URL. No
+  reader locks were added, and unrelated single-field reads were left alone.
+- `web/session_modes.py` (394 lines) now owns the pane-mode transition and `_refresh_pane_cwd()`.
+  The move is verbatim: the diff against the original block is only the documented boundary
+  substitutions — `jsonify(...)` to a returned payload or `ModeTransitionError`, and the three
+  side effects to `ModeTransitionEffects`. The module imports no Flask and no `web.api`.
+- `web/api.py` fell from 3,745 to 3,500 lines. Its `/mode` route is request parsing, one service
+  call and status mapping, and it re-exports the moved names. The three effects are resolved
+  **in the route body**, which is what keeps the existing `patch.object(api, ...)` coverage
+  pointed at the code under test — binding them at import time would have silently detached it.
+
+Automated acceptance:
+
+- `tests/test_backend_concurrency_contract.py` gained `OperationScopedConfigTestCase` (6 cases).
+  The harness serves every settings access — direct attribute read and `snapshot()` alike — from
+  its own fresh generation and records which; assertions are written against the generation the
+  operation read first, on what it did with the values, never on read counts.
+- `tests/test_session_modes.py` is new (19 cases): the `/mode` refusal matrix the existing ~30
+  route tests never covered, each asserted on the response *and* on a whole-pane snapshot so a
+  mutation leaking ahead of a validation is visible; plus the boundary properties — the service
+  called with no request context, the route mapping the service's own status rather than a fixed
+  400, and the absence of the `web.api` import that would cycle.
+- Pre-fix evidence: all six M-3 cases fail against the unmodified sources with genuine
+  mixed-generation symptoms — the SSH connect opens on one generation's timeout and keeps alive
+  on another's, split quotes limit 2 having refused against 1, launch logs `2 > 1` and quotes 3,
+  the broadcast names `vosk` and asks about `whisper`, voice start is authorized by the vosk
+  generation and starts whisper, and the vosk startup probes an endpoint it never captured.
+- Full runner: **2,048 tests, 9 skipped, no failures** (baseline before the stage: 2,023 with 9
+  skipped). Ruff and `git diff --check` clean.
+
+Manual acceptance:
+
+- The user reviewed the Stage 3 code changes and accepted them on 2026-08-24.
+
+Two deviations from the plan's letter, both in its direction:
+
+- The plan lists only single-field reads for voice availability. The `service_url` parameter was
+  threaded through the two vosk probe helpers as well, because probing one endpoint while
+  reporting another is the same "quote the value you acted on" invariant as the capacity
+  messages. It adds an optional parameter with real callers, not a dead one.
+- The plan's characterization matrix expected a pre-extraction capture. The ~30 existing `/mode`
+  route tests already were that capture and passed unchanged through the move; the new file adds
+  the refusal half they never covered rather than duplicating them.
+
+One characterization finding, recorded without a code change: `_normalize_startup_mode()` only
+returns `"browser"` for a `wsl` pane, so the browser branch's own `session.mode != "wsl"` guard
+is unreachable through the route — an SSH pane asking for browser mode is normalized to
+`"terminal"` and answered `200`. The guard was left standing because this extraction is
+behavior-neutral by contract, and the reachable answer is pinned in `tests/test_session_modes.py`.
+Removing it is separate guardrail-5 cleanup.
+
+Documentation completed:
+
+- `AGENTS.md` and `CLAUDE.md`: `web/session_modes.py` added to the Important Code / repo layout
+  sections, `web/api.py` documented as HTTP and Socket.IO adaptation, the RuntimeConfig snapshot
+  guardrail extended to state that the unit is the **operation**, and a new architecture
+  guardrail covering `web/api.py` regrowth and the two rules that make such a move safe.
+- `CHANGELOG.md` records the user-visible half of M-3. The extraction has no entry of its own.
+- `docs/pre_merge_code_review_2026-08-24.md` records the M-3/L-1 remediation and acceptance
+  without rewriting its original point-in-time findings.
 
 ### Problem
 

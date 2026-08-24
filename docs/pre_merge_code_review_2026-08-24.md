@@ -10,7 +10,7 @@ This is a point-in-time code audit, not a behavior contract. The review covered 
 
 ## Post-review remediation
 
-**Stages 1 and 2 were implemented, automatically exercised, and manually accepted on 2026-08-24.** H-3, M-1, M-2 and the branch-scoped part of H-2 are resolved in the post-review code. The findings and verdict below remain the point-in-time record for the reviewed commit; they no longer describe the disposition of those findings in the updated tree. M-3 and L-1 remain assigned to Stage 3, and H-2's three pre-existing connection-lifecycle bullets remain separate follow-up hardening — Stage 2 does not claim them.
+**All three stages were implemented, automatically exercised, and manually accepted on 2026-08-24.** H-3, M-1, M-2, M-3, L-1 and the branch-scoped part of H-2 are resolved in the post-review code. The findings and verdict below remain the point-in-time record for the reviewed commit; they no longer describe the disposition of those findings in the updated tree. H-1 stays withdrawn, and H-2's three pre-existing connection-lifecycle bullets remain separate follow-up hardening — no stage claims them.
 
 H-3 remediation:
 
@@ -39,6 +39,53 @@ M-2 remediation:
 Stage 2 automated acceptance added `tests/test_explorer_git_identity.py` (the real sidebar executed in a Node `vm` across group switches, Follow-scope changes, delayed successes and delayed failures), captured-target coverage in `tests/test_terminal_modes.py`, and retired-connection, replaced-connection, parse/publish-barrier and lock-freedom cases in `tests/test_api.py`. The regression tests were confirmed to fail against the unmodified files first. The full runner reached 2,023 tests with 9 skipped and no failures; Ruff and `git diff --check` passed. The user then completed the shell-switch and both delayed-frontend manual scenarios and accepted the result.
 
 Automated acceptance added real sibling-scope repository coverage for Stage/Unstage/Discard All and narrowed Commit, plus local/SSH coverage for stdout limits, stderr limits, missing completion status, normal non-zero exits, structural reads, mutations, and the explicit search/diff partial paths. The focused Stage 1 suites, Ruff, and `git diff --check` passed. The full runner reached 2,004 tests with 9 skipped; its only two environment-sensitive failures were the withdrawn H-1 process-tree cases, which the fix plan explicitly excludes from Stage 1. The user then completed the disposable-repository manual scenarios and accepted the result.
+
+M-3 remediation:
+
+- Every operation the finding named now captures one `runtime_config.snapshot()` at its start
+  and reads each field off that object: the SSH connect's timeout and keepalive (captured
+  before the slow open, which is the window a refresh lands in), both capacity checks' verdict
+  plus log line plus refusal text, voice start's `enabled` and `engine`, and the install
+  broadcast's engine name and availability answer.
+- One adjacent case found in the same audit was converted with them: `_ensure_vosk_service()`
+  read its startup timeout three times, and probed one endpoint while logging another. It now
+  captures both, and `_vosk_service_reachable()`/`_wait_for_vosk_ready()` accept the captured
+  URL so a caller cannot check one address and name a different one. `voice_status_endpoint()`
+  had the same split and passes its own captured URL.
+- No reader locks were added. One captured immutable state reference remains the model, and
+  unrelated single-field reads were left alone.
+
+L-1 remediation:
+
+- `web/session_modes.py` is the new canonical owner of the pane-mode transition. The move is
+  verbatim: the diff against the original block is only the boundary substitutions —
+  `jsonify(...)` becomes a returned payload or a `ModeTransitionError` carrying its own status,
+  and the three side effects become `ModeTransitionEffects`. `_refresh_pane_cwd()` moved with
+  the transaction it only ever served.
+- `web/api.py` fell from 3,745 to 3,500 lines and its `/mode` route is now request parsing, one
+  service call, and status mapping. It re-exports the moved names for backwards compatibility.
+- The service imports no Flask and no `web.api`; the route resolves the three effects **in its
+  own body**, which is what keeps the existing `patch.object(api, "_close_ssh_connection")` and
+  `patch.object(api.socketio, "start_background_task")` coverage pointed at the code under test.
+- No endpoint, response shape, persistence, presentation schema, logging content, or
+  user-visible behavior changed, so the extraction gets no `CHANGELOG.md` entry of its own.
+
+Stage 3 automated acceptance added `OperationScopedConfigTestCase` to
+`tests/test_backend_concurrency_contract.py` — a harness that serves every settings access from
+its own fresh generation and asserts on what the operation *did* with the values, not on how
+many times it read them — and a new `tests/test_session_modes.py` holding the `/mode` refusal
+matrix (each case asserted against a whole-pane snapshot, so a mutation leaking ahead of a
+validation is visible) plus the extraction's boundary properties. All six M-3 cases were
+confirmed to fail against the unmodified sources first, with genuine mixed-generation symptoms.
+The full runner reached 2,048 tests with 9 skipped and no failures; Ruff and `git diff --check`
+passed. The user then completed the Stage 3 manual review and accepted the result.
+
+One characterization finding is recorded without a code change: `_normalize_startup_mode()`
+only returns `"browser"` for a `wsl` pane, so the browser branch's own
+`session.mode != "wsl"` guard cannot be reached through the route — an SSH pane asking for
+browser mode is normalized to `"terminal"` and answered `200`. The guard was left standing
+because this extraction is behavior-neutral by contract; the reachable answer is pinned in
+`tests/test_session_modes.py`. Removing it is separate guardrail-5 cleanup.
 
 ## Verdict
 

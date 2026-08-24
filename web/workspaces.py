@@ -724,16 +724,18 @@ def launch_session_group(
             logger.warning("Empty or invalid sessions list")
             return {"error": "At least one session is required"}, 400
 
-        if len(sessions_config) > runtime_config.max_sessions:
+        # One captured limit for the verdict, the log line and the refusal
+        # sentence: three separate reads could refuse against one cap, record a
+        # second and tell the user to raise a third.
+        max_sessions = runtime_config.snapshot().max_sessions
+        if len(sessions_config) > max_sessions:
             logger.warning(
                 "Too many sessions requested: %d > %d",
                 len(sessions_config),
-                runtime_config.max_sessions,
+                max_sessions,
             )
             return {
-                "error": capacity_refusal(
-                    len(sessions_config), runtime_config.max_sessions
-                )
+                "error": capacity_refusal(len(sessions_config), max_sessions)
             }, 400
 
         connection_mode = _normalize_connection_mode(data.get("connection_mode"))

@@ -55,6 +55,8 @@ from web import api as web_api
 from web import config as web_config
 from web import explorer as web_explorer
 from web import runtime_state as web_runtime_state
+from web import terminal_io as web_terminal_io
+from web import voice as web_voice
 from web import workspaces as web_workspaces
 
 #: The one-shot snapshot ISSUE-2026-041 must publish so a multi-field consumer
@@ -731,6 +733,272 @@ class PooledSshReservationTestCase(unittest.TestCase):
         got_sftp.close.assert_called_once()
         client.close.assert_called_once()
 
+def _operation_generation(index):
+    """One complete settings generation, distinguishable by its index.
+
+    Every field moves with `index`, and the voice engine alternates, so two
+    *consecutive* generations can never agree by accident — which is what makes
+    "did this operation read a second one?" answerable from the values it used
+    rather than from how many reads preceded it.
+    """
+    return {
+        "ssh": {
+            "connection_timeout": 100 + index,
+            "keepalive_interval": 200 + index,
+        },
+        # 1, 2, 3 ... clamped at MAX_SESSIONS_MAX; the capacity cases below stay
+        # in the first few generations, where the clamp cannot flatten two.
+        "terminal": {"max_sessions": 1 + index},
+        "voice_input": {
+            "enabled": True,
+            "engine": "vosk" if index % 2 == 0 else "whisper",
+            "vosk_service_url": "ws://localhost:%d" % (2700 + index),
+            "vosk_startup_timeout_seconds": 30 + index,
+        },
+    }
+
+
+class OperationScopedConfigTestCase(unittest.TestCase):
+    """M-3 — an operation reads one settings generation, not several.
+
+    ISSUE-2026-041 gave `RuntimeConfig` an immutable generation and a
+    `snapshot()` for whole-payload readers, but several *operations* still read
+    the singleton a field at a time: the SSH connect derived its timeout and its
+    keepalive separately, the two capacity checks read `max_sessions` once for
+    the verdict and again for the sentence quoting it, voice start read
+    `enabled` and `engine` apart, the install broadcast named one engine and
+    asked about another, and the vosk startup read its timeout three times.
+    A concurrent App Settings refresh could therefore combine values no single
+    config file ever contained.
+
+    Each case forces that rather than racing for it. `_ticking_reads()` publishes
+    a *fresh* generation on every settings access — a direct attribute read
+    through `RuntimeConfig.__getattr__` and a whole-generation `snapshot()`
+    alike — and records which generation each access was served. An operation
+    that captures one snapshot therefore uses one generation throughout; an
+    operation that reads N fields uses N.
+
+    Every assertion is written against `_served[0]`, the generation the
+    operation read *first*, because that is the contract itself: capture one
+    snapshot at the start of the operation and use that object throughout. And
+    they assert what the operation *did* with the values — the interval it kept
+    the transport alive on, the limit its refusal quotes, the engine it started
+    — never how many times it read them. One snapshot is the means; one
+    generation is the contract.
+    """
+
+    def setUp(self):
+        self.runtime_config = web_config.runtime_config
+        # Restore the process-wide singleton from the real files afterwards;
+        # every other suite reads this same instance.
+        self.addCleanup(self.runtime_config.refresh)
+        self._served = []
+
+    def _ticking_reads(self):
+        """Serve every settings access from its own fresh generation."""
+        served = self._served
+        original_getattr = web_config.RuntimeConfig.__getattr__
+        original_snapshot = web_config.RuntimeConfig.snapshot
+
+        def publish(instance):
+            index = len(served)
+            served.append(index)
+            instance.__dict__["_state"] = web_config._build_runtime_state(
+                _operation_generation(index)
+            )
+
+        def ticking_getattr(instance, name):
+            if not name.startswith("_"):
+                publish(instance)
+            return original_getattr(instance, name)
+
+        def ticking_snapshot(instance):
+            publish(instance)
+            return original_snapshot(instance)
+
+        return patch.multiple(
+            web_config.RuntimeConfig,
+            __getattr__=ticking_getattr,
+            snapshot=ticking_snapshot,
+        )
+
+    def _first_generation(self):
+        """The generation the operation read first — the one it must have kept."""
+        self.assertTrue(self._served, "the operation read no settings at all")
+        return _operation_generation(self._served[0])
+
+    # -- SSH connect ----------------------------------------------------
+
+    def test_ssh_connect_opens_and_keeps_alive_on_one_generation(self):
+        """The timeout the transport opened on and the interval it is kept
+        alive on describe the same settings.
+
+        `connect()` can sit for the length of the timeout it was handed, which
+        is exactly the window an App Settings refresh lands in; reading the
+        keepalive afterwards took it from whatever generation had replaced it.
+        """
+        opened = {}
+        client = MagicMock()
+        transport = MagicMock()
+        client.get_transport.return_value = transport
+        client.connect.side_effect = lambda **kwargs: opened.update(kwargs)
+        # Bail after the keepalive rather than streaming: the connector's own
+        # except branch handles OSError, so the path stays bounded.
+        client.invoke_shell.side_effect = OSError("stop here")
+
+        session = api.session_manager.create_session(
+            group_id="cfg-ssh",
+            host="127.0.0.1",
+            directory="/tmp",
+            username="root",
+            password="pass",
+        )
+        self.addCleanup(api.session_manager.reset_sessions)
+
+        fake_paramiko = MagicMock()
+        fake_paramiko.SSHClient.return_value = client
+        fake_paramiko.SSHException = type("SSHException", (Exception,), {})
+
+        with patch.object(web_terminal_io, "paramiko", fake_paramiko), self._ticking_reads():
+            web_terminal_io._connect_ssh_session(session.session_id, session)
+
+        expected = self._first_generation()["ssh"]
+        self.assertEqual(opened["timeout"], expected["connection_timeout"])
+        transport.set_keepalive.assert_called_once_with(expected["keepalive_interval"])
+
+    # -- Capacity -------------------------------------------------------
+
+    def test_a_split_refusal_quotes_the_limit_it_refused_against(self):
+        """The verdict and the sentence explaining it name one cap.
+
+        Reading the cap twice does not merely misquote it: the refusal ends up
+        reporting a limit at or above the pane count it has just refused to
+        allow, which is advice the user cannot act on.
+        """
+        group = api.session_manager.create_group(
+            name="Cap", connection_mode="wsl", layout="single", terminal_count=1
+        )
+        session = api.session_manager.create_session(
+            group_id=group.group_id, host="cmd", directory="/tmp", mode="wsl"
+        )
+        self.addCleanup(api.session_manager.reset_sessions)
+        api.app.config["TESTING"] = True
+        client = api.app.test_client()
+
+        with self._ticking_reads():
+            response = client.post(f"/api/sessions/{session.session_id}/split", json={})
+
+        self.assertEqual(response.status_code, 400)
+        limit = self._first_generation()["terminal"]["max_sessions"]
+        self.assertEqual(
+            response.get_json()["error"], web_workspaces.capacity_refusal(2, limit)
+        )
+        self.assertLess(limit, 2, "the refusal must quote a limit below what it refused")
+
+    def test_a_launch_refusal_logs_and_quotes_the_same_limit(self):
+        """Verdict, log line and refusal text all come from one generation."""
+        api.app.config["TESTING"] = True
+        client = api.app.test_client()
+        self.addCleanup(api.session_manager.reset_sessions)
+
+        with self._ticking_reads():
+            with self.assertLogs(web_workspaces.logger, level="WARNING") as logged:
+                response = client.post(
+                    "/api/sessions",
+                    json={
+                        "connection_mode": "wsl",
+                        "sessions": [{"directory": "/tmp"}, {"directory": "/tmp"}],
+                    },
+                )
+
+        self.assertEqual(response.status_code, 400)
+        limit = self._first_generation()["terminal"]["max_sessions"]
+        self.assertEqual(
+            response.get_json()["error"], web_workspaces.capacity_refusal(2, limit)
+        )
+        self.assertIn(
+            "Too many sessions requested: 2 > %d" % limit,
+            "\n".join(logged.output),
+        )
+
+    # -- Voice ----------------------------------------------------------
+
+    def test_voice_start_runs_the_engine_the_generation_that_allowed_it_named(self):
+        """`enabled` and `engine` are one decision, not two reads."""
+        started = []
+        with api.app.test_request_context("/"):
+            api.request.sid = "cfg-client"  # type: ignore[attr-defined]
+            with patch.object(api, "emit"), patch.object(
+                api, "_start_vosk_voice_session", lambda _id: started.append("vosk")
+            ), patch.object(
+                api, "_start_whisper_voice_session", lambda _id: started.append("whisper")
+            ), self._ticking_reads():
+                api.handle_voice_start({"session_id": "cfg-voice"})
+
+        self.addCleanup(api.release_voice_session, "cfg-voice", "vosk")
+        self.assertEqual(started, [self._first_generation()["voice_input"]["engine"]])
+
+    def test_the_install_broadcast_answers_about_the_engine_it_names(self):
+        """The engine in the payload is the engine availability was asked of."""
+        asked = []
+
+        def _record(engine=None, *_args, **_kwargs):
+            asked.append(engine)
+            return True
+
+        emitted = {}
+
+        def _emit(event, payload, **_kwargs):
+            emitted[event] = payload
+
+        with patch.object(api.socketio, "emit", _emit), patch.object(
+            api, "_voice_engine_available", _record
+        ), self._ticking_reads():
+            api._broadcast_voice_install_finished({"status": "success"})
+
+        payload = emitted["voice_availability_updated"]
+        self.assertEqual(
+            payload["engine"], self._first_generation()["voice_input"]["engine"]
+        )
+        self.assertEqual(asked, [payload["engine"]])
+
+    def test_the_vosk_startup_waits_and_reports_on_one_generation(self):
+        """One endpoint and one budget across a startup that read both twice."""
+        probed = []
+        waited = []
+
+        def _reachable(timeout=2.0, service_url=None):
+            probed.append(service_url)
+            return False
+
+        def _ready(process, timeout=30, service_url=None):
+            waited.append((timeout, service_url))
+            return False
+
+        process = MagicMock()
+        process.poll.return_value = None
+        process.pid = 4242
+
+        with patch.object(web_voice, "_vosk_service_reachable", _reachable), patch.object(
+            web_voice, "_wait_for_vosk_ready", _ready
+        ), patch.object(web_voice.subprocess, "Popen", return_value=process), patch.object(
+            web_voice.os.path, "exists", return_value=True
+        ), self._ticking_reads():
+            with self.assertLogs(web_voice.logger, level="ERROR") as logged:
+                started = web_voice._ensure_vosk_service()
+
+        self.addCleanup(setattr, web_voice, "_vosk_process", None)
+        self.assertFalse(started)
+        expected = self._first_generation()["voice_input"]
+        self.assertEqual(probed, [expected["vosk_service_url"]])
+        self.assertEqual(
+            waited,
+            [(expected["vosk_startup_timeout_seconds"], expected["vosk_service_url"])],
+        )
+        self.assertIn(
+            "not ready after %ss" % expected["vosk_startup_timeout_seconds"],
+            "\n".join(logged.output),
+        )
 
 if __name__ == "__main__":
     unittest.main()

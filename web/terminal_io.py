@@ -1382,6 +1382,12 @@ def _connect_ssh_session(session_id: str, session: Any):
     _broadcast_session_status(session_id)
 
     client = None
+    # One captured generation for both SSH settings, taken before the slow
+    # open rather than around it: `connect()` can sit here for the length of
+    # the timeout it was handed, and an App Settings refresh landing inside
+    # that window used to give the keepalive a different generation's value
+    # than the timeout the transport was actually opened with.
+    ssh_settings = runtime_config.snapshot().ssh_config
     try:
         client = paramiko.SSHClient()
         _apply_host_key_policy(client, paramiko)
@@ -1394,13 +1400,13 @@ def _connect_ssh_session(session_id: str, session: Any):
             port=session.port,
             username=session.username,
             password=session.password or None,
-            timeout=runtime_config.ssh_config.get("connection_timeout", 30),
+            timeout=ssh_settings.get("connection_timeout", 30),
             look_for_keys=not bool(session.password),
             allow_agent=not bool(session.password)
         )
         logger.info(f"[{session_id}] SSH connected successfully")
 
-        keepalive_interval = int(runtime_config.ssh_config.get("keepalive_interval", 60) or 0)
+        keepalive_interval = int(ssh_settings.get("keepalive_interval", 60) or 0)
         if keepalive_interval > 0:
             transport = client.get_transport()
             if transport is not None:
