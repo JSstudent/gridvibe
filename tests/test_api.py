@@ -6323,15 +6323,15 @@ class ApiRoutesTestCase(unittest.TestCase):
 
         for shell_kind in ("cmd", "powershell", "wsl", "posix"):
             with self.subTest(shell_kind=shell_kind):
+                connection = {"kind": "local", "shell_kind": shell_kind}
                 with patch.object(web_terminal_io, "_send_connection_input") as send_input:
-                    api._run_startup_sequence(
-                        {"kind": "local", "shell_kind": shell_kind}, session
-                    )
+                    api._run_startup_sequence(connection, session)
 
                 self.assertEqual(
                     [call.args[1] for call in send_input.call_args_list],
                     ["npm run dev\n"],
                 )
+                self.assertNotIn("ssh_startup_scrub", connection)
 
     def test_a_local_shell_is_handed_its_hook_at_spawn(self):
         """cmd and bash read their prompt hook from the environment."""
@@ -6363,17 +6363,71 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("]9;9;", command[4])
         self.assertEqual(environment, {})
 
-    def test_only_a_remote_shell_is_sent_a_line(self):
-        """`sshd` forwards only what AcceptEnv allows, so this one is typed."""
+    def test_remote_hook_arms_a_one_shot_startup_scrub(self):
+        """The extra marker bounds cleanup to GridVibe's own SSH bootstrap."""
         session = SimpleNamespace(directory="", initial_command="")
+        connection = {"kind": "ssh", "shell_kind": "posix"}
 
         with patch.object(web_terminal_io, "_send_connection_input") as send_input:
-            api._run_startup_sequence({"kind": "ssh", "shell_kind": "posix"}, session)
+            api._run_startup_sequence(connection, session)
 
         sent = [call.args[1] for call in send_input.call_args_list]
-        self.assertEqual(len(sent), 1)
+        self.assertEqual(len(sent), 2)
         self.assertIn("]9;9;", sent[0])
         self.assertIn("gridvibe-pid", sent[0])
+        self.assertIn("gridvibe-startup-ready", sent[1])
+        self.assertIn("ssh_startup_scrub", connection)
+
+    def test_remote_startup_scrub_removes_only_exact_internal_echo_lines(self):
+        connection = {"kind": "ssh", "shell_kind": "posix"}
+        commands = [
+            " _gv(){ printf hook; }",
+            "cd /srv/app",
+        ]
+        marker_command = web_terminal_io._arm_ssh_startup_scrub(connection, commands)
+        marker = connection["ssh_startup_scrub"]["marker"]
+        raw = (
+            "Welcome to Ubuntu\r\n"
+            f"{commands[0]}\r\n"
+            f"ubuntu@host:~$ {commands[0]}\r\n"
+            f"{commands[1]}\r\n"
+            f"ubuntu@host:~$ {commands[1]}\r\n"
+            f"ubuntu@host:/srv/app$ {marker_command}\r\n"
+            f"{marker}ubuntu@host:/srv/app$ echo user-command\r\n"
+        )
+        split = raw.index(marker) + len(marker) // 2
+
+        self.assertEqual(
+            web_terminal_io._scrub_ssh_startup_output(connection, raw[:split]),
+            "",
+        )
+        cleaned = web_terminal_io._scrub_ssh_startup_output(
+            connection, raw[split:]
+        )
+
+        self.assertEqual(
+            cleaned,
+            "Welcome to Ubuntu\r\nubuntu@host:/srv/app$ echo user-command\r\n",
+        )
+        self.assertNotIn("ssh_startup_scrub", connection)
+        self.assertEqual(
+            web_terminal_io._scrub_ssh_startup_output(connection, "live output"),
+            "live output",
+        )
+
+    def test_remote_startup_scrub_timeout_releases_original_output(self):
+        connection = {"kind": "ssh"}
+        web_terminal_io._arm_ssh_startup_scrub(connection, ["cd /srv/app"])
+        deadline = connection["ssh_startup_scrub"]["deadline"]
+        raw = "Welcome\r\nubuntu@host:~$ cd /srv/app\r\nunsupported shell"
+
+        self.assertEqual(
+            web_terminal_io._scrub_ssh_startup_output(
+                connection, raw, now=deadline + 0.01
+            ),
+            raw,
+        )
+        self.assertNotIn("ssh_startup_scrub", connection)
 
     def test_the_shell_integration_setting_leaves_the_prompt_alone(self):
         """The hook mutates the user's prompt, so the switch is a real one."""
@@ -6835,8 +6889,13 @@ class ApiRoutesTestCase(unittest.TestCase):
         ), patch.object(web_terminal_io, "_send_connection_input") as send_input:
             api._run_startup_sequence({"kind": "ssh", "shell_kind": "posix"}, session)
 
+        sent = [
+            call.args[1]
+            for call in send_input.call_args_list
+            if "gridvibe-startup-ready" not in call.args[1]
+        ]
         self.assertEqual(
-            [call.args[1] for call in send_input.call_args_list],
+            sent,
             ["cd /srv/app/api 2>/dev/null || cd /srv/app\n"],
         )
 
@@ -6851,9 +6910,12 @@ class ApiRoutesTestCase(unittest.TestCase):
         ), patch.object(web_terminal_io, "_send_connection_input") as send_input:
             api._run_startup_sequence({"kind": "ssh", "shell_kind": "posix"}, session)
 
-        self.assertEqual(
-            [call.args[1] for call in send_input.call_args_list], ["cd /srv/app\n"]
-        )
+        sent = [
+            call.args[1]
+            for call in send_input.call_args_list
+            if "gridvibe-startup-ready" not in call.args[1]
+        ]
+        self.assertEqual(sent, ["cd /srv/app\n"])
 
     def test_each_windows_shell_family_gets_its_own_fallback_form(self):
         """`||` is cmd's; PowerShell tests the path so no red error is drawn."""

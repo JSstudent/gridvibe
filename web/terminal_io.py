@@ -683,6 +683,81 @@ def _startup_directories(session: Any) -> Tuple[str, str]:
     return observed, launch_directory
 
 
+SSH_STARTUP_SCRUB_TIMEOUT = 2.0
+SSH_STARTUP_SCRUB_MAX_CHARS = 64 * 1024
+_SSH_STARTUP_READY_HEAD = "\x1b]777;gridvibe-startup-ready;"
+_SSH_STARTUP_READY_TAIL = "\x1b\\"
+
+
+def _arm_ssh_startup_scrub(
+    connection: Dict[str, Any], commands: Iterable[str]
+) -> str:
+    """Arm one bounded scrub and return its invisible completion command.
+
+    Only GridVibe's own SSH bootstrap lines are registered. The normal stream
+    stays untouched, as do local shells and the user's configured startup
+    command. A random OSC marker gives the reader an exact point after which
+    every registered line has been processed by the remote shell.
+    """
+    token = uuid.uuid4().hex
+    marker = f"{_SSH_STARTUP_READY_HEAD}{token}{_SSH_STARTUP_READY_TAIL}"
+    marker_command = (
+        f" printf '\\033]777;gridvibe-startup-ready;{token}\\033\\\\'"
+    )
+    connection["ssh_startup_scrub"] = {
+        "commands": tuple(commands) + (marker_command,),
+        "marker": marker,
+        "pending": "",
+        "deadline": time.monotonic() + SSH_STARTUP_SCRUB_TIMEOUT,
+    }
+    return marker_command
+
+
+def _scrub_ssh_startup_output(
+    connection: Dict[str, Any],
+    output: str = "",
+    *,
+    now: Optional[float] = None,
+    force: bool = False,
+) -> str:
+    """Hide exact SSH bootstrap echo lines, failing open on every uncertainty."""
+    state = connection.get("ssh_startup_scrub")
+    if not isinstance(state, dict):
+        return output
+
+    pending = f"{state.get('pending') or ''}{output}"
+    state["pending"] = pending
+    marker = str(state.get("marker") or "")
+    marker_at = pending.find(marker) if marker else -1
+
+    expired = (time.monotonic() if now is None else now) >= float(
+        state.get("deadline") or 0.0
+    )
+    if marker_at < 0:
+        if not force and not expired and len(pending) <= SSH_STARTUP_SCRUB_MAX_CHARS:
+            return ""
+        # A shell that did not understand the marker must never leave its MOTD
+        # or diagnostics hidden. Drop the state and release the original bytes.
+        connection.pop("ssh_startup_scrub", None)
+        return pending
+
+    marker_end = marker_at + len(marker)
+    before_marker = pending[:marker_at]
+    after_marker = pending[marker_end:]
+    commands = tuple(
+        command
+        for command in state.get("commands", ())
+        if isinstance(command, str) and command and "\n" not in command and "\r" not in command
+    )
+    cleaned = "".join(
+        line
+        for line in before_marker.splitlines(keepends=True)
+        if not any(line.rstrip("\r\n").endswith(command) for command in commands)
+    )
+    connection.pop("ssh_startup_scrub", None)
+    return f"{cleaned}{after_marker}"
+
+
 def _run_startup_sequence(connection: Dict[str, Any], session: Any):
     """Change into the target directory and optionally run an initial command."""
     shell_kind = connection.get("shell_kind")
@@ -697,6 +772,8 @@ def _run_startup_sequence(connection: Dict[str, Any], session: Any):
     if shell_kind == "wsl":
         time.sleep(0.25)
 
+    ssh_startup_commands = []
+
     # Only a *remote* shell is sent the hook: a local pane was handed it at
     # spawn (`_local_shell_integration`), where nothing is echoed into the pane.
     # `sshd` forwards only the environment its `AcceptEnv` allows, so there is
@@ -706,9 +783,9 @@ def _run_startup_sequence(connection: Dict[str, Any], session: Any):
     # itself stays on either way, so a shell that emits OSC 7 from the user's
     # own configuration is still read.
     if connection.get("kind") == "ssh" and runtime_config.terminal_shell_integration:
-        _send_connection_input(
-            connection, f"{remote_shell_integration_command()}{newline}"
-        )
+        hook_command = remote_shell_integration_command()
+        ssh_startup_commands.append(hook_command)
+        _send_connection_input(connection, f"{hook_command}{newline}")
         time.sleep(0.15)
 
     startup_directory, fallback_directory = _startup_directories(session)
@@ -742,8 +819,14 @@ def _run_startup_sequence(connection: Dict[str, Any], session: Any):
             command = f"cd {shlex.quote(target_directory)}"
             if fallback_target:
                 command = f"{command} 2>/dev/null || cd {shlex.quote(fallback_target)}"
+        if connection.get("kind") == "ssh":
+            ssh_startup_commands.append(command)
         _send_connection_input(connection, f"{command}{newline}")
         time.sleep(0.15)
+
+    if ssh_startup_commands:
+        marker_command = _arm_ssh_startup_scrub(connection, ssh_startup_commands)
+        _send_connection_input(connection, f"{marker_command}{newline}")
 
     startup_command = _compose_agent_startup_command(session)
     if startup_command:
@@ -766,6 +849,18 @@ def _finalize_stream(session_id: str):
 SSH_STREAM_RECV_TIMEOUT = 0.5
 
 
+def _publish_ssh_terminal_output(session_id: str, output: str) -> None:
+    """Cache and emit one already-observed SSH output chunk."""
+    if not output:
+        return
+    _cache_terminal_output(session_id, output)
+    socketio.emit(
+        'terminal_output',
+        {'session_id': session_id, 'data': output},
+        room=session_id  # type: ignore
+    )
+
+
 def _stream_ssh_output(session_id: str):
     """Read terminal output from the SSH channel and forward it to clients."""
     try:
@@ -786,6 +881,9 @@ def _stream_ssh_output(session_id: str):
             try:
                 data = channel.recv(4096)
             except socket.timeout:
+                _publish_ssh_terminal_output(
+                    session_id, _scrub_ssh_startup_output(connection)
+                )
                 if channel.exit_status_ready():
                     break
                 continue
@@ -794,15 +892,18 @@ def _stream_ssh_output(session_id: str):
                 break
 
             output = data.decode("utf-8", errors="ignore")
-            _cache_terminal_output(session_id, output)
+            # Observe the raw stream first: a line that carries the prompt's cwd
+            # marker may also carry a bootstrap echo that the visual scrub drops.
             _observe_terminal_output_cwd(session_id, connection, output)
-            # Emit outside connection_lock: a slow client write must not stall
-            # every other terminal's pump behind the global lock.
-            socketio.emit(
-                'terminal_output',
-                {'session_id': session_id, 'data': output},
-                room=session_id # type: ignore
+            _publish_ssh_terminal_output(
+                session_id, _scrub_ssh_startup_output(connection, output)
             )
+
+        # EOF before the marker is a failed handshake, not permission to hide
+        # the remote diagnostics that explain why the shell exited.
+        _publish_ssh_terminal_output(
+            session_id, _scrub_ssh_startup_output(connection, force=True)
+        )
     except Exception as e:
         session = session_manager.get_session(session_id)
         if session and _is_explorer_session(session):

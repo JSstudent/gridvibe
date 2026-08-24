@@ -4,6 +4,8 @@ All notable changes to GridVibe will be documented in this file.
 
 ## Unreleased
 
+- **(fix) Restored SSH terminals no longer print GridVibe's startup plumbing.** The remote working-directory hook and restore `cd` still run exactly as before, but their PTY-echoed command lines are removed from the initial console output before it is cached for replay. Cleanup is one-shot and SSH-only: local cmd, PowerShell, WSL and normal terminal output never enter it, while an unsupported or slow remote shell fails open after a short bound and shows the original output instead of hiding diagnostics.
+
 - **(fix) Find works in a very large file's own diff.** A file big enough for the plain large-file view turns Find off, because that view has no per-line rows to point at. That verdict was applied to the whole pane, so the file's **Diff** tab — a patch of a few lines, and bounded however large the file is — had no find box either. This was already fixed for a commit diff opened from the Git sidebar; the file's own diff now behaves the same way. Source and the Markdown preview of such a file still have Find off, and still say so — and on those two panels `Ctrl+F` now falls through to your browser's own find instead of being swallowed by a box that could not answer.
 
 - **(fix) The Markdown preview says so when it gives up.** If the file changed in the moment between GridVibe reading its text and rendering its preview, the panel was left showing "Rendering preview…" with nothing to click. It now says what happened and offers **Refresh**, which reloads Source and Preview together.
