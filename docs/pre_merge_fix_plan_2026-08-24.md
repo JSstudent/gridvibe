@@ -2,13 +2,13 @@
 
 Date: 2026-08-24
 
-Updated after the 2026-08-24 validation pass
+Updated after Stage 1 implementation, automated acceptance, and manual acceptance on 2026-08-24
 
 Scope: H-3, the branch-scoped part of H-2, plus M-1 through M-3 and L-1
 
 This is a point-in-time implementation plan, not a behavior contract. The code, tests, `AGENTS.md`, `CLAUDE.md`, and other maintained documents remain authoritative after a fix lands.
 
-## Validated finding disposition
+## Validated finding disposition and current status
 
 The validation pass changes what belongs in a pre-merge fix:
 
@@ -16,8 +16,8 @@ The validation pass changes what belongs in a pre-merge fix:
 | --- | --- | --- |
 | H-1 | Withdrawn and excluded | Make no process-tree, Job Object, timeout, or process-group change. The existing stalled-remote tests are green and the documented dead-PID safety trade remains intact. |
 | H-2 | Re-scoped | Fix only the branch-added possibility that a retired connection republishes `current_directory` after a deliberate clear. The older pump/finalizer/registration issues remain separate hardening work and are not merge blockers. |
-| H-3 | Confirmed merge blocker | Fix first. The out-of-scope discard was reproduced through the application and can destroy an edit hidden by the narrowed sidebar. |
-| M-1 | Confirmed branch regression in reach | Correct the result semantics now that this branch applies the existing bounded runner to every Git call. |
+| H-3 | Resolved in Stage 1 | Bulk mutations now obey the selected Git scope, and narrowed Commit refuses hidden staged paths. Automated and manual acceptance passed. |
+| M-1 | Resolved in Stage 1 | Bounded runners now distinguish completion from truncation; structural reads and mutations reject incomplete results, while search/diff retain explicit partial-result contracts. |
 | M-2, M-3, L-1 | Confirmed | Retain as scoped correctness/architecture work in descending change-risk order. |
 
 Do not reintroduce H-1 into this plan without a new reliable reproduction. Do not describe H-2 bullets 1–3 as regressions introduced by this branch.
@@ -26,11 +26,11 @@ Do not reintroduce H-1 into this plan without a new reliable reproduction. Do no
 
 Resolve the actionable branch concerns in three stages ordered by **implementation and regression risk**, from highest to lowest. Severity and change risk are separate: H-3 is the only validated merge blocker, while M-1 joins it in Stage 1 because changing the shared Git result model affects every explorer Git read and mutation.
 
-| Stage | Change risk | Findings | Why it is ordered here |
-| --- | --- | --- | --- |
-| 1 | Highest | H-3, M-1 | Changes destructive Git mutation scope and the completion semantics consumed by every local/SSH Git caller. |
-| 2 | Moderate | H-2, branch-scoped symptom only; M-2 | Adds identity checks at backend/frontend asynchronous publication boundaries without redesigning connection registration. |
-| 3 | Lowest when constrained as described | M-3, L-1 | Snapshot adoption is mechanical. The API extraction is characterization-first and behavior-neutral; redesign is excluded. |
+| Stage | Status | Change risk | Findings | Why it is ordered here |
+| --- | --- | --- | --- | --- |
+| 1 | **Complete — accepted 2026-08-24** | Highest | H-3, M-1 | Changes destructive Git mutation scope and the completion semantics consumed by every local/SSH Git caller. |
+| 2 | Pending | Moderate | H-2, branch-scoped symptom only; M-2 | Adds identity checks at backend/frontend asynchronous publication boundaries without redesigning connection registration. |
+| 3 | Pending | Lowest when constrained as described | M-3, L-1 | Snapshot adoption is mechanical. The API extraction is characterization-first and behavior-neutral; redesign is excluded. |
 
 Each stage is independently reviewable and must leave its focused tests green before the next stage starts. The validated baseline is already green: two consecutive full runs reported 1,983 tests passing with 9 skipped. A fix must preserve that baseline.
 
@@ -46,11 +46,40 @@ Each stage is independently reviewable and must leave its focused tests green be
 
 ---
 
-## Stage 1 — Scoped Git mutations and trustworthy bounded results
+## Stage 1 — Scoped Git mutations and trustworthy bounded results — Complete
 
 Risk: highest
 
 Findings: H-3 and M-1
+
+### Completion record — 2026-08-24
+
+Status: **implemented, automatically accepted, manually accepted, and documented.** No Stage 2 or Stage 3 work was included.
+
+Delivered code:
+
+- `web/explorer.py` now resolves one selected scope pathspec for bulk Git actions. Stage All, both Unstage All forms, and Discard All use it; Discard All restores only the tracked, non-conflicted worktree paths returned by its complete scoped status read.
+- Narrowed Commit compares complete repository-wide and scoped staged-path sets, including cross-scope rename endpoints through `--no-renames`, and refuses without committing when a staged path is hidden. Repository-root Commit is unchanged, and Publish remains branch-wide.
+- Local and SSH Git results now carry independent completion, exit-status-observed, stdout-truncated, stderr-truncated, and output-limit-terminated facts. Output limiting never synthesizes success.
+- One centralized completeness gate protects structural reads and every mutation. Incomplete mutations report possible repository change, require a refresh, and are not retried. `web/explorer_search.py` and bounded diff opt into the only explicit stdout-partial paths.
+- `web/static/js/explorer-git-sidebar.js` now confirms that Discard All affects tracked files in the current Git scope while preserving staged content and untracked files.
+
+Automated acceptance:
+
+- Real repository tests cover sibling-scope byte/index isolation for Stage All, Unstage All, and Discard All; root and narrowed scope; unborn `HEAD`; deletes and renames; staged-plus-unstaged content; untracked and conflicted files; unusual NUL-delimited names; and narrowed/root Commit behavior.
+- Local and SSH runner tests cover stdout and stderr ceilings, missing completion status, normal success and non-zero exit, incomplete structural reads and mutations, and the explicit partial search/diff contracts.
+- Focused explorer Git, API, search, and process-bound suites passed, as did Ruff and `git diff --check`.
+- The full runner reached 2,004 tests with 9 skipped. Its only two environment-sensitive failures were the withdrawn H-1 process-tree cases, which are explicitly excluded from this plan and received no code change.
+
+Manual acceptance:
+
+- The user repeated the disposable narrowed-scope and repository-root scenarios, verified the modal and ordinary below-limit behavior, and accepted Stage 1 on 2026-08-24.
+
+Documentation completed:
+
+- The selected-Git-scope and bounded-output guardrails were updated in `AGENTS.md` and `CLAUDE.md`.
+- `CHANGELOG.md` records both user-visible fixes.
+- `docs/pre_merge_code_review_2026-08-24.md` records the H-3/M-1 remediation and acceptance without rewriting its original point-in-time findings.
 
 ### Problem
 

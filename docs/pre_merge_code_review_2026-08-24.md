@@ -8,6 +8,25 @@ This is a point-in-time code audit, not a behavior contract. The review covered 
 
 **Validation pass (2026-08-24, same commit, working tree clean apart from this file).** Every finding below was re-checked against the code, and three were exercised against a running system. The pass changed three things: H-1 is **withdrawn** (its test evidence does not reproduce, and its mechanism is a sub-millisecond race the code deliberately declines to take); H-2 is **re-scoped** (three of its four bullets describe code that is unchanged from `main`); and H-3 is **upgraded from analysis to reproduction** — the out-of-scope discard was executed and the file contents confirmed. Each finding now carries a `Validation` note recording what was verified and how.
 
+## Post-review remediation
+
+**Stage 1 was implemented, automatically exercised, and manually accepted on 2026-08-24.** H-3 and M-1 are resolved in the post-review code. The findings and verdict below remain the point-in-time record for the reviewed commit; they no longer describe the disposition of those two findings in the updated tree. H-2, M-2, M-3, and L-1 remain assigned to the later stages of the fix plan.
+
+H-3 remediation:
+
+- Stage All and Unstage All now pass the selected root/Pin/Follow pathspec to Git, including the unborn-`HEAD` unstage form.
+- Discard All scopes its complete status read first, then restores only the tracked, non-conflicted worktree paths returned from that scope. Staged content, untracked files, conflicts, and out-of-scope paths remain untouched.
+- A narrowed Commit compares the complete repository staged-path set with the complete scoped set and refuses when hidden staged paths exist. Repository-root Commit keeps its normal behavior, while Publish deliberately remains branch-wide.
+- The Discard All confirmation now says it affects tracked files in the current Git scope and retains the staged/untracked preservation warning.
+
+M-1 remediation:
+
+- Local and SSH Git runners now report exit-status observation, stdout/stderr truncation, output-limit termination, and overall completion independently. An output ceiling no longer invents `returncode=0`.
+- Structural reads and every mutation require a complete result. An incomplete mutation reports that repository state may have changed, requests a fresh state read, and is never retried automatically.
+- Repository search and bounded diff are the only callers allowed to consume stdout-limited output, because both have an explicit partial-result contract. Stderr-limited execution and a command/channel ending without a status remain failures.
+
+Automated acceptance added real sibling-scope repository coverage for Stage/Unstage/Discard All and narrowed Commit, plus local/SSH coverage for stdout limits, stderr limits, missing completion status, normal non-zero exits, structural reads, mutations, and the explicit search/diff partial paths. The focused Stage 1 suites, Ruff, and `git diff --check` passed. The full runner reached 2,004 tests with 9 skipped; its only two environment-sensitive failures were the withdrawn H-1 process-tree cases, which the fix plan explicitly excludes from Stage 1. The user then completed the disposable-repository manual scenarios and accepted the result.
+
 ## Verdict
 
 Do not merge yet — on H-3 alone. A narrowed Git sidebar can irreversibly discard unstaged edits it never showed the user, and that was reproduced end to end, not inferred.
