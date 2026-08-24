@@ -18,6 +18,7 @@ from web import explorer_search
 from web.config import RuntimeConfig
 from web.explorer import (
     ExplorerRouteError,
+    _git_command_result,
     _LocalExplorerBackend,
     _remote_git_shell_command,
     _run_remote_git_command,
@@ -155,6 +156,46 @@ class GitGrepArgsTestCase(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 1)
         self.assertFalse(result.stdout_truncated)
+
+    def test_git_grep_rejects_stderr_limited_execution(self):
+        results = iter(
+            (
+                _git_command_result(
+                    args=["git"],
+                    returncode=0,
+                    stdout=b"/repo\ntrue\n",
+                    stderr=b"",
+                ),
+                _git_command_result(
+                    args=["git"],
+                    returncode=None,
+                    stdout=b"",
+                    stderr=b"diagnostic",
+                    stderr_truncated=True,
+                    output_limit_terminated=True,
+                ),
+            )
+        )
+
+        class Backend:
+            def run_git(self, args, **kwargs):
+                return next(results)
+
+            def canonical_repo_root(self, path):
+                return path
+
+            def pathspec(self, repo_root, scope_path):
+                return "."
+
+        matches = explorer_search.git_grep_matches(
+            Backend(),
+            "/repo",
+            "/repo",
+            _options(),
+            2.0,
+        )
+        with self.assertRaisesRegex(ExplorerRouteError, "bounded Git output limit"):
+            list(matches)
 
 
 class GitGrepZParserTestCase(unittest.TestCase):

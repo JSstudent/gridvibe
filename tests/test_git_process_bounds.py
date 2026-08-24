@@ -195,9 +195,24 @@ class _StubRemoteStream:
         self.total = int(total)
         self.remaining = int(total)
         self.bytes_read = 0
-        self.channel = SimpleNamespace(recv_exit_status=lambda: exit_status)
+        self.closed = False
+
+        def receive_exit_status():
+            if isinstance(exit_status, BaseException):
+                raise exit_status
+            return exit_status
+
+        self.channel = SimpleNamespace(
+            recv_exit_status=receive_exit_status,
+            close=self._close,
+        )
+
+    def _close(self):
+        self.closed = True
 
     def read(self, size: int = -1) -> bytes:
+        if self.closed:
+            return b""
         if size is None or size < 0:
             size = self.remaining
         count = min(size, self.remaining)
@@ -206,6 +221,11 @@ class _StubRemoteStream:
         self.remaining -= count
         self.bytes_read += count
         return b"x" * count
+
+
+class _TimeoutRemoteStream(_StubRemoteStream):
+    def read(self, size: int = -1) -> bytes:
+        raise TimeoutError("remote channel timed out")
 
 
 class _StubRemoteClient:
@@ -219,6 +239,44 @@ class _StubRemoteClient:
     def exec_command(self, command, timeout=None):
         self.commands.append(command)
         return None, self.stdout, self.stderr
+
+
+def _git_result(
+    *,
+    stdout=b"",
+    stderr=b"",
+    returncode=0,
+    stdout_truncated=False,
+    stderr_truncated=False,
+):
+    limited = stdout_truncated or stderr_truncated
+    return web_explorer._git_command_result(
+        args=["git"],
+        returncode=None if limited else returncode,
+        stdout=stdout,
+        stderr=stderr,
+        stdout_truncated=stdout_truncated,
+        stderr_truncated=stderr_truncated,
+        output_limit_terminated=limited,
+    )
+
+
+class _QueuedGitBackend:
+    def __init__(self, *results):
+        self.results = list(results)
+        self.calls = []
+
+    def run_git(self, args, **kwargs):
+        self.calls.append((list(args), dict(kwargs)))
+        if not self.results:
+            raise AssertionError("unexpected Git retry")
+        return self.results.pop(0)
+
+    def pathspec(self, repo_root, scope_path):
+        return "tracked.txt"
+
+    def validate_repo_paths(self, repo_root, root_path, current_path):
+        return None
 
 
 class ExplorerGitEnvironmentTestCase(unittest.TestCase):
@@ -309,6 +367,10 @@ class ExplorerGitOutputBoundsTestCase(unittest.TestCase):
 
         self.assertLess(len(result.stdout), OVERSIZED_OUTPUT_BYTES)
         self.assertTrue(getattr(result, "stdout_truncated", False))
+        self.assertFalse(result.complete)
+        self.assertTrue(result.output_limit_terminated)
+        self.assertFalse(result.exit_status_observed)
+        self.assertIsNone(result.returncode)
 
     def test_unbounded_callers_still_get_bounded_stderr(self):
         """A failing command's stderr is output too, and was never capped."""
@@ -317,6 +379,10 @@ class ExplorerGitOutputBoundsTestCase(unittest.TestCase):
             result = web_explorer._run_git_command(["status"], cwd=os.getcwd())
 
         self.assertLess(len(result.stderr), OVERSIZED_OUTPUT_BYTES)
+        self.assertTrue(result.stderr_truncated)
+        self.assertFalse(result.complete)
+        self.assertTrue(result.output_limit_terminated)
+        self.assertIsNone(result.returncode)
 
     def test_bounded_callers_also_bound_stderr(self):
         """A caller-supplied stdout cap does not excuse stderr from having one."""
@@ -362,6 +428,39 @@ class ExplorerGitOutputBoundsTestCase(unittest.TestCase):
         self.assertTrue(result.stdout_truncated)
         self.assertLessEqual(len(result.stdout), 64 * 1024)
 
+    def test_normal_success_and_nonzero_exit_keep_observed_status(self):
+        for returncode in (0, 23):
+            with self.subTest(returncode=returncode):
+                stub = _RecordingSubprocess(returncode=returncode)
+                with patch.object(web_explorer, "subprocess", stub):
+                    result = web_explorer._run_git_command(["status"], cwd=os.getcwd())
+
+                self.assertEqual(result.returncode, returncode)
+                self.assertTrue(result.exit_status_observed)
+                self.assertTrue(result.complete)
+                self.assertFalse(result.stdout_truncated)
+                self.assertFalse(result.stderr_truncated)
+                self.assertFalse(result.output_limit_terminated)
+
+    def test_local_timeout_remains_distinct_from_output_limiting(self):
+        process = _StubGitProcess()
+        waits = 0
+
+        def wait(timeout=None):
+            nonlocal waits
+            waits += 1
+            if waits == 1:
+                raise subprocess.TimeoutExpired(["git", "status"], timeout)
+            return process.returncode
+
+        process.wait = wait
+        stub = _RecordingSubprocess()
+        with patch.object(stub, "Popen", return_value=process), patch.object(
+            web_explorer, "subprocess", stub
+        ):
+            with self.assertRaises(subprocess.TimeoutExpired):
+                web_explorer._run_git_command(["status"], cwd=os.getcwd(), timeout=0.01)
+
 
 class RemoteGitOutputBoundsTestCase(unittest.TestCase):
     """The SSH runner owes the same bounds as the local one (Guardrail 6)."""
@@ -388,6 +487,10 @@ class RemoteGitOutputBoundsTestCase(unittest.TestCase):
         )
 
         self.assertLess(len(result.stderr), OVERSIZED_OUTPUT_BYTES)
+        self.assertTrue(result.stderr_truncated)
+        self.assertTrue(result.output_limit_terminated)
+        self.assertFalse(result.complete)
+        self.assertIsNone(result.returncode)
 
     def test_remote_reads_are_bounded_at_the_channel_not_after(self):
         """A bounded drain reads a bounded amount, whatever the peer sends."""
@@ -402,7 +505,7 @@ class RemoteGitOutputBoundsTestCase(unittest.TestCase):
 
     def test_remote_truncation_is_reported(self):
         """Already true — pinned so the bounded-drain rewrite preserves it."""
-        client = _StubRemoteClient(stdout_bytes=64 * 1024)
+        client = _StubRemoteClient(stdout_bytes=(64 * 1024) + 1)
         result = web_explorer._run_remote_git_command(
             client,
             ["log", "--oneline"],
@@ -411,6 +514,262 @@ class RemoteGitOutputBoundsTestCase(unittest.TestCase):
         )
 
         self.assertTrue(result.stdout_truncated)
+        self.assertTrue(result.output_limit_terminated)
+        self.assertFalse(result.complete)
+        self.assertIsNone(result.returncode)
+
+    def test_remote_exact_ceiling_is_complete_when_eof_is_observed(self):
+        client = _StubRemoteClient(stdout_bytes=64 * 1024)
+        result = web_explorer._run_remote_git_command(
+            client,
+            ["log", "--oneline"],
+            cwd="/srv/app",
+            max_output_bytes=64 * 1024,
+        )
+
+        self.assertFalse(result.stdout_truncated)
+        self.assertTrue(result.complete)
+        self.assertEqual(result.returncode, 0)
+
+    def test_remote_normal_success_and_nonzero_exit_keep_observed_status(self):
+        for returncode in (0, 23):
+            with self.subTest(returncode=returncode):
+                client = _StubRemoteClient(exit_status=returncode)
+                result = web_explorer._run_remote_git_command(
+                    client,
+                    ["status"],
+                    cwd="/srv/app",
+                )
+
+                self.assertEqual(result.returncode, returncode)
+                self.assertTrue(result.exit_status_observed)
+                self.assertTrue(result.complete)
+                self.assertFalse(result.stdout_truncated)
+                self.assertFalse(result.stderr_truncated)
+                self.assertFalse(result.output_limit_terminated)
+
+    def test_remote_timeout_remains_distinct_from_output_limiting(self):
+        client = _StubRemoteClient()
+        client.stdout = _TimeoutRemoteStream(0)
+
+        with self.assertRaises(subprocess.TimeoutExpired):
+            web_explorer._run_remote_git_command(
+                client,
+                ["status"],
+                cwd="/srv/app",
+                timeout=0.01,
+            )
+
+    def test_remote_channel_closure_without_status_is_incomplete(self):
+        client = _StubRemoteClient(exit_status=EOFError("channel closed"))
+
+        result = web_explorer._run_remote_git_command(
+            client,
+            ["status"],
+            cwd="/srv/app",
+        )
+
+        self.assertIsNone(result.returncode)
+        self.assertFalse(result.exit_status_observed)
+        self.assertFalse(result.complete)
+
+
+class ExplorerGitIncompleteResultTestCase(unittest.TestCase):
+    """Incomplete structural reads and mutations never masquerade as success."""
+
+    def test_every_mutation_rejects_output_limited_execution_without_retry(self):
+        def incomplete():
+            return _git_result(stdout_truncated=True)
+
+        status_v2 = _git_result(
+            stdout=(
+                b"1 .M N... 100644 100644 100644 old new tracked.txt\0"
+            )
+        )
+        status_v1 = _git_result(stdout=b" M tracked.txt\0")
+        cases = (
+            (
+                "stage",
+                lambda backend: web_explorer._git_stage_path(
+                    backend, "/repo", "/repo/tracked.txt", "/repo"
+                ),
+                [incomplete()],
+            ),
+            (
+                "unstage",
+                lambda backend: web_explorer._git_unstage_path(
+                    backend, "/repo", "/repo/tracked.txt", "/repo"
+                ),
+                [incomplete()],
+            ),
+            (
+                "stage-all",
+                lambda backend: web_explorer._git_stage_all_paths(
+                    backend, "/repo", "/repo"
+                ),
+                [incomplete()],
+            ),
+            (
+                "unstage-all",
+                lambda backend: web_explorer._git_unstage_all_paths(
+                    backend, "/repo", "/repo"
+                ),
+                [incomplete()],
+            ),
+            (
+                "revert",
+                lambda backend: web_explorer._git_revert_path(
+                    backend, "/repo", "/repo/tracked.txt", "/repo"
+                ),
+                [status_v2, incomplete()],
+            ),
+            (
+                "discard-all",
+                lambda backend: web_explorer._git_discard_all_paths(
+                    backend, "/repo", "/repo"
+                ),
+                [status_v1, incomplete()],
+            ),
+            (
+                "commit",
+                lambda backend: web_explorer._git_commit(
+                    backend, "/repo", "message", "/repo"
+                ),
+                [
+                    _git_result(stdout=b"tracked.txt\0"),
+                    _git_result(stdout=b"tracked.txt\0"),
+                    incomplete(),
+                ],
+            ),
+            (
+                "publish",
+                lambda backend: web_explorer._git_publish(
+                    backend, "/repo", "/repo"
+                ),
+                [_git_result(), incomplete()],
+            ),
+        )
+
+        with patch.object(
+            web_explorer, "_git_action_repo_root", return_value="/repo"
+        ), patch.object(
+            web_explorer,
+            "_git_action_scope",
+            return_value=("/repo", "tracked.txt"),
+        ), patch.object(web_explorer, "_git_has_head", return_value=True):
+            for name, invoke, results in cases:
+                with self.subTest(mutation=name):
+                    backend = _QueuedGitBackend(*results)
+                    with self.assertRaisesRegex(ValueError, "bounded Git output limit"):
+                        invoke(backend)
+                    self.assertFalse(backend.results)
+
+    def test_structural_models_reject_incomplete_results(self):
+        backend = _QueuedGitBackend(_git_result(stdout_truncated=True))
+        with patch.object(
+            web_explorer,
+            "_resolve_git_worktree_root",
+            return_value=("/repo", None),
+        ):
+            context, statuses = web_explorer._get_git_context(
+                backend,
+                "/repo",
+                "/repo",
+            )
+        self.assertFalse(context["available"])
+        self.assertIn("bounded Git output limit", context["error"])
+        self.assertEqual(statuses, {})
+
+        for label, invoke in (
+            (
+                "graph",
+                lambda item: web_explorer._bounded_git_graph_log(
+                    item, "/repo", "."
+                ),
+            ),
+            (
+                "commit files",
+                lambda item: web_explorer._git_commit_files_log(
+                    item, "/repo", "."
+                ),
+            ),
+        ):
+            with self.subTest(read=label):
+                backend = _QueuedGitBackend(_git_result(stdout_truncated=True))
+                with self.assertRaisesRegex(ValueError, "bounded Git output limit"):
+                    invoke(backend)
+
+    def test_diff_keeps_its_explicit_partial_result_contract(self):
+        partial = b"diff --git a/a.txt b/a.txt\n+partial\n"
+        backend = _QueuedGitBackend(
+            _git_result(stdout=partial, stdout_truncated=True)
+        )
+
+        text, truncated, byte_count = web_explorer._bounded_git_diff(
+            backend,
+            "/repo",
+            ["diff"],
+        )
+
+        self.assertEqual(text, partial.decode())
+        self.assertTrue(truncated)
+        self.assertEqual(byte_count, len(partial))
+
+    def test_diff_rejects_stderr_limited_execution(self):
+        backend = _QueuedGitBackend(
+            _git_result(stderr=b"diagnostic", stderr_truncated=True)
+        )
+
+        with self.assertRaisesRegex(ValueError, "bounded Git output limit"):
+            web_explorer._bounded_git_diff(
+                backend,
+                "/repo",
+                ["diff"],
+            )
+
+
+class ExplorerGitScopePathspecTestCase(unittest.TestCase):
+    def test_bulk_action_uses_one_local_or_remote_scope_pathspec(self):
+        local_root = os.path.abspath(os.path.join(os.sep, "repo"))
+        cases = (
+            (
+                web_explorer._LocalExplorerBackend(),
+                local_root,
+                os.path.join(local_root, "inside"),
+                "inside",
+            ),
+            (
+                web_explorer._SftpExplorerBackend(),
+                "/srv/repo",
+                "/srv/repo/inside",
+                "inside",
+            ),
+        )
+        for backend, repo_root, scope_path, expected in cases:
+            with self.subTest(remote=backend.remote), patch.object(
+                web_explorer,
+                "_git_action_anchor",
+                return_value=(repo_root, scope_path),
+            ), patch.object(
+                backend,
+                "pathspec",
+                wraps=backend.pathspec,
+            ) as pathspec, patch.object(
+                backend,
+                "run_git",
+                return_value=_git_result(),
+            ) as run_git:
+                web_explorer._git_stage_all_paths(
+                    backend,
+                    repo_root,
+                    scope_path,
+                )
+
+            pathspec.assert_called_once_with(repo_root, scope_path)
+            self.assertEqual(
+                run_git.call_args.args[0],
+                ["add", "--all", "--", expected],
+            )
 
 
 class ExplorerGitProcessTreeTestCase(unittest.TestCase):

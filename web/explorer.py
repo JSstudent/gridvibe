@@ -1152,6 +1152,82 @@ def _git_output_limit(max_output_bytes: Optional[int]) -> int:
     return max(1, min(int(max_output_bytes), EXPLORER_GIT_MAX_OUTPUT_BYTES))
 
 
+def _git_command_result(
+    *,
+    args: Any,
+    returncode: Optional[int],
+    stdout: bytes,
+    stderr: bytes,
+    stdout_truncated: bool = False,
+    stderr_truncated: bool = False,
+    output_limit_terminated: bool = False,
+) -> subprocess.CompletedProcess:
+    """Build one subprocess-like Git result with explicit completion facts."""
+    result = subprocess.CompletedProcess(
+        args=args,
+        returncode=returncode,
+        stdout=stdout,
+        stderr=stderr,
+    )
+    result.stdout_truncated = bool(stdout_truncated)
+    result.stderr_truncated = bool(stderr_truncated)
+    result.output_limit_terminated = bool(output_limit_terminated)
+    result.exit_status_observed = returncode is not None
+    result.complete = bool(
+        result.exit_status_observed
+        and not result.stdout_truncated
+        and not result.stderr_truncated
+        and not result.output_limit_terminated
+    )
+    return result
+
+
+def _require_complete_git_result(
+    result: Any,
+    operation: str,
+    *,
+    allow_stdout_truncation: bool = False,
+    mutation: bool = False,
+) -> None:
+    """Reject a Git result that cannot safely be treated as complete."""
+    stdout_truncated = bool(getattr(result, "stdout_truncated", False))
+    stderr_truncated = bool(getattr(result, "stderr_truncated", False))
+    output_limit_terminated = bool(getattr(result, "output_limit_terminated", False))
+    exit_status_observed = bool(
+        getattr(result, "exit_status_observed", getattr(result, "returncode", None) is not None)
+    )
+    complete = bool(
+        getattr(
+            result,
+            "complete",
+            exit_status_observed
+            and not stdout_truncated
+            and not stderr_truncated
+            and not output_limit_terminated,
+        )
+    )
+    if complete:
+        return
+    if (
+        allow_stdout_truncation
+        and stdout_truncated
+        and not stderr_truncated
+        and output_limit_terminated
+    ):
+        return
+
+    if stdout_truncated or stderr_truncated or output_limit_terminated:
+        detail = " exceeded the bounded Git output limit"
+    else:
+        detail = " ended before Git reported a completion status"
+    if mutation:
+        raise ValueError(
+            f"{operation}{detail}; repository state may have changed. "
+            "Refresh Git state before retrying; the action was not retried."
+        )
+    raise ValueError(f"{operation}{detail}; refresh Git state and try again")
+
+
 def _drain_bounded_pipe(pipe: Any, limit: int, chunks: List[bytes]) -> bool:
     """Read at most `limit` bytes from a child pipe; return whether more existed.
 
@@ -1207,9 +1283,9 @@ def _run_git_command(
     helpers and not only git itself — killing the direct child leaves a
     grandchild holding our pipes, which is what made a 30 s bound take 269 s.
 
-    A command whose stdout hit the ceiling reports `stdout_truncated` and
-    returns 0: it was killed mid-stream, so its exit status describes our kill
-    rather than the repository, and the output it did produce is usable.
+    Completion and exit status are independent. A stream that reaches its
+    ceiling is marked truncated, the output-limit termination is explicit,
+    and no exit status is invented for the command that was interrupted.
     """
     if timeout is None:
         timeout = GIT_WRITE_TIMEOUT if write else GIT_READ_TIMEOUT
@@ -1232,6 +1308,7 @@ def _run_git_command(
     stdout_chunks: List[bytes] = []
     stderr_chunks: List[bytes] = []
     stdout_truncated = threading.Event()
+    stderr_truncated = threading.Event()
     halted = threading.Event()
 
     def halt_child() -> None:
@@ -1249,6 +1326,7 @@ def _run_git_command(
 
     def drain_stderr() -> None:
         if _drain_bounded_pipe(process.stderr, EXPLORER_GIT_MAX_STDERR_BYTES, stderr_chunks):
+            stderr_truncated.set()
             halt_child()
 
     stdout_thread = threading.Thread(target=drain_stdout, daemon=True)
@@ -1283,15 +1361,16 @@ def _run_git_command(
             stderr=b"".join(stderr_chunks),
         ) from expired
 
-    truncated = stdout_truncated.is_set()
-    result = subprocess.CompletedProcess(
+    output_limit_terminated = halted.is_set()
+    return _git_command_result(
         args=command,
-        returncode=0 if truncated else process.returncode,
+        returncode=None if output_limit_terminated else process.returncode,
         stdout=b"".join(stdout_chunks),
         stderr=b"".join(stderr_chunks),
+        stdout_truncated=stdout_truncated.is_set(),
+        stderr_truncated=stderr_truncated.is_set(),
+        output_limit_terminated=output_limit_terminated,
     )
-    result.stdout_truncated = truncated
-    return result
 
 
 def _decode_git_output(raw_output: bytes) -> str:
@@ -1523,29 +1602,36 @@ def _remote_git_shell_command(
     return f"{env_prefix} git -C {shlex.quote(cwd)} {quoted_args}"
 
 
-def _drain_remote_stream(stream: Any, limit: int, deadline: float) -> Tuple[bytes, bool]:
+def _drain_remote_stream(stream: Any, limit: int, deadline: float) -> Tuple[bytes, bool, bool]:
     """Read at most `limit` bytes from an SSH channel file before `deadline`.
 
-    Returns the bytes read and whether the drain stopped early — because the
-    peer had more to send than the ceiling allows, or because the deadline
-    passed. Either way the caller is holding an incomplete stream and must
-    close the channel rather than block on an exit status that will not come.
+    Returns the bytes read, whether the output ceiling was exceeded, and
+    whether the deadline elapsed. Either incomplete outcome requires closing
+    the channel rather than waiting on an exit status that may never come.
     """
     chunks: List[bytes] = []
     size = 0
     while size < limit:
         if time.monotonic() > deadline:
-            return b"".join(chunks), True
-        chunk = stream.read(min(_GIT_STREAM_CHUNK_BYTES, limit - size))
+            return b"".join(chunks), False, True
+        try:
+            chunk = stream.read(min(_GIT_STREAM_CHUNK_BYTES, limit - size))
+        except (socket.timeout, TimeoutError):
+            return b"".join(chunks), False, True
         if isinstance(chunk, str):
             chunk = chunk.encode("utf-8", errors="replace")
         if not chunk:
-            return b"".join(chunks), False
+            return b"".join(chunks), False, False
         chunks.append(chunk)
         size += len(chunk)
     # At the ceiling: one more byte separates "there was more" from "exact fit".
-    overflow = stream.read(1)
-    return b"".join(chunks), bool(overflow)
+    if time.monotonic() > deadline:
+        return b"".join(chunks), False, True
+    try:
+        overflow = stream.read(1)
+    except (socket.timeout, TimeoutError):
+        return b"".join(chunks), False, True
+    return b"".join(chunks), bool(overflow), False
 
 
 def _close_remote_channel(stream: Any) -> None:
@@ -1560,15 +1646,16 @@ def _close_remote_channel(stream: Any) -> None:
         pass
 
 
-def _remote_exit_status(stream: Any) -> int:
-    """Return the remote command's exit status, or -1 if it never reported one."""
+def _remote_exit_status(stream: Any) -> Optional[int]:
+    """Return the remote command's exit status, or None if none was observed."""
     channel = getattr(stream, "channel", None)
     if channel is None:
         return 0
     try:
-        return int(channel.recv_exit_status())
-    except (OSError, TypeError, ValueError):
-        return -1
+        status = int(channel.recv_exit_status())
+        return status if status >= 0 else None
+    except (EOFError, OSError, TypeError, ValueError):
+        return None
 
 
 def _run_remote_git_command(
@@ -1590,32 +1677,51 @@ def _run_remote_git_command(
     if timeout is None:
         timeout = REMOTE_GIT_WRITE_TIMEOUT if write else REMOTE_GIT_READ_TIMEOUT
     command = _remote_git_shell_command(args, cwd, write=write)
-    _stdin, stdout, stderr = client.exec_command(command, timeout=timeout)
+    try:
+        _stdin, stdout, stderr = client.exec_command(command, timeout=timeout)
+    except (socket.timeout, TimeoutError) as exc:
+        raise subprocess.TimeoutExpired(command, timeout) from exc
     deadline = time.monotonic() + float(timeout)
-    stdout_data, stdout_incomplete = _drain_remote_stream(
+    stdout_data, stdout_truncated, stdout_timed_out = _drain_remote_stream(
         stdout, _git_output_limit(max_output_bytes), deadline
     )
-    stderr_data, stderr_incomplete = _drain_remote_stream(
+    if stdout_timed_out:
+        _close_remote_channel(stdout)
+        raise subprocess.TimeoutExpired(command, timeout, output=stdout_data, stderr=b"")
+    if stdout_truncated:
+        _close_remote_channel(stdout)
+        return _git_command_result(
+            args=command,
+            returncode=None,
+            stdout=stdout_data,
+            stderr=b"",
+            stdout_truncated=True,
+            output_limit_terminated=True,
+        )
+
+    stderr_data, stderr_truncated, stderr_timed_out = _drain_remote_stream(
         stderr, EXPLORER_GIT_MAX_STDERR_BYTES, deadline
     )
-
-    truncated = stdout_incomplete or (
-        max_output_bytes is not None and len(stdout_data) >= max(1, int(max_output_bytes))
-    )
-    if stdout_incomplete or stderr_incomplete:
+    if stderr_timed_out:
         _close_remote_channel(stdout)
+        raise subprocess.TimeoutExpired(command, timeout, output=stdout_data, stderr=stderr_data)
+    if stderr_truncated:
+        _close_remote_channel(stdout)
+        return _git_command_result(
+            args=command,
+            returncode=None,
+            stdout=stdout_data,
+            stderr=stderr_data,
+            stderr_truncated=True,
+            output_limit_terminated=True,
+        )
 
-    result = subprocess.CompletedProcess(
+    return _git_command_result(
         args=command,
-        # Killed mid-stream, so the status describes our close, not the
-        # repository — the local runner reports a truncated command the
-        # same way.
-        returncode=0 if truncated else _remote_exit_status(stdout),
+        returncode=_remote_exit_status(stdout),
         stdout=stdout_data,
         stderr=stderr_data,
     )
-    result.stdout_truncated = truncated
-    return result
 
 
 class _LocalExplorerBackend:
@@ -2301,6 +2407,11 @@ def _resolve_git_worktree_root(backend: Any, current_path: str) -> Tuple[Optiona
     except Exception as exc:
         return None, str(exc)
 
+    try:
+        _require_complete_git_result(rev_parse, "Git repository detection")
+    except ValueError as exc:
+        return None, str(exc)
+
     if rev_parse.returncode != 0:
         return None, None
 
@@ -2351,6 +2462,7 @@ def _get_git_context(
     ]
     try:
         status_result = backend.run_git(status_args, cwd=repo_root, timeout=2.0)
+        _require_complete_git_result(status_result, "Git status")
     except (subprocess.TimeoutExpired, TimeoutError):
         context = _empty_explorer_git_context("Git status timed out")
         context["repo_root"] = repo_root
@@ -2460,13 +2572,19 @@ def _bounded_git_diff(backend: Any, repo_root: str, args: List[str]) -> Tuple[st
         timeout=3.0,
         max_output_bytes=EXPLORER_GIT_DIFF_MAX_BYTES + 1,
     )
-    if result.returncode != 0:
+    _require_complete_git_result(
+        result,
+        "Git diff",
+        allow_stdout_truncation=True,
+    )
+    runner_truncated = bool(getattr(result, "stdout_truncated", False))
+    if not runner_truncated and result.returncode != 0:
         error = _decode_git_output(result.stderr) or "Git diff failed"
         raise ValueError(error)
     if b"\x00" in result.stdout:
         raise ValueError("Git diff appears to contain binary data")
 
-    truncated = len(result.stdout) > EXPLORER_GIT_DIFF_MAX_BYTES
+    truncated = runner_truncated or len(result.stdout) > EXPLORER_GIT_DIFF_MAX_BYTES
     diff_bytes = result.stdout[:EXPLORER_GIT_DIFF_MAX_BYTES]
     diff_text = diff_bytes.decode("utf-8", errors="replace")
     lines = diff_text.splitlines(keepends=True)
@@ -2612,6 +2730,7 @@ def _git_commit_files_log(backend: Any, repo_root: str, pathspec: str) -> Dict[s
         cwd=repo_root,
         timeout=3.0,
     )
+    _require_complete_git_result(result, "Git commit-file history")
     if result.returncode != 0:
         return {}
     return _parse_git_name_status_log(result.stdout)
@@ -2669,6 +2788,7 @@ def _bounded_git_graph_log(backend: Any, repo_root: str, pathspec: str) -> List[
         cwd=repo_root,
         timeout=3.0,
     )
+    _require_complete_git_result(result, "Git graph")
     if result.returncode != 0:
         return []
     return _parse_git_graph_log(result.stdout)
@@ -2840,29 +2960,60 @@ def _get_git_diff(
     }
 
 
+def _git_action_anchor(
+    backend: Any,
+    root_path: str,
+    current_path: Optional[str] = None,
+) -> Tuple[str, str]:
+    """Resolve and validate one explorer Git mutation anchor."""
+    anchor_path = current_path or root_path
+    repo_root, detect_error = _resolve_git_worktree_root(backend, anchor_path)
+    if repo_root is None:
+        raise ValueError(detect_error or "Folder is not inside a Git worktree")
+    validation_error = backend.validate_repo_paths(repo_root, root_path, anchor_path)
+    if validation_error:
+        raise ValueError(validation_error)
+    return str(repo_root), anchor_path
+
+
 def _git_action_repo_root(
     backend: Any,
     root_path: str,
     current_path: Optional[str] = None,
 ) -> str:
-    """Return the repository root for an explorer git mutation, or raise."""
-    git_context, _statuses = _get_git_context(
-        backend,
-        root_path,
-        current_path or root_path,
-    )
-    if not git_context.get("available"):
-        raise ValueError(git_context.get("error") or "Folder is not inside a Git worktree")
-    return str(git_context["repo_root"])
+    """Return the repository root for an explorer Git mutation, or raise."""
+    repo_root, _anchor_path = _git_action_anchor(backend, root_path, current_path)
+    return repo_root
+
+
+def _git_action_scope(
+    backend: Any,
+    root_path: str,
+    current_path: Optional[str] = None,
+) -> Tuple[str, str]:
+    """Return a validated repository root and its selected Git pathspec."""
+    repo_root, anchor_path = _git_action_anchor(backend, root_path, current_path)
+    return repo_root, backend.pathspec(repo_root, anchor_path)
 
 
 def _git_has_head(backend: Any, repo_root: str) -> bool:
     """Return whether the repository has at least one commit."""
     try:
         result = backend.run_git(["rev-parse", "--verify", "--quiet", "HEAD"], cwd=repo_root, timeout=2.0)
-    except Exception:
-        return False
+    except (subprocess.TimeoutExpired, TimeoutError) as exc:
+        raise ValueError("Git repository state check timed out") from exc
+    _require_complete_git_result(result, "Git repository state check")
     return result.returncode == 0
+
+
+def _require_git_mutation_result(result: Any, operation: str) -> None:
+    """Require an unambiguously complete result from a Git mutation."""
+    _require_complete_git_result(result, operation, mutation=True)
+
+
+def _literal_git_pathspec(path: str) -> str:
+    """Keep a path read from NUL-delimited Git output literal on write-back."""
+    return f":(literal){path}"
 
 
 def _git_stage_path(
@@ -2878,6 +3029,7 @@ def _git_stage_path(
         result = backend.run_git(["add", "--", pathspec], cwd=repo_root, write=True)
     except subprocess.TimeoutExpired as exc:
         raise ValueError("Git stage timed out") from exc
+    _require_git_mutation_result(result, "Git stage")
     if result.returncode != 0:
         raise ValueError(_decode_git_output(result.stderr) or "Git stage failed")
 
@@ -2899,6 +3051,7 @@ def _git_unstage_path(
         result = backend.run_git(args, cwd=repo_root, write=True)
     except subprocess.TimeoutExpired as exc:
         raise ValueError("Git unstage timed out") from exc
+    _require_git_mutation_result(result, "Git unstage")
     if result.returncode != 0:
         raise ValueError(_decode_git_output(result.stderr) or "Git unstage failed")
 
@@ -2908,17 +3061,21 @@ def _git_stage_all_paths(
     root_path: str,
     current_path: Optional[str] = None,
 ) -> None:
-    """Stage every working-tree change in an explorer repository.
+    """Stage every working-tree change in the selected explorer Git scope.
 
     Bulk form of _git_stage_path (ISSUE-2026-032): runs ``git add --all``
-    scoped to the repository root so modified, deleted, and untracked files
-    all land in the index in one action.
+    with the selected pathspec so hidden sibling changes remain untouched.
     """
-    repo_root = _git_action_repo_root(backend, root_path, current_path)
+    repo_root, scope_pathspec = _git_action_scope(backend, root_path, current_path)
     try:
-        result = backend.run_git(["add", "--all"], cwd=repo_root, write=True)
+        result = backend.run_git(
+            ["add", "--all", "--", scope_pathspec],
+            cwd=repo_root,
+            write=True,
+        )
     except subprocess.TimeoutExpired as exc:
         raise ValueError("Git stage all timed out") from exc
+    _require_git_mutation_result(result, "Git stage all")
     if result.returncode != 0:
         raise ValueError(_decode_git_output(result.stderr) or "Git stage all failed")
 
@@ -2928,22 +3085,23 @@ def _git_unstage_all_paths(
     root_path: str,
     current_path: Optional[str] = None,
 ) -> None:
-    """Unstage every staged change in an explorer repository.
+    """Unstage every staged change in the selected explorer Git scope.
 
     Bulk form of _git_unstage_path: index-only, so the worktree is untouched
     and nothing the reader has edited can be lost. Before the first commit
     there is no HEAD to reset against, so the same fallback the single-path
-    helper uses applies -- ``git rm --cached -r`` over the repository root.
+    helper uses applies -- ``git rm --cached -r`` over the selected pathspec.
     """
-    repo_root = _git_action_repo_root(backend, root_path, current_path)
+    repo_root, scope_pathspec = _git_action_scope(backend, root_path, current_path)
     if _git_has_head(backend, repo_root):
-        args = ["reset", "--quiet", "HEAD", "--", "."]
+        args = ["reset", "--quiet", "HEAD", "--", scope_pathspec]
     else:
-        args = ["rm", "--cached", "-r", "--quiet", "--", "."]
+        args = ["rm", "--cached", "-r", "--quiet", "--", scope_pathspec]
     try:
         result = backend.run_git(args, cwd=repo_root, write=True)
     except subprocess.TimeoutExpired as exc:
         raise ValueError("Git unstage all timed out") from exc
+    _require_git_mutation_result(result, "Git unstage all")
     if result.returncode != 0:
         raise ValueError(_decode_git_output(result.stderr) or "Git unstage all failed")
 
@@ -2983,6 +3141,7 @@ def _git_revert_path(
         )
     except subprocess.TimeoutExpired as exc:
         raise ValueError("Git revert timed out") from exc
+    _require_complete_git_result(status, "Git revert status")
     if status.returncode != 0:
         raise ValueError(_decode_git_output(status.stderr) or "Git revert failed")
 
@@ -3008,6 +3167,7 @@ def _git_revert_path(
             )
         except subprocess.TimeoutExpired as exc:
             raise ValueError("Git revert timed out") from exc
+        _require_git_mutation_result(result, "Git revert")
         if result.returncode != 0:
             raise ValueError(
                 _decode_git_output(result.stderr)
@@ -3028,6 +3188,7 @@ def _git_revert_path(
         result = backend.run_git(["restore", "--worktree", "--", pathspec], cwd=repo_root, write=True)
     except subprocess.TimeoutExpired as exc:
         raise ValueError("Git revert timed out") from exc
+    _require_git_mutation_result(result, "Git revert")
     if result.returncode != 0:
         raise ValueError(
             _decode_git_output(result.stderr)
@@ -3068,18 +3229,30 @@ def _git_discard_all_paths(
     root_path: str,
     current_path: Optional[str] = None,
 ) -> None:
-    """Discard every tracked file's unstaged worktree changes.
+    """Discard tracked unstaged changes in the selected explorer Git scope.
 
     Bulk form of _git_revert_path (OD-1): restores only tracked,
     non-conflicted worktree changes with ``git restore --worktree``, so
     staged content is preserved and untracked files are left in place —
     never ``git clean``.
     """
-    repo_root = _git_action_repo_root(backend, root_path, current_path)
+    repo_root, scope_pathspec = _git_action_scope(backend, root_path, current_path)
     try:
-        status = backend.run_git(["status", "--porcelain", "-z"], cwd=repo_root, timeout=5.0)
+        status = backend.run_git(
+            [
+                "status",
+                "--porcelain",
+                "-z",
+                "--untracked-files=all",
+                "--",
+                scope_pathspec,
+            ],
+            cwd=repo_root,
+            timeout=5.0,
+        )
     except subprocess.TimeoutExpired as exc:
         raise ValueError("Git discard all timed out") from exc
+    _require_complete_git_result(status, "Git discard all status")
     if status.returncode != 0:
         raise ValueError(_decode_git_output(status.stderr) or "Git discard all failed")
 
@@ -3089,10 +3262,14 @@ def _git_discard_all_paths(
 
     try:
         result = backend.run_git(
-            ["restore", "--worktree", "--", *paths], cwd=repo_root, timeout=30.0, write=True
+            ["restore", "--worktree", "--", *map(_literal_git_pathspec, paths)],
+            cwd=repo_root,
+            timeout=30.0,
+            write=True,
         )
     except subprocess.TimeoutExpired as exc:
         raise ValueError("Git discard all timed out") from exc
+    _require_git_mutation_result(result, "Git discard all")
     if result.returncode != 0:
         raise ValueError(
             _decode_git_output(result.stderr)
@@ -3107,15 +3284,49 @@ def _git_commit(
     message: str,
     current_path: Optional[str] = None,
 ) -> None:
-    """Commit staged changes inside an explorer repository."""
+    """Commit staged changes only when none are hidden outside the scope."""
     commit_message = str(message or "").strip()
     if not commit_message:
         raise ValueError("Commit message is required")
-    repo_root = _git_action_repo_root(backend, root_path, current_path)
+    repo_root, scope_pathspec = _git_action_scope(backend, root_path, current_path)
     try:
+        staged = backend.run_git(
+            ["diff", "--cached", "--no-renames", "--name-only", "-z"],
+            cwd=repo_root,
+            timeout=5.0,
+        )
+        _require_complete_git_result(staged, "Git staged-path check")
+        if staged.returncode != 0:
+            raise ValueError(_decode_git_output(staged.stderr) or "Git staged-path check failed")
+        scoped_staged = backend.run_git(
+            [
+                "diff",
+                "--cached",
+                "--no-renames",
+                "--name-only",
+                "-z",
+                "--",
+                scope_pathspec,
+            ],
+            cwd=repo_root,
+            timeout=5.0,
+        )
+        _require_complete_git_result(scoped_staged, "Git scoped staged-path check")
+        if scoped_staged.returncode != 0:
+            raise ValueError(
+                _decode_git_output(scoped_staged.stderr) or "Git scoped staged-path check failed"
+            )
+        all_paths = {path for path in staged.stdout.split(b"\0") if path}
+        scoped_paths = {path for path in scoped_staged.stdout.split(b"\0") if path}
+        if all_paths - scoped_paths:
+            raise ValueError(
+                "Staged changes exist outside the current Git scope; switch to the "
+                "repository-root scope or unstage those paths before committing"
+            )
         result = backend.run_git(["commit", "-m", commit_message], cwd=repo_root, timeout=30.0, write=True)
     except subprocess.TimeoutExpired as exc:
         raise ValueError("Git commit timed out") from exc
+    _require_git_mutation_result(result, "Git commit")
     if result.returncode != 0:
         raise ValueError(
             _decode_git_output(result.stderr)
@@ -3129,7 +3340,7 @@ def _git_publish(
     root_path: str,
     current_path: Optional[str] = None,
 ) -> None:
-    """Push the current branch of an explorer repository, setting upstream if needed."""
+    """Push the current branch; publish remains branch-wide in a narrowed scope."""
     repo_root = _git_action_repo_root(backend, root_path, current_path)
     try:
         upstream = backend.run_git(
@@ -3137,10 +3348,12 @@ def _git_publish(
             cwd=repo_root,
             timeout=3.0,
         )
+        _require_complete_git_result(upstream, "Git upstream check")
         if upstream.returncode == 0:
             push_args = ["push"]
         else:
             branch_result = backend.run_git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=repo_root, timeout=3.0)
+            _require_complete_git_result(branch_result, "Git branch check")
             branch = _decode_git_output(branch_result.stdout)
             if branch_result.returncode != 0 or not branch or branch == "HEAD":
                 raise ValueError("Cannot publish a detached HEAD")
@@ -3148,6 +3361,7 @@ def _git_publish(
         result = backend.run_git(push_args, cwd=repo_root, timeout=120.0, write=True)
     except subprocess.TimeoutExpired as exc:
         raise ValueError("Git publish timed out") from exc
+    _require_git_mutation_result(result, "Git publish")
     if result.returncode != 0:
         raise ValueError(
             _decode_git_output(result.stderr)

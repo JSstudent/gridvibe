@@ -1144,7 +1144,7 @@
     async function explorerGitDiscardAll(index) {
         const confirmed = await openGenericConfirmModal({
             title: 'Discard all changes?',
-            copy: 'Discard the unstaged changes in every tracked file?',
+            copy: 'Discard unstaged changes in tracked files in the current Git scope?',
             note: 'Unstaged edits will be lost. Staged versions and untracked files are kept.',
             confirmLabel: 'Discard all',
             danger: true,

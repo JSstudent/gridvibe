@@ -7750,6 +7750,27 @@ class ApiRoutesTestCase(unittest.TestCase):
         latest = self._run_git(repo_dir, "log", "-1", "--pretty=%s").stdout.decode().strip()
         self.assertEqual(latest, "second commit")
 
+    def test_explorer_git_root_scoped_commit_supports_unborn_head(self):
+        repo_dir = Path(self.temp_dir.name) / "fresh-commit"
+        repo_dir.mkdir()
+        (repo_dir / "new.txt").write_text("new\n", encoding="utf-8")
+        self._run_git(repo_dir, "init")
+        self._run_git(repo_dir, "config", "user.email", "gridvibe@example.invalid")
+        self._run_git(repo_dir, "config", "user.name", "GridVibe Test")
+        self._run_git(repo_dir, "add", "new.txt")
+        session_id = self._create_explorer_session(repo_dir)
+
+        response = self.client.post(
+            f"/api/explorer/{session_id}/git/commit",
+            json={"message": "first commit"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            self._run_git(repo_dir, "log", "-1", "--pretty=%s").stdout.decode().strip(),
+            "first commit",
+        )
+
     def test_explorer_git_commit_requires_message(self):
         repo_dir = Path(self.temp_dir.name) / "repo"
         repo_dir.mkdir()
@@ -7792,6 +7813,29 @@ class ApiRoutesTestCase(unittest.TestCase):
         self._run_git(repo_dir, "add", ".")
         self._run_git(repo_dir, "commit", "-m", "initial")
         return repo_dir
+
+    def _init_scoped_git_repo(self, name: str = "scoped-repo") -> Path:
+        repo_dir = Path(self.temp_dir.name) / name
+        (repo_dir / "inscope").mkdir(parents=True)
+        (repo_dir / "outscope").mkdir()
+        (repo_dir / "inscope" / "a.txt").write_text("inside original\n", encoding="utf-8")
+        (repo_dir / "inscope" / "conflict.txt").write_text("base\n", encoding="utf-8")
+        (repo_dir / "inscope" / "delete.txt").write_text("delete original\n", encoding="utf-8")
+        (repo_dir / "inscope" / "odd [name].txt").write_text("odd original\n", encoding="utf-8")
+        (repo_dir / "outscope" / "b.txt").write_text("outside original\n", encoding="utf-8")
+        self._run_git(repo_dir, "init")
+        self._run_git(repo_dir, "config", "user.email", "gridvibe@example.invalid")
+        self._run_git(repo_dir, "config", "user.name", "GridVibe Test")
+        self._run_git(repo_dir, "add", ".")
+        self._run_git(repo_dir, "commit", "-m", "initial")
+        return repo_dir
+
+    def _scoped_git_post(self, session_id: str, endpoint: str, json=None):
+        return self.client.post(
+            f"/api/explorer/{session_id}/git/{endpoint}",
+            query_string={"scope": "path", "path": "inscope"},
+            json={} if json is None else json,
+        )
 
     def test_explorer_git_diff_distinguishes_worktree_and_staged(self):
         # ISSUE-2026-023: a partially staged file must expose its worktree hunks
@@ -7967,6 +8011,52 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(changes["second.txt"]["git"]["index_status"], "D")
         self.assertEqual(changes["new.txt"]["git"]["index_status"], "A")
 
+    def test_explorer_git_stage_all_changes_only_the_selected_scope(self):
+        repo_dir = self._init_scoped_git_repo()
+        inside = repo_dir / "inscope" / "a.txt"
+        outside = repo_dir / "outscope" / "b.txt"
+        inside.write_text("inside changed\n", encoding="utf-8")
+        (repo_dir / "inscope" / "delete.txt").unlink()
+        (repo_dir / "inscope" / "odd [name].txt").rename(
+            repo_dir / "inscope" / "renamed [name].txt"
+        )
+        (repo_dir / "inscope" / "new.txt").write_text("inside new\n", encoding="utf-8")
+        outside.write_text("outside changed\n", encoding="utf-8")
+        outside_untracked = repo_dir / "outscope" / "new.txt"
+        outside_untracked.write_text("outside new\n", encoding="utf-8")
+        outside_bytes = outside.read_bytes()
+        outside_index = self._run_git(
+            repo_dir, "ls-files", "--stage", "--", "outscope"
+        ).stdout
+        session_id = self._create_explorer_session(repo_dir)
+
+        response = self._scoped_git_post(session_id, "stage-all")
+
+        self.assertEqual(response.status_code, 200)
+        staged_paths = set(
+            filter(
+                None,
+                self._run_git(
+                    repo_dir, "diff", "--cached", "--name-only", "-z"
+                ).stdout.decode().split("\0"),
+            )
+        )
+        self.assertEqual(
+            staged_paths,
+            {
+                "inscope/a.txt",
+                "inscope/delete.txt",
+                "inscope/new.txt",
+                "inscope/renamed [name].txt",
+            },
+        )
+        self.assertEqual(outside.read_bytes(), outside_bytes)
+        self.assertEqual(
+            self._run_git(repo_dir, "ls-files", "--stage", "--", "outscope").stdout,
+            outside_index,
+        )
+        self.assertEqual(outside_untracked.read_text(encoding="utf-8"), "outside new\n")
+
     def test_explorer_git_stage_all_requires_a_repository(self):
         plain_dir = Path(self.temp_dir.name) / "plain"
         plain_dir.mkdir()
@@ -8008,6 +8098,38 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual((repo_dir / "new.txt").read_text(encoding="utf-8"), "new\n")
         self.assertFalse((repo_dir / "second.txt").exists())
 
+    def test_explorer_git_unstage_all_changes_only_the_selected_scope(self):
+        repo_dir = self._init_scoped_git_repo()
+        inside = repo_dir / "inscope" / "a.txt"
+        outside = repo_dir / "outscope" / "b.txt"
+        inside.write_text("inside staged\n", encoding="utf-8")
+        outside.write_text("outside staged\n", encoding="utf-8")
+        self._run_git(repo_dir, "add", "--all")
+        outside_bytes = outside.read_bytes()
+        outside_index = self._run_git(
+            repo_dir, "ls-files", "--stage", "--", "outscope"
+        ).stdout
+        session_id = self._create_explorer_session(repo_dir)
+
+        response = self._scoped_git_post(session_id, "unstage-all")
+
+        self.assertEqual(response.status_code, 200)
+        staged_paths = set(
+            filter(
+                None,
+                self._run_git(
+                    repo_dir, "diff", "--cached", "--name-only", "-z"
+                ).stdout.decode().split("\0"),
+            )
+        )
+        self.assertEqual(staged_paths, {"outscope/b.txt"})
+        self.assertEqual(inside.read_text(encoding="utf-8"), "inside staged\n")
+        self.assertEqual(outside.read_bytes(), outside_bytes)
+        self.assertEqual(
+            self._run_git(repo_dir, "ls-files", "--stage", "--", "outscope").stdout,
+            outside_index,
+        )
+
     def test_explorer_git_unstage_all_before_the_first_commit(self):
         # No HEAD to reset against: the same `rm --cached` fallback the
         # single-path unstage uses has to carry the bulk form too.
@@ -8024,6 +8146,31 @@ class ApiRoutesTestCase(unittest.TestCase):
         changes = {change["path"]: change for change in response.get_json()["changes"]}
         self.assertEqual(changes["new.txt"]["git"]["status"], "untracked")
         self.assertEqual((repo_dir / "new.txt").read_text(encoding="utf-8"), "new\n")
+
+    def test_explorer_git_unstage_all_before_first_commit_keeps_sibling_index(self):
+        repo_dir = Path(self.temp_dir.name) / "fresh-scoped"
+        (repo_dir / "inscope").mkdir(parents=True)
+        (repo_dir / "outscope").mkdir()
+        (repo_dir / "inscope" / "a.txt").write_text("inside\n", encoding="utf-8")
+        (repo_dir / "outscope" / "b.txt").write_text("outside\n", encoding="utf-8")
+        self._run_git(repo_dir, "init")
+        self._run_git(repo_dir, "add", "--all")
+        outside_index = self._run_git(
+            repo_dir, "ls-files", "--stage", "--", "outscope"
+        ).stdout
+        session_id = self._create_explorer_session(repo_dir)
+
+        response = self._scoped_git_post(session_id, "unstage-all")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            self._run_git(repo_dir, "ls-files", "--", "inscope").stdout,
+            b"",
+        )
+        self.assertEqual(
+            self._run_git(repo_dir, "ls-files", "--stage", "--", "outscope").stdout,
+            outside_index,
+        )
 
     def test_explorer_git_unstage_all_requires_a_repository(self):
         plain_dir = Path(self.temp_dir.name) / "plain-unstage"
@@ -8079,6 +8226,146 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(changes["README.md"]["git"]["index_status"], "M")
         self.assertEqual(changes["README.md"]["git"]["worktree_status"], ".")
 
+    def test_explorer_git_discard_all_changes_only_the_selected_scope(self):
+        repo_dir = self._init_scoped_git_repo()
+        inside = repo_dir / "inscope" / "a.txt"
+        inside_odd = repo_dir / "inscope" / "odd [name].txt"
+        inside_deleted = repo_dir / "inscope" / "delete.txt"
+        outside = repo_dir / "outscope" / "b.txt"
+        inside.write_text("inside staged\n", encoding="utf-8")
+        outside.write_text("outside staged\n", encoding="utf-8")
+        self._run_git(repo_dir, "add", "--all")
+        inside.write_text("inside staged\ninside worktree\n", encoding="utf-8")
+        inside_odd.write_text("odd worktree\n", encoding="utf-8")
+        inside_deleted.unlink()
+        outside.write_text("outside staged\noutside worktree\n", encoding="utf-8")
+        inside_untracked = repo_dir / "inscope" / "untracked.txt"
+        outside_untracked = repo_dir / "outscope" / "untracked.txt"
+        inside_untracked.write_text("inside untracked\n", encoding="utf-8")
+        outside_untracked.write_text("outside untracked\n", encoding="utf-8")
+        outside_bytes = outside.read_bytes()
+        outside_index = self._run_git(
+            repo_dir, "ls-files", "--stage", "--", "outscope"
+        ).stdout
+        session_id = self._create_explorer_session(repo_dir)
+
+        response = self._scoped_git_post(session_id, "discard-all")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(inside.read_text(encoding="utf-8"), "inside staged\n")
+        self.assertEqual(inside_odd.read_text(encoding="utf-8"), "odd original\n")
+        self.assertEqual(inside_deleted.read_text(encoding="utf-8"), "delete original\n")
+        self.assertEqual(outside.read_bytes(), outside_bytes)
+        self.assertEqual(
+            self._run_git(repo_dir, "ls-files", "--stage", "--", "outscope").stdout,
+            outside_index,
+        )
+        self.assertEqual(inside_untracked.read_text(encoding="utf-8"), "inside untracked\n")
+        self.assertEqual(outside_untracked.read_text(encoding="utf-8"), "outside untracked\n")
+
+    def test_explorer_git_discard_all_leaves_conflicts_untouched(self):
+        repo_dir = self._init_scoped_git_repo()
+        conflict = repo_dir / "inscope" / "conflict.txt"
+        ordinary = repo_dir / "inscope" / "a.txt"
+        base_branch = self._run_git(
+            repo_dir, "symbolic-ref", "--short", "HEAD"
+        ).stdout.decode().strip()
+        self._run_git(repo_dir, "checkout", "-b", "conflicting")
+        conflict.write_text("branch version\n", encoding="utf-8")
+        self._run_git(repo_dir, "add", "inscope/conflict.txt")
+        self._run_git(repo_dir, "commit", "-m", "branch conflict")
+        self._run_git(repo_dir, "checkout", base_branch)
+        conflict.write_text("base branch version\n", encoding="utf-8")
+        self._run_git(repo_dir, "add", "inscope/conflict.txt")
+        self._run_git(repo_dir, "commit", "-m", "base conflict")
+        merge = subprocess.run(
+            ["git", "merge", "conflicting"],
+            cwd=repo_dir,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        self.assertNotEqual(merge.returncode, 0)
+        conflict_bytes = conflict.read_bytes()
+        ordinary.write_text("discard me\n", encoding="utf-8")
+        session_id = self._create_explorer_session(repo_dir)
+
+        response = self._scoped_git_post(session_id, "discard-all")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(ordinary.read_text(encoding="utf-8"), "inside original\n")
+        self.assertEqual(conflict.read_bytes(), conflict_bytes)
+        self.assertIn(
+            b"UU inscope/conflict.txt",
+            self._run_git(repo_dir, "status", "--porcelain").stdout,
+        )
+
+    def test_explorer_git_scoped_commit_refuses_hidden_staged_paths(self):
+        repo_dir = self._init_scoped_git_repo()
+        (repo_dir / "inscope" / "a.txt").write_text("inside staged\n", encoding="utf-8")
+        (repo_dir / "outscope" / "b.txt").write_text("outside staged\n", encoding="utf-8")
+        self._run_git(repo_dir, "add", "--all")
+        head_before = self._run_git(repo_dir, "rev-parse", "HEAD").stdout
+        index_before = self._run_git(repo_dir, "ls-files", "--stage").stdout
+        session_id = self._create_explorer_session(repo_dir)
+
+        response = self._scoped_git_post(
+            session_id,
+            "commit",
+            {"message": "must not commit hidden changes"},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("outside the current Git scope", response.get_json()["error"])
+        self.assertIn("unstage", response.get_json()["error"].lower())
+        self.assertEqual(self._run_git(repo_dir, "rev-parse", "HEAD").stdout, head_before)
+        self.assertEqual(self._run_git(repo_dir, "ls-files", "--stage").stdout, index_before)
+
+    def test_explorer_git_scoped_commit_refuses_cross_scope_rename(self):
+        repo_dir = self._init_scoped_git_repo()
+        (repo_dir / "outscope" / "b.txt").rename(
+            repo_dir / "inscope" / "moved-from-outside.txt"
+        )
+        self._run_git(repo_dir, "add", "--all")
+        head_before = self._run_git(repo_dir, "rev-parse", "HEAD").stdout
+        session_id = self._create_explorer_session(repo_dir)
+
+        response = self._scoped_git_post(
+            session_id,
+            "commit",
+            {"message": "must not commit half-visible rename"},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("outside the current Git scope", response.get_json()["error"])
+        self.assertEqual(self._run_git(repo_dir, "rev-parse", "HEAD").stdout, head_before)
+
+    def test_explorer_git_scoped_commit_succeeds_when_all_staged_paths_are_visible(self):
+        repo_dir = self._init_scoped_git_repo()
+        inside = repo_dir / "inscope" / "a.txt"
+        outside = repo_dir / "outscope" / "b.txt"
+        inside.write_text("inside staged\n", encoding="utf-8")
+        self._run_git(repo_dir, "add", "--", "inscope/a.txt")
+        outside.write_text("outside worktree only\n", encoding="utf-8")
+        session_id = self._create_explorer_session(repo_dir)
+
+        response = self._scoped_git_post(
+            session_id,
+            "commit",
+            {"message": "visible scope only"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            self._run_git(repo_dir, "log", "-1", "--pretty=%s").stdout.decode().strip(),
+            "visible scope only",
+        )
+        self.assertEqual(outside.read_text(encoding="utf-8"), "outside worktree only\n")
+        self.assertIn(
+            b"outscope/b.txt",
+            self._run_git(repo_dir, "diff", "--name-only").stdout,
+        )
+
     def test_explorer_git_discard_all_rejects_when_nothing_unstaged(self):
         # A clean-or-untracked-only worktree is a clear error, and the
         # untracked file must survive.
@@ -8130,6 +8417,11 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("(busy || !discardable.length) ? 'disabled'", html)
         self.assertIn("explorerGitCanBulkDiscard(file.git && file.git.status)", html)
         self.assertIn("title: 'Discard all changes?'", html)
+        self.assertIn(
+            "copy: 'Discard unstaged changes in tracked files in the current Git scope?'",
+            html,
+        )
+        self.assertIn("Staged versions and untracked files are kept.", html)
         self.assertIn(".explorer-git-section-title", html)
         self.assertIn(".explorer-git-section-actions", html)
         # The Staged Changes header carries the mirror control: index-only,
