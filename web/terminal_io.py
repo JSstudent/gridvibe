@@ -406,9 +406,11 @@ def _observe_terminal_output_cwd(
     terminal).
 
     This runs on the pane's own pump thread -- the only writer of the residue --
-    and deliberately takes no lock: a per-chunk scan under ``connection_lock``
-    would sit in front of every other pane's output (guardrail 2). The chunk is
-    still cached and replayed verbatim; this only observes it.
+    and the parse deliberately takes no lock: a per-chunk scan under
+    ``connection_lock`` would sit in front of every other pane's output
+    (guardrail 2). Publishing what it found is the part that needs the lock,
+    and it is ``_publish_observed_cwd``'s. The chunk is still cached and
+    replayed verbatim; this only observes it.
     """
     residue = str(connection.get("cwd_residue") or "")
     if "\x1b" not in output and not residue:
@@ -436,12 +438,43 @@ def _observe_terminal_output_cwd(
     if not directory:
         return
 
-    session = session_manager.get_session(session_id)
-    if session is None or str(getattr(session, "current_directory", "") or "") == directory:
-        return
+    if _publish_observed_cwd(session_id, connection, directory):
+        _broadcast_session_status(session_id)
 
-    session_manager.update_session_metadata(session_id, current_directory=directory)
-    _broadcast_session_status(session_id)
+
+def _publish_observed_cwd(
+    session_id: str,
+    connection: Dict[str, Any],
+    directory: str,
+) -> bool:
+    """Write an observed directory back, but only while its connection is current.
+
+    The parse above belongs to one connection entry, and a retargeting -- a
+    shell switch, a mode switch -- clears ``current_directory`` and then
+    replaces or removes that entry. The retiring shell's last prompt can still
+    be in flight at that moment, so publishing on the strength of the parse
+    alone puts the old shell's directory back *after* the clear that
+    deliberately took it away, and the pane then answers "where am I?" with a
+    directory nothing live is standing in. The connection that produced the
+    sequence has to still be the registry's entry for the session, and
+    ``is`` is the test: a replacement carrying the same shell kind is a
+    different shell.
+
+    The check and the write are one lock hold in the allowed
+    ``connection_lock`` -> ``SessionManager.lock`` order, because a check the
+    write does not sit inside is the same race one step later. Both are
+    in-memory; the broadcast is the caller's, after every lock is released.
+    """
+    with connection_lock:
+        if ssh_connections.get(session_id) is not connection:
+            return False
+        session = session_manager.get_session(session_id)
+        if session is None:
+            return False
+        if str(getattr(session, "current_directory", "") or "") == directory:
+            return False
+        session_manager.update_session_metadata(session_id, current_directory=directory)
+        return True
 
 
 def _local_process_cwd(connection: Dict[str, Any]) -> str:

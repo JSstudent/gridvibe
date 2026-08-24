@@ -920,6 +920,17 @@
                 explorerResumeSourceRenderJob(terminal);
                 restoreExplorerFileScroll(index, terminal._cachedExplorerScroll);
                 resyncExplorerEditorOnAttach(index);
+                /* A Git action that completed while this group was cached left
+                   the slot alone on purpose — `terminals[index]` belonged to
+                   the group that had replaced it — and marked its own pane for
+                   the fresh load instead. This is where the pane is back on
+                   screen, so this is where that load happens. */
+                if (terminal._explorerGitReloadPending) {
+                    terminal._explorerGitReloadPending = false;
+                    if (terminal._explorerGitSidebarOpen) {
+                        loadExplorerGitRepo(index);
+                    }
+                }
             }
             /* The cards were detached while another group was shown, so any
                voice stop that completed in that window addressed elements no
@@ -4435,18 +4446,24 @@
         });
     }
 
-    function setTerminalRefreshState(index, refreshing) {
-        setTerminalActionState(index, refreshing ? 'refresh' : '');
+    /* Take the hold, and get back the release bound to the buttons it just
+       disabled. Refresh and Clear both await, and a group switch inside that
+       wait hands `trefresh-<index>` to whichever pane took the slot: releasing
+       by index there clears somebody else's busy state and leaves the pane
+       that asked stuck on “Refreshing…” inside its cached fragment, which is
+       exactly where its own card went. The nodes are the identity. */
+    function holdTerminalActionState(index, action) {
+        const buttons = {
+            refreshButton: document.getElementById(`trefresh-${index}`),
+            explorerRefreshButton: document.getElementById(`explorer-refresh-${index}`),
+            clearButton: document.getElementById(`tclear-${index}`)
+        };
+        applyTerminalActionState(buttons, action);
+        return () => applyTerminalActionState(buttons, '');
     }
 
-    function setTerminalClearState(index, clearing) {
-        setTerminalActionState(index, clearing ? 'clear' : '');
-    }
-
-    function setTerminalActionState(index, action = '') {
-        const refreshButton = document.getElementById(`trefresh-${index}`);
-        const explorerRefreshButton = document.getElementById(`explorer-refresh-${index}`);
-        const clearButton = document.getElementById(`tclear-${index}`);
+    function applyTerminalActionState(buttons, action = '') {
+        const { refreshButton, explorerRefreshButton, clearButton } = buttons || {};
         const isBusy = Boolean(action);
 
         if (refreshButton) {
@@ -4488,7 +4505,12 @@
     }
 
     function flushPendingOutput(index) {
-        const terminal = terminals[index];
+        flushCapturedPendingOutput(terminals[index]);
+    }
+
+    /* Same flush, addressed to a pane object rather than to a grid slot, for
+       the asynchronous callers that captured one before they awaited. */
+    function flushCapturedPendingOutput(terminal) {
         if (!terminal?._attached || !terminal.term || !terminal._pendingOutput) {
             return;
         }
@@ -4687,22 +4709,22 @@
        pointer movement typed at it. GridVibeTerminalModes owns the teardown
        and, for the replaying path, the ordering it has to land in; the page
        owns only the pane it lands on. */
-    function terminalModeResetWriter(index) {
-        return data => {
-            const terminal = terminals[index];
-            if (!terminal?.term) {
-                return;
-            }
+    function terminalModeResetTarget(index) {
+        return GridVibeTerminalModes.captureResetTarget({
+            pane: terminals[index],
+            sessionId: sessionIds[index],
             /* Anything already queued behind a not-yet-fitted pane — the
                replay included — has to be applied first, or the teardown would
                be overwritten by the very bytes it exists to undo. */
-            flushPendingOutput(index);
-            terminal.term.write(data);
-        };
-    }
-
-    function resetTerminalMouseReporting(index) {
-        return GridVibeTerminalModes.resetMouseReporting(terminalModeResetWriter(index));
+            flush: pane => flushCapturedPendingOutput(pane),
+            write: (pane, data) => {
+                if (pane?.term) {
+                    pane.term.write(data);
+                }
+            },
+            currentPane: () => terminals[index],
+            currentSessionId: () => sessionIds[index]
+        });
     }
 
     async function refreshTerminalDisplay(index) {
@@ -4712,7 +4734,12 @@
             return false;
         }
 
-        setTerminalRefreshState(index, true);
+        /* Everything below the first await addresses this capture, not the
+           slot: a group switch during the rejoin puts another pane in
+           `terminals[index]`, and the teardown is owed to the pane that asked
+           for it. */
+        const resetTarget = terminalModeResetTarget(index);
+        const releaseBusy = holdTerminalActionState(index, 'refresh');
         try {
             if (isBrowserSession(terminal._session)) {
                 reloadBrowserPane(index);
@@ -4751,16 +4778,21 @@
                     emit: (event, payload, ack) => (
                         ack ? socket.emit(event, payload, ack) : socket.emit(event, payload)
                     ),
-                    write: terminalModeResetWriter(index),
+                    write: data => resetTarget.write(data),
                     setTimeout: (fn, ms) => window.setTimeout(fn, ms),
                     clearTimeout: handle => window.clearTimeout(handle)
                 });
-                await redrawAttachedTerminals([index], { forceResize: true });
+                /* The redraw is slot work: it fits and repaints whatever is in
+                   `index` now. Never the incoming group, for a reset that
+                   belonged to the group it replaced. */
+                if (resetTarget.isCurrent()) {
+                    await redrawAttachedTerminals([index], { forceResize: true });
+                }
                 return false;
             }
 
             /* No socket, so no replay to wait behind. */
-            resetTerminalMouseReporting(index);
+            GridVibeTerminalModes.resetMouseReporting(data => resetTarget.write(data));
 
             if (terminal._attached && terminal.term.rows > 0) {
                 terminal.term.refresh(0, terminal.term.rows - 1);
@@ -4768,7 +4800,7 @@
         } catch (error) {
             console.error('[GridVibe Sessions] refreshTerminalDisplay failed:', error);
         } finally {
-            setTerminalRefreshState(index, false);
+            releaseBusy();
         }
 
         return false;
@@ -4790,7 +4822,11 @@
             return false;
         }
 
-        setTerminalClearState(index, true);
+        /* Same capture rule as Reset view above: Clear awaits too, so the
+           release has to reach the buttons it disabled rather than whatever is
+           in the slot by then. */
+        const resetTarget = terminalModeResetTarget(index);
+        const releaseBusy = holdTerminalActionState(index, 'clear');
         try {
             logSessionWindowAction('Clearing terminal display', {
                 index,
@@ -4805,7 +4841,7 @@
                the reset cleared and the teardown needs no ordering of its own.
                It is written all the same: the cure is named here rather than
                left as a side effect of term.reset()'s scope. */
-            resetTerminalMouseReporting(index);
+            GridVibeTerminalModes.resetMouseReporting(data => resetTarget.write(data));
 
             if (terminal._attached) {
                 await ensureTerminalReady(index);
@@ -4822,7 +4858,7 @@
         } catch (error) {
             console.error('[GridVibe Sessions] clearTerminalDisplay failed:', error);
         } finally {
-            setTerminalClearState(index, false);
+            releaseBusy();
         }
 
         return false;

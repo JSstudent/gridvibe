@@ -61,6 +61,65 @@
        that the pane is not left typing mouse reports while it waits. */
     const REPLAY_SETTLE_TIMEOUT_MS = 1500;
 
+    /* A grid slot is not an identity. Reset view is asynchronous — the
+       teardown lands only when the rejoin is acknowledged, or when the
+       fallback fires — and a group switch in between puts a *different* pane
+       in `terminals[index]`. Resolving the slot at completion time therefore
+       wrote a dead TUI's teardown into whichever pane had since taken the
+       slot, and left the pane that asked for it still typing mouse reports.
+
+       So the reset is captured before the wait: the pane object and the
+       session id it was asked for. The two halves are deliberately unequal.
+       The *write* follows the captured pane wherever it now lives — cached
+       and off-screen included — because that pane asked for its input back
+       and the answer is owed to it. The *slot* work (the redraw, the busy
+       state on `trefresh-<index>`) is skipped when that pane is no longer the
+       one on screen, because those touch a card that now belongs to somebody
+       else. */
+    function captureResetTarget(io) {
+        const target = io || {};
+        const pane = target.pane || null;
+        const sessionId = target.sessionId;
+        const write = typeof target.write === 'function' ? target.write : null;
+        const flush = typeof target.flush === 'function' ? target.flush : null;
+        const currentPane = typeof target.currentPane === 'function' ? target.currentPane : null;
+        const currentSessionId = typeof target.currentSessionId === 'function'
+            ? target.currentSessionId
+            : null;
+
+        return {
+            pane,
+            sessionId,
+            /* Bound to the captured pane, and flushing *its* queue first:
+               anything held behind a not-yet-fitted pane — the replay
+               included — has to be applied before the teardown that exists to
+               undo it. */
+            write(data) {
+                if (!pane || !write) {
+                    return false;
+                }
+                if (flush) {
+                    flush(pane);
+                }
+                write(pane, data);
+                return true;
+            },
+            /* Slot-level work only. Never gates the write above. */
+            isCurrent() {
+                if (!pane) {
+                    return false;
+                }
+                if (currentPane && currentPane() !== pane) {
+                    return false;
+                }
+                if (currentSessionId && currentSessionId() !== sessionId) {
+                    return false;
+                }
+                return true;
+            }
+        };
+    }
+
     /* `write` is the pane's own `term.write` — client-side only. Returns
        whether the teardown was actually written, so a caller can tell "the
        pane was reset" from "there was no pane". */
@@ -134,6 +193,7 @@
         MOUSE_REPORTING_MODES,
         MOUSE_REPORTING_RESET,
         REPLAY_SETTLE_TIMEOUT_MS,
+        captureResetTarget,
         resetMouseReporting,
         rejoinAndResetAfterReplay
     };

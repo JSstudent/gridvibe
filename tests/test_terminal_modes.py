@@ -49,6 +49,53 @@ function fakeClock() {
     };
 }
 
+/* The page's half of Reset view: a grid whose slot 0 holds one pane, plus the
+   group switch that hands that slot to a different pane object. Each pane
+   records what its own `term.write` received, so "which pane got the teardown"
+   is answered by reading the panes rather than by trusting an index. */
+function makePane(name) {
+    const pane = { name, _attached: true, _pendingOutput: '', stream: [] };
+    pane.term = { write: data => pane.stream.push(data) };
+    return pane;
+}
+
+function grid(modes) {
+    const paneA = makePane('a');
+    const paneB = makePane('b');
+    const terminals = [paneA];
+    const sessionIds = ['sess-a'];
+
+    /* The page's captured flush, verbatim in behaviour: the pane's queued
+       bytes go in before anything written after them. */
+    const flush = pane => {
+        if (!pane || !pane._attached || !pane.term || !pane._pendingOutput) {
+            return;
+        }
+        const pending = pane._pendingOutput;
+        pane._pendingOutput = '';
+        pane.term.write(pending);
+    };
+
+    return {
+        paneA,
+        paneB,
+        capture: () => modes.captureResetTarget({
+            pane: terminals[0],
+            sessionId: sessionIds[0],
+            flush,
+            write: (pane, data) => { if (pane?.term) { pane.term.write(data); } },
+            currentPane: () => terminals[0],
+            currentSessionId: () => sessionIds[0]
+        }),
+        switchGroup: () => { terminals[0] = paneB; sessionIds[0] = 'sess-b'; },
+        reconnect: () => { sessionIds[0] = 'sess-a2'; },
+        emptySlot: () => { terminals[0] = null; sessionIds[0] = null; },
+        stream: pane => pane.stream.map(
+            data => (data === modes.MOUSE_REPORTING_RESET ? 'teardown' : data)
+        )
+    };
+}
+
 function harness(modes, options) {
     const opts = options || {};
     const writes = [];
@@ -321,6 +368,147 @@ class RejoinReplayOrderingTestCase(TerminalModesNodeTestCase):
         )
         self.assertEqual(result["beforeAck"], [])
         self.assertEqual(result["stream"], ["replayed", "teardown"])
+
+
+class CapturedResetTargetTestCase(TerminalModesNodeTestCase):
+    """A grid slot is not an identity, and Reset view is asynchronous.
+
+    The teardown lands when the rejoin is acknowledged; a group switch inside
+    that wait puts another pane in `terminals[index]`. The write follows the
+    pane that asked, the slot work does not follow the slot.
+    """
+
+    def test_the_teardown_follows_the_pane_that_asked_after_a_group_switch(self):
+        result = self._run_node(
+            """
+            const page = grid(modes);
+            const target = page.capture();
+            page.switchGroup();
+            const wrote = target.write(modes.MOUSE_REPORTING_RESET);
+            process.stdout.write(JSON.stringify({
+                wrote,
+                asked: page.stream(page.paneA),
+                incoming: page.stream(page.paneB)
+            }));
+            """
+        )
+        self.assertTrue(result["wrote"])
+        self.assertEqual(result["asked"], ["teardown"])
+        # The pane that merely inherited the slot receives nothing at all.
+        self.assertEqual(result["incoming"], [])
+
+    def test_the_captured_pane_queue_is_flushed_before_the_teardown(self):
+        """The replay is what re-arms the mode, so it has to be applied to the
+        captured pane first — including while that pane is off-screen."""
+        result = self._run_node(
+            """
+            const page = grid(modes);
+            const target = page.capture();
+            page.paneA._pendingOutput = '\x1b[?1003hreplayed';
+            page.switchGroup();
+            target.write(modes.MOUSE_REPORTING_RESET);
+            process.stdout.write(JSON.stringify({
+                asked: page.stream(page.paneA),
+                incoming: page.stream(page.paneB),
+                drained: page.paneA._pendingOutput
+            }));
+            """
+        )
+        self.assertEqual(result["asked"], ["[?1003hreplayed", "teardown"])
+        self.assertEqual(result["incoming"], [])
+        self.assertEqual(result["drained"], "")
+
+    def test_slot_work_is_skipped_once_the_pane_or_its_session_moves(self):
+        """The redraw and the busy release address `index`; the incoming group
+        must never inherit either from a reset it did not ask for."""
+        result = self._run_node(
+            """
+            const fresh = grid(modes);
+            const before = fresh.capture().isCurrent();
+
+            const replaced = grid(modes);
+            const replacedTarget = replaced.capture();
+            replaced.switchGroup();
+
+            const reconnected = grid(modes);
+            const reconnectedTarget = reconnected.capture();
+            reconnected.reconnect();
+
+            const emptied = grid(modes);
+            const emptiedTarget = emptied.capture();
+            emptied.emptySlot();
+
+            process.stdout.write(JSON.stringify({
+                before,
+                afterGroupSwitch: replacedTarget.isCurrent(),
+                afterSessionChange: reconnectedTarget.isCurrent(),
+                afterSlotEmptied: emptiedTarget.isCurrent()
+            }));
+            """
+        )
+        self.assertTrue(result["before"])
+        self.assertFalse(result["afterGroupSwitch"])
+        # A pane that reconnected under the same object is a different session.
+        self.assertFalse(result["afterSessionChange"])
+        self.assertFalse(result["afterSlotEmptied"])
+
+    def test_an_empty_slot_captures_a_target_that_writes_nothing(self):
+        """Capturing from a slot with no pane must report rather than throw."""
+        result = self._run_node(
+            """
+            const target = modes.captureResetTarget({
+                pane: null,
+                sessionId: 'sess-a',
+                write: () => { throw new Error('must not write'); }
+            });
+            process.stdout.write(JSON.stringify({
+                wrote: target.write(modes.MOUSE_REPORTING_RESET),
+                isCurrent: target.isCurrent()
+            }));
+            """
+        )
+        self.assertFalse(result["wrote"])
+        self.assertFalse(result["isCurrent"])
+
+    def test_the_replay_and_the_teardown_both_reach_the_original_pane_in_order(self):
+        """The whole sequence end to end: the rejoin is acknowledged only after
+        the group has already switched, and the ordering the module exists for
+        still holds — on the pane that asked."""
+        result = self._run_node(
+            """
+            const page = grid(modes);
+            const target = page.capture();
+            const clock = fakeClock();
+            let ack = null;
+            const pending = modes.rejoinAndResetAfterReplay({
+                sessionId: 'sess-a',
+                emit: (event, payload, callback) => {
+                    if (event === 'join_session') { ack = callback; }
+                },
+                write: data => target.write(data),
+                setTimeout: clock.setTimeout,
+                clearTimeout: clock.clearTimeout
+            });
+            // The server replays into the pane's own queue, then acknowledges —
+            // and the user switched group in between.
+            page.paneA._pendingOutput = '\x1b[?1003hsome TUI frame';
+            page.switchGroup();
+            ack();
+            const outcome = await pending;
+            process.stdout.write(JSON.stringify({
+                settledBy: outcome.settledBy,
+                asked: page.stream(page.paneA),
+                incoming: page.stream(page.paneB),
+                slotWorkAllowed: target.isCurrent()
+            }));
+            """
+        )
+        self.assertEqual(result["settledBy"], "ack")
+        self.assertEqual(
+            result["asked"], ["[?1003hsome TUI frame", "teardown"]
+        )
+        self.assertEqual(result["incoming"], [])
+        self.assertFalse(result["slotWorkAllowed"])
 
 
 if __name__ == "__main__":

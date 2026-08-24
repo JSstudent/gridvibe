@@ -567,7 +567,14 @@ class MultiWorkspacePersistenceTestCase(unittest.TestCase):
         """
         self._group("group-a", self.WORKSPACE_A, "secret-a")
         session = api.session_manager.get_group_sessions("group-a")[0]
+        # Registered, because the observation only publishes while its entry is
+        # the registry's current one -- the pump never holds any other kind.
         connection = {"kind": "ssh", "shell_kind": "posix"}
+        with api.connection_lock:
+            api.ssh_connections[session.session_id] = connection
+        self.addCleanup(
+            lambda: api.ssh_connections.pop(session.session_id, None)
+        )
 
         # The prompt hook reported the new directory before the agent took over.
         web_terminal_io._observe_terminal_output_cwd(

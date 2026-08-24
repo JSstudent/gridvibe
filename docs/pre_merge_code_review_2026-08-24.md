@@ -10,7 +10,7 @@ This is a point-in-time code audit, not a behavior contract. The review covered 
 
 ## Post-review remediation
 
-**Stage 1 was implemented, automatically exercised, and manually accepted on 2026-08-24.** H-3 and M-1 are resolved in the post-review code. The findings and verdict below remain the point-in-time record for the reviewed commit; they no longer describe the disposition of those two findings in the updated tree. H-2, M-2, M-3, and L-1 remain assigned to the later stages of the fix plan.
+**Stages 1 and 2 were implemented, automatically exercised, and manually accepted on 2026-08-24.** H-3, M-1, M-2 and the branch-scoped part of H-2 are resolved in the post-review code. The findings and verdict below remain the point-in-time record for the reviewed commit; they no longer describe the disposition of those findings in the updated tree. M-3 and L-1 remain assigned to Stage 3, and H-2's three pre-existing connection-lifecycle bullets remain separate follow-up hardening — Stage 2 does not claim them.
 
 H-3 remediation:
 
@@ -24,6 +24,19 @@ M-1 remediation:
 - Local and SSH Git runners now report exit-status observation, stdout/stderr truncation, output-limit termination, and overall completion independently. An output ceiling no longer invents `returncode=0`.
 - Structural reads and every mutation require a complete result. An incomplete mutation reports that repository state may have changed, requests a fresh state read, and is never retried automatically.
 - Repository search and bounded diff are the only callers allowed to consume stdout-limited output, because both have an explicit partial-result contract. Stderr-limited execution and a command/channel ending without a status remain failures.
+
+H-2 remediation (branch-scoped bullet 4 only):
+
+- A parsed working-directory event now publishes only while the exact connection that produced it is still the registry's entry for that session — identity, not session id and not shell kind, so a replacement of the same family is a different shell.
+- The current-entry check, the directory comparison and the metadata write are one `connection_lock` → `SessionManager.lock` hold; parsing and residue handling stay lock-free, and the broadcast runs after both locks are released. A discarded event changes no status, replays nothing, and never touches the replacement's metadata.
+- Bullets 1–3 are untouched by design. No attempt tokens, registration changes, pump/finalizer rewrites, or shell-switch resequencing were made.
+
+M-2 remediation:
+
+- Reset view captures the pane object and session id before it waits. The mouse teardown follows that pane wherever it now lives — cached and off-screen included, with the pane's own queued output flushed ahead of it — while the redraw and the busy release are refused once the capture is no longer the pane on screen. The busy hold releases the buttons it disabled rather than re-resolving them by slot, so neither pane is left mid-refresh. Clear was given the same treatment; it awaits identically.
+- Explorer Git actions capture pane, session id and normalized scope, and re-check all three before every post-`await` write, render, reload and refresh. A replaced pane is not painted and has its Git model marked stale for a fresh load when its group returns; a pane that only changed Follow scope is painted and its current scope loaded immediately. Errors are never attached to a moved pane, busy state is always released on the captured pane, and the already-sent mutation is never cancelled or reissued.
+
+Stage 2 automated acceptance added `tests/test_explorer_git_identity.py` (the real sidebar executed in a Node `vm` across group switches, Follow-scope changes, delayed successes and delayed failures), captured-target coverage in `tests/test_terminal_modes.py`, and retired-connection, replaced-connection, parse/publish-barrier and lock-freedom cases in `tests/test_api.py`. The regression tests were confirmed to fail against the unmodified files first. The full runner reached 2,023 tests with 9 skipped and no failures; Ruff and `git diff --check` passed. The user then completed the shell-switch and both delayed-frontend manual scenarios and accepted the result.
 
 Automated acceptance added real sibling-scope repository coverage for Stage/Unstage/Discard All and narrowed Commit, plus local/SSH coverage for stdout limits, stderr limits, missing completion status, normal non-zero exits, structural reads, mutations, and the explicit search/diff partial paths. The focused Stage 1 suites, Ruff, and `git diff --check` passed. The full runner reached 2,004 tests with 9 skipped; its only two environment-sensitive failures were the withdrawn H-1 process-tree cases, which the fix plan explicitly excludes from Stage 1. The user then completed the disposable-repository manual scenarios and accepted the result.
 
@@ -212,12 +225,12 @@ Two observations retained so they are not rediscovered as findings. The two stal
 | --- | --- | --- |
 | Same-origin, host keys, secrets | Pass | No relevant security implementation was changed; new terminal output remains room-scoped. |
 | Durable JSON state | Pass | New presentation fields continue through the existing validated saved/runtime stores; no fourth store or direct durable JSON write was introduced. |
-| Shared locks and identity | **Watch** | H-2's bullets are true, but three of the four describe code unchanged from `main`; only the new cwd publication is branch-scoped. |
+| Shared locks and identity | **Watch** | H-2's bullets are true, but three of the four describe code unchanged from `main`; only the new cwd publication was branch-scoped, and Stage 2 resolved that one. The three pre-existing bullets remain open follow-up hardening. |
 | Immutable config publication | **Incomplete** | Publication is atomic, but M-3 lists multi-field readers that do not take a snapshot. |
 | SSH/SFTP pool reservation | Pass | Verified: `_acquire_ssh_sftp()` reserves under the lock, opens outside it, and commit/cancel match the entry object; `_release_ssh_sftp()` matches on `entry.client is client`. |
 | Bounded output/processes | **Incomplete** | Stream and process ceilings hold and the process-tree tests pass (H-1 withdrawn); M-1's truncation-as-success remains. |
 | Repaint/tier/worker architecture | Pass | The new DOM-free policy modules have Node-executed behavioral coverage; no CDN dependency or busy polling was introduced. |
-| Shell quoting and cwd observation | **Incomplete** | Hooks use the intended shell-specific mechanisms and parsing stays outside `connection_lock`, but a retiring pump can still republish `current_directory` after a deliberate clear (H-2, bullet 4). |
+| Shell quoting and cwd observation | **Incomplete** at review; resolved in Stage 2 | Hooks use the intended shell-specific mechanisms and parsing stays outside `connection_lock`. A retiring pump could republish `current_directory` after a deliberate clear (H-2, bullet 4); publication is now gated on the exact current connection entry. |
 | One selected Git scope | **Fail** | H-3 transports the anchor but does not apply it to the bulk action target; reproduced as out-of-scope data loss. |
 | Dead code/wiring | Pass | No confirmed dead endpoint, config key, Socket.IO event, or new UI control was found; the shell-integration setting and new modules are wired and tested. |
 | API/module structure | **Watch** | L-1 regrows the API orchestration surface despite substantial frontend extraction being well separated. |

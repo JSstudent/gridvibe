@@ -1047,10 +1047,63 @@
         return true;
     }
 
-    async function performExplorerGitAction(index, endpoint, body) {
+    /* What a Git action is allowed to still do when its answer arrives.
+
+       The request itself is already bound -- its scope rode in the URL and the
+       server acted on that scope -- so nothing here cancels or reissues it.
+       What needs binding is everything the *answer* does, because none of the
+       three things it addresses survives an await on its own: `terminals[i]`
+       is a grid slot and a group switch rehouses it, the session id goes with
+       it, and Follow browsing moves the captured pane's own scope while the
+       request is in flight. The three are one identity, and the two ways it
+       can break need different answers -- hence a state rather than a
+       boolean. */
+    const EXPLORER_GIT_IDENTITY_CURRENT = 'current';
+    const EXPLORER_GIT_IDENTITY_SCOPE_CHANGED = 'scope-changed';
+    const EXPLORER_GIT_IDENTITY_PANE_REPLACED = 'pane-replaced';
+
+    function explorerGitCaptureIdentity(index) {
         const pane = terminals[index];
-        const sessionId = sessionIds[index];
-        const scopePath = explorerGitScopePath(pane);
+        return { pane, sessionId: sessionIds[index], scopePath: explorerGitScopePath(pane) };
+    }
+
+    function explorerGitIdentityState(index, identity) {
+        if (!identity || !identity.pane) {
+            return EXPLORER_GIT_IDENTITY_PANE_REPLACED;
+        }
+        if (terminals[index] !== identity.pane || sessionIds[index] !== identity.sessionId) {
+            return EXPLORER_GIT_IDENTITY_PANE_REPLACED;
+        }
+        if (explorerGitScopePath(identity.pane) !== identity.scopePath) {
+            return EXPLORER_GIT_IDENTITY_SCOPE_CHANGED;
+        }
+        return EXPLORER_GIT_IDENTITY_CURRENT;
+    }
+
+    function explorerGitIdentityIsCurrent(index, identity) {
+        return explorerGitIdentityState(index, identity) === EXPLORER_GIT_IDENTITY_CURRENT;
+    }
+
+    /* The mutation landed; only its answer is stale. Deliberately *not*
+       invalidateExplorerGitRepo(): that also drops `_explorerGitRepo`, which
+       is the model the pane's panel is still painted from -- blanking a
+       background pane's sidebar to report that something else finished is a
+       worse answer than a slightly old one. The pane simply stops counting as
+       loaded, so the next load refetches instead of short-circuiting on the
+       anchor path it already holds, and `_explorerGitReloadPending` is what
+       gets that load run when the pane comes back on screen. */
+    function explorerGitMarkModelStale(pane) {
+        if (!pane) {
+            return;
+        }
+        pane._explorerGitRepoLoaded = false;
+        pane._explorerGitAnchorPath = '';
+        pane._explorerGitReloadPending = true;
+    }
+
+    async function performExplorerGitAction(index, endpoint, body) {
+        const identity = explorerGitCaptureIdentity(index);
+        const { pane, sessionId, scopePath } = identity;
         if (!pane || !sessionId || pane._explorerGitActionBusy) {
             return false;
         }
@@ -1068,26 +1121,52 @@
             if (!response.ok) {
                 throw new Error(data.error || 'Git action failed');
             }
-            pane._explorerGitRepo = data;
-            pane._explorerGitRepoLoaded = true;
-            pane._explorerGitAnchorPath = String(data.anchor_path || '');
-            pane._explorerGitRevision = typeof data.revision === 'string' ? data.revision : '';
-            // A successful GridVibe Git action is authoritative: it re-arms a
-            // suspended change-listener watch and resets its baseline.
-            pane._explorerGitWatchSuspended = false;
-            syncExplorerTabGitFromRepo(index, data);
-            succeeded = true;
+            if (explorerGitIdentityIsCurrent(index, identity)) {
+                pane._explorerGitRepo = data;
+                pane._explorerGitRepoLoaded = true;
+                pane._explorerGitAnchorPath = String(data.anchor_path || '');
+                pane._explorerGitRevision = typeof data.revision === 'string' ? data.revision : '';
+                // A successful GridVibe Git action is authoritative: it re-arms a
+                // suspended change-listener watch and resets its baseline.
+                pane._explorerGitWatchSuspended = false;
+                syncExplorerTabGitFromRepo(index, data);
+                succeeded = true;
+            } else {
+                explorerGitMarkModelStale(pane);
+            }
         } catch (error) {
             console.error('[GridVibe Sessions] Explorer Git action failed:', error);
-            pane._explorerGitRepoError = error.message || 'Git action failed.';
+            // The error belongs to the scope it was raised for. Painting it onto
+            // a pane that has since moved would attach it to a repository model
+            // the user never asked this of.
+            if (explorerGitIdentityIsCurrent(index, identity)) {
+                pane._explorerGitRepoError = error.message || 'Git action failed.';
+            } else {
+                explorerGitMarkModelStale(pane);
+            }
         } finally {
+            // Always released on the captured pane -- a busy flag left set is a
+            // pane that can never act again -- but painted only where it is
+            // still the pane on screen.
             pane._explorerGitActionBusy = false;
-            renderExplorerGitPanels(index);
+            const state = explorerGitIdentityState(index, identity);
+            if (state !== EXPLORER_GIT_IDENTITY_PANE_REPLACED) {
+                renderExplorerGitPanels(index);
+                if (state === EXPLORER_GIT_IDENTITY_SCOPE_CHANGED && pane._explorerGitSidebarOpen) {
+                    // Same pane, different scope: the fresh load is owed here
+                    // and now, because this pane is the one on screen.
+                    pane._explorerGitReloadPending = false;
+                    loadExplorerGitRepo(index);
+                }
+            }
         }
-        if (succeeded && pane._explorerMode === 'directory') {
+        if (!succeeded || !explorerGitIdentityIsCurrent(index, identity)) {
+            return succeeded;
+        }
+        if (pane._explorerMode === 'directory') {
             loadExplorerPane(index, null, { force: true, showLoading: false });
         }
-        if (succeeded && EXPLORER_GIT_WORKTREE_ENDPOINTS.has(endpoint)) {
+        if (EXPLORER_GIT_WORKTREE_ENDPOINTS.has(endpoint)) {
             await refreshExplorerAfterGitAction(index, body && body.path ? String(body.path) : '');
         }
         return succeeded;
@@ -1211,9 +1290,16 @@
             }
             return;
         }
+        const identity = explorerGitCaptureIdentity(index);
         const committed = await performExplorerGitAction(index, 'commit', { message });
-        if (committed) {
-            pane._explorerGitCommitMessage = '';
+        if (!committed) {
+            return;
+        }
+        // The draft belongs to the pane, so it is cleared on the pane. The
+        // render is slot work and waits on the same identity every other
+        // post-await paint does.
+        pane._explorerGitCommitMessage = '';
+        if (explorerGitIdentityIsCurrent(index, identity)) {
             renderExplorerGitPanels(index);
         }
     }

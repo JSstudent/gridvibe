@@ -970,8 +970,11 @@ class ApiRoutesTestCase(unittest.TestCase):
         # local shell picker), still wired per pane slot by terminals.js.
         self.assertIn('data-terminal-refresh="${index}"', html)
         self.assertIn('wireCardButton(card, `[data-terminal-refresh="${i}"]`', html)
-        self.assertIn("function setTerminalRefreshState(index, refreshing)", html)
         self.assertIn("async function refreshTerminalDisplay(index)", html)
+        # Refresh awaits, so the hold is taken against the buttons it disabled
+        # and released through the closure it handed back — never re-resolved by
+        # slot, which a group switch would have handed to somebody else.
+        self.assertIn("holdTerminalActionState(index, 'refresh')", html)
 
     def test_terminals_page_explorer_bar_has_refresh_before_up_control(self):
         response = self.client.get("/terminals")
@@ -992,7 +995,9 @@ class ApiRoutesTestCase(unittest.TestCase):
             html,
         )
         self.assertIn("refreshTerminalDisplay(index);", html)
-        self.assertIn("const explorerRefreshButton = document.getElementById(`explorer-refresh-${index}`);", html)
+        # The busy state is taken and released through the captured-button hold,
+        # so what matters is that this button is one of the three it captures.
+        self.assertIn("document.getElementById(`explorer-refresh-${index}`)", html)
         self.assertIn("explorerRefreshButton.disabled = isBusy;", html)
 
     def test_terminals_page_explorer_shortcuts_refresh_and_navigate_parent(self):
@@ -3441,8 +3446,8 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         html = self._page_html(response)
         self.assertIn('data-terminal-clear="${i}"', html)
-        self.assertIn("function setTerminalClearState(index, clearing)", html)
         self.assertIn("async function clearTerminalDisplay(index)", html)
+        self.assertIn("holdTerminalActionState(index, 'clear')", html)
 
     def test_terminals_page_rebuilds_reused_group_views_when_session_ids_change(self):
         response = self.client.get("/terminals")
@@ -3768,8 +3773,16 @@ class ApiRoutesTestCase(unittest.TestCase):
         refresh_body = html[refresh_start:clear_start]
         clear_body = html[clear_start:clear_end]
 
+        for name, body in (("refresh", refresh_body), ("clear", clear_body)):
+            with self.subTest(control=name):
+                # Both await, so both capture the pane before they do. Writing
+                # through the capture is what keeps a teardown on the pane that
+                # asked for it after a group switch has taken the slot.
+                self.assertIn("terminalModeResetTarget(index)", body)
+                self.assertIn("resetTarget.write(data)", body)
+
         # Clear purges the replay buffer, so a plain teardown needs no ordering.
-        self.assertIn("resetTerminalMouseReporting(index);", clear_body)
+        self.assertIn("GridVibeTerminalModes.resetMouseReporting(", clear_body)
 
         # Reset view replays that buffer instead, and the buffer still holds the
         # dead program's `?1003h` — so the rejoin has to be the ack-sequenced one
@@ -3777,6 +3790,9 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("GridVibeTerminalModes.rejoinAndResetAfterReplay(", refresh_body)
         self.assertNotIn("socket.emit('join_session'", refresh_body)
         self.assertNotIn("socket.emit('leave_session'", refresh_body)
+        # The redraw is slot work and waits on the captured identity; the
+        # incoming group must never be redrawn for a reset it did not ask for.
+        self.assertIn("if (resetTarget.isCurrent()) {", refresh_body)
 
     def test_terminals_page_clear_command_matches_shell_family_and_host(self):
         """`cls` is a cmd/PowerShell command; POSIX hosts and WSL panes get `clear`."""
@@ -3837,6 +3853,25 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("explorerReleasePaneWork(terminal);", html)
         self.assertIn("restoreTerminalViewports: false", html)
         self.assertIn("clearTerminalViewports: false", html)
+
+    def test_terminals_page_reloads_a_git_model_marked_stale_while_cached(self):
+        """A Git action that lands while its group is cached leaves the slot
+        alone -- `terminals[index]` belongs to the group that replaced it -- and
+        marks its own pane instead. The promised fresh load has to actually
+        happen, or the pane comes back showing a repository state that moved."""
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = self._page_html(response)
+        restore_start = html.index("function restoreCachedPaneUiState(")
+        restore_end = html.index("let currentWorkspaceLabel", restore_start)
+        restore_html = html[restore_start:restore_end]
+        # The pane is back on screen here, so this is where the load runs -- and
+        # only for a sidebar that is open to receive it.
+        self.assertIn("terminal._explorerGitReloadPending", restore_html)
+        self.assertIn("terminal._explorerGitReloadPending = false;", restore_html)
+        self.assertIn("if (terminal._explorerGitSidebarOpen) {", restore_html)
+        self.assertIn("loadExplorerGitRepo(index);", restore_html)
 
     def test_terminals_page_restores_viewports_after_cached_group_redraw(self):
         response = self.client.get("/terminals")
@@ -5623,6 +5658,19 @@ class ApiRoutesTestCase(unittest.TestCase):
         api.session_manager.update_session_status(session.session_id, api.SessionStatus.CONNECTED)
         return session
 
+    def _register_connection(self, session_id: str, **fields):
+        """Put one connection entry in the registry and hand it back.
+
+        A pump only ever observes output through the entry the registry is
+        holding, and publication is gated on that being still true, so a test
+        that observes through a dict nobody registered is testing the gate
+        rather than the observation.
+        """
+        connection = dict(fields)
+        with api.connection_lock:
+            api.ssh_connections[session_id] = connection
+        return connection
+
     def test_switch_pane_shell_restarts_local_terminal_under_powershell(self):
         repo_dir = Path(self.temp_dir.name) / "repo"
         repo_dir.mkdir()
@@ -6173,7 +6221,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         desktop = Path(self.temp_dir.name) / "desktop"
         desktop.mkdir(parents=True)
         session_id = self._create_local_terminal_session(desktop).session_id
-        connection = {"kind": "local", "shell_kind": "posix"}
+        connection = self._register_connection(session_id, kind="local", shell_kind="posix")
 
         with patch.object(web_terminal_io, "_send_connection_input") as send_input:
             web_terminal_io._observe_terminal_output_cwd(
@@ -6193,7 +6241,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         desktop = Path(self.temp_dir.name) / "desktop"
         desktop.mkdir(parents=True)
         session_id = self._create_local_terminal_session(desktop).session_id
-        connection = {"kind": "local", "shell_kind": "posix"}
+        connection = self._register_connection(session_id, kind="local", shell_kind="posix")
 
         web_terminal_io._observe_terminal_output_cwd(session_id, connection, "\x1b]7;file://box/srv/a")
         self.assertIsNone(api.session_manager.get_session(session_id).current_directory)
@@ -6209,7 +6257,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         desktop = Path(self.temp_dir.name) / "desktop"
         desktop.mkdir(parents=True)
         session_id = self._create_local_terminal_session(desktop).session_id
-        connection = {"kind": "local", "shell_kind": "posix"}
+        connection = self._register_connection(session_id, kind="local", shell_kind="posix")
         prompt = "\x1b]7;file://box/srv/app\x1b\\$ "
 
         with patch.object(web_terminal_io, "_broadcast_session_status") as broadcast:
@@ -6226,7 +6274,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         session_id = self._create_local_terminal_session(
             desktop, startup_mode="agent", initial_command_mode="agent"
         ).session_id
-        connection = {"kind": "local", "shell_kind": "posix"}
+        connection = self._register_connection(session_id, kind="local", shell_kind="posix")
 
         web_terminal_io._observe_terminal_output_cwd(
             session_id, connection, "\x1b]7;file://box/srv/app/api\x1b\\"
@@ -6241,6 +6289,126 @@ class ApiRoutesTestCase(unittest.TestCase):
         probe.assert_not_called()
         self.assertEqual(directory, "/srv/app/api")
         self.assertEqual(source, web_terminal_io.CWD_SOURCE_SHELL_INTEGRATION)
+
+    def test_a_retired_connection_cannot_republish_the_cwd_it_was_cleared_of(self):
+        """A shell switch clears `current_directory` and retires the entry. The
+        retiring shell's last prompt can still be in a pipe at that moment, and
+        publishing it would put the dead shell's directory back."""
+        desktop = Path(self.temp_dir.name) / "desktop"
+        desktop.mkdir(parents=True)
+        session_id = self._create_local_terminal_session(desktop).session_id
+        retired = self._register_connection(session_id, kind="local", shell_kind="posix")
+        with api.connection_lock:
+            api.ssh_connections.pop(session_id, None)
+
+        with patch.object(web_terminal_io, "_broadcast_session_status") as broadcast:
+            web_terminal_io._observe_terminal_output_cwd(
+                session_id, retired, "\x1b]7;file://box/srv/app/old\x1b\\$ "
+            )
+
+        broadcast.assert_not_called()
+        self.assertIsNone(api.session_manager.get_session(session_id).current_directory)
+
+    def test_a_replaced_connection_cannot_write_over_the_shell_that_took_its_place(self):
+        """Identity is the entry object, not the session id and not the shell
+        kind: the replacement shell is a different shell of the same family."""
+        desktop = Path(self.temp_dir.name) / "desktop"
+        desktop.mkdir(parents=True)
+        session_id = self._create_local_terminal_session(desktop).session_id
+        retired = {"kind": "local", "shell_kind": "posix"}
+        replacement = self._register_connection(
+            session_id, kind="local", shell_kind="posix"
+        )
+        self.assertIsNot(retired, replacement)
+
+        with patch.object(web_terminal_io, "_broadcast_session_status") as broadcast:
+            web_terminal_io._observe_terminal_output_cwd(
+                session_id, retired, "\x1b]7;file://box/srv/app/old\x1b\\$ "
+            )
+
+        broadcast.assert_not_called()
+        self.assertIsNone(api.session_manager.get_session(session_id).current_directory)
+
+        # The entry that *is* current still publishes, from the same registry.
+        with patch.object(web_terminal_io, "_broadcast_session_status") as broadcast:
+            web_terminal_io._observe_terminal_output_cwd(
+                session_id, replacement, "\x1b]7;file://box/srv/app/new\x1b\\$ "
+            )
+
+        broadcast.assert_called_once_with(session_id)
+        self.assertEqual(
+            api.session_manager.get_session(session_id).current_directory,
+            "/srv/app/new",
+        )
+
+    def test_a_registry_change_between_the_parse_and_the_write_publishes_nothing(self):
+        """The window the gate exists for. Parsing is deliberately lock-free, so
+        the entry can be retired after the sequence is read and before the
+        directory is written -- which is exactly the interleaving a shell switch
+        produces. Barrier, not a sleep: the retirement is driven from inside the
+        observation, between its two halves."""
+        desktop = Path(self.temp_dir.name) / "desktop"
+        desktop.mkdir(parents=True)
+        session_id = self._create_local_terminal_session(desktop).session_id
+        connection = self._register_connection(session_id, kind="local", shell_kind="posix")
+        real_normalize = web_terminal_io.normalize_observed_cwd
+
+        def retire_then_normalize(*args, **kwargs):
+            with api.connection_lock:
+                api.ssh_connections.pop(session_id, None)
+            return real_normalize(*args, **kwargs)
+
+        with patch.object(
+            web_terminal_io, "normalize_observed_cwd", side_effect=retire_then_normalize
+        ) as normalize, patch.object(
+            web_terminal_io, "_broadcast_session_status"
+        ) as broadcast:
+            web_terminal_io._observe_terminal_output_cwd(
+                session_id, connection, "\x1b]7;file://box/srv/app/gone\x1b\\$ "
+            )
+
+        # The parse ran -- this is not a test that passes by never getting there.
+        normalize.assert_called_once()
+        broadcast.assert_not_called()
+        self.assertIsNone(api.session_manager.get_session(session_id).current_directory)
+
+    def test_the_cwd_broadcast_holds_neither_shared_lock(self):
+        """Guardrail 2: the check and the write share one hold, the emit is
+        outside it. Asked from another thread, because both locks are reentrant
+        and the publishing thread could re-take either one without noticing."""
+        desktop = Path(self.temp_dir.name) / "desktop"
+        desktop.mkdir(parents=True)
+        session_id = self._create_local_terminal_session(desktop).session_id
+        connection = self._register_connection(session_id, kind="local", shell_kind="posix")
+        held = {}
+
+        def probe_locks(_session_id):
+            def attempt():
+                for name, lock in (
+                    ("connection_lock", api.connection_lock),
+                    ("manager_lock", api.session_manager.lock),
+                ):
+                    acquired = lock.acquire(blocking=False)
+                    held[name] = not acquired
+                    if acquired:
+                        lock.release()
+
+            thread = threading.Thread(target=attempt)
+            thread.start()
+            thread.join(timeout=5)
+
+        with patch.object(
+            web_terminal_io, "_broadcast_session_status", side_effect=probe_locks
+        ):
+            web_terminal_io._observe_terminal_output_cwd(
+                session_id, connection, "\x1b]7;file://box/srv/app/free\x1b\\$ "
+            )
+
+        self.assertEqual(held, {"connection_lock": False, "manager_lock": False})
+        self.assertEqual(
+            api.session_manager.get_session(session_id).current_directory,
+            "/srv/app/free",
+        )
 
     def test_effective_directory_prefers_the_observation_over_the_probe(self):
         desktop = Path(self.temp_dir.name) / "desktop"

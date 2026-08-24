@@ -2,7 +2,7 @@
 
 Date: 2026-08-24
 
-Updated after Stage 1 implementation, automated acceptance, and manual acceptance on 2026-08-24
+Updated after Stage 2 implementation, automated acceptance, and manual acceptance on 2026-08-24
 
 Scope: H-3, the branch-scoped part of H-2, plus M-1 through M-3 and L-1
 
@@ -15,10 +15,11 @@ The validation pass changes what belongs in a pre-merge fix:
 | Finding | Disposition in this plan | Consequence |
 | --- | --- | --- |
 | H-1 | Withdrawn and excluded | Make no process-tree, Job Object, timeout, or process-group change. The existing stalled-remote tests are green and the documented dead-PID safety trade remains intact. |
-| H-2 | Re-scoped | Fix only the branch-added possibility that a retired connection republishes `current_directory` after a deliberate clear. The older pump/finalizer/registration issues remain separate hardening work and are not merge blockers. |
+| H-2 | Resolved in Stage 2 (re-scoped part only) | A cwd observation now publishes only while the exact connection that produced it is still the registry's entry. The older pump/finalizer/registration issues remain separate hardening work and are not merge blockers. |
 | H-3 | Resolved in Stage 1 | Bulk mutations now obey the selected Git scope, and narrowed Commit refuses hidden staged paths. Automated and manual acceptance passed. |
 | M-1 | Resolved in Stage 1 | Bounded runners now distinguish completion from truncation; structural reads and mutations reject incomplete results, while search/diff retain explicit partial-result contracts. |
-| M-2, M-3, L-1 | Confirmed | Retain as scoped correctness/architecture work in descending change-risk order. |
+| M-2 | Resolved in Stage 2 | Every post-`await` write in Reset view and in the explorer Git actions names the pane, session and scope it captured; a stale completion is discarded and followed by a fresh load. |
+| M-3, L-1 | Confirmed | Retain as scoped correctness/architecture work in descending change-risk order. |
 
 Do not reintroduce H-1 into this plan without a new reliable reproduction. Do not describe H-2 bullets 1–3 as regressions introduced by this branch.
 
@@ -29,7 +30,7 @@ Resolve the actionable branch concerns in three stages ordered by **implementati
 | Stage | Status | Change risk | Findings | Why it is ordered here |
 | --- | --- | --- | --- | --- |
 | 1 | **Complete — accepted 2026-08-24** | Highest | H-3, M-1 | Changes destructive Git mutation scope and the completion semantics consumed by every local/SSH Git caller. |
-| 2 | Pending | Moderate | H-2, branch-scoped symptom only; M-2 | Adds identity checks at backend/frontend asynchronous publication boundaries without redesigning connection registration. |
+| 2 | **Complete — accepted 2026-08-24** | Moderate | H-2, branch-scoped symptom only; M-2 | Adds identity checks at backend/frontend asynchronous publication boundaries without redesigning connection registration. |
 | 3 | Pending | Lowest when constrained as described | M-3, L-1 | Snapshot adoption is mechanical. The API extraction is characterization-first and behavior-neutral; redesign is excluded. |
 
 Each stage is independently reviewable and must leave its focused tests green before the next stage starts. The validated baseline is already green: two consecutive full runs reported 1,983 tests passing with 9 skipped. A fix must preserve that baseline.
@@ -189,11 +190,50 @@ Required regression coverage:
 
 ---
 
-## Stage 2 — Identity-safe cwd and frontend async completion
+## Stage 2 — Identity-safe cwd and frontend async completion — Complete
 
 Risk: moderate
 
 Findings: H-2 branch-scoped cwd symptom and M-2
+
+### Completion record — 2026-08-24
+
+Status: **implemented, automatically accepted, manually accepted, and documented.** No Stage 3 work was included.
+
+Delivered code:
+
+- `web/terminal_io.py` gained `_publish_observed_cwd()`. Parsing and residue handling remain lock-free; the current-entry check (`ssh_connections.get(session_id) is connection`), the directory comparison and the metadata write are one `connection_lock` → `SessionManager.lock` hold, and `_broadcast_session_status()` runs after both are released. A discarded event changes nothing — no status, no replay, no write to the replacement's metadata. No attempt tokens, registration changes, pump/finalizer rewrites or shell-switch resequencing were made.
+- `web/static/js/terminal-modes.js` gained `captureResetTarget()`: the write follows the captured pane object (flushing that pane's own `_pendingOutput` first) wherever it now lives, while `isCurrent()` gates slot work only.
+- `web/static/js/terminals.js` captures that target in both `refreshTerminalDisplay()` and `clearTerminalDisplay()`, guards the post-rejoin redraw on `isCurrent()`, and replaces the index-resolved busy setters with `holdTerminalActionState()`, which returns a release bound to the buttons it disabled. `flushPendingOutput()` gained a captured-object twin. `restoreCachedPaneUiState()` runs the fresh Git load a stale action asked for.
+- `web/static/js/explorer-git-sidebar.js` captures `{pane, sessionId, scopePath}` before every action and reports a three-valued identity state. A **replaced pane** is not painted at all and has its Git model marked stale (without blanking `_explorerGitRepo`); a **changed scope** is painted and its current scope loaded now. Busy state is always released on the captured pane, errors are never attached to a moved pane, and the already-sent mutation is never cancelled or reissued.
+
+Automated acceptance:
+
+- New `tests/test_explorer_git_identity.py` evaluates the real sidebar in a Node `vm` and covers delayed success and delayed failure across a group switch and a Follow-scope change, the commit draft, the closed-sidebar case, and each part of the identity in isolation — with an unchanged-behaviour control.
+- `tests/test_terminal_modes.py` gained a captured-target case: the teardown follows the pane that asked after a group switch, the pane's queue is flushed ahead of it, slot work is refused, and the full replay-then-teardown ordering still holds with the switch in the middle.
+- `tests/test_api.py` gained the retired-connection, replaced-connection, barrier (registry change between parse and publication) and lock-freedom cases, plus a `_register_connection` helper; the four pre-existing observation tests and one in `tests/test_multi_workspace.py` now register their connection, which is the only shape a pump ever holds.
+- Pre-fix evidence: the three cwd regression tests fail against the unmodified `web/terminal_io.py`, and eight of the nine Git identity tests fail against the unmodified sidebar (the ninth is the control, which passes both ways).
+- Full runner: **2,023 tests, 9 skipped, no failures**. Ruff and `git diff --check` clean.
+
+Manual acceptance:
+
+- The user repeated the shell-switch and both delayed-frontend scenarios and accepted Stage 2 on 2026-08-24.
+
+Two deviations from the plan's letter, both in its direction:
+
+- The busy release is bound to the buttons it disabled rather than skipped when stale. Skipping alone would have left the pane that asked stuck on "Refreshing…" inside its cached fragment while the replacement's own busy state was cleared for it. The same rule was applied to Clear, which awaits identically.
+- A pane-replaced Git completion gets an explicit fresh load on cached-group return. `restoreCachedGroupView()` re-attaches DOM and reloads nothing on its own, so "let normal activation reload it" was not true without it.
+
+Consequent cleanup: `setTerminalRefreshState`, `setTerminalClearState`, `setTerminalActionState` and `resetTerminalMouseReporting` were left with no callers and removed (guardrail 5), and the four legacy `assertIn("function …")` assertions that pinned their spelling were converted to contract-level checks.
+
+Deliberately untouched: `_track_terminal_agent_input()` also writes `current_directory` from a connection. It is driven by user input rather than a pump, and this stage is scoped to the observation path; the three deferred connection-lifecycle races remain follow-up hardening.
+
+Documentation completed:
+
+- The cwd-observation guardrail in `AGENTS.md` and `CLAUDE.md` now states the publication rule, and explicitly states nothing about connection-attempt generations, pump adoption, or finalizer ownership.
+- A new guardrail in both files covers post-`await` identity binding on the frontend.
+- `CHANGELOG.md` records both user-visible fixes without claiming the older connection lifecycle is corrected.
+- `docs/pre_merge_code_review_2026-08-24.md` records the H-2/M-2 remediation and acceptance without rewriting its original point-in-time findings.
 
 ### Problem
 
@@ -293,7 +333,7 @@ Required regression coverage:
 - The deterministic retired-connection test proves late cwd cannot undo a deliberate clear, while a current connection still publishes normally.
 - Node tests prove slot/scope replacement is harmless for Reset view and every Git action completion path.
 - Existing stream, cwd, shell-switch, terminal-mode, explorer Git, and group-switch suites remain green.
-- Run the full suite and Ruff before starting Stage 3.
+- Run the full suite and Ruff before starting Stage 3. *(Done: 2,023 tests, 9 skipped, no failures; Ruff clean.)*
 
 #### Manual acceptance
 
