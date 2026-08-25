@@ -258,7 +258,7 @@ python -m ruff check .
 
 Backend lives in the modular `web/` package (`app.py`, `api.py`, `agents.py`, `terminal_io.py`, `explorer.py`, `explorer_search.py`, `voice.py`, …), session state in `sessions/manager.py`, the voice service in `services/`, and the two pages in `templates/` with assets in `web/static/`. Root-level `api.py`, `session_manager.py`, `cleanup.py`, and `webview_launcher.py` are compatibility shims — edit the canonical modules.
 
-More: [`CONTRIBUTING.md`](CONTRIBUTING.md) · [`CHANGELOG.md`](CHANGELOG.md) · [`docs/logging_guide.md`](docs/logging_guide.md) · [`docs/voice_guideline.md`](docs/voice_guideline.md)
+More: [`CONTRIBUTING.md`](CONTRIBUTING.md) · [`CHANGELOG.md`](CHANGELOG.md) · [`docs/logging_guide.md`](docs/logging_guide.md) · [`docs/voice_guideline.md`](docs/voice_guideline.md) · [`docs/session_state_guideline.md`](docs/session_state_guideline.md)
 
 ## Local Files
 
@@ -273,7 +273,7 @@ Created at runtime, never committed:
 | `.encryption_key` | Fernet key for password encryption |
 | `logs/gridvibe.log` | Main rotating log file |
 
-Each of those three JSON state files — `config.json`, `saved_sessions.json` and `runtime_state.json` — is written the same careful way: one change at a time under an OS-level `<file>.lock`, committed through a scratch file and an atomic replace, with the previous version kept as `<file>.bak`. A file GridVibe cannot read is moved aside as `<file>.corrupt-<timestamp>` and the backup is loaded in its place, rather than being reported as empty and overwritten. A save that does not reach the disk is reported as a retryable failure, never as success. Those sidecar files are local state and are gitignored alongside the files they protect.
+Each of those three JSON state files — `config.json`, `saved_sessions.json` and `runtime_state.json` — is written the same careful way: one change at a time under an OS-level `<file>.lock`, committed through a scratch file and an atomic replace, with the previous version kept as `<file>.bak`. A file GridVibe cannot read is moved aside as `<file>.corrupt-<timestamp>` and the backup is loaded in its place, rather than being reported as empty and overwritten. A save that does not reach the disk is reported as a retryable failure, never as success. Those sidecar files are local state and are gitignored alongside the files they protect. The developer-facing contract for all of it — what is captured, when, and what restore replays — is [`docs/session_state_guideline.md`](docs/session_state_guideline.md).
 
 ## License
 
