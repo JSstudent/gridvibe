@@ -1,16 +1,195 @@
 # GridVibe Testing Issues
-Last updated: 2026-08-11
+Last updated: 2026-08-21
 
 ## Open Issues
+
+None.
+
+## Closed Issues
+
+### Issue ID: ISSUE-2026-044
+- Title: Opening a file explorer from a navigated terminal roots at the launch directory, not the current one
+- Priority: High
+- Status: Closed
+- Area: `web/api.py`, `web/explorer.py`, `web/terminal_io.py`, `web/static/js/explorer-git-sidebar.js`, `web/static/js/explorer-git-watch.js`
+- Assignee: Unassigned
+- Tags: `explorer`, `terminal`, `git`, `session`
+- Reported: 2026-08-21
+- Closed: 2026-08-21
+
+Description:
+A terminal pane launched on a Default Working Directory, then navigated with `cd`
+to a subdirectory, opens its file explorer rooted at the *launch* directory. When
+that launch directory is above the repository — `…\Desktop` with the repo at
+`…\Desktop\gridvibe_colab` — the Git sidebar reports no worktree, and navigating
+into the repository through the Files tree does not bring it back, because the
+sidebar is anchored on the explorer root rather than on the directory being
+browsed. The behaviour is also intermittent: the live-cwd probe is a write into
+the interactive shell with a 0.75 s deadline, and a shell that is busy silently
+yields the launch directory instead.
+
+Steps to reproduce:
+1. Launch a Local Repository terminal pane with the Default Working Directory set
+   to a folder that *contains* a Git repository.
+2. In the pane, `cd` into the repository.
+3. Switch the pane to File Explorer mode.
+4. Observe the root, then expand the Git sidebar; navigate into the repository in
+   the Files tree and observe it again.
+
+Expected behavior:
+The explorer opens on the directory the shell is actually in, rooted so that the
+repository containing it is visible, and the Git sidebar stays attached to that
+root. An explorer deliberately launched above repositories may pin its current
+folder as a fixed Git scope or follow the browsed folder after the user enables
+the respective option.
+
+Actual behavior / logs:
+Root-caused by code inspection; see `docs/working_directory_hardening.md` §2.1-2.3
+for the three independent mechanisms (`web/api.py:2929`, `web/explorer.py:99`,
+`web/explorer.py:2628`).
+
+Resolution:
+All stages in `docs/working_directory_hardening.md` have landed. A pane's
+working directory is now observed
+rather than assumed, an explorer opened from a navigated terminal roots on
+the repository containing it, and the observed directory is what a split, a
+preset and a workspace snapshot record. The Git sidebar, its watcher, and all
+eight mutation routes now share one selected anchor. That anchor is the explorer
+root by default; the Graph header's per-pane pin can capture the current folder
+as a fixed scope, while the independent Follow browsed folder toggle opts all
+reads, watcher polls, and actions into the live confined directory together.
+Disabling follow returns to the pin, if present. The two control states and the
+root-relative pin path travel through pane presentation, so Save Workspace and
+restart restore the same Git scope. The sidebar identifies which repository it
+will act on. See also
+ISSUE-2026-046, the two ways a pane could still be pinned to a directory nobody
+picked.
+
+### Issue ID: ISSUE-2026-046
+- Title: The explorer will not follow a shell that has walked back up out of a subdirectory
+- Priority: High
+- Status: Closed
+- Area: `web/explorer.py`, `web/api.py`, `web/runtime_state.py`, `sessions/manager.py`
+- Assignee: Unassigned
+- Tags: `explorer`, `terminal`, `session`, `persistence`
+- Reported: 2026-08-21
+- Closed: 2026-08-21
+
+Description:
+Reported after stages 1-3 landed: a pane launched on a directory, `cd`-ed into a
+subdirectory and switched to the explorer opens correctly on the subdirectory,
+but switching back to the terminal, `cd`-ing back up and switching to the
+explorer again reopens it on the subdirectory. Two independent mechanisms, both
+confirmed against live state:
+
+1. `_resolve_explorer_open_root()`'s widen-guard floor was `session.directory`,
+   which every mode switch rewrites to wherever the pane last was. After one
+   round trip the floor *is* the subdirectory, so a working directory above it
+   reads as a strict ancestor and is clamped straight back down. The guard also
+   applied unconditionally, so even with a stable floor a pane launched inside
+   `repo/src` could never open the explorer on `repo`.
+2. `explorer_root_configured` was live-only and re-derived in
+   `TerminalSession.__post_init__` from the presence of a root, on the premise
+   that a root reaching a launch config is one somebody chose. That premise is
+   false for exactly the root the flag exists to disarm: the terminal->explorer
+   switch has to store the root it derived, and a snapshot carried it back as a
+   configured one. A live pane in the reporter's workspace showed the end state
+   -- `startup_mode: "terminal"`, a root, and `explorer_root_configured: true`,
+   which no in-run code path can produce.
+
+Steps to reproduce:
+1. Launch a terminal pane on a directory that contains a Git repository.
+2. `cd` into the repository and switch the pane to File Explorer mode. It roots
+   on the repository, correctly.
+3. Switch back to a terminal, `cd` back up to the launch directory, and switch
+   to File Explorer mode again.
+
+Expected behavior:
+The explorer opens on the directory the shell is now in.
+
+Actual behavior / logs:
+It reopens on the repository below. Reproduced directly against
+`_resolve_explorer_open_root()`: with the floor at the subdirectory the result
+is the subdirectory, and with the floor at the real launch directory it is the
+launch directory.
+
+### Proposed solution:
+Landed. `TerminalSession.launch_directory` records where a pane was built and
+nothing moves it; the widen guard reads that instead of `directory`, and binds
+only while the pane is still inside it -- the guard is against a repository root
+widening the view, never against the user. `explorer_root_configured` joins
+`_SESSION_SNAPSHOT_FIELDS` so a root and whether anybody chose it survive the
+restart together, and a config that does not state the flag (the launcher, or a
+snapshot written before the field existed) is answered from the pane: a root on
+an explorer pane is configured, a root on any other pane is a derived leftover.
+
+### Issue ID: ISSUE-2026-045
+- Title: A saved workspace restores an agent pane at its launch directory, not the directory the agent was started in
+- Priority: High
+- Status: Closed
+- Area: `web/terminal_io.py`, `web/runtime_state.py`, `web/static/js/terminals.js`, `sessions/manager.py`
+- Assignee: Unassigned
+- Tags: `session`, `workspace`, `persistence`, `terminal`
+- Reported: 2026-08-21
+- Closed: 2026-08-21
+
+Description:
+`_track_terminal_agent_input()` promotes a pane to agent mode when a registered
+agent binary is submitted at the prompt, updating `startup_mode`,
+`agent_selection` and `initial_command` — but not `directory`. Nothing else
+tracks a pane's working directory either, so Save Workspace captures the launch
+directory and a restart replays `cd <launch dir>` followed by the agent command.
+The pane returns in the right mode and the wrong place. The same stale value is
+what a pane split inherits.
+
+Steps to reproduce:
+1. Launch a terminal pane on a repository root.
+2. `cd` into a subdirectory and start an agent (`codex`).
+3. Save the workspace, restart GridVibe, and restore it.
+
+Expected behavior:
+The restored agent pane starts in the subdirectory the agent was started in.
+
+Actual behavior / logs:
+Root-caused by code inspection; see `docs/working_directory_hardening.md` §2.4
+(`web/terminal_io.py:895`, `web/runtime_state.py:152`,
+`web/static/js/terminals.js:2451`).
+
+### Resolution:
+`docs/working_directory_hardening.md`, stages 2 and 3.
+
+Stage 2 gave a pane a working directory it *observes* rather than assumes:
+`current_directory`, read out of an OSC 7 / OSC 9;9 prompt hook in the pane's
+own output (`web/terminal_cwd.py`), which keeps answering while an agent holds
+the terminal because the value stored is the one the shell reported just before
+the agent started.
+
+Stage 3 persisted it. `_track_terminal_agent_input()` stamps the observed
+directory at promotion -- the one moment the shell is still at a prompt --
+writing `current_directory` and never `directory`, which keeps meaning "where
+this pane started". `_snapshot_session()` writes that observation into the
+snapshot's existing `directory` slot, so a restore replays it and the persisted
+shape gained no new key. `buildWorkspaceTerminalEntry()` reads the same pair for
+Save Workspace, and `split_session()` clones where the pane is instead of where
+it started. D3 settled the matching reconnect question: a dropped pane
+reconnects into the observed directory with the launch directory carried as the
+`cd`'s own fallback, so a reconnect and a restore of the same pane replay the
+same value.
+
+Covered by `tests/test_multi_workspace.py`
+(`test_a_runtime_promoted_agent_is_captured_where_it_was_started` and the
+restore round trip beside it) and the split, promotion and reconnect cases in
+`tests/test_api.py`.
 
 ### Issue ID: ISSUE-2026-038
 - Title: A crashed TUI leaves mouse tracking on and types escape sequences at the prompt
 - Priority: Medium
-- Status: Open
-- Area: `web/static/js/terminals.js`, `web/api.py`
+- Status: Closed
+- Area: `web/static/js/terminal-modes.js`, `web/static/js/terminals.js`, `templates/terminals.html`, `tests/test_terminal_modes.py`, `tests/test_api.py`
 - Assignee: Unassigned
 - Tags: `terminal`, `session`, `socketio`, `ui`, `tests`
 - Reported: 2026-07-30
+- Closed: 2026-08-17
 
 Description:
 When a TUI running in a GridVibe pane exits without restoring terminal state — a crash, a `SIGKILL`, or a dropped SSH connection — the DECSET mouse-tracking modes it enabled stay set in the pane's xterm.js instance. The shell that regains the prompt is a plain line editor with no interest in mouse reports, so every pointer movement or click over the pane is encoded and sent as input, filling the command line with sequences such as `35;43;24M35;43;19M35;39;18M…`. The pane is unusable for typing until the user notices, clears the line, and finds a way to turn the mode back off, and the user can easily submit the accumulated garbage by pressing Enter. Observed on an Ubuntu host after `opencode` died with `Illegal instruction (core dumped)`.
@@ -33,7 +212,165 @@ Confirmed by code inspection. Nothing in GridVibe enables or disables mouse trac
 ### Proposed solution:
 Make the recovery explicit instead of incidental. In `web/static/js/terminals.js`, have both `clearTerminalDisplay()` and `refreshTerminalDisplay()` write an explicit mouse-tracking teardown into the pane after `term.reset()` — `\033[?1000l\033[?1002l\033[?1003l\033[?1005l\033[?1006l\033[?1015l` through `term.write()`, which changes only the client's mode state and sends nothing to the shell, so it stays inside the pane's existing behavior and touches no route. For `refreshTerminalDisplay()` the write must happen *after* the replayed buffer is applied, not before the `join_session` round trip, or the replay will overwrite it again; sequencing it against the async replay is the main implementation question. Consider whether the replay itself should be sanitized instead — filtering mode-setting sequences out of `_get_buffered_terminal_output()` is more invasive, risks corrupting a legitimately running TUI's state on rejoin, and should not be done without deciding what a rejoin to a *live* TUI is supposed to look like. A visible affordance is worth considering separately: a pane that is receiving mouse reports at a shell prompt could surface a one-click "Reset terminal modes" action rather than requiring the user to guess. Regression tests belong in `tests/test_api.py` alongside `test_terminals_page_clear_sends_shell_command_and_purges_replay_buffer`, asserting that both handlers emit the teardown sequence and that the refresh path emits it after the rejoin.
 
-## Closed Issues
+Resolution:
+Still reproducible as described, and the investigation target resolved against the code: `TERMINAL_OUTPUT_BUFFER_MAX_CHARS` is 50,000, so whether a long-running pane has evicted the enabling sequence is a matter of how much the dead program happened to print. That is exactly why the recovery could not be left to depend on it.
+
+**The teardown is a named module, not two inline writes.** `web/static/js/terminal-modes.js` (DOM-free, `require()`-able, loaded on the terminals page ahead of `terminals.js`) publishes `MOUSE_REPORTING_MODES` — the trackers `1000/1002/1003` beside the encodings `1005/1006/1015`, because a stale encoding left on its own still changes what the next program's reports look like — and `MOUSE_REPORTING_RESET`, which is written through `term.write()`. That feeds the pane's own parser and sends nothing to the shell, so no route moved and no command appears at the prompt.
+
+**The two controls needed different amounts of work, and the difference is the bug.** `clearTerminalDisplay()` purges the server buffer, so nothing can re-arm what `term.reset()` cleared and a plain write suffices; it is written all the same, so the cure is named rather than left as a side effect of `term.reset()`'s scope. `refreshTerminalDisplay()` replays that buffer on purpose, so its two bare emits were replaced by `rejoinAndResetAfterReplay()`, which carries an **acknowledgement callback** on the `join_session` emit: `handle_join_session()` emits the replay inside the handler and the ack packet is written after it, over the same ordered connection, so the ack fires on a client that has already processed the replayed bytes. No guessed delay, and a bounded 1.5 s fallback covers a socket that never answers — the pane comes back either way, and exactly one of the two paths writes the teardown.
+
+**The replay itself is not sanitized, and that is a decision rather than an omission.** The same rejoin serves the initial page load and every session-group switch, where a pane with a TUI *still running* needs that program's mouse reporting restored with it. Filtering mode sets out of `_get_buffered_terminal_output()` would break the live case in order to fix the dead one, and neither the server nor the client can tell the two apart — a `kill -9` leaves the alternate screen buffer set too, so even that cannot distinguish them. The accepted cost is stated rather than hidden: **Reset view is now genuinely a reset**, and a live full-screen TUI loses mouse reporting until it re-arms, as it would in any terminal emulator. The pane the feature exists to rescue has no program left to re-arm anything.
+
+The separately-deferred affordance was not built. It would have had to appear whenever mouse reports are flowing, which is indistinguishable from ordinary TUI use, and both existing controls now cure the pane — so there is nothing left to guess between.
+
+Covered behaviorally by `tests/test_terminal_modes.py`, which executes the module in Node against a stubbed socket, pane writer, and clock: the teardown lands *after* the replayed buffer (verified to fail when the ordering is degraded to the pre-fix write), the pane leaves its room before rejoining, an unacknowledged rejoin still resets under the published bound, an acknowledged one cancels the fallback and writes once, and a pane with nothing to rejoin resets immediately. `tests/test_api.py` adds the two server-side premises — `test_join_session_replays_mode_sequences_inside_the_handler` pins that the replay is emitted inside the handler and is not filtered — plus `test_terminals_page_recovery_controls_both_reset_mouse_reporting`. Two legacy source-text tests were converted to contract-level checks in the same change rather than having their literals patched: `test_terminals_page_refreshes_only_one_terminal_by_replaying_its_buffer` now asserts the rejoin rather than the spelling of two emits, and `test_terminals_joins_rooms_for_every_pane` asserts that each pane-creation path joins instead of counting occurrences of a string.
+
+### Issue ID: ISSUE-2026-043
+- Title: A pooled SSH transport can be reaped while the request that selected it is still opening its channel
+- Priority: Low
+- Status: Closed
+- Area: `web/explorer.py`, `tests/test_backend_concurrency_contract.py`
+- Assignee: Unassigned
+- Tags: `explorer`, `ssh`, `concurrency`, `performance`, `tests`
+- Reported: 2026-08-17
+- Closed: 2026-08-17
+
+Description:
+`_acquire_ssh_sftp()` read the pool entry under `_ssh_client_pool_lock` but incremented `in_use` only after `open_sftp()` had returned. For the length of that round trip the entry looked idle to any reaper — and every acquire, on any session, runs one — so an entry picked up at 59 s of the 60 s idle timeout could have its transport closed underneath the request that just chose it.
+
+There was no channel or client *leak*: `_release_ssh_sftp()` always closes the SFTP channel and closes a client that is no longer pooled. The consequence was a spurious request failure the user did nothing to cause. `SshSftpPoolTestCase` in `tests/test_api.py` already covered the symmetric case for a holder that *is* counted (`test_a_request_in_flight_past_the_idle_timeout_is_not_reaped`); this was the window before the count existed.
+
+Steps to reproduce:
+Run `python -m unittest tests.test_backend_concurrency_contract.PooledSshReservationTestCase`. The pooled client blocks inside `open_sftp()` while the entry ages past the idle timeout and a reap runs.
+
+Expected behavior:
+An entry selected for a channel open is already reserved, so the reaper skips it and the acquire returns the pooled client.
+
+Actual behavior / logs:
+The reaper closed the selected transport mid-open and dropped the pool entry.
+
+Resolution:
+**Selecting and counting are now one lock hold.** `_reserve_pooled_ssh_client()` takes the entry and increments `in_use` under `_ssh_client_pool_lock`, so the entry a request is about to open a channel on is never momentarily idle; `open_sftp()` still runs outside the lock, because network work inside a shared lock is what Guardrails 2 and 3 forbid and moving it in would have been a worse defect than the one being fixed. `_commit_pooled_ssh_reservation()` stamps `last_used` on success and `_cancel_pooled_ssh_reservation()` gives the reservation back and drops the entry on failure — a dead transport, or a channel open that raised.
+
+**A reservation lives on the entry it was taken against, not on the session id.** Both the commit and the rollback match by entry identity, which is what keeps a replacement out of them: if the selected entry is evicted mid-open and another request pools its own transport under the same id, committing by id would charge the replacement for a holder it never had — a count no release can give back, so that transport would be spared from the reaper for the life of the process — and rolling back by id would close a transport another request is using. Two tests pin exactly those two cases, each verified to fail when the matching is degraded to the session id.
+
+**`in_use` widened its meaning by one word and nothing else.** It now counts the requests holding a client *and* those that have selected it and are still opening their channel. Everything downstream is unchanged: the reaper still skips a non-zero count, `_evict_pooled_ssh_client()` still ignores it (its callers found the transport dead or are tearing the session down), and release still matches by client identity, so the loser of a pooling race still discharges nothing and closes its own handle.
+
+Plan followed:
+Select the exact entry and increment its reservation count under the pool lock; run `open_sftp()` outside it; commit last-used metadata by entry identity on success, or release the reservation and evict only the matching failed client on failure. Keep release idempotent across the replacement and loser paths, and close every SFTP channel exactly once. Keep the existing reuse, idle-reap, concurrent-holder, loser, and teardown tests green untouched.
+
+### Issue ID: ISSUE-2026-042
+- Title: A workspace label is checked for uniqueness but never claimed, so two concurrent creates both win
+- Priority: Medium
+- Status: Closed
+- Area: `web/workspaces.py`, `web/api.py`, `tests/test_backend_concurrency_contract.py`
+- Assignee: Unassigned
+- Tags: `workspace`, `concurrency`, `api`, `tests`
+- Reported: 2026-08-17
+- Closed: 2026-08-17
+
+Description:
+`workspace_label_conflict()` documented itself as "a check, not a mutex": its two reads are not one snapshot, and no lock spanned the call and the mutation that followed it. The create route, the rename route, and the launch-into-new path all checked availability and then called a separately locked manager mutation, so two concurrent requests could both pass and produce duplicate non-empty labels.
+
+That was an accepted local-single-user tradeoff when it was written. It contradicted the stronger contract stated in `AGENTS.md` and `CLAUDE.md` — a non-empty label identifies at most one workspace across live and saved state — and Guardrail 2's check-then-act rule.
+
+Steps to reproduce:
+Run `python -m unittest tests.test_backend_concurrency_contract.WorkspaceLabelClaimTestCase`. Four of its seven cases were the defect and carried `expectedFailure`; two concurrent `POST /api/workspaces` with the same label both returned `201`.
+
+Expected behavior:
+Exactly one non-empty claim succeeds; the loser gets the existing actionable `409` (`conflict: "workspace_label_taken"`, the conflicting kind, and the label). Empty labels stay unconstrained. Case- and whitespace-insensitive comparison and self-exclusion on rename are unchanged.
+
+Actual behavior / logs:
+`[201, 201]`, and two live workspaces share the label.
+
+Resolution:
+**The namespace has a mutex of its own, and the check and the mutation happen inside it.** `_claim_workspace_label()` in `web/workspaces.py` holds `_label_namespace_lock` across the `workspace_label_conflict()` verdict *and* the live mutation that acts on it, and `create_labelled_workspace()` / `rename_workspace_label()` are the two owners every mutating path now goes through: `POST /api/workspaces`, `PATCH /api/workspaces/<id>`, and `resolve_launch_destination()` — which is launch-into-new *and* move-into-new. `workspace_label_conflict()` keeps its old signature and is still called directly by `POST /api/workspaces/validate-label`, which is advisory by design and rechecks at commit; its docstring now says it is the check rather than the claim.
+
+**A lock of its own, rather than widening one that already exists.** The saved half of the namespace lives in `runtime_state.json` behind a cross-process file lock, and Guardrail 2 forbids reading it under `SessionManager.lock`; the claim lock sits *above* both (`_label_namespace_lock` → manager lock / runtime-state lock, never the reverse) so the durable read stays outside the manager lock. A test pins that directly: while the claim is inside `list_restorable_workspaces()`, a second thread must still be able to take `SessionManager.lock`.
+
+**An empty label takes no lock at all.** It is not a name, so it claims nothing — an unlabelled create neither waits on the namespace nor holds it up for one that does, and concurrent empty-label creates all still succeed.
+
+**The claim is process-local, deliberately.** The live half of the namespace is this process's in-memory workspace table, which a second GridVibe process cannot see, so cross-process uniqueness is not achievable by locking and was not attempted. The supported shape is one process per install bound to `127.0.0.1`; the cost of two is a duplicate label, never lost state. That boundary is stated in the module and in the guardrail rather than implied.
+
+Plan followed:
+Introduce one workspace-service owner for "check the live namespace and create/rename", and route direct create, rename, and launch-into-new through it. Snapshot saved-slot conflicts *outside* the manager lock — never do durable-file I/O inside a shared manager lock, and never hold it across Socket.IO work. Keep `POST /api/workspaces/validate-label` advisory and recheck at commit. Decide the cross-process boundary explicitly and state it. Cover create/create, create/rename, rename/rename, and launch-into-new.
+
+### Issue ID: ISSUE-2026-041
+- Title: RuntimeConfig publishes settings field by field, so a reader can serve two generations at once
+- Priority: Medium
+- Status: Closed
+- Area: `web/config.py`, `web/api.py`, `web/voice.py`, `web/explorer_search.py`, `tests/test_backend_concurrency_contract.py`
+- Assignee: Unassigned
+- Tags: `config`, `concurrency`, `api`, `tests`
+- Reported: 2026-08-17
+- Closed: 2026-08-17
+
+Description:
+`RuntimeConfig.refresh()` assigned `app_config`, the section dictionaries, and every derived attribute one at a time, and readers took no lock at all. `_public_app_config()` reads roughly fifteen attributes independently, as do the `app_config_updated` broadcast and the other multi-field consumers, so a request that overlapped a refresh could be served half of one generation and half of the next — a response no config file ever described. This is the Guardrail 2 atomic-multi-value-snapshot rule.
+
+The durable side was *not* affected: the App Settings write path serializes load/merge/save/refresh under `_config_lock`, and `web/state_files.py` protects the file itself. The defect was purely in-memory publication, which is why adding a lock around `refresh()` alone would not have fixed it — every existing reader would still have raced exactly as before.
+
+Steps to reproduce:
+Run `python -m unittest tests.test_backend_concurrency_contract.RuntimeConfigPublicationTestCase`. The interleaving was forced rather than raced for: `refresh()` was paused immediately after it published one derived field and the payload was built from that state.
+
+Expected behavior:
+A reader observes one whole generation. Multi-field consumers capture one generation before building a payload.
+
+Actual behavior / logs:
+The payload came back mixed — `{'theme': 'B', 'max_sessions': 'B', 'autosave': 'A', 'surface_mode': 'A', 'whisper_model': 'A'}`.
+
+Resolution:
+**One immutable generation, published by one reference swap.** `_build_runtime_state()` normalizes a whole configuration into a frozen `RuntimeConfigState` without touching the published one, and `refresh()` installs it with a single assignment under `_config_lock` — held so two concurrent refreshes cannot publish out of order and leave the staler one live. A refresh caught mid-normalization has published nothing at all, which is what the second (undecorated) test pins.
+
+**A reader still has to read once.** `runtime_config.snapshot()` captures the generation, and every multi-field consumer takes it once and reads the payload off it: `_public_app_config()`, the `app_config_updated` broadcast, `_normalize_app_config_update()` (so a partial update's fallbacks all come from one config), `/api/voice-status`, both page renders, `search_limits_from_config()`, and the faster-whisper model cache, where the cache key and the model loaded under it must describe the same settings. Reading `runtime_config.a` then `runtime_config.b` is still two reads however atomically each is published, so the snapshot — not the swap — is what fixes the readers.
+
+**Direct reads and scoped test patching still work.** Attribute reads delegate to the published generation, so `runtime_config.max_sessions` is unchanged everywhere, and a `patch.object(runtime_config, ...)` override shadows it as an instance attribute; `snapshot()` folds those shadows into the captured generation, so a patched setting reaches a snapshot reader exactly as it reaches a direct one. The one behavioural change is that an override now *outlives* a refresh instead of being overwritten by one, so the single test that hand-rolled save/restore by assignment was migrated to `patch.object` in the same change — restoring by assigning the old value back would have frozen that field for every later test.
+
+Plan followed:
+Normalize the complete next configuration into an immutable state object off-lock, publish it with one reference swap, and give multi-field consumers a snapshot accessor to read from. Preserve existing direct-attribute reads and the suite's scoped attribute patching, or migrate them in the same change. Keep persistence under `_config_lock` and `web/state_files.py` — do not introduce a second durable path.
+
+### Issue ID: ISSUE-2026-040
+- Title: Explorer Git commands are unbounded in output, in stderr, and in process lifetime
+- Priority: High
+- Status: Closed
+- Area: `web/explorer.py`, `web/process_bounds.py`, `web/selfupdate.py`, `tests/test_git_process_bounds.py`, `tests/test_explorer_search.py`
+- Assignee: Unassigned
+- Tags: `explorer`, `git`, `performance`, `subprocess`, `tests`
+- Reported: 2026-08-17
+- Closed: 2026-08-17
+
+Description:
+`_run_git_command()` and `_run_remote_git_command()` treat every bound as something the *caller* opts into, so the ordinary explorer paths run without one. Four separate gaps, all in the same two functions:
+
+1. **Output is unbounded by default.** `max_output_bytes` is passed by exactly one caller (`explorer_search.py`, `SEARCH_GIT_MAX_OUTPUT_BYTES`). Status, the commit graph, commit-file listings, diff, and every mutation omit it, so a repository that produces a very large status or diff returns all of it into memory. `_bounded_git_diff()` shows the shape of the problem plainly: it slices to `EXPLORER_GIT_DIFF_MAX_BYTES` only *after* the complete output has already been captured, so the peak allocation is the repository's, not GridVibe's.
+2. **stderr is never bounded, on either path.** The bounded local branch caps stdout and accumulates stderr in an unlimited list; the remote `head -c` pipeline bounds stdout only.
+3. **Read commands do not suppress the credential prompt.** The env is built as `if write: GIT_TERMINAL_PROMPT=0 else: GIT_OPTIONAL_LOCKS=0` — mutually exclusive — so a read that consults a remote can block on a prompt nobody can answer. The remote shell prefix has the identical either/or.
+4. **The timeout path owns no process group.** The unbounded branch is `subprocess.run(timeout=...)`, which on Windows reaps with an unbounded `communicate()`; the bounded branch kills only the direct child and then calls `wait()` and `join()` with no bound at all. A surviving transport helper holding our pipes therefore outlasts the timeout.
+
+Items 3 and 4 are direct conflicts with Guardrail 4, which requires every `git` invocation to carry `GIT_TERMINAL_PROMPT=0` and to own a bounded process-group shutdown; items 1 and 2 are Guardrail 3. `web/selfupdate.py::_run_repo_git()` already implements the process-group pattern correctly and is the reference.
+
+Steps to reproduce:
+Run `python -m unittest tests.test_git_process_bounds`. Twelve of its cases carried `expectedFailure` and were the defect; the six undecorated ones were behaviour that already worked and had to survive the fix. All are undecorated now — the decorators came off in the change that made them pass. For item 4 specifically, `ExplorerGitProcessTreeTestCase` points a repository at a TCP listener that accepts and then says nothing and calls the runner with a 2 s timeout: the call does not return within 8 s.
+
+Expected behavior:
+A ceiling belongs to the runner, not to the caller, so no call site can forget it: both streams bounded on both backends, `GIT_TERMINAL_PROMPT=0` on every invocation with `GIT_OPTIONAL_LOCKS=0` retained for reads, and a timeout that terminates the process group and reaps under a second bound. `stdout_truncated`, the Git exit status, UTF-8 replacement, search truncation reporting, and the existing response shapes are unchanged.
+
+Actual behavior / logs:
+Confirmed by the tests above against `web/explorer.py:1015-1123` (local) and `:1332-1386` (remote). The stalled-remote case reproduces only with an `https://` remote, not `git://`: git speaks `git://` in-process, while `https://` forks `git-remote-https`, which is the helper that inherits our pipes and survives a kill of the direct child.
+
+Resolution:
+**The ceiling belongs to the runner.** `web/explorer.py` publishes `EXPLORER_GIT_MAX_OUTPUT_BYTES` (10 MiB, the same allowance the file preview already has) and `EXPLORER_GIT_MAX_STDERR_BYTES` (1 MiB — stderr is diagnostics, never a payload). `_git_output_limit()` lets a caller tighten that bound and nobody widen it, so search keeps its 8 MiB and the Diff view now asks for `EXPLORER_GIT_DIFF_MAX_BYTES + 1` — one byte past the cap is all it takes to tell "exactly at the limit" from "there was more", and it drops the diff's peak allocation from the repository's size to 256 KiB. `byte_count` is consequently the bytes read rather than the bytes Git would have produced; `truncated` says which of the two it is, and nothing in the frontend reads the field.
+
+**Both streams are drained to a ceiling rather than sliced after the fact.** `_drain_bounded_pipe()` stops at the limit and the first reader to hit one terminates the command, so the peak is ours. `stdout_truncated`, the forced `returncode 0` on truncation, UTF-8 replacement, and the search payload's truncation reporting are unchanged.
+
+**Every invocation sets `GIT_TERMINAL_PROMPT=0`**, local and remote, read and write; reads keep `GIT_OPTIONAL_LOCKS=0` alongside it, not instead of it.
+
+**The process group is shared, not re-typed.** `web/process_bounds.py` now owns `new_process_group()` and `terminate_process_tree()`; `web/selfupdate.py` (which wrote the pattern) and the explorer runner both import them, and a test pins that they are the same objects. One behaviour was added in the move: a child that `poll()` reports as already reaped is not tree-killed, because a dead parent's pid cannot name its orphans and on POSIX is free to name a stranger. The explorer runner spawns into that group, terminates it on timeout or truncation, and reaps under `PROCESS_REAP_TIMEOUT` with bounded thread joins; a pipe whose reader had to be abandoned is left to that daemon thread rather than closed underneath it.
+
+**The remote `| head -c N` pipeline is gone.** A pipeline reports *head's* exit status, not git's, which silently turned a failed remote command into an empty successful one — the reason the Diff view could never opt into a cap. `_run_remote_git_command()` bounds a deadline-aware channel drain instead, which caps the same bytes, keeps git's own status, and closes the channel when a drain stops early so nothing waits on `recv_exit_status()` for a command it is refusing to read. The SSH client pool counts clients, not exec channels, so closing one returns nothing to it.
+
+Plan followed:
+Publish a module-level `EXPLORER_GIT_MAX_OUTPUT_BYTES` on `web/explorer.py` and apply it in the runner, keeping smaller per-operation limits (search, diff) layered on top where semantics require them. Replace the local `subprocess.run()` and direct-kill paths with an owned `Popen` process group, concurrent bounded draining of both streams, group termination on timeout or truncation, and a second bounded reap — reusing the corrected `web/selfupdate.py` pattern rather than writing a weaker variant. Replace the remote whole-stream `read()` calls with a deadline-aware bounded channel drain for both streams, and make sure closing or timing out a channel cannot leave a pooled transport counted forever (see ISSUE-2026-043). Keep the shared local/remote backend abstraction intact (Guardrail 6); no frontend Diff change is needed, but if the work touches the Diff view then the `explorer-diff.js` extraction trigger in Guardrail 6 applies.
 
 ### Issue ID: ISSUE-2026-039
 - Title: Restored SSH workspaces fail to authenticate because the launch that created them references no saved session
@@ -867,6 +1204,8 @@ Harden binary preview handling in both `web/api.py` and `templates/terminals.htm
 
 Resolution:
 Explorer file editor mode now only accepts known preview/source formats from the existing language and filename maps. Unsupported extensions are rejected before preview decoding, known formats are checked for NUL bytes, invalid UTF-8, and excessive control bytes, and SSH/local paths share the same validation. The frontend keeps the directory listing active on failed opens and prepends a non-blocking error notice instead of leaving the pane stuck on an opening message. Tests cover unsupported local and remote formats, non-NUL binary-like content, and the directory-preserving client path.
+
+The filename half of that resolution has since been replaced: an allowlist of names could not tell `Dockerfile_chss` or an extensionless script from a binary, and refused both. An unrecognised name is now decided by its *contents* — a bounded sample is sniffed before the full preview read, so an unknown binary is still refused early and cheaply (the responsiveness this issue was about), while an unknown text file opens as plain text. The NUL/UTF-8/control-byte checks, the shared local/SSH validation, and the directory-preserving client path are unchanged.
 
 ### Issue ID: ISSUE-2026-005
 - Title: Explorer file find blocks terminal UI on large previews

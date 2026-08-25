@@ -153,6 +153,14 @@ def normalize_native_zoom_factor(value: Any) -> Optional[float]:
 _SESSION_SNAPSHOT_FIELDS = (
     "host",
     "directory",
+    # A second directory field, and both are needed: `directory` answers "where
+    # is this pane" (`_snapshot_session()` writes the *observed* directory into
+    # it, so a restore replays a `cd` to where the pane was), while
+    # `launch_directory` answers "what may the explorer not widen past".
+    # Rebuilding the second from the first moved the floor to wherever the pane
+    # happened to be, so the same pane in the same directory opened a different
+    # explorer root before and after a restart.
+    "launch_directory",
     "username",
     "port",
     "initial_command",
@@ -166,8 +174,15 @@ _SESSION_SNAPSHOT_FIELDS = (
     "use_powershell",
     "startup_mode",
     "explorer_root_directory",
+    # A root and whether anybody chose it are one fact, and splitting them
+    # across the restart loses the half that matters: a derived root came back
+    # indistinguishable from a configured one and pinned the pane for good.
+    "explorer_root_configured",
     "explorer_tree_open",
     "explorer_git_open",
+    "explorer_git_follow_browsing",
+    "explorer_git_pin_active",
+    "explorer_git_pinned_path",
     "explorer_search_open",
     "explorer_sidebar_width",
     "explorer_sidebar_scroll",
@@ -186,9 +201,35 @@ _SESSION_SNAPSHOT_FIELDS = (
 
 
 def _snapshot_session(session: Any) -> Dict[str, Any]:
-    """Return the replayable launch config for one live session."""
+    """Return the replayable launch config for one live session.
+
+    The `directory` slot carries where the pane *is*, not where it started:
+    a restore replays a `cd`, and replaying the launch directory is what
+    brought an agent back in the wrong place (ISSUE-2026-045). The observation
+    is `current_directory`, written only by the shell-integration reader and by
+    agent promotion, so an absent one falls back to the launch value exactly as
+    before.
+
+    Only that already-known value is read. This runs inside the runtime-state
+    lock hold, so the other `effective_directory()` sources are off limits:
+    the OS read opens an exec channel on a remote pane and the probe types at
+    its prompt, and neither slow nor network work belongs under a shared lock.
+
+    `explorer_root_configured` rides along beside the root it qualifies. It
+    was left out at first on the premise that a root reaching a launch config
+    is one somebody chose -- which is false for exactly the root this flag
+    exists to disarm: the terminal->explorer switch *has* to store the root it
+    derived, because the live explorer is confined to it, and a snapshot then
+    carried that root back as a configured one. A snapshot written before this
+    field existed simply does not state it, and `TerminalSession` answers from
+    the pane instead.
+    """
     data = session if isinstance(session, dict) else session.to_dict()
-    return {key: data.get(key) for key in _SESSION_SNAPSHOT_FIELDS}
+    snapshot = {key: data.get(key) for key in _SESSION_SNAPSHOT_FIELDS}
+    observed = str(data.get("current_directory") or "").strip()
+    if observed:
+        snapshot["directory"] = observed
+    return snapshot
 
 
 def _snapshot_group(group: Any, sessions: List[Any]) -> Dict[str, Any]:

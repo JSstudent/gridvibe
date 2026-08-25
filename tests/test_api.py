@@ -120,12 +120,28 @@ class _CountedChunk(str):
 
 
 class FakeSshStream:
+    """A paramiko-like channel file: `read(size)` consumes, `read()` drains.
+
+    The size argument is not decoration — the explorer's remote Git runner
+    drains both channels in bounded chunks (ISSUE-2026-040) rather than
+    calling `read()` whole, so a double that ignored it would answer the same
+    bytes on every chunk.
+    """
+
     def __init__(self, data=b"", returncode=0):
         self._data = data
-        self.channel = SimpleNamespace(recv_exit_status=lambda: returncode)
+        self._offset = 0
+        self.channel = SimpleNamespace(
+            recv_exit_status=lambda: returncode,
+            close=lambda: None,
+        )
 
-    def read(self):
-        return self._data
+    def read(self, size=-1):
+        if size is None or size < 0:
+            size = len(self._data) - self._offset
+        chunk = self._data[self._offset : self._offset + size]
+        self._offset += len(chunk)
+        return chunk
 
 
 class FakeSshExecClient:
@@ -254,6 +270,22 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 201)
         return response.get_json()["sessions"][0]["session_id"]
 
+    def _preview_html(self, session_id: str, path: str) -> str:
+        """Return the lazily rendered Markdown preview for one explorer file.
+
+        The file GET no longer renders one: `preview_type` says the panel
+        exists, and this bounded read is what fills it the first time the
+        reader selects Preview.
+        """
+        response = self.client.get(
+            f"/api/explorer/{session_id}/file/preview",
+            query_string={"path": path},
+        )
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["preview_type"], "markdown")
+        return payload["preview_html"]
+
     def _page_html(self, response) -> str:
         """Return page HTML plus its extracted static CSS/JS.
 
@@ -270,7 +302,11 @@ class ApiRoutesTestCase(unittest.TestCase):
             "css/terminals.css",
             "js/terminal-icons.js",
             "js/voice-input.js",
+            "js/explorer-worker-core.js",
+            "js/explorer-worker-client.js",
             "js/explorer-viewer.js",
+            "js/explorer-git-sidebar.js",
+            "js/explorer-diff.js",
             "js/explorer-tabs.js",
             "js/explorer-editor.js",
             "js/explorer-search.js",
@@ -749,10 +785,16 @@ class ApiRoutesTestCase(unittest.TestCase):
         entry_end = html.index("function buildActiveWorkspaceSessionConfig(groupId = activeGroupId)", entry_start)
         entry_html = html[entry_start:entry_end]
         self.assertIn("session_id: session.session_id || ''", entry_html)
-        self.assertIn("session.explorer_root_directory || session.directory", entry_html)
+        # Where the pane *is*, not where it started -- and an explorer pane
+        # still answers with the root, which is the boundary a relaunch has to
+        # reproduce.
+        self.assertIn("session.current_directory || session.directory", entry_html)
+        self.assertIn("session.explorer_root_directory || liveDirectory", entry_html)
         self.assertNotIn("terminal?._explorerPath", entry_html)
         self.assertIn("Boolean(terminal?._explorerTreeSidebarOpen)", entry_html)
         self.assertIn("Boolean(terminal?._explorerGitSidebarOpen)", entry_html)
+        self.assertIn("Boolean(terminal?._explorerGitFollowBrowsing)", entry_html)
+        self.assertIn("terminal._explorerGitPinnedPath", entry_html)
         cache_state_start = html.index("function captureCachedPaneUiState()")
         cache_state_end = html.index("function restoreCachedPaneUiState", cache_state_start)
         cache_state_html = html[cache_state_start:cache_state_end]
@@ -761,6 +803,11 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("function restoreExplorerSidebarState(index)", html)
         self.assertIn("_explorerTreeSidebarOpen: Boolean(session.explorer_tree_open)", html)
         self.assertIn("_explorerGitSidebarOpen: Boolean(session.explorer_git_open)", html)
+        self.assertIn(
+            "_explorerGitFollowBrowsing: Boolean(session.explorer_git_follow_browsing)",
+            html,
+        )
+        self.assertIn("_explorerGitPinnedPath: session.explorer_git_pin_active", html)
         self.assertIn("_explorerSearchSidebarOpen: Boolean(session.explorer_search_open)", html)
         self.assertIn("workspace_only: true", save_handler_html)
         self.assertIn("source_saved_session_id: saveTarget.id || undefined", save_handler_html)
@@ -779,6 +826,9 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("agent_selection: resolvedStartupMode === 'agent'", html)
         self.assertIn("data-explorer-tree-open=", html)
         self.assertIn("data-explorer-git-open=", html)
+        self.assertIn("data-explorer-git-follow-browsing=", html)
+        self.assertIn("data-explorer-git-pin-active=", html)
+        self.assertIn("data-explorer-git-pinned-path=", html)
         self.assertIn("data-explorer-search-open=", html)
         self.assertIn("explorer_tree_open: resolvedStartupMode === 'explorer'", html)
         self.assertIn("explorer_git_open: resolvedStartupMode === 'explorer'", html)
@@ -920,8 +970,11 @@ class ApiRoutesTestCase(unittest.TestCase):
         # local shell picker), still wired per pane slot by terminals.js.
         self.assertIn('data-terminal-refresh="${index}"', html)
         self.assertIn('wireCardButton(card, `[data-terminal-refresh="${i}"]`', html)
-        self.assertIn("function setTerminalRefreshState(index, refreshing)", html)
         self.assertIn("async function refreshTerminalDisplay(index)", html)
+        # Refresh awaits, so the hold is taken against the buttons it disabled
+        # and released through the closure it handed back — never re-resolved by
+        # slot, which a group switch would have handed to somebody else.
+        self.assertIn("holdTerminalActionState(index, 'refresh')", html)
 
     def test_terminals_page_explorer_bar_has_refresh_before_up_control(self):
         response = self.client.get("/terminals")
@@ -942,7 +995,9 @@ class ApiRoutesTestCase(unittest.TestCase):
             html,
         )
         self.assertIn("refreshTerminalDisplay(index);", html)
-        self.assertIn("const explorerRefreshButton = document.getElementById(`explorer-refresh-${index}`);", html)
+        # The busy state is taken and released through the captured-button hold,
+        # so what matters is that this button is one of the three it captures.
+        self.assertIn("document.getElementById(`explorer-refresh-${index}`)", html)
         self.assertIn("explorerRefreshButton.disabled = isBusy;", html)
 
     def test_terminals_page_explorer_shortcuts_refresh_and_navigate_parent(self):
@@ -1284,7 +1339,12 @@ class ApiRoutesTestCase(unittest.TestCase):
         # the last `+`/`−` text buttons in the explorer: they took their weight
         # from the page font and sat beside SVG neighbours on the same row.
         # They share the same two icons rather than growing explorer-local ones.
-        viewer = self._static("js/explorer-viewer.js")
+        viewer = "\n".join(
+            (
+                self._static("js/explorer-viewer.js"),
+                self._static("js/explorer-git-sidebar.js"),
+            )
+        )
         for hook, icon in (
             ('aria-label="Stage changes"', "UI_PLUS_ICON"),
             ('aria-label="Unstage changes"', "UI_MINUS_ICON"),
@@ -1415,17 +1475,13 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("await loadExplorerGitRepo(index);", explorer_refresh_html)
         self.assertIn("return refreshed;", explorer_refresh_html)
         self.assertIn("await refreshExplorerPane(index);", refresh_html)
-        self.assertIn("function captureExplorerFileScroll(index)", html)
-        self.assertIn("function restoreExplorerFileScroll(index, state)", html)
-        self.assertIn("function updateExplorerFileInPlace(index, data, scrollState = null)", html)
         self.assertIn("updateExplorerFileInPlace(index, data, scrollState)", html)
         self.assertIn(".explorer-list.file-view", html)
         self.assertIn("list.classList.add('file-view');", html)
-        self.assertIn("listScrollTop: list.scrollTop", html)
-        self.assertIn("list.scrollTop = state.listScrollTop || 0;", html)
-        self.assertIn("wasAtBottom: maxScrollTop > 0 && scrollEl.scrollTop >= maxScrollTop - 2", html)
-        self.assertIn("scrollEl.scrollTop = panelState.wasAtBottom", html)
-        self.assertIn("window.setTimeout(applyScroll, 80);", html)
+        # The DOM-free policy is shipped on the page. Exact-offset behavior,
+        # delayed Preview arrival and the in-place refresh adapter are executed
+        # in tests/test_explorer_scroll.py rather than pinned as source text.
+        self.assertIn('/static/js/explorer-scroll.js', html)
         self.assertIn("async function syncExplorerPane(index)", html)
         self.assertIn("if (pane?._explorerMode === 'file' && pane._explorerFilePath) {\n            return true;\n        }", html)
         self.assertIn("syncExplorerPane(i);", html)
@@ -1464,7 +1520,10 @@ class ApiRoutesTestCase(unittest.TestCase):
         # lists here only broke the page test whenever one gained an argument.
         self.assertIn("function renderExplorerSourceLines(", html)
         self.assertIn("function highlightExplorerCode(", html)
-        self.assertIn("code.innerHTML = renderExplorerSourceLines(", html)
+        # The rendered row, not the expression that assembles it: the Source
+        # panel builds one <div> per line, in one pass or in frame-sized
+        # slices, and both emit exactly this markup.
+        self.assertIn('<div class="explorer-source-line" data-explorer-line=', html)
         self.assertIn("const EXPLORER_LANGUAGE_BY_EXTENSION = Object.freeze({", html)
         self.assertIn("'.py': 'python'", html)
         self.assertIn("'.go': 'go'", html)
@@ -1518,7 +1577,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("function markExplorerSearchInElement(root, query, activeIndex = 0, maxMatches = EXPLORER_SEARCH_MAX_MATCHES)", html)
         self.assertIn("document.createTreeWalker(", html)
         self.assertIn("node.replaceWith(fragment);", html)
-        self.assertIn("code.innerHTML = renderExplorerSourceLines(", html)
+        self.assertIn('<div class="explorer-source-line" data-explorer-line=', html)
         self.assertIn("function findExplorerSearchTargetIndex()", html)
         target = html[
             html.index("function findExplorerSearchTargetIndex()"):
@@ -1549,7 +1608,13 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("scheduleExplorerSearch(index, { resetActive: true });", html)
         self.assertIn("capped: ranges.length >= maxMatches,", html)
         self.assertIn("count.title = capped ? `Showing first ${matchCount} matches` : '';", html)
-        self.assertIn("state.resultQuery === query && Array.isArray(state.ranges)", html)
+        # Cached ranges are reused only for the same query *and* the same
+        # buffer they were resolved against — they are absolute offsets into
+        # one exact string. Executed, not spelled out here:
+        # tests/test_explorer_source_frame.py's
+        # test_search_ranges_never_outlive_the_buffer_they_address runs a
+        # buffer out from under a cached result set and watches them be
+        # rescanned.
         self.assertIn("state.matchCapped = capped;", html)
 
     def test_terminals_page_explorer_directory_search_filters_current_entries(self):
@@ -1705,8 +1770,19 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("engine.highlight(source, { language: grammar, ignoreIllegal: true })", html)
         # Source rendering prefers the whole-document pass, falling back per line.
         self.assertIn(": explorerHighlightDocumentLines(content, normalizedLanguage);", html)
-        self.assertIn("? explorerRenderHighlightedRuns(runs.get(record.number), searchRanges)", html)
-        self.assertIn(": highlightExplorerCode(record.text, language, searchRanges, record.start);", html)
+        # Which of those two a row gets — the cached token map or the per-line
+        # fallback — is executed rather than spelled out here:
+        # tests/test_explorer_source_frame.py renders with and without a token
+        # map and with a failed highlight job.
+        #
+        # Non-trivial buffers start as plain escaped rows while the shared,
+        # bounded worker pool tokenizes; the transferred result is compact
+        # (typed arrays and a class dictionary, never a cloned Map of run
+        # objects), which tests/test_explorer_workers.py round-trips. The
+        # threshold below is the one part with no executable seam — it is a
+        # documented number, so the named constant stays.
+        self.assertIn("/static/js/explorer-worker-client.js", html)
+        self.assertIn("HIGHLIGHT_WORKER_MIN_CHARS = 64 * 1024", html)
         # The oversized-file guard is preserved for the highlighter.
         self.assertIn("if (source.length > EXPLORER_PLAIN_PREVIEW_THRESHOLD) {", html)
         # Explorer-scoped token palette for both themes, shared by the Source
@@ -1732,7 +1808,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("/static/vendor/diff2html-ui-base.min.js", html)
         self.assertIn("/static/vendor/diff2html.min.css", html)
         # Diff2Html configuration: char-level intraline + explicit limits.
-        self.assertIn("function explorerDiff2HtmlConfig()", html)
+        self.assertIn("function explorerDiff2HtmlConfig(tier)", html)
         self.assertIn("matching: 'words',", html)
         self.assertIn("diffStyle: 'char',", html)
         self.assertIn("synchronisedScroll: false,", html)
@@ -1741,7 +1817,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         # tracks Diff2Html's own default rather than sitting below it.
         self.assertIn("maxLineLengthHighlight: 10000", html)
         self.assertIn(
-            "new window.Diff2HtmlUI(host, diff, explorerDiff2HtmlConfig(), window.hljs)",
+            "new window.Diff2HtmlUI(host, diff, explorerDiff2HtmlConfig(tier), window.hljs)",
             html,
         )
         # draw() highlights on its own because the config sets `highlight: true`.
@@ -1750,13 +1826,12 @@ class ApiRoutesTestCase(unittest.TestCase):
         # and no explicit re-highlight.
         self.assertIn("ui.draw();", html)
         self.assertNotIn("ui.highlightCode();", html)
-        # Both wrapped and unwrapped paths prefer Diff2Html; only unavailable
-        # vendor assets use the handwritten renderer.
-        self.assertIn("function renderExplorerDiffWithDiff2Html(index, code, diff, banner)", html)
-        self.assertIn(
-            "if (!renderExplorerDiffWithDiff2Html(index, code, diff, banner)) {",
-            html,
-        )
+        # Diff2Html remains synchronous for small/medium patches. The large
+        # tier's handwritten parse goes through the shared worker and only its
+        # DOM adapter stays on the page, preserving both undo affordances —
+        # which tests/test_explorer_workers.py drives end to end
+        # (test_large_diff_paints_a_status_then_the_worker_model_with_undo)
+        # rather than reading the branch out of this file.
         self.assertIn("code.innerHTML = banner + renderExplorerSideBySideDiff(index, diff);", html)
         self.assertIn("function renderExplorerSideBySideDiff(index, diff)", html)
         # Truncation is captured from the API and surfaced without blocking.
@@ -1812,6 +1887,9 @@ class ApiRoutesTestCase(unittest.TestCase):
             "vendor/highlight.min.js",
             "vendor/diff2html-ui-base.min.js",
             "vendor/diff2html.min.css",
+            "js/explorer-worker-core.js",
+            "js/explorer-worker-client.js",
+            "js/explorer-worker.js",
         ):
             with self.subTest(filename=filename):
                 response = self.client.get(f"/static/{filename}")
@@ -1885,7 +1963,7 @@ class ApiRoutesTestCase(unittest.TestCase):
             html,
         )
         # Result activation: source rows carry line identity for scroll+flash.
-        self.assertIn('data-explorer-line="${record.number}"', html)
+        self.assertIn('<div class="explorer-source-line" data-explorer-line=', html)
         # Ctrl+Shift+F dispatch tries the explorer target before the terminal
         # scrollback overlay, so a focused explorer pane wins the shared
         # shortcut deterministically.
@@ -2112,6 +2190,7 @@ class ApiRoutesTestCase(unittest.TestCase):
     def test_terminals_page_explorer_tabs_show_unstaged_git_status(self):
         """Open tabs mirror only the worktree/unstaged status column."""
         viewer = self._static("js/explorer-viewer.js")
+        sidebar = self._static("js/explorer-git-sidebar.js")
         tabs = self._static("js/explorer-tabs.js")
         css = self._static("css/terminals.css")
         helper = tabs[
@@ -2125,13 +2204,15 @@ class ApiRoutesTestCase(unittest.TestCase):
         # rendered for; the sidebar sync and the badge itself live in the tabs.
         self.assertIn("assignedTab.git = data.git || null;", viewer)
         self.assertIn("renderedTab.git = data.git || null;", viewer)
-        self.assertIn("syncExplorerTabGitFromRepo(index, data);", viewer)
+        self.assertIn("syncExplorerTabGitFromRepo(index, data);", sidebar)
         self.assertIn("${gitBadge}", tabs)
         self.assertIn(".explorer-tab-main > .explorer-git-badge {", css)
 
     def test_terminals_page_explorer_diff_line_undo_is_revision_guarded(self):
         """Per-line discard stays inside the existing bounded editor save route."""
-        viewer = self._static("js/explorer-viewer.js")
+        # The Diff view moved to its own file (guardrail 6's extraction
+        # trigger); the undo controls travelled with it.
+        viewer = self._static("js/explorer-diff.js")
         css = self._static("css/terminals.css")
         line_undo = viewer[
             viewer.index("function explorerDiffShowsOnlyWorktreeChanges(pane)"):
@@ -2180,7 +2261,7 @@ class ApiRoutesTestCase(unittest.TestCase):
     def test_terminals_page_explorer_diff_block_undo(self):
         """A contiguous run of changed lines can be undone in one save, through
         the same revision-guarded editor route the per-line undo uses."""
-        viewer = self._static("js/explorer-viewer.js")
+        viewer = self._static("js/explorer-diff.js")
         css = self._static("css/terminals.css")
         blocks = viewer[
             viewer.index("function explorerDiffChangeBlocks(diff)"):
@@ -2240,8 +2321,12 @@ class ApiRoutesTestCase(unittest.TestCase):
         # Traversal above the Explorer root is rejected.
         self.assertIn("if (!segments.length) {", html)
         self.assertIn("if (segment.includes(':')) {", html)
-        # Wired into both the full render and in-place refresh preview paths.
-        self.assertEqual(html.count("wireExplorerMarkdownLinks(index, preview);"), 2)
+        # One paint serves every preview path — first render, in-place refresh,
+        # restore and the lazy first visit to the Preview tab all go through
+        # paintExplorerPreview(), so the wiring happens exactly once. The count
+        # is the contract; that the paint exists is executed in
+        # tests/test_explorer_scroll.py, which counts its paints per path.
+        self.assertEqual(html.count("wireExplorerMarkdownLinks(index, preview);"), 1)
 
     def test_terminals_page_explorer_persists_open_tabs(self):
         """ISSUE-2026-015: open tabs serialize into and restore from a session."""
@@ -2942,12 +3027,13 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("const EXPLORER_MD_FONT_KEY = 'gridvibe.mdPreviewFont';", html)
         # Header control is present.
         self.assertIn('data-explorer-md-appearance="${index}"', html)
-        # Appearance is applied idempotently on both preview render paths.
+        # Appearance is applied by the one shared preview paint, so every path
+        # into the panel gets it without any of them restating it.
         self.assertEqual(
             html.count(
                 "applyExplorerMarkdownAppearanceToElement(preview, explorerMarkdownAppearance());"
             ),
-            2,
+            1,
         )
         # Preset/font classes and their token-driven surfaces exist in CSS.
         self.assertIn(".explorer-markdown-preview.md-preset-paper {", html)
@@ -3307,14 +3393,52 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         html = self._page_html(response)
         self.assertIn("const EXPLORER_PLAIN_PREVIEW_THRESHOLD = 2 * 1024 * 1024;", html)
-        # The flag is captured on both render paths and consulted by the source
-        # renderer plus the Markdown preview highlighter.
+        # One decision point sets the flag, from the threshold, so it and the
+        # presentation tier beside it can never be computed from different
+        # content; both render paths go through it.
         self.assertIn(
-            "pane._explorerFilePlain = pane._explorerFileContent.length > EXPLORER_PLAIN_PREVIEW_THRESHOLD;",
+            "pane._explorerFilePlain = text.length > EXPLORER_PLAIN_PREVIEW_THRESHOLD;",
             html,
         )
+        self.assertEqual(
+            html.count("applyExplorerSourceTier(pane, pane._explorerFileContent);"), 2
+        )
+        # Consulted by the source renderer and the Markdown preview highlighter.
         self.assertIn("pane._explorerFilePlain ? '' : (pane._explorerFileLanguage || '')", html)
         self.assertIn("if (!pane._explorerFilePlain) {", html)
+
+    def test_terminals_page_find_bar_follows_the_incoming_file_tier(self):
+        """The header's find bar is decided after the tier is recomputed.
+
+        The large-file tier renders no per-line rows for a find to address, so
+        the header renders no find bar. Reading that decision before
+        `applyExplorerSourceTier()` reads the *outgoing* file's tier, which put
+        a find bar on a large file opened after a small one and took it off a
+        small file opened after a large one — an ordering bug with no visible
+        symptom until the second file.
+        """
+        viewer = self._static("js/explorer-viewer.js")
+
+        applied = viewer.index("applyExplorerSourceTier(pane, pane._explorerFileContent);")
+        decided = viewer.index("const findAvailable = explorerFileOffersFind(pane,")
+        rendered = viewer.index("${findAvailable ?")
+        self.assertLess(applied, decided)
+        self.assertLess(decided, rendered)
+
+        # Which *panel* it is offered on is not a header decision: the header
+        # is not rebuilt on a panel switch, so one stable shell is rendered
+        # whenever any panel could answer and one owner hides or shows it.
+        # Executed in tests/test_explorer_find_availability.py.
+        self.assertIn(".explorer-editor-search[hidden]", self._static("css/terminals.css"))
+
+        # An in-place refresh across the boundary is a different header, so it
+        # hands back to a full rebuild rather than updating around a control
+        # that is no longer standing there. That check reads the incoming
+        # content directly, so it does not depend on this ordering at all.
+        self.assertIn(
+            "if (nextTier !== explorerPaneSourceTier(pane)) {",
+            viewer,
+        )
 
     def test_terminals_page_exposes_per_terminal_clear_control(self):
         response = self.client.get("/terminals")
@@ -3322,8 +3446,8 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         html = self._page_html(response)
         self.assertIn('data-terminal-clear="${i}"', html)
-        self.assertIn("function setTerminalClearState(index, clearing)", html)
         self.assertIn("async function clearTerminalDisplay(index)", html)
+        self.assertIn("holdTerminalActionState(index, 'clear')", html)
 
     def test_terminals_page_rebuilds_reused_group_views_when_session_ids_change(self):
         response = self.client.get("/terminals")
@@ -3486,10 +3610,18 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         html = self._page_html(response)
         refresh_start = html.index("async function refreshTerminalDisplay(index)")
-        self.assertIn("terminal.term.reset();", html[refresh_start:])
-        self.assertIn("emitTerminalResize(index, true);", html[refresh_start:])
-        self.assertIn("socket.emit('leave_session', { session_id: sessionId });", html[refresh_start:])
-        self.assertIn("socket.emit('join_session', { session_id: sessionId });", html[refresh_start:])
+        refresh_body = html[refresh_start:html.index("async function clearTerminalDisplay(index)")]
+        self.assertIn("terminal.term.reset();", refresh_body)
+        self.assertIn("emitTerminalResize(index, true);", refresh_body)
+        # The replay is what a refresh is for: the pane leaves its room and
+        # rejoins it so the server resends that one session's buffer. Both
+        # emits now go through GridVibeTerminalModes, which owns the ordering
+        # the mouse-reporting teardown needs (ISSUE-2026-038).
+        # The call boundary is the contract terminals.js has no Node harness
+        # for; what happens on the other side of it — the teardown landing
+        # after the replayed buffer, once, and still landing when the rejoin is
+        # never acked — is executed in tests/test_terminal_modes.py.
+        self.assertIn("GridVibeTerminalModes.rejoinAndResetAfterReplay({", refresh_body)
 
     def test_terminals_page_uses_updated_session_action_labels_and_styles(self):
         response = self.client.get("/terminals")
@@ -3620,11 +3752,53 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         html = self._page_html(response)
         clear_start = html.index("async function clearTerminalDisplay(index)")
-        self.assertIn("terminal.term.reset();", html[clear_start:])
-        self.assertIn("terminal.term.clear();", html[clear_start:])
-        self.assertIn("const clearCommand = getTerminalClearCommand(index);", html[clear_start:])
-        self.assertIn("socket.emit('clear_terminal_buffer', { session_id: sessionId });", html[clear_start:])
-        self.assertIn("socket.emit('terminal_input', { session_id: sessionId, data: clearCommand });", html[clear_start:])
+        clear_body = html[clear_start:]
+        self.assertIn("terminal.term.reset();", clear_body)
+        self.assertIn("terminal.term.clear();", clear_body)
+        command_capture = clear_body.index("const clearCommand = getTerminalClearCommand(index);")
+        readiness_wait = clear_body.index("await ensureTerminalReady(index, 12, resetTargetIsCurrent)")
+        self.assertLess(command_capture, readiness_wait)
+        self.assertIn("socket.emit('clear_terminal_buffer', { session_id: sessionId });", clear_body)
+        self.assertIn("socket.emit('terminal_input', { session_id: sessionId, data: clearCommand });", clear_body)
+
+    def test_terminals_page_recovery_controls_both_reset_mouse_reporting(self):
+        """ISSUE-2026-038 — a TUI that died without unwinding leaves its mouse
+        reporting armed and the shell types the reports at its own prompt. Both
+        header controls named for recovery have to cure it, not just Clear."""
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = self._page_html(response)
+
+        refresh_start = html.index("async function refreshTerminalDisplay(index)")
+        clear_start = html.index("async function clearTerminalDisplay(index)")
+        clear_end = html.index("function clearTerminalDisplayFromButton(index)", clear_start)
+        refresh_body = html[refresh_start:clear_start]
+        clear_body = html[clear_start:clear_end]
+
+        for name, body in (("refresh", refresh_body), ("clear", clear_body)):
+            with self.subTest(control=name):
+                # Both await, so both capture the pane before they do. Writing
+                # through the capture is what keeps a teardown on the pane that
+                # asked for it after a group switch has taken the slot.
+                self.assertIn("terminalModeResetTarget(index)", body)
+                self.assertIn("resetTarget.write(data)", body)
+                self.assertIn(
+                    "ensureTerminalReady(index, 12, resetTargetIsCurrent)", body
+                )
+
+        # Clear purges the replay buffer, so a plain teardown needs no ordering.
+        self.assertIn("GridVibeTerminalModes.resetMouseReporting(", clear_body)
+
+        # Reset view replays that buffer instead, and the buffer still holds the
+        # dead program's `?1003h` — so the rejoin has to be the ack-sequenced one
+        # that resets *after* the replayed bytes land, never two bare emits.
+        self.assertIn("GridVibeTerminalModes.rejoinAndResetAfterReplay(", refresh_body)
+        self.assertNotIn("socket.emit('join_session'", refresh_body)
+        self.assertNotIn("socket.emit('leave_session'", refresh_body)
+        # The redraw is slot work and waits on the captured identity; the
+        # incoming group must never be redrawn for a reset it did not ask for.
+        self.assertIn("isCurrent: resetTargetIsCurrent", refresh_body)
 
     def test_terminals_page_clear_command_matches_shell_family_and_host(self):
         """`cls` is a cmd/PowerShell command; POSIX hosts and WSL panes get `clear`."""
@@ -3675,8 +3849,35 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("function restoreTerminalViewportState(terminal, state, { isCurrent = null } = {})", html)
         self.assertIn("captureCachedPaneUiState();", html)
         self.assertIn("restoreCachedPaneUiState({", html)
+        # A frame-sliced Source build belongs to the card, not to the window:
+        # it is suspended on the way out and resumed on the way back. Closing
+        # the group while it is suspended discards the pane rather than handing
+        # it back, so its work is released and its queued readers dropped —
+        # they re-read terminals[index], which belongs to the visible group.
+        self.assertIn("explorerSuspendSourceRenderJob(terminal);", html)
+        self.assertIn("explorerResumeSourceRenderJob(terminal);", html)
+        self.assertIn("explorerReleasePaneWork(terminal);", html)
         self.assertIn("restoreTerminalViewports: false", html)
         self.assertIn("clearTerminalViewports: false", html)
+
+    def test_terminals_page_reloads_a_git_model_marked_stale_while_cached(self):
+        """A Git action that lands while its group is cached leaves the slot
+        alone -- `terminals[index]` belongs to the group that replaced it -- and
+        marks its own pane instead. The promised fresh load has to actually
+        happen, or the pane comes back showing a repository state that moved."""
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = self._page_html(response)
+        restore_start = html.index("function restoreCachedPaneUiState(")
+        restore_end = html.index("let currentWorkspaceLabel", restore_start)
+        restore_html = html[restore_start:restore_end]
+        # The pane is back on screen here, so this is where the load runs -- and
+        # only for a sidebar that is open to receive it.
+        self.assertIn("terminal._explorerGitReloadPending", restore_html)
+        self.assertIn("terminal._explorerGitReloadPending = false;", restore_html)
+        self.assertIn("if (terminal._explorerGitSidebarOpen) {", restore_html)
+        self.assertIn("loadExplorerGitRepo(index);", restore_html)
 
     def test_terminals_page_restores_viewports_after_cached_group_redraw(self):
         response = self.client.get("/terminals")
@@ -4545,7 +4746,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         """A stalled transport reports through the launcher instead of hanging."""
         process = FakeGitProcess(stall=True)
         with patch.object(selfupdate.subprocess, "Popen", return_value=process):
-            with patch.object(selfupdate, "_terminate_process_tree") as terminate:
+            with patch.object(selfupdate, "terminate_process_tree") as terminate:
                 with self.assertRaises(api.AppUpdateError) as context:
                     selfupdate._run_repo_git(["fetch", "--all", "--prune"], timeout=30)
 
@@ -5418,6 +5619,11 @@ class ApiRoutesTestCase(unittest.TestCase):
         selected_dir = repo_dir / "src"
         selected_dir.mkdir(parents=True)
         session_id = self._create_explorer_session(repo_dir)
+        api.session_manager.update_session_metadata(
+            session_id,
+            explorer_git_pin_active=True,
+            explorer_git_pinned_path="src",
+        )
 
         with patch.object(api.socketio, "start_background_task") as start_task:
             response = self.client.post(
@@ -5431,8 +5637,13 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(session.startup_mode, "terminal")
         self.assertEqual(Path(session.directory), selected_dir.resolve())
         self.assertEqual(Path(session.explorer_root_directory), repo_dir.resolve())
+        self.assertFalse(session.explorer_git_pin_active)
+        self.assertEqual(session.explorer_git_pinned_path, "")
         self.assertEqual(session.status, api.SessionStatus.PENDING)
-        self.assertEqual(response.get_json()["startup_mode"], "terminal")
+        payload = response.get_json()
+        self.assertEqual(payload["startup_mode"], "terminal")
+        self.assertFalse(payload["explorer_git_pin_active"])
+        self.assertEqual(payload["explorer_git_pinned_path"], "")
 
     def _create_local_terminal_session(self, directory: Path, **overrides):
         """One connected Local Repo terminal pane running cmd by default."""
@@ -5453,13 +5664,26 @@ class ApiRoutesTestCase(unittest.TestCase):
         api.session_manager.update_session_status(session.session_id, api.SessionStatus.CONNECTED)
         return session
 
+    def _register_connection(self, session_id: str, **fields):
+        """Put one connection entry in the registry and hand it back.
+
+        A pump only ever observes output through the entry the registry is
+        holding, and publication is gated on that being still true, so a test
+        that observes through a dict nobody registered is testing the gate
+        rather than the observation.
+        """
+        connection = dict(fields)
+        with api.connection_lock:
+            api.ssh_connections[session_id] = connection
+        return connection
+
     def test_switch_pane_shell_restarts_local_terminal_under_powershell(self):
         repo_dir = Path(self.temp_dir.name) / "repo"
         repo_dir.mkdir()
         session = self._create_local_terminal_session(repo_dir, initial_command="claude")
 
         with patch.object(api.os, "name", "nt"), patch.object(
-            api, "_resolve_live_terminal_cwd", return_value=None
+            web_terminal_io, "_resolve_live_terminal_cwd", return_value=None
         ), patch.object(api, "_close_ssh_connection") as close_connection, patch.object(
             api.socketio, "start_background_task"
         ) as start_task:
@@ -5488,7 +5712,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         session = self._create_local_terminal_session(repo_dir, use_powershell=True, host="PowerShell")
 
         with patch.object(api.os, "name", "nt"), patch.object(
-            api, "_resolve_live_terminal_cwd", return_value=None
+            web_terminal_io, "_resolve_live_terminal_cwd", return_value=None
         ), patch.object(api, "_close_ssh_connection"), patch.object(
             api.socketio, "start_background_task"
         ):
@@ -5512,7 +5736,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         )
 
         with patch.object(api.os, "name", "nt"), patch.object(
-            api, "_resolve_live_terminal_cwd", return_value=None
+            web_terminal_io, "_resolve_live_terminal_cwd", return_value=None
         ), patch.object(api, "_close_ssh_connection"), patch.object(
             api.socketio, "start_background_task"
         ):
@@ -5535,7 +5759,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         session = self._create_local_terminal_session(repo_dir)
 
         with patch.object(api.os, "name", "nt"), patch.object(
-            api, "_resolve_live_terminal_cwd", return_value=str(nested_dir)
+            web_terminal_io, "_resolve_live_terminal_cwd", return_value=str(nested_dir)
         ), patch.object(api, "_close_ssh_connection"), patch.object(
             api.socketio, "start_background_task"
         ):
@@ -5554,7 +5778,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         session = self._create_local_terminal_session(repo_dir)
 
         with patch.object(api.os, "name", "nt"), patch.object(
-            api, "_resolve_live_terminal_cwd", return_value="/home/dev/project"
+            web_terminal_io, "_resolve_live_terminal_cwd", return_value="/home/dev/project"
         ), patch.object(api, "_close_ssh_connection"), patch.object(
             api.socketio, "start_background_task"
         ):
@@ -5725,7 +5949,7 @@ class ApiRoutesTestCase(unittest.TestCase):
             explorer_root_directory=str(repo_dir),
         )
 
-        with patch.object(api, "_resolve_live_terminal_cwd", return_value=str(outside_dir)) as resolve_cwd, patch.object(
+        with patch.object(web_terminal_io, "_resolve_live_terminal_cwd", return_value=str(outside_dir)) as resolve_cwd, patch.object(
             api,
             "_close_ssh_connection",
         ):
@@ -5884,6 +6108,1051 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(parent_payload["path"], "")
         self.assertEqual(parent_payload["parent_path"], "")
 
+    def test_switch_terminal_to_explorer_roots_on_repo_below_launch_directory(self):
+        """The reported case: launch above a repo, cd into it, open the explorer.
+
+        The root becomes the *repository*, not the launch directory and not the
+        bare working directory -- so the Git sidebar has an anchor and the
+        reader can still navigate up to the repository root.
+        """
+        desktop = Path(self.temp_dir.name) / "desktop"
+        repo_dir = desktop / "project"
+        nested = repo_dir / "src"
+        nested.mkdir(parents=True)
+        self._run_git(repo_dir, "init")
+        session_id = self._create_local_terminal_session(desktop).session_id
+
+        with patch.object(web_terminal_io, "_resolve_live_terminal_cwd", return_value=str(nested)), patch.object(
+            api, "_close_ssh_connection"
+        ):
+            response = self.client.post(
+                f"/api/sessions/{session_id}/mode",
+                json={"startup_mode": "explorer", "refresh_cwd": True},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertNotIn("cwd_probe", payload)
+        # The client must open where the terminal is now, not reuse a Preview
+        # path captured relative to the explorer's previous root.
+        self.assertEqual(payload["explorer_open_path"], "src")
+        updated = api.session_manager.get_session(session_id)
+        self.assertEqual(Path(updated.directory), nested.resolve())
+        self.assertEqual(Path(updated.explorer_root_directory), repo_dir.resolve())
+
+    def test_switch_terminal_to_explorer_does_not_widen_root_above_launch_directory(self):
+        """A pane launched inside a repository subdirectory keeps that floor."""
+        repo_dir = Path(self.temp_dir.name) / "project"
+        nested = repo_dir / "src"
+        nested.mkdir(parents=True)
+        self._run_git(repo_dir, "init")
+        session_id = self._create_local_terminal_session(nested).session_id
+
+        with patch.object(web_terminal_io, "_resolve_live_terminal_cwd", return_value=str(nested)), patch.object(
+            api, "_close_ssh_connection"
+        ):
+            response = self.client.post(
+                f"/api/sessions/{session_id}/mode",
+                json={"startup_mode": "explorer", "refresh_cwd": True},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        updated = api.session_manager.get_session(session_id)
+        self.assertEqual(Path(updated.directory), nested.resolve())
+        self.assertEqual(Path(updated.explorer_root_directory), nested.resolve())
+
+    def test_switch_terminal_to_explorer_reports_a_failed_cwd_probe(self):
+        """A probe that cannot answer is reported, not silently swallowed."""
+        desktop = Path(self.temp_dir.name) / "desktop"
+        (desktop / "project").mkdir(parents=True)
+        session_id = self._create_local_terminal_session(desktop).session_id
+
+        with patch.object(web_terminal_io, "_resolve_live_terminal_cwd", return_value=None), patch.object(
+            api, "_close_ssh_connection"
+        ):
+            response = self.client.post(
+                f"/api/sessions/{session_id}/mode",
+                json={"startup_mode": "explorer", "refresh_cwd": True},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        probe = response.get_json()["cwd_probe"]
+        self.assertFalse(probe["resolved"])
+        self.assertEqual(probe["reason"], "probe_failed")
+        # It names the directory the pane actually opened on.
+        self.assertEqual(Path(probe["directory"]), desktop.resolve())
+        # And carries nothing else. `requested` was always true here -- the
+        # object is only emitted for a requested, unresolved probe -- and
+        # `source` names an internal provenance no client distinguishes. Both
+        # remain inside _refresh_pane_cwd(); neither crosses the boundary.
+        self.assertEqual(set(probe), {"resolved", "reason", "directory"})
+
+    def test_switch_agent_pane_to_explorer_never_probes_the_shell(self):
+        """The probe types at a prompt, and an agent pane has no prompt."""
+        desktop = Path(self.temp_dir.name) / "desktop"
+        desktop.mkdir(parents=True)
+        session_id = self._create_local_terminal_session(
+            desktop, startup_mode="agent", initial_command_mode="agent"
+        ).session_id
+
+        with patch.object(web_terminal_io, "_resolve_live_terminal_cwd") as probe, patch.object(
+            api, "_close_ssh_connection"
+        ):
+            response = self.client.post(
+                f"/api/sessions/{session_id}/mode",
+                json={"startup_mode": "explorer", "refresh_cwd": True},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        probe.assert_not_called()
+        self.assertEqual(response.get_json()["cwd_probe"]["reason"], "agent_pane")
+
+    def test_live_terminal_cwd_probe_refuses_an_agent_pane(self):
+        """The refusal lives at the probe too, not only at its one caller."""
+        desktop = Path(self.temp_dir.name) / "desktop"
+        desktop.mkdir(parents=True)
+        session_id = self._create_local_terminal_session(
+            desktop, startup_mode="agent", initial_command_mode="agent"
+        ).session_id
+        session = api.session_manager.get_session(session_id)
+        with api.connection_lock:
+            api.ssh_connections[session_id] = {"kind": "local", "shell_kind": "powershell"}
+
+        with patch.object(api, "_send_connection_input") as send_input:
+            self.assertIsNone(api._resolve_live_terminal_cwd(session_id, session))
+        send_input.assert_not_called()
+
+    def test_terminal_output_reports_the_working_directory_without_a_write(self):
+        """Source A: read out of output the shell was going to produce anyway."""
+        desktop = Path(self.temp_dir.name) / "desktop"
+        desktop.mkdir(parents=True)
+        session_id = self._create_local_terminal_session(desktop).session_id
+        connection = self._register_connection(session_id, kind="local", shell_kind="posix")
+
+        with patch.object(web_terminal_io, "_send_connection_input") as send_input:
+            web_terminal_io._observe_terminal_output_cwd(
+                session_id,
+                connection,
+                "\x1b]7;file://box/srv/app/src\x1b\\dev@box:~$ ",
+            )
+
+        send_input.assert_not_called()
+        self.assertEqual(
+            api.session_manager.get_session(session_id).current_directory,
+            "/srv/app/src",
+        )
+
+    def test_a_sequence_split_across_two_reads_still_reports(self):
+        """A read boundary is not an observation the pane gets to lose."""
+        desktop = Path(self.temp_dir.name) / "desktop"
+        desktop.mkdir(parents=True)
+        session_id = self._create_local_terminal_session(desktop).session_id
+        connection = self._register_connection(session_id, kind="local", shell_kind="posix")
+
+        web_terminal_io._observe_terminal_output_cwd(session_id, connection, "\x1b]7;file://box/srv/a")
+        self.assertIsNone(api.session_manager.get_session(session_id).current_directory)
+        web_terminal_io._observe_terminal_output_cwd(session_id, connection, "pp\x1b\\$ ")
+
+        self.assertEqual(
+            api.session_manager.get_session(session_id).current_directory,
+            "/srv/app",
+        )
+
+    def test_an_unchanged_directory_is_not_rebroadcast(self):
+        """The hook fires on every prompt; only a move is news."""
+        desktop = Path(self.temp_dir.name) / "desktop"
+        desktop.mkdir(parents=True)
+        session_id = self._create_local_terminal_session(desktop).session_id
+        connection = self._register_connection(session_id, kind="local", shell_kind="posix")
+        prompt = "\x1b]7;file://box/srv/app\x1b\\$ "
+
+        with patch.object(web_terminal_io, "_broadcast_session_status") as broadcast:
+            web_terminal_io._observe_terminal_output_cwd(session_id, connection, prompt)
+            web_terminal_io._observe_terminal_output_cwd(session_id, connection, prompt)
+            web_terminal_io._observe_terminal_output_cwd(session_id, connection, prompt)
+
+        broadcast.assert_called_once_with(session_id)
+
+    def test_an_agent_pane_is_observed_even_though_it_is_never_probed(self):
+        """The shell reported where it was before the agent took the terminal."""
+        desktop = Path(self.temp_dir.name) / "desktop"
+        desktop.mkdir(parents=True)
+        session_id = self._create_local_terminal_session(
+            desktop, startup_mode="agent", initial_command_mode="agent"
+        ).session_id
+        connection = self._register_connection(session_id, kind="local", shell_kind="posix")
+
+        web_terminal_io._observe_terminal_output_cwd(
+            session_id, connection, "\x1b]7;file://box/srv/app/api\x1b\\"
+        )
+        session = api.session_manager.get_session(session_id)
+
+        with patch.object(web_terminal_io, "_resolve_live_terminal_cwd") as probe:
+            directory, source = api.effective_directory(
+                session_id, session, allow_probe=True
+            )
+
+        probe.assert_not_called()
+        self.assertEqual(directory, "/srv/app/api")
+        self.assertEqual(source, web_terminal_io.CWD_SOURCE_SHELL_INTEGRATION)
+
+    def test_a_retired_connection_cannot_republish_the_cwd_it_was_cleared_of(self):
+        """A shell switch clears `current_directory` and retires the entry. The
+        retiring shell's last prompt can still be in a pipe at that moment, and
+        publishing it would put the dead shell's directory back."""
+        desktop = Path(self.temp_dir.name) / "desktop"
+        desktop.mkdir(parents=True)
+        session_id = self._create_local_terminal_session(desktop).session_id
+        retired = self._register_connection(session_id, kind="local", shell_kind="posix")
+        with api.connection_lock:
+            api.ssh_connections.pop(session_id, None)
+
+        with patch.object(web_terminal_io, "_broadcast_session_status") as broadcast:
+            web_terminal_io._observe_terminal_output_cwd(
+                session_id, retired, "\x1b]7;file://box/srv/app/old\x1b\\$ "
+            )
+
+        broadcast.assert_not_called()
+        self.assertIsNone(api.session_manager.get_session(session_id).current_directory)
+
+    def test_a_replaced_connection_cannot_write_over_the_shell_that_took_its_place(self):
+        """Identity is the entry object, not the session id and not the shell
+        kind: the replacement shell is a different shell of the same family."""
+        desktop = Path(self.temp_dir.name) / "desktop"
+        desktop.mkdir(parents=True)
+        session_id = self._create_local_terminal_session(desktop).session_id
+        retired = {"kind": "local", "shell_kind": "posix"}
+        replacement = self._register_connection(
+            session_id, kind="local", shell_kind="posix"
+        )
+        self.assertIsNot(retired, replacement)
+
+        with patch.object(web_terminal_io, "_broadcast_session_status") as broadcast:
+            web_terminal_io._observe_terminal_output_cwd(
+                session_id, retired, "\x1b]7;file://box/srv/app/old\x1b\\$ "
+            )
+
+        broadcast.assert_not_called()
+        self.assertIsNone(api.session_manager.get_session(session_id).current_directory)
+
+        # The entry that *is* current still publishes, from the same registry.
+        with patch.object(web_terminal_io, "_broadcast_session_status") as broadcast:
+            web_terminal_io._observe_terminal_output_cwd(
+                session_id, replacement, "\x1b]7;file://box/srv/app/new\x1b\\$ "
+            )
+
+        broadcast.assert_called_once_with(session_id)
+        self.assertEqual(
+            api.session_manager.get_session(session_id).current_directory,
+            "/srv/app/new",
+        )
+
+    def test_a_registry_change_between_the_parse_and_the_write_publishes_nothing(self):
+        """The window the gate exists for. Parsing is deliberately lock-free, so
+        the entry can be retired after the sequence is read and before the
+        directory is written -- which is exactly the interleaving a shell switch
+        produces. Barrier, not a sleep: the retirement is driven from inside the
+        observation, between its two halves."""
+        desktop = Path(self.temp_dir.name) / "desktop"
+        desktop.mkdir(parents=True)
+        session_id = self._create_local_terminal_session(desktop).session_id
+        connection = self._register_connection(session_id, kind="local", shell_kind="posix")
+        real_normalize = web_terminal_io.normalize_observed_cwd
+
+        def retire_then_normalize(*args, **kwargs):
+            with api.connection_lock:
+                api.ssh_connections.pop(session_id, None)
+            return real_normalize(*args, **kwargs)
+
+        with patch.object(
+            web_terminal_io, "normalize_observed_cwd", side_effect=retire_then_normalize
+        ) as normalize, patch.object(
+            web_terminal_io, "_broadcast_session_status"
+        ) as broadcast:
+            web_terminal_io._observe_terminal_output_cwd(
+                session_id, connection, "\x1b]7;file://box/srv/app/gone\x1b\\$ "
+            )
+
+        # The parse ran -- this is not a test that passes by never getting there.
+        normalize.assert_called_once()
+        broadcast.assert_not_called()
+        self.assertIsNone(api.session_manager.get_session(session_id).current_directory)
+
+    def test_the_cwd_broadcast_holds_neither_shared_lock(self):
+        """Guardrail 2: the check and the write share one hold, the emit is
+        outside it. Asked from another thread, because both locks are reentrant
+        and the publishing thread could re-take either one without noticing."""
+        desktop = Path(self.temp_dir.name) / "desktop"
+        desktop.mkdir(parents=True)
+        session_id = self._create_local_terminal_session(desktop).session_id
+        connection = self._register_connection(session_id, kind="local", shell_kind="posix")
+        held = {}
+
+        def probe_locks(_session_id):
+            def attempt():
+                for name, lock in (
+                    ("connection_lock", api.connection_lock),
+                    ("manager_lock", api.session_manager.lock),
+                ):
+                    acquired = lock.acquire(blocking=False)
+                    held[name] = not acquired
+                    if acquired:
+                        lock.release()
+
+            thread = threading.Thread(target=attempt)
+            thread.start()
+            thread.join(timeout=5)
+
+        with patch.object(
+            web_terminal_io, "_broadcast_session_status", side_effect=probe_locks
+        ):
+            web_terminal_io._observe_terminal_output_cwd(
+                session_id, connection, "\x1b]7;file://box/srv/app/free\x1b\\$ "
+            )
+
+        self.assertEqual(held, {"connection_lock": False, "manager_lock": False})
+        self.assertEqual(
+            api.session_manager.get_session(session_id).current_directory,
+            "/srv/app/free",
+        )
+
+    def test_effective_directory_prefers_the_observation_over_the_probe(self):
+        desktop = Path(self.temp_dir.name) / "desktop"
+        desktop.mkdir(parents=True)
+        session_id = self._create_local_terminal_session(desktop).session_id
+        api.session_manager.update_session_metadata(
+            session_id, current_directory="/srv/app/src"
+        )
+        session = api.session_manager.get_session(session_id)
+
+        with patch.object(web_terminal_io, "_resolve_live_terminal_cwd") as probe:
+            directory, source = api.effective_directory(
+                session_id, session, allow_probe=True
+            )
+
+        probe.assert_not_called()
+        self.assertEqual(directory, "/srv/app/src")
+        self.assertEqual(source, web_terminal_io.CWD_SOURCE_SHELL_INTEGRATION)
+
+    def test_effective_directory_reports_the_launch_directory_as_an_assumption(self):
+        """Nothing observed and nothing probed is still an answer -- a labelled one."""
+        desktop = Path(self.temp_dir.name) / "desktop"
+        desktop.mkdir(parents=True)
+        session_id = self._create_local_terminal_session(desktop).session_id
+        session = api.session_manager.get_session(session_id)
+
+        with patch.object(
+            web_terminal_io, "_resolve_live_terminal_cwd", return_value=None
+        ) as probe:
+            directory, source = api.effective_directory(
+                session_id, session, allow_probe=True
+            )
+
+        probe.assert_called_once_with(session_id, session)
+        self.assertEqual(directory, str(desktop))
+        self.assertEqual(source, web_terminal_io.CWD_SOURCE_LAUNCH)
+
+    def test_effective_directory_leaves_the_probe_alone_unless_asked(self):
+        desktop = Path(self.temp_dir.name) / "desktop"
+        desktop.mkdir(parents=True)
+        session_id = self._create_local_terminal_session(desktop).session_id
+        session = api.session_manager.get_session(session_id)
+
+        with patch.object(web_terminal_io, "_resolve_live_terminal_cwd") as probe:
+            directory, source = api.effective_directory(session_id, session)
+
+        probe.assert_not_called()
+        self.assertEqual(directory, str(desktop))
+        self.assertEqual(source, web_terminal_io.CWD_SOURCE_LAUNCH)
+
+    def test_switch_agent_pane_to_explorer_opens_on_the_observed_directory(self):
+        """ISSUE-2026-044 on the pane stage 1 could only answer with a refusal."""
+        desktop = Path(self.temp_dir.name) / "desktop"
+        nested = desktop / "project"
+        nested.mkdir(parents=True)
+        session_id = self._create_local_terminal_session(
+            desktop, startup_mode="agent", initial_command_mode="agent"
+        ).session_id
+        api.session_manager.update_session_metadata(
+            session_id, current_directory=str(nested)
+        )
+
+        with patch.object(web_terminal_io, "_resolve_live_terminal_cwd") as probe, patch.object(
+            api, "_close_ssh_connection"
+        ):
+            response = self.client.post(
+                f"/api/sessions/{session_id}/mode",
+                json={"startup_mode": "explorer", "refresh_cwd": True},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        probe.assert_not_called()
+        payload = response.get_json()
+        self.assertNotIn("cwd_probe", payload)
+        self.assertEqual(Path(payload["explorer_root_directory"]), nested.resolve())
+
+    def test_a_local_pane_is_never_typed_at(self):
+        """A typed hook is echoed into the pane; a local shell is handed one."""
+        session = SimpleNamespace(directory="", initial_command="npm run dev")
+
+        for shell_kind in ("cmd", "powershell", "wsl", "posix"):
+            with self.subTest(shell_kind=shell_kind):
+                connection = {"kind": "local", "shell_kind": shell_kind}
+                with patch.object(web_terminal_io, "_send_connection_input") as send_input:
+                    api._run_startup_sequence(connection, session)
+
+                self.assertEqual(
+                    [call.args[1] for call in send_input.call_args_list],
+                    ["npm run dev\n"],
+                )
+                self.assertNotIn("ssh_startup_scrub", connection)
+
+    def test_a_local_shell_is_handed_its_hook_at_spawn(self):
+        """cmd and bash read their prompt hook from the environment."""
+        command, environment = web_terminal_io._local_shell_integration("cmd", ["cmd.exe"], {})
+        self.assertEqual(command, ["cmd.exe"])
+        self.assertIn("]9;9;", environment["PROMPT"])
+
+        command, environment = web_terminal_io._local_shell_integration("posix", ["/bin/bash"], {})
+        self.assertEqual(command, ["/bin/bash"])
+        self.assertIn("]9;9;", environment["PROMPT_COMMAND"])
+
+    def test_a_wsl_shell_forwards_its_hook_through_wslenv(self):
+        """wsl.exe only passes the variables WSLENV names, and keeps the rest."""
+        _, environment = web_terminal_io._local_shell_integration(
+            "wsl", ["wsl.exe"], {"WSLENV": "MY_VAR/p"}
+        )
+
+        self.assertIn("]9;9;", environment["PROMPT_COMMAND"])
+        self.assertEqual(environment["WSLENV"], "MY_VAR/p:PROMPT_COMMAND")
+
+    def test_powershell_takes_its_hook_as_an_argument(self):
+        """PowerShell cannot take a function through the environment."""
+        command, environment = web_terminal_io._local_shell_integration(
+            "powershell", ["powershell.exe", "-NoLogo"], {}
+        )
+
+        self.assertEqual(command[:3], ["powershell.exe", "-NoLogo", "-NoExit"])
+        self.assertEqual(command[3], "-Command")
+        self.assertIn("]9;9;", command[4])
+        self.assertEqual(environment, {})
+
+    def test_remote_hook_arms_a_one_shot_startup_scrub(self):
+        """The extra marker bounds cleanup to GridVibe's own SSH bootstrap."""
+        session = SimpleNamespace(directory="", initial_command="")
+        connection = {"kind": "ssh", "shell_kind": "posix"}
+
+        with patch.object(web_terminal_io, "_send_connection_input") as send_input:
+            api._run_startup_sequence(connection, session)
+
+        sent = [call.args[1] for call in send_input.call_args_list]
+        self.assertEqual(len(sent), 2)
+        self.assertIn("]9;9;", sent[0])
+        self.assertIn("gridvibe-pid", sent[0])
+        self.assertIn("gridvibe-startup-ready", sent[1])
+        self.assertIn("ssh_startup_scrub", connection)
+
+    def test_remote_startup_scrub_removes_only_exact_internal_echo_lines(self):
+        connection = {"kind": "ssh", "shell_kind": "posix"}
+        commands = [
+            " _gv(){ printf hook; }",
+            "cd /srv/app",
+        ]
+        marker_command = web_terminal_io._arm_ssh_startup_scrub(connection, commands)
+        marker = connection["ssh_startup_scrub"]["marker"]
+        raw = (
+            "Welcome to Ubuntu\r\n"
+            f"{commands[0]}\r\n"
+            f"ubuntu@host:~$ {commands[0]}\r\n"
+            f"{commands[1]}\r\n"
+            f"ubuntu@host:~$ {commands[1]}\r\n"
+            f"ubuntu@host:/srv/app$ {marker_command}\r\n"
+            f"{marker}ubuntu@host:/srv/app$ echo user-command\r\n"
+        )
+        split = raw.index(marker) + len(marker) // 2
+
+        self.assertEqual(
+            web_terminal_io._scrub_ssh_startup_output(connection, raw[:split]),
+            "",
+        )
+        cleaned = web_terminal_io._scrub_ssh_startup_output(
+            connection, raw[split:]
+        )
+
+        self.assertEqual(
+            cleaned,
+            "Welcome to Ubuntu\r\nubuntu@host:/srv/app$ echo user-command\r\n",
+        )
+        self.assertNotIn("ssh_startup_scrub", connection)
+        self.assertEqual(
+            web_terminal_io._scrub_ssh_startup_output(connection, "live output"),
+            "live output",
+        )
+
+    def test_remote_startup_scrub_timeout_releases_original_output(self):
+        connection = {"kind": "ssh"}
+        web_terminal_io._arm_ssh_startup_scrub(connection, ["cd /srv/app"])
+        deadline = connection["ssh_startup_scrub"]["deadline"]
+        raw = "Welcome\r\nubuntu@host:~$ cd /srv/app\r\nunsupported shell"
+
+        self.assertEqual(
+            web_terminal_io._scrub_ssh_startup_output(
+                connection, raw, now=deadline + 0.01
+            ),
+            raw,
+        )
+        self.assertNotIn("ssh_startup_scrub", connection)
+
+    def test_the_shell_integration_setting_leaves_the_prompt_alone(self):
+        """The hook mutates the user's prompt, so the switch is a real one."""
+        session = SimpleNamespace(directory="", initial_command="npm run dev")
+
+        with patch.object(
+            web_config.runtime_config, "terminal_shell_integration", False
+        ), patch.object(web_terminal_io, "_send_connection_input") as send_input:
+            api._run_startup_sequence({"kind": "ssh", "shell_kind": "posix"}, session)
+            command, environment = web_terminal_io._local_shell_integration("cmd", ["cmd.exe"], {})
+
+        self.assertEqual(
+            [call.args[1] for call in send_input.call_args_list],
+            ["npm run dev\n"],
+        )
+        self.assertEqual(command, ["cmd.exe"])
+        self.assertEqual(environment, {})
+
+    def test_splitting_a_navigated_terminal_starts_where_the_pane_is(self):
+        """A terminal pane clones where it *is*, not where it started."""
+        launch_dir = Path(self.temp_dir.name) / "desktop"
+        navigated = launch_dir / "project"
+        navigated.mkdir(parents=True)
+        source = self._create_local_terminal_session(launch_dir)
+        api.session_manager.update_session_metadata(
+            source.session_id, current_directory=str(navigated)
+        )
+
+        with patch.object(api.socketio, "start_background_task"):
+            response = self.client.post(f"/api/sessions/{source.session_id}/split")
+
+        self.assertEqual(response.status_code, 201, response.get_json())
+        self.assertEqual(response.get_json()["session"]["directory"], str(navigated))
+
+    def test_splitting_an_unobserved_terminal_still_starts_at_its_launch_directory(self):
+        """Nothing observed is not a reason to hand the new pane nothing."""
+        launch_dir = Path(self.temp_dir.name) / "desktop"
+        launch_dir.mkdir(parents=True)
+        source = self._create_local_terminal_session(launch_dir)
+
+        with patch.object(web_terminal_io, "_resolve_live_terminal_cwd") as probe, patch.object(
+            api.socketio, "start_background_task"
+        ):
+            response = self.client.post(f"/api/sessions/{source.session_id}/split")
+
+        self.assertEqual(response.status_code, 201, response.get_json())
+        # A split must not type at the pane it is cloning.
+        probe.assert_not_called()
+        self.assertEqual(response.get_json()["session"]["directory"], str(launch_dir))
+
+    def test_a_derived_root_does_not_pin_the_next_explorer_switch(self):
+        """D2: a root nobody chose confines the live explorer and pins nothing.
+
+        Terminal -> explorer derives a root from where the pane is. Going back
+        to terminal and `cd`ing somewhere else must re-derive: before stage 3
+        the derived root came back out of explorer mode looking configured, and
+        the second switch pinned to a directory the user never picked.
+        """
+        desktop = Path(self.temp_dir.name) / "desktop"
+        first = desktop / "one"
+        second = desktop / "two"
+        first.mkdir(parents=True)
+        second.mkdir(parents=True)
+        session_id = self._create_local_terminal_session(desktop).session_id
+
+        with patch.object(
+            web_terminal_io, "_resolve_live_terminal_cwd", return_value=str(first)
+        ), patch.object(api, "_close_ssh_connection"):
+            self.client.post(
+                f"/api/sessions/{session_id}/mode",
+                json={"startup_mode": "explorer", "refresh_cwd": True},
+            )
+
+        opened = api.session_manager.get_session(session_id)
+        self.assertEqual(Path(opened.explorer_root_directory), first.resolve())
+        # The live explorer is confined to it; nothing chose it.
+        self.assertFalse(opened.explorer_root_configured)
+
+        with patch.object(api.socketio, "start_background_task"):
+            self.client.post(
+                f"/api/sessions/{session_id}/mode",
+                json={"startup_mode": "terminal", "directory": ""},
+            )
+
+        back = api.session_manager.get_session(session_id)
+        self.assertEqual(back.explorer_root_directory, "")
+
+        with patch.object(
+            web_terminal_io, "_resolve_live_terminal_cwd", return_value=str(second)
+        ), patch.object(api, "_close_ssh_connection"):
+            self.client.post(
+                f"/api/sessions/{session_id}/mode",
+                json={"startup_mode": "explorer", "refresh_cwd": True},
+            )
+
+        reopened = api.session_manager.get_session(session_id)
+        self.assertEqual(Path(reopened.explorer_root_directory), second.resolve())
+
+    def test_the_explorer_follows_a_shell_that_walked_back_up(self):
+        """The reported case, end to end.
+
+        Launch a terminal on a directory, `cd` into a repository below it and
+        open the explorer -- it roots on the repo. Go back to the terminal,
+        `cd` back up, and open the explorer again: it used to reopen on the
+        repo. The floor the widen-guard clamps to is the pane's *launch*
+        directory, and the mode switch had just rewritten that to the repo, so
+        walking up read as widening and was clamped straight back down.
+        """
+        workspace = Path(self.temp_dir.name) / "workspace"
+        repo_dir = workspace / "project"
+        repo_dir.mkdir(parents=True)
+        self._run_git(repo_dir, "init")
+        session_id = self._create_local_terminal_session(workspace).session_id
+
+        with patch.object(
+            web_terminal_io, "_resolve_live_terminal_cwd", return_value=str(repo_dir)
+        ), patch.object(api, "_close_ssh_connection"):
+            self.client.post(
+                f"/api/sessions/{session_id}/mode",
+                json={"startup_mode": "explorer", "refresh_cwd": True},
+            )
+
+        opened = api.session_manager.get_session(session_id)
+        self.assertEqual(Path(opened.explorer_root_directory), repo_dir.resolve())
+
+        with patch.object(api.socketio, "start_background_task"):
+            self.client.post(
+                f"/api/sessions/{session_id}/mode",
+                json={"startup_mode": "terminal", "directory": ""},
+            )
+
+        # The pane now *launches* in the repo as far as `directory` goes...
+        self.assertEqual(
+            Path(api.session_manager.get_session(session_id).directory),
+            repo_dir.resolve(),
+        )
+
+        with patch.object(
+            web_terminal_io, "_resolve_live_terminal_cwd", return_value=str(workspace)
+        ), patch.object(api, "_close_ssh_connection"):
+            self.client.post(
+                f"/api/sessions/{session_id}/mode",
+                json={"startup_mode": "explorer", "refresh_cwd": True},
+            )
+
+        # ...and the explorer still opens where the shell actually is.
+        reopened = api.session_manager.get_session(session_id)
+        self.assertEqual(Path(reopened.explorer_root_directory), workspace.resolve())
+
+    def test_the_explorer_follows_a_shell_above_its_launch_directory(self):
+        """The floor guards against widening, not against the user.
+
+        A pane launched inside `project/src` whose shell has walked up to
+        `project` is standing there on purpose. Clamping it back to `src` opens
+        the explorer on a directory the terminal beside it is not in.
+        """
+        repo_dir = Path(self.temp_dir.name) / "project"
+        nested = repo_dir / "src"
+        nested.mkdir(parents=True)
+        self._run_git(repo_dir, "init")
+        session_id = self._create_local_terminal_session(nested).session_id
+
+        with patch.object(
+            web_terminal_io, "_resolve_live_terminal_cwd", return_value=str(repo_dir)
+        ), patch.object(api, "_close_ssh_connection"):
+            self.client.post(
+                f"/api/sessions/{session_id}/mode",
+                json={"startup_mode": "explorer", "refresh_cwd": True},
+            )
+
+        updated = api.session_manager.get_session(session_id)
+        self.assertEqual(Path(updated.explorer_root_directory), repo_dir.resolve())
+
+    def test_the_widen_guard_still_holds_while_the_pane_is_inside_it(self):
+        """Walking *down* from the launch directory does not widen the root."""
+        repo_dir = Path(self.temp_dir.name) / "project"
+        nested = repo_dir / "src"
+        deeper = nested / "inner"
+        deeper.mkdir(parents=True)
+        self._run_git(repo_dir, "init")
+        session_id = self._create_local_terminal_session(nested).session_id
+
+        with patch.object(
+            web_terminal_io, "_resolve_live_terminal_cwd", return_value=str(deeper)
+        ), patch.object(api, "_close_ssh_connection"):
+            self.client.post(
+                f"/api/sessions/{session_id}/mode",
+                json={"startup_mode": "explorer", "refresh_cwd": True},
+            )
+
+        updated = api.session_manager.get_session(session_id)
+        # The repository root is above the directory the user picked, so the
+        # floor holds and the pane roots where it was launched.
+        self.assertEqual(Path(updated.directory), deeper.resolve())
+        self.assertEqual(Path(updated.explorer_root_directory), nested.resolve())
+
+    def test_a_mode_switch_never_moves_the_launch_directory(self):
+        """`directory` is rewritten by a switch; the floor read from it is not."""
+        workspace = Path(self.temp_dir.name) / "workspace"
+        nested = workspace / "project"
+        nested.mkdir(parents=True)
+        session_id = self._create_local_terminal_session(workspace).session_id
+
+        with patch.object(
+            web_terminal_io, "_resolve_live_terminal_cwd", return_value=str(nested)
+        ), patch.object(api, "_close_ssh_connection"):
+            self.client.post(
+                f"/api/sessions/{session_id}/mode",
+                json={"startup_mode": "explorer", "refresh_cwd": True},
+            )
+        with patch.object(api.socketio, "start_background_task"):
+            self.client.post(
+                f"/api/sessions/{session_id}/mode",
+                json={"startup_mode": "terminal", "directory": ""},
+            )
+
+        session = api.session_manager.get_session(session_id)
+        self.assertEqual(Path(session.directory), nested.resolve())
+        self.assertEqual(Path(session.launch_directory), workspace)
+
+    def test_an_unlabelled_root_is_configured_only_on_an_explorer_pane(self):
+        """What a launch config that does not state the flag means.
+
+        A root on an explorer pane is that pane's boundary and somebody chose
+        it. On a terminal pane it can only be one a terminal->explorer switch
+        derived and an older snapshot carried back, and calling that configured
+        is what pinned a restored pane to a directory nobody picked.
+        """
+        group = api.session_manager.create_group(
+            name="Local", connection_mode="wsl", layout="single", terminal_count=1
+        )
+        chosen = api.session_manager.create_session(
+            group_id=group.group_id,
+            host="Files",
+            directory="/srv/app",
+            startup_mode="explorer",
+            explorer_root_directory="/srv/app",
+        )
+        derived = api.session_manager.create_session(
+            group_id=group.group_id,
+            host="cmd",
+            directory="/srv/app/api",
+            startup_mode="terminal",
+            explorer_root_directory="/srv/app/api",
+        )
+        self.assertTrue(chosen.explorer_root_configured)
+        self.assertFalse(derived.explorer_root_configured)
+
+        # A stated flag is believed either way, and a non-boolean states
+        # nothing rather than pinning the pane through a truthy string.
+        stated = api.session_manager._session_launch_fields(
+            {
+                "directory": "/srv/app",
+                "startup_mode": "terminal",
+                "explorer_root_directory": "/srv/app",
+                "explorer_root_configured": True,
+            }
+        )
+        self.assertIs(stated["explorer_root_configured"], True)
+        malformed = api.session_manager._session_launch_fields(
+            {
+                "directory": "/srv/app",
+                "startup_mode": "terminal",
+                "explorer_root_directory": "/srv/app",
+                "explorer_root_configured": "yes",
+            }
+        )
+        self.assertIsNone(malformed["explorer_root_configured"])
+
+    def test_a_configured_root_survives_the_round_trip_and_still_pins(self):
+        """The other half of D2: a chosen root is not what stage 3 drops."""
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        nested = repo_dir / "src"
+        nested.mkdir(parents=True)
+        session_id = self._create_explorer_session(repo_dir)
+        self.assertTrue(
+            api.session_manager.get_session(session_id).explorer_root_configured
+        )
+
+        with patch.object(api.socketio, "start_background_task"):
+            self.client.post(
+                f"/api/sessions/{session_id}/mode",
+                json={"startup_mode": "terminal", "directory": "src"},
+            )
+
+        back = api.session_manager.get_session(session_id)
+        self.assertEqual(Path(back.explorer_root_directory), repo_dir.resolve())
+        self.assertTrue(back.explorer_root_configured)
+
+        # ...and it still pins, even though the pane is now sitting in `src`.
+        with patch.object(
+            web_terminal_io, "_resolve_live_terminal_cwd", return_value=str(nested)
+        ), patch.object(api, "_close_ssh_connection"):
+            self.client.post(
+                f"/api/sessions/{session_id}/mode",
+                json={"startup_mode": "explorer", "refresh_cwd": True},
+            )
+
+        reopened = api.session_manager.get_session(session_id)
+        self.assertEqual(Path(reopened.explorer_root_directory), repo_dir.resolve())
+
+    def test_a_shell_outside_the_configured_root_stores_a_derived_one(self):
+        """F15: the one branch where the flag and the root disagree.
+
+        `_resolve_explorer_open_root()` answers with the configured root only
+        while it still holds the observed cwd. A shell that has walked outside
+        it gets a *derived* root -- which still has to be stored, because the
+        live explorer is confined to it, but must not come back as a pin.
+        """
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        outside = Path(self.temp_dir.name) / "outside"
+        deeper = outside / "deep"
+        deeper.mkdir(parents=True)
+        session_id = self._create_explorer_session(repo_dir)
+        self.assertTrue(
+            api.session_manager.get_session(session_id).explorer_root_configured
+        )
+
+        with patch.object(api.socketio, "start_background_task"):
+            self.client.post(
+                f"/api/sessions/{session_id}/mode",
+                json={"startup_mode": "terminal", "directory": ""},
+            )
+        with patch.object(
+            web_terminal_io, "_resolve_live_terminal_cwd", return_value=str(outside)
+        ), patch.object(api, "_close_ssh_connection"):
+            self.client.post(
+                f"/api/sessions/{session_id}/mode",
+                json={"startup_mode": "explorer", "refresh_cwd": True},
+            )
+
+        switched = api.session_manager.get_session(session_id)
+        self.assertEqual(Path(switched.explorer_root_directory), outside.resolve())
+        # The root stored is not the configured one, so the flag that qualifies
+        # it must not say it was chosen.
+        self.assertFalse(switched.explorer_root_configured)
+
+        # ...and because it does not, it does not pin the next switch either.
+        with patch.object(api.socketio, "start_background_task"):
+            self.client.post(
+                f"/api/sessions/{session_id}/mode",
+                json={"startup_mode": "terminal", "directory": ""},
+            )
+        with patch.object(
+            web_terminal_io, "_resolve_live_terminal_cwd", return_value=str(deeper)
+        ), patch.object(api, "_close_ssh_connection"):
+            self.client.post(
+                f"/api/sessions/{session_id}/mode",
+                json={"startup_mode": "explorer", "refresh_cwd": True},
+            )
+
+        reopened = api.session_manager.get_session(session_id)
+        self.assertEqual(Path(reopened.explorer_root_directory), deeper.resolve())
+        self.assertFalse(reopened.explorer_root_configured)
+
+    def test_a_snapshot_round_trip_keeps_where_the_pane_was_launched(self):
+        """The floor is only meaningful across a restart, so it is persisted.
+
+        `_snapshot_session()` deliberately writes the *observed* directory into
+        the snapshot's `directory` slot, so rebuilding the floor from it moves
+        the floor to wherever the pane happened to be.
+        """
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        nested = repo_dir / "a" / "b"
+        nested.mkdir(parents=True)
+        session = self._create_local_terminal_session(repo_dir)
+        api.session_manager.update_session_metadata(
+            session.session_id, current_directory=str(nested)
+        )
+
+        snapshot = web_runtime_state._snapshot_session(
+            api.session_manager.get_session(session.session_id)
+        )
+        # The snapshot survives the file's own read-side allowlist...
+        restored = web_runtime_state._validate_session(snapshot)
+        self.assertIsNotNone(restored)
+        rebuilt = api.session_manager.create_session(
+            group_id=session.group_id,
+            **api.session_manager._session_launch_fields(restored),
+        )
+
+        # ...and the pane comes back *in* the subdirectory it was working in,
+        # while still remembering the directory it was launched in.
+        self.assertEqual(Path(rebuilt.directory), nested)
+        self.assertEqual(Path(rebuilt.launch_directory), repo_dir)
+
+    def test_a_restored_pane_still_opens_the_explorer_on_its_repository(self):
+        """End to end: the same pane in the same directory, after a restart.
+
+        Before the floor was persisted this pane came back rooted on `web`,
+        with no way to navigate up to the repository it belongs to.
+        """
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        nested = repo_dir / "web"
+        nested.mkdir(parents=True)
+        self._run_git(repo_dir, "init")
+        session = self._create_local_terminal_session(repo_dir)
+        api.session_manager.update_session_metadata(
+            session.session_id, current_directory=str(nested)
+        )
+
+        restored = web_runtime_state._validate_session(
+            web_runtime_state._snapshot_session(
+                api.session_manager.get_session(session.session_id)
+            )
+        )
+        # `mode` is not a captured field: a restore takes it from the group's
+        # connection mode, exactly as `_prepare_launch_sessions()` does.
+        rebuilt = api.session_manager.create_session(
+            group_id=session.group_id,
+            **api.session_manager._session_launch_fields({**restored, "mode": "wsl"}),
+        )
+        api.session_manager.update_session_status(
+            rebuilt.session_id, api.SessionStatus.CONNECTED
+        )
+
+        with patch.object(
+            web_terminal_io, "_resolve_live_terminal_cwd", return_value=str(nested)
+        ), patch.object(api, "_close_ssh_connection"):
+            response = self.client.post(
+                f"/api/sessions/{rebuilt.session_id}/mode",
+                json={"startup_mode": "explorer", "refresh_cwd": True},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        reopened = api.session_manager.get_session(rebuilt.session_id)
+        self.assertEqual(Path(reopened.explorer_root_directory), repo_dir.resolve())
+
+    def test_a_mode_switch_drops_the_dead_shell_s_last_report(self):
+        """The pane that reported it is being closed; the report is not live."""
+        desktop = Path(self.temp_dir.name) / "desktop"
+        nested = desktop / "project"
+        nested.mkdir(parents=True)
+        session_id = self._create_local_terminal_session(desktop).session_id
+        api.session_manager.update_session_metadata(
+            session_id, current_directory=str(nested)
+        )
+
+        with patch.object(api, "_close_ssh_connection"):
+            response = self.client.post(
+                f"/api/sessions/{session_id}/mode", json={"startup_mode": "explorer"}
+            )
+
+        self.assertEqual(response.status_code, 200)
+        switched = api.session_manager.get_session(session_id)
+        self.assertIsNone(switched.current_directory)
+        # Nothing was lost: the directory it named is what `directory` holds.
+        self.assertEqual(Path(switched.directory), nested.resolve())
+
+    def test_a_reconnect_returns_to_the_observed_directory(self):
+        """D3: a pane comes back where it was, with the launch dir as fallback."""
+        session = SimpleNamespace(
+            directory="/srv/app", current_directory="/srv/app/api", initial_command=""
+        )
+
+        with patch.object(
+            web_config.runtime_config, "terminal_shell_integration", False
+        ), patch.object(web_terminal_io, "_send_connection_input") as send_input:
+            api._run_startup_sequence({"kind": "ssh", "shell_kind": "posix"}, session)
+
+        sent = [
+            call.args[1]
+            for call in send_input.call_args_list
+            if "gridvibe-startup-ready" not in call.args[1]
+        ]
+        self.assertEqual(
+            sent,
+            ["cd /srv/app/api 2>/dev/null || cd /srv/app\n"],
+        )
+
+    def test_a_reconnect_with_nothing_observed_carries_no_fallback(self):
+        """No observation means no second directory to try."""
+        session = SimpleNamespace(
+            directory="/srv/app", current_directory=None, initial_command=""
+        )
+
+        with patch.object(
+            web_config.runtime_config, "terminal_shell_integration", False
+        ), patch.object(web_terminal_io, "_send_connection_input") as send_input:
+            api._run_startup_sequence({"kind": "ssh", "shell_kind": "posix"}, session)
+
+        sent = [
+            call.args[1]
+            for call in send_input.call_args_list
+            if "gridvibe-startup-ready" not in call.args[1]
+        ]
+        self.assertEqual(sent, ["cd /srv/app\n"])
+
+    def test_each_windows_shell_family_gets_its_own_fallback_form(self):
+        """`||` is cmd's; PowerShell tests the path so no red error is drawn."""
+        session = SimpleNamespace(
+            directory="C:\\repo", current_directory="C:\\repo\\src", initial_command=""
+        )
+
+        sent = {}
+        for shell_kind in ("cmd", "powershell"):
+            with patch.object(
+                web_config.runtime_config, "terminal_shell_integration", False
+            ), patch.object(web_terminal_io, "_send_connection_input") as send_input:
+                api._run_startup_sequence(
+                    {"kind": "local", "shell_kind": shell_kind}, session
+                )
+            sent[shell_kind] = send_input.call_args_list[0].args[1]
+
+        self.assertIn('cd /d "C:\\repo\\src" 2>nul || cd /d "C:\\repo"', sent["cmd"])
+        self.assertIn("Test-Path -LiteralPath 'C:\\repo\\src'", sent["powershell"])
+        self.assertIn("Set-Location -LiteralPath 'C:\\repo'", sent["powershell"])
+
+    def test_agent_promotion_stamps_where_the_agent_was_started(self):
+        """The one moment the shell is still at a prompt (ISSUE-2026-045)."""
+        desktop = Path(self.temp_dir.name) / "desktop"
+        desktop.mkdir(parents=True)
+        session_id = self._create_local_terminal_session(desktop).session_id
+        connection = {"kind": "local", "shell_kind": "posix"}
+
+        with patch.object(
+            web_terminal_io, "_process_reported_cwd", return_value="/srv/app/api"
+        ), patch.object(web_terminal_io, "_broadcast_session_status"), patch.object(
+            web_terminal_io, "_resolve_live_terminal_cwd"
+        ) as probe:
+            with api.connection_lock:
+                api.ssh_connections[session_id] = connection
+            web_terminal_io._track_terminal_agent_input(
+                session_id, connection, "codex\r"
+            )
+
+        # Promotion must not type at a prompt the agent is about to take over.
+        probe.assert_not_called()
+        promoted = api.session_manager.get_session(session_id)
+        self.assertEqual(promoted.startup_mode, "agent")
+        self.assertEqual(promoted.current_directory, "/srv/app/api")
+        # The launch slot still says where the pane started.
+        self.assertEqual(Path(promoted.directory), desktop)
+
+    def test_agent_promotion_invents_nothing_when_nothing_answers(self):
+        """A launch-directory answer is an assumption, not an observation."""
+        desktop = Path(self.temp_dir.name) / "desktop"
+        desktop.mkdir(parents=True)
+        session_id = self._create_local_terminal_session(desktop).session_id
+        connection = {"kind": "local", "shell_kind": "posix"}
+
+        with patch.object(web_terminal_io, "_broadcast_session_status"):
+            web_terminal_io._track_terminal_agent_input(
+                session_id, connection, "codex\r"
+            )
+
+        promoted = api.session_manager.get_session(session_id)
+        self.assertEqual(promoted.startup_mode, "agent")
+        self.assertIsNone(promoted.current_directory)
+
     def test_local_stream_shutdown_after_explorer_switch_does_not_mark_error(self):
         repo_dir = Path(self.temp_dir.name) / "repo"
         repo_dir.mkdir()
@@ -5945,7 +7214,11 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(updated.host, "example.com")
         self.assertEqual(updated.username, "ubuntu")
         self.assertEqual(updated.directory, "/srv/app/src")
-        self.assertEqual(updated.explorer_root_directory, "/srv/app")
+        # A terminal pane carries no *configured* explorer root, so /srv/app was
+        # never a root anyone chose -- it was the launch directory wearing one.
+        # The pane now roots where it actually is, clamped so it can never widen
+        # above the launch directory.
+        self.assertEqual(updated.explorer_root_directory, "/srv/app/src")
         self.assertEqual(updated.startup_mode, "explorer")
         self.assertEqual(updated.status, api.SessionStatus.CONNECTED)
         client.close.assert_called_once()
@@ -6006,7 +7279,7 @@ class ApiRoutesTestCase(unittest.TestCase):
             }
         )
 
-        with patch.object(api, "_resolve_live_terminal_cwd", return_value="/opt/tools") as resolve_cwd, patch.object(
+        with patch.object(web_terminal_io, "_resolve_live_terminal_cwd", return_value="/opt/tools") as resolve_cwd, patch.object(
             web_explorer,
             "_open_ssh_sftp",
             return_value=(MagicMock(), fake_sftp),
@@ -6190,6 +7463,58 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(payload["mode"], "head")
         self.assertIn("+changed", payload["diff"])
         self.assertFalse(payload["truncated"])
+
+    def test_explorer_git_diff_context_width_is_named_not_supplied(self):
+        """The Source gutter's narrower read, and the allowlist behind it.
+
+        The route takes the *name* of a context width, never a number: the
+        value that reaches Git's argv is chosen server-side, so the same
+        refusal shape as the mode allowlist applies to a width nobody
+        published.
+        """
+        repo_dir = self._init_committed_repo()
+        readme = repo_dir / "README.md"
+        readme.write_text("\n".join(f"line {n}" for n in range(1, 21)) + "\n", encoding="utf-8")
+        self._run_git(repo_dir, "add", "README.md")
+        self._run_git(repo_dir, "commit", "-m", "twenty lines")
+        changed = [f"line {n}" for n in range(1, 21)]
+        changed[9] = "line 10 edited"
+        readme.write_text("\n".join(changed) + "\n", encoding="utf-8")
+        session_id = self._create_explorer_session(repo_dir)
+
+        def diff_for(**extra):
+            response = self.client.get(
+                f"/api/explorer/{session_id}/git/diff",
+                query_string={"path": "README.md", "mode": "head", **extra},
+            )
+            return response
+
+        default_response = diff_for()
+        zero_response = diff_for(context="zero")
+
+        self.assertEqual(default_response.status_code, 200)
+        self.assertEqual(zero_response.status_code, 200)
+        default_diff = default_response.get_json()["diff"]
+        zero_diff = zero_response.get_json()["diff"]
+        # Both describe the same change...
+        for changed_line in ("+line 10 edited", "-line 10"):
+            self.assertIn(changed_line, default_diff)
+            self.assertIn(changed_line, zero_diff)
+        # ...but only the default carries the surrounding context lines.
+        self.assertIn("\n line 9", default_diff)
+        self.assertNotIn("\n line 9", zero_diff)
+        self.assertLess(len(zero_diff), len(default_diff))
+
+        # A width the server never published is a refusal, not a fallback to
+        # the default — a typo must not quietly serve the wider diff.
+        # Surrounding whitespace is trimmed, as it is for a commit ref; the
+        # name itself is what has to match.
+        self.assertEqual(diff_for(context=" zero ").status_code, 200)
+        for rejected in ("0", "3", "--unified=0", "999", "default"):
+            with self.subTest(context=rejected):
+                refusal = diff_for(context=rejected)
+                self.assertEqual(refusal.status_code, 400)
+                self.assertIn("context", refusal.get_json()["error"].lower())
 
     def test_explorer_git_diff_returns_commit_file_diff(self):
         repo_dir = Path(self.temp_dir.name) / "repo"
@@ -6599,6 +7924,27 @@ class ApiRoutesTestCase(unittest.TestCase):
         latest = self._run_git(repo_dir, "log", "-1", "--pretty=%s").stdout.decode().strip()
         self.assertEqual(latest, "second commit")
 
+    def test_explorer_git_root_scoped_commit_supports_unborn_head(self):
+        repo_dir = Path(self.temp_dir.name) / "fresh-commit"
+        repo_dir.mkdir()
+        (repo_dir / "new.txt").write_text("new\n", encoding="utf-8")
+        self._run_git(repo_dir, "init")
+        self._run_git(repo_dir, "config", "user.email", "gridvibe@example.invalid")
+        self._run_git(repo_dir, "config", "user.name", "GridVibe Test")
+        self._run_git(repo_dir, "add", "new.txt")
+        session_id = self._create_explorer_session(repo_dir)
+
+        response = self.client.post(
+            f"/api/explorer/{session_id}/git/commit",
+            json={"message": "first commit"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            self._run_git(repo_dir, "log", "-1", "--pretty=%s").stdout.decode().strip(),
+            "first commit",
+        )
+
     def test_explorer_git_commit_requires_message(self):
         repo_dir = Path(self.temp_dir.name) / "repo"
         repo_dir.mkdir()
@@ -6641,6 +7987,29 @@ class ApiRoutesTestCase(unittest.TestCase):
         self._run_git(repo_dir, "add", ".")
         self._run_git(repo_dir, "commit", "-m", "initial")
         return repo_dir
+
+    def _init_scoped_git_repo(self, name: str = "scoped-repo") -> Path:
+        repo_dir = Path(self.temp_dir.name) / name
+        (repo_dir / "inscope").mkdir(parents=True)
+        (repo_dir / "outscope").mkdir()
+        (repo_dir / "inscope" / "a.txt").write_text("inside original\n", encoding="utf-8")
+        (repo_dir / "inscope" / "conflict.txt").write_text("base\n", encoding="utf-8")
+        (repo_dir / "inscope" / "delete.txt").write_text("delete original\n", encoding="utf-8")
+        (repo_dir / "inscope" / "odd [name].txt").write_text("odd original\n", encoding="utf-8")
+        (repo_dir / "outscope" / "b.txt").write_text("outside original\n", encoding="utf-8")
+        self._run_git(repo_dir, "init")
+        self._run_git(repo_dir, "config", "user.email", "gridvibe@example.invalid")
+        self._run_git(repo_dir, "config", "user.name", "GridVibe Test")
+        self._run_git(repo_dir, "add", ".")
+        self._run_git(repo_dir, "commit", "-m", "initial")
+        return repo_dir
+
+    def _scoped_git_post(self, session_id: str, endpoint: str, json=None):
+        return self.client.post(
+            f"/api/explorer/{session_id}/git/{endpoint}",
+            query_string={"scope": "path", "path": "inscope"},
+            json={} if json is None else json,
+        )
 
     def test_explorer_git_diff_distinguishes_worktree_and_staged(self):
         # ISSUE-2026-023: a partially staged file must expose its worktree hunks
@@ -6816,6 +8185,52 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(changes["second.txt"]["git"]["index_status"], "D")
         self.assertEqual(changes["new.txt"]["git"]["index_status"], "A")
 
+    def test_explorer_git_stage_all_changes_only_the_selected_scope(self):
+        repo_dir = self._init_scoped_git_repo()
+        inside = repo_dir / "inscope" / "a.txt"
+        outside = repo_dir / "outscope" / "b.txt"
+        inside.write_text("inside changed\n", encoding="utf-8")
+        (repo_dir / "inscope" / "delete.txt").unlink()
+        (repo_dir / "inscope" / "odd [name].txt").rename(
+            repo_dir / "inscope" / "renamed [name].txt"
+        )
+        (repo_dir / "inscope" / "new.txt").write_text("inside new\n", encoding="utf-8")
+        outside.write_text("outside changed\n", encoding="utf-8")
+        outside_untracked = repo_dir / "outscope" / "new.txt"
+        outside_untracked.write_text("outside new\n", encoding="utf-8")
+        outside_bytes = outside.read_bytes()
+        outside_index = self._run_git(
+            repo_dir, "ls-files", "--stage", "--", "outscope"
+        ).stdout
+        session_id = self._create_explorer_session(repo_dir)
+
+        response = self._scoped_git_post(session_id, "stage-all")
+
+        self.assertEqual(response.status_code, 200)
+        staged_paths = set(
+            filter(
+                None,
+                self._run_git(
+                    repo_dir, "diff", "--cached", "--name-only", "-z"
+                ).stdout.decode().split("\0"),
+            )
+        )
+        self.assertEqual(
+            staged_paths,
+            {
+                "inscope/a.txt",
+                "inscope/delete.txt",
+                "inscope/new.txt",
+                "inscope/renamed [name].txt",
+            },
+        )
+        self.assertEqual(outside.read_bytes(), outside_bytes)
+        self.assertEqual(
+            self._run_git(repo_dir, "ls-files", "--stage", "--", "outscope").stdout,
+            outside_index,
+        )
+        self.assertEqual(outside_untracked.read_text(encoding="utf-8"), "outside new\n")
+
     def test_explorer_git_stage_all_requires_a_repository(self):
         plain_dir = Path(self.temp_dir.name) / "plain"
         plain_dir.mkdir()
@@ -6823,6 +8238,121 @@ class ApiRoutesTestCase(unittest.TestCase):
         session_id = self._create_explorer_session(plain_dir)
 
         response = self.client.post(f"/api/explorer/{session_id}/git/stage-all", json={})
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("worktree", response.get_json()["error"].lower())
+
+    def test_explorer_git_unstage_all_clears_the_index_without_touching_the_worktree(self):
+        # Bulk form of the per-row Unstage: every staged change moves back to
+        # the worktree, and the files on disk are left exactly as they were.
+        repo_dir = self._init_committed_repo()
+        (repo_dir / "second.txt").write_text("second\n", encoding="utf-8")
+        self._run_git(repo_dir, "add", "second.txt")
+        self._run_git(repo_dir, "commit", "-m", "second file")
+        (repo_dir / "README.md").write_text("# Project\nchanged\n", encoding="utf-8")
+        (repo_dir / "second.txt").unlink()
+        (repo_dir / "new.txt").write_text("new\n", encoding="utf-8")
+        self._run_git(repo_dir, "add", "--all")
+        session_id = self._create_explorer_session(repo_dir)
+
+        response = self.client.post(f"/api/explorer/{session_id}/git/unstage-all", json={})
+
+        self.assertEqual(response.status_code, 200)
+        changes = {change["path"]: change for change in response.get_json()["changes"]}
+        self.assertEqual(changes["README.md"]["git"]["index_status"], ".")
+        self.assertEqual(changes["README.md"]["git"]["worktree_status"], "M")
+        self.assertEqual(changes["second.txt"]["git"]["index_status"], ".")
+        self.assertEqual(changes["second.txt"]["git"]["worktree_status"], "D")
+        self.assertEqual(changes["new.txt"]["git"]["status"], "untracked")
+        # Index-only: the worktree is untouched, so nothing edited is lost.
+        self.assertEqual(
+            (repo_dir / "README.md").read_text(encoding="utf-8"),
+            "# Project\nchanged\n",
+        )
+        self.assertEqual((repo_dir / "new.txt").read_text(encoding="utf-8"), "new\n")
+        self.assertFalse((repo_dir / "second.txt").exists())
+
+    def test_explorer_git_unstage_all_changes_only_the_selected_scope(self):
+        repo_dir = self._init_scoped_git_repo()
+        inside = repo_dir / "inscope" / "a.txt"
+        outside = repo_dir / "outscope" / "b.txt"
+        inside.write_text("inside staged\n", encoding="utf-8")
+        outside.write_text("outside staged\n", encoding="utf-8")
+        self._run_git(repo_dir, "add", "--all")
+        outside_bytes = outside.read_bytes()
+        outside_index = self._run_git(
+            repo_dir, "ls-files", "--stage", "--", "outscope"
+        ).stdout
+        session_id = self._create_explorer_session(repo_dir)
+
+        response = self._scoped_git_post(session_id, "unstage-all")
+
+        self.assertEqual(response.status_code, 200)
+        staged_paths = set(
+            filter(
+                None,
+                self._run_git(
+                    repo_dir, "diff", "--cached", "--name-only", "-z"
+                ).stdout.decode().split("\0"),
+            )
+        )
+        self.assertEqual(staged_paths, {"outscope/b.txt"})
+        self.assertEqual(inside.read_text(encoding="utf-8"), "inside staged\n")
+        self.assertEqual(outside.read_bytes(), outside_bytes)
+        self.assertEqual(
+            self._run_git(repo_dir, "ls-files", "--stage", "--", "outscope").stdout,
+            outside_index,
+        )
+
+    def test_explorer_git_unstage_all_before_the_first_commit(self):
+        # No HEAD to reset against: the same `rm --cached` fallback the
+        # single-path unstage uses has to carry the bulk form too.
+        repo_dir = Path(self.temp_dir.name) / "fresh"
+        repo_dir.mkdir()
+        self._run_git(repo_dir, "init")
+        (repo_dir / "new.txt").write_text("new\n", encoding="utf-8")
+        self._run_git(repo_dir, "add", "--all")
+        session_id = self._create_explorer_session(repo_dir)
+
+        response = self.client.post(f"/api/explorer/{session_id}/git/unstage-all", json={})
+
+        self.assertEqual(response.status_code, 200)
+        changes = {change["path"]: change for change in response.get_json()["changes"]}
+        self.assertEqual(changes["new.txt"]["git"]["status"], "untracked")
+        self.assertEqual((repo_dir / "new.txt").read_text(encoding="utf-8"), "new\n")
+
+    def test_explorer_git_unstage_all_before_first_commit_keeps_sibling_index(self):
+        repo_dir = Path(self.temp_dir.name) / "fresh-scoped"
+        (repo_dir / "inscope").mkdir(parents=True)
+        (repo_dir / "outscope").mkdir()
+        (repo_dir / "inscope" / "a.txt").write_text("inside\n", encoding="utf-8")
+        (repo_dir / "outscope" / "b.txt").write_text("outside\n", encoding="utf-8")
+        self._run_git(repo_dir, "init")
+        self._run_git(repo_dir, "add", "--all")
+        outside_index = self._run_git(
+            repo_dir, "ls-files", "--stage", "--", "outscope"
+        ).stdout
+        session_id = self._create_explorer_session(repo_dir)
+
+        response = self._scoped_git_post(session_id, "unstage-all")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            self._run_git(repo_dir, "ls-files", "--", "inscope").stdout,
+            b"",
+        )
+        self.assertEqual(
+            self._run_git(repo_dir, "ls-files", "--stage", "--", "outscope").stdout,
+            outside_index,
+        )
+
+    def test_explorer_git_unstage_all_requires_a_repository(self):
+        plain_dir = Path(self.temp_dir.name) / "plain-unstage"
+        plain_dir.mkdir()
+        (plain_dir / "file.txt").write_text("hello\n", encoding="utf-8")
+        session_id = self._create_explorer_session(plain_dir)
+
+        response = self.client.post(f"/api/explorer/{session_id}/git/unstage-all", json={})
 
         self.assertEqual(response.status_code, 400)
         self.assertIn("worktree", response.get_json()["error"].lower())
@@ -6869,6 +8399,146 @@ class ApiRoutesTestCase(unittest.TestCase):
         changes = {change["path"]: change for change in response.get_json()["changes"]}
         self.assertEqual(changes["README.md"]["git"]["index_status"], "M")
         self.assertEqual(changes["README.md"]["git"]["worktree_status"], ".")
+
+    def test_explorer_git_discard_all_changes_only_the_selected_scope(self):
+        repo_dir = self._init_scoped_git_repo()
+        inside = repo_dir / "inscope" / "a.txt"
+        inside_odd = repo_dir / "inscope" / "odd [name].txt"
+        inside_deleted = repo_dir / "inscope" / "delete.txt"
+        outside = repo_dir / "outscope" / "b.txt"
+        inside.write_text("inside staged\n", encoding="utf-8")
+        outside.write_text("outside staged\n", encoding="utf-8")
+        self._run_git(repo_dir, "add", "--all")
+        inside.write_text("inside staged\ninside worktree\n", encoding="utf-8")
+        inside_odd.write_text("odd worktree\n", encoding="utf-8")
+        inside_deleted.unlink()
+        outside.write_text("outside staged\noutside worktree\n", encoding="utf-8")
+        inside_untracked = repo_dir / "inscope" / "untracked.txt"
+        outside_untracked = repo_dir / "outscope" / "untracked.txt"
+        inside_untracked.write_text("inside untracked\n", encoding="utf-8")
+        outside_untracked.write_text("outside untracked\n", encoding="utf-8")
+        outside_bytes = outside.read_bytes()
+        outside_index = self._run_git(
+            repo_dir, "ls-files", "--stage", "--", "outscope"
+        ).stdout
+        session_id = self._create_explorer_session(repo_dir)
+
+        response = self._scoped_git_post(session_id, "discard-all")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(inside.read_text(encoding="utf-8"), "inside staged\n")
+        self.assertEqual(inside_odd.read_text(encoding="utf-8"), "odd original\n")
+        self.assertEqual(inside_deleted.read_text(encoding="utf-8"), "delete original\n")
+        self.assertEqual(outside.read_bytes(), outside_bytes)
+        self.assertEqual(
+            self._run_git(repo_dir, "ls-files", "--stage", "--", "outscope").stdout,
+            outside_index,
+        )
+        self.assertEqual(inside_untracked.read_text(encoding="utf-8"), "inside untracked\n")
+        self.assertEqual(outside_untracked.read_text(encoding="utf-8"), "outside untracked\n")
+
+    def test_explorer_git_discard_all_leaves_conflicts_untouched(self):
+        repo_dir = self._init_scoped_git_repo()
+        conflict = repo_dir / "inscope" / "conflict.txt"
+        ordinary = repo_dir / "inscope" / "a.txt"
+        base_branch = self._run_git(
+            repo_dir, "symbolic-ref", "--short", "HEAD"
+        ).stdout.decode().strip()
+        self._run_git(repo_dir, "checkout", "-b", "conflicting")
+        conflict.write_text("branch version\n", encoding="utf-8")
+        self._run_git(repo_dir, "add", "inscope/conflict.txt")
+        self._run_git(repo_dir, "commit", "-m", "branch conflict")
+        self._run_git(repo_dir, "checkout", base_branch)
+        conflict.write_text("base branch version\n", encoding="utf-8")
+        self._run_git(repo_dir, "add", "inscope/conflict.txt")
+        self._run_git(repo_dir, "commit", "-m", "base conflict")
+        merge = subprocess.run(
+            ["git", "merge", "conflicting"],
+            cwd=repo_dir,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        self.assertNotEqual(merge.returncode, 0)
+        conflict_bytes = conflict.read_bytes()
+        ordinary.write_text("discard me\n", encoding="utf-8")
+        session_id = self._create_explorer_session(repo_dir)
+
+        response = self._scoped_git_post(session_id, "discard-all")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(ordinary.read_text(encoding="utf-8"), "inside original\n")
+        self.assertEqual(conflict.read_bytes(), conflict_bytes)
+        self.assertIn(
+            b"UU inscope/conflict.txt",
+            self._run_git(repo_dir, "status", "--porcelain").stdout,
+        )
+
+    def test_explorer_git_scoped_commit_refuses_hidden_staged_paths(self):
+        repo_dir = self._init_scoped_git_repo()
+        (repo_dir / "inscope" / "a.txt").write_text("inside staged\n", encoding="utf-8")
+        (repo_dir / "outscope" / "b.txt").write_text("outside staged\n", encoding="utf-8")
+        self._run_git(repo_dir, "add", "--all")
+        head_before = self._run_git(repo_dir, "rev-parse", "HEAD").stdout
+        index_before = self._run_git(repo_dir, "ls-files", "--stage").stdout
+        session_id = self._create_explorer_session(repo_dir)
+
+        response = self._scoped_git_post(
+            session_id,
+            "commit",
+            {"message": "must not commit hidden changes"},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("outside the current Git scope", response.get_json()["error"])
+        self.assertIn("unstage", response.get_json()["error"].lower())
+        self.assertEqual(self._run_git(repo_dir, "rev-parse", "HEAD").stdout, head_before)
+        self.assertEqual(self._run_git(repo_dir, "ls-files", "--stage").stdout, index_before)
+
+    def test_explorer_git_scoped_commit_refuses_cross_scope_rename(self):
+        repo_dir = self._init_scoped_git_repo()
+        (repo_dir / "outscope" / "b.txt").rename(
+            repo_dir / "inscope" / "moved-from-outside.txt"
+        )
+        self._run_git(repo_dir, "add", "--all")
+        head_before = self._run_git(repo_dir, "rev-parse", "HEAD").stdout
+        session_id = self._create_explorer_session(repo_dir)
+
+        response = self._scoped_git_post(
+            session_id,
+            "commit",
+            {"message": "must not commit half-visible rename"},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("outside the current Git scope", response.get_json()["error"])
+        self.assertEqual(self._run_git(repo_dir, "rev-parse", "HEAD").stdout, head_before)
+
+    def test_explorer_git_scoped_commit_succeeds_when_all_staged_paths_are_visible(self):
+        repo_dir = self._init_scoped_git_repo()
+        inside = repo_dir / "inscope" / "a.txt"
+        outside = repo_dir / "outscope" / "b.txt"
+        inside.write_text("inside staged\n", encoding="utf-8")
+        self._run_git(repo_dir, "add", "--", "inscope/a.txt")
+        outside.write_text("outside worktree only\n", encoding="utf-8")
+        session_id = self._create_explorer_session(repo_dir)
+
+        response = self._scoped_git_post(
+            session_id,
+            "commit",
+            {"message": "visible scope only"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            self._run_git(repo_dir, "log", "-1", "--pretty=%s").stdout.decode().strip(),
+            "visible scope only",
+        )
+        self.assertEqual(outside.read_text(encoding="utf-8"), "outside worktree only\n")
+        self.assertIn(
+            b"outscope/b.txt",
+            self._run_git(repo_dir, "diff", "--name-only").stdout,
+        )
 
     def test_explorer_git_discard_all_rejects_when_nothing_unstaged(self):
         # A clean-or-untracked-only worktree is a clear error, and the
@@ -6921,8 +8591,26 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("(busy || !discardable.length) ? 'disabled'", html)
         self.assertIn("explorerGitCanBulkDiscard(file.git && file.git.status)", html)
         self.assertIn("title: 'Discard all changes?'", html)
+        self.assertIn(
+            "copy: 'Discard unstaged changes in tracked files in the current Git scope?'",
+            html,
+        )
+        self.assertIn("Staged versions and untracked files are kept.", html)
         self.assertIn(".explorer-git-section-title", html)
         self.assertIn(".explorer-git-section-actions", html)
+        # The Staged Changes header carries the mirror control: index-only,
+        # so it takes no confirm, and it is disabled with an empty index.
+        self.assertIn("data-explorer-git-unstage-all", html)
+        self.assertIn("function explorerGitUnstageAll(index)", html)
+        self.assertIn("performExplorerGitAction(index, 'unstage-all', {})", html)
+        unstage_all_button = html[
+            html.index("data-explorer-git-unstage-all"):
+        ][:200]
+        self.assertIn("(busy || !staged.length) ? 'disabled'", unstage_all_button)
+        unstage_all = html[
+            html.index("function explorerGitUnstageAll(index)"):
+        ][:200]
+        self.assertNotIn("openGenericConfirmModal", unstage_all)
 
     def test_terminals_page_git_change_rows_lead_with_the_file_name(self):
         # Change rows read "name — muted directory" with the status badge on the
@@ -6936,10 +8624,8 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn('class="explorer-diff-commit-file-dir"', html)
         # The badge trails the name and leads the inline actions; the full path
         # stays on the row.
-        row = html[
-            html.index('<div class="explorer-diff-commit-file" title='):
-            html.index("</div>\n            `;")
-        ]
+        row_start = html.index('<div class="explorer-diff-commit-file" title=')
+        row = html[row_start:html.index("</div>\n            `;", row_start)]
         self.assertIn("data-explorer-copy-path", row)
         self.assertLess(
             row.index('class="explorer-diff-commit-file-path"'),
@@ -6960,7 +8646,10 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         html = self._page_html(response)
         self.assertIn("const EXPLORER_GIT_WORKTREE_ENDPOINTS = new Set([", html)
-        self.assertIn("'stage', 'unstage', 'revert', 'commit', 'stage-all', 'discard-all',", html)
+        self.assertIn(
+            "'stage', 'unstage', 'revert', 'commit', 'stage-all', 'unstage-all', 'discard-all',",
+            html,
+        )
         self.assertIn("EXPLORER_GIT_WORKTREE_ENDPOINTS.has(endpoint)", html)
         self.assertIn("async function refreshExplorerAfterGitAction(index, actionPath)", html)
         refresh_fn = html[
@@ -7390,9 +9079,11 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(payload["encoding"], "utf-8")
         self.assertFalse(payload["truncated"])
         self.assertEqual(payload["size"], file_path.stat().st_size)
+        # The panel's existence travels with the file; its content does not.
         self.assertEqual(payload["preview_type"], "markdown")
-        self.assertIn("<h1>Project</h1>", payload["preview_html"])
+        self.assertIsNone(payload["preview_html"])
         self.assertEqual(payload["language"], "markdown")
+        self.assertIn("<h1>Project</h1>", self._preview_html(session_id, "README.md"))
 
     # ── In-app editor: read metadata ──
     def test_explorer_file_returns_editor_metadata_for_complete_file(self):
@@ -8041,18 +9732,12 @@ class ApiRoutesTestCase(unittest.TestCase):
         )
         session_id = self._create_explorer_session(repo_dir)
 
-        file_response = self.client.get(
-            f"/api/explorer/{session_id}/file",
-            query_string={"path": "README.md"},
-        )
+        preview_html = self._preview_html(session_id, "README.md")
 
-        self.assertEqual(file_response.status_code, 200)
-        payload = file_response.get_json()
-        self.assertEqual(payload["preview_type"], "markdown")
-        self.assertIn("<h1>Title</h1>", payload["preview_html"])
-        self.assertIn("<strong>Safe bold</strong>", payload["preview_html"])
-        self.assertNotIn("<script", payload["preview_html"])
-        self.assertNotIn("javascript:", payload["preview_html"])
+        self.assertIn("<h1>Title</h1>", preview_html)
+        self.assertIn("<strong>Safe bold</strong>", preview_html)
+        self.assertNotIn("<script", preview_html)
+        self.assertNotIn("javascript:", preview_html)
 
     def test_explorer_markdown_preview_keeps_fenced_code_language(self):
         repo_dir = Path(self.temp_dir.name) / "repo"
@@ -8064,13 +9749,8 @@ class ApiRoutesTestCase(unittest.TestCase):
         )
         session_id = self._create_explorer_session(repo_dir)
 
-        file_response = self.client.get(
-            f"/api/explorer/{session_id}/file",
-            query_string={"path": "README.md"},
-        )
+        preview_html = self._preview_html(session_id, "README.md")
 
-        self.assertEqual(file_response.status_code, 200)
-        preview_html = file_response.get_json()["preview_html"]
         # Fenced blocks keep their language hint so the client can syntax-highlight.
         self.assertIn('<code class="language-python">', preview_html)
         # Inline code stays classless and is left as plain monospace.
@@ -8085,13 +9765,8 @@ class ApiRoutesTestCase(unittest.TestCase):
         )
         session_id = self._create_explorer_session(repo_dir)
 
-        response = self.client.get(
-            f"/api/explorer/{session_id}/file",
-            query_string={"path": "diagram.md"},
-        )
+        preview_html = self._preview_html(session_id, "diagram.md")
 
-        self.assertEqual(response.status_code, 200)
-        preview_html = response.get_json()["preview_html"]
         self.assertIn('<code class="language-mermaid">', preview_html)
         self.assertIn("flowchart LR", preview_html)
         self.assertNotIn("<svg", preview_html)
@@ -8107,13 +9782,8 @@ class ApiRoutesTestCase(unittest.TestCase):
         )
         session_id = self._create_explorer_session(repo_dir)
 
-        file_response = self.client.get(
-            f"/api/explorer/{session_id}/file",
-            query_string={"path": "README.md"},
-        )
+        preview_html = self._preview_html(session_id, "README.md")
 
-        self.assertEqual(file_response.status_code, 200)
-        preview_html = file_response.get_json()["preview_html"]
         self.assertIn("The feed ends at &lt;img&gt; before this text.", preview_html)
         self.assertIn(
             '<img alt="Markdown image" src="https://example.com/image.png">',
@@ -8187,15 +9857,116 @@ class ApiRoutesTestCase(unittest.TestCase):
         )
         session_id = self._create_explorer_session(repo_dir)
 
-        file_response = self.client.get(
-            f"/api/explorer/{session_id}/file",
-            query_string={"path": "README.md"},
-        )
+        preview_html = self._preview_html(session_id, "README.md")
 
-        self.assertEqual(file_response.status_code, 200)
-        preview_html = file_response.get_json()["preview_html"]
         self.assertIn('<div class="md-callout md-callout-tip">', preview_html)
         self.assertIn("Helpful hint.", preview_html)
+
+    def test_explorer_file_preview_is_a_separate_bounded_read(self):
+        """0.4: the Markdown render is lazy, and it is still a *read*.
+
+        The file GET stopped rendering and sanitizing a preview for a panel the
+        reader may never select. What it kept is the field that says the panel
+        exists — `preview_type` — because a save answers with this same payload
+        and the client bails to a full pane rebuild whenever that flips.
+        """
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        (repo_dir / "README.md").write_text("# Title\n\nbody\n", encoding="utf-8")
+        (repo_dir / "notes.txt").write_text("# Not markdown\n", encoding="utf-8")
+        session_id = self._create_explorer_session(repo_dir)
+
+        file_payload = self.client.get(
+            f"/api/explorer/{session_id}/file",
+            query_string={"path": "README.md"},
+        ).get_json()
+        self.assertEqual(file_payload["preview_type"], "markdown")
+        self.assertIsNone(file_payload["preview_html"])
+
+        # The lazy read renders the same HTML the eager one used to.
+        self.assertIn("<h1>Title</h1>", self._preview_html(session_id, "README.md"))
+
+        # A save answers with the same shape, so the panel never blinks out of
+        # existence and the client never rebuilds the pane around it.
+        saved = self.client.put(
+            f"/api/explorer/{session_id}/file",
+            json={
+                "path": "README.md",
+                "content": "# Title\n\nedited\n",
+                "base_revision": file_payload["revision"],
+            },
+        )
+        self.assertEqual(saved.status_code, 200)
+        self.assertEqual(saved.get_json()["preview_type"], "markdown")
+        self.assertIsNone(saved.get_json()["preview_html"])
+        # ...and the next lazy read reflects the write.
+        self.assertIn("edited", self._preview_html(session_id, "README.md"))
+
+    def test_explorer_file_preview_carries_the_revision_source_was_read_at(self):
+        """Two reads need a token, or nobody can tell they disagree.
+
+        Source and Preview came from one read and were consistent by
+        construction; the lazy split made them two. The client's staleness
+        guard compares its own state before and after the flight, which catches
+        the *viewer* moving on and cannot catch the *file* moving on — so a
+        write landing between the two reads put a render of the newer bytes
+        beside Source's older ones. The preview now answers with the same
+        ``state_revision`` the file payload set as the change listener's
+        baseline, which is what makes the two comparable.
+        """
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        target = repo_dir / "README.md"
+        target.write_text("# Title\n\nbody\n", encoding="utf-8")
+        session_id = self._create_explorer_session(repo_dir)
+
+        file_payload = self.client.get(
+            f"/api/explorer/{session_id}/file",
+            query_string={"path": "README.md"},
+        ).get_json()
+        preview = self.client.get(
+            f"/api/explorer/{session_id}/file/preview",
+            query_string={"path": "README.md"},
+        ).get_json()
+
+        # Same token, same spelling: an unchanged file reads identically from
+        # both routes, so a matching pair is the ordinary case and not a
+        # coincidence the client has to interpret.
+        self.assertTrue(file_payload["state_revision"])
+        self.assertEqual(preview["state_revision"], file_payload["state_revision"])
+
+        # A write between the two reads is what the token exists to expose.
+        # The size moves, so this does not depend on mtime resolution.
+        target.write_text("# Title\n\nbody rewritten and longer\n", encoding="utf-8")
+        after = self.client.get(
+            f"/api/explorer/{session_id}/file/preview",
+            query_string={"path": "README.md"},
+        ).get_json()
+        self.assertNotEqual(after["state_revision"], file_payload["state_revision"])
+        # Still a read, and still the same bounded payload otherwise.
+        self.assertEqual(after["preview_type"], "markdown")
+        self.assertIn("rewritten", after["preview_html"])
+
+    def test_explorer_file_preview_refuses_what_it_cannot_preview(self):
+        """Same resolution and root confinement as every other bounded read."""
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        (repo_dir / "notes.txt").write_text("# Not markdown\n", encoding="utf-8")
+        outside = Path(self.temp_dir.name) / "outside.md"
+        outside.write_text("# Secret\n", encoding="utf-8")
+        session_id = self._create_explorer_session(repo_dir)
+
+        for path in ("notes.txt", "../outside.md", "missing.md"):
+            with self.subTest(path=path):
+                response = self.client.get(
+                    f"/api/explorer/{session_id}/file/preview",
+                    query_string={"path": path},
+                )
+                # A refusal, never a rendered body: not-Markdown and missing
+                # answer differently (400 / 404), and neither leaks content.
+                self.assertIn(response.status_code, (400, 404))
+                self.assertNotIn("Secret", response.get_data(as_text=True))
+                self.assertNotIn("preview_html", response.get_data(as_text=True))
 
     def test_explorer_file_does_not_preview_non_markdown_text(self):
         repo_dir = Path(self.temp_dir.name) / "repo"
@@ -8250,6 +10021,63 @@ class ApiRoutesTestCase(unittest.TestCase):
         for path, expected_language in cases.items():
             with self.subTest(path=path):
                 self.assertEqual(web_explorer._explorer_code_language(path), expected_language)
+
+    def test_explorer_code_language_covers_dockerfile_and_makefile_variants(self):
+        """A conventional family varies the name, not the extension."""
+        cases = {
+            "deploy/docker/Dockerfile_chss": "dockerfile",
+            "Dockerfile.dev": "dockerfile",
+            "dockerfile-prod": "dockerfile",
+            "api.dockerfile": "dockerfile",
+            "Makefile.local": "makefile",
+            "build.mk": "makefile",
+            # A real extension still wins over the name it happens to start with.
+            "dockerfile_parser.py": "python",
+            "makefile_helpers.sh": "shell",
+        }
+        for path, expected_language in cases.items():
+            with self.subTest(path=path):
+                self.assertEqual(web_explorer._explorer_code_language(path), expected_language)
+
+    def test_explorer_preview_language_decides_unknown_names_by_content(self):
+        """An unrecognised name is not a refusal; a bounded content sniff decides."""
+        reads: list[tuple[str, int]] = []
+
+        class SamplingBackend:
+            def __init__(self, content: bytes):
+                self.content = content
+
+            def read_file_prefix(self, file_path: str, max_bytes: int) -> bytes:
+                reads.append((file_path, max_bytes))
+                return self.content[:max_bytes]
+
+        text_backend = SamplingBackend(b"All rights reserved.\n")
+        for path in ("LICENSE", "Jenkinsfile", "scripts/entrypoint", "main.tf"):
+            with self.subTest(path=path):
+                self.assertIsNone(web_explorer._explorer_code_language(path))
+                self.assertEqual(
+                    web_explorer._explorer_preview_language(text_backend, path),
+                    "text",
+                )
+
+        # Only a bounded sample is read to make that decision, never the file.
+        self.assertTrue(reads)
+        for _, max_bytes in reads:
+            self.assertEqual(max_bytes, web_explorer.EXPLORER_BINARY_SAMPLE_BYTES + 1)
+
+        with self.assertRaises(ValueError):
+            web_explorer._explorer_preview_language(
+                SamplingBackend(b"binary\x00payload"),
+                "archive.bin",
+            )
+
+        # A recognised name still answers from the map, with no read at all.
+        reads.clear()
+        self.assertEqual(
+            web_explorer._explorer_preview_language(text_backend, "Dockerfile_chss"),
+            "dockerfile",
+        )
+        self.assertEqual(reads, [])
 
     def test_explorer_file_rejects_path_outside_root(self):
         repo_dir = Path(self.temp_dir.name) / "repo"
@@ -8594,10 +10422,10 @@ class ApiRoutesTestCase(unittest.TestCase):
 
     def test_explorer_go_workflow_files_are_editor_eligible(self):
         """Wave 2 / 2.b (OD-2): go.mod and peers resolve to a preview language."""
-        self.assertEqual(web_explorer._explorer_editor_language("go.mod"), "go")
-        self.assertEqual(web_explorer._explorer_editor_language("go.sum"), "text")
-        self.assertEqual(web_explorer._explorer_editor_language("go.work"), "go")
-        self.assertEqual(web_explorer._explorer_editor_language("go.work.sum"), "text")
+        self.assertEqual(web_explorer._explorer_code_language("go.mod"), "go")
+        self.assertEqual(web_explorer._explorer_code_language("go.sum"), "text")
+        self.assertEqual(web_explorer._explorer_code_language("go.work"), "go")
+        self.assertEqual(web_explorer._explorer_code_language("go.work.sum"), "text")
 
     def test_explorer_file_serves_go_mod(self):
         """Wave 2 / 2.b (OD-2): GET on go.mod no longer 400s and resolves to go."""
@@ -8639,10 +10467,11 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(payload["content"], body)
         self.assertEqual(payload["total_size"], len(body.encode("utf-8")))
 
-    def test_explorer_file_rejects_unsupported_editor_format(self):
+    def test_explorer_file_rejects_unknown_format_with_binary_content(self):
+        """An unrecognised name is decided by its content, and binary is refused."""
         repo_dir = Path(self.temp_dir.name) / "repo"
         repo_dir.mkdir()
-        (repo_dir / "archive.bin").write_bytes(b"plain bytes without nul")
+        (repo_dir / "archive.bin").write_bytes(b"binary\x00payload")
         session_id = self._create_explorer_session(repo_dir)
 
         file_response = self.client.get(
@@ -8651,9 +10480,37 @@ class ApiRoutesTestCase(unittest.TestCase):
         )
 
         self.assertEqual(file_response.status_code, 400)
-        self.assertIn("format is not supported", file_response.get_json()["error"])
+        self.assertIn("binary", file_response.get_json()["error"])
 
-    def test_explorer_file_rejects_unsupported_remote_editor_format(self):
+    def test_explorer_file_serves_unknown_extension_text_as_plain_text(self):
+        """Dockerfile_chss and peers open: the name is not an allowlist."""
+        repo_dir = Path(self.temp_dir.name) / "repo"
+        repo_dir.mkdir()
+        (repo_dir / "Dockerfile_chss").write_text("FROM python:3.12\nRUN echo hi\n")
+        (repo_dir / "LICENSE").write_text("All rights reserved.\n")
+        session_id = self._create_explorer_session(repo_dir)
+
+        dockerfile_response = self.client.get(
+            f"/api/explorer/{session_id}/file",
+            query_string={"path": "Dockerfile_chss"},
+        )
+        licence_response = self.client.get(
+            f"/api/explorer/{session_id}/file",
+            query_string={"path": "LICENSE"},
+        )
+
+        self.assertEqual(dockerfile_response.status_code, 200)
+        dockerfile_payload = dockerfile_response.get_json()
+        self.assertEqual(dockerfile_payload["language"], "dockerfile")
+        self.assertIn("FROM python:3.12", dockerfile_payload["content"])
+        self.assertTrue(dockerfile_payload["editable"])
+
+        self.assertEqual(licence_response.status_code, 200)
+        licence_payload = licence_response.get_json()
+        self.assertEqual(licence_payload["language"], "text")
+        self.assertIn("All rights reserved.", licence_payload["content"])
+
+    def test_explorer_file_rejects_unknown_remote_format_with_binary_content(self):
         group = api.session_manager.create_group(
             name="SSH",
             connection_mode="ssh",
@@ -8672,7 +10529,11 @@ class ApiRoutesTestCase(unittest.TestCase):
         fake_sftp = FakeSftp(
             {
                 "/srv/app": {"type": "directory"},
-                "/srv/app/archive.bin": {"type": "file", "content": b"plain bytes"},
+                "/srv/app/archive.bin": {"type": "file", "content": b"binary\x00payload"},
+                "/srv/app/Dockerfile_chss": {
+                    "type": "file",
+                    "content": b"FROM python:3.12\n",
+                },
             }
         )
 
@@ -8681,9 +10542,15 @@ class ApiRoutesTestCase(unittest.TestCase):
                 f"/api/explorer/{session.session_id}/file",
                 query_string={"path": "archive.bin"},
             )
+            dockerfile_response = self.client.get(
+                f"/api/explorer/{session.session_id}/file",
+                query_string={"path": "Dockerfile_chss"},
+            )
 
         self.assertEqual(response.status_code, 400)
-        self.assertIn("format is not supported", response.get_json()["error"])
+        self.assertIn("binary", response.get_json()["error"])
+        self.assertEqual(dockerfile_response.status_code, 200)
+        self.assertEqual(dockerfile_response.get_json()["language"], "dockerfile")
 
     def test_create_sessions_uses_cmd_label_for_local_repo_cmd_panes(self):
         sessions_payload = {
@@ -9721,6 +11588,9 @@ class ApiRoutesTestCase(unittest.TestCase):
                             "startup_mode": "explorer",
                             "explorer_tree_open": True,
                             "explorer_git_open": True,
+                            "explorer_git_follow_browsing": True,
+                            "explorer_git_pin_active": True,
+                            "explorer_git_pinned_path": "nested/repo",
                             "explorer_search_open": True,
                             "explorer_open_tabs": ["README.md"],
                             "explorer_active_tab": "README.md",
@@ -9745,6 +11615,9 @@ class ApiRoutesTestCase(unittest.TestCase):
         reopened = api.session_manager.get_session(session.session_id)
         self.assertTrue(reopened.explorer_tree_open)
         self.assertTrue(reopened.explorer_git_open)
+        self.assertTrue(reopened.explorer_git_follow_browsing)
+        self.assertTrue(reopened.explorer_git_pin_active)
+        self.assertEqual(reopened.explorer_git_pinned_path, "nested/repo")
         self.assertTrue(reopened.explorer_search_open)
         self.assertEqual(reopened.explorer_open_tabs, ["README.md"])
         self.assertEqual(reopened.explorer_active_tab, "README.md")
@@ -11196,11 +13069,19 @@ class ApiRoutesTestCase(unittest.TestCase):
                                     api._connect_local_session("abc123", session)
 
         winpty.spawn.assert_called_once()
-        command_line = winpty.spawn.call_args.args[0]
-        self.assertIn("wsl.exe", command_line)
-        self.assertIn("--distribution Debian", command_line)
-        self.assertIn("--user devuser", command_line)
-        self.assertIn('--cd /mnt/c/repo', command_line)
+        command_args = winpty.spawn.call_args.args[0]
+        self.assertEqual(
+            command_args,
+            [
+                "wsl.exe",
+                "--distribution",
+                "Debian",
+                "--user",
+                "devuser",
+                "--cd",
+                "/mnt/c/repo",
+            ],
+        )
 
     def test_connect_local_session_uses_powershell_when_requested(self):
         session = SimpleNamespace(
@@ -11224,9 +13105,12 @@ class ApiRoutesTestCase(unittest.TestCase):
                                 api._connect_local_session("abc123", session)
 
         winpty.spawn.assert_called_once()
-        command_line = winpty.spawn.call_args.args[0]
-        self.assertIn("powershell.exe", command_line)
-        self.assertIn("-NoLogo", command_line)
+        command_args = winpty.spawn.call_args.args[0]
+        self.assertEqual(command_args[:4], ["powershell.exe", "-NoLogo", "-NoExit", "-Command"])
+        self.assertEqual(
+            command_args[4],
+            web_terminal_io.shell_integration_arguments("powershell")[2],
+        )
 
     def test_connect_local_session_requires_pywinpty_on_windows(self):
         session = SimpleNamespace(
@@ -11563,6 +13447,51 @@ class ApiRoutesTestCase(unittest.TestCase):
                 "session_id": session.session_id,
                 "data": "bootprompt",
             },
+        )
+
+    def test_join_session_replays_mode_sequences_inside_the_handler(self):
+        """ISSUE-2026-038 — the client resets a crashed TUI's mouse reporting
+        after the replay, sequenced on the join acknowledgement.
+
+        Two server-side premises hold that up. The replay is emitted *inside*
+        the handler, so the ack packet written when the handler returns can
+        never overtake it; and the replay is not filtered for mode-setting
+        sequences, because a rejoin to a pane whose TUI is still running has to
+        restore that program's mouse reporting.
+        """
+        api.session_manager.create_group(
+            name="Modes",
+            connection_mode="ssh",
+            layout="single",
+            terminal_count=1,
+            group_id="group-modes",
+        )
+        session = api.session_manager.create_session(
+            group_id="group-modes",
+            host="10.0.0.13",
+            directory="/tmp/project",
+        )
+
+        api._cache_terminal_output(session.session_id, "\x1b[?1003h\x1b[?1006hframe")
+
+        socket_client = api.socketio.test_client(
+            api.app,
+            flask_test_client=self.client,
+        )
+        self.addCleanup(socket_client.disconnect)
+
+        socket_client.emit("join_session", {"session_id": session.session_id})
+        # No sleep, no background-task flush: the replay is already queued by
+        # the time the handler has returned.
+        events = socket_client.get_received()
+
+        terminal_output_events = [
+            event for event in events if event["name"] == "terminal_output"
+        ]
+        self.assertEqual(len(terminal_output_events), 1)
+        self.assertEqual(
+            terminal_output_events[0]["args"][0]["data"],
+            "\x1b[?1003h\x1b[?1006hframe",
         )
 
     def test_join_session_replays_buffer_only_once_per_socket_client(self):
@@ -12263,9 +14192,25 @@ class ExplorerGitRevisionTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 201)
         return response.get_json()["sessions"][0]["session_id"]
 
-    def _git_state(self, session_id: str, known: str = ""):
-        query = f"?known={known}" if known else ""
-        return self.client.get(f"/api/explorer/{session_id}/git/state{query}")
+    def _git_state(
+        self,
+        session_id: str,
+        known: str = "",
+        path: str = "",
+        *,
+        path_scope: bool = False,
+    ):
+        query = {}
+        if known:
+            query["known"] = known
+        if path:
+            query["path"] = path
+        if path_scope:
+            query["scope"] = "path"
+        return self.client.get(
+            f"/api/explorer/{session_id}/git/state",
+            query_string=query,
+        )
 
     # ── Revision helper ─────────────────────────────────────────────────────
 
@@ -12337,6 +14282,14 @@ class ExplorerGitRevisionTestCase(unittest.TestCase):
             web_explorer._git_repo_revision(other, changes),
         )
 
+    def test_revision_changes_when_the_nested_repository_anchor_changes(self):
+        context = self._base_context()
+
+        first = web_explorer._git_repo_revision({**context, "repo_path": "repo-a"}, [])
+        second = web_explorer._git_repo_revision({**context, "repo_path": "repo-b"}, [])
+
+        self.assertNotEqual(first, second)
+
     def test_equal_semantic_state_in_two_roots_shares_revision(self):
         first_repo = self._init_committed_repo("repo-a")
         second_repo = self._init_committed_repo("repo-b")
@@ -12367,6 +14320,76 @@ class ExplorerGitRevisionTestCase(unittest.TestCase):
         (sub_dir / "inside.txt").write_text("inside\n\nchanged\n", encoding="utf-8")
         after_inside = self._git_state(session_id).get_json()["revision"]
         self.assertNotEqual(baseline, after_inside)
+
+    def test_browsed_path_only_changes_git_scope_when_following_is_enabled(self):
+        repo_dir = self._init_committed_repo()
+        source_dir = repo_dir / "src"
+        source_dir.mkdir()
+        source_file = source_dir / "inside.txt"
+        source_file.write_text("inside\n", encoding="utf-8")
+        self._run_git(repo_dir, "add", ".")
+        self._run_git(repo_dir, "commit", "-m", "add source")
+        source_file.write_text("inside\nchanged\n", encoding="utf-8")
+        session_id = self._create_explorer_session(Path(self.temp_dir.name))
+
+        root_scoped = self.client.get(
+            f"/api/explorer/{session_id}/git/repo",
+            query_string={"path": "repo/src"},
+        )
+        response = self.client.get(
+            f"/api/explorer/{session_id}/git/repo",
+            query_string={"scope": "path", "path": "repo/src"},
+        )
+
+        self.assertEqual(root_scoped.status_code, 400)
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["anchor_path"].replace("\\", "/"), "repo/src")
+        self.assertEqual(payload["git"]["repo_path"].replace("\\", "/"), "repo")
+        self.assertEqual(payload["git"]["repo_name"], "repo")
+        self.assertEqual([item["path"].replace("\\", "/") for item in payload["changes"]], ["repo/src/inside.txt"])
+
+    def test_navigation_does_not_narrow_a_root_scoped_git_tree(self):
+        repo_dir = self._init_committed_repo()
+        source_dir = repo_dir / "src"
+        source_dir.mkdir()
+        source_file = source_dir / "inside.txt"
+        source_file.write_text("inside\n", encoding="utf-8")
+        self._run_git(repo_dir, "add", ".")
+        self._run_git(repo_dir, "commit", "-m", "add source")
+        (repo_dir / "README.md").write_text("# Project\n\nroot change\n", encoding="utf-8")
+        source_file.write_text("inside\nsource change\n", encoding="utf-8")
+        session_id = self._create_explorer_session(repo_dir)
+
+        root_scoped = self.client.get(
+            f"/api/explorer/{session_id}/git/repo",
+            query_string={"path": "src"},
+        ).get_json()
+        followed = self.client.get(
+            f"/api/explorer/{session_id}/git/repo",
+            query_string={"scope": "path", "path": "src"},
+        ).get_json()
+
+        self.assertEqual(root_scoped["anchor_path"], "")
+        self.assertEqual(
+            {item["path"].replace("\\", "/") for item in root_scoped["changes"]},
+            {"README.md", "src/inside.txt"},
+        )
+        self.assertEqual(followed["anchor_path"].replace("\\", "/"), "src")
+        self.assertEqual(
+            [item["path"].replace("\\", "/") for item in followed["changes"]],
+            ["src/inside.txt"],
+        )
+
+    def test_two_repositories_below_one_root_have_distinct_revisions(self):
+        self._init_committed_repo("repo-a")
+        self._init_committed_repo("repo-b")
+        session_id = self._create_explorer_session(Path(self.temp_dir.name))
+
+        first = self._git_state(session_id, path="repo-a", path_scope=True).get_json()
+        second = self._git_state(session_id, path="repo-b", path_scope=True).get_json()
+
+        self.assertNotEqual(first["revision"], second["revision"])
 
     # ── Route ───────────────────────────────────────────────────────────────
 
@@ -12495,6 +14518,58 @@ class ExplorerGitRevisionTestCase(unittest.TestCase):
         self.assertRegex(commit_revision, r"^[0-9a-f]{16}$")
         self.assertNotIn(commit_revision, {repo_revision, stage_revision})
         self.assertEqual(commit_revision, self._git_state(session_id).get_json()["revision"])
+
+    def test_all_git_mutations_share_the_selected_root_or_followed_anchor(self):
+        root = Path(self.temp_dir.name) / "root"
+        current = root / "nested"
+        current.mkdir(parents=True)
+        target = current / "file.txt"
+        target.write_text("content\n", encoding="utf-8")
+        session_id = self._create_explorer_session(root)
+        summary = {
+            "anchor_path": "",
+            "git": {},
+            "changes": [],
+            "commits": [],
+            "revision": "0123456789abcdef",
+        }
+        cases = (
+            ("stage", "_git_stage_path", {"path": "nested/file.txt"}),
+            ("unstage", "_git_unstage_path", {"path": "nested/file.txt"}),
+            ("stage-all", "_git_stage_all_paths", {}),
+            ("unstage-all", "_git_unstage_all_paths", {}),
+            ("discard-all", "_git_discard_all_paths", {}),
+            ("revert", "_git_revert_path", {"path": "nested/file.txt"}),
+            ("commit", "_git_commit", {"message": "message"}),
+            ("publish", "_git_publish", {}),
+        )
+
+        scopes = (
+            ("root", {"path": "nested"}, root.resolve()),
+            ("follow", {"scope": "path", "path": "nested"}, current.resolve()),
+        )
+        for scope, query, expected_anchor in scopes:
+            for endpoint, helper_name, body in cases:
+                with self.subTest(scope=scope, endpoint=endpoint), patch.object(
+                    api, helper_name
+                ) as action, patch.object(
+                    api, "_get_git_repo_summary", return_value=summary
+                ) as get_summary:
+                    response = self.client.post(
+                        f"/api/explorer/{session_id}/git/{endpoint}",
+                        query_string=query,
+                        json=body,
+                    )
+
+                    self.assertEqual(response.status_code, 200)
+                    action.assert_called_once()
+                    self.assertEqual(action.call_args.args[1], str(root.resolve()))
+                    self.assertEqual(action.call_args.args[-1], str(expected_anchor))
+                    get_summary.assert_called_once()
+                    self.assertEqual(
+                        get_summary.call_args.args[1:],
+                        (str(root.resolve()), str(expected_anchor)),
+                    )
 
 
 class ExplorerFileStateTestCase(unittest.TestCase):
@@ -12724,11 +14799,11 @@ class ExplorerGitWatchFrontendTestCase(unittest.TestCase):
         self.assertIn("performance.now()", watch)
 
     def test_quiet_refresh_helper_contract(self):
-        viewer = self._static("js/explorer-viewer.js")
-        self.assertIn("async function refreshExplorerGitRepoQuiet(index)", viewer)
-        quiet_fn = viewer[
-            viewer.index("async function refreshExplorerGitRepoQuiet"):
-            viewer.index("function applyExplorerGitRepoQuiet")
+        sidebar = self._static("js/explorer-git-sidebar.js")
+        self.assertIn("async function refreshExplorerGitRepoQuiet(index)", sidebar)
+        quiet_fn = sidebar[
+            sidebar.index("async function refreshExplorerGitRepoQuiet"):
+            sidebar.index("function applyExplorerGitRepoQuiet")
         ]
         # Forced + quiet: no invalidate (which would flash the Loading
         # placeholder), only a CSS class toggle on the existing panel.
@@ -12736,8 +14811,8 @@ class ExplorerGitWatchFrontendTestCase(unittest.TestCase):
         self.assertIn("git-refreshing", quiet_fn)
         self.assertNotIn("_explorerGitRepoLoading = true", quiet_fn)
         self.assertIn("cache: 'no-store'", quiet_fn)
-        self.assertIn("function applyExplorerGitRepoQuiet(index, data)", viewer)
-        self.assertIn("_explorerGitRevision", viewer)
+        self.assertIn("function applyExplorerGitRepoQuiet(index, data)", sidebar)
+        self.assertIn("_explorerGitRevision", sidebar)
         # Tab badges re-render only when the badge map actually changed — the
         # sync itself moved with the tab domain (explorer-tabs.js).
         self.assertIn("badgesChanged", self._static("js/explorer-tabs.js"))
@@ -12745,9 +14820,9 @@ class ExplorerGitWatchFrontendTestCase(unittest.TestCase):
         self.assertIn(".explorer-git-panel.git-refreshing", css)
 
     def test_suspended_watch_renders_muted_pause_line(self):
-        viewer = self._static("js/explorer-viewer.js")
-        self.assertIn("Live updates paused", viewer)
-        self.assertIn("_explorerGitWatchSuspended", viewer)
+        sidebar = self._static("js/explorer-git-sidebar.js")
+        self.assertIn("Live updates paused", sidebar)
+        self.assertIn("_explorerGitWatchSuspended", sidebar)
         css = self._static("css/terminals.css")
         self.assertIn(".explorer-git-watch-paused", css)
 
@@ -12793,7 +14868,7 @@ class ExplorerGitWatchFrontendTestCase(unittest.TestCase):
         self.assertIn("async function refreshExplorerOpenFileQuiet(index)", viewer)
         quiet_fn = viewer[
             viewer.index("async function refreshExplorerOpenFileQuiet"):
-            viewer.index("function applyExplorerGitRepoQuiet")
+            viewer.index("function explorerEntriesSignature")
         ]
         # Quiet: no loading placeholder, no tree/pane reload, and never against
         # an open editor buffer.
@@ -12813,7 +14888,8 @@ class ExplorerGitWatchFrontendTestCase(unittest.TestCase):
         watch = self._static("js/explorer-git-watch.js")
         # One request, two baselines: the listing/tree consumer rides the same
         # /git/state poll the sidebar uses rather than adding an endpoint.
-        self.assertEqual(watch.count("/git/state?known="), 1)
+        self.assertEqual(watch.count("explorerGitRequestUrl("), 1)
+        self.assertIn("'state'", watch)
         self.assertIn("function explorerFsWatchConsumer(pane)", watch)
         self.assertIn("_explorerFsWatchRevision", watch)
         self.assertIn("refreshExplorerFilesystemSurfacesQuiet(index)", watch)
@@ -12851,7 +14927,7 @@ class ExplorerGitWatchFrontendTestCase(unittest.TestCase):
                 self.assertIn(helper, viewer)
         quiet_fn = viewer[
             viewer.index("function explorerEntriesSignature(entries)"):
-            viewer.index("async function performExplorerGitAction")
+            viewer.index("function explorerResolveFileView")
         ]
         self.assertIn("cache: 'no-store'", quiet_fn)
         # Quiet: no loading placeholder, no tab/scroll/search reset, and never
@@ -12887,7 +14963,7 @@ class ExplorerGitWatchFrontendTestCase(unittest.TestCase):
         self.assertIn("pinnedTab.git = preview.git || null;", promote_fn)
 
     def test_empty_diff_falls_back_to_the_file_content_view(self):
-        viewer = self._static("js/explorer-viewer.js")
+        viewer = self._static("js/explorer-diff.js")
         self.assertIn("function explorerFallbackFromEmptyDiff(index)", viewer)
         fallback = viewer[
             viewer.index("function explorerFallbackFromEmptyDiff(index)"):
@@ -13018,6 +15094,42 @@ class ExplorerSourceSelectionHighlightTestCase(unittest.TestCase):
         self.assertIn("state.seekOffset = null;", resolve)
         self.assertIn("state.activeIndex = explorerResolveSearchActiveIndex(state, ranges);", viewer)
 
+    def test_repo_search_highlights_the_picked_hit_and_nothing_before_that(self):
+        # The panel's `active` row means "this is the location you are looking
+        # at". Arriving results used to select hit 0, so a permanent highlight
+        # sat on the first line of the first file the reader had never opened
+        # — and it made the first Enter step to the *second* hit.
+        search = self._static("js/explorer-search.js")
+        arrival = search[
+            search.index("state.payload = data;"):
+            search.index("} catch (error) {")
+        ]
+        self.assertIn("state.activeHit = -1;", arrival)
+        self.assertNotIn("state.activeHit = files.length ? 0 : -1;", search)
+        # Clicking a hit is what makes it active, resolved by path:line against
+        # the same flattened list Enter/Arrow stepping walks.
+        self.assertIn("function explorerRepoSearchHitIndex(state, path, line)", search)
+        self.assertIn("hit.path === path && Number(hit.line) === Number(line)", search)
+        click = search[
+            search.index("results.querySelectorAll('[data-explorer-search-path]')"):
+            search.index("results.querySelector('[data-explorer-search-retry]')")
+        ]
+        self.assertIn("const hitIndex = explorerRepoSearchHitIndex(state, path, line);", click)
+        self.assertIn("state.activeHit = hitIndex;", click)
+        self.assertLess(
+            click.index("state.activeHit = hitIndex;"),
+            click.index("activateExplorerSearchHit(index, path, line, {"),
+        )
+        # With nothing selected, Enter and the arrows open hit 0 rather than
+        # skipping it.
+        keys = search[
+            search.index("function handleExplorerRepoSearchKeydown(index, event)"):
+            search.index("async function activateExplorerSearchHit(")
+        ]
+        self.assertIn("state.activeHit < 0", keys)
+        # A new query, a cleared panel and an error all deselect.
+        self.assertNotIn("state.activeHit = 0;", search)
+
     def test_repo_search_hit_uses_exact_source_line_without_local_find(self):
         search = self._static("js/explorer-search.js")
         activation = search[
@@ -13081,13 +15193,19 @@ class ExplorerSourceSelectionHighlightTestCase(unittest.TestCase):
         # the expression, which broke whenever the decision gained an unrelated
         # term (the editor underlay's fold opt-out).
         renderer = viewer[
-            viewer.index("function renderExplorerSourceLines("):
+            viewer.index("function explorerSourceRowModel("):
             viewer.index("function explorerRevealMarkdownSearchMatches")
         ]
         collapse_decision = next(
             line for line in renderer.splitlines() if "const allowMarkdownCollapse" in line
         )
         self.assertNotIn("searchRanges", collapse_decision)
+        # Stronger than the line above, and the reason it cannot regress: the
+        # row model — which resolves which rows a fold set leaves standing —
+        # is not passed the search ranges at all. They reach the per-row code
+        # cell, which is the only thing a find repaint touches.
+        model = renderer[: renderer.index("function explorerSourceRowCodeHtml(")]
+        self.assertNotIn("searchRanges", model)
         self.assertNotIn(
             "normalizedLanguage === 'markdown' && !searchRanges.length", viewer
         )
@@ -14197,7 +16315,11 @@ class GuardrailAuditFixesTestCase(unittest.TestCase):
         "js/lifecycle.js",
         "js/launcher.js",
         "js/terminals.js",
+        "js/explorer-worker-core.js",
+        "js/explorer-worker-client.js",
+        "js/explorer-worker.js",
         "js/explorer-viewer.js",
+        "js/explorer-diff.js",
         "js/explorer-tabs.js",
         "js/explorer-editor.js",
         "js/explorer-search.js",
@@ -14301,6 +16423,7 @@ class ExtractedFrontendAssetsTestCase(unittest.TestCase):
         self.assertIn(f"/static/js/terminal-icons.js?v={__version__}", terminals_html)
         self.assertIn(f"/static/js/voice-input.js?v={__version__}", terminals_html)
         self.assertIn(f"/static/js/explorer-viewer.js?v={__version__}", terminals_html)
+        self.assertIn(f"/static/js/explorer-git-sidebar.js?v={__version__}", terminals_html)
         self.assertIn(f"/static/js/explorer-editor.js?v={__version__}", terminals_html)
         self.assertIn(f"/static/js/explorer-fs.js?v={__version__}", terminals_html)
         self.assertIn(f"/static/js/terminals.js?v={__version__}", terminals_html)
@@ -14333,6 +16456,43 @@ class ExtractedFrontendAssetsTestCase(unittest.TestCase):
         self.assertLess(
             terminals_html.index("js/voice-input.js"),
             terminals_html.index("js/explorer-viewer.js"),
+        )
+        # The DOM-free worker transform and its lazy shared pool load before
+        # both paint adapters. They are terminals-only; the launcher has no
+        # Source or Diff surface to tokenize.
+        for worker_asset in ("explorer-worker-core.js", "explorer-worker-client.js"):
+            self.assertIn(f"/static/js/{worker_asset}?v={__version__}", terminals_html)
+            self.assertNotIn(f"js/{worker_asset}", launcher_html)
+        self.assertLess(
+            terminals_html.index("js/explorer-worker-core.js"),
+            terminals_html.index("js/explorer-worker-client.js"),
+        )
+        self.assertLess(
+            terminals_html.index("js/explorer-worker-client.js"),
+            terminals_html.index("js/explorer-viewer.js"),
+        )
+        # explorer-git-sidebar.js is the Git domain lifted out of
+        # explorer-viewer.js by guardrail 6's standing extraction trigger.
+        self.assertNotIn("js/explorer-git-sidebar.js", launcher_html)
+        self.assertLess(
+            terminals_html.index("js/explorer-viewer.js"),
+            terminals_html.index("js/explorer-git-sidebar.js"),
+        )
+        self.assertLess(
+            terminals_html.index("js/explorer-git-sidebar.js"),
+            terminals_html.index("js/terminals.js"),
+        )
+        # explorer-diff.js is the Diff domain lifted out of explorer-viewer.js
+        # by guardrail 6's extraction trigger, and loads directly after it.
+        self.assertIn(f"/static/js/explorer-diff.js?v={__version__}", terminals_html)
+        self.assertNotIn("js/explorer-diff.js", launcher_html)
+        self.assertLess(
+            terminals_html.index("js/explorer-viewer.js"),
+            terminals_html.index("js/explorer-diff.js"),
+        )
+        self.assertLess(
+            terminals_html.index("js/explorer-diff.js"),
+            terminals_html.index("js/terminals.js"),
         )
         # explorer-tabs.js is the tab domain lifted out of explorer-viewer.js;
         # the two are one surface split across two files and load as a pair,
@@ -14393,6 +16553,13 @@ class ExtractedFrontendAssetsTestCase(unittest.TestCase):
             terminals_html.index("js/terminal-shell.js"),
             terminals_html.index("js/terminals.js"),
         )
+        # terminal-modes.js (mouse-reporting recovery) is DOM-free policy that
+        # terminals.js calls into, so it has to be defined before it.
+        self.assertIn(f"/static/js/terminal-modes.js?v={__version__}", terminals_html)
+        self.assertLess(
+            terminals_html.index("js/terminal-modes.js"),
+            terminals_html.index("js/terminals.js"),
+        )
 
     def test_extracted_assets_are_served_without_jinja(self):
         for filename in (
@@ -14405,6 +16572,7 @@ class ExtractedFrontendAssetsTestCase(unittest.TestCase):
             "js/terminal-icons.js",
             "js/voice-input.js",
             "js/explorer-viewer.js",
+            "js/explorer-diff.js",
             "js/explorer-tabs.js",
             "js/explorer-editor.js",
             "js/explorer-search.js",
@@ -14490,8 +16658,16 @@ class ExtractedFrontendAssetsTestCase(unittest.TestCase):
         """Finding 1.1 step 3 — room-scoped session_status requires explorer
         and browser panes to join their session rooms like terminal panes."""
         terminals = self.client.get("/static/js/terminals.js").get_data(as_text=True)
-        join_calls = terminals.count("socket.emit('join_session'")
-        self.assertGreaterEqual(join_calls, 4)
+        # Every path that puts a live session on screen joins its room, whatever
+        # kind of pane it is — the initial load, a pane replaced in place, and a
+        # pane created by a split.
+        for function_name in (
+            "function replacePaneWithTerminal(index, session) {",
+            "async function splitTerminalPane(index, axis) {",
+        ):
+            with self.subTest(function=function_name):
+                body = terminals[terminals.index(function_name):]
+                self.assertIn("socket.emit('join_session'", body[:body.index("\n    }\n")])
         # The initial-load join loop must not filter sessions by pane type.
         load_join = terminals[terminals.index("data.sessions.forEach(session => {"):]
         load_join = load_join[:load_join.index("});")]
@@ -15220,6 +17396,91 @@ class AgentInputTrackingLockTestCase(unittest.TestCase):
         self.assertEqual(connection["_gridvibe_input_line"], "")
 
 
+class ExplorerPaneDisposalTestCase(unittest.TestCase):
+    """Every path that discards an explorer pane gives its work back.
+
+    The behaviour itself is executed in tests/test_explorer_repaint.py; this is
+    a served-asset check because no Node harness loads terminals.js, and it is
+    kept to the call name for that reason.
+    """
+
+    DISPOSAL_PATHS = (
+        ("function teardownCurrentGrid()", "function createPaneInstance(session)"),
+        ("function replaceSessionPaneMode(index, session)", "function showExplorerCwdNotice("),
+        ("function dropCachedGroupView(groupId)", "let reportedActiveGroupId"),
+    )
+
+    def setUp(self):
+        api.app.config["TESTING"] = True
+        self.client = api.app.test_client()
+
+    def test_all_three_disposal_paths_release_the_outgoing_explorer_pane(self):
+        response = self.client.get("/static/js/terminals.js")
+        self.assertEqual(response.status_code, 200)
+        terminals_js = response.get_data(as_text=True)
+        response.close()
+
+        for start, end in self.DISPOSAL_PATHS:
+            with self.subTest(path=start):
+                body = terminals_js[
+                    terminals_js.index(start):terminals_js.index(end)
+                ]
+                self.assertIn("explorerReleasePaneWork(", body)
+                # Disposal must not use the live-pane operation: that one
+                # executes the queued readers, which re-read terminals[index].
+                self.assertNotIn("explorerAbandonSourceRenderJob(", body)
+
+    def test_a_cached_group_switch_still_suspends_rather_than_releases(self):
+        """Suspension is not disposal — the pane comes back with its position
+        and its queued readers intact."""
+        response = self.client.get("/static/js/terminals.js")
+        terminals_js = response.get_data(as_text=True)
+        response.close()
+        capture = terminals_js[
+            terminals_js.index("function captureCachedPaneUiState()"):
+            terminals_js.index("function restoreCachedPaneUiState(")
+        ]
+
+        self.assertIn("explorerSuspendSourceRenderJob(terminal);", capture)
+        self.assertNotIn("explorerReleasePaneWork(", capture)
+
+
+class TerminalInputSendOrderTestCase(unittest.TestCase):
+    """The keystroke reaches the shell before anything observes the pane.
+
+    The tracker's agent-promotion branch can fall through to a fresh remote
+    exec channel and a bounded wait; sitting that between Enter and the shell
+    delayed the keystroke and let a later input handler (Socket.IO runs them on
+    separate threads) overtake it.
+    """
+
+    def setUp(self):
+        api.session_manager.reset_sessions()
+        self.addCleanup(api.session_manager.reset_sessions)
+        self.session_id = "send-order-session"
+        api.ssh_connections[self.session_id] = {"kind": "ssh"}
+        self.addCleanup(api.ssh_connections.pop, self.session_id, None)
+
+    def test_input_is_sent_before_agent_tracking_runs(self):
+        calls = []
+
+        with patch.object(api, "_send_connection_input", side_effect=lambda *a: calls.append("send")), \
+                patch.object(api, "_track_terminal_agent_input", side_effect=lambda *a: calls.append("track")):
+            api.handle_terminal_input({"session_id": self.session_id, "data": "claude\r"})
+
+        self.assertEqual(calls, ["send", "track"])
+
+    def test_a_failed_send_records_no_agent_promotion(self):
+        """Nothing reached the shell, so nothing may be recorded as started."""
+        with patch.object(api, "_send_connection_input", side_effect=OSError("socket closed")), \
+                patch.object(api, "_track_terminal_agent_input") as track, \
+                patch.object(api, "emit") as emit:
+            api.handle_terminal_input({"session_id": self.session_id, "data": "claude\r"})
+
+        track.assert_not_called()
+        emit.assert_called_once()
+
+
 class RuntimeConfigExtractionTestCase(unittest.TestCase):
     """Finding 6.2 — runtime config lives in web/config.py behind RuntimeConfig."""
 
@@ -15504,15 +17765,15 @@ class DeadCodeSweepTestCase(unittest.TestCase):
     # ── 10.2: terminal font settings wired through to terminals page ────────
 
     def test_terminal_font_settings_in_terminals_page_body(self):
-        orig_size = api.runtime_config.terminal_font_size
-        orig_family = api.runtime_config.terminal_font_family
-        api.runtime_config.terminal_font_size = 18
-        api.runtime_config.terminal_font_family = "JetBrains Mono, monospace"
-        try:
+        # Scoped with patch.object like every other RuntimeConfig override in
+        # this suite: settings are published as one immutable generation now
+        # (ISSUE-2026-041), so an assignment is a lasting shadow rather than a
+        # value the next refresh overwrites, and restoring by assigning the old
+        # value back would freeze the field for every later test.
+        with patch.object(api.runtime_config, "terminal_font_size", 18), patch.object(
+            api.runtime_config, "terminal_font_family", "JetBrains Mono, monospace"
+        ):
             html = self.client.get("/terminals").get_data(as_text=True)
-        finally:
-            api.runtime_config.terminal_font_size = orig_size
-            api.runtime_config.terminal_font_family = orig_family
         self.assertIn('data-terminal-font-size="18"', html)
         self.assertIn("JetBrains Mono", html)
 
@@ -16302,6 +18563,24 @@ class HostKeyPolicyTestCase(unittest.TestCase):
         )
         self.assertEqual(response.get_json()["ssh"]["host_key_policy"], "strict")
 
+    def test_app_config_endpoint_round_trips_shell_integration(self):
+        response = self.client.get("/api/app-config")
+        self.assertTrue(response.get_json()["terminal"]["shell_integration"])
+
+        response = self.client.post(
+            "/api/app-config", json={"terminal": {"shell_integration": False}}
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.get_json()["terminal"]["shell_integration"])
+        self.assertFalse(api.load_config()["terminal"]["shell_integration"])
+        self.assertFalse(api.runtime_config.terminal_shell_integration)
+
+        # A non-boolean keeps the stored value rather than coercing one.
+        response = self.client.post(
+            "/api/app-config", json={"terminal": {"shell_integration": "sure"}}
+        )
+        self.assertFalse(response.get_json()["terminal"]["shell_integration"])
+
     def test_launcher_ships_host_key_policy_select(self):
         html = self.client.get("/").get_data(as_text=True)
         self.assertIn('id="appSshHostKeyPolicy"', html)
@@ -16613,7 +18892,12 @@ class ExplorerDownloadTestCase(unittest.TestCase):
         # A format the viewer cannot render never reaches editor mode, so its
         # toolbar download button is unreachable: the right-click path section
         # downloads the row directly instead.
-        viewer_js = self._static("js/explorer-viewer.js")
+        viewer_js = "\n".join(
+            (
+                self._static("js/explorer-viewer.js"),
+                self._static("js/explorer-git-sidebar.js"),
+            )
+        )
         self.assertIn("label: 'Download file'", viewer_js)
         self.assertIn(
             "action: () => downloadExplorerFile(index, { path: downloadTargets[0].path })",
@@ -18232,12 +20516,16 @@ class SettingsLauncherConfigTestCase(unittest.TestCase):
             agent_selection="claude",
             agent_auto_mode=True,
         )
-        with patch.object(web_terminal_io, "_send_connection_input") as send:
+        with patch.object(
+            web_config.runtime_config, "terminal_shell_integration", False
+        ), patch.object(web_terminal_io, "_send_connection_input") as send:
             web_terminal_io._run_startup_sequence(connection, session)
         send.assert_called_once_with(connection, "claude --permission-mode auto\n")
 
         session.agent_auto_mode = False
-        with patch.object(web_terminal_io, "_send_connection_input") as send:
+        with patch.object(
+            web_config.runtime_config, "terminal_shell_integration", False
+        ), patch.object(web_terminal_io, "_send_connection_input") as send:
             web_terminal_io._run_startup_sequence(connection, session)
         send.assert_called_once_with(connection, "claude\n")
 

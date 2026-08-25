@@ -30,12 +30,17 @@ import time
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, BinaryIO, Dict, List, Optional, Tuple
+from typing import Any, BinaryIO, Callable, Dict, List, Optional, Tuple
 
 from web.config import runtime_config
 from web.hostkeys import (  # noqa: F401 - _load_persistent_host_keys re-exported
     _apply_host_key_policy,
     _load_persistent_host_keys,
+)
+from web.process_bounds import (
+    PROCESS_REAP_TIMEOUT,
+    new_process_group,
+    terminate_process_tree,
 )
 
 try:
@@ -100,6 +105,85 @@ def _explorer_root_directory(session: Any) -> str:
     ).strip()
 
 
+def _configured_explorer_root_directory(session: Any) -> str:
+    """Return only a root somebody chose -- never a derived one.
+
+    A derived root is not a configured root, and there are two ways one can be
+    manufactured. `_explorer_root_directory()` falls back to
+    `session.directory`, which for a pane launched as a *terminal* invents a
+    root nobody picked; and the terminal->explorer switch has to *store* the
+    root it resolved, because the live explorer needs a confinement boundary,
+    which would otherwise let that resolved root pin the next switch. So the
+    stored root answers here only when `explorer_root_configured` says it came
+    from a launch config -- the launcher's own field, a saved preset, or a
+    restored snapshot. Anything deciding *where an explorer opens* asks this.
+    """
+    if not getattr(session, "explorer_root_configured", False):
+        return ""
+    return str(getattr(session, "explorer_root_directory", "") or "").strip()
+
+
+def _local_path_inside(root_path: str, candidate: str) -> bool:
+    """Return whether a local path is the root or sits underneath it."""
+    if not root_path or not candidate:
+        return False
+    try:
+        common_path = os.path.commonpath([root_path, candidate])
+    except ValueError:
+        return False
+    return os.path.normcase(common_path) == os.path.normcase(root_path)
+
+
+def _resolve_explorer_open_root(
+    configured_root: str,
+    observed_cwd: str,
+    launch_directory: str,
+    repo_root: Optional[str],
+    *,
+    contains: Callable[[str, str], bool],
+) -> str:
+    """Choose the root an explorer pane opens on.
+
+    A pane's launch directory is where it started; its working directory is
+    where it is now. The explorer opens *at* the working directory and roots:
+
+    - on the configured root, whenever one was really chosen and still holds
+      the working directory;
+    - otherwise on the Git worktree containing the working directory, so a repo
+      below the launch directory gets a Git sidebar and can still be navigated
+      up to its own root;
+    - otherwise on the working directory itself.
+
+    The candidate is clamped so it never widens the root *above* the launch
+    directory the user picked: a strict ancestor of that floor yields the floor.
+    ``contains(ancestor, path)`` is inclusive, so "strict ancestor" is
+    ``contains(candidate, floor) and not contains(floor, candidate)`` and needs
+    no separate equality predicate for either path flavour.
+
+    The floor binds only while the pane is still *inside* it. The guard is
+    against a repository root silently widening the view above the directory
+    the user picked, not against the user themselves: a shell that has walked
+    up out of the floor is standing somewhere on purpose, and clamping it back
+    down opens the explorer on a directory the terminal beside it is not in.
+    ``launch_directory`` is therefore ``TerminalSession.launch_directory``,
+    which nothing moves -- passing ``session.directory``, which every mode
+    switch rewrites, left the floor at the subdirectory the pane last showed
+    and the explorer could never follow the shell back up again.
+    """
+    if configured_root and contains(configured_root, observed_cwd):
+        return configured_root
+
+    candidate = repo_root or observed_cwd
+    if (
+        launch_directory
+        and contains(launch_directory, observed_cwd)
+        and contains(candidate, launch_directory)
+        and not contains(launch_directory, candidate)
+    ):
+        return launch_directory
+    return candidate
+
+
 def _default_explorer_candidate_path(session: Any, root_path: str) -> str:
     """Return the default explorer directory when no path is requested."""
     current_raw = str(getattr(session, "directory", "") or "").strip()
@@ -133,6 +217,7 @@ CODE_PREVIEW_LANGUAGES = {
     ".cpp": "cpp",
     ".cs": "csharp",
     ".css": "css",
+    ".dockerfile": "dockerfile",
     ".env": "dotenv",
     ".example": "config",
     ".go": "go",
@@ -149,6 +234,7 @@ CODE_PREVIEW_LANGUAGES = {
     ".kts": "kotlin",
     ".log": "log",
     ".lua": "lua",
+    ".mk": "makefile",
     ".php": "php",
     ".ps1": "powershell",
     ".py": "python",
@@ -180,6 +266,19 @@ CODE_PREVIEW_FILENAMES = {
     "go.work.sum": "text",
     "makefile": "makefile",
 }
+# Conventional families that vary the *name* rather than the extension:
+# ``Dockerfile_chss``, ``Dockerfile.dev``, ``Makefile.local``, ``.env.local``.
+# Matched on the lowercased basename, and only once the exact-name and
+# extension maps have both missed — so ``dockerfile_parser.py`` stays Python.
+CODE_PREVIEW_FILENAME_PREFIXES = {
+    ".env.": "dotenv",
+    "dockerfile": "dockerfile",
+    "makefile": "makefile",
+}
+# What an unrecognised name resolves to. The filename no longer decides whether
+# a file can be opened — the content does (see get_explorer_file_payload) — so
+# anything that reads as text is previewed and edited as plain text.
+EXPLORER_FALLBACK_LANGUAGE = "text"
 EXPLORER_BINARY_SAMPLE_BYTES = 4096
 EXPLORER_TEXT_CONTROL_BYTES = {7, 8, 9, 10, 12, 13, 27}
 MARKDOWN_ALLOWED_TAGS = {
@@ -261,24 +360,45 @@ def _is_tail_preview_file(path: str) -> bool:
 
 
 def _explorer_code_language(path: str) -> Optional[str]:
-    """Return the source language for code files shown in explorer previews."""
+    """Return the source language for code files shown in explorer previews.
+
+    ``None`` means "this name says nothing about the language" — not "refuse
+    this file". Callers that need a language for an open file resolve that
+    through :func:`_explorer_preview_language`.
+    """
     filename = os.path.basename(path).lower()
     if filename in CODE_PREVIEW_FILENAMES:
         return CODE_PREVIEW_FILENAMES[filename]
-    if filename.startswith(".env."):
-        return "dotenv"
     _, extension = os.path.splitext(path.lower())
     if extension in MARKDOWN_PREVIEW_EXTENSIONS:
         return "markdown"
-    return CODE_PREVIEW_LANGUAGES.get(extension)
+    if extension in CODE_PREVIEW_LANGUAGES:
+        return CODE_PREVIEW_LANGUAGES[extension]
+    for prefix, language in CODE_PREVIEW_FILENAME_PREFIXES.items():
+        if filename.startswith(prefix):
+            return language
+    return None
 
 
-def _explorer_editor_language(path: str) -> str:
-    """Return the editor language or reject unsupported explorer formats."""
-    language = _explorer_code_language(path)
-    if language is None:
-        raise ValueError("Explorer file format is not supported for editor preview")
-    return language
+def _explorer_preview_language(backend: Any, file_path: str) -> str:
+    """Return the preview/editor language for a file, refusing unknown binaries.
+
+    An unrecognised name is not a refusal: a filename allowlist cannot tell a
+    ``Dockerfile_chss`` or an extensionless script from a binary, so the content
+    decides instead and an unknown *text* file opens as plain text. The decision
+    reads a bounded sample rather than the whole file, so an unknown binary is
+    turned away without first paying for a 10 MiB read (over SFTP, on a remote
+    pane). The ``+ 1`` keeps the sample from being treated as a complete
+    document, so a multibyte character straddling the boundary is not misread as
+    binary.
+    """
+    language = _explorer_code_language(file_path)
+    if language is not None:
+        return language
+    sample = backend.read_file_prefix(file_path, EXPLORER_BINARY_SAMPLE_BYTES + 1)
+    if _explorer_content_looks_binary(sample):
+        raise ValueError("Explorer file appears to be binary")
+    return EXPLORER_FALLBACK_LANGUAGE
 
 
 # Extensions the read-only image viewer renders inline via an <img> tag. SVG is
@@ -1011,6 +1131,138 @@ def _clean_git_path(path: str) -> str:
 GIT_READ_TIMEOUT = 2.0
 GIT_WRITE_TIMEOUT = 15.0
 
+# Every explorer Git command is bounded by default (ISSUE-2026-040). A ceiling
+# the caller opts into is a ceiling that is missing wherever a caller forgot,
+# and status, graph, commit-file, diff, and every mutation had forgotten it: a
+# repository, not GridVibe, decided how much memory one request could spend.
+# The same 10 MiB the file preview already allows. A caller may still ask for
+# a tighter bound (`explorer_search`'s 8 MiB, the diff view's 256 KiB); nobody
+# can ask for a wider one.
+EXPLORER_GIT_MAX_OUTPUT_BYTES = 10 * 1024 * 1024
+# stderr is diagnostics, never a payload, so it gets its own far smaller
+# ceiling: whatever a runaway command has to say, the first megabyte says it.
+EXPLORER_GIT_MAX_STDERR_BYTES = 1 * 1024 * 1024
+_GIT_STREAM_CHUNK_BYTES = 64 * 1024
+
+
+def _git_output_limit(max_output_bytes: Optional[int]) -> int:
+    """Return the effective stdout ceiling for one Git command."""
+    if max_output_bytes is None:
+        return EXPLORER_GIT_MAX_OUTPUT_BYTES
+    return max(1, min(int(max_output_bytes), EXPLORER_GIT_MAX_OUTPUT_BYTES))
+
+
+def _git_command_result(
+    *,
+    args: Any,
+    returncode: Optional[int],
+    stdout: bytes,
+    stderr: bytes,
+    stdout_truncated: bool = False,
+    stderr_truncated: bool = False,
+    output_limit_terminated: bool = False,
+) -> subprocess.CompletedProcess:
+    """Build one subprocess-like Git result with explicit completion facts."""
+    result = subprocess.CompletedProcess(
+        args=args,
+        returncode=returncode,
+        stdout=stdout,
+        stderr=stderr,
+    )
+    result.stdout_truncated = bool(stdout_truncated)
+    result.stderr_truncated = bool(stderr_truncated)
+    result.output_limit_terminated = bool(output_limit_terminated)
+    result.exit_status_observed = returncode is not None
+    result.complete = bool(
+        result.exit_status_observed
+        and not result.stdout_truncated
+        and not result.stderr_truncated
+        and not result.output_limit_terminated
+    )
+    return result
+
+
+def _require_complete_git_result(
+    result: Any,
+    operation: str,
+    *,
+    allow_stdout_truncation: bool = False,
+    mutation: bool = False,
+) -> None:
+    """Reject a Git result that cannot safely be treated as complete."""
+    stdout_truncated = bool(getattr(result, "stdout_truncated", False))
+    stderr_truncated = bool(getattr(result, "stderr_truncated", False))
+    output_limit_terminated = bool(getattr(result, "output_limit_terminated", False))
+    exit_status_observed = bool(
+        getattr(result, "exit_status_observed", getattr(result, "returncode", None) is not None)
+    )
+    complete = bool(
+        getattr(
+            result,
+            "complete",
+            exit_status_observed
+            and not stdout_truncated
+            and not stderr_truncated
+            and not output_limit_terminated,
+        )
+    )
+    if complete:
+        return
+    if (
+        allow_stdout_truncation
+        and stdout_truncated
+        and not stderr_truncated
+        and output_limit_terminated
+    ):
+        return
+
+    if stdout_truncated or stderr_truncated or output_limit_terminated:
+        detail = " exceeded the bounded Git output limit"
+    else:
+        detail = " ended before Git reported a completion status"
+    if mutation:
+        raise ValueError(
+            f"{operation}{detail}; repository state may have changed. "
+            "Refresh Git state before retrying; the action was not retried."
+        )
+    raise ValueError(f"{operation}{detail}; refresh Git state and try again")
+
+
+def _drain_bounded_pipe(pipe: Any, limit: int, chunks: List[bytes]) -> bool:
+    """Read at most `limit` bytes from a child pipe; return whether more existed.
+
+    Guardrail 3: the bound is on the *read*, not a slice taken afterwards, so
+    the peak memory is ours rather than the repository's. Stopping short leaves
+    the child blocked on a full pipe, which is why every caller pairs this with
+    a process-tree kill.
+    """
+    size = 0
+    try:
+        while True:
+            chunk = pipe.read(_GIT_STREAM_CHUNK_BYTES)
+            if not chunk:
+                return False
+            remaining = limit - size
+            if remaining > 0:
+                kept = chunk[:remaining]
+                chunks.append(kept)
+                size += len(kept)
+            if len(chunk) > max(0, remaining):
+                return True
+    except (OSError, ValueError):
+        # The pipe was closed underneath us during teardown.
+        return False
+
+
+def _close_pipe_if_idle(pipe: Any, reader: threading.Thread) -> None:
+    """Close a child pipe, unless the reader we gave up on still owns it."""
+    if pipe is None or reader.is_alive():
+        return
+    try:
+        pipe.close()
+    except (OSError, ValueError):
+        pass
+
 
 def _run_git_command(
     args: List[str],
@@ -1020,107 +1272,105 @@ def _run_git_command(
     write: bool = False,
     max_output_bytes: Optional[int] = None,
 ) -> subprocess.CompletedProcess:
-    """Run an explorer Git command with predictable process settings.
+    """Run an explorer Git command under output, time, and process bounds.
 
-    Reads run with GIT_OPTIONAL_LOCKS=0; writes run with GIT_TERMINAL_PROMPT=0
-    so they can never hang on an interactive credential prompt.
+    Every invocation is bounded, whatever the caller asked for. Reads keep
+    GIT_OPTIONAL_LOCKS=0, and reads *and* writes set GIT_TERMINAL_PROMPT=0: a
+    read consults the upstream ref too, and a server has no terminal on which
+    to answer a credential prompt (Guardrail 4). Both streams are drained to a
+    ceiling rather than sliced afterwards (Guardrail 3), and the child is
+    spawned into its own process group so the timeout covers git's transport
+    helpers and not only git itself — killing the direct child leaves a
+    grandchild holding our pipes, which is what made a 30 s bound take 269 s.
+
+    Completion and exit status are independent. A stream that reaches its
+    ceiling is marked truncated, the output-limit termination is explicit,
+    and no exit status is invented for the command that was interrupted.
     """
     if timeout is None:
         timeout = GIT_WRITE_TIMEOUT if write else GIT_READ_TIMEOUT
     env = os.environ.copy()
-    if write:
-        env["GIT_TERMINAL_PROMPT"] = "0"
-    else:
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    if not write:
         env["GIT_OPTIONAL_LOCKS"] = "0"
-    command = ["git", *args]
-    if max_output_bytes is None:
-        return subprocess.run(
-            command,
-            cwd=cwd,
-            env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=timeout,
-            check=False,
-        )
 
-    output_limit = max(1, int(max_output_bytes))
+    command = ["git", *args]
+    stdout_limit = _git_output_limit(max_output_bytes)
     process = subprocess.Popen(
         command,
         cwd=cwd,
         env=env,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
+        **new_process_group(),
     )
+
     stdout_chunks: List[bytes] = []
     stderr_chunks: List[bytes] = []
-    stdout_size = 0
     stdout_truncated = threading.Event()
+    stderr_truncated = threading.Event()
+    halted = threading.Event()
 
-    def read_stdout() -> None:
-        nonlocal stdout_size
-        assert process.stdout is not None
-        while True:
-            chunk = process.stdout.read(64 * 1024)
-            if not chunk:
-                break
-            remaining = output_limit - stdout_size
-            if remaining > 0:
-                kept = chunk[:remaining]
-                stdout_chunks.append(kept)
-                stdout_size += len(kept)
-            if len(chunk) > max(0, remaining):
-                stdout_truncated.set()
-                try:
-                    process.terminate()
-                except OSError:
-                    pass
+    def halt_child() -> None:
+        # The first reader to hit its ceiling ends the command; whatever is
+        # still queued is output we have already decided not to keep.
+        if halted.is_set():
+            return
+        halted.set()
+        terminate_process_tree(process)
 
-    def read_stderr() -> None:
-        assert process.stderr is not None
-        while True:
-            chunk = process.stderr.read(64 * 1024)
-            if not chunk:
-                break
-            stderr_chunks.append(chunk)
+    def drain_stdout() -> None:
+        if _drain_bounded_pipe(process.stdout, stdout_limit, stdout_chunks):
+            stdout_truncated.set()
+            halt_child()
 
-    stdout_thread = threading.Thread(target=read_stdout, daemon=True)
-    stderr_thread = threading.Thread(target=read_stderr, daemon=True)
+    def drain_stderr() -> None:
+        if _drain_bounded_pipe(process.stderr, EXPLORER_GIT_MAX_STDERR_BYTES, stderr_chunks):
+            stderr_truncated.set()
+            halt_child()
 
-    def close_process_streams() -> None:
-        if process.stdout is not None:
-            process.stdout.close()
-        if process.stderr is not None:
-            process.stderr.close()
-
+    stdout_thread = threading.Thread(target=drain_stdout, daemon=True)
+    stderr_thread = threading.Thread(target=drain_stderr, daemon=True)
     stdout_thread.start()
     stderr_thread.start()
+
+    expired: Optional[subprocess.TimeoutExpired] = None
     try:
         process.wait(timeout=timeout)
     except subprocess.TimeoutExpired as exc:
-        process.kill()
-        process.wait()
-        stdout_thread.join()
-        stderr_thread.join()
-        close_process_streams()
+        expired = exc
+        terminate_process_tree(process)
+        try:
+            process.wait(timeout=PROCESS_REAP_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            # An orphan we could not reach still holds the pipe. Return the
+            # request thread rather than waiting on it — bounding our own wait
+            # is the entire point of this path.
+            pass
+
+    stdout_thread.join(PROCESS_REAP_TIMEOUT)
+    stderr_thread.join(PROCESS_REAP_TIMEOUT)
+    _close_pipe_if_idle(process.stdout, stdout_thread)
+    _close_pipe_if_idle(process.stderr, stderr_thread)
+
+    if expired is not None:
         raise subprocess.TimeoutExpired(
             command,
-            exc.timeout,
+            expired.timeout,
             output=b"".join(stdout_chunks),
             stderr=b"".join(stderr_chunks),
-        ) from exc
+        ) from expired
 
-    stdout_thread.join()
-    stderr_thread.join()
-    close_process_streams()
-    result = subprocess.CompletedProcess(
+    output_limit_terminated = halted.is_set()
+    return _git_command_result(
         args=command,
-        returncode=0 if stdout_truncated.is_set() else process.returncode,
+        returncode=None if output_limit_terminated else process.returncode,
         stdout=b"".join(stdout_chunks),
         stderr=b"".join(stderr_chunks),
+        stdout_truncated=stdout_truncated.is_set(),
+        stderr_truncated=stderr_truncated.is_set(),
+        output_limit_terminated=output_limit_terminated,
     )
-    result.stdout_truncated = stdout_truncated.is_set()
-    return result
 
 
 def _decode_git_output(raw_output: bytes) -> str:
@@ -1334,19 +1584,78 @@ def _remote_git_shell_command(
     cwd: str,
     *,
     write: bool = False,
-    max_output_bytes: Optional[int] = None,
 ) -> str:
     """Build a Git command for a remote POSIX-compatible SSH shell.
 
-    Reads run with GIT_OPTIONAL_LOCKS=0; writes run with GIT_TERMINAL_PROMPT=0
-    so they can never hang on an interactive credential prompt.
+    Every command sets GIT_TERMINAL_PROMPT=0 so it can never hang on an
+    interactive credential prompt; reads additionally set GIT_OPTIONAL_LOCKS=0.
+
+    Output bounds are *not* expressed here. A `| head -c N` pipeline reports
+    head's exit status instead of git's, which silently turns a failed remote
+    command into an empty successful one — the reason the diff view could never
+    opt into a cap. `_run_remote_git_command` bounds the channel drain instead,
+    which costs no exit status and closes the channel at the ceiling anyway
+    (ISSUE-2026-040).
     """
     quoted_args = " ".join(shlex.quote(part) for part in args)
-    env_prefix = "GIT_TERMINAL_PROMPT=0" if write else "GIT_OPTIONAL_LOCKS=0"
-    command = f"{env_prefix} git -C {shlex.quote(cwd)} {quoted_args}"
-    if max_output_bytes is not None:
-        command += f" | head -c {max(1, int(max_output_bytes))}"
-    return command
+    env_prefix = "GIT_TERMINAL_PROMPT=0" if write else "GIT_TERMINAL_PROMPT=0 GIT_OPTIONAL_LOCKS=0"
+    return f"{env_prefix} git -C {shlex.quote(cwd)} {quoted_args}"
+
+
+def _drain_remote_stream(stream: Any, limit: int, deadline: float) -> Tuple[bytes, bool, bool]:
+    """Read at most `limit` bytes from an SSH channel file before `deadline`.
+
+    Returns the bytes read, whether the output ceiling was exceeded, and
+    whether the deadline elapsed. Either incomplete outcome requires closing
+    the channel rather than waiting on an exit status that may never come.
+    """
+    chunks: List[bytes] = []
+    size = 0
+    while size < limit:
+        if time.monotonic() > deadline:
+            return b"".join(chunks), False, True
+        try:
+            chunk = stream.read(min(_GIT_STREAM_CHUNK_BYTES, limit - size))
+        except (socket.timeout, TimeoutError):
+            return b"".join(chunks), False, True
+        if isinstance(chunk, str):
+            chunk = chunk.encode("utf-8", errors="replace")
+        if not chunk:
+            return b"".join(chunks), False, False
+        chunks.append(chunk)
+        size += len(chunk)
+    # At the ceiling: one more byte separates "there was more" from "exact fit".
+    if time.monotonic() > deadline:
+        return b"".join(chunks), False, True
+    try:
+        overflow = stream.read(1)
+    except (socket.timeout, TimeoutError):
+        return b"".join(chunks), False, True
+    return b"".join(chunks), bool(overflow), False
+
+
+def _close_remote_channel(stream: Any) -> None:
+    """Close an exec channel we stopped reading, so nothing waits on it."""
+    channel = getattr(stream, "channel", None)
+    close = getattr(channel, "close", None)
+    if close is None:
+        return
+    try:
+        close()
+    except OSError:
+        pass
+
+
+def _remote_exit_status(stream: Any) -> Optional[int]:
+    """Return the remote command's exit status, or None if none was observed."""
+    channel = getattr(stream, "channel", None)
+    if channel is None:
+        return 0
+    try:
+        status = int(channel.recv_exit_status())
+        return status if status >= 0 else None
+    except (EOFError, OSError, TypeError, ValueError):
+        return None
 
 
 def _run_remote_git_command(
@@ -1358,32 +1667,61 @@ def _run_remote_git_command(
     write: bool = False,
     max_output_bytes: Optional[int] = None,
 ) -> Any:
-    """Run a Git command over SSH and return a subprocess-like result."""
+    """Run a Git command over SSH and return a subprocess-like result.
+
+    The SSH path owes the same bounds as the local one (Guardrail 6): both
+    streams are drained to a ceiling against a deadline instead of read whole,
+    and a drain that stopped early closes the channel — `recv_exit_status()`
+    waits for a command that cannot finish while we are refusing to read it.
+    """
     if timeout is None:
         timeout = REMOTE_GIT_WRITE_TIMEOUT if write else REMOTE_GIT_READ_TIMEOUT
-    command = _remote_git_shell_command(
-        args,
-        cwd,
-        write=write,
-        max_output_bytes=max_output_bytes,
+    command = _remote_git_shell_command(args, cwd, write=write)
+    try:
+        _stdin, stdout, stderr = client.exec_command(command, timeout=timeout)
+    except (socket.timeout, TimeoutError) as exc:
+        raise subprocess.TimeoutExpired(command, timeout) from exc
+    deadline = time.monotonic() + float(timeout)
+    stdout_data, stdout_truncated, stdout_timed_out = _drain_remote_stream(
+        stdout, _git_output_limit(max_output_bytes), deadline
     )
-    _stdin, stdout, stderr = client.exec_command(command, timeout=timeout)
-    stdout_data = stdout.read()
-    stderr_data = stderr.read()
-    if isinstance(stdout_data, str):
-        stdout_data = stdout_data.encode("utf-8", errors="replace")
-    if isinstance(stderr_data, str):
-        stderr_data = stderr_data.encode("utf-8", errors="replace")
-    result = subprocess.CompletedProcess(
+    if stdout_timed_out:
+        _close_remote_channel(stdout)
+        raise subprocess.TimeoutExpired(command, timeout, output=stdout_data, stderr=b"")
+    if stdout_truncated:
+        _close_remote_channel(stdout)
+        return _git_command_result(
+            args=command,
+            returncode=None,
+            stdout=stdout_data,
+            stderr=b"",
+            stdout_truncated=True,
+            output_limit_terminated=True,
+        )
+
+    stderr_data, stderr_truncated, stderr_timed_out = _drain_remote_stream(
+        stderr, EXPLORER_GIT_MAX_STDERR_BYTES, deadline
+    )
+    if stderr_timed_out:
+        _close_remote_channel(stdout)
+        raise subprocess.TimeoutExpired(command, timeout, output=stdout_data, stderr=stderr_data)
+    if stderr_truncated:
+        _close_remote_channel(stdout)
+        return _git_command_result(
+            args=command,
+            returncode=None,
+            stdout=stdout_data,
+            stderr=stderr_data,
+            stderr_truncated=True,
+            output_limit_terminated=True,
+        )
+
+    return _git_command_result(
         args=command,
-        returncode=stdout.channel.recv_exit_status(),
+        returncode=_remote_exit_status(stdout),
         stdout=stdout_data,
         stderr=stderr_data,
     )
-    result.stdout_truncated = (
-        max_output_bytes is not None and len(stdout_data) >= max(1, int(max_output_bytes))
-    )
-    return result
 
 
 class _LocalExplorerBackend:
@@ -2048,12 +2386,14 @@ def _explorer_backend(session: Any):
         yield _LocalExplorerBackend(session)
 
 
-def _get_git_context(
-    backend: Any,
-    root_path: str,
-    current_path: str,
-) -> Tuple[Dict[str, Any], Dict[str, Dict[str, Any]]]:
-    """Return repository metadata and path statuses for an explorer directory."""
+def _resolve_git_worktree_root(backend: Any, current_path: str) -> Tuple[Optional[str], Optional[str]]:
+    """Return the Git worktree root containing a path, plus a probe error.
+
+    ``(None, None)`` means the path is simply not inside a worktree;
+    ``(None, "...")`` means the probe itself could not answer. Both the sidebar
+    context and the explorer's open-root resolution ask the same question, so
+    they ask it through one implementation.
+    """
     try:
         rev_parse = backend.run_git(
             ["rev-parse", "--show-toplevel", "--is-inside-work-tree"],
@@ -2061,20 +2401,52 @@ def _get_git_context(
             timeout=2.0,
         )
     except FileNotFoundError:
-        return _empty_explorer_git_context("Git executable was not found"), {}
+        return None, "Git executable was not found"
     except (subprocess.TimeoutExpired, TimeoutError):
-        return _empty_explorer_git_context("Git repository detection timed out"), {}
+        return None, "Git repository detection timed out"
     except Exception as exc:
-        return _empty_explorer_git_context(str(exc)), {}
+        return None, str(exc)
+
+    try:
+        _require_complete_git_result(rev_parse, "Git repository detection")
+    except ValueError as exc:
+        return None, str(exc)
 
     if rev_parse.returncode != 0:
-        return _empty_explorer_git_context(), {}
+        return None, None
 
     rev_lines = _decode_git_output(rev_parse.stdout).splitlines()
     if len(rev_lines) < 2 or rev_lines[1].lower() != "true":
-        return _empty_explorer_git_context(), {}
+        return None, None
 
-    repo_root = backend.canonical_repo_root(rev_lines[0])
+    return backend.canonical_repo_root(rev_lines[0]), None
+
+
+def _explorer_cwd_repo_root(backend: Any, current_path: str) -> Optional[str]:
+    """Return the worktree root of an explorer's working directory, or None.
+
+    Used only to choose where the pane opens, so a probe that cannot answer is
+    not an error -- the caller falls back to the working directory itself.
+    """
+    if not current_path:
+        return None
+    try:
+        repo_root, _error = _resolve_git_worktree_root(backend, current_path)
+    except Exception:
+        return None
+    return repo_root or None
+
+
+def _get_git_context(
+    backend: Any,
+    root_path: str,
+    current_path: str,
+) -> Tuple[Dict[str, Any], Dict[str, Dict[str, Any]]]:
+    """Return repository metadata and path statuses for an explorer directory."""
+    repo_root, detect_error = _resolve_git_worktree_root(backend, current_path)
+    if repo_root is None:
+        return _empty_explorer_git_context(detect_error), {}
+
     validation_error = backend.validate_repo_paths(repo_root, root_path, current_path)
     if validation_error:
         return _empty_explorer_git_context(validation_error), {}
@@ -2090,6 +2462,7 @@ def _get_git_context(
     ]
     try:
         status_result = backend.run_git(status_args, cwd=repo_root, timeout=2.0)
+        _require_complete_git_result(status_result, "Git status")
     except (subprocess.TimeoutExpired, TimeoutError):
         context = _empty_explorer_git_context("Git status timed out")
         context["repo_root"] = repo_root
@@ -2185,15 +2558,33 @@ def _append_deleted_git_entries(
 
 
 def _bounded_git_diff(backend: Any, repo_root: str, args: List[str]) -> Tuple[str, bool, int]:
-    """Run Git diff and return bounded UTF-8 text output."""
-    result = backend.run_git(args, cwd=repo_root, timeout=3.0)
-    if result.returncode != 0:
+    """Run Git diff and return bounded UTF-8 text output.
+
+    The runner is asked for one byte past the diff ceiling, which is all it
+    takes to tell "exactly at the limit" from "there was more" — so the peak
+    is 256 KiB rather than however large the repository's diff happens to be.
+    `byte_count` is therefore the bytes we read, not the bytes Git would have
+    produced, and `truncated` says which of the two it is.
+    """
+    result = backend.run_git(
+        args,
+        cwd=repo_root,
+        timeout=3.0,
+        max_output_bytes=EXPLORER_GIT_DIFF_MAX_BYTES + 1,
+    )
+    _require_complete_git_result(
+        result,
+        "Git diff",
+        allow_stdout_truncation=True,
+    )
+    runner_truncated = bool(getattr(result, "stdout_truncated", False))
+    if not runner_truncated and result.returncode != 0:
         error = _decode_git_output(result.stderr) or "Git diff failed"
         raise ValueError(error)
     if b"\x00" in result.stdout:
         raise ValueError("Git diff appears to contain binary data")
 
-    truncated = len(result.stdout) > EXPLORER_GIT_DIFF_MAX_BYTES
+    truncated = runner_truncated or len(result.stdout) > EXPLORER_GIT_DIFF_MAX_BYTES
     diff_bytes = result.stdout[:EXPLORER_GIT_DIFF_MAX_BYTES]
     diff_text = diff_bytes.decode("utf-8", errors="replace")
     lines = diff_text.splitlines(keepends=True)
@@ -2211,16 +2602,45 @@ def _validated_git_commit_ref(value: Any) -> str:
     return commit
 
 
-def _git_diff_args_for_mode(mode: str, pathspec: str, commit: Optional[str] = None) -> List[str]:
+#: Context widths the read-only diff route will produce, keyed by the flag a
+#: client may send. The client picks a *name*, never a number: the width that
+#: reaches argv is chosen here, so the route keeps the same shape as the mode
+#: allowlist beside it and no request can dictate a Git argument.
+#:
+#: ``zero`` exists for the Source gutter's change marks. They need every +/-
+#: line and no context at all — a block is flushed by a context line or by a
+#: hunk header, and ``-U0`` turns the former into the latter — so the marks
+#: are identical either way and up to six lines per hunk stop being sent and
+#: stop being parsed. ``None`` is Git's own default (three lines), which is
+#: what the Diff *panel* renders and must keep.
+GIT_DIFF_CONTEXT_WIDTHS: Dict[str, Optional[int]] = {"zero": 0}
+
+
+def _git_diff_args_for_mode(
+    mode: str,
+    pathspec: str,
+    commit: Optional[str] = None,
+    context_lines: Optional[int] = None,
+) -> List[str]:
     """Return read-only Git diff arguments for an explorer file."""
+    context = [] if context_lines is None else [f"--unified={int(context_lines)}"]
     if mode == "worktree":
-        return ["diff", "--no-ext-diff", "--no-color", "--", pathspec]
+        return ["diff", *context, "--no-ext-diff", "--no-color", "--", pathspec]
     if mode == "staged":
-        return ["diff", "--cached", "--no-ext-diff", "--no-color", "--", pathspec]
+        return ["diff", "--cached", *context, "--no-ext-diff", "--no-color", "--", pathspec]
     if mode == "head":
-        return ["diff", "HEAD", "--no-ext-diff", "--no-color", "--", pathspec]
+        return ["diff", "HEAD", *context, "--no-ext-diff", "--no-color", "--", pathspec]
     if mode == "commit":
-        return ["show", "--format=", "--no-ext-diff", "--no-color", commit or "", "--", pathspec]
+        return [
+            "show",
+            "--format=",
+            *context,
+            "--no-ext-diff",
+            "--no-color",
+            commit or "",
+            "--",
+            pathspec,
+        ]
     raise ValueError("Invalid Git diff mode")
 
 
@@ -2310,6 +2730,7 @@ def _git_commit_files_log(backend: Any, repo_root: str, pathspec: str) -> Dict[s
         cwd=repo_root,
         timeout=3.0,
     )
+    _require_complete_git_result(result, "Git commit-file history")
     if result.returncode != 0:
         return {}
     return _parse_git_name_status_log(result.stdout)
@@ -2367,6 +2788,7 @@ def _bounded_git_graph_log(backend: Any, repo_root: str, pathspec: str) -> List[
         cwd=repo_root,
         timeout=3.0,
     )
+    _require_complete_git_result(result, "Git graph")
     if result.returncode != 0:
         return []
     return _parse_git_graph_log(result.stdout)
@@ -2418,6 +2840,7 @@ def _git_repo_revision(git_context: Dict[str, Any], changes: List[Dict[str, Any]
     )
     canonical = json.dumps(
         {
+            "repo_path": git_context.get("repo_path") or "",
             "branch": git_context.get("branch"),
             "head": git_context.get("head"),
             "ahead": git_context.get("ahead"),
@@ -2431,27 +2854,55 @@ def _git_repo_revision(git_context: Dict[str, Any], changes: List[Dict[str, Any]
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:EXPLORER_GIT_REVISION_LENGTH]
 
 
-def _get_git_repo_state(backend: Any, root_path: str) -> Dict[str, Any]:
+def _git_repo_anchor_identity(backend: Any, root_path: str, repo_root: str) -> str:
+    """Return a stable explorer-root-relative identity for one repository.
+
+    A repository below the explorer root needs its relative path in the Git
+    revision so navigating between sibling repositories invalidates the
+    sidebar.  A repository containing the explorer root is the pane's implicit
+    repository and uses the empty identity.  Absolute paths never enter the
+    token, preserving local/SSH parity.
+    """
+    if not backend.path_inside_root(root_path, repo_root):
+        return ""
+    return _clean_git_path(backend.rel_explorer_path(root_path, repo_root))
+
+
+def _get_git_repo_state(
+    backend: Any,
+    root_path: str,
+    current_path: Optional[str] = None,
+) -> Dict[str, Any]:
     """Return the sidebar's semantic Git state without the commit graph."""
-    git_context, statuses = _get_git_context(backend, root_path, root_path)
+    anchor_path = current_path or root_path
+    git_context, statuses = _get_git_context(backend, root_path, anchor_path)
     if not git_context.get("available"):
         raise ValueError(git_context.get("error") or "Folder is not inside a Git worktree")
     repo_root = str(git_context["repo_root"])
+    git_context["repo_path"] = _git_repo_anchor_identity(backend, root_path, repo_root)
+    trimmed_repo_root = repo_root.rstrip("/\\") or repo_root
+    git_context["repo_name"] = backend.basename(trimmed_repo_root) or repo_root
     changes = _explorer_git_changed_files(backend, root_path, repo_root, statuses)
     return {
+        "anchor_path": backend.rel_explorer_path(root_path, anchor_path),
         "git": git_context,
         "changes": changes,
         "revision": _git_repo_revision(git_context, changes),
     }
 
 
-def _get_git_repo_summary(backend: Any, root_path: str) -> Dict[str, Any]:
-    """Return changed files and a bounded commit graph for an explorer root."""
-    state = _get_git_repo_state(backend, root_path)
+def _get_git_repo_summary(
+    backend: Any,
+    root_path: str,
+    current_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Return changed files and a bounded commit graph for the browsed path."""
+    anchor_path = current_path or root_path
+    state = _get_git_repo_state(backend, root_path, anchor_path)
     repo_root = str(state["git"]["repo_root"])
-    root_pathspec = backend.pathspec(repo_root, root_path)
-    commits = _bounded_git_graph_log(backend, repo_root, root_pathspec)
-    commit_files = _git_commit_files_log(backend, repo_root, root_pathspec)
+    anchor_pathspec = backend.pathspec(repo_root, anchor_path)
+    commits = _bounded_git_graph_log(backend, repo_root, anchor_pathspec)
+    commit_files = _git_commit_files_log(backend, repo_root, anchor_pathspec)
     return {
         **state,
         "commits": _attach_commit_files(
@@ -2468,12 +2919,23 @@ def _get_git_diff(
     file_path: str,
     mode: str,
     commit: Optional[str] = None,
+    context: Any = None,
 ) -> Dict[str, Any]:
-    """Return a bounded read-only Git diff for an explorer file."""
+    """Return a bounded read-only Git diff for an explorer file.
+
+    ``context`` names a width in ``GIT_DIFF_CONTEXT_WIDTHS`` (the request's
+    string, resolved here) rather than carrying one; an unknown name is a
+    refusal, not a fallback, so a typo cannot quietly serve the panel's diff to
+    a caller that asked for the narrow one.
+    """
     if mode not in {"worktree", "staged", "head", "commit"}:
         raise ValueError("Invalid Git diff mode")
     if mode == "commit":
         commit = _validated_git_commit_ref(commit)
+    context_name = str(context or "").strip()
+    if context_name and context_name not in GIT_DIFF_CONTEXT_WIDTHS:
+        raise ValueError("Invalid Git diff context")
+    context_lines = GIT_DIFF_CONTEXT_WIDTHS.get(context_name) if context_name else None
 
     git_context, _statuses = _get_git_context(backend, root_path, backend.file_dirname(file_path))
     if not git_context.get("available"):
@@ -2485,7 +2947,7 @@ def _get_git_diff(
         diff_text, truncated, raw_bytes = _bounded_git_diff(
             backend,
             repo_root,
-            _git_diff_args_for_mode(mode, pathspec, commit),
+            _git_diff_args_for_mode(mode, pathspec, commit, context_lines),
         )
     except subprocess.TimeoutExpired as exc:
         raise ValueError("Git diff timed out") from exc
@@ -2498,38 +2960,88 @@ def _get_git_diff(
     }
 
 
-def _git_action_repo_root(backend: Any, root_path: str) -> str:
-    """Return the repository root for an explorer git mutation, or raise."""
-    git_context, _statuses = _get_git_context(backend, root_path, root_path)
-    if not git_context.get("available"):
-        raise ValueError(git_context.get("error") or "Folder is not inside a Git worktree")
-    return str(git_context["repo_root"])
+def _git_action_anchor(
+    backend: Any,
+    root_path: str,
+    current_path: Optional[str] = None,
+) -> Tuple[str, str]:
+    """Resolve and validate one explorer Git mutation anchor."""
+    anchor_path = current_path or root_path
+    repo_root, detect_error = _resolve_git_worktree_root(backend, anchor_path)
+    if repo_root is None:
+        raise ValueError(detect_error or "Folder is not inside a Git worktree")
+    validation_error = backend.validate_repo_paths(repo_root, root_path, anchor_path)
+    if validation_error:
+        raise ValueError(validation_error)
+    return str(repo_root), anchor_path
+
+
+def _git_action_repo_root(
+    backend: Any,
+    root_path: str,
+    current_path: Optional[str] = None,
+) -> str:
+    """Return the repository root for an explorer Git mutation, or raise."""
+    repo_root, _anchor_path = _git_action_anchor(backend, root_path, current_path)
+    return repo_root
+
+
+def _git_action_scope(
+    backend: Any,
+    root_path: str,
+    current_path: Optional[str] = None,
+) -> Tuple[str, str]:
+    """Return a validated repository root and its selected Git pathspec."""
+    repo_root, anchor_path = _git_action_anchor(backend, root_path, current_path)
+    return repo_root, backend.pathspec(repo_root, anchor_path)
 
 
 def _git_has_head(backend: Any, repo_root: str) -> bool:
     """Return whether the repository has at least one commit."""
     try:
         result = backend.run_git(["rev-parse", "--verify", "--quiet", "HEAD"], cwd=repo_root, timeout=2.0)
-    except Exception:
-        return False
+    except (subprocess.TimeoutExpired, TimeoutError) as exc:
+        raise ValueError("Git repository state check timed out") from exc
+    _require_complete_git_result(result, "Git repository state check")
     return result.returncode == 0
 
 
-def _git_stage_path(backend: Any, root_path: str, file_path: str) -> None:
+def _require_git_mutation_result(result: Any, operation: str) -> None:
+    """Require an unambiguously complete result from a Git mutation."""
+    _require_complete_git_result(result, operation, mutation=True)
+
+
+def _literal_git_pathspec(path: str) -> str:
+    """Keep a path read from NUL-delimited Git output literal on write-back."""
+    return f":(literal){path}"
+
+
+def _git_stage_path(
+    backend: Any,
+    root_path: str,
+    file_path: str,
+    current_path: Optional[str] = None,
+) -> None:
     """Stage one worktree path inside an explorer repository."""
-    repo_root = _git_action_repo_root(backend, root_path)
+    repo_root = _git_action_repo_root(backend, root_path, current_path)
     pathspec = backend.pathspec(repo_root, file_path)
     try:
         result = backend.run_git(["add", "--", pathspec], cwd=repo_root, write=True)
     except subprocess.TimeoutExpired as exc:
         raise ValueError("Git stage timed out") from exc
+    _require_git_mutation_result(result, "Git stage")
     if result.returncode != 0:
         raise ValueError(_decode_git_output(result.stderr) or "Git stage failed")
 
 
-def _git_unstage_path(backend: Any, root_path: str, file_path: str) -> None:
+def _git_unstage_path(
+    backend: Any,
+    root_path: str,
+    file_path: str,
+    current_path: Optional[str] = None,
+) -> None:
     """Unstage one path inside an explorer repository."""
-    repo_root = _git_action_repo_root(backend, root_path)
+    repo_root = _git_action_repo_root(backend, root_path, current_path)
     pathspec = backend.pathspec(repo_root, file_path)
     if _git_has_head(backend, repo_root):
         args = ["reset", "--quiet", "HEAD", "--", pathspec]
@@ -2539,30 +3051,70 @@ def _git_unstage_path(backend: Any, root_path: str, file_path: str) -> None:
         result = backend.run_git(args, cwd=repo_root, write=True)
     except subprocess.TimeoutExpired as exc:
         raise ValueError("Git unstage timed out") from exc
+    _require_git_mutation_result(result, "Git unstage")
     if result.returncode != 0:
         raise ValueError(_decode_git_output(result.stderr) or "Git unstage failed")
 
 
-def _git_stage_all_paths(backend: Any, root_path: str) -> None:
-    """Stage every working-tree change in an explorer repository.
+def _git_stage_all_paths(
+    backend: Any,
+    root_path: str,
+    current_path: Optional[str] = None,
+) -> None:
+    """Stage every working-tree change in the selected explorer Git scope.
 
     Bulk form of _git_stage_path (ISSUE-2026-032): runs ``git add --all``
-    scoped to the repository root so modified, deleted, and untracked files
-    all land in the index in one action.
+    with the selected pathspec so hidden sibling changes remain untouched.
     """
-    repo_root = _git_action_repo_root(backend, root_path)
+    repo_root, scope_pathspec = _git_action_scope(backend, root_path, current_path)
     try:
-        result = backend.run_git(["add", "--all"], cwd=repo_root, write=True)
+        result = backend.run_git(
+            ["add", "--all", "--", scope_pathspec],
+            cwd=repo_root,
+            write=True,
+        )
     except subprocess.TimeoutExpired as exc:
         raise ValueError("Git stage all timed out") from exc
+    _require_git_mutation_result(result, "Git stage all")
     if result.returncode != 0:
         raise ValueError(_decode_git_output(result.stderr) or "Git stage all failed")
+
+
+def _git_unstage_all_paths(
+    backend: Any,
+    root_path: str,
+    current_path: Optional[str] = None,
+) -> None:
+    """Unstage every staged change in the selected explorer Git scope.
+
+    Bulk form of _git_unstage_path: index-only, so the worktree is untouched
+    and nothing the reader has edited can be lost. Before the first commit
+    there is no HEAD to reset against, so the same fallback the single-path
+    helper uses applies -- ``git rm --cached -r`` over the selected pathspec.
+    """
+    repo_root, scope_pathspec = _git_action_scope(backend, root_path, current_path)
+    if _git_has_head(backend, repo_root):
+        args = ["reset", "--quiet", "HEAD", "--", scope_pathspec]
+    else:
+        args = ["rm", "--cached", "-r", "--quiet", "--", scope_pathspec]
+    try:
+        result = backend.run_git(args, cwd=repo_root, write=True)
+    except subprocess.TimeoutExpired as exc:
+        raise ValueError("Git unstage all timed out") from exc
+    _require_git_mutation_result(result, "Git unstage all")
+    if result.returncode != 0:
+        raise ValueError(_decode_git_output(result.stderr) or "Git unstage all failed")
 
 
 _GIT_UNMERGED_STATUS_CODES = frozenset({"DD", "AU", "UD", "UA", "DU", "AA", "UU"})
 
 
-def _git_revert_path(backend: Any, root_path: str, file_path: str) -> None:
+def _git_revert_path(
+    backend: Any,
+    root_path: str,
+    file_path: str,
+    current_path: Optional[str] = None,
+) -> None:
     """Discard one file's unstaged worktree changes.
 
     Runs the equivalent of ``git restore --worktree -- <path>``, which restores
@@ -2572,7 +3124,7 @@ def _git_revert_path(backend: Any, root_path: str, file_path: str) -> None:
     files are refused. A file with no unstaged change is a clear error instead
     of a no-op that would look like a broken action.
     """
-    repo_root = _git_action_repo_root(backend, root_path)
+    repo_root = _git_action_repo_root(backend, root_path, current_path)
     pathspec = backend.pathspec(repo_root, file_path)
     try:
         status = backend.run_git(
@@ -2589,6 +3141,7 @@ def _git_revert_path(backend: Any, root_path: str, file_path: str) -> None:
         )
     except subprocess.TimeoutExpired as exc:
         raise ValueError("Git revert timed out") from exc
+    _require_complete_git_result(status, "Git revert status")
     if status.returncode != 0:
         raise ValueError(_decode_git_output(status.stderr) or "Git revert failed")
 
@@ -2614,6 +3167,7 @@ def _git_revert_path(backend: Any, root_path: str, file_path: str) -> None:
             )
         except subprocess.TimeoutExpired as exc:
             raise ValueError("Git revert timed out") from exc
+        _require_git_mutation_result(result, "Git revert")
         if result.returncode != 0:
             raise ValueError(
                 _decode_git_output(result.stderr)
@@ -2634,6 +3188,7 @@ def _git_revert_path(backend: Any, root_path: str, file_path: str) -> None:
         result = backend.run_git(["restore", "--worktree", "--", pathspec], cwd=repo_root, write=True)
     except subprocess.TimeoutExpired as exc:
         raise ValueError("Git revert timed out") from exc
+    _require_git_mutation_result(result, "Git revert")
     if result.returncode != 0:
         raise ValueError(
             _decode_git_output(result.stderr)
@@ -2669,19 +3224,35 @@ def _git_discardable_worktree_paths(raw_status: str) -> List[str]:
     return paths
 
 
-def _git_discard_all_paths(backend: Any, root_path: str) -> None:
-    """Discard every tracked file's unstaged worktree changes.
+def _git_discard_all_paths(
+    backend: Any,
+    root_path: str,
+    current_path: Optional[str] = None,
+) -> None:
+    """Discard tracked unstaged changes in the selected explorer Git scope.
 
     Bulk form of _git_revert_path (OD-1): restores only tracked,
     non-conflicted worktree changes with ``git restore --worktree``, so
     staged content is preserved and untracked files are left in place —
     never ``git clean``.
     """
-    repo_root = _git_action_repo_root(backend, root_path)
+    repo_root, scope_pathspec = _git_action_scope(backend, root_path, current_path)
     try:
-        status = backend.run_git(["status", "--porcelain", "-z"], cwd=repo_root, timeout=5.0)
+        status = backend.run_git(
+            [
+                "status",
+                "--porcelain",
+                "-z",
+                "--untracked-files=all",
+                "--",
+                scope_pathspec,
+            ],
+            cwd=repo_root,
+            timeout=5.0,
+        )
     except subprocess.TimeoutExpired as exc:
         raise ValueError("Git discard all timed out") from exc
+    _require_complete_git_result(status, "Git discard all status")
     if status.returncode != 0:
         raise ValueError(_decode_git_output(status.stderr) or "Git discard all failed")
 
@@ -2691,10 +3262,14 @@ def _git_discard_all_paths(backend: Any, root_path: str) -> None:
 
     try:
         result = backend.run_git(
-            ["restore", "--worktree", "--", *paths], cwd=repo_root, timeout=30.0, write=True
+            ["restore", "--worktree", "--", *map(_literal_git_pathspec, paths)],
+            cwd=repo_root,
+            timeout=30.0,
+            write=True,
         )
     except subprocess.TimeoutExpired as exc:
         raise ValueError("Git discard all timed out") from exc
+    _require_git_mutation_result(result, "Git discard all")
     if result.returncode != 0:
         raise ValueError(
             _decode_git_output(result.stderr)
@@ -2703,16 +3278,55 @@ def _git_discard_all_paths(backend: Any, root_path: str) -> None:
         )
 
 
-def _git_commit(backend: Any, root_path: str, message: str) -> None:
-    """Commit staged changes inside an explorer repository."""
+def _git_commit(
+    backend: Any,
+    root_path: str,
+    message: str,
+    current_path: Optional[str] = None,
+) -> None:
+    """Commit staged changes only when none are hidden outside the scope."""
     commit_message = str(message or "").strip()
     if not commit_message:
         raise ValueError("Commit message is required")
-    repo_root = _git_action_repo_root(backend, root_path)
+    repo_root, scope_pathspec = _git_action_scope(backend, root_path, current_path)
     try:
+        staged = backend.run_git(
+            ["diff", "--cached", "--no-renames", "--name-only", "-z"],
+            cwd=repo_root,
+            timeout=5.0,
+        )
+        _require_complete_git_result(staged, "Git staged-path check")
+        if staged.returncode != 0:
+            raise ValueError(_decode_git_output(staged.stderr) or "Git staged-path check failed")
+        scoped_staged = backend.run_git(
+            [
+                "diff",
+                "--cached",
+                "--no-renames",
+                "--name-only",
+                "-z",
+                "--",
+                scope_pathspec,
+            ],
+            cwd=repo_root,
+            timeout=5.0,
+        )
+        _require_complete_git_result(scoped_staged, "Git scoped staged-path check")
+        if scoped_staged.returncode != 0:
+            raise ValueError(
+                _decode_git_output(scoped_staged.stderr) or "Git scoped staged-path check failed"
+            )
+        all_paths = {path for path in staged.stdout.split(b"\0") if path}
+        scoped_paths = {path for path in scoped_staged.stdout.split(b"\0") if path}
+        if all_paths - scoped_paths:
+            raise ValueError(
+                "Staged changes exist outside the current Git scope; switch to the "
+                "repository-root scope or unstage those paths before committing"
+            )
         result = backend.run_git(["commit", "-m", commit_message], cwd=repo_root, timeout=30.0, write=True)
     except subprocess.TimeoutExpired as exc:
         raise ValueError("Git commit timed out") from exc
+    _require_git_mutation_result(result, "Git commit")
     if result.returncode != 0:
         raise ValueError(
             _decode_git_output(result.stderr)
@@ -2721,19 +3335,25 @@ def _git_commit(backend: Any, root_path: str, message: str) -> None:
         )
 
 
-def _git_publish(backend: Any, root_path: str) -> None:
-    """Push the current branch of an explorer repository, setting upstream if needed."""
-    repo_root = _git_action_repo_root(backend, root_path)
+def _git_publish(
+    backend: Any,
+    root_path: str,
+    current_path: Optional[str] = None,
+) -> None:
+    """Push the current branch; publish remains branch-wide in a narrowed scope."""
+    repo_root = _git_action_repo_root(backend, root_path, current_path)
     try:
         upstream = backend.run_git(
             ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
             cwd=repo_root,
             timeout=3.0,
         )
+        _require_complete_git_result(upstream, "Git upstream check")
         if upstream.returncode == 0:
             push_args = ["push"]
         else:
             branch_result = backend.run_git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=repo_root, timeout=3.0)
+            _require_complete_git_result(branch_result, "Git branch check")
             branch = _decode_git_output(branch_result.stdout)
             if branch_result.returncode != 0 or not branch or branch == "HEAD":
                 raise ValueError("Cannot publish a detached HEAD")
@@ -2741,6 +3361,7 @@ def _git_publish(backend: Any, root_path: str) -> None:
         result = backend.run_git(push_args, cwd=repo_root, timeout=120.0, write=True)
     except subprocess.TimeoutExpired as exc:
         raise ValueError("Git publish timed out") from exc
+    _require_git_mutation_result(result, "Git publish")
     if result.returncode != 0:
         raise ValueError(
             _decode_git_output(result.stderr)
@@ -2855,11 +3476,12 @@ def _open_ssh_sftp(session: Any) -> Tuple[Any, Any]:
 class _PooledSSHClient:
     """One pooled SSH transport, with the bookkeeping the reaper needs.
 
-    `in_use` counts the explorer requests currently holding this client. It
-    lives on the record rather than in a parallel map so an entry cannot exist
-    without its count, and evicting the entry drops the count with it — a
-    stranded count would spare a client from the reaper forever, which is this
-    guard's own failure mode inverted.
+    `in_use` counts the explorer requests currently holding this client — and,
+    from the two-phase reservation on, the requests that have *selected* it and
+    are still opening their channel. It lives on the record rather than in a
+    parallel map so an entry cannot exist without its count, and evicting the
+    entry drops the count with it — a stranded count would spare a client from
+    the reaper forever, which is this guard's own failure mode inverted.
     """
 
     __slots__ = ("client", "last_used", "in_use")
@@ -2943,31 +3565,73 @@ def _evict_all_pooled_ssh_clients() -> None:
         _close_ssh_client_quietly(client)
 
 
+def _reserve_pooled_ssh_client(session_id: str) -> Optional[_PooledSSHClient]:
+    """Phase 1: pick this session's pooled entry and count the holder at once.
+
+    Selecting and counting are one lock hold, so the entry a request is about
+    to open a channel on is never momentarily idle. Counting *before* the
+    channel exists is the whole point: `open_sftp()` is a network round trip
+    that must run outside the lock, and for its duration the reaper — which
+    every acquire on every session runs — would otherwise see a free entry and
+    close the transport underneath the request that just chose it.
+    """
+    with _ssh_client_pool_lock:
+        entry = _ssh_client_pool.get(session_id)
+        if entry is None:
+            return None
+        entry.in_use += 1
+        return entry
+
+
+def _commit_pooled_ssh_reservation(session_id: str, entry: _PooledSSHClient) -> None:
+    """Phase 2, success: keep the reservation and stamp the entry it holds.
+
+    A reservation only survives on the entry it was taken against. If that
+    entry was evicted or replaced while the channel opened, the client is no
+    longer pooled and the count went with the record; the caller's handle stays
+    uncounted so release closes it rather than charging another entry.
+    """
+    with _ssh_client_pool_lock:
+        if _ssh_client_pool.get(session_id) is entry:
+            entry.last_used = time.monotonic()
+
+
+def _cancel_pooled_ssh_reservation(session_id: str, entry: _PooledSSHClient) -> None:
+    """Phase 2, failure: give the reservation back and drop the entry.
+
+    Both callers found the transport unusable — a dead transport, or a channel
+    open that raised — so the client is closed rather than left pooled for the
+    next request to fail on. Matching by entry identity is what keeps a
+    replacement another request is already holding out of it.
+    """
+    stale_client = None
+    with _ssh_client_pool_lock:
+        if entry.in_use:
+            entry.in_use -= 1
+        if _ssh_client_pool.get(session_id) is entry:
+            del _ssh_client_pool[session_id]
+            stale_client = entry.client
+    if stale_client is not None:
+        _close_ssh_client_quietly(stale_client)
+
+
 def _acquire_ssh_sftp(session: Any) -> Tuple[Any, Any]:
     """Return (client, sftp), reusing the pooled SSH transport when it is alive."""
     _reap_idle_pooled_ssh_clients()
     session_id = session.session_id
-    with _ssh_client_pool_lock:
-        entry = _ssh_client_pool.get(session_id)
+    entry = _reserve_pooled_ssh_client(session_id)
     if entry is not None:
         client = entry.client
         if _ssh_client_transport_active(client):
             try:
                 sftp = client.open_sftp()
             except Exception:
-                _evict_pooled_ssh_client(session_id, client)
+                _cancel_pooled_ssh_reservation(session_id, entry)
             else:
-                with _ssh_client_pool_lock:
-                    current = _ssh_client_pool.get(session_id)
-                    # If the entry was evicted and replaced meanwhile this
-                    # client is no longer pooled: leave it uncounted so
-                    # release closes it rather than charging another record.
-                    if current is not None and current.client is client:
-                        current.last_used = time.monotonic()
-                        current.in_use += 1
+                _commit_pooled_ssh_reservation(session_id, entry)
                 return client, sftp
         else:
-            _evict_pooled_ssh_client(session_id, client)
+            _cancel_pooled_ssh_reservation(session_id, entry)
 
     client, sftp = _open_ssh_sftp(session)
     if _ssh_client_transport_active(client):
@@ -3114,14 +3778,21 @@ def _resolve_pane_terminal_directory(session: Any, requested_directory: Any = ""
     splitting one of those panes into a terminal: both need the directory the
     pane is currently showing, resolved through the same root containment rules.
 
-    Returns ``(directory, explorer_root_directory)``. Raises ``ValueError`` for a
-    path the caller should report as a 400; SFTP/connection failures surface as
-    the types in ``_sftp_request_error_types()``.
+    Returns ``(directory, explorer_root_directory)``. The root handed back is
+    the *configured* one and never the root the pane was confined to: a pane
+    that never had a chosen root must not acquire one on the way out, or the
+    root the terminal->explorer switch derived from where the pane happened to
+    be would pin every later switch to a directory nobody picked. Raises
+    ``ValueError`` for a path the caller should report as a 400;
+    SFTP/connection failures surface as the types in
+    ``_sftp_request_error_types()``.
     """
+    configured = bool(_configured_explorer_root_directory(session))
+
     if _is_browser_session(session):
         # A browser pane never navigates the filesystem, so its recorded
         # directory is already the one the shell should start in.
-        return getattr(session, "directory", ""), _explorer_root_directory(session)
+        return getattr(session, "directory", ""), _configured_explorer_root_directory(session)
 
     if _is_remote_explorer_session(session):
         client = None
@@ -3135,12 +3806,12 @@ def _resolve_pane_terminal_directory(session: Any, requested_directory: Any = ""
             )
         finally:
             _release_ssh_sftp(session, client, sftp)
-        return selected_directory, root_path
+        return selected_directory, (root_path if configured else "")
 
     root_path, selected_directory = _resolve_explorer_candidate_path(session, requested_directory)
     if not os.path.isdir(selected_directory):
         raise ValueError("Selected explorer path is not a directory")
-    return selected_directory, root_path
+    return selected_directory, (root_path if configured else "")
 
 
 def _resolve_remote_explorer_paths(sftp: Any, session: Any, requested_path: Any = "") -> Tuple[str, str]:
@@ -3181,6 +3852,49 @@ def _resolve_remote_explorer_file_path(sftp: Any, session: Any, requested_path: 
 # ── Explorer file read/save payload builders (in-app editor) ────────────────
 
 
+def get_explorer_file_preview_payload(backend: Any, requested_path: Any) -> Dict[str, Any]:
+    """Return the rendered Markdown preview for one explorer file.
+
+    The lazy half of the file read: same resolution, same root confinement and
+    the same bounded ``read_explorer_file_preview`` cap as the file payload,
+    but it renders and sanitizes the Markdown and returns nothing else. A
+    read, so the file explorer's read-only contract is unchanged; it exists so
+    that opening a Markdown file in Source view stops paying for a preview
+    nobody asked to see.
+
+    Carries ``state_revision`` for the same reason the file payload does, and
+    derived from the same single ``stat``. Source and Preview used to come from
+    one read and were consistent by construction; the lazy split made them two
+    reads, and with no token from the second the client can tell that the
+    *viewer* moved on but not that the *file* did — so a write landing between
+    the two showed a preview of newer bytes beside Source's older ones. The
+    client compares it against the baseline the file load set and declines a
+    preview that describes different bytes.
+    """
+    root_path, file_path = backend.resolve_file(requested_path)
+    if not _is_markdown_file(file_path):
+        raise ValueError("File has no Markdown preview")
+    size, modified = backend.stat_file(file_path)
+    preview = read_explorer_file_preview(
+        backend,
+        file_path,
+        total_size=size,
+        tail=_is_tail_preview_file(file_path),
+    )
+    preview_bytes = preview["bytes"]
+    if _explorer_content_looks_binary(preview_bytes):
+        raise ValueError("Explorer file appears to be binary")
+    content = preview_bytes.decode("utf-8", errors="replace")
+    return {
+        "root": root_path,
+        "path": backend.rel_explorer_path(root_path, file_path),
+        "preview_type": "markdown",
+        "preview_html": _render_markdown_preview(content) or "",
+        "truncated": preview["truncated"],
+        "state_revision": _explorer_file_state_revision(size, modified),
+    }
+
+
 def get_explorer_file_payload(backend: Any, requested_path: Any) -> Dict[str, Any]:
     """Return the canonical read payload for one explorer file.
 
@@ -3214,7 +3928,7 @@ def get_explorer_file_payload(backend: Any, requested_path: Any) -> Dict[str, An
             "git_context": None,
         }
 
-    code_language = _explorer_editor_language(file_path)
+    code_language = _explorer_preview_language(backend, file_path)
     preview = read_explorer_file_preview(
         backend,
         file_path,
@@ -3228,7 +3942,6 @@ def get_explorer_file_payload(backend: Any, requested_path: Any) -> Dict[str, An
 
     truncated = preview["truncated"]
     content = preview_bytes.decode("utf-8", errors="replace")
-    preview_html = _render_markdown_preview(content) if _is_markdown_file(file_path) else None
     edit_metadata = _explorer_edit_metadata(preview_bytes, truncated=truncated)
     git_context, git_statuses = _get_git_context(backend, root_path, backend.file_dirname(file_path))
     file_git = (
@@ -3249,8 +3962,19 @@ def get_explorer_file_payload(backend: Any, requested_path: Any) -> Dict[str, An
         "preview_end_byte": preview["preview_end_byte"],
         "total_size": preview["total_size"],
         "content": content,
-        "preview_type": "markdown" if preview_html is not None else None,
-        "preview_html": preview_html,
+        # An independent, always-present field: the *existence* of a Preview
+        # panel is a property of the file, not of whether a preview happened to
+        # be rendered into this response. Deriving it from `preview_html` was
+        # what tied the panel's existence to the eager render — and since this
+        # payload also answers a successful save, flipping it there would have
+        # made every save on a Markdown file rebuild the whole pane.
+        "preview_type": "markdown" if _is_markdown_file(file_path) else None,
+        # Never rendered here. Markdown rendering plus Bleach sanitization ran
+        # on every file GET and every save, for every Markdown file, whether or
+        # not the reader ever left Source view — and nothing cached it, so each
+        # refresh paid again. The Preview panel asks for it when it is first
+        # shown, through get_explorer_file_preview_payload() below.
+        "preview_html": None,
         "language": code_language,
         "editable": edit_metadata["editable"],
         "edit_block_reason": edit_metadata["edit_block_reason"],
@@ -3292,9 +4016,10 @@ def save_explorer_file_payload(
 ) -> Dict[str, Any]:
     """Validate and atomically replace one explorer file, returning the read payload.
 
-    Enforces the full save contract: root-confinement, the filename/language
-    gate, the 10 MiB read/write bounds, complete strict-UTF-8 + single
-    line-ending source, and the optimistic-concurrency revision check. The
+    Enforces the full save contract: root-confinement, the 10 MiB read/write
+    bounds, a content check that keeps binary out, complete strict-UTF-8 +
+    single line-ending source, and the optimistic-concurrency revision check.
+    Editability is decided by the file's *contents*, never by its name. The
     request is always a full-file replacement; a missing revision is a ``400``,
     never an overwrite escape hatch.
     """
@@ -3308,9 +4033,6 @@ def save_explorer_file_payload(
     root_path, file_path = backend.resolve_file(requested_path)
 
     with _explorer_save_claim(session_id, backend.fs_claim_key(file_path)):
-        # Filename/language gate (also raises for unsupported formats).
-        _explorer_editor_language(file_path)
-
         # Fully read the current file through the bounded read contract; a file
         # that no longer fits it can no longer be edited in place.
         raw_current = backend.read_file_prefix(file_path, EXPLORER_FILE_PREVIEW_MAX_BYTES + 1)

@@ -382,19 +382,23 @@ def _ensure_whisper_model():
             "numpy is not installed. Install it with: pip install numpy"
         )
 
+    # One captured generation for all three parameters: the cache key and the
+    # model that gets loaded under it must describe the same settings, or a
+    # refresh landing between them caches a model under the wrong key.
+    settings = runtime_config.snapshot()
     with _whisper_model_lock:
-        wanted_params = (runtime_config.whisper_model, runtime_config.whisper_device, runtime_config.whisper_compute_type)
+        wanted_params = (settings.whisper_model, settings.whisper_device, settings.whisper_compute_type)
         if _whisper_model_instance is None or _whisper_model_params != wanted_params:
             logger.info(
                 "Loading faster-whisper model %s on %s (%s)",
-                runtime_config.whisper_model,
-                runtime_config.whisper_device,
-                runtime_config.whisper_compute_type,
+                settings.whisper_model,
+                settings.whisper_device,
+                settings.whisper_compute_type,
             )
             _whisper_model_instance = WhisperModel(
-                runtime_config.whisper_model,
-                device=runtime_config.whisper_device,
-                compute_type=runtime_config.whisper_compute_type,
+                settings.whisper_model,
+                device=settings.whisper_device,
+                compute_type=settings.whisper_compute_type,
             )
             _whisper_model_params = wanted_params
         return _whisper_model_instance
@@ -431,14 +435,21 @@ def _transcribe_whisper_audio(audio_bytes: bytes) -> str:
     ).strip()
 
 
-def _vosk_service_reachable(timeout=2.0):
-    """Return True when the configured Vosk WebSocket endpoint accepts a handshake."""
+def _vosk_service_reachable(timeout=2.0, service_url=None):
+    """Return True when the configured Vosk WebSocket endpoint accepts a handshake.
+
+    ``service_url`` lets a caller that already captured a settings generation
+    probe the endpoint it is about to name, rather than whichever one is live
+    by the time the probe runs — the answer and the URL reported beside it have
+    to describe the same endpoint. Omitting it reads the current setting.
+    """
     if ws_client is None:
         return False
 
+    url = service_url if service_url is not None else runtime_config.vosk_service_url
     ws = None
     try:
-        ws = ws_client.create_connection(runtime_config.vosk_service_url, timeout=timeout)
+        ws = ws_client.create_connection(url, timeout=timeout)
         return True
     except Exception:
         return False
@@ -454,14 +465,22 @@ def _ensure_vosk_service():
     """Start vosk-service subprocess if not already running."""
     global _vosk_process
 
+    # One captured generation for the whole startup: this call can wait out the
+    # startup timeout twice, and reading the setting again afterwards let the
+    # log line report a budget the wait had never used.
+    settings = runtime_config.snapshot()
+    startup_timeout = settings.vosk_startup_timeout_seconds
+
     with _vosk_process_lock:
-        if _vosk_service_reachable(timeout=1.5):
+        if _vosk_service_reachable(timeout=1.5, service_url=settings.vosk_service_url):
             if _vosk_process is None:
-                logger.info("Using already-running vosk-service at %s", runtime_config.vosk_service_url)
+                logger.info("Using already-running vosk-service at %s", settings.vosk_service_url)
             return True
 
         if _vosk_process is not None and _vosk_process.poll() is None:
-            if _wait_for_vosk_ready(_vosk_process, timeout=runtime_config.vosk_startup_timeout_seconds):
+            if _wait_for_vosk_ready(
+                _vosk_process, timeout=startup_timeout, service_url=settings.vosk_service_url
+            ):
                 return True
 
         # Clean up a dead process handle
@@ -484,11 +503,13 @@ def _ensure_vosk_service():
             _vosk_process = process
 
             # Poll until the service accepts a real WebSocket handshake.
-            if not _wait_for_vosk_ready(process, timeout=runtime_config.vosk_startup_timeout_seconds):
+            if not _wait_for_vosk_ready(
+                process, timeout=startup_timeout, service_url=settings.vosk_service_url
+            ):
                 if process.poll() is None:
                     logger.error(
                         "vosk-service not ready after %ss; model download/load may still be in progress or the service may be hung",
-                        runtime_config.vosk_startup_timeout_seconds,
+                        startup_timeout,
                     )
                     process.kill()
                     try:
@@ -509,14 +530,14 @@ def _ensure_vosk_service():
             return False
 
 
-def _wait_for_vosk_ready(process, timeout=30):
+def _wait_for_vosk_ready(process, timeout=30, service_url=None):
     """Block until vosk-service accepts a WebSocket connection, or timeout."""
     deadline = time.monotonic() + timeout
 
     while time.monotonic() < deadline:
         if process is not None and process.poll() is not None:
             return False  # process exited
-        if _vosk_service_reachable(timeout=1.5):
+        if _vosk_service_reachable(timeout=1.5, service_url=service_url):
             return True
         time.sleep(0.5)
     return False

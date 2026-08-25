@@ -60,6 +60,38 @@
         return pane._explorerTabs.find(tab => tab.id === EXPLORER_PREVIEW_TAB_ID) || pane._explorerTabs[0];
     }
 
+    /* Seed consumers that must know the restored browsing directory before the
+       async tab restore runs (notably a Git sidebar restored in Follow mode).
+       `null` means no directory was persisted; an empty string is a real saved
+       explorer-root directory. */
+    function explorerPersistedPreviewDirectory(session) {
+        const rawViews = session?.explorer_tab_views;
+        if (!rawViews || typeof rawViews !== 'object') {
+            return null;
+        }
+        const rawPreview = rawViews[EXPLORER_PREVIEW_TAB_ID];
+        if (
+            !rawPreview
+            || typeof rawPreview !== 'object'
+            || !Object.prototype.hasOwnProperty.call(rawPreview, 'dir')
+        ) {
+            return null;
+        }
+        return explorerNormalizeTabPath(rawPreview.dir);
+    }
+
+    /* A mode-switch response carries the terminal's freshly resolved cwd
+       relative to its freshly resolved explorer root. That path must win over
+       the saved Preview directory, whose relative value belongs to the root the
+       explorer used before the terminal moved. Initial page/workspace restores
+       carry no transient override and continue restoring their saved view. */
+    function explorerInitialPreviewDirectory(session) {
+        if (session && Object.prototype.hasOwnProperty.call(session, 'explorer_open_path')) {
+            return explorerNormalizeTabPath(session.explorer_open_path);
+        }
+        return explorerPersistedPreviewDirectory(session) ?? undefined;
+    }
+
     function explorerFindTab(pane, id) {
         ensureExplorerTabState(pane);
         return pane._explorerTabs.find(tab => tab.id === id) || null;
@@ -294,6 +326,23 @@
         } else if (tab.path) {
             return;
         }
+        /* The find query belongs to the tab *and the file it was typed
+           against*, never to the pane. One pane-wide query meant opening
+           anything else re-ran the outgoing file's search over the incoming
+           one: marks the reader never asked for, and a scroll-to-first-match
+           that overrode the offset the tab restore had just put back. Pairing
+           it with the path is what makes the permanent Preview tab — which
+           shows a different file on every plain click — drop the query while a
+           pinned tab, or a reopen of the same file, keeps it.
+
+           In-memory only. Nothing here reaches the persisted tab record; the
+           snapshot contract stores no Search query or result. */
+        if (isFile) {
+            const query = String(pane._explorerSearch?.query || '');
+            tab.find = query
+                ? { path: explorerNormalizeTabPath(pane._explorerFilePath), query }
+                : null;
+        }
         const scroll = captureExplorerFileScroll(index);
         if (!scroll) {
             return;
@@ -317,6 +366,16 @@
         const view = tab && tab.view;
         if (!view) {
             return null;
+        }
+        const policy = typeof explorerScrollPolicy === 'function'
+            ? explorerScrollPolicy()
+            : null;
+        if (policy) {
+            return policy.resolveTabView(tab, revisions, {
+                resolveRecord: (record, current) => (
+                    window.GridVibeExplorerPersistence?.resolveRecord(record, current)
+                )
+            });
         }
         const current = typeof revisions === 'string'
             ? { source: revisions, preview: revisions, diff: revisions, directory: revisions }
@@ -968,14 +1027,9 @@
         const savedPreviewPath = explorerNormalizeTabPath(
             rawPreviewView && typeof rawPreviewView === 'object' ? rawPreviewView.path : ''
         );
-        const savedPreviewDir = explorerNormalizeTabPath(
-            rawPreviewView && typeof rawPreviewView === 'object' ? rawPreviewView.dir : ''
-        );
-        const hasSavedPreviewDir = Boolean(
-            rawPreviewView
-            && typeof rawPreviewView === 'object'
-            && Object.prototype.hasOwnProperty.call(rawPreviewView, 'dir')
-        );
+        const persistedPreviewDir = explorerPersistedPreviewDirectory(session);
+        const savedPreviewDir = persistedPreviewDir === null ? '' : persistedPreviewDir;
+        const hasSavedPreviewDir = persistedPreviewDir !== null;
         if (hasSavedPreviewDir) {
             previewTab.dirPath = savedPreviewDir;
         } else if (!savedPreviewPath) {

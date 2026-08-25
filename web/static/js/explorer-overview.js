@@ -70,6 +70,11 @@ function explorerChangeMarksEligible(pane) {
         && pane._explorerGitContext?.available
         && !pane._explorerDiffCommit
         && !pane._explorerEdit
+        // The large-file tier renders no per-line rows, so there is nothing to
+        // hang a gutter marker or a ruler lane on — and fetching a diff to
+        // build a model nothing can paint is the work the tier exists to
+        // avoid. Its notice tells the reader the marks are off.
+        && explorerPaneSourceTier(pane) !== 'large'
     );
 }
 
@@ -163,10 +168,19 @@ async function loadExplorerChangeMarks(index, { force = false } = {}) {
         truncated = Boolean(pane._explorerDiffTruncated);
     } else {
         try {
-            const params = new URLSearchParams({ path, mode: 'head' });
+            /* `context=zero` is the marks' own narrower read of the same
+               bounded endpoint: -U0 drops the context lines and keeps every
+               +/- line, which is exactly what a mark and a peek are made of,
+               so the model is identical and up to six lines per hunk never
+               travel. The reply is deliberately *not* written into
+               `_explorerDiffContent` / `_explorerDiffCacheKey` — the Diff
+               panel reads those and would render a context-free patch. The
+               reverse reuse above is still sound: a -U3 diff yields the same
+               marks. */
+            const params = new URLSearchParams({ path, mode: 'head', context: 'zero' });
             const response = await fetch(
                 `/api/explorer/${encodeURIComponent(sessionId)}/git/diff?${params.toString()}`,
-                { cache: 'no-store' }
+                { cache: 'no-store', signal: explorerRequestSignal(pane, 'changeMarks') }
             );
             const data = await response.json().catch(() => ({}));
             if (!response.ok) {
@@ -175,6 +189,12 @@ async function loadExplorerChangeMarks(index, { force = false } = {}) {
             diff = data.diff || '';
             truncated = Boolean(data.truncated);
         } catch (error) {
+            // A superseded load is not a failure: a newer open cancelled it
+            // and will paint its own marks. Logging it would put a red line in
+            // the console for every fast file switch (guardrail 9).
+            if (explorerIsAbortError(error)) {
+                return;
+            }
             // An untracked file returns an empty diff, but any genuine failure
             // also just means no marks — the Source view stands on its own.
             console.error('[GridVibe Sessions] Explorer change marks failed:', error);
@@ -212,9 +232,14 @@ function applyExplorerChangeMarks(index) {
     scheduleExplorerOverviewSync(index);
 }
 
-/* The gutter half. Rows are rebuilt from scratch on every render, so there is
-   never anything to clean up — a missing model or an ineligible pane simply
-   means no marks. No layout reads here: the geometry pass owns those.
+/* The gutter half. This used to lean on the rows being rebuilt from scratch on
+   every render, so there was never anything to clean up. That is no longer
+   true: a repaint that only moves search marks leaves the row <div>s standing
+   (which is the point of it), and a reload of the model — a Git action, a
+   watcher signal — then paints onto rows that already carry the last pass's
+   attribute and its marker button. So the pass clears its own output first,
+   over the rows it is about to walk, and stays idempotent however often it
+   runs. No layout reads here: the geometry pass owns those.
 
    Every marked row also gains its marker button (Phase 5): the coloured bar /
    wedge is itself the click target that toggles the block's peek. It is a
@@ -223,10 +248,22 @@ function applyExplorerChangeMarks(index) {
    nested button is invalid HTML. One `appendChild` per marked row inside the
    pass that already walks exactly those rows; the clicks are handled by one
    delegated listener (wireExplorerChangePeek). */
+function clearExplorerChangeMarkGutter(code) {
+    if (!code) {
+        return;
+    }
+    code.querySelectorAll('.explorer-source-line[data-explorer-change]').forEach(row => {
+        delete row.dataset.explorerChange;
+        row.classList.remove('explorer-source-change-after');
+    });
+    code.querySelectorAll('.explorer-change-marker').forEach(marker => marker.remove());
+}
+
 function applyExplorerChangeMarkGutter(index) {
     const pane = terminals[index];
     const code = document.getElementById(`explorer-code-${index}`);
     const model = pane?._explorerChangeMarks;
+    clearExplorerChangeMarkGutter(code);
     if (
         !pane
         || !code
@@ -577,10 +614,15 @@ function wireExplorerChangePeek(index) {
    `role="scrollbar"` is the honest description: click, drag and wheel all
    drive the inner .explorer-source-view it points at. The viewport box is
    decorative — the scroll position it shows is already on the aside as
-   aria-valuenow. */
+   aria-valuenow.
+
+   It starts stood down rather than `hidden`: the frame's track is reserved
+   either way, so leaving the layout would only trade the column's own strip
+   for a bare seam until the first sync. `aria-hidden` goes with the state —
+   a scrollbar that controls nothing is not one to announce. */
 function explorerOverviewHtml(index) {
     return `<aside
-        class="explorer-source-overview"
+        class="explorer-source-overview is-empty"
         data-explorer-overview="${index}"
         data-explorer-overview-mode="ruler"
         role="scrollbar"
@@ -590,7 +632,7 @@ function explorerOverviewHtml(index) {
         aria-valuemin="0"
         aria-valuemax="100"
         aria-valuenow="0"
-        hidden
+        aria-hidden="true"
     ><canvas class="explorer-overview-canvas"></canvas><div class="explorer-overview-viewport" aria-hidden="true"></div></aside>`;
 }
 
@@ -956,6 +998,26 @@ function wireExplorerOverview(index, parts) {
     }
 }
 
+/* The one writer of the stood-down state. The strip keeps its box; the
+   canvas, the viewport box and the pointer gestures go with the geometry that
+   justified them (CSS), and so do the scrollbar semantics (here). */
+function setExplorerOverviewStoodDown(aside, stoodDown) {
+    aside.classList.toggle('is-empty', stoodDown);
+    if (stoodDown) {
+        aside.setAttribute('aria-hidden', 'true');
+    } else {
+        aside.removeAttribute('aria-hidden');
+    }
+}
+
+/* The reader of that one writer, and it reads exactly what the writer writes.
+   It also tested `aside.hidden`, which nothing has set since the markup stopped
+   emitting it — a term whose only effect was to make a reader of this function
+   wonder which of the two states is the real one. */
+function explorerOverviewStoodDown(aside) {
+    return aside.classList.contains('is-empty');
+}
+
 function syncExplorerOverview(index) {
     const parts = explorerOverviewParts(index);
     const pane = terminals[index];
@@ -971,9 +1033,12 @@ function syncExplorerOverview(index) {
     }
     const geometry = explorerOverviewGeometry(index, parts);
     /* Nothing rendered to survey — an empty file, the in-place editor's
-       textarea, a panel switched away — so the column leaves the layout
-       instead of standing there showing the last file's shape. */
-    parts.aside.hidden = !geometry;
+       textarea, a panel switched away — so the column stands down instead of
+       standing there showing the last file's shape. It keeps its width while
+       it does: the frame's second track is reserved, and a column that left
+       the layout re-wrapped every line of text beside it on the way out and
+       back again on the way in. */
+    setExplorerOverviewStoodDown(parts.aside, !geometry);
     if (!geometry) {
         return;
     }
@@ -1011,7 +1076,7 @@ function scheduleExplorerOverviewViewport(index) {
     }
     const update = () => {
         const parts = explorerOverviewParts(index);
-        if (parts && !parts.aside.hidden) {
+        if (parts && !explorerOverviewStoodDown(parts.aside)) {
             updateExplorerOverviewViewport(parts);
         }
     };

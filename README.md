@@ -116,7 +116,7 @@ Browser mode is the most reliable for microphone permissions. Settings apply liv
 | --- | --- |
 | **Session tabs** | Keep related panes together in draggable tabs. Use `Alt+1`–`Alt+9` to switch, middle-click to close, or broadcast typing to every pane in the active tab. |
 | **Saved sessions** | Save a setup as a reusable preset, import one later, or choose **New Session** for a clean start. Stored SSH passwords are encrypted. |
-| **Save & restore** | GridVibe autosaves your workspace and also offers **Save Workspace**. After a restart, restore the same tabs, pane layouts, directories, commands, active group, and explorer presentation; passwords are never written to the workspace snapshot. Lowering `max_sessions` does not truncate wider stored presets or rewrite their split geometry; a group that no longer fits is refused with the number to raise the setting to, and the stored preset and snapshot are left untouched. A snapshot damaged outside GridVibe fails as a whole tab rather than restoring one pane short, so the restore chooser's counts always match what a restore starts; window chrome such as top-bar visibility and Markdown appearance falls back to its default instead. |
+| **Save & restore** | GridVibe autosaves your workspace and also offers **Save Workspace**. After a restart, restore the same tabs, pane layouts, commands, active group, and explorer presentation; each pane comes back in the directory it was *working in*, falling back to the one it was launched in if that directory is gone. Passwords are never written to the workspace snapshot. Lowering `max_sessions` does not truncate wider stored presets or rewrite their split geometry; a group that no longer fits is refused with the number to raise the setting to, and the stored preset and snapshot are left untouched. A snapshot damaged outside GridVibe fails as a whole tab rather than restoring one pane short, so the restore chooser's counts always match what a restore starts; window chrome such as top-bar visibility and Markdown appearance falls back to its default instead. |
 | **Close & restart** | Voluntary close, manual restart, and update restart share one in-page choice: continue without saving, save every open workspace, or save every open session preset and then every workspace. GridVibe waits for each live workspace window to flush its current presentation; if a requested save fails, GridVibe stays open and leaves the same three choices available. |
 | **Multiple workspaces** | Optionally keep separate projects in separate windows, move tabs between them without restarting terminals, and switch with `Alt+W` / `Alt+Shift+W` — including from the launcher, where `Alt+W` goes back to the workspace that opened it. |
 | **Updates** | **Check for updates** fast-forwards a Git clone, then uses the same save-or-restart choices as a manual restart. |
@@ -125,13 +125,16 @@ Closing a workspace ends its terminals but keeps it available to restore. **Clos
 
 ## File Explorer
 
-Swap any pane between a terminal and a file explorer with one button — same directory, no re-navigation. Works on a local repo folder or a remote host over SFTP.
+Swap any pane between a terminal and a file explorer with one button — same directory, no re-navigation. The explorer roots on the Git repository containing that directory, so its sidebar works and you can navigate up to the repository's own root, and it never widens above the folder the pane was launched in unless the shell has itself walked out of it. Works on a local repo folder or a remote host over SFTP.
+
+When the pane cannot say where it is — the shell never answered, or the pane is running an agent and so has no prompt to read — the explorer opens on the directory the pane launched in and says so in a dismissible bar at the top of the pane, naming the folder it actually opened. The switch itself succeeded, so the bar is informational and carries no retry; it is there because silently opening a different folder is the failure that is hard to notice.
 
 | | |
 | --- | --- |
-| **Browse & preview** | Use breadcrumbs, a lazy file tree, draggable file tabs, syntax-coloured source, rendered Markdown and Mermaid, inline images, downloads, and `Ctrl+F` find. |
+| **Browse & preview** | Use breadcrumbs, a lazy file tree, draggable file tabs, syntax-coloured source, rendered Markdown and Mermaid, inline images, downloads, and `Ctrl+F` find. Markdown is rendered the first time you select the **Preview** tab rather than on every open, and diagrams draw as they scroll into view. |
 | **Edit** | Edit complete UTF-8 text files in place and save with `Ctrl+S`. Saves are atomic, and a conflict prompt protects files changed on disk. With voice input on, the editor gets its own 🎙️ button and dictates at the caret. |
-| **Git** | See branch and file status, inspect current or historical diffs, and stage, unstage, commit, publish, or discard changes. Diff views also support line and block undo. |
+| **Git** | See branch and file status, inspect current or historical diffs, and stage, unstage, commit, publish, or discard changes. The sidebar starts linked to the explorer root chosen in the launcher or derived when a terminal enters explorer mode, so browsing into a subfolder does not reset the graph or change the target of Git actions. In the Graph header, the pin captures the current folder as a new fixed Git scope — useful when the explorer root is above a repository — while the independent chain button follows the folder being browsed. Both settings survive Save Workspace and restart; if both are enabled, turning follow off returns to the pinned folder. The one case where a pin is deliberately dropped is switching the pane to a terminal — the shell can walk to another repository entirely, so the fixed scope would be a lie — and follow-browsing is untouched by that. **Stage All** and **Unstage All** act on every changed file at once; unlike **Discard All** beside them, neither asks for confirmation, because staging only moves entries in and out of the index and nothing in your working copy changes. Diff views also support line and block undo. The commit graph has its own find box behind the magnifying glass in the Graph header: type to highlight every matching commit message in the loaded graph, with a match counter and `Enter`/`Shift+Enter` (or the ↑/↓ buttons) to step through the hits — the same controls as the `Ctrl+F` file find — and `Esc` or the magnifier again to put it away. It searches the commit subjects the graph is showing, so it finds what is on screen rather than replacing `git log --grep`. |
+| **Very large files & diffs** | Past ~20,000 lines or 4 MiB a file opens in a **large file view**: plain text, no syntax colour, line numbers, folding, change marks or overview ruler, and no find — a notice at the top of the pane names each one. Download and Edit still work. Below that tier, non-trivial Source files paint readable plain rows first and gain syntax colour when a bounded background worker finishes; small files keep the instant synchronous path. Large diffs degrade in two steps, giving up intraline emphasis and then syntax colour, but always keeping side-by-side layout, line numbers, and line and block undo; the largest tier's parse runs in that same background pool. |
 | **Search** | Press `Ctrl+Shift+F` for repository-wide search with case, whole-word, regex, file-pattern, scope, and `.gitignore` controls. |
 | **Find a file** | Type in the Files tree's filter box to find files and folders anywhere under the root **by name**, with the matched part highlighted in place. Same case, whole-word, and regex toggles; `Enter` opens the first hit, `Esc` clears the filter. |
 | **Fold a level** | `Alt`-click a folder's fold arrow in the Files tree to fold or unfold **every folder beside it** at once. The new state mirrors the folder you clicked, so `Alt`-clicking any open top-level folder folds the whole tree in one go. Folding a level also forgets what was open inside it, so those folders reopen clean, and the tree scrolls to keep the folder you clicked in view instead of jumping once its rows disappear. |
@@ -166,7 +169,7 @@ GridVibe does not proxy pages or bypass `X-Frame-Options`/CSP, so sites that blo
 | 🔄 | Reset the view and replay recent output (reloads explorer and browser panes). On a Local Repo terminal it opens a dropdown: **Reset view** plus a **Shell** section that restarts the pane in cmd, PowerShell, or a WSL distro |
 | 📁 ⇄ 💻 | Swap between terminal and file explorer at the current directory |
 | 🌐 ⇄ 💻 | Swap a Local Repo pane between terminal and browser preview |
-| 🪟 | Split side-by-side or stacked. A terminal clones its connection; an explorer or browser pane splits off a terminal instead — for both SSH and Local Repo — rooted where the explorer is currently browsing |
+| 🪟 | Split side-by-side or stacked. A terminal clones its connection and opens the new pane where it *is*, not where it started; an explorer or browser pane splits off a terminal instead — for both SSH and Local Repo — rooted where the explorer is currently browsing |
 | 🧹 | Clear the display and purge the replay buffer |
 | 🎙️ | Start/stop voice input (when enabled) |
 | 🌙 ⇄ ☀️ | Toggle an explorer pane between dark and light |
@@ -205,7 +208,7 @@ Drag the dividers between panes to resize them.
 
 ## Configuration
 
-Everything lives in **App Settings** — same dialog from the gear on the launcher *or* the session window, so settings never need a trip back to the launcher. It covers theme, surface mode, terminal font and size, max sessions, workspace autosave interval, SSH host-key policy, and all voice options. The one exception is **Multiple workspaces**: it changes what every launch does, so its switch sits in the launcher's Workspaces card instead of the dialog.
+Everything lives in **App Settings** — same dialog from the gear on the launcher *or* the session window, so settings never need a trip back to the launcher. It covers theme, surface mode, terminal font and size, max sessions, shell integration, workspace autosave interval, SSH host-key policy, and all voice options. The one exception is **Multiple workspaces**: it changes what every launch does, so its switch sits in the launcher's Workspaces card instead of the dialog.
 
 On disk, settings load from `config.json` (git-ignored) falling back to `default_config.json`:
 
@@ -213,7 +216,7 @@ On disk, settings load from `config.json` (git-ignored) falling back to `default
 {
   "server": { "host": "127.0.0.1", "port": 5050 },
   "appearance": { "theme": "dark" },
-  "terminal": { "max_sessions": 16, "font_size": 14 },
+  "terminal": { "max_sessions": 16, "font_size": 14, "shell_integration": true },
   "workspace": { "surface_mode": "normal", "autosave_interval_minutes": 5, "multi_workspace_enabled": false },
   "ssh": { "host_key_policy": "auto-add" },
   "explorer_search": { "max_files": 2000, "max_matches": 5000, "timeout_seconds": 20 }
@@ -221,6 +224,16 @@ On disk, settings load from `config.json` (git-ignored) falling back to `default
 ```
 
 GridVibe generates a Flask session signing key at startup unless `GRIDVIBE_SECRET_KEY`, `SECRET_KEY`, or `security.secret_key` is set.
+
+### Shell integration
+
+`terminal.shell_integration` (on by default) is what lets GridVibe follow the directory a terminal is *in*, rather than the one it was launched in — which is what the file explorer opens on when you switch a pane over to it.
+
+It adds an invisible escape sequence to the shell's prompt carrying the current directory — `OSC 9;9`, which carries the path as raw text, for every shell family GridVibe installs a hook into — then reads that out of the terminal's own output. It never types at your prompt to ask, so the answer is still right while a build, a pager, a TUI, or an agent is running — and a pane running an agent reports the directory the agent was started in. The other convention, `OSC 7`, is a `file://` URL and is still *accepted*: a shell that arrives with its own OSC 7 hook already installed is read exactly as before. GridVibe only stopped emitting it, because a URL has to be percent-decoded to read, and that makes a directory named `100%done` or `literal%2Fname` ambiguous.
+
+A **local** shell is handed the hook when GridVibe starts it — cmd through its `PROMPT` environment variable, bash through `PROMPT_COMMAND` (forwarded into WSL with `WSLENV`), PowerShell as a `-Command` argument — so nothing is typed and nothing appears in the pane. A **remote** shell cannot be handed anything (`sshd` forwards only what its `AcceptEnv` allows, and writing a file to your server is not something a terminal should do), so SSH panes are sent one short line at startup, which the shell echoes like any other command.
+
+What it costs, stated plainly: that one echoed line on SSH panes; an existing bash/zsh prompt hook is kept and appended to, and PowerShell's `prompt` function is wrapped rather than replaced, but **cmd's `PROMPT` is replaced** with the default `$P$G` plus the sequence. On a local shell whose own startup files set `PROMPT_COMMAND` themselves, the inherited hook is overwritten and GridVibe falls back to reading the OS. Turn the setting off in App Settings to leave every prompt untouched — GridVibe still reads the sequence if your own shell configuration happens to emit it, and otherwise falls back to asking the shell directly when it is idle.
 
 ## Security
 
@@ -245,7 +258,7 @@ python -m ruff check .
 
 Backend lives in the modular `web/` package (`app.py`, `api.py`, `agents.py`, `terminal_io.py`, `explorer.py`, `explorer_search.py`, `voice.py`, …), session state in `sessions/manager.py`, the voice service in `services/`, and the two pages in `templates/` with assets in `web/static/`. Root-level `api.py`, `session_manager.py`, `cleanup.py`, and `webview_launcher.py` are compatibility shims — edit the canonical modules.
 
-More: [`CONTRIBUTING.md`](CONTRIBUTING.md) · [`CHANGELOG.md`](CHANGELOG.md) · [`docs/logging_guide.md`](docs/logging_guide.md) · [`docs/voice_guideline.md`](docs/voice_guideline.md)
+More: [`CONTRIBUTING.md`](CONTRIBUTING.md) · [`CHANGELOG.md`](CHANGELOG.md) · [`docs/logging_guide.md`](docs/logging_guide.md) · [`docs/voice_guideline.md`](docs/voice_guideline.md) · [`docs/session_state_guideline.md`](docs/session_state_guideline.md)
 
 ## Local Files
 
@@ -260,7 +273,7 @@ Created at runtime, never committed:
 | `.encryption_key` | Fernet key for password encryption |
 | `logs/gridvibe.log` | Main rotating log file |
 
-Both JSON state files are written the same careful way: one change at a time under an OS-level `<file>.lock`, committed through a scratch file and an atomic replace, with the previous version kept as `<file>.bak`. A file GridVibe cannot read is moved aside as `<file>.corrupt-<timestamp>` and the backup is loaded in its place, rather than being reported as empty and overwritten. A save that does not reach the disk is reported as a retryable failure, never as success. Those sidecar files are local state and are gitignored alongside the files they protect.
+Each of those three JSON state files — `config.json`, `saved_sessions.json` and `runtime_state.json` — is written the same careful way: one change at a time under an OS-level `<file>.lock`, committed through a scratch file and an atomic replace, with the previous version kept as `<file>.bak`. A file GridVibe cannot read is moved aside as `<file>.corrupt-<timestamp>` and the backup is loaded in its place, rather than being reported as empty and overwritten. A save that does not reach the disk is reported as a retryable failure, never as success. Those sidecar files are local state and are gitignored alongside the files they protect. The developer-facing contract for all of it — what is captured, when, and what restore replays — is [`docs/session_state_guideline.md`](docs/session_state_guideline.md).
 
 ## License
 

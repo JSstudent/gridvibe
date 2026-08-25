@@ -317,6 +317,10 @@ class DiscardAllExplorerEditsTestCase(NodeHarnessMixin, unittest.TestCase):
             sandbox.applyScrollMetrics = () => {};
             sandbox.applyExplorerSearch = () => {};
             sandbox.renderExplorerSource = index => calls.renderSource.push(index);
+            // Owned by explorer-viewer.js: reads the rows once the render that
+            // built them has finished. Immediate here, as it is for every
+            // document small enough to render in one pass.
+            sandbox.whenExplorerSourceRendered = (index, run) => run();
             sandbox.openGenericConfirmModal = () => Promise.resolve(confirm);
             // The Edit button the exit path would focus, if it focused one.
             sandbox.document.querySelector = selector => {

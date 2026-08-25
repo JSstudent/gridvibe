@@ -11,7 +11,7 @@ import re
 import threading
 import time
 import uuid
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 from flask import jsonify, render_template, request, send_file, send_from_directory
 from flask_socketio import emit, join_room, leave_room
@@ -79,6 +79,7 @@ from web.config import (
     TERMINAL_FONT_SIZE_MIN,
     WHISPER_MODEL_OPTIONS,
     ConfigPersistenceError,
+    RuntimeConfigState,
     _config_lock,
     _merge_dicts,
     _normalize_surface_mode,
@@ -94,11 +95,12 @@ from web.explorer import (  # noqa: F401 - some names re-exported for backwards 
     _append_deleted_git_entries,
     _attach_git_status_to_entries,
     _clean_git_entry_status,
+    _configured_explorer_root_directory,
     _evict_all_pooled_ssh_clients,
     _evict_pooled_ssh_client,
     _explorer_backend,
     _explorer_content_looks_binary,
-    _explorer_editor_language,
+    _explorer_cwd_repo_root,
     _explorer_image_mimetype,
     _explorer_root_directory,
     _fs_root_revision,
@@ -113,6 +115,7 @@ from web.explorer import (  # noqa: F401 - some names re-exported for backwards 
     _git_stage_all_paths,
     _git_stage_path,
     _git_status_for_entry,
+    _git_unstage_all_paths,
     _git_unstage_path,
     _is_browser_session,
     _is_explorer_image_file,
@@ -120,6 +123,10 @@ from web.explorer import (  # noqa: F401 - some names re-exported for backwards 
     _is_markdown_file,
     _is_remote_explorer_session,
     _is_tail_preview_file,
+    _local_path_inside,
+    _LocalExplorerBackend,
+    _relative_explorer_path,
+    _relative_remote_explorer_path,
     _release_ssh_sftp,
     _remote_explorer_root_directory,
     _remote_is_directory,
@@ -127,10 +134,13 @@ from web.explorer import (  # noqa: F401 - some names re-exported for backwards 
     _remote_path_inside,
     _render_markdown_preview,
     _resolve_explorer_candidate_path,
+    _resolve_explorer_open_root,
     _resolve_pane_terminal_directory,
     _resolve_remote_explorer_candidate_path,
     _sftp_request_error_types,
+    _SftpExplorerBackend,
     get_explorer_file_payload,
+    get_explorer_file_preview_payload,
     get_explorer_file_state_payload,
     open_path_in_os_file_manager,
     read_explorer_file_preview,
@@ -220,6 +230,12 @@ from web.selfupdate import (  # noqa: F401 - perform_self_update re-exported for
     perform_app_update,
     perform_self_update,
 )
+from web.session_modes import (  # noqa: F401 - re-exported for backwards compatibility
+    ModeTransitionEffects,
+    ModeTransitionError,
+    _refresh_pane_cwd,
+    apply_pane_mode_change,
+)
 from web.session_presentation import (
     PresentationValidationError,
     apply_group_presentation,
@@ -228,6 +244,7 @@ from web.session_presentation import (
 from web.terminal_io import (  # noqa: F401 - re-exported for backwards compatibility
     _MAX_TRACKED_SOCKET_CLIENTS,
     _MAX_TRACKED_TERMINAL_COMMAND_LENGTH,
+    CWD_SOURCE_LAUNCH,
     LOCAL_SHELL_KINDS,
     SSH_STREAM_RECV_TIMEOUT,
     TERMINAL_OUTPUT_BUFFER_MAX_CHARS,
@@ -269,6 +286,7 @@ from web.terminal_io import (  # noqa: F401 - re-exported for backwards compatib
     _track_terminal_agent_input,
     client_joined_sessions,
     connection_lock,
+    effective_directory,
     session_output_buffers,
     ssh_connections,
 )
@@ -316,10 +334,12 @@ from web.voice import (  # noqa: F401 - re-exported for backwards compatibility
 )
 from web.workspaces import (
     DEFAULT_WORKSPACE_ID,
+    WorkspaceRequestError,
     _redacted_launch_summary,
     capacity_refusal,
     close_extra_workspaces,
     close_live_workspace,
+    create_labelled_workspace,
     forget_emptied_default_workspace,
     forget_pruned_workspaces,
     launch_session_group,
@@ -329,6 +349,7 @@ from web.workspaces import (
     normalize_workspace_id,
     normalize_workspace_label,
     public_workspace_payload,
+    rename_workspace_label,
     restore_workspaces,
     workspace_has_groups,
     workspace_label,
@@ -370,40 +391,52 @@ def _refresh_runtime_config():
     runtime_config.refresh()
 
 
-def _active_voice_model_name() -> str:
-    """Return the currently configured STT model name."""
-    return runtime_config.whisper_model if runtime_config.voice_engine == "whisper" else runtime_config.vosk_model
+def _active_voice_model_name(settings: Optional[RuntimeConfigState] = None) -> str:
+    """Return the currently configured STT model name.
+
+    A caller already holding a captured generation passes it in, so the engine
+    and the model it names come from the same one.
+    """
+    settings = settings if settings is not None else runtime_config.snapshot()
+    return settings.whisper_model if settings.voice_engine == "whisper" else settings.vosk_model
 
 
 def _public_app_config() -> Dict[str, Any]:
-    """Return the subset of app config that the launcher can edit safely."""
+    """Return the subset of app config that the launcher can edit safely.
+
+    Built from one captured generation (ISSUE-2026-041): a payload of twelve
+    independently read settings could otherwise describe a config file that
+    never existed, half from before a concurrent refresh and half from after.
+    """
+    settings = runtime_config.snapshot()
     return {
         "install_kind": install_kind(),
         "version": __version__,
         "appearance": {
-            "theme": runtime_config.app_theme,
+            "theme": settings.app_theme,
         },
         "workspace": {
-            "surface_mode": runtime_config.app_surface_mode,
-            "autosave_interval_minutes": runtime_config.workspace_autosave_interval_minutes,
-            "multi_workspace_enabled": runtime_config.multi_workspace_enabled,
+            "surface_mode": settings.app_surface_mode,
+            "autosave_interval_minutes": settings.workspace_autosave_interval_minutes,
+            "multi_workspace_enabled": settings.multi_workspace_enabled,
         },
         "ssh": {
-            "host_key_policy": runtime_config.ssh_host_key_policy,
+            "host_key_policy": settings.ssh_host_key_policy,
         },
         "terminal": {
-            "font_family": runtime_config.terminal_font_family,
-            "font_size": runtime_config.terminal_font_size,
-            "max_sessions": runtime_config.max_sessions,
+            "font_family": settings.terminal_font_family,
+            "font_size": settings.terminal_font_size,
+            "max_sessions": settings.max_sessions,
+            "shell_integration": settings.terminal_shell_integration,
         },
         "voice_input": {
-            "enabled": runtime_config.voice_enabled,
-            "engine": runtime_config.voice_engine,
-            "vosk_model": runtime_config.vosk_model,
-            "whisper_model": runtime_config.whisper_model,
-            "whisper_device": runtime_config.whisper_device,
-            "whisper_compute_type": runtime_config.whisper_compute_type,
-            "language": runtime_config.voice_language,
+            "enabled": settings.voice_enabled,
+            "engine": settings.voice_engine,
+            "vosk_model": settings.vosk_model,
+            "whisper_model": settings.whisper_model,
+            "whisper_device": settings.whisper_device,
+            "whisper_compute_type": settings.whisper_compute_type,
+            "language": settings.voice_language,
         }
     }
 
@@ -415,19 +448,20 @@ def _broadcast_app_config_update(apply_scope: str = "session"):
     default ``session`` targets only the focused terminal, ``all`` pushes the
     font settings to every active session.
     """
+    settings = runtime_config.snapshot()
     socketio.emit(
         "app_config_updated",
         {
             "appearance": {
-                "theme": runtime_config.app_theme,
+                "theme": settings.app_theme,
             },
             "workspace": {
-                "surface_mode": runtime_config.app_surface_mode,
-                "multi_workspace_enabled": runtime_config.multi_workspace_enabled,
+                "surface_mode": settings.app_surface_mode,
+                "multi_workspace_enabled": settings.multi_workspace_enabled,
             },
             "terminal": {
-                "font_family": runtime_config.terminal_font_family,
-                "font_size": runtime_config.terminal_font_size,
+                "font_family": settings.terminal_font_family,
+                "font_size": settings.terminal_font_size,
                 "apply_scope": "all" if apply_scope == "all" else "session",
             },
             "timestamp": int(time.time() * 1000),
@@ -436,34 +470,40 @@ def _broadcast_app_config_update(apply_scope: str = "session"):
 
 
 def _normalize_app_config_update(data: Any) -> Dict[str, Any]:
-    """Validate and normalize launcher-editable app settings."""
+    """Validate and normalize launcher-editable app settings.
+
+    Every omitted field falls back to the *same* captured generation
+    (ISSUE-2026-041), so a partial update cannot write back a mixture of two
+    configs for the settings the request did not mention.
+    """
+    settings = runtime_config.snapshot()
     payload = data if isinstance(data, dict) else {}
     appearance = payload.get("appearance")
     if not isinstance(appearance, dict):
         appearance = {}
-    theme = str(appearance.get("theme", runtime_config.app_theme)).strip().lower()
+    theme = str(appearance.get("theme", settings.app_theme)).strip().lower()
     if theme not in {"system", "light", "dark"}:
-        theme = runtime_config.app_theme
+        theme = settings.app_theme
 
     workspace = payload.get("workspace")
     if not isinstance(workspace, dict):
         workspace = {}
-    surface_mode = _normalize_surface_mode(workspace.get("surface_mode"), runtime_config.app_surface_mode)
+    surface_mode = _normalize_surface_mode(workspace.get("surface_mode"), settings.app_surface_mode)
     multi_workspace_enabled = workspace.get(
         "multi_workspace_enabled",
-        runtime_config.multi_workspace_enabled,
+        settings.multi_workspace_enabled,
     )
     if not isinstance(multi_workspace_enabled, bool):
-        multi_workspace_enabled = runtime_config.multi_workspace_enabled
+        multi_workspace_enabled = settings.multi_workspace_enabled
     try:
         autosave_interval_minutes = int(
             workspace.get(
                 "autosave_interval_minutes",
-                runtime_config.workspace_autosave_interval_minutes,
+                settings.workspace_autosave_interval_minutes,
             )
         )
     except (TypeError, ValueError):
-        autosave_interval_minutes = runtime_config.workspace_autosave_interval_minutes
+        autosave_interval_minutes = settings.workspace_autosave_interval_minutes
     autosave_interval_minutes = max(
         AUTOSAVE_INTERVAL_MINUTES_MIN,
         min(AUTOSAVE_INTERVAL_MINUTES_MAX, autosave_interval_minutes),
@@ -473,47 +513,52 @@ def _normalize_app_config_update(data: Any) -> Dict[str, Any]:
     if not isinstance(ssh_settings, dict):
         ssh_settings = {}
     host_key_policy = str(
-        ssh_settings.get("host_key_policy", runtime_config.ssh_host_key_policy)
+        ssh_settings.get("host_key_policy", settings.ssh_host_key_policy)
     ).strip().lower()
     if host_key_policy not in HOST_KEY_POLICY_OPTIONS:
-        host_key_policy = runtime_config.ssh_host_key_policy
+        host_key_policy = settings.ssh_host_key_policy
 
     terminal_settings = payload.get("terminal")
     if not isinstance(terminal_settings, dict):
         terminal_settings = {}
     font_family = str(
-        terminal_settings.get("font_family", runtime_config.terminal_font_family)
+        terminal_settings.get("font_family", settings.terminal_font_family)
     ).strip()
     if not font_family or len(font_family) > TERMINAL_FONT_FAMILY_MAX_LENGTH:
-        font_family = runtime_config.terminal_font_family
+        font_family = settings.terminal_font_family
     try:
-        font_size = int(terminal_settings.get("font_size", runtime_config.terminal_font_size))
+        font_size = int(terminal_settings.get("font_size", settings.terminal_font_size))
     except (TypeError, ValueError):
-        font_size = runtime_config.terminal_font_size
+        font_size = settings.terminal_font_size
     font_size = max(TERMINAL_FONT_SIZE_MIN, min(TERMINAL_FONT_SIZE_MAX, font_size))
     try:
-        max_sessions = int(terminal_settings.get("max_sessions", runtime_config.max_sessions))
+        max_sessions = int(terminal_settings.get("max_sessions", settings.max_sessions))
     except (TypeError, ValueError):
-        max_sessions = runtime_config.max_sessions
+        max_sessions = settings.max_sessions
     max_sessions = max(MAX_SESSIONS_MIN, min(MAX_SESSIONS_MAX, max_sessions))
+    shell_integration = terminal_settings.get(
+        "shell_integration", settings.terminal_shell_integration
+    )
+    if not isinstance(shell_integration, bool):
+        shell_integration = settings.terminal_shell_integration
 
     voice_input = payload.get("voice_input")
     if not isinstance(voice_input, dict):
         voice_input = {}
 
-    engine = str(voice_input.get("engine", runtime_config.voice_engine)).strip().lower()
+    engine = str(voice_input.get("engine", settings.voice_engine)).strip().lower()
     if engine not in {"vosk", "whisper"}:
-        engine = runtime_config.voice_engine
+        engine = settings.voice_engine
 
     whisper_device_value = str(
-        voice_input.get("whisper_device", runtime_config.whisper_device)
+        voice_input.get("whisper_device", settings.whisper_device)
     ).strip().lower()
     if whisper_device_value not in {"cpu", "cuda"}:
-        whisper_device_value = runtime_config.whisper_device
+        whisper_device_value = settings.whisper_device
 
     next_whisper_model = str(
-        voice_input.get("whisper_model", runtime_config.whisper_model)
-    ).strip() or runtime_config.whisper_model
+        voice_input.get("whisper_model", settings.whisper_model)
+    ).strip() or settings.whisper_model
     if next_whisper_model not in WHISPER_MODEL_OPTIONS:
         next_whisper_model = "base"
 
@@ -533,25 +578,27 @@ def _normalize_app_config_update(data: Any) -> Dict[str, Any]:
             "font_family": font_family,
             "font_size": font_size,
             "max_sessions": max_sessions,
+            "shell_integration": shell_integration,
         },
         "voice_input": {
-            "enabled": bool(voice_input.get("enabled", runtime_config.voice_enabled)),
+            "enabled": bool(voice_input.get("enabled", settings.voice_enabled)),
             "engine": engine,
-            "vosk_model": str(voice_input.get("vosk_model", runtime_config.vosk_model)).strip() or runtime_config.vosk_model,
+            "vosk_model": str(voice_input.get("vosk_model", settings.vosk_model)).strip() or settings.vosk_model,
             "whisper_model": next_whisper_model,
             "whisper_device": whisper_device_value,
             "whisper_compute_type": str(
-                voice_input.get("whisper_compute_type", runtime_config.whisper_compute_type)
-            ).strip() or runtime_config.whisper_compute_type,
-            "language": str(voice_input.get("language", runtime_config.voice_language)).strip() or runtime_config.voice_language,
+                voice_input.get("whisper_compute_type", settings.whisper_compute_type)
+            ).strip() or settings.whisper_compute_type,
+            "language": str(voice_input.get("language", settings.voice_language)).strip() or settings.voice_language,
         }
     }
 
 
+_default_terminal_count = min(4, runtime_config.snapshot().max_sessions)
 active_launch_options: Dict[str, Any] = {
     "connection_mode": "ssh",
-    "layout": _normalize_layout("grid", min(4, runtime_config.max_sessions)),
-    "terminal_count": min(4, runtime_config.max_sessions),
+    "layout": _normalize_layout("grid", _default_terminal_count),
+    "terminal_count": _default_terminal_count,
 }
 
 
@@ -657,14 +704,15 @@ def index():
     logger.info("GET /")
     with _browser_shutdown_lock:
         browser_shutdown_token = _browser_shutdown_token
+    settings = runtime_config.snapshot()
     return render_template(
         'index.html',
-        max_sessions=runtime_config.max_sessions,
+        max_sessions=settings.max_sessions,
         agent_options=_agent_options(),
         local_windows_shells_available=os.name == "nt",
         browser_shutdown_enabled=bool(browser_shutdown_token),
         browser_shutdown_token=browser_shutdown_token,
-        multi_workspace_enabled=runtime_config.multi_workspace_enabled,
+        multi_workspace_enabled=settings.multi_workspace_enabled,
         version=__version__,
     )
 
@@ -679,18 +727,19 @@ def terminals_page():
         return str(exc), 400
     if not _workspace_exists(workspace_id):
         return "Workspace not found", 400
-    return render_template('terminals.html', max_sessions=runtime_config.max_sessions,
-                           app_surface_mode=runtime_config.app_surface_mode,
+    settings = runtime_config.snapshot()
+    return render_template('terminals.html', max_sessions=settings.max_sessions,
+                           app_surface_mode=settings.app_surface_mode,
                            workspace_id=workspace_id,
                            workspace_label=workspace_label(workspace_id),
-                           multi_workspace_enabled=runtime_config.multi_workspace_enabled,
+                           multi_workspace_enabled=settings.multi_workspace_enabled,
                            local_windows_shells_available=os.name == "nt",
-                           voice_enabled=runtime_config.voice_enabled,
-                           voice_engine=runtime_config.voice_engine,
-                           voice_model=_active_voice_model_name(),
-                           voice_language=runtime_config.voice_language,
-                           terminal_font_size=runtime_config.terminal_font_size,
-                           terminal_font_family=runtime_config.terminal_font_family,
+                           voice_enabled=settings.voice_enabled,
+                           voice_engine=settings.voice_engine,
+                           voice_model=_active_voice_model_name(settings),
+                           voice_language=settings.voice_language,
+                           terminal_font_size=settings.terminal_font_size,
+                           terminal_font_family=settings.terminal_font_family,
                            version=__version__)
 
 
@@ -1282,13 +1331,33 @@ def get_explorer_file(session_id: str):
     return _explorer_route_response(session, handler)
 
 
+@app.route('/api/explorer/<session_id>/file/preview', methods=['GET'])
+def get_explorer_file_preview(session_id: str):
+    """Return the rendered Markdown preview for one explorer file.
+
+    Split out of the file GET so that opening a Markdown file in Source view
+    stops rendering and sanitizing a preview nobody asked to see. Same bounded,
+    root-confined read as the file payload; the Preview panel asks for this the
+    first time it is shown, and again after a save while it is the shown panel.
+    """
+    session = session_manager.get_session(session_id)
+    if session is None:
+        return jsonify({"error": "Session not found"}), 404
+    requested_path = request.args.get("path", "")
+
+    def handler(backend: Any) -> Dict[str, Any]:
+        return get_explorer_file_preview_payload(backend, requested_path)
+
+    return _explorer_route_response(session, handler)
+
+
 @app.route('/api/explorer/<session_id>/file', methods=['PUT'])
 def save_explorer_file(session_id: str):
     """Atomically replace one explorer text file with edited contents.
 
     The single bounded exception to the explorer's read-only filesystem
     contract: writes are confined to the session root and guarded by the
-    filename/language gate, the 10 MiB read/write limit, complete strict-UTF-8
+    binary-content check, the 10 MiB read/write limit, complete strict-UTF-8
     single-line-ending source, and an optimistic-concurrency revision check
     (web/explorer.py). The app-level cross-origin write guard already covers
     this PUT.
@@ -1551,10 +1620,14 @@ def get_explorer_git_diff(session_id: str):
     mode = request.args.get("mode", "worktree")
     commit = request.args.get("commit")
     requested_path = request.args.get("path", "")
+    # Names a context width from the server's own allowlist
+    # (GIT_DIFF_CONTEXT_WIDTHS); absent means Git's default, which is what the
+    # Diff panel renders. The Source gutter's change marks pass "zero".
+    context = request.args.get("context", "")
 
     def handler(backend: Any) -> Dict[str, Any]:
         root_path, file_path = backend.resolve_diff_path(requested_path)
-        diff_payload = _get_git_diff(backend, root_path, file_path, mode, commit)
+        diff_payload = _get_git_diff(backend, root_path, file_path, mode, commit, context)
         return {
             "root": root_path,
             "path": backend.rel_explorer_path(root_path, file_path),
@@ -1575,6 +1648,14 @@ def _with_no_store(result: Any):
     return result
 
 
+def _explorer_git_anchor_paths(backend: Any) -> Tuple[str, str]:
+    """Resolve the Git scope, rooted on the pane unless a path is explicit."""
+    root_path = backend.root_directory()
+    if request.args.get("scope") != "path":
+        return root_path, root_path
+    return backend.resolve_dir(request.args.get("path", ""))
+
+
 @app.route('/api/explorer/<session_id>/git/repo', methods=['GET'])
 def get_explorer_git_repo(session_id: str):
     """Return bounded read-only Git repository metadata for the diff sidebar."""
@@ -1583,8 +1664,8 @@ def get_explorer_git_repo(session_id: str):
         return jsonify({"error": "Session not found"}), 404
 
     def handler(backend: Any) -> Dict[str, Any]:
-        root_path = backend.root_directory()
-        summary = _get_git_repo_summary(backend, root_path)
+        root_path, current_path = _explorer_git_anchor_paths(backend)
+        summary = _get_git_repo_summary(backend, root_path, current_path)
         return {"root": root_path, **summary}
 
     return _explorer_route_response(session, handler)
@@ -1604,8 +1685,8 @@ def get_explorer_git_state(session_id: str):
     known = request.args.get("known", "")
 
     def handler(backend: Any) -> Dict[str, Any]:
-        root_path = backend.root_directory()
-        state = _get_git_repo_state(backend, root_path)
+        root_path, current_path = _explorer_git_anchor_paths(backend)
+        state = _get_git_repo_state(backend, root_path, current_path)
         revision = state["revision"]
         return {"revision": revision, "changed": revision != known}
 
@@ -1622,9 +1703,10 @@ def stage_explorer_git_file(session_id: str):
     requested_path = data.get("path", "")
 
     def handler(backend: Any) -> Dict[str, Any]:
-        root_path, file_path = backend.resolve_candidate(requested_path, allow_empty_root=False)
-        _git_stage_path(backend, root_path, file_path)
-        summary = _get_git_repo_summary(backend, root_path)
+        root_path, current_path = _explorer_git_anchor_paths(backend)
+        _target_root, file_path = backend.resolve_candidate(requested_path, allow_empty_root=False)
+        _git_stage_path(backend, root_path, file_path, current_path)
+        summary = _get_git_repo_summary(backend, root_path, current_path)
         return {"root": root_path, **summary}
 
     return _explorer_route_response(session, handler)
@@ -1640,9 +1722,10 @@ def unstage_explorer_git_file(session_id: str):
     requested_path = data.get("path", "")
 
     def handler(backend: Any) -> Dict[str, Any]:
-        root_path, file_path = backend.resolve_candidate(requested_path, allow_empty_root=False)
-        _git_unstage_path(backend, root_path, file_path)
-        summary = _get_git_repo_summary(backend, root_path)
+        root_path, current_path = _explorer_git_anchor_paths(backend)
+        _target_root, file_path = backend.resolve_candidate(requested_path, allow_empty_root=False)
+        _git_unstage_path(backend, root_path, file_path, current_path)
+        summary = _get_git_repo_summary(backend, root_path, current_path)
         return {"root": root_path, **summary}
 
     return _explorer_route_response(session, handler)
@@ -1656,9 +1739,25 @@ def stage_all_explorer_git(session_id: str):
         return jsonify({"error": "Session not found"}), 404
 
     def handler(backend: Any) -> Dict[str, Any]:
-        root_path = backend.root_directory()
-        _git_stage_all_paths(backend, root_path)
-        summary = _get_git_repo_summary(backend, root_path)
+        root_path, current_path = _explorer_git_anchor_paths(backend)
+        _git_stage_all_paths(backend, root_path, current_path)
+        summary = _get_git_repo_summary(backend, root_path, current_path)
+        return {"root": root_path, **summary}
+
+    return _explorer_route_response(session, handler)
+
+
+@app.route('/api/explorer/<session_id>/git/unstage-all', methods=['POST'])
+def unstage_all_explorer_git(session_id: str):
+    """Unstage every staged change in an explorer Git repository (index only)."""
+    session = session_manager.get_session(session_id)
+    if session is None:
+        return jsonify({"error": "Session not found"}), 404
+
+    def handler(backend: Any) -> Dict[str, Any]:
+        root_path, current_path = _explorer_git_anchor_paths(backend)
+        _git_unstage_all_paths(backend, root_path, current_path)
+        summary = _get_git_repo_summary(backend, root_path, current_path)
         return {"root": root_path, **summary}
 
     return _explorer_route_response(session, handler)
@@ -1672,9 +1771,9 @@ def discard_all_explorer_git(session_id: str):
         return jsonify({"error": "Session not found"}), 404
 
     def handler(backend: Any) -> Dict[str, Any]:
-        root_path = backend.root_directory()
-        _git_discard_all_paths(backend, root_path)
-        summary = _get_git_repo_summary(backend, root_path)
+        root_path, current_path = _explorer_git_anchor_paths(backend)
+        _git_discard_all_paths(backend, root_path, current_path)
+        summary = _get_git_repo_summary(backend, root_path, current_path)
         return {"root": root_path, **summary}
 
     return _explorer_route_response(session, handler)
@@ -1690,9 +1789,10 @@ def revert_explorer_git_file(session_id: str):
     requested_path = data.get("path", "")
 
     def handler(backend: Any) -> Dict[str, Any]:
-        root_path, file_path = backend.resolve_candidate(requested_path, allow_empty_root=False)
-        _git_revert_path(backend, root_path, file_path)
-        summary = _get_git_repo_summary(backend, root_path)
+        root_path, current_path = _explorer_git_anchor_paths(backend)
+        _target_root, file_path = backend.resolve_candidate(requested_path, allow_empty_root=False)
+        _git_revert_path(backend, root_path, file_path, current_path)
+        summary = _get_git_repo_summary(backend, root_path, current_path)
         return {"root": root_path, **summary}
 
     return _explorer_route_response(session, handler)
@@ -1708,9 +1808,9 @@ def commit_explorer_git(session_id: str):
     message = data.get("message", "")
 
     def handler(backend: Any) -> Dict[str, Any]:
-        root_path = backend.root_directory()
-        _git_commit(backend, root_path, message)
-        summary = _get_git_repo_summary(backend, root_path)
+        root_path, current_path = _explorer_git_anchor_paths(backend)
+        _git_commit(backend, root_path, message, current_path)
+        summary = _get_git_repo_summary(backend, root_path, current_path)
         return {"root": root_path, **summary}
 
     return _explorer_route_response(session, handler)
@@ -1724,9 +1824,9 @@ def publish_explorer_git(session_id: str):
         return jsonify({"error": "Session not found"}), 404
 
     def handler(backend: Any) -> Dict[str, Any]:
-        root_path = backend.root_directory()
-        _git_publish(backend, root_path)
-        summary = _get_git_repo_summary(backend, root_path)
+        root_path, current_path = _explorer_git_anchor_paths(backend)
+        _git_publish(backend, root_path, current_path)
+        summary = _get_git_repo_summary(backend, root_path, current_path)
         return {"root": root_path, **summary}
 
     return _explorer_route_response(session, handler)
@@ -1794,13 +1894,17 @@ def create_workspace():
     A workspace created here is deliberately empty, so it is marked
     ``retain_when_empty`` until its first group arrives — otherwise cleanup
     could not tell it apart from a workspace emptied by a close or a move.
+
+    The label is *claimed* rather than checked (ISSUE-2026-042): the namespace
+    verdict and the create are one decision, so two windows submitting the same
+    name produce one workspace and one actionable ``409``.
     """
     data = request.get_json(silent=True) or {}
     label = normalize_workspace_label(data.get("label") or data.get("workspace_label"))
-    conflict = workspace_label_conflict(label)
-    if conflict is not None:
-        return jsonify(conflict), 409
-    workspace = session_manager.create_workspace(label=label, retain_when_empty=True)
+    try:
+        workspace = create_labelled_workspace(label, retain_when_empty=True)
+    except WorkspaceRequestError as exc:
+        return jsonify({"error": str(exc), **exc.payload}), exc.status
     logger.debug("Created workspace %s label=%r", workspace.workspace_id, workspace.label)
     return jsonify(public_workspace_payload(workspace, 0)), 201
 
@@ -1860,17 +1964,13 @@ def rename_workspace(workspace_id: str):
     if "label" not in data:
         return jsonify({"error": "A 'label' is required"}), 400
 
-    label = normalize_workspace_label(data.get("label"))
-    if session_manager.get_workspace(resolved_workspace_id) is None:
-        return jsonify({"error": "Workspace not found"}), 404
-    # The renamed workspace's own live record and its own saved slot are the
-    # same identity, never a conflict (SGP-13).
-    conflict = workspace_label_conflict(label, exclude_workspace_id=resolved_workspace_id)
-    if conflict is not None:
-        return jsonify(conflict), 409
-    workspace = session_manager.rename_workspace(resolved_workspace_id, label)
-    if workspace is None:
-        return jsonify({"error": "Workspace not found"}), 404
+    # Claimed, not checked (ISSUE-2026-042). The renamed workspace's own live
+    # record and its own saved slot are the same identity, never a conflict
+    # (SGP-13), which is what the exclusion inside the claim is for.
+    try:
+        workspace = rename_workspace_label(resolved_workspace_id, data.get("label"))
+    except WorkspaceRequestError as exc:
+        return jsonify({"error": str(exc), **exc.payload}), exc.status
 
     groups = session_manager.get_workspace_groups(resolved_workspace_id)
     return jsonify(public_workspace_payload(workspace, len(groups)))
@@ -2594,16 +2694,25 @@ def split_session(session_id: str):
         return jsonify({"error": "Session group not found"}), 404
 
     group_sessions = session_manager.get_group_sessions(group.group_id)
-    if len(group_sessions) >= runtime_config.max_sessions:
+    # One captured limit for the verdict and for the sentence that quotes it:
+    # reading it twice let a refresh between them refuse against one cap and
+    # then tell the user to raise a different one.
+    max_sessions = runtime_config.snapshot().max_sessions
+    if len(group_sessions) >= max_sessions:
         return jsonify({
-            "error": capacity_refusal(
-                len(group_sessions) + 1, runtime_config.max_sessions
-            )
+            "error": capacity_refusal(len(group_sessions) + 1, max_sessions)
         }), 400
 
     host = source.host
-    directory = source.directory
-    root_directory = source.explorer_root_directory
+    # A terminal pane clones where it *is*, not where it started: splitting a
+    # navigated shell used to hand the new pane the launch directory. An
+    # explorer or browser pane falls into the branch below, which resolves the
+    # directory it is currently showing instead.
+    directory, _cwd_source = effective_directory(session_id, source)
+    directory = directory or source.directory
+    root_directory = (
+        source.explorer_root_directory if source.explorer_root_configured else ""
+    )
     startup_mode = source.startup_mode
 
     if _is_explorer_session(source) or _is_browser_session(source):
@@ -2646,6 +2755,10 @@ def split_session(session_id: str):
         use_powershell=source.use_powershell,
         startup_mode=startup_mode,
         explorer_root_directory=root_directory,
+        # Stated rather than derived: the clone carries a root only when the
+        # source's was configured, so the new pane inherits that pin even
+        # though a terminal pane's own root would read as a derived one.
+        explorer_root_configured=bool(root_directory),
     )
     if not new_session:
         return jsonify({"error": "Session group not found"}), 404
@@ -2738,13 +2851,19 @@ def change_session_shell(session_id: str):
         return jsonify(session.to_dict())
 
     next_directory = session.directory
-    probed_directory = _resolve_live_terminal_cwd(session_id, session)
-    if probed_directory and os.path.isdir(probed_directory):
-        next_directory = probed_directory
+    # The replacement shell starts where the pane is, not where it launched --
+    # and asks the observed sources first, so switching shells mid-build lands
+    # in the right directory instead of the one the probe could not confirm.
+    observed_directory, _ = effective_directory(session_id, session, allow_probe=True)
+    if observed_directory and os.path.isdir(observed_directory):
+        next_directory = observed_directory
 
     session_manager.update_session_metadata(
         session_id,
         directory=next_directory,
+        # The replacement shell has observed nothing yet, and the old shell's
+        # last report is not an observation of this one.
+        current_directory=None,
         distribution=distribution,
         use_wsl=use_wsl,
         use_powershell=use_powershell,
@@ -2771,162 +2890,29 @@ def change_session_shell(session_id: str):
 
 @app.route('/api/sessions/<session_id>/mode', methods=['POST'])
 def change_session_mode(session_id: str):
-    """Switch one pane between terminal, file explorer, and browser modes."""
-    session = session_manager.get_session(session_id)
-    if not session:
-        return jsonify({"error": "Session not found"}), 404
+    """Switch one pane between terminal, file explorer, and browser modes.
 
-    if session.mode not in {"ssh", "wsl"}:
-        return jsonify({"error": "Pane mode switching is only available for SSH and Local Repo sessions"}), 400
-
-    data = request.get_json(silent=True) or {}
-    target_mode = _normalize_startup_mode(data.get("startup_mode"), session.mode)
-    if target_mode not in {"terminal", "explorer", "browser"}:
-        return jsonify({"error": "startup_mode must be 'terminal', 'explorer', or 'browser'"}), 400
-
-    if target_mode == "browser":
-        if session.mode != "wsl":
-            return jsonify({"error": "Browser mode is only available for Local Repo sessions"}), 400
-        # Mode transitions only. A live pane's tab strip is presentation state
-        # and belongs to the ordered, revisioned `/api/session-presentation`
-        # transaction — this route used to accept a whole strip as well, which
-        # made it a second, unordered writer for the same field.
-        try:
-            requested_browser_url = data.get("url") or data.get("initial_command")
-            browser_url = (
-                _normalize_browser_url(requested_browser_url)
-                if requested_browser_url
-                else None
-            )
-            browser_snapshot = session_manager.merge_browser_tabs(
-                session_id,
-                browser_url=browser_url,
-                browser_active_tab=data.get("active_tab"),
-                default_browser_url=DEFAULT_BROWSER_URL,
-            )
-            if browser_snapshot is None:
-                return jsonify({"error": "Session not found"}), 404
-        except ValueError as exc:
-            return jsonify({"error": str(exc)}), 400
-
-        session_manager.update_session_status(session_id, SessionStatus.CONNECTED)
-        _close_ssh_connection(session_id, clear_buffer=True)
-        _broadcast_session_status(session_id)
-        return jsonify(browser_snapshot)
-
-    if target_mode == "explorer":
-        requested_directory = data.get("directory")
-        if data.get("refresh_cwd"):
-            requested_directory = _resolve_live_terminal_cwd(session_id, session) or requested_directory
-        next_directory = session.directory
-        root_directory = ""
-
-        if session.mode == "ssh":
-            if requested_directory:
-                next_directory = _remote_path_clean(requested_directory)
-            next_directory = _remote_path_clean(next_directory or "/")
-            root_candidate = _remote_explorer_root_directory(session) or next_directory
-            client = None
-            sftp = None
-            try:
-                client, sftp = _acquire_ssh_sftp(session)
-                next_directory = sftp.normalize(next_directory)
-                if not _remote_is_directory(sftp, next_directory):
-                    raise ValueError("Explorer root directory does not exist")
-                try:
-                    root_directory = sftp.normalize(root_candidate)
-                    root_is_valid = _remote_is_directory(sftp, root_directory)
-                except OSError:
-                    root_directory = next_directory
-                    root_is_valid = False
-                if not root_is_valid or not _remote_path_inside(root_directory, next_directory):
-                    root_directory = next_directory
-            except ValueError as exc:
-                return jsonify({"error": str(exc)}), 400
-            except _sftp_request_error_types() as exc:
-                return jsonify({"error": str(exc)}), 500
-            finally:
-                _release_ssh_sftp(session, client, sftp)
-
-            session_manager.update_session_metadata(
-                session_id,
-                directory=next_directory,
-                explorer_root_directory=root_directory,
-                initial_command="",
-                startup_mode="explorer",
-            )
-        else:
-            if requested_directory:
-                next_directory = os.path.abspath(os.path.expanduser(str(requested_directory)))
-            if not next_directory or not os.path.isdir(next_directory):
-                return jsonify({"error": "Explorer root directory does not exist"}), 400
-
-            root_directory = _explorer_root_directory(session) or next_directory
-            root_directory = os.path.realpath(os.path.abspath(os.path.expanduser(root_directory)))
-            next_directory = os.path.realpath(os.path.abspath(os.path.expanduser(next_directory)))
-            try:
-                common_path = os.path.commonpath([root_directory, next_directory])
-            except ValueError:
-                common_path = ""
-            if (
-                not os.path.isdir(root_directory)
-                or os.path.normcase(common_path) != os.path.normcase(root_directory)
-            ):
-                root_directory = next_directory
-
-            session_manager.update_session_metadata(
-                session_id,
-                host="File Explorer",
-                directory=next_directory,
-                explorer_root_directory=root_directory,
-                username="",
-                port=22,
-                password=None,
-                initial_command="",
-                startup_mode="explorer",
-                browser_tabs=[],
-                browser_active_tab=0,
-            )
-        session_manager.update_session_status(session_id, SessionStatus.CONNECTED)
-        _close_ssh_connection(session_id, clear_buffer=True)
-        _broadcast_session_status(session_id)
-        return jsonify(session_manager.get_session(session_id).to_dict())
-
-    if not (_is_explorer_session(session) or _is_browser_session(session)):
-        return jsonify(session.to_dict())
-
+    HTTP adaptation only: the transition itself lives in
+    `web/session_modes.py`. The three side effects are resolved here rather
+    than imported there because they belong to this module's Socket.IO server
+    and connection registry — and looking them up in this body is what keeps
+    them the same patch points they have always been.
+    """
     try:
-        next_directory, root_path = _resolve_pane_terminal_directory(
-            session,
-            data.get("directory", ""),
+        payload = apply_pane_mode_change(
+            session_id,
+            request.get_json(silent=True) or {},
+            ModeTransitionEffects(
+                close_connection=_close_ssh_connection,
+                broadcast_status=_broadcast_session_status,
+                start_connector=lambda pane_session_id: socketio.start_background_task(
+                    _connect_session, pane_session_id
+                ),
+            ),
         )
-    except ValueError as exc:
-        return jsonify({"error": str(exc)}), 400
-    except _sftp_request_error_types() as exc:
-        return jsonify({"error": str(exc)}), 500
-
-    updates = {
-        "directory": next_directory,
-        "explorer_root_directory": root_path,
-        "initial_command": "",
-        "initial_command_mode": "command",
-        "startup_mode": "terminal",
-        # A pane leaving browser mode drops its tab strip; a stale strip would
-        # otherwise be re-persisted and reopen browser tabs on a shell pane.
-        "browser_tabs": [],
-        "browser_active_tab": 0,
-    }
-    if session.mode == "wsl":
-        updates["host"] = _local_shell_display_name(
-            use_wsl=session.use_wsl,
-            use_powershell=session.use_powershell,
-            distribution=session.distribution,
-        )
-    session_manager.update_session_metadata(session_id, **updates)
-    session_manager.update_session_status(session_id, SessionStatus.PENDING)
-    _broadcast_session_status(session_id)
-    socketio.start_background_task(_connect_session, session_id)
-    return jsonify(session_manager.get_session(session_id).to_dict())
+    except ModeTransitionError as exc:
+        return jsonify({"error": exc.message}), exc.status_code
+    return jsonify(payload)
 
 
 @app.route('/api/sessions/<session_id>', methods=['DELETE'])
@@ -3251,8 +3237,19 @@ def handle_terminal_input(data):
         sanitized_input = _sanitize_terminal_input(connection, input_data)
         if not sanitized_input:
             return
-        _track_terminal_agent_input(session_id, connection, sanitized_input)
+        # Send first, track after. The tracker's agent-promotion branch calls
+        # effective_directory(), which for a remote pane with a known shell pid
+        # and no shell-integration observation opens a fresh exec channel and
+        # waits up to the bounded remote-CWD timeout — between the user's Enter
+        # and the shell receiving it, on the handler thread. Socket.IO's default
+        # async_handlers=True runs later events for the same client on separate
+        # threads, so newer input could overtake the blocked keystroke.
+        # Nothing in the tracker feeds the send (it only reads the sanitized
+        # text), so the order is otherwise behaviour-preserving. One deliberate
+        # change: if the send raises, the tracker no longer runs, so a promotion
+        # cannot be recorded for input the shell never received.
         _send_connection_input(connection, sanitized_input)
+        _track_terminal_agent_input(session_id, connection, sanitized_input)
     except Exception as e:
         logger.error(f"Error sending input: {e}")
         emit('terminal_output', {
@@ -3288,9 +3285,13 @@ def handle_terminal_resize(data):
 
 def _broadcast_voice_install_finished(state: Dict[str, Any]) -> None:
     """Tell open windows that voice availability changed after an install."""
+    # One captured generation names the engine and answers whether it is
+    # available: reading the setting twice could report one engine's name
+    # beside another engine's availability.
+    engine = runtime_config.snapshot().voice_engine
     socketio.emit('voice_availability_updated', {
-        'engine': runtime_config.voice_engine,
-        'engine_available': _voice_engine_available(runtime_config.voice_engine),
+        'engine': engine,
+        'engine_available': _voice_engine_available(engine),
         'engines_available': _voice_engines_available(),
         'install': state,
         'timestamp': int(time.time() * 1000),
@@ -3300,21 +3301,26 @@ def _broadcast_voice_install_finished(state: Dict[str, Any]) -> None:
 @app.route('/api/voice-status', methods=['GET'])
 def voice_status_endpoint():
     """Check voice input availability and service status."""
-    if runtime_config.voice_engine == "vosk":
-        service_running: Optional[bool] = _vosk_service_reachable(timeout=1.0)
-        service_url = runtime_config.vosk_service_url
+    settings = runtime_config.snapshot()
+    if settings.voice_engine == "vosk":
+        # Probe the endpoint this response is about to name, not whichever one
+        # is live by the time the handshake runs.
+        service_url = settings.vosk_service_url
+        service_running: Optional[bool] = _vosk_service_reachable(
+            timeout=1.0, service_url=service_url
+        )
     else:
         service_running = None
         service_url = ""
-    engine_available = _voice_engine_available(runtime_config.voice_engine, service_running)
+    engine_available = _voice_engine_available(settings.voice_engine, service_running)
     status_message = (
         "Voice backend is available."
         if engine_available
-        else _voice_engine_unavailable_message(runtime_config.voice_engine, service_running)
+        else _voice_engine_unavailable_message(settings.voice_engine, service_running)
     )
     return jsonify({
-        'enabled': runtime_config.voice_enabled,
-        'engine': runtime_config.voice_engine,
+        'enabled': settings.voice_enabled,
+        'engine': settings.voice_engine,
         'engine_available': engine_available,
         # Per-engine availability so App Settings can annotate the engine the
         # user is picking, not only the one currently saved.
@@ -3323,11 +3329,11 @@ def voice_status_endpoint():
         'vosk_packages_available': _vosk_service_packages_available(),
         'service_running': service_running,
         'service_url': service_url,
-        'model': _active_voice_model_name(),
-        'language': runtime_config.voice_language,
-        'startup_timeout_seconds': runtime_config.vosk_startup_timeout_seconds,
-        'whisper_device': runtime_config.whisper_device,
-        'whisper_compute_type': runtime_config.whisper_compute_type,
+        'model': _active_voice_model_name(settings),
+        'language': settings.voice_language,
+        'startup_timeout_seconds': settings.vosk_startup_timeout_seconds,
+        'whisper_device': settings.whisper_device,
+        'whisper_compute_type': settings.whisper_compute_type,
         'status_message': status_message,
         'install': _voice_install_status(),
     })
@@ -3388,7 +3394,11 @@ def handle_voice_start(data):
     """
     logger.info("voice_start requested by client %s for session %s",
                 request.sid, data.get('session_id'))  # type: ignore[arg-type]
-    if not runtime_config.voice_enabled:
+    # One captured generation decides both whether voice may start and which
+    # engine starts: a refresh between the two reads could let a disabled
+    # config through, or start the engine the previous generation named.
+    voice_settings = runtime_config.snapshot()
+    if not voice_settings.voice_enabled:
         emit('voice_status', {'status': 'error',
                               'message': 'Voice input is disabled in config'})
         return
@@ -3398,7 +3408,7 @@ def handle_voice_start(data):
         emit('voice_status', {'status': 'error', 'message': 'Missing session_id'})
         return
 
-    engine = 'whisper' if runtime_config.voice_engine == 'whisper' else 'vosk'
+    engine = 'whisper' if voice_settings.voice_engine == 'whisper' else 'vosk'
     register_voice_session(request.sid, session_id, engine)  # type: ignore[arg-type]
 
     if engine == 'whisper':

@@ -110,6 +110,9 @@
         custom_agent: '',
         explorer_tree_open: false,
         explorer_git_open: false,
+        explorer_git_follow_browsing: false,
+        explorer_git_pin_active: false,
+        explorer_git_pinned_path: '',
         explorer_search_open: false,
         explorer_open_tabs: [],
         explorer_active_tab: '',
@@ -726,6 +729,13 @@
                     && Boolean(row.querySelector('.t-agent-auto-mode')?.checked),
                 explorer_tree_open: commandMode === 'explorer' && row.dataset.explorerTreeOpen === 'true',
                 explorer_git_open: commandMode === 'explorer' && row.dataset.explorerGitOpen === 'true',
+                explorer_git_follow_browsing: commandMode === 'explorer'
+                    && row.dataset.explorerGitFollowBrowsing === 'true',
+                explorer_git_pin_active: commandMode === 'explorer' && explorerTabsMatchRoot
+                    && row.dataset.explorerGitPinActive === 'true',
+                explorer_git_pinned_path: commandMode === 'explorer' && explorerTabsMatchRoot
+                    ? (row.dataset.explorerGitPinnedPath || '')
+                    : '',
                 explorer_search_open: commandMode === 'explorer' && row.dataset.explorerSearchOpen === 'true',
                 explorer_open_tabs: commandMode === 'explorer' && explorerTabsMatchRoot
                     ? parseStringArrayDataset(row.dataset.explorerOpenTabs)
@@ -1778,6 +1788,9 @@
                     data-command-mode="${escHtml(commandUi.mode)}"
                     data-explorer-tree-open="${terminal.explorer_tree_open ? 'true' : 'false'}"
                     data-explorer-git-open="${terminal.explorer_git_open ? 'true' : 'false'}"
+                    data-explorer-git-follow-browsing="${terminal.explorer_git_follow_browsing ? 'true' : 'false'}"
+                    data-explorer-git-pin-active="${terminal.explorer_git_pin_active ? 'true' : 'false'}"
+                    data-explorer-git-pinned-path="${escHtml(terminal.explorer_git_pinned_path || '')}"
                     data-explorer-search-open="${terminal.explorer_search_open ? 'true' : 'false'}"
                     data-explorer-open-tabs="${escHtml(JSON.stringify(Array.isArray(terminal.explorer_open_tabs) ? terminal.explorer_open_tabs : []))}"
                     data-explorer-tabs-dir="${escHtml(terminal.directory || '')}"

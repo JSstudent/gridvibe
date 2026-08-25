@@ -609,6 +609,33 @@
         return terminal?._paneType === 'explorer';
     }
 
+    /* Two page-wide explorer caches are built lazily and were never given
+       back: the worker pool (explorer-worker-client.js) — up to four threads
+       with a Highlight.js build resident in each — and the line-record cache
+       in explorer-viewer.js, which pins whichever documents it last answered
+       about. Both outlived the last explorer pane for the life of the page.
+
+       Released only when *no* explorer pane is left anywhere — the visible
+       grid and every cached group. The predicate has to be that strict for the
+       pool: terminating mid-flight rejects the running jobs as superseded, so
+       a pane still on screen would sit on its plain first paint until
+       something else happened to repaint it. Neither cache is disabled by
+       this, only emptied — the pool respawns on the next request and the
+       records rebuild on the next render, so a reopened pane pays one worker
+       startup and one document walk. */
+    function releaseExplorerResourcesIfIdle() {
+        if (terminals.some(isExplorerPaneInstance)) {
+            return;
+        }
+        for (const cached of cachedGroupViews.values()) {
+            if ((cached.terminals || []).some(isExplorerPaneInstance)) {
+                return;
+            }
+        }
+        (typeof window !== 'undefined' && window.GridVibeExplorerWorkers)?.terminate?.();
+        explorerReleaseLineRecordCache();
+    }
+
     function isBrowserSession(session) {
         return session?.mode === 'wsl' && session?.startup_mode === 'browser';
     }
@@ -870,6 +897,11 @@
                     || 'dark'
                 );
                 terminal._cachedExplorerScroll = captureExplorerFileScroll(index);
+                /* A frame-sliced Source build keeps appending rows into a
+                   detached tree otherwise, competing for frames with the
+                   group being attached in its place. It resumes on the way
+                   back with its position and its queued readers intact. */
+                explorerSuspendSourceRenderJob(terminal);
             } else {
                 terminal._cachedExplorerScroll = null;
             }
@@ -885,8 +917,20 @@
                 restoreTerminalViewportState(terminal, terminal._cachedTerminalViewport);
             }
             if (isExplorerPaneInstance(terminal)) {
+                explorerResumeSourceRenderJob(terminal);
                 restoreExplorerFileScroll(index, terminal._cachedExplorerScroll);
                 resyncExplorerEditorOnAttach(index);
+                /* A Git action that completed while this group was cached left
+                   the slot alone on purpose — `terminals[index]` belonged to
+                   the group that had replaced it — and marked its own pane for
+                   the fresh load instead. This is where the pane is back on
+                   screen, so this is where that load happens. */
+                if (terminal._explorerGitReloadPending) {
+                    terminal._explorerGitReloadPending = false;
+                    if (terminal._explorerGitSidebarOpen) {
+                        loadExplorerGitRepo(index);
+                    }
+                }
             }
             /* The cards were detached while another group was shown, so any
                voice stop that completed in that window addressed elements no
@@ -1099,12 +1143,20 @@
         }
         clearSessionRoutes(cached.sessionIds || []);
         (cached.terminals || []).forEach(terminal => {
+            /* Closed while suspended: the build will never resume. The pane
+               is being discarded, not handed back, so the queue is dropped
+               rather than flushed — global `terminals` belongs to the visible
+               group here, and those readers re-read `terminals[index]`. */
+            if (isExplorerPaneInstance(terminal)) {
+                explorerReleasePaneWork(terminal);
+            }
             if (terminal?.term) {
                 try { terminal.term.dispose(); } catch (_) {}
             }
         });
         cachedGroupViews.delete(groupId);
         presentationController()?.forgetGroup(groupId);
+        releaseExplorerResourcesIfIdle();
     }
 
     /* Tell the backend which group this window has in front, so the workspace
@@ -2236,13 +2288,20 @@
                 explorerCaptureActiveTabView(index);
             }
             const tabs = explorerSerializeTabs(terminal);
-            const sidebar = explorerSidebarPresentation(index);
+            /* The pane object, not just its slot: this describes cached groups
+               too, and a detached pane has no slot in `terminals`. */
+            const sidebar = explorerSidebarPresentation(index, terminal);
             return {
                 sessionId,
                 mode: 'explorer',
                 explorer: {
                     treeOpen: Boolean(terminal?._explorerTreeSidebarOpen),
                     gitOpen: Boolean(terminal?._explorerGitSidebarOpen),
+                    gitFollowBrowsing: Boolean(terminal?._explorerGitFollowBrowsing),
+                    gitPinActive: typeof terminal?._explorerGitPinnedPath === 'string',
+                    gitPinnedPath: typeof terminal?._explorerGitPinnedPath === 'string'
+                        ? terminal._explorerGitPinnedPath
+                        : '',
                     searchOpen: Boolean(terminal?._explorerSearchSidebarOpen),
                     sidebarWidth: sidebar.width,
                     sidebarScroll: sidebar.scroll,
@@ -2406,9 +2465,15 @@
         const commandMode = startupMode === 'agent'
             ? 'agent'
             : (startupMode === 'explorer' || startupMode === 'browser' ? startupMode : 'command');
+        /* Where the pane *is*, not where it started: `current_directory` is the
+           observed value (null until something actually observed it), and a
+           saved preset that replays the launch directory is what brought an
+           agent back in the wrong place. An explorer pane keeps answering with
+           its root, which is the boundary a relaunch has to reproduce. */
+        const liveDirectory = session.current_directory || session.directory || '';
         const selectedDirectory = startupMode === 'explorer'
-            ? (session.explorer_root_directory || session.directory || '')
-            : (session.directory || '');
+            ? (session.explorer_root_directory || liveDirectory)
+            : liveDirectory;
         const explorerSlot = startupMode === 'explorer' && terminal ? terminals.indexOf(terminal) : -1;
         if (explorerSlot !== -1) {
             /* Fold the shown tab's live mode + scroll into its record so the
@@ -2419,8 +2484,8 @@
             ? explorerSerializeTabs(terminal)
             : { open_tabs: [], active_tab: '', tab_views: {} };
         const mdAppearance = startupMode === 'explorer' ? explorerMarkdownAppearance() : null;
-        const explorerSidebar = startupMode === 'explorer' && explorerSlot !== -1
-            ? explorerSidebarPresentation(explorerSlot)
+        const explorerSidebar = startupMode === 'explorer' && terminal
+            ? explorerSidebarPresentation(explorerSlot, terminal)
             : {
                 width: Number(session.explorer_sidebar_width) || 260,
                 scroll: session.explorer_sidebar_scroll || {},
@@ -2452,6 +2517,15 @@
             agent_auto_mode: commandMode === 'agent' ? Boolean(session.agent_auto_mode) : false,
             explorer_tree_open: startupMode === 'explorer' ? Boolean(terminal?._explorerTreeSidebarOpen) : false,
             explorer_git_open: startupMode === 'explorer' ? Boolean(terminal?._explorerGitSidebarOpen) : false,
+            explorer_git_follow_browsing: startupMode === 'explorer'
+                ? Boolean(terminal?._explorerGitFollowBrowsing)
+                : false,
+            explorer_git_pin_active: startupMode === 'explorer'
+                && typeof terminal?._explorerGitPinnedPath === 'string',
+            explorer_git_pinned_path: startupMode === 'explorer'
+                && typeof terminal?._explorerGitPinnedPath === 'string'
+                ? terminal._explorerGitPinnedPath
+                : '',
             explorer_search_open: startupMode === 'explorer' ? Boolean(terminal?._explorerSearchSidebarOpen) : false,
             explorer_sidebar_width: explorerSidebar.width,
             explorer_sidebar_scroll: explorerSidebar.scroll,
@@ -4372,18 +4446,24 @@
         });
     }
 
-    function setTerminalRefreshState(index, refreshing) {
-        setTerminalActionState(index, refreshing ? 'refresh' : '');
+    /* Take the hold, and get back the release bound to the buttons it just
+       disabled. Refresh and Clear both await, and a group switch inside that
+       wait hands `trefresh-<index>` to whichever pane took the slot: releasing
+       by index there clears somebody else's busy state and leaves the pane
+       that asked stuck on “Refreshing…” inside its cached fragment, which is
+       exactly where its own card went. The nodes are the identity. */
+    function holdTerminalActionState(index, action) {
+        const buttons = {
+            refreshButton: document.getElementById(`trefresh-${index}`),
+            explorerRefreshButton: document.getElementById(`explorer-refresh-${index}`),
+            clearButton: document.getElementById(`tclear-${index}`)
+        };
+        applyTerminalActionState(buttons, action);
+        return () => applyTerminalActionState(buttons, '');
     }
 
-    function setTerminalClearState(index, clearing) {
-        setTerminalActionState(index, clearing ? 'clear' : '');
-    }
-
-    function setTerminalActionState(index, action = '') {
-        const refreshButton = document.getElementById(`trefresh-${index}`);
-        const explorerRefreshButton = document.getElementById(`explorer-refresh-${index}`);
-        const clearButton = document.getElementById(`tclear-${index}`);
+    function applyTerminalActionState(buttons, action = '') {
+        const { refreshButton, explorerRefreshButton, clearButton } = buttons || {};
         const isBusy = Boolean(action);
 
         if (refreshButton) {
@@ -4425,7 +4505,12 @@
     }
 
     function flushPendingOutput(index) {
-        const terminal = terminals[index];
+        flushCapturedPendingOutput(terminals[index]);
+    }
+
+    /* Same flush, addressed to a pane object rather than to a grid slot, for
+       the asynchronous callers that captured one before they awaited. */
+    function flushCapturedPendingOutput(terminal) {
         if (!terminal?._attached || !terminal.term || !terminal._pendingOutput) {
             return;
         }
@@ -4505,20 +4590,19 @@
         });
     }
 
-    async function ensureTerminalReady(index, maxAttempts = 12) {
+    async function ensureTerminalReady(index, maxAttempts = 12, isCurrent = null) {
         const terminal = terminals[index];
         if (!terminal?._attached) {
             return false;
         }
-
-        for (let attempt = 0; attempt < maxAttempts; attempt++) {
-            if (fitTerminal(index)) {
-                return true;
-            }
-            await waitForAnimationFrames(1);
-        }
-
-        return Boolean(terminals[index]?._fitReady);
+        const capturedIsCurrent = typeof isCurrent === 'function' ? isCurrent : () => true;
+        return GridVibeTerminalModes.waitForCurrentPaneReady({
+            maxAttempts,
+            isCurrent: () => terminals[index] === terminal && capturedIsCurrent(),
+            attempt: () => fitTerminal(index),
+            wait: () => waitForAnimationFrames(1),
+            ready: () => Boolean(terminal._fitReady)
+        });
     }
 
     async function ensureAttachedTerminalsReady(indices) {
@@ -4619,6 +4703,29 @@
         await redrawPass({ delayMs: 90, dispatchResize: true });
     }
 
+    /* A pane whose TUI died without unwinding keeps that program's mouse
+       reporting armed, and the shell that inherits the prompt gets every
+       pointer movement typed at it. GridVibeTerminalModes owns the teardown
+       and, for the replaying path, the ordering it has to land in; the page
+       owns only the pane it lands on. */
+    function terminalModeResetTarget(index) {
+        return GridVibeTerminalModes.captureResetTarget({
+            pane: terminals[index],
+            sessionId: sessionIds[index],
+            /* Anything already queued behind a not-yet-fitted pane — the
+               replay included — has to be applied first, or the teardown would
+               be overwritten by the very bytes it exists to undo. */
+            flush: pane => flushCapturedPendingOutput(pane),
+            write: (pane, data) => {
+                if (pane?.term) {
+                    pane.term.write(data);
+                }
+            },
+            currentPane: () => terminals[index],
+            currentSessionId: () => sessionIds[index]
+        });
+    }
+
     async function refreshTerminalDisplay(index) {
         const terminal = terminals[index];
         const sessionId = sessionIds[index];
@@ -4626,7 +4733,13 @@
             return false;
         }
 
-        setTerminalRefreshState(index, true);
+        /* Everything below the first await addresses this capture, not the
+           slot: a group switch during the rejoin puts another pane in
+           `terminals[index]`, and the teardown is owed to the pane that asked
+           for it. */
+        const resetTarget = terminalModeResetTarget(index);
+        const resetTargetIsCurrent = () => resetTarget.isCurrent();
+        const releaseBusy = holdTerminalActionState(index, 'refresh');
         try {
             if (isBrowserSession(terminal._session)) {
                 reloadBrowserPane(index);
@@ -4647,19 +4760,42 @@
             if (terminal._attached) {
                 terminal.term.reset();
                 terminal.term.clear();
-                await ensureTerminalReady(index);
-                emitTerminalResize(index, true);
+                const ready = await ensureTerminalReady(index, 12, resetTargetIsCurrent);
+                if (ready && resetTargetIsCurrent()) {
+                    emitTerminalResize(index, true);
+                }
             } else {
                 attachTerminal(index);
-                await ensureTerminalReady(index);
+                await ensureTerminalReady(index, 12, resetTargetIsCurrent);
             }
 
             if (sessionId && socket) {
-                socket.emit('leave_session', { session_id: sessionId });
-                socket.emit('join_session', { session_id: sessionId });
-                await redrawAttachedTerminals([index], { forceResize: true });
+                /* The rejoin is what replays the server's rolling buffer, and
+                   that buffer still holds a dead TUI's `?1003h`. The mode
+                   teardown therefore has to be written *after* the replayed
+                   bytes land, not after term.reset() — hence the ack-sequenced
+                   rejoin rather than two bare emits. */
+                await GridVibeTerminalModes.rejoinAndResetAfterReplay({
+                    sessionId,
+                    emit: (event, payload, ack) => (
+                        ack ? socket.emit(event, payload, ack) : socket.emit(event, payload)
+                    ),
+                    write: data => resetTarget.write(data),
+                    setTimeout: (fn, ms) => window.setTimeout(fn, ms),
+                    clearTimeout: handle => window.clearTimeout(handle)
+                });
+                /* The redraw is slot work: it fits and repaints whatever is in
+                   `index` now. Never the incoming group, for a reset that
+                   belonged to the group it replaced. */
+                await redrawAttachedTerminals([index], {
+                    forceResize: true,
+                    isCurrent: resetTargetIsCurrent
+                });
                 return false;
             }
+
+            /* No socket, so no replay to wait behind. */
+            GridVibeTerminalModes.resetMouseReporting(data => resetTarget.write(data));
 
             if (terminal._attached && terminal.term.rows > 0) {
                 terminal.term.refresh(0, terminal.term.rows - 1);
@@ -4667,7 +4803,7 @@
         } catch (error) {
             console.error('[GridVibe Sessions] refreshTerminalDisplay failed:', error);
         } finally {
-            setTerminalRefreshState(index, false);
+            releaseBusy();
         }
 
         return false;
@@ -4689,7 +4825,13 @@
             return false;
         }
 
-        setTerminalClearState(index, true);
+        /* Same capture rule as Reset view above: Clear awaits too, so the
+           release has to reach the buttons it disabled rather than whatever is
+           in the slot by then. */
+        const resetTarget = terminalModeResetTarget(index);
+        const resetTargetIsCurrent = () => resetTarget.isCurrent();
+        const clearCommand = getTerminalClearCommand(index);
+        const releaseBusy = holdTerminalActionState(index, 'clear');
         try {
             logSessionWindowAction('Clearing terminal display', {
                 index,
@@ -4700,14 +4842,20 @@
             terminal._pendingOutput = '';
             terminal.term.reset();
             terminal.term.clear();
+            /* Clear purges the replay buffer below, so nothing can re-arm what
+               the reset cleared and the teardown needs no ordering of its own.
+               It is written all the same: the cure is named here rather than
+               left as a side effect of term.reset()'s scope. */
+            GridVibeTerminalModes.resetMouseReporting(data => resetTarget.write(data));
 
             if (terminal._attached) {
-                await ensureTerminalReady(index);
-                emitTerminalResize(index, true);
+                const ready = await ensureTerminalReady(index, 12, resetTargetIsCurrent);
+                if (ready && resetTargetIsCurrent()) {
+                    emitTerminalResize(index, true);
+                }
             }
 
             if (sessionId && socket && terminal._session?.status === 'connected') {
-                const clearCommand = getTerminalClearCommand(index);
                 socket.emit('clear_terminal_buffer', { session_id: sessionId });
                 socket.emit('terminal_input', { session_id: sessionId, data: clearCommand });
             } else if (sessionId && socket) {
@@ -4716,7 +4864,7 @@
         } catch (error) {
             console.error('[GridVibe Sessions] clearTerminalDisplay failed:', error);
         } finally {
-            setTerminalClearState(index, false);
+            releaseBusy();
         }
 
         return false;
@@ -4853,6 +5001,14 @@
         disconnectObservers(resizeObservers);
         // Dispose xterm instances to free memory
         terminals.forEach(t => {
+            /* Every close and every non-caching group switch lands here, so
+               this is where an explorer pane's outstanding work is given
+               back: a frame-sliced Source build would otherwise keep
+               appending rows into a detached tree, and its queued readers
+               would run against whatever fills the slot next. */
+            if (isExplorerPaneInstance(t)) {
+                explorerReleasePaneWork(t);
+            }
             if (t && t.term) {
                 try { t.term.dispose(); } catch (_) {}
             }
@@ -4865,6 +5021,7 @@
         sessionIds = [];
         gridBuilt  = false;
         visibleGroupId = '';
+        releaseExplorerResourcesIfIdle();
     }
 
     /* ─────────────────────────────────────────────
@@ -4878,6 +5035,11 @@
                 _attached: false,
                 _explorerTreeSidebarOpen: Boolean(session.explorer_tree_open),
                 _explorerGitSidebarOpen: Boolean(session.explorer_git_open),
+                _explorerGitFollowBrowsing: Boolean(session.explorer_git_follow_browsing),
+                _explorerGitPinnedPath: session.explorer_git_pin_active
+                    ? String(session.explorer_git_pinned_path || '')
+                    : undefined,
+                _explorerPath: explorerInitialPreviewDirectory(session),
                 _explorerSearchSidebarOpen: Boolean(session.explorer_search_open),
                 _explorerSidebarWidth: Number(session.explorer_sidebar_width) || 260,
                 _explorerSidebarScroll: session.explorer_sidebar_scroll || {},
@@ -6042,6 +6204,11 @@
             _attached: false,
             _explorerTreeSidebarOpen: Boolean(session.explorer_tree_open),
             _explorerGitSidebarOpen: Boolean(session.explorer_git_open),
+            _explorerGitFollowBrowsing: Boolean(session.explorer_git_follow_browsing),
+            _explorerGitPinnedPath: session.explorer_git_pin_active
+                ? String(session.explorer_git_pinned_path || '')
+                : undefined,
+            _explorerPath: explorerInitialPreviewDirectory(session),
             _explorerSearchSidebarOpen: Boolean(session.explorer_search_open),
             _explorerSidebarWidth: Number(session.explorer_sidebar_width) || 260,
             _explorerSidebarScroll: session.explorer_sidebar_scroll || {},
@@ -6239,6 +6406,18 @@
     }
 
     function replaceSessionPaneMode(index, session) {
+        /* Each replacement function refuses a card or wrapper that is not
+           there, and that refusal leaves the pane on screen exactly as it was
+           — so the same precondition is checked here, before anything is
+           released. Past it the outgoing explorer pane is being discarded,
+           not suspended: it is about to leave `terminals[index]`, taking its
+           frame-sliced build and its in-flight requests with it. */
+        if (!document.getElementById(`tc-${index}`) || !document.getElementById(`tw-${index}`)) {
+            return false;
+        }
+        if (isExplorerPaneInstance(terminals[index])) {
+            explorerReleasePaneWork(terminals[index]);
+        }
         const replaced = isBrowserSession(session)
             ? replacePaneWithBrowser(index, session)
             : (isExplorerSession(session)
@@ -6251,6 +6430,45 @@
             noteGroupPresentationChanged(visibleGroupId);
         }
         return replaced;
+    }
+
+    /* A cwd probe that could not answer left the explorer on an assumed
+       directory. Report it in the pane rather than swallowing it: the silent
+       fallback to the launch directory is what made the same gesture open two
+       different roots on two different days. Informational, so it carries a
+       Dismiss and no retry -- the switch itself succeeded. */
+    function showExplorerCwdNotice(index, probe) {
+        const surface = document.getElementById(`explorer-${index}`);
+        const bar = surface?.querySelector('.explorer-bar');
+        if (!surface || !bar) {
+            return;
+        }
+        document.getElementById(`explorer-cwd-bar-${index}`)?.remove();
+
+        const notice = document.createElement('div');
+        notice.id = `explorer-cwd-bar-${index}`;
+        notice.className = 'explorer-cwd-bar';
+
+        const message = document.createElement('span');
+        message.className = 'explorer-fs-bar-message';
+        message.setAttribute('role', 'status');
+        const opened = String(probe?.directory || '');
+        message.textContent = probe?.reason === 'agent_pane'
+            ? `This pane is running an agent, so its current directory was not read. Opened at ${opened}.`
+            : `The terminal did not answer where it is. Opened at ${opened}.`;
+        notice.appendChild(message);
+
+        const actions = document.createElement('span');
+        actions.className = 'explorer-fs-bar-actions';
+        const dismiss = document.createElement('button');
+        dismiss.type = 'button';
+        dismiss.className = 'explorer-fs-bar-action';
+        dismiss.textContent = 'Dismiss';
+        dismiss.addEventListener('click', () => notice.remove());
+        actions.appendChild(dismiss);
+        notice.appendChild(actions);
+
+        bar.insertAdjacentElement('afterend', notice);
     }
 
     async function switchSessionPaneMode(index) {
@@ -6286,6 +6504,8 @@
 
             if (!replaceSessionPaneMode(index, data)) {
                 await initialLoad();
+            } else if (data.cwd_probe && data.cwd_probe.resolved === false) {
+                showExplorerCwdNotice(index, data.cwd_probe);
             }
         } catch (error) {
             console.error('[GridVibe Sessions] switchSessionPaneMode failed:', error);
@@ -6369,6 +6589,11 @@
                     type: 'explorer',
                     explorer_tree_open: Boolean(pane._explorerTreeSidebarOpen),
                     explorer_git_open: Boolean(pane._explorerGitSidebarOpen),
+                    explorer_git_follow_browsing: Boolean(pane._explorerGitFollowBrowsing),
+                    explorer_git_pin_active: typeof pane._explorerGitPinnedPath === 'string',
+                    explorer_git_pinned_path: typeof pane._explorerGitPinnedPath === 'string'
+                        ? pane._explorerGitPinnedPath
+                        : '',
                     explorer_search_open: Boolean(pane._explorerSearchSidebarOpen),
                     explorer_sidebar_width: sidebar.width,
                     explorer_sidebar_scroll: sidebar.scroll,
@@ -7190,6 +7415,9 @@
                     if (snapshot.type === 'explorer') {
                         entry.explorer_tree_open = snapshot.explorer_tree_open;
                         entry.explorer_git_open = snapshot.explorer_git_open;
+                        entry.explorer_git_follow_browsing = snapshot.explorer_git_follow_browsing;
+                        entry.explorer_git_pin_active = snapshot.explorer_git_pin_active;
+                        entry.explorer_git_pinned_path = snapshot.explorer_git_pinned_path;
                         entry.explorer_search_open = snapshot.explorer_search_open;
                         entry.explorer_sidebar_width = snapshot.explorer_sidebar_width;
                         entry.explorer_sidebar_scroll = snapshot.explorer_sidebar_scroll;

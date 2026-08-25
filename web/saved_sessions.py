@@ -95,6 +95,9 @@ def _default_terminal_entries():
             "agent_auto_mode": False,
             "explorer_tree_open": False,
             "explorer_git_open": False,
+            "explorer_git_follow_browsing": False,
+            "explorer_git_pin_active": False,
+            "explorer_git_pinned_path": "",
             "explorer_search_open": False,
             "explorer_sidebar_width": EXPLORER_SIDEBAR_WIDTH_MIN + 80,
             "explorer_sidebar_scroll": {},
@@ -234,6 +237,13 @@ def _normalize_terminal_entries(
                 "agent_auto_mode": startup_mode == "agent" and bool(entry.get("agent_auto_mode")),
                 "explorer_tree_open": bool(entry.get("explorer_tree_open")),
                 "explorer_git_open": bool(entry.get("explorer_git_open")),
+                "explorer_git_follow_browsing": bool(
+                    entry.get("explorer_git_follow_browsing")
+                ),
+                "explorer_git_pin_active": bool(entry.get("explorer_git_pin_active")),
+                "explorer_git_pinned_path": _normalize_explorer_tab_path(
+                    entry.get("explorer_git_pinned_path")
+                ),
                 "explorer_search_open": bool(entry.get("explorer_search_open")),
                 "explorer_sidebar_width": _normalize_explorer_sidebar_width(
                     entry.get("explorer_sidebar_width")
@@ -272,6 +282,9 @@ def _normalize_terminal_entries(
 _LIVE_SESSION_VIEW_FIELDS = (
     "explorer_tree_open",
     "explorer_git_open",
+    "explorer_git_follow_browsing",
+    "explorer_git_pin_active",
+    "explorer_git_pinned_path",
     "explorer_search_open",
     "explorer_sidebar_width",
     "explorer_sidebar_scroll",
@@ -473,6 +486,18 @@ def _merge_workspace_session_config(
         )
         saved_terminal["explorer_git_open"] = (
             startup_mode == "explorer" and workspace_terminal["explorer_git_open"]
+        )
+        saved_terminal["explorer_git_follow_browsing"] = (
+            startup_mode == "explorer"
+            and workspace_terminal["explorer_git_follow_browsing"]
+        )
+        saved_terminal["explorer_git_pin_active"] = (
+            startup_mode == "explorer" and workspace_terminal["explorer_git_pin_active"]
+        )
+        saved_terminal["explorer_git_pinned_path"] = (
+            workspace_terminal["explorer_git_pinned_path"]
+            if startup_mode == "explorer"
+            else ""
         )
         saved_terminal["explorer_search_open"] = (
             startup_mode == "explorer" and workspace_terminal.get("explorer_search_open", False)

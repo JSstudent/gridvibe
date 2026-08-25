@@ -52,6 +52,18 @@ class TerminalSession:
     group_id: str
     host: str
     directory: str
+    # Where the pane *started*. `current_directory` is where it is now, observed
+    # from the shell's own output (web/terminal_cwd.py) and None until something
+    # has actually observed it -- never a guess, and never written by a probe
+    # that failed. Read it through `effective_directory()`, never directly.
+    current_directory: Optional[str] = None
+    # The directory this pane was *built* on, and the one thing here that never
+    # moves afterwards. `directory` is rewritten to wherever the pane last was
+    # by every mode switch and by the shell switch, so it stops naming the
+    # launcher's choice after the first of those -- which is why the explorer's
+    # widen-guard floor (`_resolve_explorer_open_root`) reads this instead.
+    # `None` means "not stated"; __post_init__ takes it from `directory`.
+    launch_directory: Optional[str] = None
     username: str = "root"
     port: int = 22
     password: Optional[str] = field(default=None, repr=False)
@@ -67,8 +79,25 @@ class TerminalSession:
     use_powershell: bool = False
     startup_mode: str = "terminal"
     explorer_root_directory: Optional[str] = None
+    # True only when `explorer_root_directory` names a root somebody chose --
+    # a Local Repository/SSH explorer pane launched with one, a saved preset,
+    # or a restored snapshot. A root the terminal->explorer switch *derived*
+    # from where the pane happened to be sets this False, so it confines the
+    # live explorer without ever becoming a pin the next switch obeys. Read it
+    # through `_configured_explorer_root_directory()`, never directly.
+    #
+    # `None` means "not stated", and __post_init__ then reads the pane itself:
+    # a root on an *explorer* pane is the boundary that pane was built with, so
+    # it is configured, while a root on a terminal/agent/browser pane can only
+    # be a derived one left behind by an older snapshot -- the switch that
+    # derives one states False, and every path that knows better (the split,
+    # both mode switches, a snapshot written since) states the flag outright.
+    explorer_root_configured: Optional[bool] = None
     explorer_tree_open: bool = False
     explorer_git_open: bool = False
+    explorer_git_follow_browsing: bool = False
+    explorer_git_pin_active: bool = False
+    explorer_git_pinned_path: str = ""
     explorer_search_open: bool = False
     explorer_sidebar_width: int = 260
     explorer_sidebar_scroll: Dict[str, Any] = field(default_factory=dict)
@@ -91,6 +120,20 @@ class TerminalSession:
     connected_at: Optional[float] = None
     error_message: Optional[str] = None
 
+    def __post_init__(self):
+        """Resolve the two fields that answer from the pane when unstated."""
+        if not str(self.launch_directory or "").strip():
+            self.launch_directory = self.directory
+        if self.explorer_root_configured is None:
+            # A root that arrives unlabelled is a chosen one only on a pane
+            # that *is* an explorer. On any other pane it is the root a
+            # terminal->explorer switch derived and an older snapshot carried
+            # back, and calling that configured pins the pane to a directory
+            # nobody picked -- the failure this flag exists to prevent.
+            self.explorer_root_configured = bool(
+                str(self.explorer_root_directory or "").strip()
+            ) and self.startup_mode == "explorer"
+
     def to_dict(self) -> dict:
         """Convert to dictionary."""
         return {
@@ -98,6 +141,12 @@ class TerminalSession:
             "group_id": self.group_id,
             "host": self.host,
             "directory": self.directory,
+            "current_directory": self.current_directory,
+            # Two directory fields, deliberately: `directory` answers "where is
+            # this pane", `launch_directory` answers "what may the explorer not
+            # widen past". The second only differs from the first once a mode
+            # switch has rewritten `directory`, which is exactly when it matters.
+            "launch_directory": self.launch_directory,
             "username": self.username,
             "port": self.port,
             "initial_command": self.initial_command,
@@ -112,8 +161,12 @@ class TerminalSession:
             "use_powershell": self.use_powershell,
             "startup_mode": self.startup_mode,
             "explorer_root_directory": self.explorer_root_directory,
+            "explorer_root_configured": self.explorer_root_configured,
             "explorer_tree_open": self.explorer_tree_open,
             "explorer_git_open": self.explorer_git_open,
+            "explorer_git_follow_browsing": self.explorer_git_follow_browsing,
+            "explorer_git_pin_active": self.explorer_git_pin_active,
+            "explorer_git_pinned_path": self.explorer_git_pinned_path,
             "explorer_search_open": self.explorer_search_open,
             "explorer_sidebar_width": self.explorer_sidebar_width,
             "explorer_sidebar_scroll": copy.deepcopy(self.explorer_sidebar_scroll),
@@ -776,6 +829,12 @@ class SessionManager:
         ):
             config = {**config, "explorer_sidebar_width": None}
         presentation = normalize_pane_presentation_fields(config)
+        # Type-checked, never coerced: a non-boolean is "not stated" rather
+        # than a truthy string, so a malformed flag falls back to the pane's
+        # own answer instead of pinning it to a root nobody chose.
+        root_configured = config.get("explorer_root_configured")
+        if not isinstance(root_configured, bool):
+            root_configured = None
         fields = {
             "host": (
                 config.get("host")
@@ -785,6 +844,13 @@ class SessionManager:
                 or "WSL"
             ),
             "directory": config.get("directory", ""),
+            # `None` means "not stated" and __post_init__ then falls back to
+            # `directory`, so a snapshot written before this field existed keeps
+            # working. A snapshot written since carries the real floor, which is
+            # the point: `_snapshot_session()` writes the *observed* directory
+            # into the `directory` slot, so rebuilding the floor from it moved
+            # the floor to wherever the pane happened to be.
+            "launch_directory": config.get("launch_directory"),
             "username": config.get("username", "root" if mode == "ssh" else ""),
             "port": config.get("port", 22),
             "password": config.get("password"),
@@ -800,8 +866,17 @@ class SessionManager:
             "use_powershell": bool(config.get("use_powershell")),
             "startup_mode": str(config.get("startup_mode") or "terminal"),
             "explorer_root_directory": config.get("explorer_root_directory"),
+            # Absent means "this launch config does not say", which is the
+            # normal case for the launcher and for a snapshot written before
+            # the flag was persisted; TerminalSession.__post_init__ then reads
+            # the pane. A caller that knows -- the split, a snapshot written
+            # since -- states it and is believed.
+            "explorer_root_configured": root_configured,
             "explorer_tree_open": False,
             "explorer_git_open": False,
+            "explorer_git_follow_browsing": False,
+            "explorer_git_pin_active": False,
+            "explorer_git_pinned_path": "",
             "explorer_search_open": False,
             "explorer_sidebar_width": 260,
             "explorer_sidebar_scroll": {},
@@ -947,6 +1022,7 @@ class SessionManager:
         allowed_fields = {
             "host",
             "directory",
+            "current_directory",
             "username",
             "port",
             "password",
@@ -961,8 +1037,12 @@ class SessionManager:
             "use_powershell",
             "startup_mode",
             "explorer_root_directory",
+            "explorer_root_configured",
             "explorer_tree_open",
             "explorer_git_open",
+            "explorer_git_follow_browsing",
+            "explorer_git_pin_active",
+            "explorer_git_pinned_path",
             "explorer_search_open",
             "explorer_sidebar_width",
             "explorer_sidebar_scroll",
@@ -1035,6 +1115,12 @@ class SessionManager:
             session.username = ""
             session.port = 22
             session.password = None
+            # The pane's shell is closing behind this switch, so its last cwd
+            # report stops being an observation of anything live -- and a
+            # browser pane never navigates the filesystem, so nothing replaces
+            # it. Leaving it set would put a dead shell's directory into the
+            # snapshot's `directory` slot.
+            session.current_directory = None
             session.initial_command = resolved_url
             session.initial_command_mode = "browser"
             session.startup_mode = "browser"

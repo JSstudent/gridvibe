@@ -91,6 +91,9 @@ LIFECYCLE_SAVE_SESSIONS_AND_WORKSPACES = "sessions+workspaces"
 EXPLORER_PRESENTATION_FIXTURE = {
     "explorer_tree_open": True,
     "explorer_git_open": True,
+    "explorer_git_follow_browsing": True,
+    "explorer_git_pin_active": True,
+    "explorer_git_pinned_path": "docs/guides",
     "explorer_search_open": True,
     "explorer_sidebar_width": 320,
     "explorer_sidebar_scroll": {

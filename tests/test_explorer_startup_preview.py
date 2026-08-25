@@ -67,11 +67,13 @@ sandbox.renderExplorerTabStrip = () => {};
 sandbox.persistExplorerTabsToSession = index => calls.persisted.push(index);
 
 sandbox.terminals[0] = { _session: scenario.session };
+sandbox.terminals[0]._explorerPath = sandbox.explorerInitialPreviewDirectory(scenario.session);
 sandbox.restoreExplorerPersistedTabs(0).then(() => {
     const pane = sandbox.terminals[0];
     const preview = pane._explorerTabs.find(tab => tab.id === '__preview__');
     process.stdout.write(JSON.stringify({
         calls,
+        initialPath: sandbox.explorerInitialPreviewDirectory(scenario.session),
         activeTabId: pane._explorerActiveTabId,
         previewHasDirPath: Object.prototype.hasOwnProperty.call(preview, 'dirPath'),
         previewDirPath: preview.dirPath,
@@ -119,7 +121,19 @@ class ExplorerStartupPreviewTestCase(unittest.TestCase):
         result = self._restore({"explorer_tab_views": {"__preview__": {"dir": "web/static"}}})
 
         self.assertEqual(result["calls"]["loaded"], ["web/static"])
+        self.assertEqual(result["initialPath"], "web/static")
         self.assertEqual(result["previewDirPath"], "web/static")
+
+    def test_a_live_mode_switch_uses_the_fresh_cwd_instead_of_the_saved_directory(self):
+        result = self._restore({
+            "explorer_open_path": "src/current",
+            "explorer_tab_views": {"__preview__": {"dir": "res"}},
+        })
+
+        # The live pane seed uses the cwd returned by the mode-switch route. The
+        # restore routine is intentionally still free to read durable tab state;
+        # live replacement does not invoke that workspace-startup routine.
+        self.assertEqual(result["initialPath"], "src/current")
 
     def test_a_saved_directory_that_is_gone_falls_back_to_the_root(self):
         result = self._restore(

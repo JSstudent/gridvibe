@@ -3321,7 +3321,13 @@
             color: var(--t-accent);
         }
 
-        .explorer-line-wrap-btn[hidden] {
+        /* Two header controls that stand down for the panel on screen: the
+           wrap toggle where wrapping means nothing, and the find shell on a
+           panel whose tier cannot answer a query. Both carry a `display` of
+           their own, which beats the UA's `[hidden]` rule, so both need this
+           one — joined rather than restated beside each. */
+        .explorer-line-wrap-btn[hidden],
+        .explorer-editor-search[hidden] {
             display: none;
         }
 
@@ -3652,6 +3658,15 @@
         }
 
         .explorer-editor-body {
+            /* Fixed overview widths (settled decision 2: not draggable, so
+               there is no per-pane width to persist or restore). `map` gets
+               room for glyph bands; `ruler` only has to hold the marker lane
+               and the viewport box. They live here, on the parent every file
+               panel shares, because the lane is reserved by Source's frame
+               *and* inside the Preview and Diff scrollers beside it — one
+               declaration, three readers, so the panels cannot drift apart. */
+            --explorer-overview-width: 110px;
+            --explorer-overview-ruler-width: 14px;
             min-height: 0;
             overflow: hidden;
             display: grid;
@@ -3687,14 +3702,17 @@
            overlaps the horizontal scrollbar. Must come after the
            .explorer-editor-panel rule above — it overrides its overflow. */
         .explorer-source-frame {
-            /* Fixed overview widths (settled decision 2: not draggable, so
-               there is no per-pane width to persist or restore). `map` gets
-               room for glyph bands; `ruler` only has to hold the marker lane
-               and the viewport box. */
-            --explorer-overview-width: 110px;
-            --explorer-overview-ruler-width: 14px;
             display: grid;
-            grid-template-columns: minmax(0, 1fr) auto;
+            /* The overview track is reserved, never `auto`. An `auto` track
+               collapses to 0 the moment its only item stands down — the
+               in-place editor, an empty file, the large-file tier — which
+               widened the text by the ruler width, re-wrapped every line and
+               slid the scrollbar sideways on the way in and back on the way
+               out. An explicit track keeps its width even while the aside is
+               empty. `map` mode is not reachable today; if it returns, stamp
+               the mode on this element and key the track off that attribute
+               rather than adding a second source of truth. */
+            grid-template-columns: minmax(0, 1fr) var(--explorer-overview-ruler-width);
             overflow: hidden;
         }
 
@@ -3719,6 +3737,22 @@
         }
 
         .explorer-source-overview[hidden] {
+            display: none;
+        }
+
+        /* Stood down: there is nothing to survey (an empty file, the in-place
+           editor's draft, the large-file tier's plain chunks), so the column
+           gives up its canvas, its viewport box and its gestures — but keeps
+           its width, its background and its separator. Leaving the layout is
+           what re-wrapped the text beside it, so `hidden` is reserved for a
+           genuine "no overview column at all" case. */
+        .explorer-source-overview.is-empty {
+            cursor: default;
+            pointer-events: none;
+        }
+
+        .explorer-source-overview.is-empty .explorer-overview-canvas,
+        .explorer-source-overview.is-empty .explorer-overview-viewport {
             display: none;
         }
 
@@ -3851,6 +3885,11 @@
                the 100% fallback only covers the first frame before the sync
                runs. */
             --explorer-source-viewport-width: 100%;
+            /* Reserve the bar's own lane: without this the bar appearing or
+               disappearing — a fold, a find that changes the row set, a tier
+               switch — re-wraps every line under it. `stable` reserves the
+               inline-end gutter only, so no band appears along the bottom. */
+            scrollbar-gutter: stable;
         }
 
         /* Source view fonts are monospace only; `default` keeps the stack the
@@ -4165,6 +4204,66 @@
             word-break: break-word;
         }
 
+        /* Large-file tier (explorer-tiers.js): bounded plain chunks instead of
+           one row per line, and the notice that names everything the tier
+           turned off. The notice is sticky because it is the only explanation
+           for a missing gutter, missing marks and a missing find — scrolling it
+           away leaves the reader looking at what reads like a broken pane. */
+        /* The Preview panel's give-up notice joins it rather than restating a
+           second in-pane role="status" surface beside it: same class of thing,
+           same treatment, one palette literal. */
+        .explorer-source-tier-notice,
+        .explorer-preview-status {
+            position: sticky;
+            top: 0;
+            z-index: 1;
+            padding: 6px 12px;
+            font-size: .74rem;
+            line-height: 1.5;
+            color: var(--explorer-muted);
+            background: var(--explorer-bar-bg);
+            border-bottom: 1px solid var(--explorer-border);
+        }
+
+        .explorer-preview-status {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        /* The retry takes .explorer-search-btn's border, radius and palette as
+           they stand; only the fixed 28px square has to go, because this one
+           carries a word rather than a glyph. */
+        .explorer-preview-refresh-btn {
+            width: auto;
+            padding: 0 10px;
+            height: 24px;
+        }
+
+        .explorer-source-plain {
+            display: block;
+            min-width: max-content;
+        }
+
+        .explorer-source-chunk {
+            margin: 0;
+            padding: 0 12px;
+            font: inherit;
+            color: inherit;
+            background: none;
+            white-space: pre;
+        }
+
+        .explorer-source-view.wrap-lines .explorer-source-plain {
+            min-width: 0;
+        }
+
+        .explorer-source-view.wrap-lines .explorer-source-chunk {
+            white-space: pre-wrap;
+            overflow-wrap: anywhere;
+            word-break: break-word;
+        }
+
         .explorer-editor-content code {
             white-space: inherit;
             overflow-wrap: inherit;
@@ -4178,6 +4277,25 @@
             overflow-x: hidden;
             overflow-y: auto;
             color: var(--explorer-text);
+            scrollbar-gutter: stable;
+            /* The same reserved overview lane the Source frame keeps as a grid
+               track and the Preview panel keeps inside its own box, so all
+               three views put the bar at the same x and none of them re-wraps
+               on the way in or out. A transparent border reserves it; the
+               gradient, positioned over the border box, paints the column's
+               1 px separator and strip. The sticky horizontal-scrollbar widget
+               is `width: 100%` of the padding box, so it stops at the lane
+               rather than running under it. */
+            border-right: var(--explorer-overview-ruler-width) solid transparent;
+            background-origin: border-box;
+            background-repeat: no-repeat;
+            background-position: right top;
+            background-size: var(--explorer-overview-ruler-width) 100%;
+            background-image: linear-gradient(
+                to right,
+                var(--explorer-row-border) 0 1px,
+                var(--explorer-bar-bg) 1px
+            );
         }
 
         .explorer-diff-split {
@@ -4206,8 +4324,9 @@
             text-transform: uppercase;
         }
 
-        /* Section headers that carry bulk actions (Stage All / Discard All)
-           keep the title text left and the compact buttons right. */
+        /* Section headers that carry bulk actions (Unstage All on Staged
+           Changes; Stage All / Discard All on Changes) keep the title text
+           left and the compact buttons right. */
         .explorer-git-section-title {
             display: flex;
             align-items: center;
@@ -4219,6 +4338,77 @@
             display: inline-flex;
             align-items: center;
             gap: 4px;
+        }
+
+        /* The Graph section's commit-message find — the Source find's controls
+           on a sidebar row, aligned with the commit rows beneath it. Sticky
+           within its own section, because stepping through matches scrolls the
+           panel: an input and a `3/17` counter that have scrolled off the top
+           are controls the reader is using blind. It sticks only while the
+           Graph section is on screen, which is the only section it belongs to.
+
+           Folded away until the header's magnifier asks for it. `display: flex`
+           beats the `hidden` attribute's own `display: none`, so the hidden
+           state has to be restated here — without this the bar never hides. */
+        .explorer-git-commit-search {
+            position: sticky;
+            top: 0;
+            z-index: 1;
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            padding: 2px 10px 6px;
+            background: var(--explorer-bar-bg);
+        }
+
+        .explorer-git-commit-search[hidden] {
+            display: none;
+        }
+
+        /* The Graph header's fixed-scope pin, follow toggle, and magnifier.
+           Same 22px box as the Stage All / Discard All controls above. */
+        .explorer-git-pin-toggle,
+        .explorer-git-follow-toggle,
+        .explorer-git-commit-search-toggle {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 22px;
+            height: 22px;
+            border-color: var(--explorer-open-folder-border);
+            background: var(--explorer-open-folder-bg);
+            color: var(--explorer-open-folder-text);
+        }
+
+        .explorer-git-pin-toggle .explorer-btn-icon,
+        .explorer-git-follow-toggle .explorer-btn-icon,
+        .explorer-git-commit-search-toggle .explorer-btn-icon {
+            display: block;
+            width: 14px;
+            height: 14px;
+        }
+
+        .explorer-git-pin-toggle:hover,
+        .explorer-git-pin-toggle:focus-visible,
+        .explorer-git-follow-toggle:hover,
+        .explorer-git-follow-toggle:focus-visible,
+        .explorer-git-commit-search-toggle:hover,
+        .explorer-git-commit-search-toggle:focus-visible {
+            background: var(--explorer-open-folder-hover-bg);
+            outline: none;
+        }
+
+        .explorer-git-commit-search-toggle[aria-expanded="true"] {
+            border-color: var(--t-accent);
+            color: var(--t-accent);
+            background: var(--explorer-row-active);
+        }
+
+        .explorer-git-pin-toggle[aria-pressed="true"],
+        .explorer-git-follow-toggle[aria-pressed="true"] {
+            border-color: var(--t-accent);
+            color: var(--t-accent);
+            background: var(--explorer-row-active);
         }
 
         .explorer-diff-sidebar-empty,
@@ -4731,16 +4921,23 @@
            renderings of one find that do not agree on a word's width read as
            two different fonts, so the padding goes and both are exactly the
            glyphs. Border-radius stays: a corner is not advance. */
-        .explorer-search-match {
+        /* The find highlight, shared by every find that paints one. The commit
+           find's row-level marker joins it rather than restating it: a matched
+           word can sit past a commit subject's cut-off, invisible, so the
+           always-visible short hash carries the same tint — and the same
+           active variant — as the marks inside the subject. */
+        .explorer-search-match,
+        .explorer-diff-commit-hash.explorer-git-commit-search-hit {
             border-radius: 2px;
             background: rgb(var(--gv-match-rgb));
             color: var(--gv-match-ink);
         }
 
-        .explorer-search-match.active {
+        .explorer-search-match.active,
+        .explorer-diff-commit-hash.explorer-git-commit-search-hit.active {
             background: rgb(var(--gv-match-active-rgb));
             color: var(--gv-match-ink);
-            box-shadow: 0 0 0 1px rgba(17, 24, 39, .3);
+            box-shadow: 0 0 0 1px rgba(var(--gv-match-ink-rgb), .3);
         }
 
         /* Occurrences of the selected word in the Source view, painted through
@@ -5168,6 +5365,26 @@
             border-bottom: 1px solid rgba(180, 83, 9, .35);
         }
 
+        /* The size tier's banner (explorer-tiers.js). Deliberately a different
+           surface from the truncation banner above: truncation says part of the
+           change is *missing*, this says all of it is here and looks plainer.
+           Both can stand at once, in that order. */
+        .explorer-diff-tier-notice {
+            padding: 6px 12px;
+            margin: 0 0 6px;
+            font-size: .74rem;
+            line-height: 1.5;
+            color: var(--explorer-muted);
+            background: var(--explorer-bar-bg);
+            border-bottom: 1px solid var(--explorer-border);
+        }
+
+        .explorer-diff-tier-notice strong,
+        .explorer-source-tier-notice strong {
+            color: var(--explorer-text);
+            font-weight: 600;
+        }
+
         .explorer-pane[data-explorer-theme="dark"] .explorer-diff-truncated {
             color: #fbbf24;
             background: rgba(251, 191, 36, .12);
@@ -5237,6 +5454,24 @@
             font-family: var(--md-preview-font);
             font-size: var(--explorer-editor-font-size, .86rem);
             line-height: 1.6;
+            scrollbar-gutter: stable;
+            /* Preview is its own scroller and spans the whole pane, while
+               Source's scroller stops at the overview column — so the bar and
+               the wrapping measure used to move by the ruler width on every
+               Source <-> Preview switch. A transparent border reserves the
+               same lane inside this scroller; the gradient, positioned over
+               the border box, paints the column's 1px separator and strip so
+               the reserved space reads as the same chrome rather than a seam. */
+            border-right: var(--explorer-overview-ruler-width) solid transparent;
+            background-origin: border-box;
+            background-repeat: no-repeat;
+            background-position: right top;
+            background-size: var(--explorer-overview-ruler-width) 100%;
+            background-image: linear-gradient(
+                to right,
+                var(--explorer-row-border) 0 1px,
+                var(--explorer-bar-bg) 1px
+            );
         }
 
         .explorer-markdown-preview > * {
@@ -5759,7 +5994,11 @@
             font-size: .75rem;
             pointer-events: none;
         }
-        .explorer-fs-bar {
+        /* The mutation error bar and the working-directory notice are the same
+           strip in the same place; only the severity colour differs, so the
+           box is declared once and the notice restates nothing but its tone. */
+        .explorer-fs-bar,
+        .explorer-cwd-bar {
             display: flex;
             align-items: center;
             gap: 10px;
@@ -5769,6 +6008,9 @@
             background: var(--explorer-row-active);
             color: var(--gv-danger);
             font-size: .74rem;
+        }
+        .explorer-cwd-bar {
+            color: var(--explorer-text);
         }
         .explorer-fs-bar-message {
             flex: 1 1 200px;

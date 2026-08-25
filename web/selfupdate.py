@@ -2,11 +2,11 @@
 
 import os
 import shutil
-import signal
 import subprocess
 from typing import Any, Dict, List
 
 from web.paths import BASE_DIR, install_kind
+from web.process_bounds import PROCESS_REAP_TIMEOUT, new_process_group, terminate_process_tree
 
 SELF_UPDATE_REPO_DIR = BASE_DIR
 
@@ -15,8 +15,10 @@ SELF_UPDATE_REPO_DIR = BASE_DIR
 # both contact the remote and get the wider bound.
 SELF_UPDATE_LOCAL_TIMEOUT = 10.0
 SELF_UPDATE_NETWORK_TIMEOUT = 30.0
-# How long we are willing to wait for a killed command's pipes to drain.
-SELF_UPDATE_REAP_TIMEOUT = 5.0
+# How long we are willing to wait for a killed command's pipes to drain. The
+# process-group ownership and tree kill this pairs with now live in
+# `web/process_bounds.py`, shared with the explorer's Git runner.
+SELF_UPDATE_REAP_TIMEOUT = PROCESS_REAP_TIMEOUT
 
 
 class AppUpdateError(RuntimeError):
@@ -25,49 +27,6 @@ class AppUpdateError(RuntimeError):
     def __init__(self, message: str, status_code: int = 400):
         super().__init__(message)
         self.status_code = status_code
-
-
-def _new_process_group() -> Dict[str, Any]:
-    """Popen kwargs that put git and its helpers in a group we can kill as one."""
-    if os.name == "nt":
-        return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
-    return {"start_new_session": True}
-
-
-def _terminate_process_tree(process: "subprocess.Popen[str]") -> None:
-    """Kill a timed-out git command *and everything it spawned*.
-
-    Killing only the direct child is not enough, and the reason is easy to miss:
-    `git fetch` hands our stdout/stderr pipes to its own transport helpers, so a
-    surviving grandchild keeps the write end open. On Windows the reader threads
-    then block until that handle closes — `subprocess.run` reaps with an
-    unbounded `communicate()` after its kill, which turned a 30 s bound into a
-    measured 269 s wait against a remote that accepted the connection and went
-    quiet. The bound has to cover the helpers or it bounds nothing.
-    """
-    if os.name == "nt":
-        taskkill = shutil.which("taskkill")
-        if taskkill:
-            try:
-                subprocess.run(
-                    [taskkill, "/F", "/T", "/PID", str(process.pid)],
-                    capture_output=True,
-                    timeout=SELF_UPDATE_REAP_TIMEOUT,
-                    check=False,
-                )
-            except (OSError, subprocess.TimeoutExpired):
-                pass
-    else:
-        try:
-            os.killpg(os.getpgid(process.pid), signal.SIGKILL)
-        except OSError:
-            pass
-
-    # Backstop, and a no-op if the tree kill already landed.
-    try:
-        process.kill()
-    except OSError:
-        pass
 
 
 def _run_repo_git(
@@ -102,7 +61,7 @@ def _run_repo_git(
             stderr=subprocess.PIPE,
             text=True,
             env=env,
-            **_new_process_group(),
+            **new_process_group(),
         )
     except OSError as exc:
         raise AppUpdateError(f"Failed to run git {' '.join(args)}: {exc}", 500) from exc
@@ -110,7 +69,7 @@ def _run_repo_git(
     try:
         stdout, stderr = process.communicate(timeout=timeout)
     except subprocess.TimeoutExpired as exc:
-        _terminate_process_tree(process)
+        terminate_process_tree(process)
         try:
             process.communicate(timeout=SELF_UPDATE_REAP_TIMEOUT)
         except subprocess.TimeoutExpired:

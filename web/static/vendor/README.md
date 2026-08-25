@@ -32,7 +32,10 @@ ship beside the files as `fonts/LICENSE-{jetbrains-mono,cascadia-code}.txt`.
 language grammars (`dos`, `powershell`, `dockerfile`) appended so the explorer
 Source viewer covers every language in `EXPLORER_HLJS_LANGUAGE`
 (`web/static/js/explorer-viewer.js`). GridVibe always passes the grammar
-explicitly — Highlight.js auto-detection is never used. To rebuild:
+explicitly — Highlight.js auto-detection is never used. The same file is loaded
+on the page for small Source files/Diff2Html and imported same-origin by
+`web/static/js/explorer-worker.js` for non-trivial Source tokenization; the
+worker does not carry a second build or a CDN fallback. To rebuild:
 
 ```
 curl -sSL -o highlight.min.js https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js

@@ -33,6 +33,7 @@ from web.explorer import (
     ExplorerRouteError,
     _decode_git_output,
     _explorer_content_looks_binary,
+    _require_complete_git_result,
 )
 
 SEARCH_QUERY_MAX_CHARS = 512
@@ -133,13 +134,14 @@ def parse_search_options(args: Any) -> SearchOptions:
 
 
 def search_limits_from_config() -> SearchLimits:
-    """Read the bounded-search limits from RuntimeConfig."""
+    """Read the bounded-search limits from one captured RuntimeConfig generation."""
+    settings = runtime_config.snapshot()
     return SearchLimits(
-        max_files=int(runtime_config.explorer_search_max_files),
-        max_matches=int(runtime_config.explorer_search_max_matches),
-        max_matches_per_file=int(runtime_config.explorer_search_max_matches_per_file),
-        max_file_bytes=int(runtime_config.explorer_search_max_file_bytes),
-        timeout_seconds=float(runtime_config.explorer_search_timeout_seconds),
+        max_files=int(settings.explorer_search_max_files),
+        max_matches=int(settings.explorer_search_max_matches),
+        max_matches_per_file=int(settings.explorer_search_max_matches_per_file),
+        max_file_bytes=int(settings.explorer_search_max_file_bytes),
+        timeout_seconds=float(settings.explorer_search_timeout_seconds),
     )
 
 
@@ -217,6 +219,7 @@ def _git_work_tree_root(backend: Any, cwd: str) -> Optional[str]:
         )
     except Exception:
         return None
+    _require_complete_git_result(rev_parse, "Git search repository detection")
     if rev_parse.returncode != 0:
         return None
     lines = _decode_git_output(rev_parse.stdout).splitlines()
@@ -254,12 +257,20 @@ def git_grep_matches(
             )
         except (subprocess.TimeoutExpired, TimeoutError) as exc:
             raise SearchDeadlineExceeded() from exc
-        if result.returncode not in (0, 1):
+        output_truncated = bool(getattr(result, "stdout_truncated", False))
+        try:
+            _require_complete_git_result(
+                result,
+                "Repository search",
+                allow_stdout_truncation=True,
+            )
+        except ValueError as exc:
+            raise ExplorerRouteError(str(exc)) from exc
+        if not output_truncated and result.returncode not in (0, 1):
             # 1 means "no matches"; anything else is a real grep failure.
             raise ExplorerRouteError(
                 _decode_git_output(result.stderr) or "Repository search failed"
             )
-        output_truncated = bool(getattr(result, "stdout_truncated", False))
         stream = result.stdout
         if output_truncated and stream and not stream.endswith(b"\n"):
             complete, separator, _partial = stream.rpartition(b"\n")

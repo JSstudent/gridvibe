@@ -12,7 +12,8 @@
   "terminal": {
     "max_sessions": 16,
     "font_family": "Consolas, Monaco, 'Courier New', monospace",
-    "font_size": 14
+    "font_size": 14,
+    "shell_integration": true
   },
   "security": {
     "cors_origins": []

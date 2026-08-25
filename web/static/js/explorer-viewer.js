@@ -1,13 +1,14 @@
     /* ─────────────────────────────────────────────
        Explorer viewer — extracted from terminals.js by the move-only second
        phase of the terminals.js split.
-       File-type classifier, syntax highlight, Git diff, Git sidebar, Files
-       tree, source/markdown render, image/mermaid viewer, breadcrumb,
+       File-type classifier, syntax highlight, Files tree, source/markdown
+       render, image/mermaid viewer, breadcrumb,
        directory listing and per-panel scroll.
        The tab strip itself — the tab records, the strip, its interactions,
        the per-tab view snapshot and saved-tab persistence — moved to
-       explorer-tabs.js, which loads directly after this file and shares the
-       same global scope; the two are one surface split across two files.
+       explorer-tabs.js; the Git sidebar moved to explorer-git-sidebar.js and
+       the Diff panel to explorer-diff.js. All are classic scripts sharing the
+       same global scope.
        Loaded before terminals.js; all shared terminal state, the markdown
        preview key listener and generic helpers remain in terminals.js.
     ───────────────────────────────────────────── */
@@ -47,6 +48,332 @@
        decoded character count, which is a close proxy for the byte size. */
     const EXPLORER_PLAIN_PREVIEW_THRESHOLD = 2 * 1024 * 1024;
 
+    /* One in-flight request per pane per named slot. Opening a second file
+       while the first is still arriving used to leave both fetches, both JSON
+       decodes and both renders to run to completion, so clicking down a tree
+       queued up work for content nobody was looking at any more; the newer
+       load now cancels the one it replaces.
+
+       Superseding is deliberately *within* a slot only — a diff load does not
+       cancel a file load — and abort stays an optimization, never a
+       correctness mechanism: a request that already resolved cannot be called
+       back, so every caller keeps its post-arrival identity check exactly as
+       it was. Returns undefined where AbortController is unavailable, which
+       fetch() reads as "no signal". */
+    function explorerRequestSignal(pane, slot) {
+        if (!pane || typeof AbortController !== 'function') {
+            return undefined;
+        }
+        const slots = pane._explorerRequestAborters || (pane._explorerRequestAborters = {});
+        slots[slot]?.abort();
+        const controller = new AbortController();
+        slots[slot] = controller;
+        return controller.signal;
+    }
+
+    function cancelExplorerRequestSlot(pane, slot) {
+        const slots = pane?._explorerRequestAborters;
+        if (!slots || !slots[slot]) {
+            return;
+        }
+        slots[slot].abort();
+        delete slots[slot];
+    }
+
+    /* Every slot at once, for a pane that is going away. The two worker-backed
+       slots (`highlight`, `editHighlight`) genuinely stop the thread — the
+       pool terminates the worker running an aborted job — so this is not just
+       a dropped callback. Every caller already guards `AbortError`, because
+       supersession within a slot aborts the same way, so cancelling here can
+       never surface as a console line (guardrail 9). */
+    function cancelExplorerRequestSlots(pane) {
+        const slots = pane?._explorerRequestAborters;
+        if (!slots) {
+            return;
+        }
+        Object.keys(slots).forEach(slot => {
+            slots[slot]?.abort();
+        });
+        delete pane._explorerRequestAborters;
+    }
+
+    /* A deliberate abort is not a failure and must not reach the console
+       (guardrail 9) — otherwise every fast file switch writes a red line.
+       `AbortError` is the fetch contract; the legacy numeric ABORT_ERR code
+       covers engines that still reject with a bare DOMException. */
+    function explorerIsAbortError(error) {
+        return Boolean(error) && (error.name === 'AbortError' || error.code === 20);
+    }
+
+    /* The presentation-tier policy (explorer-tiers.js, DOM-free and
+       Node-tested). Looked up rather than captured so a page that somehow
+       loaded without it degrades to today's behaviour instead of throwing. */
+    function explorerTierPolicy() {
+        return (typeof window !== 'undefined' && window.GridVibeExplorerTiers) || null;
+    }
+
+    /* One place decides how a buffer is presented, so the 2 MiB highlight
+       threshold and the presentation tier can never end up computed from
+       different content. Cached on the pane because counting lines is O(bytes)
+       and the render path asks on every repaint. */
+    function applyExplorerSourceTier(pane, content) {
+        if (!pane) {
+            return;
+        }
+        const text = typeof content === 'string' ? content : '';
+        const policy = explorerTierPolicy();
+        pane._explorerFilePlain = text.length > EXPLORER_PLAIN_PREVIEW_THRESHOLD;
+        pane._explorerSourceMetrics = policy
+            ? policy.sourceMetrics(text)
+            : { bytes: text.length, lines: 0 };
+        pane._explorerSourceTier = policy
+            ? policy.sourceTier(pane._explorerSourceMetrics)
+            : 'full';
+    }
+
+    function explorerPaneSourceTier(pane) {
+        return pane?._explorerSourceTier || 'full';
+    }
+
+    /* Find is a capability of the *panel on screen*, decided from the tier for
+       the two panels the tier describes. One input in the header serves all
+       three, so leaving it live while the panel it is pointed at cannot answer
+       would hand the reader a control that silently does nothing — and the
+       tier's notice says so in as many words.
+
+       Source is what the tier is about: above the ceiling there are no
+       per-line rows for a find to address. Preview shares the verdict for a
+       different reason — the render of a 4 MiB Markdown file is itself
+       enormous and the preview find walks its whole subtree unbounded, which
+       is the freeze the tier exists to remove.
+
+       Diff is not the file. Its patch is capped by the backend's
+       EXPLORER_GIT_DIFF_MAX_BYTES however large the file is, so it can always
+       answer, and applying one file's size to it took Find away from a
+       four-line patch. This is the remaining half of the same fix that resets
+       the tier when a *commit* diff opens; the file's own worktree diff used
+       to inherit the verdict. */
+    function explorerPaneAllowsFind(pane, view = 'source') {
+        if (view === 'diff') {
+            return true;
+        }
+        const policy = explorerTierPolicy();
+        return policy
+            ? policy.sourceTierAllows(explorerPaneSourceTier(pane), 'find')
+            : true;
+    }
+
+    /* True while any panel this file can show could answer a find — which is
+       what decides whether the search shell is *rendered* at all. Rendering it
+       per-view would mean rebuilding the header on every panel switch, and
+       setExplorerFileView() deliberately does not touch the header. One stable
+       shell, hidden and shown by syncExplorerFindAvailability(). */
+    function explorerFileOffersFind(pane, { hasGitDiff = false } = {}) {
+        return explorerPaneAllowsFind(pane, 'source')
+            || explorerPaneAllowsFind(pane, 'preview')
+            || (hasGitDiff && explorerPaneAllowsFind(pane, 'diff'));
+    }
+
+    /* The one owner of "is the find control offered right now". Header
+       visibility, Ctrl+F and applyExplorerSearch() all read the same verdict,
+       so a hidden control can never claim the shortcut and suppress the
+       browser's own find while refusing to serve the query.
+
+       The query itself is left alone: a find typed on Diff stays in the state
+       and in the input while Source hides the shell, and comes back with it. */
+    function syncExplorerFindAvailability(index, view = null) {
+        const pane = terminals[index];
+        /* Answered before the shell is looked up, and never *from* it: a
+           browsed listing has its own find control in the toolbar and no file
+           header at all, so "there is no shell here" is not the same answer as
+           "Find is unavailable". */
+        const allowed = !pane
+            || pane._explorerMode !== 'file'
+            || explorerPaneAllowsFind(pane, view || activeExplorerFileView(index));
+        const shell = document.querySelector(`[data-explorer-search="${index}"]`);
+        if (shell) {
+            shell.hidden = !allowed;
+        }
+        return allowed;
+    }
+
+    /* The tier's in-pane notice. Deliberately *not* showGridVibeNotice(): that
+       is the launcher's one global banner and it reports events, while this
+       describes a state that lasts as long as the file is open. Same shape as
+       the diff truncation banner — one role="status" element inside the
+       surface it describes, styled from tokens.css. */
+    function explorerSourceTierNoticeHtml(pane) {
+        const policy = explorerTierPolicy();
+        const notice = policy ? policy.sourceTierNotice(pane?._explorerSourceMetrics || null) : null;
+        if (!notice) {
+            return '';
+        }
+        return '<div class="explorer-source-tier-notice" role="status">'
+            + `<strong>${escHtml(notice.title)}</strong> `
+            + `${escHtml(notice.detail)} `
+            + `Turned off: ${escHtml(notice.disabled.join(', '))}. `
+            + `<strong>${escHtml(notice.findNote)}</strong> `
+            + escHtml(notice.retained)
+            + '</div>';
+    }
+
+    /* The large tier's body: a bounded number of plain chunks instead of one
+       row per line. Nothing here is per-line, so the gutter, section folding,
+       the occurrence tint (which anchors on `.explorer-source-lines`), the
+       change marks and the overview ruler are absent by construction rather
+       than by a flag each of them has to remember to check.
+
+       The leading newline is sacrificial and has to stay. sourceChunks() cuts
+       *after* a newline, so a chunk begins with the next line's first
+       character — and when that line is blank, the chunk begins with a
+       newline. The HTML fragment parser drops a single U+000A immediately
+       following a `<pre>` start tag (the same rule covers `listing` and
+       `textarea`), and `innerHTML` and `insertAdjacentHTML` both run that
+       algorithm, so the file's own blank line was eaten and the pane stopped
+       being byte-faithful to it. Giving the parser a newline of ours leaves it
+       something to swallow that is not the file's. */
+    function explorerLargeSourceChunkHtml(chunk) {
+        return `<pre class="explorer-source-chunk">\n${escHtml(chunk)}</pre>`;
+    }
+
+    /* An element built outside the document, so a rebuild costs no layout
+       until the moment it is swapped in. Returns null for empty markup. */
+    function explorerDetachedElement(html) {
+        const template = document.createElement('template');
+        template.innerHTML = String(html || '');
+        return template.content.firstElementChild;
+    }
+
+    function explorerLargeSourceHost(code) {
+        return code ? code.querySelector('.explorer-source-plain') : null;
+    }
+
+    /* Put the finished chunks on screen in place of the ones the reader has
+       been looking at, holding their offset across the exchange. Both writes
+       are in one task, so the collapsed intermediate state is never painted. */
+    function explorerSwapLargeSourceHost(code, pane, previous, host) {
+        const top = code.scrollTop;
+        const left = code.scrollLeft;
+        const notice = code.querySelector('.explorer-source-tier-notice');
+        const nextNotice = explorerDetachedElement(explorerSourceTierNoticeHtml(pane));
+        if (notice && nextNotice) {
+            code.replaceChild(nextNotice, notice);
+        }
+        code.replaceChild(host, previous);
+        code.scrollTop = top;
+        code.scrollLeft = left;
+    }
+
+    /* The large tier's paint, over frames.
+
+       Not building one row per line is what the tier is for, but escaping ten
+       megabytes and handing the parser a single string that size is the same
+       uninterruptible task wearing a different shape — and it lands on exactly
+       the files the tier exists to make openable. The chunks the policy
+       already cuts are the unit, emitted under the same frame budget the row
+       build uses, so the window keeps answering clicks throughout.
+
+       Where those chunks are assembled depends on whether there is anything
+       to protect. The first paint has nothing on screen, so the notice and an
+       empty host go in and the file fills in from the top. A *replacement* —
+       a watcher refresh, a save — has the reader somewhere in the document,
+       and emptying the scroller under them collapses the content, which the
+       browser answers by putting them at the top for every frame the rebuild
+       lasts before the restore snaps them home at the end. A log file gaining
+       a line did that on every poll. So a replacement is assembled off-screen
+       and swapped in whole.
+
+       Readers queued through whenExplorerSourceRendered() wait for the last
+       chunk, exactly as they wait for the last row: a scroll restore that ran
+       against an empty host would restore nothing. */
+    function renderExplorerLargeSource(index, code) {
+        const pane = terminals[index];
+        const policy = explorerTierPolicy();
+        const content = pane?._explorerFileContent || '';
+        /* Nothing this tier paints depends on anything a repaint moves: there
+           is no find, no gutter and no fold set, so a second call for the same
+           buffer would re-escape and re-parse megabytes to produce exactly the
+           chunks already on screen. */
+        const painted = pane._explorerLargeSourceRender;
+        if (painted
+            && painted.content === content
+            && !pane._explorerSourceRenderJob
+            && explorerLargeSourceHost(code) === painted.host) {
+            explorerFlushSourceRenderCallbacks(pane);
+            return;
+        }
+        const chunks = policy ? policy.sourceChunks(content) : [content];
+        explorerCancelSourceRenderJob(pane);
+        pane._explorerSourceRender = null;
+        pane._explorerSourceModel = null;
+        pane._explorerLargeSourceRender = null;
+        // The host on screen, if this is a replacement rather than a first paint.
+        const replacing = explorerLargeSourceHost(code);
+        let host;
+        if (replacing) {
+            host = explorerDetachedElement('<div class="explorer-source-plain"></div>');
+        } else {
+            code.innerHTML = `${explorerSourceTierNoticeHtml(pane)}<div class="explorer-source-plain"></div>`;
+            host = explorerLargeSourceHost(code);
+        }
+        if (!host) {
+            code.innerHTML = `${explorerSourceTierNoticeHtml(pane)}`
+                + `<div class="explorer-source-plain">${chunks.map(explorerLargeSourceChunkHtml).join('')}</div>`;
+            pane._explorerLargeSourceRender = null;
+            explorerFlushSourceRenderCallbacks(pane);
+            return;
+        }
+        /* What the job must find on screen to know it is still wanted: the
+           host it is filling, or the one it is going to replace. */
+        const onScreen = replacing || host;
+        const commit = () => {
+            if (replacing) {
+                explorerSwapLargeSourceHost(code, pane, replacing, host);
+            }
+            pane._explorerLargeSourceRender = { content, host };
+        };
+        if (chunks.length <= 1 || typeof window.requestAnimationFrame !== 'function') {
+            host.innerHTML = chunks.map(explorerLargeSourceChunkHtml).join('');
+            commit();
+            explorerFlushSourceRenderCallbacks(pane);
+            return;
+        }
+        const job = { frame: 0, at: 0, suspended: false, step: null };
+        pane._explorerSourceRenderJob = job;
+        const step = () => {
+            job.frame = 0;
+            if (job.suspended) {
+                return;
+            }
+            if (pane._explorerSourceRenderJob !== job) {
+                return;
+            }
+            if (explorerLargeSourceHost(code) !== onScreen) {
+                // Same standing-down rule as the row build above: a job that
+                // can never finish must not hold the pane's reader queue.
+                explorerAbandonSourceRenderJob(pane);
+                return;
+            }
+            const started = performance.now();
+            while (job.at < chunks.length) {
+                host.insertAdjacentHTML('beforeend', explorerLargeSourceChunkHtml(chunks[job.at]));
+                job.at += 1;
+                if (performance.now() - started >= EXPLORER_SOURCE_RENDER_BUDGET_MS) {
+                    break;
+                }
+            }
+            if (job.at < chunks.length) {
+                job.frame = window.requestAnimationFrame(step);
+                return;
+            }
+            pane._explorerSourceRenderJob = null;
+            commit();
+            explorerFlushSourceRenderCallbacks(pane);
+        };
+        job.step = step;
+        job.frame = window.requestAnimationFrame(step);
+    }
+
     const EXPLORER_LANGUAGE_BY_EXTENSION = Object.freeze({
         '.bash': 'shell',
         '.bat': 'batch',
@@ -58,6 +385,7 @@
         '.cpp': 'cpp',
         '.cs': 'csharp',
         '.css': 'css',
+        '.dockerfile': 'dockerfile',
         '.env': 'dotenv',
         '.example': 'config',
         '.go': 'go',
@@ -79,6 +407,7 @@
         '.lua': 'lua',
         '.md': 'markdown',
         '.markdown': 'markdown',
+        '.mk': 'makefile',
         '.php': 'php',
         '.ps1': 'powershell',
         '.py': 'python',
@@ -109,6 +438,17 @@
         'go.sum': 'text',
         'go.work': 'go',
         'go.work.sum': 'text',
+        'makefile': 'makefile'
+    });
+
+    /* Conventional families that vary the name rather than the extension
+       (Dockerfile_chss, Dockerfile.dev, Makefile.local, .env.local). Matched
+       only after the exact-name and extension maps have both missed, so
+       dockerfile_parser.py stays Python. Mirrors
+       CODE_PREVIEW_FILENAME_PREFIXES in web/explorer.py. */
+    const EXPLORER_LANGUAGE_BY_FILENAME_PREFIX = Object.freeze({
+        '.env.': 'dotenv',
+        'dockerfile': 'dockerfile',
         'makefile': 'makefile'
     });
 
@@ -286,10 +626,13 @@
         if (filename && EXPLORER_LANGUAGE_BY_FILENAME[filename]) {
             return EXPLORER_LANGUAGE_BY_FILENAME[filename];
         }
-        if (filename.startsWith('.env.')) {
-            return 'dotenv';
+        const byExtension = EXPLORER_LANGUAGE_BY_EXTENSION[explorerPathExtension(path)];
+        if (byExtension) {
+            return byExtension;
         }
-        return EXPLORER_LANGUAGE_BY_EXTENSION[explorerPathExtension(path)] || '';
+        const prefixMatch = Object.keys(EXPLORER_LANGUAGE_BY_FILENAME_PREFIX)
+            .find((prefix) => filename.startsWith(prefix));
+        return prefixMatch ? EXPLORER_LANGUAGE_BY_FILENAME_PREFIX[prefixMatch] : '';
     }
 
     function explorerLanguageClass(language) {
@@ -783,6 +1126,160 @@
         return lines;
     }
 
+    /* An explicit third state beside a token Map and the cached-null fallback:
+       a worker job is in flight for this buffer, so the first paint is plain
+       escaped text. It must not fall through to the handwritten lexer — on a
+       1.5 MiB minified line that lexer is another long main-thread task, which
+       would defeat moving Highlight.js away in the first place.
+
+       Strictly a *pending* state, never a resting one. A job that fails
+       resolves to real tokens on this thread (see the catch below) rather than
+       leaving the sentinel standing, because a sentinel that never lifts is a
+       file the reader watches stay grey for as long as it is open. */
+    const EXPLORER_HIGHLIGHT_PENDING = Symbol('explorer-highlight-pending');
+
+    function explorerWorkerClient() {
+        return (typeof window !== 'undefined' && window.GridVibeExplorerWorkers) || null;
+    }
+
+    /* Search ranges are absolute offsets into one exact string, so they are
+       only meaningful against that string. Keying them on the query alone let
+       a range set outlive the buffer it was resolved against — and the two
+       buffers in play here differ by their line endings, because the in-place
+       editor normalizes CRLF to LF for its draft while the file keeps its own.
+       Painting one on the other put every mark a line-count of characters away
+       from its match, walking further across each row and wrapping at the row
+       length: a highlight that drifted diagonally down the file.
+
+       The content is compared by reference-or-value against the buffer the
+       rows are about to be built from, which is the only thing that makes the
+       offsets mean what they say. Holding the string costs nothing — it is the
+       same reference the pane already owns, exactly as the highlight cache
+       holds its key. */
+    function explorerSearchRangesMatchContent(state, pane) {
+        return state.resultContent === (pane?._explorerFileContent || '');
+    }
+
+    function explorerSourceSearchRangesOnScreen(index, pane) {
+        if (activeExplorerFileView(index) !== 'source') {
+            return [];
+        }
+        const state = ensureExplorerSearchState(pane);
+        if (!state.query
+            || state.resultQuery !== state.query
+            || !Array.isArray(state.ranges)
+            || !explorerSearchRangesMatchContent(state, pane)) {
+            return [];
+        }
+        return decorateExplorerSearchRanges(state.ranges, state.activeIndex || 0);
+    }
+
+    /* Small files keep the zero-startup-cost synchronous path. Above the
+       worker client's measured floor, a cache miss starts one shared-pool job
+       and returns the pending sentinel immediately. Repaints while it runs
+       reuse that job; a different content/language identity aborts it through
+       the same per-pane request slots file/diff loads use.
+
+       The answer is committed only if it still describes the pane. A winning
+       answer invalidates the render token and rebuilds with the current find
+       decorations; a superseded answer never paints stale content. */
+    function explorerHighlightLinesForRender(index, pane, content, normalizedLanguage) {
+        const cache = pane ? pane._explorerHighlightCache : null;
+        if (cache && cache.content === content && cache.language === normalizedLanguage) {
+            // One cache shape, one meaning: a hit is the answer for this
+            // buffer, whether the worker produced it or this thread did. The
+            // failure path used to store a third state here — a "plain miss"
+            // that read back as the pending sentinel forever.
+            return cache.lines;
+        }
+        const previous = pane?._explorerHighlightPending;
+        const grammar = EXPLORER_HLJS_LANGUAGE[normalizedLanguage];
+        const workers = explorerWorkerClient();
+        const source = String(content || '');
+        if (!pane || !grammar || source.length > EXPLORER_PLAIN_PREVIEW_THRESHOLD
+            || !workers?.canHighlight?.(source)) {
+            if (previous) {
+                pane._explorerHighlightPending = null;
+                cancelExplorerRequestSlot(pane, 'highlight');
+            }
+            return explorerHighlightDocumentLinesCached(pane, content, normalizedLanguage);
+        }
+
+        if (previous && previous.content === content && previous.language === normalizedLanguage) {
+            return EXPLORER_HIGHLIGHT_PENDING;
+        }
+
+        const pending = { content, language: normalizedLanguage };
+        pane._explorerHighlightPending = pending;
+        workers.highlight(source, grammar, {
+            signal: explorerRequestSignal(pane, 'highlight')
+        }).then(lines => {
+            if (pane._explorerHighlightPending !== pending) {
+                return;
+            }
+            pane._explorerHighlightPending = null;
+            const currentLanguage = normalizeExplorerLanguage(
+                pane._explorerFilePlain ? '' : (pane._explorerFileLanguage || '')
+            );
+            if (pane._explorerFileContent !== content || currentLanguage !== normalizedLanguage) {
+                return;
+            }
+            pane._explorerHighlightCache = { content, language: normalizedLanguage, lines };
+            /* The rows on screen are the deliberately plain first paint. The
+               content did not move, so the normal repaint policy would skip;
+               marking the record stale makes the syntax-coloured pass a
+               rebuild. The record itself is *kept* — discarding it is what
+               made the recolour look like a new document and drop the reader
+               back to line 1 a beat after a large file finished opening. */
+            if (pane._explorerSourceRender) {
+                pane._explorerSourceRender.stale = true;
+            }
+            renderExplorerSource(index, explorerSourceSearchRangesOnScreen(index, pane));
+        }).catch(error => {
+            if (pane._explorerHighlightPending !== pending) {
+                return;
+            }
+            pane._explorerHighlightPending = null;
+            if (explorerIsAbortError(error)) {
+                return;
+            }
+            console.error('[GridVibe Sessions] Explorer highlight worker failed:', error);
+            const currentLanguage = normalizeExplorerLanguage(
+                pane._explorerFilePlain ? '' : (pane._explorerFileLanguage || '')
+            );
+            if (pane._explorerFileContent !== content || currentLanguage !== normalizedLanguage) {
+                return;
+            }
+            /* Fall back to exactly what a page with no worker support does:
+               tokenize here, on this thread. Caching the miss instead left the
+               *open* buffer permanently uncoloured — the pending sentinel
+               renders plain escaped text and deliberately does not fall
+               through to the per-line lexer, and nothing re-rendered — while
+               the very next file recovered, because _failWorker() disables the
+               pool and canHighlight() then routes it down this same
+               synchronous path. One failure, two different answers for the
+               same file depending on when it was opened.
+
+               The size argument the pending sentinel is built on cannot fire
+               here: the gate above only offers a buffer to the worker when it
+               is *under* EXPLORER_PLAIN_PREVIEW_THRESHOLD, so anything
+               reaching this catch is already a file the synchronous path is
+               allowed to tokenize. The result is cached on the pane by the
+               shared helper, so a disabled worker still does not turn every
+               repaint into another pass. */
+            explorerHighlightDocumentLinesCached(pane, content, normalizedLanguage);
+            // Same staleness handshake as the success path: the content did
+            // not move, so the repaint policy would otherwise skip, and the
+            // record is kept rather than discarded so the recolour is not
+            // mistaken for a new document.
+            if (pane._explorerSourceRender) {
+                pane._explorerSourceRender.stale = true;
+            }
+            renderExplorerSource(index, explorerSourceSearchRangesOnScreen(index, pane));
+        });
+        return EXPLORER_HIGHLIGHT_PENDING;
+    }
+
     /* Render one line's worth of Highlight.js runs, reusing the shared
        escape+search-mark helpers so search marks coexist with syntax spans. */
     function explorerRenderHighlightedRuns(runs, searchRanges = []) {
@@ -830,282 +1327,6 @@
         viewer.prepend(notice);
     }
 
-    function explorerGitStatusLabel(git) {
-        if (!git || typeof git !== 'object') {
-            return '';
-        }
-        const status = git.status || 'clean';
-        if (status === 'clean' && git.has_descendant_changes) {
-            return '*';
-        }
-        return EXPLORER_GIT_STATUS_LABELS[status] || '';
-    }
-
-    function explorerGitStatusTitle(git) {
-        if (!git || typeof git !== 'object') {
-            return 'Git status unavailable';
-        }
-        const status = git.status || 'clean';
-        if (git.has_descendant_changes && git.descendant_status) {
-            return `Directory contains ${git.descendant_status} Git changes`;
-        }
-        if (status === 'clean' && git.has_descendant_changes) {
-            return 'Directory contains Git changes';
-        }
-        return `Git status: ${status}`;
-    }
-
-    function explorerGitBadgeHtml(git) {
-        const label = explorerGitStatusLabel(git);
-        const status = git?.status || 'clean';
-        const className = label ? status : 'clean';
-        return `<span class="explorer-git-badge ${escHtml(className)}" title="${escHtml(explorerGitStatusTitle(git))}">${escHtml(label)}</span>`;
-    }
-
-    function explorerHasGitDiff(git) {
-        if (!git || typeof git !== 'object') {
-            return false;
-        }
-        return ['modified', 'added', 'deleted', 'renamed', 'conflicted'].includes(git.status || '');
-    }
-
-    function explorerGitSummaryText(git) {
-        if (!git || typeof git !== 'object') {
-            return '';
-        }
-        if (!git.available) {
-            return git.error ? 'Git unavailable' : 'No Git repo';
-        }
-        const parts = [git.branch || (git.head ? git.head.slice(0, 7) : 'Git')];
-        if (Number(git.ahead || 0) > 0) {
-            parts.push(`↑${git.ahead}`);
-        }
-        if (Number(git.behind || 0) > 0) {
-            parts.push(`↓${git.behind}`);
-        }
-        if (git.dirty) {
-            parts.push('*');
-        }
-        return parts.join(' ');
-    }
-
-    function updateExplorerGitSummary(index, git) {
-        const summary = document.getElementById(`explorer-git-${index}`);
-        if (!summary) {
-            return;
-        }
-        const text = explorerGitSummaryText(git);
-        summary.textContent = text;
-        summary.title = git?.error || (git?.repo_root || text);
-    }
-
-    function explorerDiffCacheKey(path, commit, mode = '') {
-        return `${String(path || '')}\n${String(commit || '')}\n${String(mode || '')}`;
-    }
-
-    function explorerDiffSidebarStatusHtml(git) {
-        return explorerGitBadgeHtml(git || { status: 'clean' });
-    }
-
-    function explorerParentDirectory(path) {
-        const cleaned = String(path || '').replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
-        const slashIndex = cleaned.lastIndexOf('/');
-        return slashIndex > 0 ? cleaned.slice(0, slashIndex) : '';
-    }
-
-    function explorerGitOpenFile(index, path, diffMode = 'worktree') {
-        if (!path) {
-            return;
-        }
-        // Changed-file rows jump straight to the diff view (ISSUE-2026-023).
-        // 'worktree' shows unstaged hunks, 'staged' shows the indexed hunks, so
-        // a partially staged file never surfaces the other section's changes.
-        const mode = diffMode === 'staged' ? 'staged' : 'worktree';
-        openExplorerFile(index, path, { openDiff: true, diffMode: mode });
-    }
-
-    async function explorerGitOpenCommitDiff(index, path, commit) {
-        if (!path || !commit) {
-            return;
-        }
-        const opened = await openExplorerFile(index, path, {
-            showLoading: true,
-            openDiff: true,
-            diffCommit: commit
-        });
-        if (!opened) {
-            renderExplorerCommitDiffFile(index, path, commit);
-        }
-    }
-
-    function explorerGitOpenFolder(index, path) {
-        loadExplorerPane(index, explorerParentDirectory(path));
-    }
-
-    function explorerGitGraphLane(character, position) {
-        // `git log --graph` gives each branch a two-character column, and a diagonal
-        // always belongs to the column it is reaching towards, not the one it starts in.
-        const column = character === '/' || character === '\\' ? (position + 1) / 2 : position / 2;
-        return Math.floor(column) % EXPLORER_GIT_GRAPH_LANE_COUNT;
-    }
-
-    function explorerGitGraphHtml(graph) {
-        const characters = Array.from(typeof graph === 'string' && graph ? graph : '*');
-        return characters.map((character, position) => {
-            if (character === ' ') {
-                return ' ';
-            }
-            const lane = explorerGitGraphLane(character, position);
-            const nodeClass = character === '*' ? ' node' : '';
-            return `<span class="explorer-diff-commit-graph-lane${nodeClass}" data-git-lane="${lane}">${escHtml(character)}</span>`;
-        }).join('');
-    }
-
-    function explorerGitStatusFromCode(code) {
-        switch (code) {
-            case 'M':
-            case 'T':
-                return 'modified';
-            case 'A':
-                return 'added';
-            case 'D':
-                return 'deleted';
-            case 'R':
-                return 'renamed';
-            case 'C':
-                return 'added';
-            case 'U':
-                return 'conflicted';
-            case '?':
-                return 'untracked';
-            case '!':
-                return 'ignored';
-            default:
-                return 'clean';
-        }
-    }
-
-    function explorerGitCodeUnmodified(code) {
-        // Porcelain v2 uses '.' for an unchanged index/worktree position; clean rows use ' '.
-        return !code || code === ' ' || code === '.';
-    }
-
-    function splitExplorerGitChanges(changes) {
-        const staged = [];
-        const unstaged = [];
-        (Array.isArray(changes) ? changes : []).forEach(file => {
-            const git = file.git || {};
-            const indexCode = git.index_status || ' ';
-            const worktreeCode = git.worktree_status || ' ';
-            if (git.status === 'conflicted') {
-                unstaged.push({ ...file, git: { ...git, status: 'conflicted' } });
-                return;
-            }
-            if (git.status === 'untracked' || indexCode === '?') {
-                unstaged.push({ ...file, git: { ...git, status: 'untracked' } });
-                return;
-            }
-            if (!explorerGitCodeUnmodified(indexCode)) {
-                staged.push({ ...file, git: { ...git, status: explorerGitStatusFromCode(indexCode) } });
-            }
-            if (!explorerGitCodeUnmodified(worktreeCode)) {
-                unstaged.push({ ...file, git: { ...git, status: explorerGitStatusFromCode(worktreeCode) } });
-            }
-        });
-        return { staged, unstaged };
-    }
-
-    function explorerGitCanRevert(status) {
-        // Tracked changes are restored from the index. A single explicitly
-        // selected untracked file can also be discarded after confirmation.
-        return ['modified', 'deleted', 'renamed', 'untracked'].includes(status || '');
-    }
-
-    function explorerGitCanBulkDiscard(status) {
-        // Bulk discard deliberately keeps untracked files. Removing a new file
-        // requires the narrower per-row action and its explicit warning.
-        return ['modified', 'deleted', 'renamed'].includes(status || '');
-    }
-
-    function explorerGitFileLabelHtml(path, fallbackName) {
-        /* Change rows lead with the file name and trail the muted directory, so
-           the file being changed stays legible at the sidebar's narrow width.
-           The directory is the part allowed to ellipsis away. */
-        const cleaned = String(path || '').replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
-        const slashIndex = cleaned.lastIndexOf('/');
-        const name = (slashIndex >= 0 ? cleaned.slice(slashIndex + 1) : cleaned)
-            || fallbackName
-            || 'Changed file';
-        const directory = slashIndex > 0 ? cleaned.slice(0, slashIndex) : '';
-        const directoryHtml = directory
-            ? `<span class="explorer-diff-commit-file-dir">${escHtml(directory)}</span>`
-            : '';
-        return `<span class="explorer-diff-commit-file-name">${escHtml(name)}</span>${directoryHtml}`;
-    }
-
-    function renderExplorerGitFileRows(index, files, options = {}) {
-        const entries = Array.isArray(files) ? files : [];
-        if (!entries.length) {
-            return `<div class="explorer-diff-sidebar-empty">${escHtml(options.emptyText || 'No files.')}</div>`;
-        }
-        const commitHash = options.commitHash || '';
-        const action = options.action || '';
-        // Staged rows diff against HEAD (index hunks); everything else shows the
-        // worktree hunks so a partially staged file never leaks the wrong side.
-        const diffMode = action === 'unstage' ? 'staged' : 'worktree';
-        return entries.map(file => {
-            const path = file.path || file.repo_path || '';
-            const status = (file.git && file.git.status) || '';
-            const pathAction = commitHash
-                ? `data-explorer-git-open-commit-diff="${escHtml(path)}" data-explorer-git-commit="${escHtml(commitHash)}"`
-                : `data-explorer-git-open-file="${escHtml(path)}" data-explorer-git-diff-mode="${escHtml(diffMode)}"`;
-            /* Stage/unstage draw their plus and minus with the shared
-               UI_PLUS_ICON / UI_MINUS_ICON — the same pair the search panel's
-               expand/collapse and the browser pane's new tab already use —
-               rather than the `+`/`−` text they used to carry beside the SVG
-               revert and open-folder buttons on the same row. A glyph centres
-               itself by `font-size` and an SVG does not, so both buttons (and
-               the editor's zoom pair, which made the same move) carry flex
-               centring and an explicit icon box in terminals.css. */
-            let actionButton = '';
-            if (action === 'stage') {
-                actionButton = `<button type="button" class="explorer-search-btn explorer-git-stage-btn" data-explorer-git-stage="${escHtml(path)}" title="Stage changes" aria-label="Stage changes">${UI_PLUS_ICON}</button>`;
-            } else if (action === 'unstage') {
-                actionButton = `<button type="button" class="explorer-search-btn explorer-git-unstage-btn" data-explorer-git-unstage="${escHtml(path)}" title="Unstage changes" aria-label="Unstage changes">${UI_MINUS_ICON}</button>`;
-            }
-            const discardLabel = status === 'untracked'
-                ? 'Delete untracked file'
-                : 'Discard changes (revert)';
-            const revertButton = (action === 'stage' && explorerGitCanRevert(status))
-                ? `<button type="button" class="explorer-search-btn explorer-git-revert-btn" data-explorer-git-revert="${escHtml(path)}" data-explorer-git-revert-status="${escHtml(status)}" title="${discardLabel}" aria-label="${discardLabel}">${EXPLORER_GIT_REVERT_ICON}</button>`
-                : '';
-            /* Download reads the worktree, so it is only offered where the
-               worktree copy is the file the row names: not for deleted files
-               and not for history rows (those show a past commit's version). */
-            const downloadPath = (path && !commitHash && status !== 'deleted')
-                ? ` data-explorer-download-path="${escHtml(path)}"`
-                : '';
-            return `
-                <div class="explorer-diff-commit-file" title="${escHtml(path)}" data-explorer-copy-path="${escHtml(path)}"${downloadPath}>
-                    ${explorerFileTypeIconHtml(path)}
-                    <button type="button" class="explorer-diff-commit-file-path" ${pathAction}>${explorerGitFileLabelHtml(path, file.name)}</button>
-                    ${explorerDiffSidebarStatusHtml(file.git)}
-                    <span class="explorer-diff-commit-file-actions">
-                        ${revertButton}
-                        ${actionButton}
-                        <button type="button" class="explorer-search-btn explorer-open-folder-btn" data-explorer-git-open-folder="${escHtml(path)}" title="Open containing folder" aria-label="Open containing folder">${EXPLORER_OPEN_FOLDER_ICON}</button>
-                    </span>
-                </div>
-            `;
-        }).join('');
-    }
-
-    /* ─────────────────────────────────────────────
-       Explorer copy-path context menu (ISSUE-2026-028)
-       Delegated on the tree + Git panels so right-clicking any file row offers
-       an in-page (WebView2-safe) Copy path / Copy relative path menu. Copy is a
-       read, so this stays inside the read-only explorer contract.
-    ───────────────────────────────────────────── */
     function explorerRootDirectory(index) {
         const session = terminals[index]?._session || {};
         return session.explorer_root_directory || session.directory || '';
@@ -1638,197 +1859,20 @@
         wireExplorerContextMenu(panel, index);
     }
 
-    function renderExplorerGitPanel(index) {
-        const pane = terminals[index];
-        const panel = document.getElementById(`explorer-git-panel-${index}`);
-        if (!pane || !panel) {
-            return;
-        }
-        wireExplorerCopyPathMenu(panel, index);
-        if (pane._explorerGitRepoLoading) {
-            panel.innerHTML = '<div class="explorer-diff-sidebar-empty">Loading repository...</div>';
-            return;
-        }
-        if (pane._explorerGitRepoError && !pane._explorerGitRepo) {
-            panel.innerHTML = `<div class="explorer-diff-sidebar-error">${escHtml(pane._explorerGitRepoError)}</div>`;
-            return;
-        }
+    /* ── Commit-message find (Graph section) ──
+       The Source find's smaller twin: one query over the loaded commit
+       subjects, the same counter, the same ↑/↓/× controls, the same
+       Enter/Shift+Enter keys, and the same <mark> paint. The matching itself
+       lives in the DOM-free explorer-git-search.js; what is here only paints
+       rows already on screen. State is per pane and runtime-only — like the
+       Source find's, it is never persisted.
 
-        const repo = pane._explorerGitRepo || {};
-        const git = repo.git || {};
-        const errorBanner = pane._explorerGitRepoError
-            ? `<div class="explorer-diff-sidebar-error">${escHtml(pane._explorerGitRepoError)}</div>`
-            : '';
-        /* The change listener (explorer-git-watch.js) suspends itself after
-           repeated failures; it must never make the sidebar look broken, so
-           this is one muted line above the last good state — Refresh re-arms. */
-        const watchPausedBanner = pane._explorerGitWatchSuspended
-            ? '<div class="explorer-diff-sidebar-empty explorer-git-watch-paused">Live updates paused — use Refresh</div>'
-            : '';
-        const changes = Array.isArray(repo.changes) ? repo.changes : [];
-        const { staged, unstaged } = splitExplorerGitChanges(changes);
-        /* Discard All remains tracked-only even though a confirmed per-row
-           action may now remove one explicitly selected untracked file. */
-        const discardable = unstaged.filter(file => explorerGitCanBulkDiscard(file.git && file.git.status));
-        const commits = Array.isArray(repo.commits) ? repo.commits : [];
-        const expandedCommits = ensureExplorerDiffExpandedCommits(pane);
-        const busy = Boolean(pane._explorerGitActionBusy);
-        const commitMessage = typeof pane._explorerGitCommitMessage === 'string' ? pane._explorerGitCommitMessage : '';
-        const hasUpstream = git.ahead !== null && git.ahead !== undefined;
-        const publishLabel = hasUpstream ? 'Push' : 'Publish branch';
-        const branchText = explorerGitSummaryText(git) || 'Git';
-        const commitRows = commits.length
-            ? commits.map(commit => {
-                const hash = commit.hash || '';
-                const expanded = hash && expandedCommits.has(`explorer:${hash}`);
-                return `
-                    <button type="button" class="explorer-diff-commit" data-explorer-git-commit-toggle="${escHtml(hash)}" data-explorer-git-commit-full="${escHtml(commit.full_hash || '')}" data-explorer-git-commit-message="${escHtml(commit.message || '')}" ${hash ? '' : 'disabled'} title="${escHtml(commit.line || '')}" aria-expanded="${expanded ? 'true' : 'false'}">
-                        <span class="explorer-diff-commit-graph">${explorerGitGraphHtml(commit.graph)}</span>
-                        <span class="explorer-diff-commit-toggle" aria-hidden="true">${expanded ? UI_CHEVRON_DOWN_ICON : UI_CHEVRON_RIGHT_ICON}</span>
-                        <span class="explorer-diff-commit-subject"><span class="explorer-diff-commit-hash">${escHtml(hash ? hash.slice(0, 7) : '')}</span> ${escHtml(commit.subject || commit.line || '')}</span>
-                    </button>
-                    ${expanded ? `<div class="explorer-diff-commit-files">${renderExplorerGitFileRows(index, commit.files, { emptyText: 'No files recorded for this commit.', commitHash: hash })}</div>` : ''}
-                `;
-            }).join('')
-            : '<div class="explorer-diff-sidebar-empty">No commits in this scope.</div>';
-
-        panel.innerHTML = `
-            ${errorBanner}
-            ${watchPausedBanner}
-            <div class="explorer-diff-sidebar-section explorer-git-repo-bar">
-                <span class="explorer-git-repo-branch" title="${escHtml(git.repo_root || branchText)}">${escHtml(branchText)}</span>
-                <button type="button" class="explorer-git-publish-btn" data-explorer-git-publish ${busy ? 'disabled' : ''} title="Push the current branch to its remote">${escHtml(publishLabel)}</button>
-            </div>
-            <div class="explorer-diff-sidebar-section">
-                <div class="explorer-diff-sidebar-title">Staged Changes</div>
-                <div class="explorer-diff-commit-files explorer-git-change-list">
-                    ${renderExplorerGitFileRows(index, staged, { emptyText: 'No staged changes.', action: 'unstage' })}
-                </div>
-                <div class="explorer-git-commit-box">
-                    <textarea class="explorer-git-commit-message" id="explorer-git-commit-message-${index}" rows="2" placeholder="Message (commits staged changes)" ${busy ? 'disabled' : ''}>${escHtml(commitMessage)}</textarea>
-                    <button type="button" class="explorer-git-commit-btn" data-explorer-git-commit ${(busy || !staged.length) ? 'disabled' : ''} title="Commit staged changes">Commit</button>
-                </div>
-            </div>
-            <div class="explorer-diff-sidebar-section">
-                <div class="explorer-diff-sidebar-title explorer-git-section-title">
-                    <span>Changes</span>
-                    <span class="explorer-git-section-actions">
-                        <button type="button" class="explorer-search-btn explorer-git-revert-btn explorer-git-discard-all-btn" data-explorer-git-discard-all ${(busy || !discardable.length) ? 'disabled' : ''} title="Discard all changes" aria-label="Discard all changes">${EXPLORER_GIT_REVERT_ICON}</button>
-                        <button type="button" class="explorer-search-btn explorer-git-stage-btn explorer-git-stage-all-btn" data-explorer-git-stage-all ${(busy || !unstaged.length) ? 'disabled' : ''} title="Stage all changes" aria-label="Stage all changes">${UI_PLUS_ICON}</button>
-                    </span>
-                </div>
-                <div class="explorer-diff-commit-files explorer-git-change-list">
-                    ${renderExplorerGitFileRows(index, unstaged, { emptyText: 'No unstaged changes.', action: 'stage' })}
-                </div>
-            </div>
-            <div class="explorer-diff-sidebar-section">
-                <div class="explorer-diff-sidebar-title">Graph</div>
-                ${commitRows}
-            </div>
-        `;
-        const commitMessageInput = panel.querySelector(`#explorer-git-commit-message-${index}`);
-        if (commitMessageInput) {
-            commitMessageInput.addEventListener('input', () => {
-                pane._explorerGitCommitMessage = commitMessageInput.value;
-            });
-        }
-        panel.querySelectorAll('[data-explorer-git-stage]').forEach(button => {
-            button.addEventListener('click', event => {
-                event.stopPropagation();
-                explorerGitStageFile(index, button.dataset.explorerGitStage || '');
-            });
-        });
-        panel.querySelectorAll('[data-explorer-git-unstage]').forEach(button => {
-            button.addEventListener('click', event => {
-                event.stopPropagation();
-                explorerGitUnstageFile(index, button.dataset.explorerGitUnstage || '');
-            });
-        });
-        panel.querySelectorAll('[data-explorer-git-revert]').forEach(button => {
-            button.addEventListener('click', event => {
-                event.stopPropagation();
-                explorerGitRevertFile(
-                    index,
-                    button.dataset.explorerGitRevert || '',
-                    button.dataset.explorerGitRevertStatus || '',
-                );
-            });
-        });
-        const stageAllButton = panel.querySelector('[data-explorer-git-stage-all]');
-        if (stageAllButton) {
-            stageAllButton.addEventListener('click', () => explorerGitStageAll(index));
-        }
-        const discardAllButton = panel.querySelector('[data-explorer-git-discard-all]');
-        if (discardAllButton) {
-            discardAllButton.addEventListener('click', () => explorerGitDiscardAll(index));
-        }
-        const publishButton = panel.querySelector('[data-explorer-git-publish]');
-        if (publishButton) {
-            publishButton.addEventListener('click', () => explorerGitPublish(index));
-        }
-        const commitButton = panel.querySelector('[data-explorer-git-commit]');
-        if (commitButton) {
-            commitButton.addEventListener('click', () => explorerGitCommit(index));
-        }
-        panel.querySelectorAll('[data-explorer-git-open-file]').forEach(button => {
-            button.addEventListener('click', () => {
-                explorerGitOpenFile(
-                    index,
-                    button.dataset.explorerGitOpenFile || '',
-                    button.dataset.explorerGitDiffMode || 'worktree',
-                );
-            });
-        });
-        panel.querySelectorAll('[data-explorer-git-open-commit-diff]').forEach(button => {
-            button.addEventListener('click', () => {
-                explorerGitOpenCommitDiff(
-                    index,
-                    button.dataset.explorerGitOpenCommitDiff || '',
-                    button.dataset.explorerGitCommit || '',
-                );
-            });
-        });
-        panel.querySelectorAll('[data-explorer-git-open-folder]').forEach(button => {
-            button.addEventListener('click', event => {
-                event.stopPropagation();
-                explorerGitOpenFolder(index, button.dataset.explorerGitOpenFolder || '');
-            });
-        });
-        panel.querySelectorAll('[data-explorer-git-commit-toggle]').forEach(button => {
-            button.addEventListener('click', () => {
-                const commit = button.dataset.explorerGitCommitToggle || '';
-                if (!commit) {
-                    return;
-                }
-                const expanded = ensureExplorerDiffExpandedCommits(pane);
-                const key = `explorer:${commit}`;
-                if (expanded.has(key)) {
-                    expanded.delete(key);
-                } else {
-                    expanded.add(key);
-                }
-                renderExplorerGitPanel(index);
-                notePanePresentationChanged(index);
-            });
-        });
-    }
-
-    function renderExplorerGitPanels(index) {
-        renderExplorerGitPanel(index);
-    }
-
-    function invalidateExplorerGitRepo(index) {
-        const pane = terminals[index];
-        if (!pane) {
-            return;
-        }
-        pane._explorerGitRepoLoaded = false;
-        pane._explorerGitRepoLoading = false;
-        pane._explorerGitRepoError = '';
-        pane._explorerGitRepo = null;
-        renderExplorerGitPanels(index);
-    }
-
+       The bar is folded away behind the Graph header's magnifier, so it costs
+       the sidebar nothing until it is asked for; the same button and Escape
+       close it again. It is always rendered and hidden by attribute rather
+       than added and removed, for the reason the panel paints instead of
+       re-rendering: revealing the bar must not take the caret out of the
+       commit-message textarea above it. */
     /* Ordered sidebar panel registry. The sidebar stacks any subset of these
        in registry order with a 6px splitter between each adjacent open pair.
        Every open panel except the last can carry a pinned pixel height in
@@ -2006,8 +2050,14 @@
         main.style.setProperty('--explorer-sidebar-width', `${width}px`);
     }
 
-    function explorerSidebarPresentation(index) {
-        const pane = terminals[index];
+    /* `pane` is passed explicitly by callers that describe a group which is not
+       the one mounted in the grid: a cached group's panes are detached, so
+       `terminals.indexOf()` answers -1 for them and resolving by slot alone
+       reported this whole function's defaults — collapsing every background
+       workspace tab's tree and Git expansion on the next save. The index is
+       still used, but only for the live scroll read, which correctly finds
+       nothing for a detached pane and leaves the stored point in place. */
+    function explorerSidebarPresentation(index, pane = terminals[index]) {
         if (!pane) return { width: 260, scroll: {}, expanded: [], gitExpanded: [] };
         ensureExplorerTreeState(pane);
         const scroll = { ...(pane._explorerSidebarScroll || {}) };
@@ -2782,79 +2832,6 @@
         applyScrollMetrics(document.getElementById(`explorer-tree-panel-${index}`), viewport);
     }
 
-    function ensureExplorerDiffExpandedCommits(pane) {
-        if (!(pane?._explorerDiffExpandedCommits instanceof Set)) {
-            pane._explorerDiffExpandedCommits = new Set();
-        }
-        return pane._explorerDiffExpandedCommits;
-    }
-
-    async function loadExplorerGitRepo(index) {
-        const pane = terminals[index];
-        const sessionId = sessionIds[index];
-        if (!pane || !sessionId || pane._explorerGitRepoLoaded || pane._explorerGitRepoLoading) {
-            renderExplorerGitPanels(index);
-            return;
-        }
-
-        pane._explorerGitRepoLoading = true;
-        pane._explorerGitRepoError = '';
-        renderExplorerGitPanels(index);
-        try {
-            const response = await fetch(`/api/explorer/${encodeURIComponent(sessionId)}/git/repo`);
-            const data = await response.json();
-            if (!response.ok) {
-                throw new Error(data.error || 'Failed to load Git repository');
-            }
-            pane._explorerGitRepoLoaded = true;
-            pane._explorerGitRepo = data;
-            pane._explorerGitRevision = typeof data.revision === 'string' ? data.revision : '';
-            // A user-initiated load re-arms a suspended change-listener watch.
-            pane._explorerGitWatchSuspended = false;
-            syncExplorerTabGitFromRepo(index, data);
-        } catch (error) {
-            console.error('[GridVibe Sessions] Explorer Git repository failed:', error);
-            pane._explorerGitRepoError = error.message || 'Failed to load Git repository.';
-        } finally {
-            pane._explorerGitRepoLoading = false;
-            renderExplorerGitPanels(index);
-        }
-    }
-
-    async function refreshExplorerGitRepoQuiet(index) {
-        /* Background variant of loadExplorerGitRepo for the Git change
-           listener (explorer-git-watch.js): forced (no _explorerGitRepoLoaded
-           early return, no invalidate — the last good panel stays on screen),
-           quiet (only a git-refreshing class on the panel, never the Loading
-           placeholder), and identity-checked (a stale pane/session id yields
-           null). Returns the fresh payload, or null on failure/staleness —
-           the pane keeps its last good _explorerGitRepo either way. */
-        const pane = terminals[index];
-        const sessionId = sessionIds[index];
-        if (!pane || !sessionId || pane._explorerGitRepoLoading || pane._explorerGitRepoRefreshing) {
-            return null;
-        }
-        const panel = document.getElementById(`explorer-git-panel-${index}`);
-        pane._explorerGitRepoRefreshing = true;
-        panel?.classList.add('git-refreshing');
-        try {
-            const response = await fetch(`/api/explorer/${encodeURIComponent(sessionId)}/git/repo`, { cache: 'no-store' });
-            const data = await response.json();
-            if (!response.ok) {
-                return null;
-            }
-            if (terminals[index] !== pane || sessionIds[index] !== sessionId) {
-                return null;
-            }
-            return data;
-        } catch (error) {
-            return null;
-        } finally {
-            pane._explorerGitRepoRefreshing = false;
-            panel?.classList.remove('git-refreshing');
-        }
-    }
-
     /* Baseline for the open-file change listener (explorer-git-watch.js), set
        from every file load and save. A non-empty value is what arms the watch,
        so clearing it (directory listing, image viewer, commit diff, empty
@@ -2940,42 +2917,6 @@
         } finally {
             pane._explorerFileWatchRefreshing = false;
         }
-    }
-
-    function applyExplorerGitRepoQuiet(index, data) {
-        /* Swap a quietly fetched Git payload into the sidebar in place: one
-           panel render, scroll/focus preserved, tab badges re-rendered only
-           when the badge map actually changed (syncExplorerTabGitFromRepo
-           guards that itself). The commit draft, expanded commits, sidebar
-           sizing and open state all live in pane state and survive the render. */
-        const pane = terminals[index];
-        const panel = document.getElementById(`explorer-git-panel-${index}`);
-        if (!pane || !panel || !data) {
-            return false;
-        }
-        const scrollTop = panel.scrollTop;
-        const active = document.activeElement;
-        const focusState = active && panel.contains(active) && typeof active.selectionStart === 'number'
-            ? { id: active.id, start: active.selectionStart, end: active.selectionEnd }
-            : null;
-        pane._explorerGitRepo = data;
-        pane._explorerGitRepoLoaded = true;
-        pane._explorerGitRevision = typeof data.revision === 'string' ? data.revision : '';
-        syncExplorerTabGitFromRepo(index, data);
-        renderExplorerGitPanel(index);
-        panel.scrollTop = Math.min(scrollTop, panel.scrollHeight);
-        if (focusState && focusState.id) {
-            const target = panel.querySelector(`#${CSS.escape(focusState.id)}`);
-            if (target) {
-                target.focus();
-                try {
-                    target.setSelectionRange(focusState.start, focusState.end);
-                } catch (error) {
-                    /* The replacement node is not selectable; focus is enough. */
-                }
-            }
-        }
-        return true;
     }
 
     /* ── Quiet filesystem-surface refresh (change-listener plan §15) ────────
@@ -3153,1183 +3094,6 @@
         }
     }
 
-    async function performExplorerGitAction(index, endpoint, body) {
-        const pane = terminals[index];
-        const sessionId = sessionIds[index];
-        if (!pane || !sessionId || pane._explorerGitActionBusy) {
-            return false;
-        }
-        pane._explorerGitActionBusy = true;
-        pane._explorerGitRepoError = '';
-        renderExplorerGitPanels(index);
-        let succeeded = false;
-        try {
-            const response = await fetch(`/api/explorer/${encodeURIComponent(sessionId)}/git/${endpoint}`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(body || {}),
-            });
-            const data = await response.json();
-            if (!response.ok) {
-                throw new Error(data.error || 'Git action failed');
-            }
-            pane._explorerGitRepo = data;
-            pane._explorerGitRepoLoaded = true;
-            pane._explorerGitRevision = typeof data.revision === 'string' ? data.revision : '';
-            // A successful GridVibe Git action is authoritative: it re-arms a
-            // suspended change-listener watch and resets its baseline.
-            pane._explorerGitWatchSuspended = false;
-            syncExplorerTabGitFromRepo(index, data);
-            succeeded = true;
-        } catch (error) {
-            console.error('[GridVibe Sessions] Explorer Git action failed:', error);
-            pane._explorerGitRepoError = error.message || 'Git action failed.';
-        } finally {
-            pane._explorerGitActionBusy = false;
-            renderExplorerGitPanels(index);
-        }
-        if (succeeded && pane._explorerMode === 'directory') {
-            loadExplorerPane(index, null, { force: true, showLoading: false });
-        }
-        if (succeeded && EXPLORER_GIT_WORKTREE_ENDPOINTS.has(endpoint)) {
-            await refreshExplorerAfterGitAction(index, body && body.path ? String(body.path) : '');
-        }
-        return succeeded;
-    }
-
-    /* Git actions that change working-tree or index state — publish only talks
-       to the remote, so it never needs the ISSUE-2026-034 refresh below. */
-    const EXPLORER_GIT_WORKTREE_ENDPOINTS = new Set([
-        'stage', 'unstage', 'revert', 'commit', 'stage-all', 'discard-all',
-    ]);
-
-    /* ISSUE-2026-034: after a mutating Git action the Files tree and the open
-       file/diff must not go stale. The tree reload guards internally on
-       pane._explorerTreeSidebarOpen; the open file re-fetches in place (which
-       drops the cached diff and re-pulls it when a diff view is showing).
-       Single-path actions only refresh the file they touched — bulk actions
-       (commit / stage-all / discard-all) can affect any open path. */
-    async function refreshExplorerAfterGitAction(index, actionPath) {
-        const pane = terminals[index];
-        if (!pane) {
-            return;
-        }
-        reloadExplorerTree(index);
-        if (pane._explorerMode !== 'file' || !pane._explorerFilePath) {
-            return;
-        }
-        if (actionPath && actionPath !== pane._explorerFilePath) {
-            return;
-        }
-        pane._explorerDiffLoaded = false;
-        pane._explorerDiffCacheKey = '';
-        await openExplorerFile(index, pane._explorerFilePath, {
-            showLoading: false,
-            preserveScroll: true,
-            tab: pane._explorerActiveTabId
-        });
-    }
-
-    function explorerGitStageFile(index, path) {
-        if (!path) {
-            return;
-        }
-        performExplorerGitAction(index, 'stage', { path });
-    }
-
-    function explorerGitStageAll(index) {
-        performExplorerGitAction(index, 'stage-all', {});
-    }
-
-    /* Bulk form of the per-row Revert (OD-1): worktree restore of tracked
-       files only — staged content is preserved and untracked files are never
-       deleted (no git clean). Irreversible, so it goes through the in-page
-       confirm shell. */
-    async function explorerGitDiscardAll(index) {
-        const confirmed = await openGenericConfirmModal({
-            title: 'Discard all changes?',
-            copy: 'Discard the unstaged changes in every tracked file?',
-            note: 'Unstaged edits will be lost. Staged versions and untracked files are kept.',
-            confirmLabel: 'Discard all',
-            danger: true,
-        });
-        if (!confirmed) {
-            return;
-        }
-        performExplorerGitAction(index, 'discard-all', {});
-    }
-
-    function explorerGitUnstageFile(index, path) {
-        if (!path) {
-            return;
-        }
-        performExplorerGitAction(index, 'unstage', { path });
-    }
-
-    /* Discarding working-tree edits is irreversible, so it goes through the
-       in-page confirm shell (WebView2 blocks window.confirm) before the
-       narrow discard route runs; a reverted open file reloads in place. */
-    async function explorerGitRevertFile(index, path, status = '') {
-        if (!path) {
-            return;
-        }
-        const untracked = status === 'untracked';
-        const confirmed = await openGenericConfirmModal({
-            title: untracked ? 'Delete untracked file?' : 'Discard changes?',
-            copy: untracked
-                ? `Permanently delete the untracked file "${path}"?`
-                : `Discard the unstaged changes in "${path}"?`,
-            note: untracked
-                ? 'This new file is not tracked by Git and cannot be restored after deletion.'
-                : 'This unstaged edit will be lost. Any staged version of the file is kept.',
-            confirmLabel: untracked ? 'Delete file' : 'Discard changes',
-            danger: true,
-        });
-        if (!confirmed) {
-            return;
-        }
-        /* A reverted open file reloads in place via the shared post-action
-           refresh (ISSUE-2026-034). */
-        performExplorerGitAction(index, 'revert', { path });
-    }
-
-    async function explorerGitCommit(index) {
-        const pane = terminals[index];
-        if (!pane) {
-            return;
-        }
-        const message = String(pane._explorerGitCommitMessage || '').trim();
-        if (!message) {
-            pane._explorerGitRepoError = 'Commit message is required.';
-            renderExplorerGitPanels(index);
-            const input = document.getElementById(`explorer-git-commit-message-${index}`);
-            if (input) {
-                input.focus();
-            }
-            return;
-        }
-        const committed = await performExplorerGitAction(index, 'commit', { message });
-        if (committed) {
-            pane._explorerGitCommitMessage = '';
-            renderExplorerGitPanels(index);
-        }
-    }
-
-    /* Publishing is outward-facing, so it confirms through the in-page shell
-       (WebView2 blocks window.confirm — Regression Guardrail 4). */
-    async function explorerGitPublish(index) {
-        const pane = terminals[index];
-        if (!pane) {
-            return;
-        }
-        const git = (pane._explorerGitRepo && pane._explorerGitRepo.git) || {};
-        const branch = git.branch || 'this branch';
-        const confirmed = await openGenericConfirmModal({
-            title: 'Publish branch?',
-            copy: `Publish ${branch} to its remote?`,
-            confirmLabel: 'Publish',
-        });
-        if (!confirmed) {
-            return;
-        }
-        performExplorerGitAction(index, 'publish', {});
-    }
-
-    /* Diff2HtmlUI configuration.
-       `matching: 'words'` + `diffStyle: 'char'` give character-level intraline
-       emphasis and LCS-based line matching instead of the fallback renderer's
-       FIFO pairing; the comparison limits are explicit so pathological diffs
-       stay responsive (Diff2Html documents line matching as the main cost). */
-    function explorerDiff2HtmlConfig() {
-        return {
-            outputFormat: 'side-by-side',
-            drawFileList: false,
-            fileContentToggle: false,
-            matching: 'words',
-            diffStyle: 'char',
-            highlight: true,
-            synchronisedScroll: false,
-            matchingMaxComparisons: 1500,
-            /* Diff2Html's own default. A line longer than this gets a plain
-               red/green block and no intraline ins/del at all, so the previous
-               2000 silently dropped emphasis on generated SQL, minified assets,
-               and long single-statement lines. The char diff is O(n·d) in the
-               edit distance, which stays cheap for the usual small edit inside
-               a long line; the bounded diff payload (256 KiB / 4,000 lines)
-               caps how many pairs can reach it. */
-            maxLineLengthHighlight: 10000
-        };
-    }
-
-    function explorerDiffTruncationBannerHtml(pane) {
-        if (!pane || !pane._explorerDiffTruncated) {
-            return '';
-        }
-        return '<div class="explorer-diff-truncated" role="status">'
-            + 'Diff truncated to 256 KiB / 4,000 lines — the change shown is incomplete.'
-            + '</div>';
-    }
-
-    function synchroniseExplorerDiffScrollbars(host) {
-        const sides = host?._explorerDiffSides || [];
-        const spacers = host?._explorerDiffScrollSpacers || [];
-        sides.forEach((side, sideIndex) => {
-            const spacer = spacers[sideIndex];
-            if (spacer) {
-                spacer.style.width = `${Math.max(side.clientWidth, side.scrollWidth)}px`;
-            }
-        });
-    }
-
-    function synchroniseExplorerDiffWrappedRows(host) {
-        const sides = host?._explorerDiffSides || [];
-        const rowsBySide = sides.map(side => [
-            ...side.querySelectorAll('.d2h-diff-tbody > tr')
-        ]);
-        rowsBySide.flat().forEach(row => {
-            row.style.height = '';
-        });
-        if (sides.length !== 2
-            || !host.closest('.explorer-diff-content')?.classList.contains('wrap-lines')) {
-            return;
-        }
-
-        const rowCount = Math.max(...rowsBySide.map(rows => rows.length), 0);
-        for (let rowIndex = 0; rowIndex < rowCount; rowIndex += 1) {
-            const pairedRows = rowsBySide
-                .map(rows => rows[rowIndex])
-                .filter(Boolean);
-            const heights = pairedRows.map(row => row.getBoundingClientRect().height);
-            const maxHeight = Math.max(...heights, 0);
-            pairedRows.forEach((row, sideIndex) => {
-                if (maxHeight - heights[sideIndex] > 0.5) {
-                    row.style.height = `${maxHeight}px`;
-                }
-            });
-        }
-    }
-
-    function scheduleExplorerDiffScrollbarSync(host) {
-        if (!host || host._explorerDiffScrollbarFrame) {
-            return;
-        }
-        const sync = () => {
-            host._explorerDiffScrollbarFrame = null;
-            if (host.isConnected) {
-                synchroniseExplorerDiffWrappedRows(host);
-                synchroniseExplorerDiffScrollbars(host);
-            }
-        };
-        if (typeof window.requestAnimationFrame === 'function') {
-            host._explorerDiffScrollbarFrame = window.requestAnimationFrame(sync);
-        } else {
-            sync();
-        }
-    }
-
-    function observeExplorerDiffLayout(host) {
-        const filesDiff = host?.querySelector('.d2h-files-diff');
-        const sides = filesDiff
-            ? [...filesDiff.querySelectorAll(':scope > .d2h-file-side-diff')]
-            : [];
-        if (sides.length !== 2) {
-            return;
-        }
-
-        const scrollbars = document.createElement('div');
-        scrollbars.className = 'explorer-diff-horizontal-scrollbars';
-        scrollbars.setAttribute('aria-hidden', 'true');
-        const tracks = sides.map((side, sideIndex) => {
-            const track = document.createElement('div');
-            track.className = 'explorer-diff-horizontal-scroll';
-            track.dataset.explorerDiffSide = sideIndex === 0 ? 'left' : 'right';
-            const spacer = document.createElement('div');
-            spacer.className = 'explorer-diff-horizontal-scroll-spacer';
-            track.appendChild(spacer);
-            track.addEventListener('scroll', () => {
-                side.scrollLeft = track.scrollLeft;
-            });
-            scrollbars.appendChild(track);
-            return { track, spacer };
-        });
-        host.appendChild(scrollbars);
-        host._explorerDiffSides = sides;
-        host._explorerDiffScrollTracks = tracks.map(item => item.track);
-        host._explorerDiffScrollSpacers = tracks.map(item => item.spacer);
-        scheduleExplorerDiffScrollbarSync(host);
-
-        sides.forEach((side, sideIndex) => {
-            side.addEventListener('wheel', event => {
-                const horizontalDelta = event.deltaX || (event.shiftKey ? event.deltaY : 0);
-                if (!horizontalDelta) {
-                    return;
-                }
-                event.preventDefault();
-                tracks[sideIndex].track.scrollLeft += horizontalDelta;
-            }, { passive: false });
-        });
-
-        if (typeof window.ResizeObserver === 'function') {
-            const observer = new window.ResizeObserver(entries => {
-                const width = entries[0]?.contentRect?.width;
-                if (Number.isFinite(width)
-                    && Math.abs(width - (host._explorerDiffObservedWidth || 0)) > 0.5) {
-                    host._explorerDiffObservedWidth = width;
-                    scheduleExplorerDiffScrollbarSync(host);
-                }
-            });
-            host._explorerDiffObservedWidth = filesDiff.getBoundingClientRect().width;
-            observer.observe(filesDiff);
-            host._explorerDiffResizeObserver = observer;
-        }
-    }
-
-    function disconnectExplorerDiffLayout(host) {
-        host?._explorerDiffResizeObserver?.disconnect();
-        if (host?._explorerDiffScrollbarFrame && typeof window.cancelAnimationFrame === 'function') {
-            window.cancelAnimationFrame(host._explorerDiffScrollbarFrame);
-        }
-    }
-
-    /* A file opened from the Changes sidebar carries an explicit worktree mode.
-       A file opened directly uses the legacy HEAD diff; that view is equally
-    safe for line undo only when the index is clean, because HEAD→worktree
-       then contains exactly the unstaged worktree changes. */
-    function explorerDiffShowsOnlyWorktreeChanges(pane) {
-        if (pane && pane._explorerDiffMode === 'worktree') {
-            return true;
-        }
-        if (!pane || (pane._explorerDiffMode && pane._explorerDiffMode !== 'head')) {
-            return false;
-        }
-        const git = pane._explorerGit;
-        if (!git || git.status === 'conflicted') {
-            return false;
-        }
-        const indexCode = git.index_status || ' ';
-        const worktreeCode = git.worktree_status || ' ';
-        return explorerGitCodeUnmodified(indexCode)
-            && !explorerGitCodeUnmodified(worktreeCode);
-    }
-
-    function explorerCanUndoDiffLine(pane) {
-        return Boolean(
-            pane
-            && pane._explorerMode === 'file'
-            && explorerDiffShowsOnlyWorktreeChanges(pane)
-            && !pane._explorerDiffCommit
-            && pane._explorerFileEditable
-            && !pane._explorerFileTruncated
-            && !pane._explorerDiffTruncated
-            && !pane._explorerDiffUndoBusy
-            && !pane._explorerEdit
-            && pane._explorerFileRevision
-            && !String(pane._explorerDiffContent || '').includes('\\ No newline at end of file')
-        );
-    }
-
-    /* Record the current worktree insertion point for every deleted line. A
-       deleted line has no new-side line number of its own, so this small map is
-       what lets a one-line restore put it back at the exact hunk position. */
-    function explorerDiffDeletionInsertions(diff) {
-        const insertions = new Map();
-        let oldLine = 0;
-        let newLine = 0;
-        String(diff || '').split(/\r?\n/).forEach(line => {
-            const hunk = line.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
-            if (hunk) {
-                oldLine = Number(hunk[1]);
-                newLine = Number(hunk[2]);
-                return;
-            }
-            if (!oldLine && !newLine) {
-                return;
-            }
-            if (line.startsWith('-') && !line.startsWith('---')) {
-                insertions.set(oldLine, newLine);
-                oldLine += 1;
-            } else if (line.startsWith('+') && !line.startsWith('+++')) {
-                newLine += 1;
-            } else if (line.startsWith(' ')) {
-                oldLine += 1;
-                newLine += 1;
-            }
-        });
-        return insertions;
-    }
-
-    /* Group the patch into change blocks: a maximal run of consecutive changed
-       lines with no context line between them — the "paragraph" a reader sees
-       as one edit. Undoing a block swaps its worktree lines (`expected`) back
-       to the HEAD lines it replaced (`replacement`) in a single save, so a
-       20-line rewrite is one click instead of twenty. `line` is the 1-based
-       worktree line the run starts at (for a pure deletion, where the removed
-       lines go back in); `oldLine` is the matching HEAD line. */
-    function explorerDiffChangeBlocks(diff) {
-        const blocks = [];
-        let oldLine = 0;
-        let newLine = 0;
-        let run = null;
-        const startRun = () => {
-            if (!run) {
-                run = { kind: 'block', line: newLine, oldLine, expected: [], replacement: [] };
-            }
-            return run;
-        };
-        const flushRun = () => {
-            if (run && (run.expected.length || run.replacement.length)) {
-                blocks.push(run);
-            }
-            run = null;
-        };
-        String(diff || '').split(/\r?\n/).forEach(line => {
-            const hunk = line.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
-            if (hunk) {
-                flushRun();
-                oldLine = Number(hunk[1]);
-                newLine = Number(hunk[2]);
-                return;
-            }
-            if (!oldLine && !newLine) {
-                return;
-            }
-            if (line.startsWith('-') && !line.startsWith('---')) {
-                startRun().replacement.push(line.slice(1));
-                oldLine += 1;
-                return;
-            }
-            if (line.startsWith('+') && !line.startsWith('+++')) {
-                startRun().expected.push(line.slice(1));
-                newLine += 1;
-                return;
-            }
-            flushRun();
-            if (line.startsWith(' ')) {
-                oldLine += 1;
-                newLine += 1;
-            }
-        });
-        flushRun();
-        return blocks;
-    }
-
-    /* Index every changed line of every block by its rendered line number so a
-       diff row can be mapped back to the block it belongs to. */
-    function explorerDiffBlockLineIndex(blocks) {
-        const byNewLine = new Map();
-        const byOldLine = new Map();
-        blocks.forEach((block, position) => {
-            block.id = String(position + 1);
-            block.rows = Math.max(block.expected.length, block.replacement.length);
-            block.expected.forEach((_, offset) => byNewLine.set(block.line + offset, block));
-            block.replacement.forEach((_, offset) => byOldLine.set(block.oldLine + offset, block));
-        });
-        return { byNewLine, byOldLine };
-    }
-
-    function explorerDiffRowBlock(blockIndex, oldLine, newLine) {
-        if (newLine?.type === 'add') {
-            const block = blockIndex.byNewLine.get(newLine.number);
-            if (block) {
-                return block;
-            }
-        }
-        if (oldLine?.type === 'delete') {
-            return blockIndex.byOldLine.get(oldLine.number) || null;
-        }
-        return null;
-    }
-
-    function explorerRenderedDiffLine(row, {
-        cellSelector,
-        numberSelector,
-        codeSelector,
-        addClass,
-        deleteClass
-    }) {
-        const cell = row?.querySelector(cellSelector);
-        const numberCell = cell?.matches(numberSelector)
-            ? cell
-            : cell?.querySelector(numberSelector);
-        const number = Number.parseInt(numberCell?.textContent || '', 10);
-        if (!cell || !numberCell || !Number.isFinite(number)) {
-            return null;
-        }
-        const typeHost = cell.matches(numberSelector) ? row : cell;
-        const type = typeHost.querySelector(`.${addClass}`)
-            || typeHost.classList.contains(addClass)
-            ? 'add'
-            : (
-                typeHost.querySelector(`.${deleteClass}`)
-                || typeHost.classList.contains(deleteClass)
-                    ? 'delete'
-                    : 'context'
-            );
-        return {
-            type,
-            number,
-            text: (cell.querySelector(codeSelector) || row.querySelector(codeSelector))?.textContent || '',
-            numberCell
-        };
-    }
-
-    function explorerDiffUndoAction(oldLine, newLine, deletionInsertions) {
-        const deleted = oldLine?.type === 'delete';
-        const added = newLine?.type === 'add';
-        if (deleted && added) {
-            return {
-                kind: 'replace',
-                line: newLine.number,
-                expected: newLine.text,
-                replacement: oldLine.text
-            };
-        }
-        if (added) {
-            return {
-                kind: 'remove',
-                line: newLine.number,
-                expected: newLine.text,
-                replacement: ''
-            };
-        }
-        if (deleted) {
-            const insertLine = deletionInsertions.get(oldLine.number);
-            if (Number.isFinite(insertLine) && insertLine > 0) {
-                return {
-                    kind: 'insert',
-                    line: insertLine,
-                    expected: '',
-                    replacement: oldLine.text
-                };
-            }
-        }
-        return null;
-    }
-
-    function registerExplorerDiffUndoAction(pane, actionId, action) {
-        if (!(pane._explorerDiffUndoActions instanceof Map)) {
-            pane._explorerDiffUndoActions = new Map();
-        }
-        pane._explorerDiffUndoActions.set(actionId, action);
-        return actionId;
-    }
-
-    function attachExplorerDiffUndoButton(index, numberCell, action) {
-        const pane = terminals[index];
-        if (!pane || !numberCell || !action) {
-            return;
-        }
-        if (!(pane._explorerDiffUndoActions instanceof Map)) {
-            pane._explorerDiffUndoActions = new Map();
-        }
-        const actionId = registerExplorerDiffUndoAction(
-            pane,
-            String(pane._explorerDiffUndoActions.size + 1),
-            action
-        );
-        const button = document.createElement('button');
-        button.type = 'button';
-        button.className = 'explorer-diff-undo-line';
-        button.dataset.explorerDiffUndoLine = actionId;
-        button.title = 'Undo this unstaged line change';
-        button.setAttribute('aria-label', 'Undo this unstaged line change');
-        button.innerHTML = EXPLORER_GIT_REVERT_ICON;
-        button.addEventListener('click', event => {
-            event.preventDefault();
-            event.stopPropagation();
-            undoExplorerDiffChange(index, actionId);
-        });
-        numberCell.appendChild(button);
-    }
-
-    /* Tag every rendered row of a multi-line block, and hang one "Undo block"
-       pill off the block's first row. Single-line blocks are left to the
-       per-line button — a pill there would say the same thing twice. */
-    function attachExplorerDiffUndoBlockButton(index, block, rows, numberCell) {
-        const pane = terminals[index];
-        if (!pane || !block || block.rows < 2) {
-            return;
-        }
-        rows.filter(Boolean).forEach(row => {
-            row.dataset.explorerDiffBlock = block.id;
-        });
-        const actionId = `block-${block.id}`;
-        if (!numberCell || pane._explorerDiffUndoActions?.has(actionId)) {
-            return;
-        }
-        registerExplorerDiffUndoAction(pane, actionId, block);
-        const label = `Undo this block of ${block.rows} unstaged line changes`;
-        const pill = document.createElement('button');
-        pill.type = 'button';
-        pill.className = 'explorer-diff-undo-block';
-        pill.dataset.explorerDiffUndoBlock = block.id;
-        pill.dataset.explorerDiffUndoAction = actionId;
-        pill.title = label;
-        pill.setAttribute('aria-label', label);
-        pill.innerHTML = `${EXPLORER_GIT_REVERT_ICON}<span>Undo block (${block.rows})</span>`;
-        pill.addEventListener('click', event => {
-            event.preventDefault();
-            event.stopPropagation();
-            undoExplorerDiffChange(index, actionId);
-        });
-        numberCell.classList.add('has-block-undo');
-        numberCell.appendChild(pill);
-    }
-
-    /* Hovering anywhere inside a block reveals that block's pill, which lives
-       on a different row (and, side by side, a different table) — so this is a
-       pair of delegated listeners on the diff root rather than CSS. */
-    function setExplorerDiffHoveredBlock(root, blockId) {
-        if (root._explorerDiffHoveredBlock === blockId) {
-            return;
-        }
-        root._explorerDiffHoveredBlock = blockId;
-        root.querySelectorAll('[data-explorer-diff-undo-block]').forEach(pill => {
-            pill.classList.toggle(
-                'is-visible',
-                Boolean(blockId) && pill.dataset.explorerDiffUndoBlock === blockId
-            );
-        });
-    }
-
-    function wireExplorerDiffBlockHover(root) {
-        /* The fallback renderer re-wires the same persistent container on every
-           render, so the listeners are attached once per element. */
-        if (root._explorerDiffBlockHoverWired) {
-            root._explorerDiffHoveredBlock = '';
-            return;
-        }
-        root._explorerDiffBlockHoverWired = true;
-        root.addEventListener('mouseover', event => {
-            const row = event.target?.closest?.('[data-explorer-diff-block]');
-            setExplorerDiffHoveredBlock(root, row?.dataset.explorerDiffBlock || '');
-        });
-        root.addEventListener('mouseleave', () => {
-            setExplorerDiffHoveredBlock(root, '');
-        });
-    }
-
-    function wireExplorerDiffUndoControls(index, root) {
-        const pane = terminals[index];
-        if (pane) {
-            pane._explorerDiffUndoActions = new Map();
-        }
-        if (!root || !explorerCanUndoDiffLine(pane)) {
-            return;
-        }
-        const deletionInsertions = explorerDiffDeletionInsertions(pane._explorerDiffContent);
-        const blockIndex = explorerDiffBlockLineIndex(
-            explorerDiffChangeBlocks(pane._explorerDiffContent)
-        );
-        wireExplorerDiffBlockHover(root);
-        const diff2HtmlSides = root._explorerDiffSides || [];
-        if (diff2HtmlSides.length === 2) {
-            const rowsBySide = diff2HtmlSides.map(side => [
-                ...side.querySelectorAll('.d2h-diff-tbody > tr')
-            ]);
-            const rowCount = Math.max(rowsBySide[0].length, rowsBySide[1].length);
-            for (let rowIndex = 0; rowIndex < rowCount; rowIndex += 1) {
-                const oldLine = explorerRenderedDiffLine(rowsBySide[0][rowIndex], {
-                    cellSelector: '.d2h-code-side-linenumber',
-                    numberSelector: '.d2h-code-side-linenumber',
-                    codeSelector: '.d2h-code-line-ctn',
-                    addClass: 'd2h-ins',
-                    deleteClass: 'd2h-del'
-                });
-                const newLine = explorerRenderedDiffLine(rowsBySide[1][rowIndex], {
-                    cellSelector: '.d2h-code-side-linenumber',
-                    numberSelector: '.d2h-code-side-linenumber',
-                    codeSelector: '.d2h-code-line-ctn',
-                    addClass: 'd2h-ins',
-                    deleteClass: 'd2h-del'
-                });
-                const action = explorerDiffUndoAction(oldLine, newLine, deletionInsertions);
-                attachExplorerDiffUndoButton(index, (newLine || oldLine)?.numberCell, action);
-                attachExplorerDiffUndoBlockButton(
-                    index,
-                    explorerDiffRowBlock(blockIndex, oldLine, newLine),
-                    [rowsBySide[0][rowIndex], rowsBySide[1][rowIndex]],
-                    (newLine || oldLine)?.numberCell
-                );
-            }
-            return;
-        }
-
-        root.querySelectorAll('.explorer-diff-row').forEach(row => {
-            const options = {
-                numberSelector: '.explorer-diff-line-number',
-                codeSelector: '.explorer-diff-line-code',
-                addClass: 'add',
-                deleteClass: 'delete'
-            };
-            const oldLine = explorerRenderedDiffLine(row, {
-                ...options,
-                cellSelector: '.explorer-diff-cell.old'
-            });
-            const newLine = explorerRenderedDiffLine(row, {
-                ...options,
-                cellSelector: '.explorer-diff-cell.new'
-            });
-            const action = explorerDiffUndoAction(oldLine, newLine, deletionInsertions);
-            attachExplorerDiffUndoButton(index, (newLine || oldLine)?.numberCell, action);
-            attachExplorerDiffUndoBlockButton(
-                index,
-                explorerDiffRowBlock(blockIndex, oldLine, newLine),
-                [row],
-                (newLine || oldLine)?.numberCell
-            );
-        });
-    }
-
-    function explorerDiffUndoContent(content, action) {
-        const lines = String(content == null ? '' : content)
-            .replace(/\r\n/g, '\n')
-            .replace(/\r/g, '\n')
-            .split('\n');
-        const lineIndex = Number(action?.line) - 1;
-        if (!Number.isInteger(lineIndex) || lineIndex < 0) {
-            return null;
-        }
-        if (action.kind === 'block') {
-            const expected = Array.isArray(action.expected) ? action.expected : [];
-            const replacement = Array.isArray(action.replacement) ? action.replacement : [];
-            if (lineIndex + expected.length > lines.length) {
-                return null;
-            }
-            const stale = expected.some((text, offset) => lines[lineIndex + offset] !== text);
-            if (stale) {
-                return null;
-            }
-            lines.splice(lineIndex, expected.length, ...replacement);
-            return lines.join('\n');
-        }
-        if (action.kind === 'insert') {
-            if (lineIndex > lines.length) {
-                return null;
-            }
-            lines.splice(lineIndex, 0, action.replacement);
-            return lines.join('\n');
-        }
-        if (lineIndex >= lines.length || lines[lineIndex] !== action.expected) {
-            return null;
-        }
-        if (action.kind === 'replace') {
-            lines[lineIndex] = action.replacement;
-        } else if (action.kind === 'remove') {
-            lines.splice(lineIndex, 1);
-        } else {
-            return null;
-        }
-        return lines.join('\n');
-    }
-
-    function setExplorerDiffUndoBusy(index, busy) {
-        const pane = terminals[index];
-        if (pane) {
-            pane._explorerDiffUndoBusy = Boolean(busy);
-        }
-        document.querySelectorAll(
-            `#explorer-diff-code-${index} :is([data-explorer-diff-undo-line], [data-explorer-diff-undo-block])`
-        ).forEach(button => {
-            button.disabled = Boolean(busy);
-            button.classList.toggle('is-busy', Boolean(busy));
-        });
-    }
-
-    function explorerDiffUndoCopy(action) {
-        if (action.kind === 'block') {
-            return {
-                title: 'Undo block of changes?',
-                copy: `Undo these ${action.rows} unstaged line changes starting at line ${action.line}?`,
-                confirmLabel: 'Undo block',
-                toast: `Undid ${action.rows} line changes`
-            };
-        }
-        return {
-            title: 'Undo line change?',
-            copy: `Undo this unstaged change on line ${action.line}?`,
-            confirmLabel: 'Undo line',
-            toast: 'Undid line change'
-        };
-    }
-
-    async function undoExplorerDiffChange(index, actionId) {
-        const pane = terminals[index];
-        const sessionId = sessionIds[index];
-        const action = pane?._explorerDiffUndoActions?.get(String(actionId));
-        if (!pane || !sessionId || !action || !explorerCanUndoDiffLine(pane)) {
-            return;
-        }
-        const content = explorerDiffUndoContent(pane._explorerFileContent, action);
-        if (content === null) {
-            showTerminalToast('This diff is stale. Refresh the file and try again.', 'error');
-            return;
-        }
-        const copy = explorerDiffUndoCopy(action);
-        const filePath = pane._explorerFilePath;
-        const baseRevision = pane._explorerFileRevision;
-        const confirmed = await openGenericConfirmModal({
-            title: copy.title,
-            copy: copy.copy,
-            note: 'The file is saved immediately. Staged changes are preserved.',
-            confirmLabel: copy.confirmLabel,
-            danger: true
-        });
-        if (
-            !confirmed
-            || !explorerCanUndoDiffLine(pane)
-            || pane._explorerFilePath !== filePath
-            || pane._explorerFileRevision !== baseRevision
-        ) {
-            return;
-        }
-
-        const scrollState = captureExplorerFileScroll(index);
-        const activeTabId = pane._explorerActiveTabId;
-        setExplorerDiffUndoBusy(index, true);
-        try {
-            const response = await fetch(`/api/explorer/${encodeURIComponent(sessionId)}/file`, {
-                method: 'PUT',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    path: filePath,
-                    content,
-                    base_revision: baseRevision
-                })
-            });
-            const data = await response.json().catch(() => ({}));
-            if (!response.ok) {
-                throw new Error(data.error || 'Could not undo this change.');
-            }
-            setExplorerDiffUndoBusy(index, false);
-            const hasRemainingDiff = explorerHasGitDiff(data.git);
-            const applied = updateExplorerFileInPlace(index, data, scrollState);
-            if (!applied) {
-                renderExplorerFile(index, data, {
-                    scrollState,
-                    openDiff: hasRemainingDiff,
-                    diffMode: 'worktree',
-                    tab: activeTabId
-                });
-            }
-            if (pane._explorerGitSidebarOpen) {
-                invalidateExplorerGitRepo(index);
-                loadExplorerGitRepo(index);
-            }
-            if (pane._explorerTreeSidebarOpen) {
-                reloadExplorerTree(index);
-            }
-            showTerminalToast(`${copy.toast} in ${data.name || pane._explorerFileName || 'file'}`, 'success');
-        } catch (error) {
-            console.error('[GridVibe Sessions] Explorer diff undo failed:', error);
-            setExplorerDiffUndoBusy(index, false);
-            showTerminalToast(error.message || 'Could not undo this change.', 'error');
-        }
-    }
-
-    /* Render the patch with the pinned Diff2Html build, reusing the pinned
-       Highlight.js instance for syntax colour. Returns false — so the caller
-       falls back to the tolerant handwritten side-by-side renderer — when the
-       assets are missing, Diff2Html throws, or it parses the patch to nothing
-       (e.g. a partial patch without a file header). */
-    function renderExplorerDiffWithDiff2Html(index, code, diff, banner) {
-        if (typeof window === 'undefined' || !window.Diff2HtmlUI || !window.hljs) {
-            return false;
-        }
-        try {
-            const host = document.createElement('div');
-            host.className = 'explorer-diff2html';
-            const ui = new window.Diff2HtmlUI(host, diff, explorerDiff2HtmlConfig(), window.hljs);
-            // draw() already runs highlightCode() because the config sets
-            // `highlight: true`. Calling it a second time re-highlights markup
-            // that is already highlighted, which nests a duplicate hljs span
-            // inside every existing one.
-            ui.draw();
-            if (!host.querySelector('.d2h-diff-table, .d2h-code-line, .d2h-file-wrapper')) {
-                return false;
-            }
-            code.innerHTML = banner;
-            code.appendChild(host);
-            observeExplorerDiffLayout(host);
-            wireExplorerDiffUndoControls(index, host);
-            return true;
-        } catch (error) {
-            console.error('[GridVibe Sessions] Diff2Html render failed:', error);
-            return false;
-        }
-    }
-
-    function renderExplorerDiff(index) {
-        const pane = terminals[index];
-        const code = document.getElementById(`explorer-diff-code-${index}`);
-        if (!pane || !code) {
-            return;
-        }
-        disconnectExplorerDiffLayout(code.querySelector('.explorer-diff2html'));
-        const wrapLines = explorerLineWrapPreference(index, 'diff');
-        code.classList.toggle('wrap-lines', wrapLines);
-        const diff = pane._explorerDiffContent || '';
-        if (!diff) {
-            code.innerHTML = '<span class="explorer-diff-empty">No Git diff for selected file.</span>';
-            return;
-        }
-        const banner = explorerDiffTruncationBannerHtml(pane);
-        if (!renderExplorerDiffWithDiff2Html(index, code, diff, banner)) {
-            code.innerHTML = banner + renderExplorerSideBySideDiff(index, diff);
-            wireExplorerDiffUndoControls(index, code);
-        }
-    }
-
-    function explorerDiffLanguage(index) {
-        const pane = terminals[index];
-        const filePath = pane?._explorerFilePath || '';
-        return normalizeExplorerLanguage(pane?._explorerFileLanguage || '') || explorerCodeLanguage(filePath);
-    }
-
-    function explorerDiffLineCodeHtml(index, text) {
-        return highlightExplorerCode(String(text || ''), explorerDiffLanguage(index)) || '&nbsp;';
-    }
-
-    function explorerDiffCellHtml(index, cell, side) {
-        if (!cell) {
-            return `
-                <div class="explorer-diff-cell empty ${side}">
-                    <span class="explorer-diff-line-number"></span>
-                    <span class="explorer-diff-line-code"></span>
-                </div>
-            `;
-        }
-        return `
-            <div class="explorer-diff-cell ${escHtml(cell.type || 'context')} ${side}">
-                <span class="explorer-diff-line-number">${cell.number ? escHtml(String(cell.number)) : ''}</span>
-                <span class="explorer-diff-line-code">${explorerDiffLineCodeHtml(index, cell.text || '')}</span>
-            </div>
-        `;
-    }
-
-    function explorerDiffRowHtml(index, left, right) {
-        if (left?.type === 'hunk') {
-            return `
-                <div class="explorer-diff-row">
-                    <div class="explorer-diff-cell hunk">${escHtml(left.text || '')}</div>
-                </div>
-            `;
-        }
-        return `
-            <div class="explorer-diff-row">
-                ${explorerDiffCellHtml(index, left, 'old')}
-                ${explorerDiffCellHtml(index, right, 'new')}
-            </div>
-        `;
-    }
-
-    function renderExplorerSideBySideDiff(index, diff) {
-        const source = String(diff || '');
-        if (!source.trim()) {
-            return '<span class="explorer-diff-empty">No Git diff for selected file.</span>';
-        }
-
-        const lines = source.split(/\r?\n/);
-        const rows = [];
-        let oldLine = 0;
-        let newLine = 0;
-        const pendingDeletes = [];
-
-        const flushDeletes = () => {
-            while (pendingDeletes.length) {
-                rows.push(explorerDiffRowHtml(index, pendingDeletes.shift(), null));
-            }
-        };
-
-        lines.forEach(line => {
-            const hunk = line.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@(.*)$/);
-            if (hunk) {
-                flushDeletes();
-                oldLine = Number(hunk[1]);
-                newLine = Number(hunk[2]);
-                rows.push(explorerDiffRowHtml(index, { type: 'hunk', text: line }, null));
-                return;
-            }
-            if (!oldLine && !newLine) {
-                return;
-            }
-            if (line.startsWith('\\ No newline')) {
-                return;
-            }
-            if (line.startsWith('-') && !line.startsWith('---')) {
-                pendingDeletes.push({
-                    type: 'delete',
-                    number: oldLine,
-                    text: line.slice(1)
-                });
-                oldLine += 1;
-                return;
-            }
-            if (line.startsWith('+') && !line.startsWith('+++')) {
-                const right = {
-                    type: 'add',
-                    number: newLine,
-                    text: line.slice(1)
-                };
-                newLine += 1;
-                rows.push(explorerDiffRowHtml(index, pendingDeletes.shift() || null, right));
-                return;
-            }
-            if (line.startsWith(' ')) {
-                flushDeletes();
-                rows.push(explorerDiffRowHtml(index,
-                    { type: 'context', number: oldLine, text: line.slice(1) },
-                    { type: 'context', number: newLine, text: line.slice(1) }
-                ));
-                oldLine += 1;
-                newLine += 1;
-            }
-        });
-
-        flushDeletes();
-        return `<div class="explorer-side-by-side-diff">${rows.join('')}</div>`;
-    }
-
-    /* Undoing the last hunk (or discarding the file's changes from the Git
-       sidebar) can leave the Diff view with nothing in it. When the file's Git
-       status stays non-clean — a partially staged file whose *staged* version
-       survives the discard — the in-place refresh keeps the Diff panel mounted
-       and the user is stranded on "No Git diff for selected file". Bounce back
-       to the file's own content view instead, honouring the sticky
-       source/preview preference, and hide the now-pointless Diff toggle until a
-       later load finds a patch again. Commit diffs are historical and never
-       empty out this way, so they are left alone. */
-    function explorerFallbackFromEmptyDiff(index) {
-        const pane = terminals[index];
-        const list = document.getElementById(`explorer-list-${index}`);
-        if (!pane || !list || pane._explorerDiffCommit) {
-            return false;
-        }
-        if (String(pane._explorerDiffContent || '').trim()) {
-            return false;
-        }
-        if (activeExplorerFileView(index) !== 'diff') {
-            return false;
-        }
-        const hasSource = Boolean(document.getElementById(`explorer-code-${index}`));
-        const hasPreview = Boolean(document.getElementById(`explorer-preview-${index}`));
-        const preferred = pane._explorerLastFileView === 'preview' && hasPreview
-            ? 'preview'
-            : (hasSource ? 'source' : (hasPreview ? 'preview' : ''));
-        if (!preferred) {
-            return false;
-        }
-        // The diff panel is not being shown, so its stashed scroll would only
-        // be restored later against unrelated content.
-        pane._explorerPendingDiffScroll = null;
-        setExplorerDiffToggleHidden(index, true);
-        setExplorerFileView(index, preferred);
-        return true;
-    }
-
-    function setExplorerDiffToggleHidden(index, hidden) {
-        const list = document.getElementById(`explorer-list-${index}`);
-        // `hidden` (not `disabled`): setExplorerEditChromeDisabled owns the
-        // disabled flag on every file-view button while the editor is open.
-        list?.querySelectorAll('[data-explorer-file-view="diff"]').forEach(button => {
-            button.hidden = Boolean(hidden);
-        });
-    }
-
-    function setExplorerDiffSplit(index, open) {
-        const pane = terminals[index];
-        if (!pane) {
-            return;
-        }
-        setExplorerFileView(index, open ? 'diff' : (pane._explorerLastFileView || 'source'));
-    }
-
-    function toggleExplorerDiffSplit(index) {
-        const pane = terminals[index];
-        setExplorerDiffSplit(index, !pane?._explorerDiffSplit);
-    }
-
-    async function loadExplorerDiff(index) {
-        const pane = terminals[index];
-        const sessionId = sessionIds[index];
-        const code = document.getElementById(`explorer-diff-code-${index}`);
-        const diffPath = pane?._explorerFilePath || '';
-        const commit = pane?._explorerDiffCommit || '';
-        // Changed-file rows request a section-specific diff (worktree vs staged)
-        // so a partially staged file never shows the other section's hunks;
-        // commit-history rows and legacy callers fall back to the HEAD diff.
-        const diffMode = commit ? 'commit' : (pane?._explorerDiffMode || 'head');
-        const cacheKey = explorerDiffCacheKey(diffPath, commit, diffMode);
-        if (!pane || !sessionId || !diffPath || !code) {
-            renderExplorerDiff(index);
-            return;
-        }
-        if (pane._explorerDiffLoaded && pane._explorerDiffCacheKey === cacheKey) {
-            renderExplorerDiff(index);
-            if (explorerFallbackFromEmptyDiff(index)) {
-                return;
-            }
-            applyExplorerPendingDiffScroll(index);
-            return;
-        }
-
-        code.textContent = 'Loading diff...';
-        try {
-            const params = new URLSearchParams({
-                path: diffPath,
-                mode: diffMode
-            });
-            if (commit) {
-                params.set('commit', commit);
-            }
-            const response = await fetch(
-                `/api/explorer/${encodeURIComponent(sessionId)}/git/diff?${params.toString()}`
-            );
-            const data = await response.json();
-            if (!response.ok) {
-                throw new Error(data.error || 'Failed to load Git diff');
-            }
-            pane._explorerDiffLoaded = true;
-            pane._explorerDiffCacheKey = cacheKey;
-            pane._explorerDiffContent = data.diff || '';
-            // The backend already bounds diffs to 256 KiB / 4,000 lines and
-            // reports truncation; keep
-            // the flag so the rendered patch is never mistaken for the whole change.
-            pane._explorerDiffTruncated = Boolean(data.truncated);
-            renderExplorerDiff(index);
-            const renderedTab = explorerFindTab(
-                pane,
-                pane._explorerRenderedTabId || pane._explorerActiveTabId
-            );
-            const restoredDiffView = explorerMatchingTabView(
-                renderedTab,
-                explorerCurrentContentRevisions(pane)
-            );
-            const restoredDiffScroll = restoredDiffView?.scroll?.panels?.diff;
-            if (restoredDiffScroll) {
-                applyScrollMetrics(
-                    explorerPanelScrollTarget(
-                        document.getElementById(`explorer-diff-panel-${index}`)
-                    ),
-                    restoredDiffScroll
-                );
-            }
-            // A patch is back (or was there all along): re-expose the toggle a
-            // previous empty-diff fallback may have hidden.
-            setExplorerDiffToggleHidden(index, false);
-            if (explorerFallbackFromEmptyDiff(index)) {
-                return;
-            }
-            applyExplorerPendingDiffScroll(index);
-            if (activeExplorerFileView(index) === 'diff') {
-                applyExplorerSearch(index);
-            }
-        } catch (error) {
-            console.error('[GridVibe Sessions] Explorer Git diff failed:', error);
-            code.innerHTML = `<span class="explorer-diff-empty">${escHtml(error.message || 'Failed to load Git diff.')}</span>`;
-        }
-    }
-
     /* Resolve a requested view onto a panel that actually exists. A stored or
        restored 'diff' mode routinely outlives its panel — discarding a file's
        changes rebuilds the viewer without one, and the captured scroll state
@@ -4352,7 +3116,7 @@
        top. Entering the in-place editor does not: it is pinning the view to
        Source on its way to mounting the editor over it, and the position it is
        about to carry into the textarea is the one the reader left. */
-    function setExplorerFileView(index, mode, { scroll = true } = {}) {
+    function setExplorerFileView(index, mode, { scroll = true, captureScroll = true } = {}) {
         const normalizedMode =
             mode === 'preview' ? 'preview'
             : mode === 'diff' ? 'diff'
@@ -4367,6 +3131,10 @@
         const diffPanel = document.getElementById(`explorer-diff-panel-${index}`);
         const selectedMode = explorerResolveFileView(index, normalizedMode);
         const isDiffMode = selectedMode === 'diff';
+        const outgoingMode = activeExplorerFileView(index);
+        if (captureScroll && outgoingMode !== selectedMode) {
+            rememberExplorerPanelScroll(index, outgoingMode);
+        }
         if (pane) {
             pane._explorerDiffSplit = isDiffMode;
             if (selectedMode === 'source' || selectedMode === 'preview') {
@@ -4394,6 +3162,16 @@
             panel.hidden = panel.dataset.explorerFilePanel !== selectedMode;
         });
         applyExplorerLineWrapState(index, selectedMode);
+        /* Find is a property of the panel now on screen, and this is the only
+           path that changes which one that is — the header is not rebuilt
+           here, so the shell has to be hidden or shown before the query below
+           is applied against it. */
+        syncExplorerFindAvailability(index, selectedMode);
+        // First visit to Preview is where the render cost now lands; later
+        // visits reuse the pane's cached HTML and are instant.
+        if (selectedMode === 'preview') {
+            ensureExplorerPreviewLoaded(index);
+        }
         if (isDiffMode) {
             loadExplorerDiff(index);
             const state = pane ? ensureExplorerSearchState(pane, 'file') : null;
@@ -4403,6 +3181,7 @@
         } else {
             applyExplorerSearch(index, { scroll });
         }
+        requestExplorerPanelScrollRestore(index, selectedMode);
     }
 
     function findExplorerMarkdownPreviewTargetIndex() {
@@ -5009,8 +3788,82 @@
         };
     }
 
-    function explorerSourceLineRecords(content) {
+    /* One document's records, kept for as long as that exact string is the one
+       being asked about. The records are read-only to every caller, and the
+       whole point of the cache is that they are asked for repeatedly against
+       the *same* buffer: a single find keystroke used to walk the document
+       three times over — once for the decoration maps and twice more inside
+       the two row models — allocating a fresh record per line each pass.
+
+       Sized against the live panes, not against a fixed 2. Two is the right
+       number *per pane* — the Source rows and the editor's draft are both live
+       during an edit and they are different strings — but the cache is
+       module-level and shared, so a flat 2 meant a workspace with three
+       explorer file panes evicted on every cross-pane call: the optimisation
+       stopped applying in exactly the configuration whose total cost is
+       highest. The ceiling keeps a pathological split from pinning a dozen
+       documents at once.
+
+       Emptied outright when the last explorer pane goes away (terminals.js).
+       Records are heavy — a 4 MiB file is ~100k objects, plus the string —
+       and an LRU only evicts on insert, so with nothing left to ask a question
+       the final entries were pinned for the life of the page. While panes are
+       open no such sweep is needed: a document nobody is looking at any more
+       falls out of an LRU sized to the panes that are, which is what an LRU is
+       for. */
+    const EXPLORER_LINE_RECORD_CACHE_PER_PANE = 2;
+    const EXPLORER_LINE_RECORD_CACHE_MAX = 8;
+    const _explorerLineRecordCache = [];
+
+    function explorerReleaseLineRecordCache() {
+        _explorerLineRecordCache.length = 0;
+    }
+
+    function explorerLineRecordCacheLimit() {
+        let panes = 0;
+        for (const pane of terminals) {
+            if (pane?._explorerMode === 'file') {
+                panes += 1;
+            }
+        }
+        return Math.min(
+            Math.max(panes, 1) * EXPLORER_LINE_RECORD_CACHE_PER_PANE,
+            EXPLORER_LINE_RECORD_CACHE_MAX
+        );
+    }
+
+    /* `cache` is an optional caller-owned single slot, for content that has no
+       business in the page-wide LRU. The in-place editor's draft is the case:
+       it moves on every keystroke so it never *hits*, but it did `unshift` —
+       and with one explorer pane open the limit is two slots, so every typing
+       frame evicted both the previous draft and that pane's own file records.
+       A pane-local slot keeps the draft's records for the two passes that want
+       them (the splice frame and the settle frame) and leaves the shared cache
+       to the panes that are reading files. */
+    function explorerSourceLineRecords(content, cache) {
         const source = String(content || '');
+        if (cache) {
+            if (cache.records && cache.source === source) {
+                return cache.records;
+            }
+            cache.source = source;
+            cache.records = explorerBuildSourceLineRecords(source);
+            return cache.records;
+        }
+        for (let at = 0; at < _explorerLineRecordCache.length; at += 1) {
+            if (_explorerLineRecordCache[at].source === source) {
+                return _explorerLineRecordCache[at].records;
+            }
+        }
+        const records = explorerBuildSourceLineRecords(source);
+        _explorerLineRecordCache.unshift({ source, records });
+        _explorerLineRecordCache.length = Math.min(
+            _explorerLineRecordCache.length, explorerLineRecordCacheLimit()
+        );
+        return records;
+    }
+
+    function explorerBuildSourceLineRecords(source) {
         const records = [];
         let lineNumber = 1;
         let index = 0;
@@ -5102,9 +3955,16 @@
        typed into is incoherent anyway. The gutter still reserves the chevron's
        width, so the code column sits exactly where the read-only view put it
        and entering edit mode moves no glyph. */
-    function renderExplorerSourceLines(content, language, searchRanges = [], collapsedLines = new Set(), highlightedLines, options = {}) {
+    /* The rows a document renders, resolved once: which records survive the
+       fold set, what heading level each carries, and the token map, gutter
+       width and language class the whole build shares. Everything downstream —
+       the one-string build below, the frame-sliced build, and the single-row
+       repaints the find and the editor's underlay make — emits rows from this
+       same model, so a row built one at a time is byte-identical to the same
+       row built in bulk. */
+    function explorerSourceRowModel(content, language, collapsedLines = new Set(), highlightedLines, options = {}) {
         const normalizedLanguage = normalizeExplorerLanguage(language);
-        const records = explorerSourceLineRecords(content);
+        const records = explorerSourceLineRecords(content, options && options.recordCache);
         const languageClass = explorerLanguageClass(language);
         const codeClass = languageClass ? ` language-${languageClass}` : '';
         const markdownDocument = normalizedLanguage === 'markdown';
@@ -5123,8 +3983,9 @@
         // Highlight.js failure, in which case each line uses the fallback lexer.
         // Callers with a pane pass the pane-cached map in (undefined here means
         // "tokenize now"); a passed-in null is a legitimate cached miss.
+        const highlightPending = highlightedLines === EXPLORER_HIGHLIGHT_PENDING;
         const runs = highlightedLines !== undefined
-            ? highlightedLines
+            ? (highlightPending ? null : highlightedLines)
             : explorerHighlightDocumentLines(content, normalizedLanguage);
         const rows = [];
         let hiddenUntilHeadingLevel = 0;
@@ -5139,32 +4000,64 @@
             }
 
             const collapsed = allowMarkdownCollapse && headingLevel && collapsedLines.has(record.number);
-            const lineHtml = runs
-                ? explorerRenderHighlightedRuns(runs.get(record.number), searchRanges)
-                : highlightExplorerCode(record.text, language, searchRanges, record.start);
-            // Heading-only Markdown tokeniser (OD-8): the fence-aware heading map
-            // already computed for section collapse doubles as the highlighter,
-            // so heading lines get a distinct token colour without a full grammar.
-            const contentHtml = headingLevel
-                ? `<span class="explorer-md-source-heading explorer-md-source-heading-${headingLevel}">${lineHtml}</span>`
-                : lineHtml;
-            rows.push(`
-                <div class="explorer-source-line" data-explorer-line="${record.number}">
-                    ${explorerSourceLineNumberHtml(record, foldControls ? headingLevel : 0, collapsed)}
-                    <code class="explorer-source-line-code${codeClass}">${contentHtml || '&nbsp;'}</code>
-                </div>
-            `);
+            rows.push({ record, headingLevel, collapsed: Boolean(collapsed) });
 
             if (collapsed) {
                 hiddenUntilHeadingLevel = headingLevel;
             }
         });
 
-        // Width follows the document, not the controls: a Markdown underlay
-        // with its buttons suppressed still keeps the read-only gutter, so the
-        // code column does not shift under the caret on entering edit mode.
-        const gutterWidth = explorerSourceGutterWidthCss(records.length, markdownDocument);
-        return `<div class="explorer-source-lines" style="--explorer-source-gutter-width: ${gutterWidth};">${rows.join('')}</div>`;
+        return {
+            records,
+            rows,
+            runs,
+            highlightPending,
+            language,
+            codeClass,
+            foldControls,
+            // Width follows the document, not the controls: a Markdown underlay
+            // with its buttons suppressed still keeps the read-only gutter, so the
+            // code column does not shift under the caret on entering edit mode.
+            gutterWidth: explorerSourceGutterWidthCss(records.length, markdownDocument)
+        };
+    }
+
+    /* One row's code cell — the only part of a row a decoration change can
+       move. The find repaints exactly this, leaving the row <div> (and with it
+       the change-mark attribute and its marker button) standing. */
+    function explorerSourceRowCodeHtml(model, row, searchRanges) {
+        const { record, headingLevel } = row;
+        const lineHtml = model.runs
+            ? explorerRenderHighlightedRuns(model.runs.get(record.number), searchRanges)
+            : (model.highlightPending
+                ? explorerMarkedEscHtml(record.text, record.start, searchRanges)
+                : highlightExplorerCode(record.text, model.language, searchRanges, record.start));
+        // Heading-only Markdown tokeniser (OD-8): the fence-aware heading map
+        // already computed for section collapse doubles as the highlighter,
+        // so heading lines get a distinct token colour without a full grammar.
+        const contentHtml = headingLevel
+            ? `<span class="explorer-md-source-heading explorer-md-source-heading-${headingLevel}">${lineHtml}</span>`
+            : lineHtml;
+        return contentHtml || '&nbsp;';
+    }
+
+    function explorerSourceRowHtml(model, row, searchRanges) {
+        return `
+                <div class="explorer-source-line" data-explorer-line="${row.record.number}">
+                    ${explorerSourceLineNumberHtml(row.record, model.foldControls ? row.headingLevel : 0, row.collapsed)}
+                    <code class="explorer-source-line-code${model.codeClass}">${explorerSourceRowCodeHtml(model, row, searchRanges)}</code>
+                </div>
+            `;
+    }
+
+    function explorerSourceLinesOpenTag(model) {
+        return `<div class="explorer-source-lines" style="--explorer-source-gutter-width: ${model.gutterWidth};">`;
+    }
+
+    function renderExplorerSourceLines(content, language, searchRanges = [], collapsedLines = new Set(), highlightedLines, options = {}) {
+        const model = explorerSourceRowModel(content, language, collapsedLines, highlightedLines, options);
+        const rows = model.rows.map(row => explorerSourceRowHtml(model, row, searchRanges));
+        return `${explorerSourceLinesOpenTag(model)}${rows.join('')}</div>`;
     }
 
     /* A match hidden inside a collapsed Markdown section has no row to
@@ -5297,21 +4190,180 @@
            the one that made it reachable was a group switch, whose cached-view
            restore re-applies the Source view through applyExplorerSearch. */
         if (pane._explorerEdit) {
+            explorerAbandonSourceRenderJob(pane);
+            return;
+        }
+
+        /* Above the tier's ceiling the per-line renderer is the freeze, not a
+           step towards it: 200k lines is 600k elements before a single
+           highlight token is counted. Render the bounded plain chunks and
+           stop — no fold wiring, no occurrence tint, no change marks, none of
+           which have rows to attach to. */
+        if (explorerPaneSourceTier(pane) === 'large') {
+            renderExplorerLargeSource(index, code);
             return;
         }
 
         const content = pane._explorerFileContent || '';
         const language = pane._explorerFilePlain ? '' : (pane._explorerFileLanguage || '');
-        const highlightedLines = explorerHighlightDocumentLinesCached(
-            pane, content, normalizeExplorerLanguage(language)
+        const collapsedLines = ensureExplorerMarkdownCollapsedLines(pane);
+        const collapsedKey = explorerSourceCollapsedKey(collapsedLines);
+
+        if (explorerReuseRenderedSource(index, code, {
+            content, language, collapsedKey, searchRanges
+        })) {
+            return;
+        }
+
+        const highlightedLines = explorerHighlightLinesForRender(
+            index, pane, content, normalizeExplorerLanguage(language)
         );
-        code.innerHTML = renderExplorerSourceLines(
-            content,
-            language,
-            searchRanges,
-            ensureExplorerMarkdownCollapsedLines(pane),
-            highlightedLines
+        const model = explorerCachedSourceRowModel(
+            pane, content, language, collapsedLines, collapsedKey, highlightedLines
         );
+        const chunking = explorerRepaintPolicy()?.chunkPlan(model.rows.length, {
+            async: typeof window.requestAnimationFrame === 'function'
+        });
+        explorerCancelSourceRenderJob(pane);
+        /* A rebuild of the *same document* is a presentation change, not a
+           navigation: the worker's syntax colours arriving, or a find whose
+           marks moved too widely to repaint in place. `code` is the scroller
+           itself, so replacing its rows sends the reader back to line 1 —
+           which is what made a large file jump to the top a beat after it
+           opened, and again on every wide find. Same content, same rows, same
+           geometry: hold the offset across the build. */
+        const keepScroll = pane._explorerSourceRender
+            && pane._explorerSourceRender.content === content
+            ? { top: code.scrollTop, left: code.scrollLeft }
+            : null;
+        const chunked = Boolean(chunking && chunking.chunked);
+        /* A frame-sliced rebuild assembles its rows off-screen when there are
+           rows on screen to protect, for the same reason the large tier does:
+           emptying the scroller first collapses the document under the reader,
+           so the browser parks them at the top for every frame the build lasts
+           and the offset is only handed back at the end. That is the flash the
+           syntax colours arriving used to cause on a big file, and the one a
+           save or a watcher refresh causes on any of them. A one-pass build
+           has no frames to flash across, and a first paint has nothing to keep
+           on screen, so both still go straight into the panel. */
+        const replacing = chunked ? explorerRenderedSourceContainer(code) : null;
+        /* One string and one parse for a document that can afford it — which
+           is nearly all of them, and is cheaper than any number of appends. */
+        const markup = chunked
+            ? `${explorerSourceLinesOpenTag(model)}</div>`
+            : `${explorerSourceLinesOpenTag(model)}${model.rows
+                .map(row => explorerSourceRowHtml(model, row, searchRanges)).join('')}</div>`;
+        let container;
+        if (replacing) {
+            container = explorerDetachedElement(markup);
+        } else {
+            code.innerHTML = markup;
+            container = explorerRenderedSourceContainer(code);
+        }
+        /* The rows are identified by a token stamped on them rather than by a
+           reference to the element: a pane that leaves file view would keep
+           the whole detached row tree alive for as long as it held that
+           reference, which on a large file is the biggest thing in the pane. */
+        _explorerSourceRenderToken += 1;
+        const token = String(_explorerSourceRenderToken);
+        if (container) {
+            container.dataset.explorerRender = token;
+        }
+        pane._explorerSourceRender = {
+            token, content, language, collapsedKey, ranges: searchRanges, keepScroll,
+            /* While a swap build runs, the rows on screen still carry the
+               *previous* token — so "is this still my surface?" is asked about
+               the container this build is going to replace, not about the one
+               it is filling. A panel the editor or a tab switch took over
+               fails that check exactly as before. */
+            replacing: replacing || null
+        };
+
+        if (!chunked) {
+            explorerFinishSourceRender(index);
+            return;
+        }
+        /* Frame-sliced build: the rest of the app keeps painting throughout.
+           Everything that reads the rows the moment a render "returns" goes
+           through whenExplorerSourceRendered(), which is immediate for the
+           synchronous build above and queued for this one. */
+        explorerRunSourceRenderJob(index, code, container, model, searchRanges, chunking.size);
+    }
+
+    /* Put the finished rows on screen in place of the ones the reader has been
+       looking at, holding their offset across the exchange. One task, so the
+       collapsed intermediate state is never painted. */
+    function explorerSwapRenderedSourceContainer(code, previous, container) {
+        const top = code.scrollTop;
+        const left = code.scrollLeft;
+        code.replaceChild(container, previous);
+        code.scrollTop = top;
+        code.scrollLeft = left;
+    }
+
+    function explorerSourceCollapsedKey(collapsedLines) {
+        return Array.from(collapsedLines || []).sort((a, b) => a - b).join(',');
+    }
+
+    /* The row model the Source view renders from, kept for as long as every
+       input to it is unchanged. A find keystroke asks for it twice — once to
+       decide which rows moved and once to emit them — and neither pass changes
+       the document, the language, the fold set or the token map. Rebuilding it
+       each time meant re-deriving every record and, on Markdown, re-running
+       the fence-aware heading scan over the whole file per keypress.
+
+       Identity comparison throughout, including on `highlightedLines`: the
+       highlight map is a stable reference held on the pane, and the pending
+       sentinel is a Symbol, so `===` distinguishes "still plain" from "the
+       worker answered" without inspecting either. */
+    function explorerCachedSourceRowModel(pane, content, language, collapsedLines, collapsedKey, highlightedLines) {
+        const cached = pane?._explorerSourceModel;
+        if (cached
+            && cached.content === content
+            && cached.language === language
+            && cached.collapsedKey === collapsedKey
+            && cached.highlightedLines === highlightedLines) {
+            return cached.model;
+        }
+        const model = explorerSourceRowModel(content, language, collapsedLines, highlightedLines);
+        if (pane) {
+            pane._explorerSourceModel = {
+                content, language, collapsedKey, highlightedLines, model
+            };
+        }
+        return model;
+    }
+
+    /* The DOM-free repaint policy (explorer-repaint.js). Looked up rather than
+       captured so a page that somehow loaded without it falls back to a full
+       rebuild every time — today's behaviour — instead of throwing. */
+    function explorerRepaintPolicy() {
+        return (typeof window !== 'undefined' && window.GridVibeExplorerRepaint) || null;
+    }
+
+    let _explorerSourceRenderToken = 0;
+
+    function explorerRenderedSourceContainer(code) {
+        return code ? code.querySelector(':scope > .explorer-source-lines') : null;
+    }
+
+    function explorerAppendSourceRows(container, model, searchRanges, from, to) {
+        if (!container) {
+            return;
+        }
+        const rows = [];
+        for (let at = from; at < to; at += 1) {
+            rows.push(explorerSourceRowHtml(model, model.rows[at], searchRanges));
+        }
+        container.insertAdjacentHTML('beforeend', rows.join(''));
+    }
+
+    /* Everything that used to sit at the tail of a rebuild. It runs once per
+       completed build — after the last slice of a chunked one — and never
+       after a skipped or decorated render, because a render that destroyed no
+       rows has nothing to re-attach. */
+    function explorerFinishSourceRender(index) {
+        explorerRestoreHeldSourceScroll(index);
         wireExplorerMarkdownSectionControls(index);
         // The rebuilt rows dropped the nodes the occurrence tint was anchored
         // to; re-derive it from whatever selection survived the render.
@@ -5319,6 +4371,342 @@
         // Re-paint the cached HEAD change marks onto the fresh rows (cheap;
         // no fetch — loads are triggered by the change signals only).
         applyExplorerChangeMarks(index);
+        explorerFlushSourceRenderCallbacks(terminals[index]);
+    }
+
+    /* One-use: the offset belongs to the build that captured it, and a later
+       render that legitimately moves the reader (a new file, a jump to a
+       match) must not be pulled back to it. */
+    function explorerRestoreHeldSourceScroll(index) {
+        const pane = terminals[index];
+        const held = pane?._explorerSourceRender?.keepScroll;
+        if (!held) {
+            return;
+        }
+        pane._explorerSourceRender.keepScroll = null;
+        const code = document.getElementById(`explorer-code-${index}`);
+        if (!code) {
+            return;
+        }
+        code.scrollTop = held.top;
+        code.scrollLeft = held.left;
+    }
+
+    function explorerFlushSourceRenderCallbacks(pane) {
+        const pending = pane?._explorerSourceRenderCallbacks;
+        if (!pending || !pending.length) {
+            return;
+        }
+        pane._explorerSourceRenderCallbacks = [];
+        pending.forEach(callback => {
+            try {
+                callback();
+            } catch (err) {
+                console.error('Explorer source render callback failed', err);
+            }
+        });
+    }
+
+    /* Read the rows once they exist. Immediate when no build is in flight —
+       which is every file small enough to render in one pass, so the ordering
+       those callers have always relied on is unchanged — and queued onto the
+       running build otherwise. A superseded build hands its queue to the build
+       that replaced it, so a scroll restore is never dropped on the floor. */
+    function whenExplorerSourceRendered(index, callback) {
+        const pane = terminals[index];
+        if (typeof callback !== 'function') {
+            return;
+        }
+        if (!pane || !pane._explorerSourceRenderJob) {
+            callback();
+            return;
+        }
+        (pane._explorerSourceRenderCallbacks || (pane._explorerSourceRenderCallbacks = []))
+            .push(callback);
+    }
+
+    function explorerCancelSourceRenderJob(pane) {
+        if (!pane || !pane._explorerSourceRenderJob) {
+            return;
+        }
+        if (typeof window.cancelAnimationFrame === 'function') {
+            window.cancelAnimationFrame(pane._explorerSourceRenderJob.frame);
+        }
+        pane._explorerSourceRenderJob = null;
+    }
+
+    /* A card that left the document is a build nobody can see.
+
+       Neither sliced job stops on being detached: the row build stops on a
+       newer render token or on the panel it was filling being replaced, and
+       the large tier's chunk pacer on the same two things. So opening a large
+       file and switching groups left a job spending its whole frame budget
+       appending rows into a detached tree, in competition with the incoming
+       group's attach, fit and paint.
+
+       Suspension is not cancellation. The rows are still wanted and so are the
+       readers queued behind them, so the job keeps its position and resumes
+       when the card comes back — and if the group is closed while suspended,
+       explorerAbandonSourceRenderJob() still flushes that queue. */
+    function explorerSuspendSourceRenderJob(pane) {
+        const job = pane?._explorerSourceRenderJob;
+        if (!job || job.suspended || typeof job.step !== 'function') {
+            return;
+        }
+        if (job.frame && typeof window.cancelAnimationFrame === 'function') {
+            window.cancelAnimationFrame(job.frame);
+        }
+        job.frame = 0;
+        job.suspended = true;
+    }
+
+    function explorerResumeSourceRenderJob(pane) {
+        const job = pane?._explorerSourceRenderJob;
+        if (!job || !job.suspended) {
+            return;
+        }
+        job.suspended = false;
+        job.frame = window.requestAnimationFrame(job.step);
+    }
+
+    /* The panel stopped being rows — the editor took it, or the large tier
+       replaced them with plain chunks — so no further slice may land. The
+       queued readers still run: they were waiting on "the rows are final",
+       and they are, just not as rows. Leaving them queued would strand a
+       scroll restore on a pane the reader is still looking at. */
+    function explorerAbandonSourceRenderJob(pane) {
+        explorerCancelSourceRenderJob(pane);
+        explorerFlushSourceRenderCallbacks(pane);
+    }
+
+    /* The whole pane is being discarded — closed with its grid, replaced by
+       another mode in place, or dropped with its cached group.
+
+       This is deliberately *not* explorerAbandonSourceRenderJob(): that one
+       belongs to a pane that stays live, where the rows are final by some
+       other route and the queued readers are still owed an answer. Here there
+       is no reader left to satisfy, and running the queue would be actively
+       wrong — the callbacks close over `index` and re-read global
+       `terminals[index]`, which by then holds the pane that replaced this one
+       (or, for a cached-group close, another group's pane in the same slot).
+
+       The frame stops, the queue is dropped unexecuted, and every in-flight
+       request goes with it so a pane nobody can see stops holding a fetch or
+       a worker. */
+    function explorerReleasePaneWork(pane) {
+        if (!pane) {
+            return;
+        }
+        explorerCancelSourceRenderJob(pane);
+        pane._explorerSourceRenderCallbacks = [];
+        cancelExplorerRequestSlots(pane);
+    }
+
+    /* The unit a frame emits rows in, and how long a frame may spend emitting
+       them. The chunk plan's slice size is a per-frame *ceiling*; this budget
+       is what actually ends a frame, because "rows" is not a unit of time —
+       2,000 rows of a minified bundle and 2,000 rows of a config file are two
+       orders of magnitude apart, and a frame that overruns is a frame the
+       window does not paint and a click the window does not answer. Filling in
+       from the top is only an improvement over freezing if the frames in
+       between are short enough to be interrupted. */
+    const EXPLORER_SOURCE_RENDER_BATCH_ROWS = 250;
+    const EXPLORER_SOURCE_RENDER_BUDGET_MS = 8;
+
+    function explorerRunSourceRenderJob(index, code, container, model, searchRanges, size) {
+        const pane = terminals[index];
+        const job = { frame: 0, at: 0, suspended: false, step: null };
+        pane._explorerSourceRenderJob = job;
+        /* Null for a first paint, which fills the panel directly; otherwise
+           the rows on screen that this build will replace when it finishes. */
+        const replacing = pane._explorerSourceRender?.replacing || null;
+        const onScreen = replacing || container;
+        const step = () => {
+            job.frame = 0;
+            /* Two ways this build stops being the one that should finish: a
+               newer render replaced it (identity, not a flag), or the panel it
+               was filling — or the one it is going to swap itself into — is no
+               longer the panel on screen. Either way the remaining rows are
+               rows nobody asked for. A suspended job is neither — it holds its
+               position until the card is back. */
+            if (job.suspended) {
+                return;
+            }
+            if (pane._explorerSourceRenderJob !== job) {
+                // A newer build owns the pane and the queue with it.
+                return;
+            }
+            if (explorerRenderedSourceContainer(code) !== onScreen) {
+                /* The panel this was filling was replaced by something that is
+                   not a newer build — the in-place editor's textarea, the
+                   large tier's chunks, a tab switch. No further slice may
+                   land, and this job stays `_explorerSourceRenderJob` forever
+                   unless it stands down here: every later
+                   whenExplorerSourceRendered() would queue behind a build that
+                   can never finish, which silently kills the pane's scroll
+                   restores, its selection restore and its Git-active sync. */
+                explorerAbandonSourceRenderJob(pane);
+                return;
+            }
+            const started = performance.now();
+            const frameEnd = Math.min(model.rows.length, job.at + size);
+            while (job.at < frameEnd) {
+                const to = Math.min(frameEnd, job.at + EXPLORER_SOURCE_RENDER_BATCH_ROWS);
+                explorerAppendSourceRows(container, model, searchRanges, job.at, to);
+                job.at = to;
+                if (performance.now() - started >= EXPLORER_SOURCE_RENDER_BUDGET_MS) {
+                    break;
+                }
+            }
+            if (job.at < model.rows.length) {
+                job.frame = window.requestAnimationFrame(step);
+                return;
+            }
+            pane._explorerSourceRenderJob = null;
+            if (replacing) {
+                explorerSwapRenderedSourceContainer(code, replacing, container);
+                if (pane._explorerSourceRender) {
+                    pane._explorerSourceRender.replacing = null;
+                }
+            }
+            explorerFinishSourceRender(index);
+        };
+        job.step = step;
+        job.frame = window.requestAnimationFrame(step);
+    }
+
+    /* The rows already on screen, kept. `true` means this render is done —
+       either because nothing it would paint differs from what is there
+       (a file open renders the rows and then applyExplorerSearch renders them
+       again; with no query the second pass has nothing to say), or because
+       only the search marks moved and the rows carrying them have been
+       repainted in place.
+
+       Row <div>s survive a decoration repaint, and with them the change-mark
+       attribute, its marker button, the open change peek and the fold
+       controls' bound listeners — which is why none of those are re-applied
+       here. Only the occurrence tint is, because its ranges point at the text
+       nodes the repaint replaced. */
+    function explorerReuseRenderedSource(index, code, next) {
+        const pane = terminals[index];
+        const policy = explorerRepaintPolicy();
+        const previous = pane._explorerSourceRender;
+        if (!policy || !previous) {
+            return false;
+        }
+        if (previous.stale) {
+            // The syntax colours arrived: every row's content changed even
+            // though the document did not.
+            return false;
+        }
+        const container = explorerRenderedSourceContainer(code);
+        /* While a swap build is running, the rows on screen are the ones it is
+           about to replace and still carry the previous render's token. The
+           surface is theirs until the swap lands, so identity is asked about
+           that element; only once the swap has happened does the token on the
+           rendered rows answer for it again. Either way the question is the
+           same one — is what is on screen still this render's? — so a panel
+           the editor or a tab switch took over still fails it and rebuilds. */
+        const sameSurface = previous.replacing
+            ? container === previous.replacing
+            : Boolean(container) && container.dataset.explorerRender === previous.token;
+        const previousRanges = previous.ranges || [];
+        /* The overwhelmingly common repaint — no query before, no query now —
+           needs no records, no maps and no plan: there is nothing a search
+           mark could have moved. */
+        const decorationsPossible = Boolean(previousRanges.length || next.searchRanges.length);
+        const records = (sameSurface && decorationsPossible)
+            ? explorerSourceLineRecords(next.content)
+            : [];
+        const plan = policy.sourceRenderPlan({
+            sameSurface,
+            pending: Boolean(pane._explorerSourceRenderJob),
+            contentChanged: previous.content !== next.content,
+            languageChanged: previous.language !== next.language,
+            foldsChanged: previous.collapsedKey !== next.collapsedKey,
+            // What a rebuild would cost, so the ceiling on what a repaint may
+            // touch is read against the document rather than as an absolute.
+            rowCount: records.length,
+            previousDecorations: policy.decorationMap(records, previousRanges),
+            nextDecorations: policy.decorationMap(records, next.searchRanges)
+        });
+        if (plan.mode === 'full') {
+            return false;
+        }
+        previous.ranges = next.searchRanges;
+        if (plan.mode === 'skip') {
+            return true;
+        }
+
+        const highlightedLines = explorerHighlightLinesForRender(
+            index, pane, next.content, normalizeExplorerLanguage(next.language)
+        );
+        const model = explorerCachedSourceRowModel(
+            pane,
+            next.content,
+            next.language,
+            ensureExplorerMarkdownCollapsedLines(pane),
+            next.collapsedKey,
+            highlightedLines
+        );
+        const byLine = new Map();
+        model.rows.forEach(row => byLine.set(row.record.number, row));
+        const cells = explorerRenderedSourceCells(container, plan.lines);
+        plan.lines.forEach(line => {
+            const row = byLine.get(line);
+            const cell = cells.get(line);
+            if (row && cell) {
+                cell.innerHTML = explorerSourceRowCodeHtml(model, row, next.searchRanges);
+            }
+        });
+        scheduleExplorerOccurrenceHighlight();
+        return true;
+    }
+
+    /* Past this many rows, finding them one at a time costs more than walking
+       the container once. Each `querySelector('[data-explorer-line="N"]')` is
+       a fresh scan of the whole row list, so a find matching a thousand lines
+       in a twenty-thousand-row file walked twenty million nodes to repaint a
+       thousand cells — that, and not the parsing, is what made typing in Find
+       lag behind the keyboard. Below the threshold the walk is the more
+       expensive of the two, and the commonest repaint of all — stepping from
+       one match to the next — touches exactly two rows. */
+    const EXPLORER_SOURCE_CELL_WALK_MIN_ROWS = 16;
+
+    /* Line number → that row's code cell, for the lines about to be repainted. */
+    function explorerRenderedSourceCells(container, lines) {
+        const cells = new Map();
+        const wanted = Array.isArray(lines) ? lines : [];
+        if (!container || !wanted.length) {
+            return cells;
+        }
+        if (wanted.length < EXPLORER_SOURCE_CELL_WALK_MIN_ROWS) {
+            wanted.forEach(line => {
+                const cell = container.querySelector(
+                    `.explorer-source-line[data-explorer-line="${line}"] > code`
+                );
+                if (cell) {
+                    cells.set(line, cell);
+                }
+            });
+            return cells;
+        }
+        const rows = container.children;
+        const needed = new Set(wanted);
+        for (let at = 0; at < rows.length; at += 1) {
+            const row = rows[at];
+            const line = Number(row.dataset?.explorerLine);
+            if (!needed.has(line)) {
+                continue;
+            }
+            /* Not `lastElementChild`: a changed row also carries the change
+               marker button, appended after the code cell. */
+            const cell = row.querySelector(':scope > code');
+            if (cell) {
+                cells.set(line, cell);
+            }
+        }
+        return cells;
     }
 
     function explorerPreviewBlockLanguage(code) {
@@ -5351,12 +4739,50 @@
 
     let explorerMermaidRenderId = 0;
 
+    /* Render each diagram as it comes into view rather than all of them up
+       front. A README with a dozen diagrams used to render every one in a
+       sequential await loop the moment the file opened — before the reader had
+       even chosen the Preview tab — which is seconds of frozen pane for
+       pictures mostly below the fold. Where IntersectionObserver is missing the
+       eager loop is still correct, so it simply runs.
+
+       The observer is stored on the preview element and disconnected when the
+       panel is rebuilt, so a pane switching files does not accumulate them. */
+    function renderExplorerMermaidLazily(preview, blocks) {
+        if (typeof window.IntersectionObserver !== 'function') {
+            return false;
+        }
+        preview._explorerMermaidObserver?.disconnect();
+        const pending = new Set(blocks.map(code => code.parentElement).filter(Boolean));
+        const observer = new window.IntersectionObserver(entries => {
+            entries.forEach(entry => {
+                if (!entry.isIntersecting || !pending.has(entry.target)) {
+                    return;
+                }
+                pending.delete(entry.target);
+                observer.unobserve(entry.target);
+                const code = entry.target.querySelector('code.language-mermaid');
+                if (code) {
+                    const blockOffset = entry.target.offsetTop;
+                    renderExplorerMermaidBlock(preview, code).then(() => {
+                        reapplyExplorerPreviewScrollAfterMermaid(preview, blockOffset);
+                    });
+                }
+            });
+        }, { root: preview, rootMargin: '200px' });
+        pending.forEach(block => observer.observe(block));
+        preview._explorerMermaidObserver = observer;
+        return true;
+    }
+
     async function renderExplorerMermaid(preview) {
         if (!preview || !window.mermaid) {
             return;
         }
         const blocks = Array.from(preview.querySelectorAll('pre > code.language-mermaid'));
         if (!blocks.length) {
+            preview._explorerMermaidObserver?.disconnect();
+            preview._explorerMermaidObserver = null;
             return;
         }
         window.mermaid.initialize({
@@ -5365,34 +4791,46 @@
             theme: currentResolvedTheme() === 'dark' ? 'dark' : 'default',
             suppressErrorRendering: true
         });
-        for (const code of blocks) {
-            const source = code.textContent || '';
-            const pre = code.parentElement;
-            const diagram = document.createElement('div');
-            diagram.className = 'explorer-mermaid';
-            pre.replaceWith(diagram);
-            try {
-                explorerMermaidRenderId += 1;
-                const rendered = await window.mermaid.render(
-                    `explorer-mermaid-${explorerMermaidRenderId}`,
-                    source
-                );
-                if (!preview.contains(diagram)) {
-                    continue;
-                }
-                diagram.innerHTML = rendered.svg;
-                rendered.bindFunctions?.(diagram);
-            } catch (error) {
-                diagram.classList.add('explorer-mermaid-error');
-                const message = String(error?.message || 'Invalid diagram').split('\n')[0];
-                diagram.textContent = `Mermaid diagram error: ${message}`;
-                continue;
-            }
-            /* Ctrl+scroll zooms the rendered diagram (notes 3); double-click
-               resets it. Bound on the diagram box so the page-zoom default is
-               suppressed only while the pointer is over the diagram. */
-            enableExplorerWheelZoom(diagram, diagram.querySelector('svg'));
+        if (renderExplorerMermaidLazily(preview, blocks)) {
+            return;
         }
+        for (const code of blocks) {
+            const blockOffset = code.parentElement?.offsetTop;
+            await renderExplorerMermaidBlock(preview, code);
+            reapplyExplorerPreviewScrollAfterMermaid(preview, blockOffset);
+        }
+    }
+
+    async function renderExplorerMermaidBlock(preview, code) {
+        const source = code.textContent || '';
+        const pre = code.parentElement;
+        if (!pre) {
+            return;
+        }
+        const diagram = document.createElement('div');
+        diagram.className = 'explorer-mermaid';
+        pre.replaceWith(diagram);
+        try {
+            explorerMermaidRenderId += 1;
+            const rendered = await window.mermaid.render(
+                `explorer-mermaid-${explorerMermaidRenderId}`,
+                source
+            );
+            if (!preview.contains(diagram)) {
+                return;
+            }
+            diagram.innerHTML = rendered.svg;
+            rendered.bindFunctions?.(diagram);
+        } catch (error) {
+            diagram.classList.add('explorer-mermaid-error');
+            const message = String(error?.message || 'Invalid diagram').split('\n')[0];
+            diagram.textContent = `Mermaid diagram error: ${message}`;
+            return;
+        }
+        /* Ctrl+scroll zooms the rendered diagram (notes 3); double-click
+           resets it. Bound on the diagram box so the page-zoom default is
+           suppressed only while the pointer is over the diagram. */
+        enableExplorerWheelZoom(diagram, diagram.querySelector('svg'));
     }
 
     /* Ctrl+scroll zoom for a scrollable view (container) around a scalable
@@ -5501,17 +4939,273 @@
         container.addEventListener('pointercancel', endDrag);
     }
 
-    function restoreExplorerPreview(index) {
+    /* Paint whatever preview HTML the pane already holds. Split out of
+       restoreExplorerPreview() so the fetch path and the restore path share
+       one insertion, one highlight pass and one Mermaid pass. */
+    /* Hashed once per rendered document, not once per call: this is consulted
+       on every view switch and every find keystroke, and the string it hashes
+       is the whole rendered preview. */
+    function explorerPreviewRenderToken(pane) {
+        const path = pane._explorerFilePath || '';
+        const html = pane._explorerPreviewHtml || '';
+        const cached = pane._explorerPreviewToken;
+        if (cached && cached.path === path && cached.html === html) {
+            return cached.token;
+        }
+        const token = explorerHashText([path, html].join(String.fromCharCode(0)));
+        pane._explorerPreviewToken = { path, html, token };
+        return token;
+    }
+
+    /* A repaint of the Preview panel is not a re-visit of it.
+
+       Every path that shows the panel used to run this: selecting the tab,
+       switching Source/Preview/Diff, and every repaint of the find. Each one
+       replaced the panel's whole subtree, which puts the reader back at the
+       top — and since the Mermaid diagrams draw as they come into view, the
+       panel it lands on is also *shorter* than the one it replaced, so the
+       proportional restore that follows cannot find the way back either. On a
+       long document that reads as being thrown to the top for no reason.
+
+       So a panel already showing this exact render is left alone, and only the
+       appearance (a few custom properties on the element itself) is re-applied.
+       The token is the path and the rendered HTML, not the element: a panel the
+       viewer rebuilt carries no token and repaints, exactly as it must. */
+    function paintExplorerPreview(index) {
         const pane = terminals[index];
         const preview = document.getElementById(`explorer-preview-${index}`);
-        if (pane && preview) {
+        if (!pane || !preview) {
+            return null;
+        }
+        const token = explorerPreviewRenderToken(pane);
+        const stale = preview.dataset.explorerPreviewRender !== token;
+        if (stale) {
+            preview._explorerMermaidObserver?.disconnect();
+            preview._explorerMermaidObserver = null;
             preview.innerHTML = pane._explorerPreviewHtml || '';
+            preview.dataset.explorerPreviewRender = token;
             if (!pane._explorerFilePlain) {
                 highlightExplorerPreviewCode(preview);
             }
+            wireExplorerMarkdownLinks(index, preview);
+        }
+        /* Outside the guard, and still the one call site: appearance is a few
+           custom properties on this element, so it costs nothing to re-apply
+           and every path into the panel keeps getting it without restating it.
+           The diagrams stay inside, after it, because they are drawn against
+           the appearance that is on the element. */
+        applyExplorerMarkdownAppearanceToElement(preview, explorerMarkdownAppearance());
+        if (stale) {
             renderExplorerMermaid(preview);
         }
         return preview;
+    }
+
+    /* The find's <mark> wrappers, taken out without touching anything else.
+
+       A repaint used to drop them with the rest of the subtree; a reused panel
+       has to have them removed explicitly, or the next query would paint its
+       marks alongside the previous query's. Parents are normalized once each
+       rather than once per mark, because a paragraph with fifty hits in it
+       would otherwise re-walk its own children fifty times. */
+    function explorerClearSearchMarks(root) {
+        const marks = root?.querySelectorAll?.('mark.explorer-search-match');
+        if (!marks || !marks.length) {
+            return;
+        }
+        const parents = new Set();
+        marks.forEach(mark => {
+            const parent = mark.parentNode;
+            if (!parent) {
+                return;
+            }
+            parents.add(parent);
+            parent.replaceChild(document.createTextNode(mark.textContent || ''), mark);
+        });
+        parents.forEach(parent => parent.normalize());
+    }
+
+    /* Fetch the rendered Markdown the first time the Preview panel is shown,
+       and paint it. The file GET no longer carries `preview_html`: rendering
+       and Bleach-sanitizing it on every open and every save, for a panel the
+       reader may never select, was one of the two costs of opening a large
+       Markdown file. `preview_type` is an independent field now, so the panel
+       still *exists* from the moment the file loads — only its content is
+       deferred.
+
+       Reuses the pane's cached HTML on every later visit, so the pause lands
+       once. Failures paint the message in the panel rather than anywhere
+       global: this is one panel's content, not an app-level event. */
+
+    /* The dead end the lazy loader could otherwise leave behind: the render
+       described bytes Source no longer holds, so it cannot be painted, and
+       "Rendering preview…" is not a state anything on screen can leave.
+
+       The action is the whole-file refresh, deliberately not a second
+       Preview-only fetch: Source still carries the revision the response
+       disagreed with, so refetching the preview alone would be declined again
+       for exactly the same reason. Re-reading the file installs one new
+       revision — and updateExplorerFileInPlace() then requests the preview
+       against it, because Preview is the panel on screen. A refresh that fails
+       changes nothing, which is why the affordance is left standing. */
+    function paintExplorerPreviewStale(index, preview) {
+        if (!preview) {
+            return null;
+        }
+        preview.innerHTML = `
+            <div class="explorer-preview-status" role="status">
+                <span>The file changed while the preview was rendering.</span>
+                <button
+                    type="button"
+                    class="explorer-search-btn explorer-preview-refresh-btn"
+                    data-explorer-preview-refresh="${index}"
+                >Refresh</button>
+            </div>
+        `;
+        const button = preview.querySelector(`[data-explorer-preview-refresh="${index}"]`);
+        button?.addEventListener('click', () => {
+            if (button.disabled) {
+                return;
+            }
+            button.disabled = true;
+            Promise.resolve(refreshExplorerOpenFileQuiet(index))
+                .catch(() => false)
+                .then(() => {
+                    // A success has already replaced this subtree; only a
+                    // failure still has a button to hand back.
+                    button.disabled = false;
+                });
+        });
+        return preview;
+    }
+
+    async function ensureExplorerPreviewLoaded(index) {
+        const pane = terminals[index];
+        const sessionId = sessionIds[index];
+        const preview = document.getElementById(`explorer-preview-${index}`);
+        if (!pane || !preview || !sessionId) {
+            return null;
+        }
+        if (pane._explorerPreviewLoaded) {
+            return paintExplorerPreview(index);
+        }
+        const path = pane._explorerFilePath || '';
+        const content = pane._explorerFileContent;
+        if (!path) {
+            return preview;
+        }
+        /* The same in-flight join loadExplorerDiff() carries, for the same
+           reason. `_explorerPreviewLoaded` is set only once the response has
+           landed, so it cannot answer for a load still in the air — and every
+           first entry into the Preview panel asks twice inside one frame: the
+           caller starts the fetch, then applyExplorerSearch() runs
+           synchronously into restoreExplorerPreview(), which sees an unloaded
+           panel and asks again. The second ask aborted the first and refetched
+           the identical URL, so every first visit cost two requests and two
+           server-side Markdown renders — Flask does not cancel on client
+           abort, so the abandoned one still ran to completion. An identical
+           in-flight load is joined; a load for different bytes still
+           supersedes, which is what the abort slot is for. The identity is the
+           path *and* the buffer, matching the staleness check inside: a save
+           lands as the same path with different content, and joining that load
+           would hand the reader a render of the bytes they just replaced. */
+        const inFlight = pane._explorerPreviewLoadInFlight;
+        if (inFlight && inFlight.path === path && inFlight.content === content) {
+            await inFlight.promise;
+            return document.getElementById(`explorer-preview-${index}`) === preview
+                ? preview
+                : null;
+        }
+        preview.textContent = 'Rendering preview...';
+        const load = (async () => {
+            try {
+                const response = await fetch(
+                    `/api/explorer/${encodeURIComponent(sessionId)}/file/preview?path=${encodeURIComponent(path)}`,
+                    { signal: explorerRequestSignal(pane, 'preview') }
+                );
+                const data = await response.json();
+                if (!response.ok) {
+                    throw new Error(data.error || 'Failed to render preview');
+                }
+                // The viewer may have moved on during the flight; the response
+                // describes whatever was open when it started.
+                if (terminals[index] !== pane
+                    || sessionIds[index] !== sessionId
+                    || pane._explorerFilePath !== path
+                    || pane._explorerFileContent !== content
+                    || document.getElementById(`explorer-preview-${index}`) !== preview) {
+                    return null;
+                }
+                /* …and the *file* may have moved on, which the checks above
+                   cannot see: they compare the viewer against itself. Source
+                   and Preview are two reads now, so a write landing between
+                   them would put a render of the newer bytes beside Source's
+                   older ones. Still never painted and never refetched from
+                   here — but no longer *silently* declined: the open-file
+                   change listener this used to lean on suspends itself after
+                   repeated failures, and nothing else repaints the panel while
+                   the reader stays on it, so the loader's placeholder could be
+                   the last thing they ever saw. Guardrail 8: say what happened
+                   and give it a retry. A response with no token (an older
+                   server) is accepted as before. */
+                const previewRevision = data.state_revision || '';
+                const baseRevision = pane._explorerFileStateRevision || '';
+                if (previewRevision && baseRevision && previewRevision !== baseRevision) {
+                    return paintExplorerPreviewStale(index, preview);
+                }
+                pane._explorerPreviewHtml = data.preview_html || '';
+                pane._explorerPreviewLoaded = true;
+            } catch (error) {
+                if (explorerIsAbortError(error)) {
+                    return null;
+                }
+                console.error('[GridVibe Sessions] Explorer preview render failed:', error);
+                preview.textContent = error.message || 'Failed to render preview.';
+                return preview;
+            }
+            const painted = paintExplorerPreview(index);
+            requestExplorerPanelScrollRestore(index, 'preview');
+            /* The find that ran while this was in the air had nothing but the
+               loader's placeholder to mark, so it counted 0 and painted
+               nothing. paintExplorerPreview() has just replaced that subtree,
+               so the query is applied to the document that actually arrived —
+               the arrival hook loadExplorerDiff() already carries. Only while
+               the reader is still on Preview: a find pointed at Source or Diff
+               owns those panels, and re-running it from here would repaint
+               them on behalf of a panel nobody is looking at. */
+            if (painted && pane._explorerSearch?.query
+                && activeExplorerFileView(index) === 'preview') {
+                applyExplorerSearch(index, { scroll: false });
+            }
+            return painted;
+        })();
+        pane._explorerPreviewLoadInFlight = { path, content, promise: load };
+        try {
+            return await load;
+        } finally {
+            if (pane._explorerPreviewLoadInFlight?.promise === load) {
+                pane._explorerPreviewLoadInFlight = null;
+            }
+        }
+    }
+
+    function restoreExplorerPreview(index) {
+        const preview = document.getElementById(`explorer-preview-${index}`);
+        const pane = terminals[index];
+        /* Repainting before the lazy render has answered would wipe the
+           loader's placeholder and leave a blank panel until the fetch lands.
+           Hand the panel to the loader instead — it paints when it has
+           something to paint. */
+        if (pane && preview && !pane._explorerPreviewLoaded) {
+            ensureExplorerPreviewLoaded(index);
+            return preview;
+        }
+        const painted = paintExplorerPreview(index) || preview;
+        /* "Restore" means the panel as the file renders it, so the find's
+           marks come off here. A repaint drops them with the subtree; a reused
+           panel keeps them until they are taken out. */
+        explorerClearSearchMarks(painted);
+        return painted;
     }
 
     function markExplorerSearchInElement(root, query, activeIndex = 0, maxMatches = EXPLORER_SEARCH_MAX_MATCHES) {
@@ -5826,6 +5520,18 @@
             return;
         }
 
+        /* The tier that removed the rows removed the find with them, and the
+           header hides the search bar — so there is no query to apply and
+           nothing to repaint. Returning here rather than falling through keeps
+           a restored search state (a tab reopened at a now-larger file) from
+           driving a repaint against rows that do not exist. Asked of the panel
+           on screen, not of the pane: the same large file's Diff panel is
+           bounded and answers perfectly well. */
+        if (pane._explorerMode === 'file'
+            && !explorerPaneAllowsFind(pane, activeExplorerFileView(index))) {
+            return;
+        }
+
         const state = ensureExplorerSearchState(pane);
         if (resetActive) {
             state.activeIndex = 0;
@@ -5853,7 +5559,9 @@
         let matchCount = 0;
         let capped = false;
         if (query && view === 'source') {
-            const cachedRanges = state.resultQuery === query && Array.isArray(state.ranges)
+            const cachedRanges = state.resultQuery === query
+                && Array.isArray(state.ranges)
+                && explorerSearchRangesMatchContent(state, pane)
                 ? state.ranges
                 : null;
             const ranges = cachedRanges || [];
@@ -5862,7 +5570,10 @@
                 const token = { cancelled: false };
                 pane._explorerSearchToken = token;
                 updateExplorerSearchControls(index, query, 0, 0);
-                const result = await explorerFindRangesAsync(pane._explorerFileContent || '', query, token);
+                // The buffer that is actually scanned, held across the await:
+                // the offsets below address this string and no other.
+                const scanned = pane._explorerFileContent || '';
+                const result = await explorerFindRangesAsync(scanned, query, token);
                 if (token.cancelled || pane._explorerSearchToken !== token) {
                     return;
                 }
@@ -5871,6 +5582,8 @@
                 ranges.capped = result.capped;
                 state.ranges = ranges;
                 state.resultQuery = query;
+                // Stamped with the exact buffer these offsets address.
+                state.resultContent = scanned;
                 explorerRevealMarkdownSearchMatches(index, ranges);
             }
             matchCount = ranges.length;
@@ -5905,7 +5618,7 @@
             renderExplorerSource(index);
             restoreExplorerPreview(index);
             if (pane._explorerDiffLoaded) {
-                renderExplorerDiff(index);
+                await renderExplorerDiff(index);
             }
             const diff = document.getElementById(`explorer-diff-code-${index}`);
             if (!diff) {
@@ -5941,7 +5654,9 @@
         state.matchCapped = capped;
         updateExplorerSearchControls(index, query, state.activeIndex || 0, matchCount, capped);
         if (query && matchCount && scroll) {
-            scrollExplorerSearchMatch(index);
+            // The active match may still be a row a frame-sliced build has not
+            // reached; scroll to it once the rows it is in exist.
+            whenExplorerSourceRendered(index, () => scrollExplorerSearchMatch(index));
         }
     }
 
@@ -6020,6 +5735,14 @@
         }
         const input = document.querySelector(`[data-explorer-search-input="${index}"]`);
         if (!input) {
+            return false;
+        }
+        /* The third capability boundary, and the one that costs the reader
+           something when it is wrong: a control that is on screen but cannot
+           serve the query still swallows Ctrl+F, so the browser's own find
+           never opens either. Refuse before focusing, from the same verdict
+           the header and applyExplorerSearch() read. */
+        if (!syncExplorerFindAvailability(index)) {
             return false;
         }
         /* Seeding the query with the current editor selection mirrors the
@@ -6278,25 +6001,50 @@
         };
     }
 
-    function applyScrollMetrics(el, metrics) {
+    /* Restore an offset the reader actually had, and fall back to the fraction
+       only when that is all there is.
+
+       A capture taken in this session carries both — the exact offset and its
+       ratio — and inside a session the offset is the truthful one: a tab
+       switch, a re-render, a rebuild of the same document all return to the
+       same content, and a fraction of a scroll extent that moved by a few
+       pixels puts the reader somewhere they never were. Horizontally that is
+       not even approximately right: a code view's horizontal position is a
+       column, and the extent it would be a fraction of is the length of the
+       single longest line, which one folded section or one row a frame-sliced
+       build has not emitted yet is enough to change. Scaling by it threw the
+       view sideways on every restore, which is what made scrolling a large
+       file feel like it was fighting back.
+
+       The ratios are what survive a restart: a persisted record stores only
+       `{x, y}` (explorer-persistence.js), so a restored workspace has no
+       offset to return to and a proportional position is the best available
+       answer. `wasAtBottom` still wins outright — "the end of the file" is an
+       intent, not a coordinate. */
+    function applyScrollMetrics(el, metrics, dimensions) {
         if (!el || !metrics) {
             return;
         }
-        const maxScrollTop = Math.max(0, el.scrollHeight - el.clientHeight);
-        const maxScrollLeft = Math.max(0, el.scrollWidth - el.clientWidth);
+        /* A caller restoring several scrollers at once reads every one of
+           their extents first and hands them back here, so the write below
+           cannot invalidate the layout the next target's read needs. Read
+           straight off the element when there is only one of it. */
+        const box = dimensions || el;
+        const maxScrollTop = Math.max(0, box.scrollHeight - box.clientHeight);
+        const maxScrollLeft = Math.max(0, box.scrollWidth - box.clientWidth);
         el.scrollLeft = Math.min(
             maxScrollLeft,
-            maxScrollLeft > 0
-                ? Math.round(maxScrollLeft * (metrics.scrollLeftRatio || 0))
-                : (metrics.scrollLeft || 0)
+            Number.isFinite(metrics.scrollLeft)
+                ? metrics.scrollLeft
+                : Math.round(maxScrollLeft * (metrics.scrollLeftRatio || 0))
         );
         el.scrollTop = metrics.wasAtBottom
             ? maxScrollTop
             : Math.min(
                 maxScrollTop,
-                maxScrollTop > 0
-                    ? Math.round(maxScrollTop * (metrics.scrollTopRatio || 0))
-                    : (metrics.scrollTop || 0)
+                Number.isFinite(metrics.scrollTop)
+                    ? metrics.scrollTop
+                    : Math.round(maxScrollTop * (metrics.scrollTopRatio || 0))
             );
     }
 
@@ -6332,15 +6080,50 @@
             if (!scrollEl) {
                 return;
             }
-            const maxScrollTop = Math.max(0, scrollEl.scrollHeight - scrollEl.clientHeight);
-            const maxScrollLeft = Math.max(0, scrollEl.scrollWidth - scrollEl.clientWidth);
-            state.panels[panel.dataset.explorerFilePanel || 'source'] = {
-                scrollLeft: scrollEl.scrollLeft,
-                scrollLeftRatio: maxScrollLeft > 0 ? scrollEl.scrollLeft / maxScrollLeft : 0,
-                scrollTop: scrollEl.scrollTop,
-                scrollTopRatio: maxScrollTop > 0 ? scrollEl.scrollTop / maxScrollTop : 0,
-                wasAtBottom: maxScrollTop > 0 && scrollEl.scrollTop >= maxScrollTop - 2
-            };
+            const mode = panel.dataset.explorerFilePanel || 'source';
+            const pane = terminals[index];
+            const store = pane?._explorerPanelScrollStore;
+            const stored = explorerPanelScrollStoreMatches(pane, store)
+                ? store.panels?.[mode]?.metrics
+                : null;
+            /* A panel that is still filling has no reader position to read.
+
+               Preview can be showing only its loader: capturing that tiny box
+               during the render's presentation snapshot would write 0 (or its
+               small clamp) over the offset waiting for the lazy Markdown
+               response.
+
+               Source has exactly the same hazard and it is not hypothetical.
+               A frame-sliced build empties the scroller before its first
+               slice lands, so the browser clamps the offset to 0 and — a task
+               later, while the remaining frames are still emitting — fires a
+               `scroll` event for it. The capture-phase listener in
+               explorerEnsureViewerShell() answers that event with this very
+               function, which would then store the clamp as the reader's
+               position and hand it to the restore queued behind the same
+               build. That is the whole of "a large file jumps to the top
+               after a save, a tab swap, or a watcher refresh": the position
+               was captured correctly and then overwritten by the rebuild's
+               own side effect a moment before it was due to be applied. A
+               synchronous build never showed it, because there the restore
+               has already run by the time the event is dispatched.
+
+               Hidden panels, an unloaded Preview and a Source build in flight
+               all retain the content-bound value already in the pane store.
+               The accepted cost is the same one the restore already carries:
+               a build owns where the file opens, so a reader who scrolls
+               inside the few frames a build lasts is returned to the offset
+               that build was restoring. */
+            const contentPending = mode === 'preview'
+                ? !pane?._explorerPreviewLoaded
+                : mode === 'source' && Boolean(pane?._explorerSourceRenderJob);
+            const metrics = (panel.hidden || contentPending) && stored
+                ? { ...stored }
+                : captureScrollMetrics(scrollEl);
+            state.panels[mode] = metrics;
+            if (!panel.hidden && !contentPending && metrics) {
+                storeExplorerPanelMetrics(index, mode, metrics);
+            }
         });
         return state;
     }
@@ -6350,54 +6133,78 @@
             return;
         }
 
+        setExplorerPanelScrollState(index, state);
+
         /* Directory listings have no file-view panels; switching modes there
            would clobber stale diff state for no visual effect. */
         const listEl = document.getElementById(`explorer-list-${index}`);
+        let restoredMode = state.activeView || 'source';
         if (listEl && listEl.querySelector('[data-explorer-file-panel]')) {
-            setExplorerFileView(index, state.activeView || 'source');
+            setExplorerFileView(index, restoredMode, { captureScroll: false });
+            restoredMode = activeExplorerFileView(index);
         }
 
-        const applyScroll = () => {
+        /* The listing and the three sidebar panels are restored in one read
+           pass and one write pass, never element by element: reading an
+           extent after writing another element's offset forces the layout
+           again, and this runs for every pane of an incoming group.
+
+           They are also restored until they *land*, not a fixed number of
+           times. The four passes this replaces — immediate, two nested
+           frames, then an 80 ms timer — existed because nobody knew when the
+           content would be final, so a 20,000-row document paid three
+           layouts it had no use for. The panel policy already answers "can
+           this target hold that offset yet?"; the same bounded answer ends
+           the sequence as soon as it can. */
+        const applyScroll = (attempt = 0) => {
             const list = document.getElementById(`explorer-list-${index}`);
             if (!list) {
                 return;
             }
-            list.scrollLeft = state.listScrollLeft || 0;
-            list.scrollTop = state.listScrollTop || 0;
-            if (state.directory) applyScrollMetrics(list, state.directory);
-            applyScrollMetrics(document.getElementById(`explorer-tree-panel-${index}`), state.sidebar?.tree);
-            applyScrollMetrics(document.getElementById(`explorer-git-panel-${index}`), state.sidebar?.git);
-            applyScrollMetrics(document.getElementById(`explorer-search-panel-${index}`), state.sidebar?.search);
-            list.querySelectorAll('[data-explorer-file-panel]').forEach(panel => {
-                const panelState = state.panels?.[panel.dataset.explorerFilePanel || 'source'];
-                const scrollEl = explorerPanelScrollTarget(panel);
-                if (panelState && scrollEl) {
-                    const maxScrollTop = Math.max(0, scrollEl.scrollHeight - scrollEl.clientHeight);
-                    const maxScrollLeft = Math.max(0, scrollEl.scrollWidth - scrollEl.clientWidth);
-                    scrollEl.scrollLeft = Math.min(
-                        maxScrollLeft,
-                        maxScrollLeft > 0
-                            ? Math.round(maxScrollLeft * (panelState.scrollLeftRatio || 0))
-                            : (panelState.scrollLeft || 0)
-                    );
-                    scrollEl.scrollTop = panelState.wasAtBottom
-                        ? maxScrollTop
-                        : Math.min(
-                            maxScrollTop,
-                            maxScrollTop > 0
-                                ? Math.round(maxScrollTop * (panelState.scrollTopRatio || 0))
-                                : (panelState.scrollTop || 0)
-                        );
+            const targets = [
+                {
+                    el: list,
+                    metrics: state.directory || {
+                        scrollLeft: state.listScrollLeft || 0,
+                        scrollTop: state.listScrollTop || 0
+                    }
+                },
+                {
+                    el: document.getElementById(`explorer-tree-panel-${index}`),
+                    metrics: state.sidebar?.tree
+                },
+                {
+                    el: document.getElementById(`explorer-git-panel-${index}`),
+                    metrics: state.sidebar?.git
+                },
+                {
+                    el: document.getElementById(`explorer-search-panel-${index}`),
+                    metrics: state.sidebar?.search
+                }
+            ].filter(target => target.el && target.metrics);
+            const policy = explorerScrollPolicy();
+            const reads = targets.map(target => ({
+                scrollHeight: target.el.scrollHeight,
+                clientHeight: target.el.clientHeight,
+                scrollWidth: target.el.scrollWidth,
+                clientWidth: target.el.clientWidth
+            }));
+            const plans = targets.map((target, at) => (policy
+                ? policy.restorePlan(target.metrics, reads[at], attempt)
+                : { apply: true, retry: false, nextAttempt: attempt + 1 }));
+            targets.forEach((target, at) => {
+                if (plans[at].apply) {
+                    applyScrollMetrics(target.el, target.metrics, reads[at]);
                 }
             });
+            const pending = plans.find(plan => plan.retry);
+            if (pending) {
+                requestAnimationFrame(() => applyScroll(pending.nextAttempt));
+            }
         };
 
         applyScroll();
-        requestAnimationFrame(() => {
-            applyScroll();
-            requestAnimationFrame(applyScroll);
-        });
-        window.setTimeout(applyScroll, 80);
+        requestExplorerPanelScrollRestore(index, restoredMode);
     }
 
     /* ── Per-tab view mode + scroll state (2.e) ──
@@ -6432,8 +6239,56 @@
         ]))}`;
     }
 
+    /* One hash per document, not one per call.
+
+       `_explorerFileContent` is a stable string reference that changes
+       whenever the bytes do, so a cache keyed on the identity of the inputs is
+       exact rather than approximate. The alternative is what this used to be:
+       a djb2 pass over every character of the open file — preceded by a join
+       that materializes a full second copy of the buffer — run again for every
+       tab switch, every group switch and every presentation capture, in both
+       directions. explorerPreviewRenderToken() above caches on the same terms
+       for the same reason. The answer is handed back as a fresh object, so a
+       tab view holding it can never alias the next caller's. */
+    function explorerContentRevisionKey(pane) {
+        if (pane._explorerMode === 'directory') {
+            return {
+                mode: 'directory',
+                path: pane._explorerPath,
+                entries: pane._explorerEntries,
+                revision: pane._explorerDirectoryRevision
+            };
+        }
+        return {
+            mode: 'file',
+            path: pane._explorerFilePath,
+            content: pane._explorerFileContent,
+            diffLoaded: Boolean(pane._explorerDiffLoaded),
+            diffCommit: pane._explorerDiffCommit,
+            diffMode: pane._explorerDiffMode,
+            diffContent: pane._explorerDiffContent
+        };
+    }
+
+    function explorerContentRevisionKeyMatches(previous, next) {
+        return Boolean(previous)
+            && previous.mode === next.mode
+            && Object.keys(next).every(name => previous[name] === next[name]);
+    }
+
     function explorerCurrentContentRevisions(pane) {
         if (!pane) return {};
+        const key = explorerContentRevisionKey(pane);
+        const cached = pane._explorerContentRevisions;
+        if (cached && explorerContentRevisionKeyMatches(cached.key, key)) {
+            return { ...cached.revisions };
+        }
+        const revisions = explorerComputeContentRevisions(pane);
+        pane._explorerContentRevisions = { key, revisions };
+        return { ...revisions };
+    }
+
+    function explorerComputeContentRevisions(pane) {
         if (pane._explorerMode === 'directory') {
             return {
                 directory: String(
@@ -6463,21 +6318,22 @@
     function applyExplorerPendingDiffScroll(index) {
         const pane = terminals[index];
         const pending = pane ? pane._explorerPendingDiffScroll : null;
-        if (!pane || !pending) {
+        if (!pane) {
             return;
         }
         pane._explorerPendingDiffScroll = null;
         let metrics = pending;
-        if (pending.persistedRecord) {
+        if (pending?.persistedRecord) {
             const resolved = window.GridVibeExplorerPersistence?.resolveRecord(
                 pending.persistedRecord,
                 explorerCurrentContentRevisions(pane)
             );
             metrics = resolved?.scroll?.panels?.diff || null;
         }
-        if (!metrics) return;
-        const panel = document.getElementById(`explorer-diff-panel-${index}`);
-        applyScrollMetrics(explorerPanelScrollTarget(panel), metrics);
+        if (metrics) {
+            storeExplorerPanelMetrics(index, 'diff', metrics);
+        }
+        requestExplorerPanelScrollRestore(index, 'diff');
     }
 
     const EXPLORER_FOLDER_ICON = `
@@ -6517,6 +6373,17 @@
             <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/>
             <polyline points="15 3 21 3 21 9"/>
             <line x1="10" y1="14" x2="21" y2="3"/>
+        </svg>
+    `;
+
+    /* Reveals the Graph section's commit find. Sized like the stage/discard
+       icons beside it in the sections above, so the three section headers'
+       controls sit on one baseline. */
+    const EXPLORER_GIT_SEARCH_ICON = `
+        <svg class="explorer-btn-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"
+            fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="11" cy="11" r="6"/>
+            <line x1="15.5" y1="15.5" x2="20" y2="20"/>
         </svg>
     `;
 
@@ -7052,8 +6919,9 @@
         pane._explorerFileName = fileName;
         pane._explorerFileContent = '';
         pane._explorerFileLanguage = '';
-        pane._explorerFilePlain = false;
+        applyExplorerSourceTier(pane, '');
         pane._explorerPreviewHtml = '';
+        pane._explorerPreviewLoaded = false;
         pane._explorerGit = null;
         /* `_explorerGitContext` describes the repository the *pane* is rooted
            in, not the shown file, so the image viewer leaves it alone — the
@@ -7137,6 +7005,7 @@
 
         renderExplorerTabStrip(index);
         persistExplorerTabsToSession(index);
+        syncExplorerGitActiveRows(index);
         return true;
     }
 
@@ -7161,7 +7030,13 @@
         }
         const codeLanguage = normalizeExplorerLanguage(data.language) || explorerCodeLanguage(path || fileName);
         const fileType = explorerFileTypeLabel(path || fileName, codeLanguage);
-        const hasPreview = data.preview_type === 'markdown' && typeof data.preview_html === 'string';
+        /* Read `preview_type` and never the HTML string. The panel's existence
+           is a property of the file; the HTML now arrives lazily, so deriving
+           it from `typeof data.preview_html === 'string'` would make the panel
+           blink out of existence on every load — and, since a save answers with
+           the same payload shape, would make every save on a Markdown file
+           bail updateExplorerFileInPlace() into a full pane rebuild. */
+        const hasPreview = data.preview_type === 'markdown';
         const requestedDiffCommit = String(diffCommit || '');
         const requestedDiffMode = requestedDiffCommit ? '' : String(diffMode || '');
         const hasGitDiff = explorerHasGitDiff(data.git) || Boolean(requestedDiffCommit);
@@ -7210,9 +7085,25 @@
         const initialFileView = keepDiffSplit
             ? 'diff'
             : (preferredFileView === 'preview' && hasPreview ? 'preview' : 'source');
+        // An explicit scrollState (in-place refresh) wins; otherwise fall back
+        // to the tab's stored snapshot, aligned with the restored view mode.
+        const effectiveScrollState = scrollState || (restoredTabView
+            ? { ...restoredTabView.scroll, activeView: initialFileView }
+            : null);
         const searchState = ensureExplorerSearchState(pane, 'file');
-        if (previousPath && previousPath !== path) {
+        /* The query the incoming surface gets is the one captured against
+           *this* tab and *this* path (explorerCaptureActiveTabView), not
+           whatever the pane was last searching. A pane-wide query is what made
+           a tab switch paint the previous file's find over the new one and
+           then scroll it to the first hit. */
+        const tabFind = assignedTab?.find;
+        const restoredQuery = tabFind
+            && explorerNormalizeTabPath(tabFind.path) === explorerNormalizeTabPath(path)
+            ? String(tabFind.query || '')
+            : '';
+        if (restoredQuery !== searchState.query || (previousPath && previousPath !== path)) {
             cancelExplorerSearch(index);
+            searchState.query = restoredQuery;
             searchState.activeIndex = 0;
             searchState.matchCount = 0;
             searchState.matchCapped = false;
@@ -7237,8 +7128,25 @@
         pane._explorerFileUtf8Bom = Boolean(data.utf8_bom);
         pane._explorerFileTruncated = Boolean(data.truncated);
         pane._explorerFileLanguage = codeLanguage;
-        pane._explorerFilePlain = pane._explorerFileContent.length > EXPLORER_PLAIN_PREVIEW_THRESHOLD;
-        pane._explorerPreviewHtml = hasPreview ? (data.preview_html || '') : '';
+        applyExplorerSourceTier(pane, pane._explorerFileContent);
+        /* Read *after* the tier is recomputed for the incoming content, never
+           before: the large tier renders no per-line rows for a find to
+           address, so the header renders no find bar, and deciding that from
+           the outgoing file's tier put one on a large file opened after a small
+           one. updateExplorerFileInPlace() treats a change in this value the
+           way it treats a change in `hasPreview` — the header is not the same
+           header, so it hands back to a full rebuild.
+
+           "Any panel could answer", not "the opening panel can": the shell is
+           rendered once and then hidden or shown per view by
+           syncExplorerFindAvailability(), because setExplorerFileView() moves
+           between panels without rebuilding this header. */
+        const findAvailable = explorerFileOffersFind(pane, { hasGitDiff });
+        // Not fetched yet — the panel exists from here, its content arrives the
+        // first time it is shown. The flag, not the string, is what says so:
+        // an empty Markdown file renders an empty preview, legitimately.
+        pane._explorerPreviewHtml = '';
+        pane._explorerPreviewLoaded = false;
         pane._explorerGit = data.git || null;
         pane._explorerGitContext = data.git_context || null;
         pane._explorerDiffLoaded = false;
@@ -7264,6 +7172,10 @@
                         : null)
                 : null)
             : null;
+        /* Install every panel's offset before an active Preview/Diff can start
+           its async load. Source still waits on whenExplorerSourceRendered()
+           below; each async panel reapplies from its own arrival hook. */
+        setExplorerPanelScrollState(index, effectiveScrollState);
         document.getElementById(`ph-${index}`)?.remove();
         list.classList.add('file-view');
         updateExplorerGitSummary(index, data.git_context || null);
@@ -7297,7 +7209,7 @@
                     <button type="button" class="explorer-md-appearance-btn" data-explorer-md-appearance="${index}" title="Appearance" aria-label="Viewer appearance" aria-haspopup="menu" aria-expanded="false">${EXPLORER_MD_APPEARANCE_ICON}</button>
                     ${explorerEditorControlsHtml(index)}
                     <button type="button" class="explorer-download-btn" data-explorer-download="${index}" title="Download file" aria-label="Download file">${EXPLORER_DOWNLOAD_ICON}</button>
-                    <div class="explorer-editor-search" data-explorer-search="${index}">
+                    ${findAvailable ? `<div class="explorer-editor-search" data-explorer-search="${index}">
                         <input
                             type="search"
                             class="explorer-search-input"
@@ -7311,7 +7223,7 @@
                         <button type="button" class="explorer-search-btn" data-explorer-search-prev="${index}" title="Previous match" aria-label="Previous match">↑</button>
                         <button type="button" class="explorer-search-btn" data-explorer-search-next="${index}" title="Next match" aria-label="Next match">↓</button>
                         <button type="button" class="explorer-search-btn" data-explorer-search-clear="${index}" title="Clear search" aria-label="Clear search">×</button>
-                    </div>
+                    </div>` : ''}
                 </div>
                 <div class="explorer-editor-body${keepDiffSplit ? ' split-diff' : ''}">
                     <div class="explorer-editor-main">
@@ -7335,15 +7247,10 @@
         applyExplorerSourceFontToElement(
             document.getElementById(`explorer-diff-code-${index}`), sourceFontAppearance
         );
-        const preview = document.getElementById(`explorer-preview-${index}`);
-        if (preview && hasPreview) {
-            preview.innerHTML = pane._explorerPreviewHtml;
-            if (!pane._explorerFilePlain) {
-                highlightExplorerPreviewCode(preview);
-            }
-            wireExplorerMarkdownLinks(index, preview);
-            applyExplorerMarkdownAppearanceToElement(preview, explorerMarkdownAppearance());
-            renderExplorerMermaid(preview);
+        // Only the panel the reader is actually looking at pays for its
+        // content; selecting Preview later goes through the same loader.
+        if (hasPreview && initialFileView === 'preview') {
+            ensureExplorerPreviewLoaded(index);
         }
 
         const appearanceButton = list.querySelector(`[data-explorer-md-appearance="${index}"]`);
@@ -7378,16 +7285,19 @@
         }
         wireExplorerEditorZoomControls(index);
         wireExplorerSearchControls(index);
+        // The shell exists for whichever panel could answer; this decides
+        // whether the one now on screen is that panel.
+        syncExplorerFindAvailability(index, initialFileView);
         refreshExplorerEditControls(index);
-        applyExplorerSearch(index);
-        // An explicit scrollState (in-place refresh) wins; otherwise fall back
-        // to the tab's stored snapshot, aligned with the restored view mode.
-        const effectiveScrollState = scrollState || (restoredTabView
-            ? { ...restoredTabView.scroll, activeView: initialFileView }
-            : null);
-        restoreExplorerFileScroll(index, effectiveScrollState);
+        /* A rebuild is a repaint, not a navigation: the restore on the next
+           line owns where this file opens. Letting the find scroll here put
+           the reader at match 1 of a query they had not retyped, a frame
+           before the stored offset was applied — and the last writer won. */
+        applyExplorerSearch(index, { scroll: false });
+        whenExplorerSourceRendered(index, () => restoreExplorerFileScroll(index, effectiveScrollState));
         renderExplorerTabStrip(index);
         persistExplorerTabsToSession(index);
+        syncExplorerGitActiveRows(index);
         return true;
     }
 
@@ -7404,11 +7314,30 @@
             return false;
         }
 
-        const hasPreview = data.preview_type === 'markdown' && typeof data.preview_html === 'string';
+        /* Read `preview_type` and never the HTML string. The panel's existence
+           is a property of the file; the HTML now arrives lazily, so deriving
+           it from `typeof data.preview_html === 'string'` would make the panel
+           blink out of existence on every load — and, since a save answers with
+           the same payload shape, would make every save on a Markdown file
+           bail updateExplorerFileInPlace() into a full pane rebuild. */
+        const hasPreview = data.preview_type === 'markdown';
         const hasGitDiff = explorerHasGitDiff(data.git);
         const preview = document.getElementById(`explorer-preview-${index}`);
         const diffPanel = document.getElementById(`explorer-diff-code-${index}`);
         if (hasPreview !== Boolean(preview) || hasGitDiff !== Boolean(diffPanel)) {
+            return false;
+        }
+        /* A save (or an external write) that pushes a file across the tier
+           boundary changes the header, not just the body: the find bar appears
+           or disappears with the tier. That is the same class of shape change
+           as the preview panel flipping, and takes the same answer — hand back
+           to a full rebuild rather than update in place around a control that
+           is no longer the one standing there. */
+        const policy = explorerTierPolicy();
+        const nextTier = policy
+            ? policy.sourceTierForContent(data.content || '')
+            : explorerPaneSourceTier(pane);
+        if (nextTier !== explorerPaneSourceTier(pane)) {
             return false;
         }
 
@@ -7429,8 +7358,12 @@
         pane._explorerFileUtf8Bom = Boolean(data.utf8_bom);
         pane._explorerFileTruncated = Boolean(data.truncated);
         pane._explorerFileLanguage = codeLanguage;
-        pane._explorerFilePlain = pane._explorerFileContent.length > EXPLORER_PLAIN_PREVIEW_THRESHOLD;
-        pane._explorerPreviewHtml = hasPreview ? (data.preview_html || '') : '';
+        applyExplorerSourceTier(pane, pane._explorerFileContent);
+        /* The file moved on disk, so any preview the pane is holding describes
+           the old bytes. Drop it; the panel refills below if it is the one on
+           screen, and otherwise on the next visit to it. */
+        pane._explorerPreviewHtml = '';
+        pane._explorerPreviewLoaded = false;
         pane._explorerGit = data.git || null;
         pane._explorerGitContext = data.git_context || null;
         const renderedTab = explorerFindTab(
@@ -7443,19 +7376,17 @@
         pane._explorerDiffLoaded = false;
         pane._explorerDiffCacheKey = '';
         pane._explorerDiffContent = '';
+        /* The old viewport still describes where the reader was in this file,
+           but it must be associated with the replacement bytes before a lazy
+           Preview request can answer. */
+        setExplorerPanelScrollState(index, scrollState);
         renderExplorerSource(index);
         // An in-place refresh means the file moved on disk (save, undo,
         // watcher) while HEAD usually did not, so the path + HEAD cache key
         // would serve stale marks: force the refetch.
         loadExplorerChangeMarks(index, { force: true });
-        if (preview && hasPreview) {
-            preview.innerHTML = pane._explorerPreviewHtml;
-            if (!pane._explorerFilePlain) {
-                highlightExplorerPreviewCode(preview);
-            }
-            wireExplorerMarkdownLinks(index, preview);
-            applyExplorerMarkdownAppearanceToElement(preview, explorerMarkdownAppearance());
-            renderExplorerMermaid(preview);
+        if (preview && hasPreview && activeExplorerFileView(index) === 'preview') {
+            ensureExplorerPreviewLoaded(index);
         }
         if (diffPanel && hasGitDiff) {
             // The header survives an in-place refresh, so a Diff toggle hidden
@@ -7493,7 +7424,7 @@
         // The captured position is restored on the next line; a find repainted
         // onto the refreshed rows must not undo that from its own frame.
         applyExplorerSearch(index, { scroll: false });
-        restoreExplorerFileScroll(index, scrollState);
+        whenExplorerSourceRendered(index, () => restoreExplorerFileScroll(index, scrollState));
         renderExplorerTabStrip(index);
         return true;
     }
@@ -7523,7 +7454,16 @@
         pane._explorerFilePath = path;
         pane._explorerFileContent = '';
         pane._explorerFileLanguage = codeLanguage;
+        /* The tier is a pane field and this view is `file` mode with no buffer
+           behind it, so it has to be restated here like every other path that
+           repoints a pane at new content. Inheriting the outgoing file's
+           `large` tier left the commit diff showing a Find bar that
+           applyExplorerSearch() then refused to serve — and, because the input
+           existed, focusExplorerSearch() still claimed Ctrl+F, so the reader
+           lost the browser's own find as well. */
+        applyExplorerSourceTier(pane, '');
         pane._explorerPreviewHtml = '';
+        pane._explorerPreviewLoaded = false;
         pane._explorerGit = null;
         // A commit diff is history: nothing on disk can change what it shows.
         setExplorerFileWatchBaseline(pane, '');
@@ -7586,12 +7526,17 @@
         });
         wireExplorerLineWrapControl(index);
         wireExplorerSearchControls(index);
+        // Always allowed here — the tier was reset above and this view is a
+        // bounded patch — but through the one owner, so there is no second
+        // answer to "is Find offered" to drift from the first.
+        syncExplorerFindAvailability(index, 'diff');
         applyExplorerEditorFontSize(index);
         applyExplorerSourceFontToElement(
             document.getElementById(`explorer-diff-code-${index}`), explorerMarkdownAppearance()
         );
         loadExplorerDiff(index);
         renderExplorerTabStrip(index);
+        syncExplorerGitActiveRows(index);
         return true;
     }
 
@@ -7621,7 +7566,10 @@
             renderExplorerMessage(index, 'Opening file...');
         }
         try {
-            const response = await fetch(`/api/explorer/${encodeURIComponent(sessionId)}/file?path=${encodeURIComponent(path)}`);
+            const response = await fetch(
+                `/api/explorer/${encodeURIComponent(sessionId)}/file?path=${encodeURIComponent(path)}`,
+                { signal: explorerRequestSignal(pane, 'file') }
+            );
             const data = await response.json();
             if (!response.ok) {
                 pane._explorerOpenErrorCode = String(data.code || '');
@@ -7650,6 +7598,11 @@
             }
             return rendered;
         } catch (error) {
+            if (explorerIsAbortError(error)) {
+                // A newer open superseded this one and owns the viewer now;
+                // reporting a failure here would paint an error over it.
+                return false;
+            }
             console.error('[GridVibe Sessions] Explorer file open failed:', error);
             renderExplorerDirectoryOpenError(index, error.message || 'Failed to open file.');
             return false;
@@ -7747,7 +7700,11 @@
             resetExplorerFsWatchBaseline(pane);
             pane._explorerFileContent = '';
             pane._explorerFileLanguage = '';
+            // Costs nothing today — the find guard checks the mode first — but
+            // the tier describes the buffer, and the buffer is now empty.
+            applyExplorerSourceTier(pane, '');
             pane._explorerPreviewHtml = '';
+            pane._explorerPreviewLoaded = false;
             pane._explorerGit = null;
             pane._explorerGitContext = data.git || null;
             pane._explorerDiffLoaded = false;
@@ -7809,6 +7766,12 @@
                 restoreExplorerFileScroll(index, restoredDirView.scroll);
             }
             renderExplorerTabStrip(index);
+            // A listing is not a diff, so the Git sidebar's highlight goes out
+            // with the file the viewer just left.
+            paintExplorerGitActiveRows(index);
+            if (pane._explorerGitSidebarOpen) {
+                loadExplorerGitRepo(index);
+            }
             return true;
         } catch (error) {
             console.error('[GridVibe Sessions] Explorer load failed:', error);

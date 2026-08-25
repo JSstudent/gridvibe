@@ -563,16 +563,26 @@
                baselines — the response's `revision` is compared against each
                consumer's own. It is still sent so the server contract and the
                log filter stay exactly as specified. */
-            const known = encodeURIComponent(
-                (sidebarConsumer ? pane._explorerGitRevision : pane._explorerFsWatchRevision) || ''
-            );
+            const known = (sidebarConsumer
+                ? pane._explorerGitRevision
+                : pane._explorerFsWatchRevision) || '';
+            const scopePath = explorerGitScopePath(pane);
             const response = await fetch(
-                `/api/explorer/${encodeURIComponent(sessionId)}/git/state?known=${known}`,
+                explorerGitRequestUrl(
+                    sessionId,
+                    'state',
+                    scopePath,
+                    { known }
+                ),
                 { cache: 'no-store' }
             );
             // Stale results are discarded: the pane/session identity must
             // survive every await or the response belongs to another pane.
-            if (terminals[index] !== pane || sessionIds[index] !== sessionId) {
+            if (
+                terminals[index] !== pane
+                || sessionIds[index] !== sessionId
+                || explorerGitScopePath(pane) !== scopePath
+            ) {
                 return;
             }
             if (!response.ok) {
@@ -581,7 +591,11 @@
                 return;
             }
             const data = await response.json();
-            if (terminals[index] !== pane || sessionIds[index] !== sessionId) {
+            if (
+                terminals[index] !== pane
+                || sessionIds[index] !== sessionId
+                || explorerGitScopePath(pane) !== scopePath
+            ) {
                 return;
             }
             pane._explorerGitWatchFailures = 0;
