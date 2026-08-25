@@ -4590,20 +4590,19 @@
         });
     }
 
-    async function ensureTerminalReady(index, maxAttempts = 12) {
+    async function ensureTerminalReady(index, maxAttempts = 12, isCurrent = null) {
         const terminal = terminals[index];
         if (!terminal?._attached) {
             return false;
         }
-
-        for (let attempt = 0; attempt < maxAttempts; attempt++) {
-            if (fitTerminal(index)) {
-                return true;
-            }
-            await waitForAnimationFrames(1);
-        }
-
-        return Boolean(terminals[index]?._fitReady);
+        const capturedIsCurrent = typeof isCurrent === 'function' ? isCurrent : () => true;
+        return GridVibeTerminalModes.waitForCurrentPaneReady({
+            maxAttempts,
+            isCurrent: () => terminals[index] === terminal && capturedIsCurrent(),
+            attempt: () => fitTerminal(index),
+            wait: () => waitForAnimationFrames(1),
+            ready: () => Boolean(terminal._fitReady)
+        });
     }
 
     async function ensureAttachedTerminalsReady(indices) {
@@ -4739,6 +4738,7 @@
            `terminals[index]`, and the teardown is owed to the pane that asked
            for it. */
         const resetTarget = terminalModeResetTarget(index);
+        const resetTargetIsCurrent = () => resetTarget.isCurrent();
         const releaseBusy = holdTerminalActionState(index, 'refresh');
         try {
             if (isBrowserSession(terminal._session)) {
@@ -4760,11 +4760,13 @@
             if (terminal._attached) {
                 terminal.term.reset();
                 terminal.term.clear();
-                await ensureTerminalReady(index);
-                emitTerminalResize(index, true);
+                const ready = await ensureTerminalReady(index, 12, resetTargetIsCurrent);
+                if (ready && resetTargetIsCurrent()) {
+                    emitTerminalResize(index, true);
+                }
             } else {
                 attachTerminal(index);
-                await ensureTerminalReady(index);
+                await ensureTerminalReady(index, 12, resetTargetIsCurrent);
             }
 
             if (sessionId && socket) {
@@ -4785,9 +4787,10 @@
                 /* The redraw is slot work: it fits and repaints whatever is in
                    `index` now. Never the incoming group, for a reset that
                    belonged to the group it replaced. */
-                if (resetTarget.isCurrent()) {
-                    await redrawAttachedTerminals([index], { forceResize: true });
-                }
+                await redrawAttachedTerminals([index], {
+                    forceResize: true,
+                    isCurrent: resetTargetIsCurrent
+                });
                 return false;
             }
 
@@ -4826,6 +4829,8 @@
            release has to reach the buttons it disabled rather than whatever is
            in the slot by then. */
         const resetTarget = terminalModeResetTarget(index);
+        const resetTargetIsCurrent = () => resetTarget.isCurrent();
+        const clearCommand = getTerminalClearCommand(index);
         const releaseBusy = holdTerminalActionState(index, 'clear');
         try {
             logSessionWindowAction('Clearing terminal display', {
@@ -4844,12 +4849,13 @@
             GridVibeTerminalModes.resetMouseReporting(data => resetTarget.write(data));
 
             if (terminal._attached) {
-                await ensureTerminalReady(index);
-                emitTerminalResize(index, true);
+                const ready = await ensureTerminalReady(index, 12, resetTargetIsCurrent);
+                if (ready && resetTargetIsCurrent()) {
+                    emitTerminalResize(index, true);
+                }
             }
 
             if (sessionId && socket && terminal._session?.status === 'connected') {
-                const clearCommand = getTerminalClearCommand(index);
                 socket.emit('clear_terminal_buffer', { session_id: sessionId });
                 socket.emit('terminal_input', { session_id: sessionId, data: clearCommand });
             } else if (sessionId && socket) {

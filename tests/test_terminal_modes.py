@@ -90,6 +90,7 @@ function grid(modes) {
         switchGroup: () => { terminals[0] = paneB; sessionIds[0] = 'sess-b'; },
         reconnect: () => { sessionIds[0] = 'sess-a2'; },
         emptySlot: () => { terminals[0] = null; sessionIds[0] = null; },
+        currentPane: () => terminals[0],
         stream: pane => pane.stream.map(
             data => (data === modes.MOUSE_REPORTING_RESET ? 'teardown' : data)
         )
@@ -417,6 +418,50 @@ class CapturedResetTargetTestCase(TerminalModesNodeTestCase):
         self.assertEqual(result["asked"], ["[?1003hreplayed", "teardown"])
         self.assertEqual(result["incoming"], [])
         self.assertEqual(result["drained"], "")
+
+    def test_readiness_stops_before_fitting_the_pane_that_took_the_slot(self):
+        """A group switch during the yielded readiness loop ends the old
+        operation before its next slot-based fit or final readiness read."""
+        result = self._run_node(
+            """
+            const page = grid(modes);
+            const target = page.capture();
+            const attempts = [];
+            let readyReads = 0;
+            const ready = await modes.waitForCurrentPaneReady({
+                maxAttempts: 3,
+                isCurrent: () => target.isCurrent(),
+                attempt: () => {
+                    attempts.push(page.currentPane().name);
+                    return false;
+                },
+                wait: async () => { page.switchGroup(); },
+                ready: () => { readyReads += 1; return true; }
+            });
+            process.stdout.write(JSON.stringify({ ready, attempts, readyReads }));
+            """
+        )
+        self.assertFalse(result["ready"])
+        self.assertEqual(result["attempts"], ["a"])
+        self.assertEqual(result["readyReads"], 0)
+
+    def test_readiness_can_finish_while_the_capture_stays_current(self):
+        result = self._run_node(
+            """
+            const page = grid(modes);
+            const target = page.capture();
+            let attempts = 0;
+            const ready = await modes.waitForCurrentPaneReady({
+                maxAttempts: 3,
+                isCurrent: () => target.isCurrent(),
+                attempt: () => { attempts += 1; return attempts === 2; },
+                wait: async () => {}
+            });
+            process.stdout.write(JSON.stringify({ ready, attempts }));
+            """
+        )
+        self.assertTrue(result["ready"])
+        self.assertEqual(result["attempts"], 2)
 
     def test_slot_work_is_skipped_once_the_pane_or_its_session_moves(self):
         """The redraw and the busy release address `index`; the incoming group

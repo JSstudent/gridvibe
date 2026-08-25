@@ -120,6 +120,38 @@
         };
     }
 
+    /* Fit/repaint retries yield between attempts, so a slot can change hands
+       even when the caller checked its capture before entering the loop. Keep
+       the current-target check and each attempt in the same JavaScript turn;
+       once identity changes, neither another attempt nor the final readiness
+       read is allowed to address the replacement pane. */
+    async function waitForCurrentPaneReady(runtime) {
+        const io = runtime || {};
+        const isCurrent = typeof io.isCurrent === 'function' ? io.isCurrent : () => false;
+        const attempt = typeof io.attempt === 'function' ? io.attempt : null;
+        const wait = typeof io.wait === 'function' ? io.wait : null;
+        const ready = typeof io.ready === 'function' ? io.ready : null;
+        const maxAttempts = Number.isInteger(io.maxAttempts) && io.maxAttempts > 0
+            ? io.maxAttempts
+            : 1;
+
+        if (!attempt) {
+            return false;
+        }
+        for (let index = 0; index < maxAttempts; index += 1) {
+            if (!isCurrent()) {
+                return false;
+            }
+            if (attempt()) {
+                return true;
+            }
+            if (wait) {
+                await wait();
+            }
+        }
+        return isCurrent() && Boolean(ready && ready());
+    }
+
     /* `write` is the pane's own `term.write` — client-side only. Returns
        whether the teardown was actually written, so a caller can tell "the
        pane was reset" from "there was no pane". */
@@ -194,6 +226,7 @@
         MOUSE_REPORTING_RESET,
         REPLAY_SETTLE_TIMEOUT_MS,
         captureResetTarget,
+        waitForCurrentPaneReady,
         resetMouseReporting,
         rejoinAndResetAfterReplay
     };

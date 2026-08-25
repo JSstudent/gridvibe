@@ -1,4 +1,4 @@
-"""L-1: the pane-mode transition transaction, and the boundary it moved behind.
+"""The pane-mode transition transaction, and the boundary it moved behind.
 
 `change_session_mode()` had regrown inside `web/api.py` to ~250 lines owning
 validation, cwd/root resolution, presentation cleanup, connection teardown,

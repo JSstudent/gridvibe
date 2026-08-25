@@ -759,7 +759,7 @@ def _operation_generation(index):
 
 
 class OperationScopedConfigTestCase(unittest.TestCase):
-    """M-3 — an operation reads one settings generation, not several.
+    """An operation reads one settings generation, not several.
 
     ISSUE-2026-041 gave `RuntimeConfig` an immutable generation and a
     `snapshot()` for whole-payload readers, but several *operations* still read

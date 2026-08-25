@@ -1,7 +1,7 @@
 """The pane-mode transition transaction: terminal <-> explorer <-> browser.
 
-Extracted from `web/api.py` (L-1 of the 2026-08-24 pre-merge plan), where
-`change_session_mode()` had regrown to ~250 lines owning validation, working
+Extracted from `web/api.py` after `change_session_mode()` had regrown to ~250
+lines owning validation, working
 directory and explorer-root resolution, presentation cleanup, connection
 teardown, metadata mutation, shell restart, and HTTP response mapping all at
 once. The move is behaviour-neutral by construction: the transaction below is

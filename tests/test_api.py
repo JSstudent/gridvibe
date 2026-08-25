@@ -3752,11 +3752,14 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         html = self._page_html(response)
         clear_start = html.index("async function clearTerminalDisplay(index)")
-        self.assertIn("terminal.term.reset();", html[clear_start:])
-        self.assertIn("terminal.term.clear();", html[clear_start:])
-        self.assertIn("const clearCommand = getTerminalClearCommand(index);", html[clear_start:])
-        self.assertIn("socket.emit('clear_terminal_buffer', { session_id: sessionId });", html[clear_start:])
-        self.assertIn("socket.emit('terminal_input', { session_id: sessionId, data: clearCommand });", html[clear_start:])
+        clear_body = html[clear_start:]
+        self.assertIn("terminal.term.reset();", clear_body)
+        self.assertIn("terminal.term.clear();", clear_body)
+        command_capture = clear_body.index("const clearCommand = getTerminalClearCommand(index);")
+        readiness_wait = clear_body.index("await ensureTerminalReady(index, 12, resetTargetIsCurrent)")
+        self.assertLess(command_capture, readiness_wait)
+        self.assertIn("socket.emit('clear_terminal_buffer', { session_id: sessionId });", clear_body)
+        self.assertIn("socket.emit('terminal_input', { session_id: sessionId, data: clearCommand });", clear_body)
 
     def test_terminals_page_recovery_controls_both_reset_mouse_reporting(self):
         """ISSUE-2026-038 — a TUI that died without unwinding leaves its mouse
@@ -3780,6 +3783,9 @@ class ApiRoutesTestCase(unittest.TestCase):
                 # asked for it after a group switch has taken the slot.
                 self.assertIn("terminalModeResetTarget(index)", body)
                 self.assertIn("resetTarget.write(data)", body)
+                self.assertIn(
+                    "ensureTerminalReady(index, 12, resetTargetIsCurrent)", body
+                )
 
         # Clear purges the replay buffer, so a plain teardown needs no ordering.
         self.assertIn("GridVibeTerminalModes.resetMouseReporting(", clear_body)
@@ -3792,7 +3798,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertNotIn("socket.emit('leave_session'", refresh_body)
         # The redraw is slot work and waits on the captured identity; the
         # incoming group must never be redrawn for a reset it did not ask for.
-        self.assertIn("if (resetTarget.isCurrent()) {", refresh_body)
+        self.assertIn("isCurrent: resetTargetIsCurrent", refresh_body)
 
     def test_terminals_page_clear_command_matches_shell_family_and_host(self):
         """`cls` is a cmd/PowerShell command; POSIX hosts and WSL panes get `clear`."""
