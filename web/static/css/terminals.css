@@ -4365,6 +4365,39 @@
             display: none;
         }
 
+        .explorer-git-commit-search-empty {
+            display: block;
+            padding: 0 10px 6px;
+            background: var(--explorer-bar-bg);
+            color: var(--explorer-muted);
+            font-size: .7rem;
+            line-height: 1.25;
+            text-align: left;
+            white-space: normal;
+        }
+
+        .explorer-git-commit-search-empty[hidden] {
+            display: none;
+        }
+
+        .explorer-git-commit-search-mode {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .explorer-git-commit-search-mode .explorer-btn-icon {
+            display: block;
+            width: 14px;
+            height: 14px;
+        }
+
+        .explorer-git-commit-search-mode[aria-pressed="true"] {
+            border-color: var(--t-accent);
+            color: var(--t-accent);
+            background: var(--explorer-row-active);
+        }
+
         /* The Graph header's fixed-scope pin, follow toggle, and magnifier.
            Same 22px box as the Stage All / Discard All controls above. */
         .explorer-git-pin-toggle,
@@ -4927,6 +4960,7 @@
            always-visible short hash carries the same tint — and the same
            active variant — as the marks inside the subject. */
         .explorer-search-match,
+        .explorer-git-commit-hash-match,
         .explorer-diff-commit-hash.explorer-git-commit-search-hit {
             border-radius: 2px;
             background: rgb(var(--gv-match-rgb));
@@ -4934,6 +4968,7 @@
         }
 
         .explorer-search-match.active,
+        .explorer-diff-commit-hash.explorer-git-commit-search-hit.active .explorer-git-commit-hash-match,
         .explorer-diff-commit-hash.explorer-git-commit-search-hit.active {
             background: rgb(var(--gv-match-active-rgb));
             color: var(--gv-match-ink);

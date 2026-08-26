@@ -319,15 +319,49 @@
     ───────────────────────────────────────────── */
     function ensureExplorerGitCommitSearchState(pane) {
         if (!pane._explorerGitCommitSearch) {
-            pane._explorerGitCommitSearch = { query: '', activeIndex: 0, open: false };
+            pane._explorerGitCommitSearch = {
+                query: '', activeIndex: 0, open: false, mode: 'subject'
+            };
         }
         return pane._explorerGitCommitSearch;
     }
 
-    function explorerGitCommitSearchCountText(query, plan) {
-        return query
-            ? `${plan.matchCount ? plan.activeIndex + 1 : 0}/${plan.matchCount}`
-            : '';
+    function explorerGitCommitSearchCountText(state, plan) {
+        if (!state.query) {
+            return '';
+        }
+        if (plan.emptyText) {
+            return '';
+        }
+        return `${plan.matchCount ? plan.activeIndex + 1 : 0}/${plan.matchCount}`;
+    }
+
+    function explorerGitCommitMessageFocusState(index) {
+        const input = document.getElementById(`explorer-git-commit-message-${index}`);
+        if (!input || document.activeElement !== input) {
+            return null;
+        }
+        return {
+            start: typeof input.selectionStart === 'number' ? input.selectionStart : 0,
+            end: typeof input.selectionEnd === 'number' ? input.selectionEnd : 0
+        };
+    }
+
+    function restoreExplorerGitCommitMessageFocus(index, state) {
+        if (!state) {
+            return;
+        }
+        const input = document.getElementById(`explorer-git-commit-message-${index}`);
+        if (!input) {
+            return;
+        }
+        input.focus();
+        try {
+            input.setSelectionRange(state.start, state.end);
+        } catch (error) {
+            // A textarea supports selection, but focus restoration must stay
+            // harmless if a test double or browser implementation does not.
+        }
     }
 
     /* Paint only, for the same reason as paintExplorerGitActiveRows below:
@@ -342,9 +376,10 @@
             return;
         }
         const state = ensureExplorerGitCommitSearchState(pane);
+        const mode = state.mode === 'hash' ? 'hash' : 'subject';
         const repo = pane._explorerGitRepo || {};
         const commits = Array.isArray(repo.commits) ? repo.commits : [];
-        const plan = policy.searchPlan(commits, state.query, state.activeIndex);
+        const plan = policy.searchPlan(commits, state.query, state.activeIndex, { mode });
         state.activeIndex = plan.activeIndex;
         let ordinal = 0;
         panel.querySelectorAll('[data-explorer-git-commit-toggle]').forEach((row, rowIndex) => {
@@ -353,22 +388,38 @@
             if (!subjectEl || !commit) {
                 return;
             }
-            const hash = commit.hash || '';
+            const hash = commit.full_hash || commit.hash || '';
+            const shortHash = commit.hash || hash;
             const ranges = plan.perCommit[rowIndex] || [];
-            const subjectHtml = ranges.length
+            const subjectHtml = mode === 'subject' && ranges.length
                 ? policy.markedSubjectHtml(
                     policy.commitSubject(commit), ranges, ordinal, plan.activeIndex
                 )
                 : escHtml(policy.commitSubject(commit));
+            const hashHtml = mode === 'hash' && ranges.length
+                ? policy.markedHashHtml(hash, ranges[0])
+                : escHtml(shortHash.slice(0, 7));
             const hashMark = policy.hashMarkClass(ranges, ordinal, plan.activeIndex);
             ordinal += ranges.length;
             subjectEl.innerHTML =
-                `<span class="explorer-diff-commit-hash${hashMark}">${escHtml(hash ? hash.slice(0, 7) : '')}</span> `
+                `<span class="explorer-diff-commit-hash${hashMark}">${hashHtml}</span> `
                 + subjectHtml;
         });
         const count = panel.querySelector('[data-explorer-git-commit-search-count]');
         if (count) {
-            count.textContent = explorerGitCommitSearchCountText(state.query, plan);
+            count.textContent = explorerGitCommitSearchCountText(state, plan);
+        }
+        const empty = panel.querySelector('[data-explorer-git-commit-search-empty]');
+        if (empty) {
+            empty.textContent = plan.emptyText || '';
+            empty.hidden = !state.open || !plan.emptyText;
+        }
+        const modeButton = panel.querySelector('[data-explorer-git-commit-search-mode]');
+        if (modeButton) {
+            const hashMode = mode === 'hash';
+            modeButton.setAttribute('aria-pressed', hashMode ? 'true' : 'false');
+            modeButton.title = hashMode ? 'Search commit subjects' : 'Search commit ids';
+            modeButton.setAttribute('aria-label', modeButton.title);
         }
         panel.querySelectorAll(
             '[data-explorer-git-commit-search-prev], [data-explorer-git-commit-search-next]'
@@ -376,7 +427,10 @@
             button.disabled = plan.matchCount === 0;
         });
         if (scroll && plan.matchCount) {
-            const active = panel.querySelector('.explorer-diff-commit .explorer-search-match.active');
+            const active = panel.querySelector(
+                '.explorer-diff-commit .explorer-search-match.active, '
+                + '.explorer-diff-commit-hash.explorer-git-commit-search-hit.active'
+            );
             if (active) {
                 requestAnimationFrame(() => {
                     scrollExplorerGitCommitRowIntoView(panel, active);
@@ -576,15 +630,19 @@
             ? 'Clear pinned Git folder'
             : 'Pin Git to the current folder';
         const commitSearch = ensureExplorerGitCommitSearchState(pane);
+        const commitSearchMode = commitSearch.mode === 'hash' ? 'hash' : 'subject';
         const searchPolicy = window.GridVibeExplorerGitSearch;
         const searchPlan = searchPolicy
-            ? searchPolicy.searchPlan(commits, commitSearch.query, commitSearch.activeIndex)
-            : { perCommit: commits.map(() => []), matchCount: 0, activeIndex: 0 };
+            ? searchPolicy.searchPlan(
+                commits, commitSearch.query, commitSearch.activeIndex, { mode: commitSearchMode }
+            )
+            : { perCommit: commits.map(() => []), matchCount: 0, activeIndex: 0, emptyText: '' };
         commitSearch.activeIndex = searchPlan.activeIndex;
         let searchOrdinal = 0;
         const commitRows = commits.length
             ? commits.map((commit, commitIndex) => {
                 const hash = commit.hash || '';
+                const searchableHash = commit.full_hash || hash;
                 const expanded = hash && expandedCommits.has(
                     window.GridVibeExplorerGitActive.commitKey(hash)
                 );
@@ -592,18 +650,22 @@
                     ? searchPolicy.commitSubject(commit)
                     : (commit.subject || commit.line || '');
                 const ranges = searchPlan.perCommit[commitIndex] || [];
-                const subjectHtml = ranges.length
+                const subjectHtml = commitSearchMode === 'subject' && ranges.length
                     ? searchPolicy.markedSubjectHtml(subject, ranges, searchOrdinal, searchPlan.activeIndex)
                     : escHtml(subject);
+                const hashHtml = commitSearchMode === 'hash' && ranges.length
+                    ? searchPolicy.markedHashHtml(searchableHash, ranges[0])
+                    : escHtml(hash ? hash.slice(0, 7) : '');
                 const hashMark = searchPolicy
                     ? searchPolicy.hashMarkClass(ranges, searchOrdinal, searchPlan.activeIndex)
                     : '';
                 searchOrdinal += ranges.length;
+                const rowTitle = `${commit.line || ''}${expanded ? ' (Alt: collapse all)' : ''}`;
                 return `
-                    <button type="button" class="explorer-diff-commit" data-explorer-git-commit-toggle="${escHtml(hash)}" data-explorer-git-commit-full="${escHtml(commit.full_hash || '')}" data-explorer-git-commit-message="${escHtml(commit.message || '')}" ${hash ? '' : 'disabled'} title="${escHtml(commit.line || '')}" aria-expanded="${expanded ? 'true' : 'false'}">
+                    <button type="button" class="explorer-diff-commit" data-explorer-git-commit-toggle="${escHtml(hash)}" data-explorer-git-commit-full="${escHtml(commit.full_hash || '')}" data-explorer-git-commit-message="${escHtml(commit.message || '')}" ${hash ? '' : 'disabled'} title="${escHtml(rowTitle)}" aria-expanded="${expanded ? 'true' : 'false'}">
                         <span class="explorer-diff-commit-graph">${explorerGitGraphHtml(commit.graph)}</span>
                         <span class="explorer-diff-commit-toggle" aria-hidden="true">${expanded ? UI_CHEVRON_DOWN_ICON : UI_CHEVRON_RIGHT_ICON}</span>
-                        <span class="explorer-diff-commit-subject"><span class="explorer-diff-commit-hash${hashMark}">${escHtml(hash ? hash.slice(0, 7) : '')}</span> ${subjectHtml}</span>
+                        <span class="explorer-diff-commit-subject"><span class="explorer-diff-commit-hash${hashMark}">${hashHtml}</span> ${subjectHtml}</span>
                     </button>
                     ${expanded ? `<div class="explorer-diff-commit-files">${renderExplorerGitFileRows(index, commit.files, { emptyText: 'No files recorded for this commit.', commitHash: hash })}</div>` : ''}
                 `;
@@ -664,11 +726,13 @@
                         aria-label="Search commit messages"
                         value="${escHtml(commitSearch.query)}"
                     >
-                    <span class="explorer-search-count" data-explorer-git-commit-search-count>${explorerGitCommitSearchCountText(commitSearch.query, searchPlan)}</span>
+                    <span class="explorer-search-count" data-explorer-git-commit-search-count>${explorerGitCommitSearchCountText(commitSearch, searchPlan)}</span>
+                    <button type="button" class="explorer-search-btn explorer-git-commit-search-mode" data-explorer-git-commit-search-mode aria-pressed="${commitSearchMode === 'hash' ? 'true' : 'false'}" title="${commitSearchMode === 'hash' ? 'Search commit subjects' : 'Search commit ids'}" aria-label="${commitSearchMode === 'hash' ? 'Search commit subjects' : 'Search commit ids'}">${EXPLORER_GIT_HASH_ICON}</button>
                     <button type="button" class="explorer-search-btn" data-explorer-git-commit-search-prev ${searchPlan.matchCount ? '' : 'disabled'} title="Previous match" aria-label="Previous match">↑</button>
                     <button type="button" class="explorer-search-btn" data-explorer-git-commit-search-next ${searchPlan.matchCount ? '' : 'disabled'} title="Next match" aria-label="Next match">↓</button>
                     <button type="button" class="explorer-search-btn" data-explorer-git-commit-search-clear title="Clear search" aria-label="Clear search">×</button>
                 </div>
+                <span class="explorer-git-commit-search-empty" data-explorer-git-commit-search-empty role="status" aria-live="polite" ${(commitSearch.open && searchPlan.emptyText) ? '' : 'hidden'}>${escHtml(searchPlan.emptyText || '')}</span>
                 ${commitRows}
             </div>
         `;
@@ -698,6 +762,12 @@
         }
         panel.querySelector('[data-explorer-git-commit-search-toggle]')?.addEventListener('click', () => {
             setExplorerGitCommitSearchOpen(index, 'toggle');
+        });
+        panel.querySelector('[data-explorer-git-commit-search-mode]')?.addEventListener('click', () => {
+            const state = ensureExplorerGitCommitSearchState(pane);
+            state.mode = state.mode === 'hash' ? 'subject' : 'hash';
+            state.activeIndex = 0;
+            paintExplorerGitCommitSearch(index);
         });
         panel.querySelector('[data-explorer-git-follow-toggle]')?.addEventListener('click', () => {
             toggleExplorerGitFollowBrowsing(index);
@@ -781,12 +851,32 @@
             });
         });
         panel.querySelectorAll('[data-explorer-git-commit-toggle]').forEach(button => {
-            button.addEventListener('click', () => {
+            button.addEventListener('mousedown', event => {
+                if (event.altKey) {
+                    /* Keep the textarea active until the click handler captures
+                       its selection. The render below replaces that textarea. */
+                    event.preventDefault();
+                }
+            });
+            button.addEventListener('click', event => {
                 const commit = button.dataset.explorerGitCommitToggle || '';
                 if (!commit) {
                     return;
                 }
                 const expanded = ensureExplorerDiffExpandedCommits(pane);
+                if (event.altKey) {
+                    const focusState = explorerGitCommitMessageFocusState(index);
+                    const plan = window.GridVibeExplorerGitSearch.collapseAllPlan(
+                        Array.from(expanded)
+                    );
+                    if (plan.changed) {
+                        expanded.clear();
+                        renderExplorerGitPanel(index);
+                        notePanePresentationChanged(index);
+                        restoreExplorerGitCommitMessageFocus(index, focusState);
+                    }
+                    return;
+                }
                 const key = window.GridVibeExplorerGitActive.commitKey(commit);
                 /* Collapsing the commit holding the open diff is final: this
                    pane has already recorded it as revealed, so the reveal in
