@@ -500,25 +500,18 @@
         notePanePresentationChanged(index);
     }
 
-    /* Directory name click: browse it in the Preview tab, and expand it so the
-       tree matches what the pane now shows. Never collapses — collapsing is
-       the fold arrow's job, so an open directory can be re-opened safely. */
+    /* Directory name click: browse it in the Preview tab without changing the
+       tree's structure. Expansion and collapse belong exclusively to the fold
+       arrow. Preview navigation still reveals its destination by expanding
+       ancestors in revealExplorerTreePath(), but never expands the destination
+       directory itself. */
     async function openExplorerTreeDirectory(index, path) {
         const pane = terminals[index];
         if (!pane || !path) {
             return;
         }
 
-        ensureExplorerTreeState(pane);
-        let childrenLoading = Promise.resolve();
-        if (!pane._explorerTreeExpanded.has(path)) {
-            pane._explorerTreeExpanded.add(path);
-            pane._explorerTreeErrors.delete(path);
-            renderExplorerTreePanel(index);
-            childrenLoading = loadExplorerTreeChildren(index, path);
-        }
         await loadExplorerPane(index, path);
-        await childrenLoading;
     }
 
     /* Expand every ancestor of the pane's current directory or open file — or

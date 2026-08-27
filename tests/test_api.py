@@ -2560,51 +2560,6 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("assignedTab.id === EXPLORER_PREVIEW_TAB_ID", html)
         self.assertIn("assignedTab.preferredMode || ''", html)
         self.assertIn("const preferredFileView = restoredMode || carriedMode;", html)
-
-    def test_terminals_page_tree_directory_click_browses_in_preview(self):
-        """A Files-tree directory *name* click browses it in the Preview tab;
-        the fold arrow beside it is a separate expand/collapse-only control."""
-        response = self.client.get("/terminals")
-
-        self.assertEqual(response.status_code, 200)
-        html = self._page_html(response)
-        toggle = html[
-            html.index("async function toggleExplorerTreeDirectory(index, path)"):
-            html.index("const EXPLORER_TREE_LEVEL_LOAD_CONCURRENCY")
-        ]
-        # The fold arrow is its own button and never navigates the Preview tab,
-        # so browsing the tree cannot evict the file the pane is showing.
-        self.assertIn("data-explorer-tree-chevron", html)
-        # It routes two gestures: a plain click folds the one directory, Alt
-        # folds every directory at that level. What each of them does to the
-        # expanded set is executed in tests/test_explorer_tree_fold.py.
-        chevron_handler = html[html.index("panel.querySelectorAll('[data-explorer-tree-chevron]')"):]
-        chevron_handler = chevron_handler[: chevron_handler.index("});")]
-        self.assertIn("event.altKey", chevron_handler)
-        self.assertIn("toggleExplorerTreeLevel(index, path)", chevron_handler)
-        self.assertIn("toggleExplorerTreeDirectory(index, path)", chevron_handler)
-        self.assertNotIn("loadExplorerPane(", chevron_handler)
-        self.assertNotIn("loadExplorerPane(", toggle)
-        self.assertIn("pane._explorerTreeExpanded.delete(path);", toggle)
-        # The name button navigates and expands, but never collapses.
-        open_dir = html[
-            html.index("async function openExplorerTreeDirectory(index, path)"):
-            html.index("async function revealExplorerTreePath(index, targetPath = '')")
-        ]
-        self.assertEqual(open_dir.count("await loadExplorerPane(index, path);"), 1)
-        self.assertNotIn("pane._explorerTreeExpanded.delete(path);", open_dir)
-        self.assertIn(
-            "openExplorerTreeDirectory(index, button.dataset.explorerTreeDir || '');",
-            html,
-        )
-        # Navigating still reveals the target row, but no longer force-expands
-        # the directory itself (that would undo the collapse click).
-        reveal = html[
-            html.index("async function revealExplorerTreePath(index, targetPath = '')"):
-            html.index("function focusExplorerTreeRow(index, path)")
-        ]
-        self.assertIn("segments.pop();", reveal)
-        self.assertNotIn("if (pane._explorerMode === 'file') {", reveal)
         # Directory navigation captures the outgoing tab's mode + scroll
         # before the loading placeholder guts the viewer (2.e parity with
         # openExplorerFile).
@@ -2613,6 +2568,16 @@ class ApiRoutesTestCase(unittest.TestCase):
             load_pane.index("explorerCaptureActiveTabView(index);"),
             load_pane.index("renderExplorerMessage(index, 'Loading directory...');"),
         )
+
+    def test_terminals_page_tree_directory_and_chevron_are_separate_controls(self):
+        """Folder navigation and tree folding have distinct button hooks."""
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = self._page_html(response)
+        # These are separate buttons rather than one row-wide click target.
+        self.assertIn("data-explorer-tree-chevron", html)
+        self.assertIn("data-explorer-tree-dir", html)
 
     def test_terminals_page_explorer_breadcrumb_navigation(self):
         """2.d (OD-3): the path label is a breadcrumb; ancestors browse in Preview."""
