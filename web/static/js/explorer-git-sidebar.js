@@ -137,20 +137,24 @@
        pinning at the root round-trips perfectly and still reads as though the
        pin had been lost. */
     function explorerGitScopeLabel(scopePath) {
-        if (scopePath === null || scopePath === undefined) {
-            return '';
-        }
-        return String(scopePath) || 'root';
+        return window.GridVibeExplorerGitPin.explorerGitPinLabel(scopePath);
     }
 
-    function explorerGitScopeTitle(scopePath, following) {
-        const label = explorerGitScopeLabel(scopePath);
-        if (!label) {
-            return '';
-        }
-        return following
-            ? `Git scope follows the browsed folder: ${label}`
-            : `Git scope pinned to: ${label}`;
+    /* The pin button's three states, read from the module the Files tree's
+       marker is painted from (explorer-git-pin.js) so the pressed button and
+       the marked row cannot disagree. Reading the pane here rather than in
+       the module keeps the module free of pane shape: what it is handed is a
+       pinned path and a browsed path.
+
+       Delegated outright, with no local fallback: a second copy of the state
+       table -- or of the word for the root -- is exactly the disagreement the
+       module exists to prevent, and it is a page script loaded before this
+       one. */
+    function explorerGitPinState(pane) {
+        return window.GridVibeExplorerGitPin.explorerGitPinButtonState(
+            typeof pane?._explorerGitPinnedPath === 'string' ? pane._explorerGitPinnedPath : null,
+            String(pane?._explorerPath || '')
+        );
     }
 
     function updateExplorerGitSummary(index, git) {
@@ -617,6 +621,41 @@
         if (typeof applyExplorerTreePinMark === 'function') {
             applyExplorerTreePinMark(index);
         }
+        applyExplorerGitPinButtonState(index);
+    }
+
+    /* The pin button, painted attribute-only.
+
+       Two things move it. A pin write, which the tree marker answers beside
+       it; and plain navigation, which changes `pinnedHere` while leaving the
+       Git model untouched — with Follow off nothing reloads, so without this
+       the button would keep a stale pressed state and a stale title until the
+       next load.
+
+       Attributes and a class, never a re-render: the panel carries the
+       commit-message textarea and the commit-search input, and re-rendering
+       it takes the caret. The repo bar's Clear pin is toggled by `hidden`
+       rather than added and removed for the same reason the tree's root
+       marker is — it must be able to appear on a navigation that renders
+       nothing. */
+    function applyExplorerGitPinButtonState(index) {
+        const pane = terminals[index];
+        const panel = document.getElementById(`explorer-git-panel-${index}`);
+        if (!pane || !panel) {
+            return;
+        }
+        const state = explorerGitPinState(pane);
+        const button = panel.querySelector('[data-explorer-git-pin-toggle]');
+        if (button) {
+            button.setAttribute('aria-pressed', state.pressed ? 'true' : 'false');
+            button.title = state.title;
+            button.setAttribute('aria-label', state.title);
+            button.classList.toggle('is-pinned-elsewhere', state.state === 'elsewhere');
+        }
+        const scopeClear = panel.querySelector('[data-explorer-git-scope-clear]');
+        if (scopeClear) {
+            scopeClear.hidden = !state.clearAvailable;
+        }
     }
 
     /* One writer for the pin, so the toggle and the error panel's explicit
@@ -644,11 +683,18 @@
         return true;
     }
 
-    function toggleExplorerGitPinnedScope(index) {
+    /* Pin *here*: clear only when the pin is the folder being browsed,
+       otherwise pin this folder — including when a pin already exists
+       somewhere else, which is one write and not an unpin followed by a pin.
+       Two writes would mean two invalidate + load round trips, a visible
+       flash at the intermediate root scope, and two presentation writes for
+       one gesture. Never an ancestor match, so this can never clear a pin the
+       user made in another folder. */
+    function toggleExplorerGitPinHere(index) {
         const pane = terminals[index];
         return setExplorerGitPinnedScope(
             index,
-            typeof pane?._explorerGitPinnedPath === 'string'
+            explorerGitPinState(pane).state === 'here'
                 ? null
                 : String(pane?._explorerPath || '')
         );
@@ -672,9 +718,7 @@
         if (pane._explorerGitRepoError && !pane._explorerGitRepo) {
             const following = Boolean(pane._explorerGitFollowBrowsing);
             const pinned = typeof pane._explorerGitPinnedPath === 'string';
-            const pinTitle = pinned
-                ? 'Clear pinned Git folder'
-                : 'Pin Git to the current folder';
+            const pinState = explorerGitPinState(pane);
             /* A pin is faithfully re-applied on restore, including one made in
                a folder that is not inside any worktree — that is the pin
                working, not the pin being lost. But a bare "Folder is not
@@ -699,14 +743,14 @@
                     <div class="explorer-diff-sidebar-title explorer-git-section-title">
                         <span>Graph</span>
                         <span class="explorer-git-section-actions">
-                            <button type="button" class="explorer-search-btn explorer-git-pin-toggle" data-explorer-git-pin-toggle aria-pressed="${pinned ? 'true' : 'false'}" title="${pinTitle}" aria-label="${pinTitle}">${EXPLORER_GIT_PIN_ICON}</button>
+                            <button type="button" class="explorer-search-btn explorer-git-pin-toggle${pinState.state === 'elsewhere' ? ' is-pinned-elsewhere' : ''}" data-explorer-git-pin-toggle aria-pressed="${pinState.pressed ? 'true' : 'false'}" title="${escHtml(pinState.title)}" aria-label="${escHtml(pinState.title)}">${EXPLORER_GIT_PIN_ICON}</button>
                             <button type="button" class="explorer-search-btn explorer-git-follow-toggle" data-explorer-git-follow-toggle aria-pressed="${following ? 'true' : 'false'}" title="${following ? 'Use fixed Git folder' : 'Follow browsed folder for Git'}" aria-label="${following ? 'Use fixed Git folder' : 'Follow browsed folder for Git'}">${EXPLORER_GIT_FOLLOW_ICON}</button>
                             <button type="button" class="explorer-search-btn explorer-git-commit-search-toggle" disabled title="Search commit messages" aria-label="Search commit messages">${EXPLORER_GIT_SEARCH_ICON}</button>
                         </span>
                     </div>
                 </div>`;
             panel.querySelector('[data-explorer-git-pin-toggle]')?.addEventListener('click', () => {
-                toggleExplorerGitPinnedScope(index);
+                toggleExplorerGitPinHere(index);
             });
             panel.querySelector('[data-explorer-git-follow-toggle]')?.addEventListener('click', () => {
                 toggleExplorerGitFollowBrowsing(index);
@@ -742,12 +786,12 @@
         const repoName = String(git.repo_name || '').trim();
         const repoBranchText = explorerGitBranchLabel(git);
         const following = Boolean(pane._explorerGitFollowBrowsing);
-        const pinned = typeof pane._explorerGitPinnedPath === 'string';
-        const scopeLabel = explorerGitScopeLabel(explorerGitScopePath(pane));
-        const scopeTitle = explorerGitScopeTitle(explorerGitScopePath(pane), following);
-        const pinTitle = pinned
-            ? 'Clear pinned Git folder'
-            : 'Pin Git to the current folder';
+        const pinState = explorerGitPinState(pane);
+        const scopeLines = window.GridVibeExplorerGitPin.explorerGitScopeLines(
+            typeof pane._explorerGitPinnedPath === 'string' ? pane._explorerGitPinnedPath : null,
+            String(pane._explorerPath || ''),
+            following
+        );
         const commitSearch = ensureExplorerGitCommitSearchState(pane);
         const commitSearchMode = commitSearch.mode === 'hash' ? 'hash' : 'subject';
         const searchPolicy = window.GridVibeExplorerGitSearch;
@@ -805,11 +849,12 @@
                         <span class="explorer-git-repo-icon">${EXPLORER_GIT_TOGGLE_ICON}</span>
                         <span class="explorer-git-repo-text">${escHtml(repoBranchText)}</span>
                     </div>
-                    ${scopeLabel ? `
-                    <div class="explorer-git-repo-line explorer-git-repo-scope" title="${escHtml(scopeTitle)}">
-                        <span class="explorer-git-repo-icon">${following ? EXPLORER_GIT_FOLLOW_ICON : EXPLORER_GIT_PIN_ICON}</span>
-                        <span class="explorer-git-repo-text">${escHtml(scopeLabel)}</span>
-                    </div>` : ''}
+                    ${scopeLines.map(line => `
+                    <div class="explorer-git-repo-line explorer-git-repo-scope explorer-git-repo-scope-${line.kind}${line.overridden ? ' is-overridden' : ''}" title="${escHtml(line.title)}">
+                        <span class="explorer-git-repo-icon">${line.kind === 'follow' ? EXPLORER_GIT_FOLLOW_ICON : EXPLORER_GIT_PIN_ICON}</span>
+                        <span class="explorer-git-repo-text">${escHtml(line.label)}</span>
+                        ${line.kind === 'pin' ? `<button type="button" class="explorer-git-clear-pin-btn explorer-git-scope-clear-btn" data-explorer-git-clear-pin data-explorer-git-scope-clear ${line.clearAvailable ? '' : 'hidden'} title="Clear the pinned Git folder: ${escHtml(line.label)}" aria-label="Clear the pinned Git folder: ${escHtml(line.label)}">Clear pin</button>` : ''}
+                    </div>`).join('')}
                 </div>
                 <button type="button" class="explorer-git-publish-btn" data-explorer-git-publish ${busy ? 'disabled' : ''} title="Push the current branch to its remote">${escHtml(publishLabel)}</button>
             </div>
@@ -844,7 +889,7 @@
                 <div class="explorer-diff-sidebar-title explorer-git-section-title">
                     <span>Graph</span>
                     <span class="explorer-git-section-actions">
-                        <button type="button" class="explorer-search-btn explorer-git-pin-toggle" data-explorer-git-pin-toggle aria-pressed="${pinned ? 'true' : 'false'}" ${busy ? 'disabled' : ''} title="${pinTitle}" aria-label="${pinTitle}">${EXPLORER_GIT_PIN_ICON}</button>
+                        <button type="button" class="explorer-search-btn explorer-git-pin-toggle${pinState.state === 'elsewhere' ? ' is-pinned-elsewhere' : ''}" data-explorer-git-pin-toggle aria-pressed="${pinState.pressed ? 'true' : 'false'}" ${busy ? 'disabled' : ''} title="${escHtml(pinState.title)}" aria-label="${escHtml(pinState.title)}">${EXPLORER_GIT_PIN_ICON}</button>
                         <button type="button" class="explorer-search-btn explorer-git-follow-toggle" data-explorer-git-follow-toggle aria-pressed="${following ? 'true' : 'false'}" ${busy ? 'disabled' : ''} title="${following ? 'Use fixed Git folder' : 'Follow browsed folder for Git'}" aria-label="${following ? 'Use fixed Git folder' : 'Follow browsed folder for Git'}">${EXPLORER_GIT_FOLLOW_ICON}</button>
                         <button type="button" class="explorer-search-btn explorer-git-commit-search-toggle" data-explorer-git-commit-search-toggle aria-expanded="${commitSearch.open ? 'true' : 'false'}" title="Search commit messages" aria-label="Search commit messages">${EXPLORER_GIT_SEARCH_ICON}</button>
                     </span>
@@ -907,7 +952,16 @@
             toggleExplorerGitFollowBrowsing(index);
         });
         panel.querySelector('[data-explorer-git-pin-toggle]')?.addEventListener('click', () => {
-            toggleExplorerGitPinnedScope(index);
+            toggleExplorerGitPinHere(index);
+        });
+        /* The one always-reachable clear. The button no longer clears a pin
+           you have navigated away from, so without this a pin on a folder
+           that is collapsed, deleted, or outside the current root would be
+           unclearable. Same writer as the button; no modifier gesture, since
+           Alt already means level-fold here and an invisible gesture is not
+           an affordance. */
+        panel.querySelector('[data-explorer-git-clear-pin]')?.addEventListener('click', () => {
+            clearExplorerGitPinnedScope(index);
         });
         panel.querySelector('[data-explorer-git-commit-search-prev]')?.addEventListener('click', () => {
             stepExplorerGitCommitSearch(index, -1);

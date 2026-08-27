@@ -9,6 +9,9 @@ from tempfile import TemporaryDirectory
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SIDEBAR_JS = REPO_ROOT / "web" / "static" / "js" / "explorer-git-sidebar.js"
+# The pin button reads its three states from this module, so both
+# harnesses load it rather than letting the sidebar fall back.
+PIN_JS = REPO_ROOT / "web" / "static" / "js" / "explorer-git-pin.js"
 NODE = shutil.which("node")
 
 
@@ -54,7 +57,6 @@ const sandbox = {
         activeElement: null,
         getElementById: () => null
     },
-    window: {},
     fetch: async (url, options) => {
         calls.push({ url, options: options || null });
         const pathScoped = url.includes('scope=path');
@@ -70,7 +72,9 @@ const sandbox = {
     }
 };
 sandbox.globalThis = sandbox;
+sandbox.window = sandbox;
 vm.createContext(sandbox);
+vm.runInContext(fs.readFileSync(process.argv[3], 'utf8'), sandbox);
 vm.runInContext(fs.readFileSync(process.argv[2], 'utf8'), sandbox);
 
 // These collaborators are separately covered; this harness observes only the
@@ -94,14 +98,19 @@ sandbox.wireExplorerCopyPathMenu = () => {};
     pane._explorerPath = 'repo one/docs';
     // Root scope is cached across navigation.
     await sandbox.loadExplorerGitRepo(0);
-    await sandbox.toggleExplorerGitPinnedScope(0);
+    await sandbox.toggleExplorerGitPinHere(0);
     pane._explorerPath = 'repo one/docs/deeper';
     // The captured folder is cached across later navigation too.
     await sandbox.loadExplorerGitRepo(0);
     await sandbox.toggleExplorerGitFollowBrowsing(0);
     await sandbox.performExplorerGitAction(0, 'publish', {});
     await sandbox.toggleExplorerGitFollowBrowsing(0);
-    await sandbox.toggleExplorerGitPinnedScope(0);
+    /* The button is "pin here", not "is there a pin": it clears only while the
+       browsed folder *is* the pinned one. From anywhere else it re-pins, which
+       is why the walk back to the pin comes first -- and why this issues no
+       request of its own, navigation being free in this harness. */
+    pane._explorerPath = 'repo one/docs';
+    await sandbox.toggleExplorerGitPinHere(0);
     pane._explorerGitRepoError = 'Root is not a repository';
     pane._explorerGitRepo = null;
     const errorPanel = {
@@ -135,7 +144,7 @@ class ExplorerGitSidebarRequestTestCase(unittest.TestCase):
             script = Path(temp_dir) / "harness.js"
             script.write_text(HARNESS, encoding="utf-8")
             result = subprocess.run(
-                [NODE, str(script), str(SIDEBAR_JS)],
+                [NODE, str(script), str(SIDEBAR_JS), str(PIN_JS)],
                 capture_output=True,
                 text=True,
                 encoding="utf-8",
@@ -199,7 +208,20 @@ function makePanel() {
         querySelector(selector) {
             const hook = selector.replace(/^\[|\]$/g, '');
             if (!this.innerHTML.includes(hook)) return null;
+            /* The pin affordances are repainted attribute-only after a write,
+               so a control stub has to be able to take attributes as well as
+               a listener. */
+            const classes = new Set();
             return {
+                attributes: {},
+                title: '',
+                hidden: false,
+                classList: {
+                    toggle(name, on) { if (on) { classes.add(name); } else { classes.delete(name); } },
+                    contains: name => classes.has(name)
+                },
+                setAttribute(name, value) { this.attributes[name] = value; },
+                getAttribute(name) { return this.attributes[name]; },
                 addEventListener: (_type, handler) => handlers.set(hook, handler)
             };
         },
@@ -257,6 +279,11 @@ const sandbox = {
 };
 sandbox.globalThis = sandbox;
 vm.createContext(sandbox);
+// Onto the harness's own `window`, beside the Git active policy already there.
+vm.runInContext(
+    fs.readFileSync(process.argv[3], 'utf8') + '\nwindow.GridVibeExplorerGitPin = GridVibeExplorerGitPin;',
+    sandbox
+);
 vm.runInContext(fs.readFileSync(process.argv[2], 'utf8'), sandbox);
 
 sandbox.escHtml = value => String(value == null ? '' : value);
@@ -312,7 +339,7 @@ class ExplorerGitScopeSurfaceTestCase(unittest.TestCase):
             script_path = Path(temp_dir) / "harness.js"
             script_path.write_text(script, encoding="utf-8")
             completed = subprocess.run(
-                [NODE, str(script_path), str(SIDEBAR_JS)],
+                [NODE, str(script_path), str(SIDEBAR_JS), str(PIN_JS)],
                 capture_output=True,
                 text=True,
                 encoding="utf-8",
@@ -392,6 +419,51 @@ class ExplorerGitScopeSurfaceTestCase(unittest.TestCase):
         # Follow names its scope too, and says which control chose it.
         self.assertIn("Git scope follows the browsed folder", result["following"])
         self.assertIn('data-icon="follow"', result["following"])
+
+    def test_a_pin_and_a_live_follow_are_two_rows_and_only_one_can_be_cleared(self):
+        """One row showed the *effective* scope, so with Follow on it named the
+        browsed folder, wore the chain icon, and still carried Clear pin -- an
+        action about a path that was not on the row."""
+        result = self._render(
+            """
+            pane._explorerGitPinnedPath = 'web/static';
+            pane._explorerGitFollowBrowsing = true;
+            const both = renderLoaded();
+            pane._explorerGitFollowBrowsing = false;
+            const pinOnly = renderLoaded();
+            emit({ both, pinOnly });
+            """
+        )
+        both = result["both"]
+        # Two rows, the pin first, each naming its own path.
+        self.assertEqual(both.count("explorer-git-repo-scope-"), 2)
+        self.assertEqual(both.count("explorer-git-repo-scope-pin"), 1)
+        self.assertEqual(both.count("explorer-git-repo-scope-follow"), 1)
+        self.assertLess(
+            both.index("explorer-git-repo-scope-pin"),
+            both.index("explorer-git-repo-scope-follow"),
+        )
+        self.assertIn(">web/static<", both)
+        self.assertIn(">web/static/js<", both)
+
+        # The clear is on the pin row, and there is exactly one of it.
+        self.assertEqual(both.count("data-explorer-git-scope-clear"), 1)
+        pin_row = both[
+            both.index("explorer-git-repo-scope-pin"):
+            both.index("explorer-git-repo-scope-follow")
+        ]
+        self.assertIn("data-explorer-git-scope-clear", pin_row)
+        # And it names the path it is about, so the two rows cannot be confused.
+        self.assertIn("Clear the pinned Git folder: web/static", pin_row)
+
+        # The pin is overridden while Follow is on, said in words as well as
+        # in the class the styling keys on -- and it does not disappear, since
+        # turning Follow off lands back on it.
+        self.assertIn("is-overridden", both)
+        self.assertIn("overridden while Follow is on", both)
+        self.assertNotIn("is-overridden", result["pinOnly"])
+        self.assertEqual(result["pinOnly"].count("explorer-git-repo-scope-"), 1)
+        self.assertNotIn("explorer-git-repo-scope-follow", result["pinOnly"])
 
 
 if __name__ == "__main__":

@@ -4485,6 +4485,19 @@
             background: var(--explorer-row-active);
         }
 
+        /* The pin button's third state. `aria-pressed` is binary and stays
+           bound to "the pin is here", so "there is a pin, somewhere else"
+           needs its own mark beside it -- without one it is indistinguishable
+           from "no pin" and nothing warns that a click is about to *move* the
+           pin. Border and a dashed underline rather than colour alone
+           (guardrail 7), inside the existing 22px box so no icon metric
+           changes. */
+        .explorer-git-pin-toggle.is-pinned-elsewhere {
+            border-color: var(--explorer-warning);
+            color: var(--explorer-warning);
+            border-style: dashed;
+        }
+
         .explorer-diff-sidebar-empty,
         .explorer-diff-sidebar-error {
             padding: 8px 10px;
@@ -4772,6 +4785,27 @@
         .explorer-git-repo-scope {
             color: var(--explorer-muted);
             font-size: .7rem;
+        }
+
+        /* A pin and a live Follow are two scopes on two rows, and while Follow
+           is on it is the one in effect -- so the pin row stands down without
+           leaving, since turning Follow off lands back on it. The row's own
+           title says so in words; this only makes the ranking visible. */
+        .explorer-git-repo-scope.is-overridden {
+            opacity: .55;
+        }
+
+        /* The scope chip's Clear pin: the one always-reachable clear once the
+           pin button became "pin here". Sized down to sit inside the chip's
+           line rather than beside the error panel's message. */
+        .explorer-git-scope-clear-btn {
+            margin-left: 6px;
+            padding: 1px 6px;
+            font-size: .65rem;
+        }
+
+        .explorer-git-scope-clear-btn[hidden] {
+            display: none;
         }
 
         .explorer-git-publish-btn,

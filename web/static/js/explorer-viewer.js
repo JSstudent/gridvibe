@@ -7133,6 +7133,13 @@
             // A listing is not a diff, so the Git sidebar's highlight goes out
             // with the file the viewer just left.
             paintExplorerGitActiveRows(index);
+            /* Walking into another folder moves the pin button between "pin
+               is here" and "pin is elsewhere" while leaving the Git model
+               untouched — with Follow off nothing below reloads, so the
+               button would otherwise keep a stale pressed state and a stale
+               title until the next load. Attribute-only, beside the tree's
+               marker. */
+            refreshExplorerPinAffordances(index);
             if (pane._explorerGitSidebarOpen) {
                 loadExplorerGitRepo(index);
             }

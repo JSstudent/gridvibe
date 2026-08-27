@@ -95,166 +95,41 @@ fixed and recorded as **ISSUE-2026-047** (stage 2, shipped 2026-08-27).
   renders its file rows; Alt-collapse restores the textarea focus and selection.
 - `explorer-git-active.js` / `-menu.js` / `-search.js` / `-pin.js` are the "new
   surface gets a DOM-free module + a thin adapter" pattern (architecture
-  guardrail 6). `-pin.js` is the newest and the one 3c and 4 extend.
+  guardrail 6). `-pin.js` is the newest, now holding the pin predicate, the pin
+  button's three states and the repo bar's scope rows — the module stage 4
+  extends to a file-level pin.
 - `explorer-tree.js` is the completed Files-tree pure-move pattern; the lasting
   extraction rule and its next trigger now live in `CLAUDE.md` and `AGENTS.md`.
 - The Files tree's pin marker (3b) is derived per row from
   `_explorerGitPinnedPath` and painted onto the two rows that changed — never by
   rebuilding `[data-explorer-tree-body]`, which resets the tree's scroll. A `''`
   pin marks the FILES head, because the body lists the root's *children* and has
-  no root row.
+  no root row. The Graph header's pin button (3c) is painted the same way, from
+  the same predicate, through the same `refreshExplorerPinAffordances(index)`.
 
 ---
 
 ## Stage 3 — The pin is visible where it was made, and re-pinnable on the fly (note 8)
 
-**Risk: low.** Depends on stage 2 and the completed Files-tree extraction gate.
+**Shipped 2026-08-27 — 3b and 3c both.** Nothing here is outstanding; the stage
+is recorded rather than planned, and the rules it established live in the code,
+in `CHANGELOG.md`, in `README.md`, and in the Git-scope guardrail in `CLAUDE.md`
+/ `AGENTS.md`.
 
-**3b (the Files-tree pin marker) shipped 2026-08-27** and is documented in
-`CHANGELOG.md`, in the Git-scope guardrail in `CLAUDE.md` / `AGENTS.md`, and in
-`README.md`; it also introduced `web/static/js/explorer-git-pin.js`, the DOM-free
-`explorerGitPathIsPinned()` predicate 3c's button state is meant to share.
+- **3b — the Files-tree pin marker.** Introduced `web/static/js/explorer-git-pin.js`
+  and its `explorerGitPathIsPinned()` predicate.
+- **3c — the pin button asks "is the pin *here*".** Three states from
+  `explorerGitPinButtonState()` on that same predicate, a one-write re-pin from
+  anywhere else, and the repo bar's always-reachable **Clear pin**.
+- **3c follow-up, from the manual pass** — the repo bar's single scope row
+  showed the *effective* scope, so with Follow on it named the browsed folder,
+  wore the chain icon and still carried a **Clear pin** for a path that was not
+  on the row. Split into one row per control via `explorerGitScopeLines()`, pin
+  first, with the clear only ever on the row that names the path it clears.
 
-### 3c. The pin button asks "is the pin *here*", not "is there a pin"
-
-**Problem.** `toggleExplorerGitPinnedScope()`
-(`explorer-git-sidebar.js:628`) is a two-state toggle on the pin's
-**existence**: pinned anywhere → clear, otherwise pin the browsed folder. So
-pinning a second folder is a two-step gesture — navigate anywhere, click to
-unpin, click again to pin — and in between the pane sits at an unpinned scope
-it reloads the whole graph for. Worse, the pressed state is the pane's only
-report that a pin exists, so the button reads as "pinned" while standing in a
-folder that has nothing to do with the pin.
-
-That framing only made sense while the pin was invisible. Now that 3b marks the
-pinned row and the repo bar names the scope, the *existence* of a pin is
-reported by two surfaces that can say **where**, and the button is free to
-answer the question it is actually next to: **is this folder the pinned one?**
-
-**Solution (code + tests):**
-
-- **Three states, one predicate.** `pinnedHere` is
-  `pinned && String(_explorerGitPinnedPath) === String(pane._explorerPath || '')`
-  — exact string equality, **never** ancestor/prefix matching (a pin on a
-  parent is not a pin here, and treating it as one lets the button clear a pin
-  the user made somewhere else). `''` is the root and equals `''`. The same
-  predicate already answers 3b's marker
-  (`GridVibeExplorerGitPin.explorerGitPathIsPinned`), so the marked row and the
-  pressed button can never disagree.
-
-  | state | `aria-pressed` | click does | title |
-  | --- | --- | --- | --- |
-  | pin is here | `true` | clears the pin | `Clear pinned Git folder` |
-  | pin is elsewhere | `false` + `is-pinned-elsewhere` | **re-pins here** | `Pin Git to this folder (pinned: <label>)` |
-  | no pin | `false` | pins here | `Pin Git to the current folder` |
-
-- **Re-pinning is one write, not an unpin followed by a pin.**
-  `setExplorerGitPinnedScope()` stays the one writer; the new
-  `toggleExplorerGitPinHere(index)` hands it either `null` or the browsed path
-  and nothing else. Two writes would mean two `invalidateExplorerGitRepo()` +
-  `loadExplorerGitRepo()` round trips, a visible flash at the intermediate
-  root scope, and two presentation writes for one user gesture.
-- **The third state is visible, and not by colour alone** (guardrail 7).
-  `aria-pressed` is binary and stays bound to `pinnedHere`, so "pinned
-  elsewhere" is carried by a class beside it — border + tint, sharing the
-  existing `.explorer-git-pin-toggle` box so no new icon metrics are
-  introduced. Without it, "no pin" and "pin elsewhere" look identical and the
-  user cannot tell that a click is about to *move* something.
-- **Clearing a pin you have navigated away from.** The button no longer does
-  it, so there must be exactly one always-reachable clear or a pin on a folder
-  that is collapsed, deleted, or outside the current root becomes unclearable.
-  Reuse the affordance stage 2 already shipped in the error panel: the repo
-  bar's scope chip carries the same `data-explorer-git-clear-pin` button
-  whenever `pinned && !pinnedHere`, wired to the existing
-  `clearExplorerGitPinnedScope()`. No modifier-click (Alt already means
-  level-fold elsewhere, and an invisible gesture is not an affordance).
-- **Navigation repaints the button, and navigation does not reload the
-  sidebar.** With Follow off, walking into another folder changes `pinnedHere`
-  while the Git model is untouched — nothing re-renders the panel today, so
-  the button would keep a stale pressed state and a stale title until the next
-  load. `refreshExplorerPinAffordances(index)` therefore paints the button
-  **attribute-only** (`aria-pressed`, `title`, `aria-label`, the class) beside
-  the tree marker. Never re-render the panel for it: it carries the commit
-  textarea and the commit-search input, and a re-render takes the caret
-  (existing Git-sidebar rule).
-- **Follow is unaffected.** The pin is still captured from the browsed folder
-  and the button still describes *the pin*, not the live Follow scope — which
-  is what keeps "turn Follow off and you land back on the fixed scope"
-  predictable. With Follow on the graph already tracks the browsed folder; the
-  pin button showing "pin is elsewhere" there is accurate, not confusing.
-- **DOM-free module.** The state table above is policy, not painting, so the
-  button state joins the predicate 3b already shipped in
-  `web/static/js/explorer-git-pin.js`: add `explorerGitPinButtonState(pinnedPath,
-  browsedPath)` -> `{ state, pressed, title, clearAvailable }` beside
-  `explorerGitPathIsPinned(pinnedPath, path)`, with the sidebar and the tree
-  holding paint-only adapters (guardrail 6, the `explorer-git-*.js` pattern).
-- **One paint entry point, already in place.** 3b landed
-  `refreshExplorerPinAffordances(index)` in `explorer-git-sidebar.js`, which
-  today calls only the tree's `applyExplorerTreePinMark(index)`. The button's
-  attribute-only paint goes in there beside it rather than at a second call
-  site, and the navigation repaint below is what makes that function earn its
-  name.
-- **Zero new persisted state**, same as 3b: both states are derived from
-  `_explorerGitPinnedPath` and `_explorerPath`.
-- **Identity still applies.** The paint captures the pane object and its
-  session id and re-checks before writing, like every other post-`await`
-  sidebar write — a group switch during a pin load must not paint another
-  pane's slot.
-
-**Tests** — `tests/test_explorer_tree_pin_mark.py` (3b's file: it already
-executes the predicate and the tree marker, so the button state joins it rather
-than opening a second file over the same module):
-
-- `explorerGitPinButtonState`: `here` / `elsewhere` / `none`; a `''` pin while
-  browsing the root is `here`; a `''` pin while browsing `web` is `elsewhere`;
-  a `web` pin while browsing `web/static` is `elsewhere` (**no** ancestor
-  match); each state's `pressed`, `title` and `clearAvailable`.
-- Clicking while pinned elsewhere issues **exactly one** write, with the new
-  path, and exactly one repo load — assert the call count, because the
-  unpin-then-pin regression is invisible in the end state.
-- Clicking while pinned here clears; clicking with no pin pins here.
-- The paint adapter updates the attributes **without** replacing the panel:
-  the button node is the same object afterwards, and a focused commit textarea
-  keeps its focus and selection.
-- The repo bar's **Clear pin** renders only when `pinned && !pinnedHere` and
-  goes through the same one writer.
-- The marker and the button agree: for any (pin, browsed) pair, the row the
-  marker lands on is `here` for exactly that browsed path. 3b's marker
-  assertions must keep passing untouched — a change there would mean the two
-  surfaces stopped sharing one predicate.
-
-**Manual test outline** (extends 3b's, which passed on 2026-08-27):
-
-11. Pin `web/static/js`, then navigate to `docs` → the button is **not**
-    pressed, wears the distinct pinned-elsewhere styling, and its title names
-    `web/static/js`; the tree marker has not moved.
-12. Click it → the pin moves to `docs` in one action: the marker moves, the
-    graph reloads **once**, and there is no intermediate flash at root scope.
-13. Navigate into `docs` again → the button is pressed. Click → the pin is
-    cleared, the marker is gone, the repo bar drops the scope chip.
-14. Pin a folder, navigate away, and use the repo bar's **Clear pin** → the
-    pin clears without navigating back to it.
-15. Pin the explorer root, browse the root → pressed; browse into any
-    subfolder → pinned-elsewhere.
-16. Turn **Follow** on with a pin set elsewhere → the graph follows browsing,
-    the button still reports the pin's location, and turning Follow off lands
-    back on the pin.
-17. Navigate quickly through several folders while a repo load is in flight ->
-    the button always matches the pane it is in, and a group switch mid-load
-    paints nothing into the replacing pane.
-18. While a Git action is running, the pin button is disabled as it is today.
-19. Save Workspace → restart → restore in a folder that is **not** the pinned
-    one → the button comes back un-pressed and pinned-elsewhere, the marker on
-    the pinned row — i.e. the restore reads as a kept pin, not a lost one.
-
-**Docs after verification:** `CHANGELOG.md` `(feat)` bullet (this is a
-user-visible gesture change, not just a marker); the Git scope guardrail in
-`CLAUDE.md` / `AGENTS.md` gains: *"the pin button is **pin here** — it is
-pressed only while the browsed folder is the pinned path, re-pins to the
-browsed folder in one write from anywhere else, and never clears a pin made
-somewhere else; clearing from elsewhere is the repo bar's Clear pin. The
-button's state and the tree marker come from one predicate, so they cannot
-disagree."*
+What stage 4 inherits: `explorer-git-pin.js` is now the module both the tree
+marker and the two Graph-header/repo-bar surfaces read, so a file-level pin
+extends the predicate, the button state and the row model in one place.
 
 ---
 
@@ -331,9 +206,10 @@ directory, not a redesign.
   (`explorer-git-watch.js`) already reloads on a scope change.
 - **Tree context menu:** `handleExplorerContextMenu()` gains **Pin Git here** /
   **Unpin Git** for a tree row (directories *and* files), placed with the
-  filesystem entries. It obeys 3c's rule on the row rather than on the pane:
-  **Unpin Git** appears only on the row that *is* the pinned path; every other
-  row offers **Pin Git here**, which re-pins in one write. Rules: **single-entry only** (never a batch target — the
+  filesystem entries. It obeys 3c's shipped rule on the row rather than on
+  the pane: **Unpin Git** appears only on the row that *is* the pinned path;
+  every other row offers **Pin Git here**, which re-pins in one write, exactly
+  as the Graph header's button does. Rules: **single-entry only** (never a batch target — the
   same rule Rename lives by); **never** on a commit row (that branch stays
   path-free — "a commit names a repository object, not a path"); the entry is
   **disabled, not dropped**, when the row is outside any worktree, with a title
@@ -527,17 +403,15 @@ narrow variant delivers the note's stated ask without that.
 | Stage | Notes | Backend | New persisted field | New endpoint | Files touched | Risk |
 | --- | --- | --- | --- | --- | --- | --- |
 | 3b | 8 | — | — | — | shipped 2026-08-27 | low |
-| 3c | 8 | — | — | — | 4 + 3b's test file | low |
+| 3c | 8 | — | — | — | shipped 2026-08-27 | low |
 | 4 | 11 | yes | `explorer_git_pin_kind` | — | ~12 + 4 test files | med-high |
 | 5 | 13 | yes | `explorer_git_graph_open` | `git/graph` | ~10 + 3 test files | high |
 
-**Hard dependencies:** 3b, 3c and 4 needed 2 — the pin had to be trustworthy before
-it was made visible or extended — and 2 shipped on 2026-08-27, followed by 3b.
-The Files-tree extraction gate is complete, so 4's tree menu can proceed; 3c's
-own dependency on 3b is now satisfied, so moving the button off "is there a pin"
-is honest — the marker and the scope chip both report where the pin is. 5 is
-independent of 3 and 4 and could be scheduled earlier, but it is the largest
-piece and benefits from the scope work landing first.
+**Hard dependencies:** 3b, 3c and 4 needed 2 — the pin had to be trustworthy
+before it was made visible or extended — and 2, 3b and 3c all shipped on
+2026-08-27. The Files-tree extraction gate is complete, so 4's tree menu can
+proceed. 5 is independent of 3 and 4 and could be scheduled earlier, but it is
+the largest piece and benefits from the scope work landing first.
 
 **Decisions still open** (pin semantics was decided with stage 2: a frozen
 *path* scope, and the document was corrected):

@@ -12,8 +12,15 @@ with the pin, because rebuilding ``[data-explorer-tree-body]`` empties the
 tree's scroller and the capture-phase scroll listener would persist that
 clamped 0 as the reader's position.
 
-Executed in Node against the real modules: the predicate, the row markup and
-the paint are run, not read. Only the markup hooks themselves
+The Graph header's pin button is the marker's other half and lives here for
+that reason: both surfaces answer "is the pin *here*" from the one predicate in
+``explorer-git-pin.js``, and a second test file over the same module is how
+they would come to disagree. The button asks *here*, not *is there a pin* -- so
+it is pressed only while the browsed folder is the pinned one, re-pins from
+anywhere else in a single write, and never clears a pin made somewhere else.
+
+Executed in Node against the real modules: the predicate, the row markup, the
+paint and the click are run, not read. Only the markup hooks themselves
 (``explorer-tree-pin-mark``, the title) are asserted as text, which is the
 documented exception for rendered markup.
 """
@@ -28,6 +35,13 @@ from tempfile import TemporaryDirectory
 STATIC_JS = Path(__file__).resolve().parent.parent / "web" / "static" / "js"
 TREE_JS = STATIC_JS / "explorer-tree.js"
 PIN_JS = STATIC_JS / "explorer-git-pin.js"
+SIDEBAR_JS = STATIC_JS / "explorer-git-sidebar.js"
+# The panel renderer's own policy collaborators, loaded rather than
+# stubbed so the render under test is the real one.
+SIDEBAR_POLICY_JS = [
+    STATIC_JS / "explorer-git-active.js",
+    STATIC_JS / "explorer-git-search.js",
+]
 
 NODE = shutil.which("node")
 
@@ -253,6 +267,254 @@ process.stdout.write(JSON.stringify({
 }));
 """
 
+# The Graph header's pin button, run in the real sidebar module against a panel
+# stub that keeps node identity. `innerHTML` on the panel is a trap: the paint
+# must be attribute-only, because the panel carries the commit-message textarea
+# and re-rendering it takes the caret.
+BUTTON_HARNESS = r"""
+const fs = require('fs');
+const vm = require('vm');
+
+const spec = JSON.parse(process.argv[5]);
+let nodeSeq = 0;
+let presentationWrites = 0;
+
+const classes = new Set(['explorer-search-btn', 'explorer-git-pin-toggle']);
+const button = {
+    nodeId: ++nodeSeq,
+    title: spec.button.title,
+    attributes: { 'aria-pressed': spec.button.pressed, 'aria-label': spec.button.title },
+    classList: {
+        toggle(name, on) { if (on) { classes.add(name); } else { classes.delete(name); } },
+        contains: name => classes.has(name)
+    },
+    setAttribute(name, value) { this.attributes[name] = value; },
+    getAttribute(name) { return this.attributes[name]; },
+    addEventListener() {}
+};
+
+/* The caret the paint must not take: a focused commit-message textarea with a
+   selection in it, standing in the same panel. */
+const textarea = {
+    focused: true,
+    selection: [3, 9],
+    focus() { this.focused = true; },
+    setSelectionRange(a, b) { this.selection = [a, b]; }
+};
+
+const scopeClear = { nodeId: ++nodeSeq, hidden: spec.scopeClearHidden, addEventListener() {} };
+let innerHtmlWrites = 0;
+const panel = {
+    nodeId: ++nodeSeq,
+    get innerHTML() { return ''; },
+    set innerHTML(value) { innerHtmlWrites += 1; textarea.focused = false; },
+    classList: { add() {}, remove() {} },
+    querySelector(selector) {
+        if (selector === '[data-explorer-git-pin-toggle]') { return button; }
+        if (selector === '[data-explorer-git-scope-clear]') { return scopeClear; }
+        return null;
+    },
+    querySelectorAll: () => []
+};
+
+const sandbox = {
+    console,
+    document: {
+        getElementById: id => (id === 'explorer-git-panel-0' ? panel : null),
+        querySelector: () => null,
+        querySelectorAll: () => [],
+        addEventListener() {},
+        body: { dataset: {}, addEventListener() {} }
+    },
+    navigator: {},
+    setTimeout,
+    clearTimeout,
+    requestAnimationFrame: () => 0,
+    fetch: () => Promise.reject(new Error('a pin write may issue no request of its own')),
+    terminals: [],
+    sessionIds: [],
+    notePanePresentationChanged: () => { presentationWrites += 1; },
+    /* The panel renderer's page-side collaborators. The pin paint touches
+       none of them; they are here so a pin *write* can run the real render
+       that follows it instead of being kept away from it. */
+    wireExplorerCopyPathMenu: () => {},
+    renderExplorerGitFileRows: () => '',
+    explorerGitGraphHtml: () => '',
+    ensureExplorerGitCommitSearchState: pane => (
+        pane.__search || (pane.__search = { open: false, query: '', activeIndex: 0, mode: 'subject' })
+    ),
+    EXPLORER_GIT_PIN_ICON: '<svg data-icon="pin"></svg>',
+    EXPLORER_GIT_FOLLOW_ICON: '<svg data-icon="follow"></svg>',
+    EXPLORER_GIT_SEARCH_ICON: '<svg data-icon="search"></svg>',
+    EXPLORER_GIT_HASH_ICON: '<svg data-icon="hash"></svg>',
+    EXPLORER_GIT_REVERT_ICON: '<svg data-icon="revert"></svg>',
+    EXPLORER_GIT_TOGGLE_ICON: '<svg data-icon="git"></svg>',
+    EXPLORER_FOLDER_ICON: '<svg data-icon="folder"></svg>',
+    UI_PLUS_ICON: '<svg data-icon="plus"></svg>',
+    UI_MINUS_ICON: '<svg data-icon="minus"></svg>',
+    UI_CHEVRON_DOWN_ICON: '<svg></svg>',
+    UI_CHEVRON_RIGHT_ICON: '<svg></svg>',
+    escHtml: value => String(value == null ? '' : value)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+};
+sandbox.globalThis = sandbox;
+sandbox.window = sandbox;
+vm.createContext(sandbox);
+vm.runInContext(fs.readFileSync(process.argv[2], 'utf8'), sandbox);
+vm.runInContext(fs.readFileSync(process.argv[3], 'utf8'), sandbox);
+process.argv.slice(6).forEach(path => {
+    vm.runInContext(fs.readFileSync(path, 'utf8'), sandbox);
+});
+vm.runInContext(fs.readFileSync(process.argv[4], 'utf8'), sandbox);
+
+sandbox.__spec = spec;
+vm.runInContext(`
+    sessionIds[0] = 'sess-0';
+    terminals[0] = { _explorerPath: __spec.browsed };
+    if (__spec.pinned !== null) { terminals[0]._explorerGitPinnedPath = __spec.pinned; }
+`, sandbox);
+
+// The tree's own paint has its own cases below; here it is only counted, so
+// that "both surfaces move together" is an observation.
+const treeMarks = [];
+sandbox.applyExplorerTreePinMark = index => { treeMarks.push(index); };
+
+/* The regression the end state cannot show: an unpin followed by a pin leaves
+   the same pane field as one write. Count them. */
+const writes = [];
+const realWrite = sandbox.setExplorerGitPinnedScope;
+sandbox.setExplorerGitPinnedScope = function (index, pinnedPath) {
+    writes.push(pinnedPath);
+    return realWrite.call(null, index, pinnedPath);
+};
+const loads = [];
+sandbox.loadExplorerGitRepo = async index => { loads.push(index); };
+
+const rendered = sandbox.explorerGitPinState(sandbox.terminals[0]);
+
+async function main() {
+    if (spec.action === 'click') {
+        await sandbox.toggleExplorerGitPinHere(0);
+    } else if (spec.action === 'clear') {
+        await sandbox.clearExplorerGitPinnedScope(0);
+    } else {
+        sandbox.refreshExplorerPinAffordances(0);
+    }
+    process.stdout.write(JSON.stringify({
+        rendered,
+        writes,
+        loads: loads.length,
+        presentationWrites,
+        pinnedAfter: typeof sandbox.terminals[0]._explorerGitPinnedPath === 'string'
+            ? sandbox.terminals[0]._explorerGitPinnedPath
+            : null,
+        pressed: button.getAttribute('aria-pressed'),
+        title: button.title,
+        ariaLabel: button.getAttribute('aria-label'),
+        elsewhereClass: button.classList.contains('is-pinned-elsewhere'),
+        buttonNodeId: button.nodeId,
+        scopeClearHidden: scopeClear.hidden,
+        innerHtmlWrites,
+        treeMarks,
+        textareaFocused: textarea.focused,
+        textareaSelection: textarea.selection
+    }));
+}
+main().catch(error => { console.error(error); process.exit(1); });
+"""
+
+# The scope chip and the pin button as rendered markup, out of the real panel
+# renderer: "Clear pin is there only when the pin is elsewhere" is a property
+# of what is built, not only of what is later painted onto it.
+PANEL_RENDER_HARNESS = r"""
+const fs = require('fs');
+const vm = require('vm');
+
+const spec = JSON.parse(process.argv[5]);
+let html = '';
+const panel = {
+    get innerHTML() { return html; },
+    set innerHTML(value) { html = value; },
+    classList: { add() {}, remove() {} },
+    querySelector: () => null,
+    querySelectorAll: () => []
+};
+
+const sandbox = {
+    console,
+    document: {
+        getElementById: id => (id === 'explorer-git-panel-0' ? panel : null),
+        querySelector: () => null,
+        querySelectorAll: () => [],
+        addEventListener() {},
+        body: { dataset: {}, addEventListener() {} }
+    },
+    navigator: {},
+    setTimeout,
+    clearTimeout,
+    requestAnimationFrame: () => 0,
+    terminals: [],
+    sessionIds: [],
+    notePanePresentationChanged: () => {},
+    wireExplorerCopyPathMenu: () => {},
+    renderExplorerGitFileRows: () => '',
+    explorerGitGraphHtml: () => '',
+    EXPLORER_GIT_PIN_ICON: '<svg data-icon="pin"></svg>',
+    EXPLORER_GIT_FOLLOW_ICON: '<svg data-icon="follow"></svg>',
+    EXPLORER_GIT_SEARCH_ICON: '<svg data-icon="search"></svg>',
+    EXPLORER_GIT_HASH_ICON: '<svg data-icon="hash"></svg>',
+    EXPLORER_GIT_REVERT_ICON: '<svg data-icon="revert"></svg>',
+    EXPLORER_GIT_TOGGLE_ICON: '<svg data-icon="git"></svg>',
+    EXPLORER_FOLDER_ICON: '<svg data-icon="folder"></svg>',
+    UI_PLUS_ICON: '<svg data-icon="plus"></svg>',
+    UI_MINUS_ICON: '<svg data-icon="minus"></svg>',
+    UI_CHEVRON_DOWN_ICON: '<svg></svg>',
+    UI_CHEVRON_RIGHT_ICON: '<svg></svg>',
+    escHtml: value => String(value == null ? '' : value)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+};
+sandbox.globalThis = sandbox;
+sandbox.window = sandbox;
+vm.createContext(sandbox);
+vm.runInContext(fs.readFileSync(process.argv[2], 'utf8'), sandbox);
+vm.runInContext(fs.readFileSync(process.argv[3], 'utf8'), sandbox);
+process.argv.slice(6).forEach(path => {
+    vm.runInContext(fs.readFileSync(path, 'utf8'), sandbox);
+});
+vm.runInContext(fs.readFileSync(process.argv[4], 'utf8'), sandbox);
+
+sandbox.__spec = spec;
+vm.runInContext(`
+    sessionIds[0] = 'sess-0';
+    terminals[0] = {
+        _explorerPath: __spec.browsed,
+        _explorerGitFollowBrowsing: __spec.following,
+        _explorerGitRepoLoaded: true,
+        _explorerGitRepo: { git: { branch: 'main', repo_name: 'gridvibe' }, commits: [] }
+    };
+    if (__spec.pinned !== null) { terminals[0]._explorerGitPinnedPath = __spec.pinned; }
+`, sandbox);
+
+sandbox.renderExplorerGitPanel(0);
+
+// The button's own slice of the markup, so an attribute belonging to a
+// neighbouring control is never read as the button's.
+const at = html.indexOf('data-explorer-git-pin-toggle');
+const buttonHtml = at === -1
+    ? ''
+    : html.slice(html.lastIndexOf('<button', at), html.indexOf('</button>', at));
+
+process.stdout.write(JSON.stringify({
+    html,
+    buttonHtml,
+    scopeClearCount: (html.match(/data-explorer-git-scope-clear/g) || []).length,
+    scopeClearHidden: /data-explorer-git-scope-clear[^>]*\bhidden\b/.test(html)
+}));
+"""
+
+
 PREDICATE_HARNESS = r"""
 const api = require(process.argv[2]);
 const cases = JSON.parse(process.argv[3]);
@@ -434,6 +696,368 @@ class ExplorerTreePinMarkPaintTestCase(unittest.TestCase):
         result = self._paint("")
         self.assertEqual(result["marked"], [])
         self.assertFalse(result["rootHidden"])
+
+
+@unittest.skipUnless(NODE, "Node.js is required for explorer tree pin mark tests")
+class ExplorerGitPinButtonStateTestCase(unittest.TestCase):
+    """The button asks "is the pin *here*", not "is there a pin"."""
+
+    def _state(self, pinned, browsed):
+        script = (
+            "const api = require(process.argv[2]);"
+            "const [pinned, browsed] = JSON.parse(process.argv[3]);"
+            "process.stdout.write(JSON.stringify("
+            "api.explorerGitPinButtonState(pinned, browsed)));"
+        )
+        completed = _run(script, str(PIN_JS), json.dumps([pinned, browsed]))
+        if completed.returncode != 0:
+            self.fail(f"node harness failed:\n{completed.stderr}")
+        return json.loads(completed.stdout)
+
+    def test_the_pin_here_state_is_pressed_and_clears(self):
+        state = self._state("web/static/js", "web/static/js")
+        self.assertEqual(state["state"], "here")
+        self.assertTrue(state["pressed"])
+        self.assertEqual(state["title"], "Clear pinned Git folder")
+        # The button is the clear, so the chip must not offer a second one.
+        self.assertFalse(state["clearAvailable"])
+
+    def test_a_pin_elsewhere_is_not_pressed_and_names_where_it_is(self):
+        state = self._state("web/static/js", "docs")
+        self.assertEqual(state["state"], "elsewhere")
+        self.assertFalse(state["pressed"])
+        # The title has to say *where*, or the reader cannot tell that a click
+        # is about to move something rather than create it.
+        self.assertIn("web/static/js", state["title"])
+        self.assertTrue(state["title"].startswith("Pin Git to this folder"))
+        self.assertTrue(state["clearAvailable"])
+
+    def test_no_pin_offers_to_pin_here_and_no_clear(self):
+        state = self._state(None, "docs")
+        self.assertEqual(state["state"], "none")
+        self.assertFalse(state["pressed"])
+        self.assertEqual(state["title"], "Pin Git to the current folder")
+        self.assertFalse(state["clearAvailable"])
+
+    def test_a_root_pin_is_here_at_the_root_and_elsewhere_below_it(self):
+        # `''` is a real pin, so a root pin browsed at the root is pressed --
+        # the state is the field's type, never its truthiness.
+        self.assertEqual(self._state("", "")["state"], "here")
+        self.assertEqual(self._state("", "web")["state"], "elsewhere")
+        self.assertIn("root", self._state("", "web")["title"])
+
+    def test_an_ancestor_pin_is_elsewhere_never_here(self):
+        # The reason the predicate is exact equality: an ancestor match would
+        # let the button clear a pin the user made in another folder.
+        self.assertEqual(self._state("web", "web/static")["state"], "elsewhere")
+        self.assertEqual(self._state("web/static", "web")["state"], "elsewhere")
+        self.assertEqual(self._state("web", "website")["state"], "elsewhere")
+
+    def test_the_marker_and_the_button_agree_for_every_pair(self):
+        # One predicate, two surfaces: the row the marker lands on is exactly
+        # the browsed path the button calls `here`. A disagreement here would
+        # mean the two stopped sharing it.
+        pairs = [
+            ("web", "web"), ("web", "web/static"), ("", ""), ("", "docs"),
+            ("web/static", "web/static"), (None, "web"), (None, ""),
+        ]
+        script = (
+            "const api = require(process.argv[2]);"
+            "process.stdout.write(JSON.stringify("
+            "JSON.parse(process.argv[3]).map(([pin, path]) => ["
+            "api.explorerGitPathIsPinned(pin, path),"
+            "api.explorerGitPinButtonState(pin, path).state === 'here'])));"
+        )
+        completed = _run(script, str(PIN_JS), json.dumps(pairs))
+        if completed.returncode != 0:
+            self.fail(f"node harness failed:\n{completed.stderr}")
+        for marked, here in json.loads(completed.stdout):
+            self.assertEqual(marked, here)
+
+
+@unittest.skipUnless(NODE, "Node.js is required for explorer tree pin mark tests")
+class ExplorerGitPinButtonClickTestCase(unittest.TestCase):
+    """One gesture is one write, and never clears somebody else's pin."""
+
+    def _act(self, pinned, browsed, action="click", scope_clear_hidden=True):
+        completed = _run(
+            BUTTON_HARNESS,
+            str(PIN_JS),
+            str(TREE_JS),
+            str(SIDEBAR_JS),
+            json.dumps({
+                "pinned": pinned,
+                "browsed": browsed,
+                "action": action,
+                "scopeClearHidden": scope_clear_hidden,
+                "button": {"title": "stale title", "pressed": "stale"},
+            }),
+            *[str(path) for path in SIDEBAR_POLICY_JS],
+        )
+        if completed.returncode != 0:
+            self.fail(f"node harness failed:\n{completed.stderr}")
+        return json.loads(completed.stdout)
+
+    def test_clicking_while_pinned_elsewhere_re_pins_in_exactly_one_write(self):
+        result = self._act("web/static/js", "docs")
+        self.assertEqual(result["pinnedAfter"], "docs")
+        # The end state cannot tell an unpin-then-pin from one write, and the
+        # difference is a visible flash at the intermediate root scope plus a
+        # second repository round trip -- so count them.
+        self.assertEqual(result["writes"], ["docs"])
+        self.assertEqual(result["loads"], 1)
+        self.assertEqual(result["presentationWrites"], 1)
+
+    def test_clicking_while_the_pin_is_here_clears_it(self):
+        result = self._act("docs", "docs")
+        self.assertIsNone(result["pinnedAfter"])
+        self.assertEqual(result["writes"], [None])
+        self.assertEqual(result["loads"], 1)
+
+    def test_clicking_with_no_pin_pins_the_browsed_folder(self):
+        result = self._act(None, "docs")
+        self.assertEqual(result["pinnedAfter"], "docs")
+        self.assertEqual(result["writes"], ["docs"])
+
+    def test_clicking_at_the_root_pins_the_root_rather_than_nothing(self):
+        result = self._act(None, "")
+        self.assertEqual(result["pinnedAfter"], "")
+        self.assertEqual(result["writes"], [""])
+        # And clicking again there clears it, because '' equals ''.
+        self.assertIsNone(self._act("", "")["pinnedAfter"])
+
+    def test_an_ancestor_pin_is_never_cleared_by_a_click_in_a_child(self):
+        result = self._act("web", "web/static")
+        self.assertEqual(result["pinnedAfter"], "web/static")
+        self.assertEqual(result["writes"], ["web/static"])
+
+    def test_the_write_repaints_both_surfaces(self):
+        # The tree marker and the button move on the same event, from the one
+        # entry point, so they cannot report different folders.
+        result = self._act(None, "docs")
+        self.assertEqual(result["treeMarks"], [0])
+        self.assertEqual(result["pressed"], "true")
+
+
+@unittest.skipUnless(NODE, "Node.js is required for explorer tree pin mark tests")
+class ExplorerGitPinButtonPaintTestCase(unittest.TestCase):
+    """Navigation repaints the button attribute-only -- never the panel."""
+
+    def _paint(self, pinned, browsed, scope_clear_hidden=True):
+        completed = _run(
+            BUTTON_HARNESS,
+            str(PIN_JS),
+            str(TREE_JS),
+            str(SIDEBAR_JS),
+            json.dumps({
+                "pinned": pinned,
+                "browsed": browsed,
+                "action": "paint",
+                "scopeClearHidden": scope_clear_hidden,
+                "button": {"title": "stale title", "pressed": "stale"},
+            }),
+            *[str(path) for path in SIDEBAR_POLICY_JS],
+        )
+        if completed.returncode != 0:
+            self.fail(f"node harness failed:\n{completed.stderr}")
+        return json.loads(completed.stdout)
+
+    def test_walking_into_the_pinned_folder_presses_the_button(self):
+        result = self._paint("docs", "docs")
+        self.assertEqual(result["pressed"], "true")
+        self.assertEqual(result["title"], "Clear pinned Git folder")
+        self.assertFalse(result["elsewhereClass"])
+
+    def test_walking_away_from_the_pin_marks_it_as_elsewhere(self):
+        result = self._paint("docs", "web/static")
+        self.assertEqual(result["pressed"], "false")
+        self.assertIn("docs", result["title"])
+        # aria-pressed is binary, so the third state is carried beside it --
+        # without the class, "no pin" and "pin elsewhere" look identical.
+        self.assertTrue(result["elsewhereClass"])
+
+    def test_the_class_comes_off_again_when_the_pin_is_cleared(self):
+        result = self._paint(None, "web/static")
+        self.assertFalse(result["elsewhereClass"])
+        self.assertEqual(result["pressed"], "false")
+        self.assertEqual(result["title"], "Pin Git to the current folder")
+
+    def test_the_title_and_the_aria_label_say_the_same_thing(self):
+        result = self._paint("docs", "web")
+        self.assertEqual(result["ariaLabel"], result["title"])
+
+    def test_the_paint_replaces_no_markup_and_keeps_the_caret(self):
+        result = self._paint("docs", "web")
+        # The panel carries the commit-message textarea and the commit-search
+        # input: re-rendering it to move a pin would take the caret with it.
+        self.assertEqual(result["innerHtmlWrites"], 0)
+        self.assertTrue(result["textareaFocused"])
+        self.assertEqual(result["textareaSelection"], [3, 9])
+        # And the button the reader may be hovering is the same node.
+        self.assertEqual(result["buttonNodeId"], self._paint("docs", "web")["buttonNodeId"])
+
+    def test_the_scope_chip_s_clear_pin_is_shown_only_from_elsewhere(self):
+        # Toggled by `hidden`, never added and removed, so it can appear on a
+        # navigation that renders nothing.
+        self.assertFalse(self._paint("docs", "web")["scopeClearHidden"])
+        self.assertTrue(self._paint("docs", "docs", scope_clear_hidden=False)["scopeClearHidden"])
+        self.assertTrue(self._paint(None, "web", scope_clear_hidden=False)["scopeClearHidden"])
+
+    def test_the_scope_chip_s_clear_goes_through_the_one_writer(self):
+        result = self._act_clear("web/static/js", "docs")
+        self.assertIsNone(result["pinnedAfter"])
+        self.assertEqual(result["writes"], [None])
+        self.assertEqual(result["loads"], 1)
+
+    def _act_clear(self, pinned, browsed):
+        completed = _run(
+            BUTTON_HARNESS,
+            str(PIN_JS),
+            str(TREE_JS),
+            str(SIDEBAR_JS),
+            json.dumps({
+                "pinned": pinned,
+                "browsed": browsed,
+                "action": "clear",
+                "scopeClearHidden": False,
+                "button": {"title": "stale title", "pressed": "stale"},
+            }),
+            *[str(path) for path in SIDEBAR_POLICY_JS],
+        )
+        if completed.returncode != 0:
+            self.fail(f"node harness failed:\n{completed.stderr}")
+        return json.loads(completed.stdout)
+
+
+@unittest.skipUnless(NODE, "Node.js is required for explorer tree pin mark tests")
+class ExplorerGitPinPanelMarkupTestCase(unittest.TestCase):
+    """What the rendered panel says before anything is painted onto it."""
+
+    def _render(self, pinned, browsed, following=False):
+        completed = _run(
+            PANEL_RENDER_HARNESS,
+            str(PIN_JS),
+            str(TREE_JS),
+            str(SIDEBAR_JS),
+            json.dumps({"pinned": pinned, "browsed": browsed, "following": following}),
+            *[str(path) for path in SIDEBAR_POLICY_JS],
+        )
+        if completed.returncode != 0:
+            self.fail(f"node harness failed:\n{completed.stderr}")
+        return json.loads(completed.stdout)
+
+    def test_the_rendered_button_already_carries_its_state(self):
+        # A render and the paint must agree, or the button flickers between
+        # them on every load.
+        here = self._render("docs", "docs")["buttonHtml"]
+        self.assertIn('aria-pressed="true"', here)
+        self.assertNotIn("is-pinned-elsewhere", here)
+
+        elsewhere = self._render("docs", "web")["buttonHtml"]
+        self.assertIn('aria-pressed="false"', elsewhere)
+        self.assertIn("is-pinned-elsewhere", elsewhere)
+        self.assertIn("docs", elsewhere)
+
+        none = self._render(None, "web")["buttonHtml"]
+        self.assertIn('aria-pressed="false"', none)
+        self.assertNotIn("is-pinned-elsewhere", none)
+
+    def test_the_scope_chip_carries_exactly_one_clear_pin(self):
+        result = self._render("docs", "web")
+        self.assertEqual(result["scopeClearCount"], 1)
+        self.assertFalse(result["scopeClearHidden"])
+
+    def test_the_clear_pin_is_present_but_hidden_while_the_pin_is_here(self):
+        # Present, so a navigation can reveal it without a re-render; hidden,
+        # because the button itself is the clear while the pin is here.
+        result = self._render("docs", "docs")
+        self.assertEqual(result["scopeClearCount"], 1)
+        self.assertTrue(result["scopeClearHidden"])
+
+    def test_following_without_a_pin_carries_no_clear_at_all(self):
+        # Follow gets its own row and names its scope, but Clear pin belongs to
+        # the row that names the pin -- and there is no pin, so no such row.
+        result = self._render(None, "web", following=True)
+        self.assertEqual(result["scopeClearCount"], 0)
+
+
+@unittest.skipUnless(NODE, "Node.js is required for explorer tree pin mark tests")
+class ExplorerGitScopeLinesTestCase(unittest.TestCase):
+    """A pin and a live Follow are two scopes, so they are two rows.
+
+    They used to share one, which showed the *effective* scope: with Follow on
+    it named the browsed folder, wore the chain icon, and still carried
+    **Clear pin** -- an action about a path that was not on the row. Nothing
+    said where the pin was, and the only button that could move something
+    pointed at the wrong one of the two.
+    """
+
+    def _lines(self, pinned, browsed, following):
+        script = (
+            "const api = require(process.argv[2]);"
+            "const [pinned, browsed, following] = JSON.parse(process.argv[3]);"
+            "process.stdout.write(JSON.stringify("
+            "api.explorerGitScopeLines(pinned, browsed, following)));"
+        )
+        completed = _run(script, str(PIN_JS), json.dumps([pinned, browsed, following]))
+        if completed.returncode != 0:
+            self.fail(f"node harness failed:\n{completed.stderr}")
+        return json.loads(completed.stdout)
+
+    def test_the_default_scope_gets_no_row_at_all(self):
+        # An unpinned, non-following pane is scoped to the explorer root;
+        # naming the default on every pane is noise.
+        self.assertEqual(self._lines(None, "web", False), [])
+
+    def test_a_pin_alone_is_one_row_naming_the_pinned_path(self):
+        lines = self._lines("open5gs/docs", "open5gs/lib", False)
+        self.assertEqual([line["kind"] for line in lines], ["pin"])
+        self.assertEqual(lines[0]["label"], "open5gs/docs")
+        self.assertIn("Git scope pinned to: open5gs/docs", lines[0]["title"])
+        self.assertFalse(lines[0]["overridden"])
+
+    def test_follow_alone_is_one_row_naming_the_browsed_folder(self):
+        lines = self._lines(None, "open5gs/lib", True)
+        self.assertEqual([line["kind"] for line in lines], ["follow"])
+        self.assertEqual(lines[0]["label"], "open5gs/lib")
+        self.assertIn("follows the browsed folder", lines[0]["title"])
+        # Nothing to clear: there is no pin.
+        self.assertFalse(lines[0]["clearAvailable"])
+
+    def test_both_controls_give_both_rows_pin_first(self):
+        lines = self._lines("open5gs/docs", "open5gs/lib", True)
+        self.assertEqual([line["kind"] for line in lines], ["pin", "follow"])
+        self.assertEqual(lines[0]["label"], "open5gs/docs")
+        self.assertEqual(lines[1]["label"], "open5gs/lib")
+
+    def test_the_pin_row_stays_while_follow_overrides_it(self):
+        # Follow overrides a pin rather than replacing it -- turning Follow off
+        # lands back on the pin -- so dropping the row would read as a lost pin.
+        line = self._lines("open5gs/docs", "open5gs/lib", True)[0]
+        self.assertTrue(line["overridden"])
+        # And it says so in words, not by the styling alone.
+        self.assertIn("overridden while Follow is on", line["title"])
+
+    def test_clear_pin_belongs_only_to_the_row_that_names_the_pin(self):
+        # The whole point of the split: a Follow row can never carry it.
+        for following in (False, True):
+            lines = self._lines("open5gs/docs", "open5gs/lib", following)
+            by_kind = {line["kind"]: line for line in lines}
+            self.assertTrue(by_kind["pin"]["clearAvailable"])
+            if following:
+                self.assertFalse(by_kind["follow"]["clearAvailable"])
+
+    def test_the_pin_row_offers_no_clear_while_the_pin_is_here(self):
+        # The pressed pin button is the clear there; a second control for one
+        # action is what the row is meant to stop.
+        line = self._lines("open5gs/docs", "open5gs/docs", False)[0]
+        self.assertFalse(line["clearAvailable"])
+
+    def test_a_root_pin_and_a_root_follow_are_both_named_root(self):
+        # '' and "no pin" ask the server for the same thing, so a root pin
+        # without a word for it round-trips perfectly and still reads as lost.
+        self.assertEqual(self._lines("", "web", False)[0]["label"], "root")
+        self.assertEqual(self._lines(None, "", True)[0]["label"], "root")
 
 
 if __name__ == "__main__":
