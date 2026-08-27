@@ -312,6 +312,14 @@ def build_live_session_view_updates(
     saved-session normalizer intentionally strips it before persistence, while
     this helper uses it to refresh an already-live workspace safely by identity
     rather than by a pane's current visual position.
+
+    The **value** comes from the normalized preset, so what is written back to
+    the pane is bounded exactly as what was stored. The **field set** comes
+    from what the page actually stated, because the normalizer fills every
+    absent key with a default: taking the field set from it too meant a pane
+    described without its Git pin was handed the *default* pin -- an unpinned
+    pane, written onto live state by a save the user asked for to record a
+    pinned one. Only the page can say a pin was cleared; silence cannot.
     """
     raw_terminals = raw_config.get("terminals")
     saved_terminals = saved_config.get("terminals")
@@ -330,7 +338,7 @@ def build_live_session_view_updates(
         updates[session_id] = {
             field_name: saved_terminals[index][field_name]
             for field_name in _LIVE_SESSION_VIEW_FIELDS
-            if field_name in saved_terminals[index]
+            if field_name in saved_terminals[index] and field_name in raw_terminal
         }
     return updates
 

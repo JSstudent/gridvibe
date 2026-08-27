@@ -69,6 +69,7 @@
             --explorer-row-active: #17324a;
             --explorer-text: #e6edf3;
             --explorer-muted: #94a3b8;
+            --explorer-warning: #fbbf24;
             --explorer-folder: #f0b35b;
             --explorer-file: #9fb2c8;
         }
@@ -138,6 +139,7 @@
             --explorer-row-active: #dbeafe;
             --explorer-text: #111827;
             --explorer-muted: #5f6f85;
+            --explorer-warning: #b45309;
             --explorer-folder: #c56f05;
             --explorer-file: #64748b;
             /* Default (non-overridden) panes follow the app theme; the
@@ -158,6 +160,7 @@
             --explorer-row-active: #17324a;
             --explorer-text: #e6edf3;
             --explorer-muted: #94a3b8;
+            --explorer-warning: #fbbf24;
             --explorer-folder: #f0b35b;
             --explorer-file: #9fb2c8;
             --explorer-btn-bg: #181818;
@@ -175,6 +178,7 @@
             --explorer-row-active: #dbeafe;
             --explorer-text: #111827;
             --explorer-muted: #5f6f85;
+            --explorer-warning: #b45309;
             --explorer-folder: #c56f05;
             --explorer-file: #64748b;
             /* Toolbar-button surface follows the pane's OWN theme, not the app
@@ -195,6 +199,7 @@
             --explorer-row-active: #17324a;
             --explorer-text: #e6edf3;
             --explorer-muted: #94a3b8;
+            --explorer-warning: #fbbf24;
             --explorer-folder: #f0b35b;
             --explorer-file: #9fb2c8;
             --explorer-btn-bg: #181818;
@@ -4452,11 +4457,50 @@
         }
 
         .explorer-diff-sidebar-error {
-            color: #b45309;
+            color: var(--explorer-warning);
         }
 
-        .explorer-pane[data-explorer-theme="dark"] .explorer-diff-sidebar-error {
-            color: #fbbf24;
+        /* The pinned scope, named beside the error that is about it. A pin is
+           re-applied faithfully across a restart, so a pin made outside any
+           worktree comes back and the panel reports exactly that — this line
+           is what turns "Folder is not inside a Git worktree" from a pane that
+           looks broken into a scope with a name and a way out. */
+        .explorer-git-scope-notice {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+            padding: 0 10px 8px;
+            color: var(--explorer-muted);
+            font-size: .72rem;
+        }
+
+        .explorer-git-scope-notice-text {
+            min-width: 0;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .explorer-git-scope-notice-path {
+            color: var(--explorer-text);
+            font-weight: 700;
+        }
+
+        .explorer-git-clear-pin-btn {
+            flex: 0 0 auto;
+            border: 1px solid var(--explorer-btn-border);
+            border-radius: 5px;
+            background: var(--explorer-btn-bg);
+            color: var(--explorer-btn-text);
+            cursor: pointer;
+            font: inherit;
+            font-size: .7rem;
+            padding: 3px 8px;
+        }
+
+        .explorer-git-clear-pin-btn:hover {
+            background: var(--explorer-btn-hover-bg);
         }
 
         /* Quiet background refresh (explorer-git-watch.js): a class toggle on
@@ -4648,6 +4692,26 @@
             font-size: .74rem;
             font-weight: 700;
             color: var(--explorer-text);
+        }
+
+        /* The selected scope, beside the repository it applies to. It gives up
+           its own width before the branch name does — the branch is what
+           identifies the repository, and an ellipsised scope still tells the
+           reader that one is set. */
+        .explorer-git-repo-scope {
+            flex: 0 1 auto;
+            min-width: 0;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            margin-right: auto;
+            color: var(--explorer-muted);
+            font-size: .7rem;
+        }
+
+        .explorer-git-repo-scope::before {
+            content: "·";
+            margin-right: 4px;
         }
 
         .explorer-git-publish-btn,

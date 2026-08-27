@@ -1,11 +1,95 @@
 # GridVibe Testing Issues
-Last updated: 2026-08-21
+Last updated: 2026-08-27
 
 ## Open Issues
 
 None.
 
 ## Closed Issues
+
+### Issue ID: ISSUE-2026-047
+- Title: A restored explorer pane loses its Git pin "sometimes"
+- Priority: High
+- Status: Closed
+- Area: `web/saved_sessions.py`, `web/session_modes.py`, `web/static/js/explorer-git-sidebar.js`, `web/static/js/explorer-git-watch.js`, `web/static/js/session-persistence.js`, `web/static/js/launcher.js`
+- Assignee: Unassigned
+- Tags: `explorer`, `git`, `session`, `persistence`
+- Reported: 2026-08-26
+- Closed: 2026-08-27
+
+Description:
+Reported as "pinned git directory not saved, git not present yellow text from top
+directory on restore ... seems to get saved sometimes ... This seems flaky." The
+pin is one fact in two fields (`explorer_git_pin_active`,
+`explorer_git_pinned_path`) and both fields already existed in all three durable
+stores, which is what made the report hard to place: nothing was missing, so the
+defect had to be an ordering, identity or resolution one somewhere along
+client -> transaction -> store -> restore -> client. `explorer_git_expanded`
+(which commits were open) rides the same chain and was reported alongside it.
+
+Steps to reproduce:
+1. Open an explorer pane rooted *above* a repository (`…\Desktop`, with the repo
+   at `…\Desktop\gridvibe_colab`). Navigate into the repository and press the
+   Graph header's pin.
+2. Save Workspace, close GridVibe entirely, relaunch, and restore.
+3. Repeat several times, restoring differently each time: restart-with-save, the
+   launcher's per-row **Save**, and Restore from the Workspaces card.
+
+Expected behavior:
+The pin comes back set and the sidebar shows the same repository, branch and
+scope it was pinned to — not the yellow "not inside a Git worktree" text from the
+top directory.
+
+Actual behavior / logs:
+Intermittent. Characterized by running the pair through all four durable routes
+as executed round trips (`tests/test_explorer_git_pin_persistence.py`) rather
+than by inventorying the fields. Three of the reported symptoms turned out not to
+be persistence failures at all — the pin round-tripped faithfully and the
+*surface* was unreadable — and one was a genuine defect on a route shared by
+every pane field.
+
+Resolution:
+Five findings, each covered by a test that fails without its fix.
+
+1. **The genuine persistence defect.** `build_live_session_view_updates()`
+   (`web/saved_sessions.py`) took its *field set* from the normalized saved
+   config, which always carries every key because the normalizer fills defaults.
+   A save whose payload never described the explorer fields therefore wrote the
+   **default** pin — unpinned — back onto the live pane. The value still comes
+   from the normalized preset; the field set now comes from what the page
+   actually stated (`and field_name in raw_terminal`). Only the page can say a
+   pin was cleared; silence cannot. This affected every field in
+   `_LIVE_SESSION_VIEW_FIELDS`, not only the pin.
+2. **A pin outside any worktree was indistinguishable from a lost pin.** The
+   round trip was faithful; the error simply named no folder. The sidebar now
+   names the pinned path and offers **Clear pin**.
+3. **A pin on the explorer root was indistinguishable from no pin.** `''` is a
+   real pinned path and requests exactly what an unpinned pane requests, so a
+   perfect restore looked like a loss. The repo bar now names the selected
+   scope, `root` included.
+4. **A pinned sidebar refetched the whole repository on every background poll.**
+   The loaded-scope identity was recorded as the anchor the *server* resolved
+   (repository-relative), then compared against the scope the client *requested*
+   (explorer-root-relative). The two rarely match, so every quiet poll read as a
+   scope change. A load is now judged against the scope it requested.
+5. **Leaving explorer mode dropped the pin but kept Follow.** Found in the
+   manual pass. Reopening the explorer lands the pane at wherever the shell
+   walked to, so a Follow left on came back scoped to a deep subdirectory of a
+   freshly derived root with the chain pressed and no pin to explain it. The
+   transition now clears the whole scope selection; a restore, which hands the
+   same root back, still restores both.
+
+Also corrected in the same pass: `CLAUDE.md` and `AGENTS.md` described the pin as
+**repository-level** while the code has always captured the browsed folder as a
+frozen path scope. The code is the intended behaviour — a pin on a subdirectory
+is the point of it — so the contract was corrected to match, and the pair's
+"one fact in two fields" rule was added to
+`docs/session_state_guideline.md`.
+
+Cover: `tests/test_explorer_git_pin_persistence.py` (all four durable routes, the
+frozen-path semantics, the refusal matrix, and the client's own round trip in
+Node), plus `tests/test_explorer_git_identity.py::LoadIdentityTestCase` and
+`tests/test_explorer_git_sidebar.py::ExplorerGitScopeSurfaceTestCase`.
 
 ### Issue ID: ISSUE-2026-044
 - Title: Opening a file explorer from a navigated terminal roots at the launch directory, not the current one

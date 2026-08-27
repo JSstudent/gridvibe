@@ -367,12 +367,22 @@ def apply_pane_mode_change(
         # the pane actually is.
         "explorer_root_directory": root_path,
         "explorer_root_configured": bool(root_path),
+        # A pane leaving explorer mode drops the sidebar's whole scope
+        # selection -- both controls, not only the one carrying a path.
         # A fixed Git pin is relative to the explorer root it was captured
         # under. Once this pane becomes a terminal it can move anywhere, so the
         # next explorer must start from its newly resolved root/current folder
         # rather than reinterpret a pin belonging to the previous root.
+        # Follow carries no path, which is why a restore and the launcher's
+        # re-rooting both leave it alone: each opens the pane at its root,
+        # where following the browsed folder is indistinguishable from not
+        # following it. This transition is the one that re-enters explorer mode
+        # at wherever the shell walked to, so leaving Follow on brought the
+        # pane back scoped to a deep subdirectory of a freshly derived root,
+        # chain pressed and no pin to explain it.
         "explorer_git_pin_active": False,
         "explorer_git_pinned_path": "",
+        "explorer_git_follow_browsing": False,
         "initial_command": "",
         "initial_command_mode": "command",
         "startup_mode": "terminal",

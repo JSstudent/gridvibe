@@ -246,6 +246,7 @@
     function explorerGitWatchSuspend(pane) {
         pane._explorerGitWatchSuspended = true;
         pane._explorerGitWatchPending = null;
+        pane._explorerGitWatchPendingScope = undefined;
         /* One render so the muted "Live updates paused — use Refresh" line
            appears above the last good sidebar; nothing else changes. Re-armed
            by refreshExplorerPane(), by reopening the sidebar, or by a
@@ -403,12 +404,19 @@
             return;
         }
         const data = pane._explorerGitWatchPending;
+        const scopePath = pane._explorerGitWatchPendingScope;
         pane._explorerGitWatchPending = null;
+        pane._explorerGitWatchPendingScope = undefined;
         // A GridVibe Git action may have applied this exact state meanwhile.
         if (data.revision && data.revision === pane._explorerGitRevision) {
             return;
         }
-        applyExplorerGitRepoQuiet(index, data);
+        /* The payload's load identity is the scope it was *fetched* under, not
+           whatever the pane's scope is by the time a deferred flush runs — a
+           deferral outlives a scope change, and labelling old data with the
+           new scope would make the pane look loaded for a scope it has never
+           asked the server about. */
+        applyExplorerGitRepoQuiet(index, data, scopePath);
     }
 
     function explorerFileWatchOnFailure(pane, status) {
@@ -527,6 +535,7 @@
     }
 
     async function explorerGitWatchApplyRefresh(index, pane, sessionId) {
+        const scopePath = explorerGitRequestedScope(pane);
         const data = await refreshExplorerGitRepoQuiet(index);
         if (terminals[index] !== pane || sessionIds[index] !== sessionId) {
             return;
@@ -543,6 +552,7 @@
         // A newer pending payload simply replaces the older one — only the
         // newest state is ever applied.
         pane._explorerGitWatchPending = data;
+        pane._explorerGitWatchPendingScope = scopePath;
         explorerGitWatchFlushPending(index);
     }
 
@@ -627,6 +637,7 @@
                 // writes, and any deferred payload is now stale.
                 pane._explorerGitWatchChanges = 0;
                 pane._explorerGitWatchPending = null;
+                pane._explorerGitWatchPendingScope = undefined;
                 pane._explorerFsWatchPending = null;
             } else {
                 pane._explorerGitWatchChanges = (pane._explorerGitWatchChanges || 0) + 1;

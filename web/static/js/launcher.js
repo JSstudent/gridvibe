@@ -677,6 +677,29 @@
         }
     }
 
+    /* Which explorer rows have had their directory edited away from the root
+       their saved state was captured under.
+
+       `collectTerminalDrafts()` drops that state — the pinned Git folder, the
+       open tabs and their views — because the paths in it are relative to a
+       root that is no longer the row's. That is right, and until now it was
+       also completely silent: the workspace relaunched with the pin simply
+       gone, which is indistinguishable from a pin that failed to save. Counted
+       here rather than inside the draft builder, which runs on every count and
+       layout change; the launch reports it once, folded into the one launch
+       notice, because the banner holds one message at a time. */
+    function retargetedExplorerRowTitles() {
+        return Array.from(document.querySelectorAll('.t-row'))
+            .filter(row => (
+                getTerminalCommandMode(row) === 'explorer'
+                && (row.dataset.explorerTabsDir || '')
+                && row.querySelector('.t-dir').value.trim() !== row.dataset.explorerTabsDir
+            ))
+            .map((row, index) => (
+                row.querySelector('.t-title')?.value.trim() || `Terminal ${index + 1}`
+            ));
+    }
+
     function collectTerminalDrafts() {
         const rows = Array.from(document.querySelectorAll('.t-row'));
         if (!rows.length) {
@@ -3507,6 +3530,9 @@
     }
 
     async function launchSessions() {
+        /* Read before the launch: `buildTerminalRows` rewrites the rows once
+           the group is open, and the edited directory is gone with them. */
+        const retargetedExplorer = retargetedExplorerRowTitles();
         const config = collectFormConfig();
         const button = document.getElementById('launchBtn');
         const sessionName = buildDefaultSessionName();
@@ -3593,10 +3619,23 @@
             const launchedName = String(data.group?.name || sessionName || '').trim();
             const launchIntro = `Launching ${data.count} ${getConnectionModeLabel(config.connection_mode)} terminals`
                 + (launchedName ? ` in "${launchedName}".` : '.');
-            const launchMessage = launchWarnings.length
+            /* Folded into the launch notice rather than sent as a second one:
+               a new notice replaces the current one, so a separate banner here
+               would either be wiped by the launch message or wipe it. */
+            const retargetNote = retargetedExplorer.length
+                ? ` Saved explorer state (pinned Git folder, open tabs) was not restored for ${
+                    retargetedExplorer.length === 1
+                        ? `"${retargetedExplorer[0]}"`
+                        : `${retargetedExplorer.length} panes`
+                }: the folder was changed after saving.`
+                : '';
+            const launchMessage = (launchWarnings.length
                 ? `${launchIntro} ${launchWarnings.length === 1 ? launchWarnings[0] : `${launchWarnings.length} startup commands were cleared after preflight failed.`}`
-                : launchIntro;
-            showGridVibeNotice(launchMessage, launchWarnings.length ? 'warning' : 'success');
+                : launchIntro) + retargetNote;
+            showGridVibeNotice(
+                launchMessage,
+                launchWarnings.length ? 'warning' : (retargetNote ? 'info' : 'success')
+            );
             if (data.launch_target === 'web') {
                 setTimeout(async () => {
                     const workspaceId = String(data.workspace_id || 'default');

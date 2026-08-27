@@ -794,7 +794,14 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("Boolean(terminal?._explorerTreeSidebarOpen)", entry_html)
         self.assertIn("Boolean(terminal?._explorerGitSidebarOpen)", entry_html)
         self.assertIn("Boolean(terminal?._explorerGitFollowBrowsing)", entry_html)
-        self.assertIn("terminal._explorerGitPinnedPath", entry_html)
+        # The pin pair travels, and travels through the one shared mapping --
+        # the five points that carry it across a rebuild each used to spell it
+        # out, and a pin that survives four of them reads as a pin that was
+        # never saved. The mapping's own behaviour is executed in
+        # tests/test_explorer_git_pin_persistence.py.
+        self.assertIn("explorer_git_pin_active", entry_html)
+        self.assertIn("explorer_git_pinned_path", entry_html)
+        self.assertIn("panePinDescriptor(terminal)", entry_html)
         cache_state_start = html.index("function captureCachedPaneUiState()")
         cache_state_end = html.index("function restoreCachedPaneUiState", cache_state_start)
         cache_state_html = html[cache_state_start:cache_state_end]
@@ -807,7 +814,11 @@ class ApiRoutesTestCase(unittest.TestCase):
             "_explorerGitFollowBrowsing: Boolean(session.explorer_git_follow_browsing)",
             html,
         )
-        self.assertIn("_explorerGitPinnedPath: session.explorer_git_pin_active", html)
+        # A rebuilt pane reads its pin back through the same shared mapping,
+        # whose `undefined`-means-unpinned rule is what keeps an unpinned pane
+        # from rebuilding as one pinned to its own root.
+        self.assertIn("_explorerGitPinnedPath: sessionPinnedPath(session)", html)
+        self.assertIn("explorerGitPinnedPathFromSession", self._static("js/session-persistence.js"))
         self.assertIn("_explorerSearchSidebarOpen: Boolean(session.explorer_search_open)", html)
         self.assertIn("workspace_only: true", save_handler_html)
         self.assertIn("source_saved_session_id: saveTarget.id || undefined", save_handler_html)
@@ -14811,7 +14822,12 @@ class ExplorerGitWatchFrontendTestCase(unittest.TestCase):
         self.assertIn("git-refreshing", quiet_fn)
         self.assertNotIn("_explorerGitRepoLoading = true", quiet_fn)
         self.assertIn("cache: 'no-store'", quiet_fn)
-        self.assertIn("function applyExplorerGitRepoQuiet(index, data)", sidebar)
+        # The quiet apply exists and takes the scope its payload was fetched
+        # under, so a deferred flush cannot label old data with a new scope.
+        # (Its behaviour is executed in tests/test_explorer_git_identity.py.)
+        self.assertIn("function applyExplorerGitRepoQuiet(", sidebar)
+        self.assertIn("requestedScopePath", sidebar)
+        self.assertIn("_explorerGitWatchPendingScope", self._static("js/explorer-git-watch.js"))
         self.assertIn("_explorerGitRevision", sidebar)
         # Tab badges re-render only when the badge map actually changed — the
         # sync itself moved with the tab domain (explorer-tabs.js).

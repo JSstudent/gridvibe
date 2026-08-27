@@ -78,6 +78,29 @@ Workspace **chrome** (`topbar_visible`, `active_group_id`, native zoom,
 `md_preset` / `md_font` / `source_font`) is a third, separately revisioned
 thing, owned by the workspace rather than by a group.
 
+### Fields That Are One Fact In Two
+
+Some state needs a second field to be readable at all. The rule for every such
+pair is the same: **capture, normalize, store and restore them together, and
+never re-derive one from the other.** Splitting a pair across a restart is how
+a value comes back wearing the wrong meaning.
+
+- **`explorer_root_directory` + `explorer_root_configured`** — a root, and
+  whether anybody *chose* it. The flag qualifies **the root actually stored**,
+  never the candidate it was chosen among, so a derived root cannot come back
+  looking like a configured one and pin the pane for good.
+- **`explorer_git_pin_active` + `explorer_git_pinned_path`** — the Git
+  sidebar's frozen path scope. `''` is a real pinned path — the explorer root
+  itself — so the flag is the *whole* difference between "pinned at the root"
+  and "not pinned", and neither field can be inferred from the other. The path
+  is relative to the root it was captured under, which makes a pin meaningless
+  under a different root: a route that **re-derives** the pane's root drops the
+  pin, and drops `explorer_git_follow_browsing` with it, while a route that
+  hands the same root back (a restore) restores all three. The saved value is
+  applied faithfully even when it resolves to no worktree — the sidebar
+  *reports* that, because widening to a repository root would silently discard
+  a scope the user chose.
+
 ---
 
 ## Live Presentation Sync (browser to server)
@@ -274,6 +297,10 @@ that then *types* its `initial_command` at the prompt.
 - `tests/test_multi_workspace.py` — capture, restore, close/forget, labels, and
   the launcher save path. It is the behavioural cover for `web/workspaces.py`
   and must pass untouched across any refactor of that module.
+- `tests/test_explorer_git_pin_persistence.py` — the Git pin pair and
+  `explorer_git_expanded` carried through all four routes that can lose them
+  (live presentation, workspace snapshot, saved preset, close-driven rebuild),
+  executed rather than inventoried, plus the client's own round trip in Node.
 - `tests/test_saved_session_store.py` — preset and encryption-key durability.
 - `tests/test_backend_concurrency_contract.py` — the RuntimeConfig publication,
   workspace-label claim, and pooled-SSH reservation guardrails.

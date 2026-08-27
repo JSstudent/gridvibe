@@ -238,6 +238,40 @@
     const PANE_MODE_EXPLORER = 'explorer';
     const PANE_MODE_BROWSER = 'browser';
 
+    /* ── The Git pin pair ────────────────────────────────────────────────
+       `explorer_git_pin_active` and `explorer_git_pinned_path` are one fact
+       in two fields: whether a scope is pinned, and the root-relative path it
+       names. They have to be read off a live pane and written back onto a
+       rebuilt one at five points on the terminals page — the live describe,
+       the Save Workspace launch config, both pane builds, and the
+       close-driven overlay — and each spelled the same pair of ternaries out
+       by hand. A pin that survives four of those and not the fifth is
+       indistinguishable, from the user's side, from a pin that was never
+       saved, which is most of what "it seems flaky" was describing. One
+       mapping, executed by the tests, instead of five copies.
+
+       The pane's own truth is the *type* of `_explorerGitPinnedPath`: a
+       string (including '') means pinned, `undefined` means not pinned. That
+       is what makes a pin at the explorer root a real, distinguishable state
+       rather than a silent no-op. */
+    function explorerGitPinDescriptor(pane) {
+        const pinned = typeof pane?._explorerGitPinnedPath === 'string';
+        return {
+            active: pinned,
+            path: pinned ? pane._explorerGitPinnedPath : ''
+        };
+    }
+
+    /* The inverse: what a rebuilt pane's `_explorerGitPinnedPath` should be,
+       given the session record the server just handed back. `undefined` is
+       deliberate and load-bearing — assigning '' would make every unpinned
+       explorer pane report itself as pinned to its root. */
+    function explorerGitPinnedPathFromSession(session) {
+        return session && session.explorer_git_pin_active
+            ? String(session.explorer_git_pinned_path || '')
+            : undefined;
+    }
+
     function buildPanePresentation(pane) {
         const sessionId = String((pane && pane.sessionId) || '').trim();
         if (!sessionId) return null;
@@ -495,6 +529,8 @@
     return {
         createPresentationQueue,
         createPresentationController,
+        explorerGitPinDescriptor,
+        explorerGitPinnedPathFromSession,
         buildGroupPresentationPayload,
         buildWorkspacePresentationPayload,
         CONTINUOUS_UPDATE_FLOOR_MS,

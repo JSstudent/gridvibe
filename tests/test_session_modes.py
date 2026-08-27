@@ -57,6 +57,7 @@ _PANE_FIELDS = (
     "launch_directory",
     "explorer_root_directory",
     "explorer_root_configured",
+    "explorer_git_follow_browsing",
     "explorer_git_pin_active",
     "explorer_git_pinned_path",
     "initial_command",

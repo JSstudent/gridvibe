@@ -31,6 +31,41 @@
             : null;
     }
 
+    /* A scope as a plain string: `null` (no pin, not following) and ''
+       (pinned at the explorer root) both go out as the root and are therefore
+       the same load identity, even though they are different pane states. */
+    function explorerGitScopeIdentity(scopePath) {
+        return scopePath === null || scopePath === undefined ? '' : String(scopePath);
+    }
+
+    function explorerGitRequestedScope(pane) {
+        return explorerGitScopeIdentity(explorerGitScopePath(pane));
+    }
+
+    /* Two different questions, and answering both with one field is what made
+       a pin look permanently unloaded.
+
+       `_explorerGitAnchorPath` is the load identity: "which scope is the model
+       on this pane the model *for*". It is compared against the scope the next
+       load would request, so it has to be the scope that *was* requested.
+       `data.anchor_path` is the server's answer — the resolved, root-relative
+       spelling of that scope — and it is a different string whenever the
+       request's spelling was not already canonical. Storing the answer and
+       comparing it to the question meant such a pane never counted as loaded:
+       every render refetched the whole repository, and the early return that
+       exists to stop that never fired once.
+
+       The server's answer is still worth keeping — it is what the sidebar can
+       show the reader — so it gets its own field rather than overwriting the
+       identity. */
+    function explorerGitNoteLoadedScope(pane, requestedScopePath, data) {
+        if (!pane) {
+            return;
+        }
+        pane._explorerGitAnchorPath = explorerGitScopeIdentity(requestedScopePath);
+        pane._explorerGitResolvedAnchor = String(data?.anchor_path || '');
+    }
+
     function explorerGitStatusLabel(git) {
         if (!git || typeof git !== 'object') {
             return '';
@@ -94,6 +129,30 @@
         const summary = explorerGitSummaryText(git) || 'Git';
         const name = String(git?.repo_name || '').trim();
         return name ? `${name} · ${summary}` : summary;
+    }
+
+    /* What the repo bar says about the scope every action in this panel acts
+       on. An unpinned, non-following pane is scoped to the explorer root by
+       default and gets no word for it — naming the default on every pane is
+       noise. A pin made *at* the root does get one, because a root pin and no
+       pin ask the server for exactly the same thing: without a word for it,
+       pinning at the root round-trips perfectly and still reads as though the
+       pin had been lost. */
+    function explorerGitScopeLabel(scopePath) {
+        if (scopePath === null || scopePath === undefined) {
+            return '';
+        }
+        return String(scopePath) || 'root';
+    }
+
+    function explorerGitScopeTitle(scopePath, following) {
+        const label = explorerGitScopeLabel(scopePath);
+        if (!label) {
+            return '';
+        }
+        return following
+            ? `Git scope follows the browsed folder: ${label}`
+            : `Git scope pinned to: ${label}`;
     }
 
     function updateExplorerGitSummary(index, git) {
@@ -547,20 +606,37 @@
         return true;
     }
 
-    async function toggleExplorerGitPinnedScope(index) {
+    /* One writer for the pin, so the toggle and the error panel's explicit
+       Clear pin cannot drift into two slightly different clears. `null` means
+       "no pin"; any string (including '') is a pinned path. */
+    async function setExplorerGitPinnedScope(index, pinnedPath) {
         const pane = terminals[index];
         if (!pane || pane._explorerGitActionBusy || pane._explorerGitRepoLoading) {
             return false;
         }
-        if (typeof pane._explorerGitPinnedPath === 'string') {
+        if (pinnedPath === null) {
             delete pane._explorerGitPinnedPath;
         } else {
-            pane._explorerGitPinnedPath = String(pane._explorerPath || '');
+            pane._explorerGitPinnedPath = String(pinnedPath);
         }
         invalidateExplorerGitRepo(index);
         notePanePresentationChanged(index);
         await loadExplorerGitRepo(index);
         return true;
+    }
+
+    function toggleExplorerGitPinnedScope(index) {
+        const pane = terminals[index];
+        return setExplorerGitPinnedScope(
+            index,
+            typeof pane?._explorerGitPinnedPath === 'string'
+                ? null
+                : String(pane?._explorerPath || '')
+        );
+    }
+
+    function clearExplorerGitPinnedScope(index) {
+        return setExplorerGitPinnedScope(index, null);
     }
 
     function renderExplorerGitPanel(index) {
@@ -580,8 +656,26 @@
             const pinTitle = pinned
                 ? 'Clear pinned Git folder'
                 : 'Pin Git to the current folder';
+            /* A pin is faithfully re-applied on restore, including one made in
+               a folder that is not inside any worktree — that is the pin
+               working, not the pin being lost. But a bare "Folder is not
+               inside a Git worktree" names no folder, and the pinned one may
+               be nowhere near where the pane is now browsing, so the message
+               reads as a bug in the pane rather than as a scope the user
+               chose. Name the scope, and put the one action that resolves it
+               next to it. In-pane and role="status": a pin is a state that
+               lasts as long as the pin does, not an event for the launcher's
+               banner. */
+            const pinnedScopeNotice = pinned
+                ? `
+                <div class="explorer-git-scope-notice" role="status">
+                    <span class="explorer-git-scope-notice-text">Pinned Git folder: <span class="explorer-git-scope-notice-path">${escHtml(explorerGitScopeLabel(pane._explorerGitPinnedPath))}</span></span>
+                    <button type="button" class="explorer-git-clear-pin-btn" data-explorer-git-clear-pin>Clear pin</button>
+                </div>`
+                : '';
             panel.innerHTML = `
                 <div class="explorer-diff-sidebar-error">${escHtml(pane._explorerGitRepoError)}</div>
+                ${pinnedScopeNotice}
                 <div class="explorer-diff-sidebar-section">
                     <div class="explorer-diff-sidebar-title explorer-git-section-title">
                         <span>Graph</span>
@@ -597,6 +691,9 @@
             });
             panel.querySelector('[data-explorer-git-follow-toggle]')?.addEventListener('click', () => {
                 toggleExplorerGitFollowBrowsing(index);
+            });
+            panel.querySelector('[data-explorer-git-clear-pin]')?.addEventListener('click', () => {
+                clearExplorerGitPinnedScope(index);
             });
             return;
         }
@@ -626,6 +723,8 @@
         const repoBranchText = explorerGitRepoLabel(git);
         const following = Boolean(pane._explorerGitFollowBrowsing);
         const pinned = typeof pane._explorerGitPinnedPath === 'string';
+        const scopeLabel = explorerGitScopeLabel(explorerGitScopePath(pane));
+        const scopeTitle = explorerGitScopeTitle(explorerGitScopePath(pane), following);
         const pinTitle = pinned
             ? 'Clear pinned Git folder'
             : 'Pin Git to the current folder';
@@ -677,6 +776,7 @@
             ${watchPausedBanner}
             <div class="explorer-diff-sidebar-section explorer-git-repo-bar">
                 <span class="explorer-git-repo-branch" title="${escHtml(git.repo_root || repoBranchText)}">${escHtml(repoBranchText)}</span>
+                ${scopeLabel ? `<span class="explorer-git-repo-scope" title="${escHtml(scopeTitle)}">${escHtml(scopeLabel)}</span>` : ''}
                 <button type="button" class="explorer-git-publish-btn" data-explorer-git-publish ${busy ? 'disabled' : ''} title="Push the current branch to its remote">${escHtml(publishLabel)}</button>
             </div>
             <div class="explorer-diff-sidebar-section">
@@ -989,6 +1089,7 @@
         pane._explorerGitRepoError = '';
         pane._explorerGitRepo = null;
         pane._explorerGitAnchorPath = '';
+        pane._explorerGitResolvedAnchor = '';
         renderExplorerGitPanels(index);
     }
 
@@ -1003,7 +1104,9 @@
         const pane = terminals[index];
         const sessionId = sessionIds[index];
         const scopePath = explorerGitScopePath(pane);
-        const requestedAnchorPath = scopePath === null ? '' : scopePath;
+        const requestedAnchorPath = explorerGitScopeIdentity(scopePath);
+        /* Like compared with like: both sides are the scope that was, or would
+           be, *requested* — never the resolved spelling the server answers with. */
         const loadedForPath = pane?._explorerGitAnchorPath === requestedAnchorPath;
         if (!pane || !sessionId || (pane._explorerGitRepoLoaded && loadedForPath) || pane._explorerGitRepoLoading) {
             renderExplorerGitPanels(index);
@@ -1030,7 +1133,7 @@
             }
             pane._explorerGitRepoLoaded = true;
             pane._explorerGitRepo = data;
-            pane._explorerGitAnchorPath = String(data.anchor_path || '');
+            explorerGitNoteLoadedScope(pane, requestedAnchorPath, data);
             pane._explorerGitRevision = typeof data.revision === 'string' ? data.revision : '';
             // A user-initiated load re-arms a suspended change-listener watch.
             pane._explorerGitWatchSuspended = false;
@@ -1100,7 +1203,7 @@
         }
     }
 
-    function applyExplorerGitRepoQuiet(index, data) {
+    function applyExplorerGitRepoQuiet(index, data, requestedScopePath) {
         /* Swap a quietly fetched Git payload into the sidebar in place: one
            panel render, scroll/focus preserved, tab badges re-rendered only
            when the badge map actually changed (syncExplorerTabGitFromRepo
@@ -1118,7 +1221,13 @@
             : null;
         pane._explorerGitRepo = data;
         pane._explorerGitRepoLoaded = true;
-        pane._explorerGitAnchorPath = String(data.anchor_path || '');
+        explorerGitNoteLoadedScope(
+            pane,
+            requestedScopePath === undefined
+                ? explorerGitRequestedScope(pane)
+                : requestedScopePath,
+            data
+        );
         pane._explorerGitRevision = typeof data.revision === 'string' ? data.revision : '';
         syncExplorerTabGitFromRepo(index, data);
         renderExplorerGitPanel(index);
@@ -1188,6 +1297,7 @@
         }
         pane._explorerGitRepoLoaded = false;
         pane._explorerGitAnchorPath = '';
+        pane._explorerGitResolvedAnchor = '';
         pane._explorerGitReloadPending = true;
     }
 
@@ -1214,7 +1324,9 @@
             if (explorerGitIdentityIsCurrent(index, identity)) {
                 pane._explorerGitRepo = data;
                 pane._explorerGitRepoLoaded = true;
-                pane._explorerGitAnchorPath = String(data.anchor_path || '');
+                explorerGitNoteLoadedScope(
+                    pane, explorerGitScopeIdentity(scopePath), data
+                );
                 pane._explorerGitRevision = typeof data.revision === 'string' ? data.revision : '';
                 // A successful GridVibe Git action is authoritative: it re-arms a
                 // suspended change-listener watch and resets its baseline.

@@ -48,18 +48,12 @@ The anchor then feeds two different consumers in `_get_git_repo_summary()` /
 That table is the whole reason note **11** (file-level pin) is a backend change
 and not a client one: only the first consumer needs a directory.
 
-> **Divergence to resolve (blocks stages 2–4).** `CLAUDE.md` states: *"The Graph
-> header's pin button resolves the repository containing the currently browsed
-> folder and captures **that repository's** explorer-root-relative path as a
-> fixed Git scope; pin is therefore repository-level."* The code captures the
-> **browsed folder**, so the pin is in fact a frozen *path* scope — the same
-> granularity Follow has, just not live. Nothing rewrites it to the repo root
-> (the server's `git.repo_path` identity is never read back by the client;
-> `grep -rn "repo_path" web/static/js/` finds one unrelated hit).
-> Notes 8 and 11 both assume the code's behaviour (pin a subdirectory; pin a
-> file), so the recommendation is **fix the document, not the code** — but this
-> is a decision, and it must be made before stage 2 writes a contract test that
-> pins one of the two readings.
+> **Divergence — resolved 2026-08-27; the document was fixed, not the code.**
+> The pin is a frozen **path** scope: it captures the *browsed folder*,
+> root-relative, at the same granularity Follow has, just not live. `CLAUDE.md`
+> and `AGENTS.md` used to call it "repository-level"; both now describe what the
+> code does, and stage 2's contract tests pin that reading. Notes 8 and 11 both
+> assume it (pin a subdirectory; pin a file), so nothing downstream re-opens it.
 
 ### 0.2 What is already persisted
 
@@ -86,9 +80,9 @@ same chain: captured in `explorerSidebarPresentation()`
 `_normalize_explorer_git_expanded()`, restored into
 `pane._explorerDiffExpandedCommits`.
 
-**So: the fields exist end-to-end.** Note 10's flakiness is therefore *not* a
-missing field — it is an ordering/identity/resolution defect somewhere in that
-chain, which is what stage 2 is for.
+**So: the fields exist end-to-end.** Note 10's flakiness was therefore *not* a
+missing field but an ordering/identity/resolution defect in that chain — found,
+fixed and recorded as **ISSUE-2026-047** (stage 2, shipped 2026-08-27).
 
 ### 0.3 Existing patterns the stages must copy
 
@@ -118,172 +112,6 @@ byte-identically, with `explorer-viewer.js` a pure deletion and
 `tests/test_explorer_tree_fold.py` / `test_explorer_find.py` passing on their
 existing assertions (only their source-of-truth path changes — still a pure
 move). Doing it *after* stage 3 would mean the move is no longer pure.
-
----
-
-## Stage 2 — Pin & expansion save/restore hardening (notes 10, 4b)
-
-**Risk: low-medium.** No new UI, no new field, no new endpoint. Characterization
-first, then a targeted fix for whatever the characterization catches. Stages 3
-and 4 both depend on the pin being trustworthy, so this comes before them.
-
-### 2.1 Problem
-
-Note 10: *"pinned git directory not saved, git not present yellow text from top
-directory on restore … seems to get saved sometimes … This seems flaky."*
-Note 4b: *"lets check open git tree persistance/restoration."*
-
-Section 0.2 shows the fields exist in every store. The symptom — the sidebar
-falling back to the explorer root and reporting no worktree — is what you see
-when `explorerGitScopePath()` answers `null`, i.e. `_explorerGitPinnedPath` is
-not a string on the restored pane. There are five plausible causes, and they
-need to be separated by test rather than by guess:
-
-- **H1 — the pin names a folder that is not a repository.** Per 0.1 the pin is
-  the *browsed folder*. Pin a folder outside any worktree (note 8's own words:
-  *"pinned a directory from a directory without a git tree"*) and the restored
-  pane faithfully re-applies it; `_get_git_context()` then answers
-  *"Folder is not inside a Git worktree"* and the sidebar paints the error.
-  **This reproduces the exact reported symptom and is not a persistence bug at
-  all** — it is the 0.1 divergence. Highest-probability cause.
-- **H2 — `loadedForPath` compares a raw scope against a resolved anchor.**
-  `loadExplorerGitRepo()` (`explorer-git-sidebar.js:912`) sets
-  `requestedAnchorPath = scopePath ?? ''` but stores
-  `pane._explorerGitAnchorPath = data.anchor_path` — the value
-  `backend.rel_explorer_path()` produced. A pin whose stored spelling differs
-  from its resolved form (trailing slash, a `.` segment, a path that resolves to
-  the root) makes those two disagree permanently: the early return never fires,
-  and the `finally` block's re-load condition can re-enter, or the panel settles
-  on a scope that is not the one the pin names.
-- **H3 — a root pin is indistinguishable from no pin.** Pinning while browsing
-  the explorer root stores `''`; `explorerGitScopePath` then returns `''`, which
-  the request encodes as `scope=path&path=` — resolving to the same root an
-  unpinned pane uses. The pin round-trips as *state* but has no *effect*, so it
-  reads as "the pin was lost".
-- **H4 — the launcher drops the pin when the row's directory is edited.**
-  `explorerTabsMatchRoot` (`launcher.js:696`) gates
-  `explorer_git_pin_active` / `_pinned_path` on the row's directory input being
-  untouched. Correct in intent (the pin is root-relative), invisible in
-  practice — the user gets no notice.
-- **H5 — the presentation write is routed by visible group.**
-  `notePanePresentationChanged(index)` (`terminals.js:2404`) ignores `index` and
-  notes `visibleGroupId || activeGroupId`. Believed safe (the pin button is only
-  reachable on-screen), but it is exactly the slot-vs-identity assumption
-  guardrail 4 exists for, and it is one assertion to pin down.
-
-### 2.2 Solution (code + tests)
-
-**Tests first — these are the deliverable even if no code changes.**
-
-- **`tests/test_explorer_git_pin_persistence.py` (new, Python).** One
-  parametrised round-trip of a pinned explorer pane through **all four** durable
-  routes, asserting the `(pin_active, pinned_path)` pair *and*
-  `explorer_git_expanded` survive each intact:
-  1. live presentation sync — `POST /api/session-presentation` →
-     `session.to_dict()`;
-  2. workspace snapshot — `_snapshot_session()` → `runtime_state.json` →
-     restore → `_normalize_session_config()`;
-  3. saved preset — Save Workspace → `saved_sessions.json` → relaunch;
-  4. close-driven rebuild — the `pendingCloseClientState` overlay fields
-     (`terminals.js:7418`) as a shape contract on the Python side.
-
-  Plus the negative cases that must stay true: explorer→terminal **clears** the
-  pin (`web/session_modes.py:374`); a wrong-typed `explorer_git_pin_active`
-  fails the **whole group** rather than dropping the pane (the "launchable shape
-  fails" rule); a pin path with `..` or `:` normalizes to `""`; the 128-key
-  ceiling on `explorer_git_expanded` holds.
-- **`tests/test_session_presentation.py` (extend, Node half).** The client's own
-  round trip, executed rather than asserted: `describePanePresentation()` →
-  `buildPanePresentation()` → the pane literal built by `createPaneInstance()`
-  yields the same `explorerGitScopePath()` it started with — including the `''`
-  (root pin) case, which is the one H3 makes ambiguous.
-- **`tests/test_explorer_git_identity.py` (extend, Node vm).** `loadedForPath`
-  (H2): a pin whose stored spelling resolves to a different string does **not**
-  re-enter the load loop, and a second `loadExplorerGitRepo()` for an unchanged
-  scope issues **no** request.
-
-**Code — only what the tests above turn red:**
-
-- **H1 / 0.1 — resolve the divergence.** Recommended: keep the code (pin = a
-  frozen path scope, which is what notes 8 and 11 assume) and **correct
-  `CLAUDE.md` + `AGENTS.md`**. Then make the failure legible instead of
-  mysterious: when a **restored** pin resolves to a folder outside any worktree,
-  the sidebar's existing error branch (`explorer-git-sidebar.js:521`) gains one
-  line naming the pinned path and a **Clear pin** action beside it. In-pane
-  error/`role="status"`, never `showGridVibeNotice()` — this is a state that
-  lasts as long as the pin does, not an event.
-  *If instead you want pin to mean repository-level, that is a behaviour change
-  and belongs in its own stage — say so before stage 2 starts.*
-- **H2** — store the **requested** scope as the load identity and keep
-  `data.anchor_path` as the *server's* answer under its own key
-  (`_explorerGitResolvedAnchor`), so the early return compares like with like.
-  Three-line change, one new assertion.
-- **H3** — make "pinned at the root" a first-class, visible state rather than a
-  silent no-op: `aria-pressed="true"` already distinguishes it in the DOM; the
-  Graph header's repo bar gains the scoped path (`repo · branch · <scope>`, and
-  `· root` when the pin is `''`). Stage 3's tree marker then makes it visible in
-  the tree too. **No schema change.**
-- **H4** — when the launcher drops a pin because the row's directory was edited,
-  report it once through `showGridVibeNotice(…, 'info')` — that *is* an event,
-  and the launcher's one banner is the right surface for it.
-- **H5** — if the Node test shows the pin can be described for the wrong group,
-  route by the pane's own group id; otherwise leave it and keep the assertion.
-
-### 2.3 Manual test outline
-
-Run each on a **local** pane and repeat 1–6 on an **SSH** pane.
-
-1. Explorer pane rooted **above** a repo (e.g. `…\Desktop`, repo at
-   `…\Desktop\gridvibe_colab`). Navigate into the repo, pin. The sidebar shows
-   the repo, branch, and (new) the scoped path.
-2. Save Workspace → close GridVibe entirely → relaunch → restore. **The pin is
-   still set and the sidebar shows the same repository** — not the yellow
-   "no worktree" text from the top directory.
-3. Repeat 1–2 five times, restoring differently each time (restart-with-save,
-   the launcher's per-row **Save**, and Restore from the Workspaces card). The
-   note calls this flaky, so a single pass is not evidence.
-4. Pin a subdirectory *inside* the repo (e.g. `web/static/js`). Restore. The
-   Graph shows only that subdirectory's commits, and Stage/Unstage/Discard All
-   still act on that scope only.
-5. Pin a folder that is **not** inside any repository. Restore. You should get
-   the new explicit message naming the pinned path plus **Clear pin** — not a
-   bare "Folder is not inside a Git worktree".
-6. Pin while browsing the explorer root itself. Restore → the pin button is
-   still pressed and the repo bar says the scope is the root.
-7. Turn **Follow** on with a pin set, restore, turn Follow off → the pane
-   returns to the pinned scope.
-8. Switch the pinned pane to terminal mode and back to explorer → **the pin is
-   gone** (this is deliberate) and the pane re-derives its root.
-9. Expand 4 commits, save, restore → the same 4 commits are expanded and the
-   sidebar is scrolled roughly where you left it.
-10. Open a diff from a commit, save, restore → that commit is expanded and its
-    row is scrolled into view (the once-per-commit reveal).
-11. Two workspaces, each with a differently pinned explorer pane; switch tabs a
-    few times, then save and restore → each pane keeps **its own** pin and
-    expansion (the cached-group capture path).
-12. Save a workspace as a preset, edit the row's **directory** in the launcher,
-    relaunch → the pin is dropped **and the launcher says so once**.
-13. Close one pane in a 3-pane group → the two survivors keep their pins and
-    expansions.
-
-### 2.4 Documentation after manual verification
-
-- **`CLAUDE.md` + `AGENTS.md`** — correct the *"The Git sidebar has one selected
-  scope"* guardrail so it describes the pin as a **fixed path scope captured
-  from the browsed folder**, not "repository-level". This is the point of the
-  stage: a stale contract is worse than a missing one.
-- **`docs/session_state_guideline.md`** — add the pin pair to the field
-  inventory with the rule the new test enforces: *`explorer_git_pin_active` and
-  `explorer_git_pinned_path` are one fact and are captured, normalized, stored
-  and restored together; a pin is meaningless without the root it was captured
-  under, so a route that retargets the root drops it.* (Same shape as the
-  `explorer_root_directory` / `explorer_root_configured` rule already recorded.)
-- **`CHANGELOG.md`** — a `(fix)` bullet per defect the characterization actually
-  caught. If nothing was broken, say so plainly in this stage's notes and ship
-  the tests as regression cover with no changelog entry.
-- **`docs/testing_issues.md`** — open an issue for note 10 in the existing
-  format, with the reproduction from 2.3 steps 1–3, and close it with the
-  finding. That is the maintained record; this plan file is not.
 
 ---
 
@@ -651,25 +479,22 @@ narrow variant delivers the note's stated ask without that.
 
 | Stage | Notes | Backend | New persisted field | New endpoint | Files touched | Risk |
 | --- | --- | --- | --- | --- | --- | --- |
-| 2 | 10, 4b | maybe | — | — | ~4 + 3 test files | low-med |
 | 3a | (gate) | — | — | — | 2 (pure move) | med |
 | 3b | 8 | — | — | — | 3 + 1 test file | low |
 | 4 | 11 | yes | `explorer_git_pin_kind` | — | ~12 + 4 test files | med-high |
 | 5 | 13 | yes | `explorer_git_graph_open` | `git/graph` | ~10 + 3 test files | high |
 
-**Hard dependencies:** 3b and 4 need 2 (the pin must be trustworthy before it is
-made visible or extended). 4's tree menu and 3b's row markup both need 3a. 5 is
+**Hard dependencies:** 3b and 4 needed 2 — the pin had to be trustworthy before
+it was made visible or extended — and 2 shipped on 2026-08-27. 4's tree menu and 3b's row markup both need 3a. 5 is
 independent of 3 and 4 and could be scheduled earlier, but it is the largest
 piece and benefits from the scope work landing first.
 
-**Decisions needed before stage 2 starts:**
+**Decisions still open** (pin semantics was decided with stage 2: a frozen
+*path* scope, and the document was corrected):
 
-1. **Pin semantics** — is the pin a frozen *path* scope (what the code does, and
-   what notes 8 and 11 assume) or *repository-level* (what `CLAUDE.md` says)?
-   Recommendation: path scope; correct the document.
-2. **Stage 4's kind field** — explicit `explorer_git_pin_kind` (recommended) or
+1. **Stage 4's kind field** — explicit `explorer_git_pin_kind` (recommended) or
    the trailing-slash encoding (smaller, worse).
-3. **Stage 5 shape** — narrow (`explorer_git_graph_open`) first, or straight to
+2. **Stage 5 shape** — narrow (`explorer_git_graph_open`) first, or straight to
    the tab-view-mode variant. Recommendation: narrow.
 
 **Every stage ends with `make check`** (`python tests/run_tests.py` and

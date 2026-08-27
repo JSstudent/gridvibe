@@ -183,5 +183,200 @@ class ExplorerGitSidebarRequestTestCase(unittest.TestCase):
         )
 
 
+SCOPE_HARNESS = r"""
+const fs = require('fs');
+const vm = require('vm');
+
+/* A minimal element stub: enough to capture innerHTML and to let a test click
+   one of the controls the panel just wired. */
+function makePanel() {
+    const handlers = new Map();
+    return {
+        innerHTML: '',
+        handlers,
+        querySelector(selector) {
+            const hook = selector.replace(/^\[|\]$/g, '');
+            if (!this.innerHTML.includes(hook)) return null;
+            return {
+                addEventListener: (_type, handler) => handlers.set(hook, handler)
+            };
+        },
+        querySelectorAll: () => [],
+        addEventListener: () => {},
+        click(hook) {
+            const handler = handlers.get(hook);
+            if (!handler) throw new Error(`nothing wired for ${hook}`);
+            handler();
+        }
+    };
+}
+
+const panel = makePanel();
+const pane = {
+    _explorerPath: 'web/static/js',
+    _explorerMode: 'directory',
+    _explorerGitSidebarOpen: true,
+    _explorerGitRepoLoaded: false,
+    _explorerGitRepoLoading: false,
+    _explorerGitActionBusy: false
+};
+const loadedRepo = {
+    anchor_path: '',
+    revision: 'rev-1',
+    git: { available: true, repo_name: 'gridvibe', branch: 'main', repo_root: '/repo' },
+    changes: [],
+    commits: []
+};
+
+const sandbox = {
+    console,
+    URL, URLSearchParams, encodeURIComponent,
+    Set, Map, Boolean, String, Number, Object, Array, JSON, Promise, Error,
+    EXPLORER_GIT_PIN_ICON: '<svg data-icon="pin"></svg>',
+    EXPLORER_GIT_FOLLOW_ICON: '<svg data-icon="follow"></svg>',
+    EXPLORER_GIT_SEARCH_ICON: '<svg data-icon="search"></svg>',
+    EXPLORER_GIT_HASH_ICON: '<svg data-icon="hash"></svg>',
+    EXPLORER_GIT_REVERT_ICON: '<svg data-icon="revert"></svg>',
+    UI_PLUS_ICON: '<svg data-icon="plus"></svg>',
+    UI_MINUS_ICON: '<svg data-icon="minus"></svg>',
+    terminals: [pane],
+    sessionIds: ['s1'],
+    document: { activeElement: null, getElementById: () => panel },
+    window: {
+        GridVibeExplorerGitActive: {
+            commitKey: hash => `explorer:${hash}`,
+            viewerTarget: () => null,
+            activeRowPlan: () => ({ rows: [], reveal: null })
+        }
+    },
+    fetch: async () => ({ ok: true, json: async () => loadedRepo })
+};
+sandbox.globalThis = sandbox;
+vm.createContext(sandbox);
+vm.runInContext(fs.readFileSync(process.argv[2], 'utf8'), sandbox);
+
+sandbox.escHtml = value => String(value == null ? '' : value);
+sandbox.wireExplorerCopyPathMenu = () => {};
+sandbox.notePanePresentationChanged = () => {};
+sandbox.syncExplorerTabGitFromRepo = () => {};
+sandbox.syncExplorerGitActiveRows = () => {};
+sandbox.renderExplorerGitFileRows = () => '';
+sandbox.splitExplorerGitChanges = () => ({ staged: [], unstaged: [] });
+sandbox.explorerGitCanBulkDiscard = () => false;
+
+const renderError = (message) => {
+    pane._explorerGitRepo = null;
+    pane._explorerGitRepoError = message;
+    panel.innerHTML = '';
+    panel.handlers.clear();
+    sandbox.renderExplorerGitPanel(0);
+    return panel.innerHTML;
+};
+const renderLoaded = () => {
+    pane._explorerGitRepoError = '';
+    pane._explorerGitRepo = loadedRepo;
+    panel.innerHTML = '';
+    panel.handlers.clear();
+    sandbox.renderExplorerGitPanel(0);
+    return panel.innerHTML;
+};
+const emit = (payload) => process.stdout.write(JSON.stringify(payload));
+"""
+
+
+@unittest.skipUnless(NODE, "Node.js is required for Git sidebar tests")
+class ExplorerGitScopeSurfaceTestCase(unittest.TestCase):
+    """The sidebar says which scope it is showing, and offers a way out of a
+    scope that cannot resolve.
+
+    A pin is re-applied faithfully across a restart -- including one made in a
+    folder that is not inside any worktree -- so the panel that comes back says
+    "Folder is not inside a Git worktree" about a folder it does not name, one
+    the user may have navigated away from long ago. Naming the scope, and
+    giving the panel the one action that resolves it, is what separates "the
+    pin was lost" from "the pin is doing exactly what you set it to".
+    """
+
+    def _render(self, body):
+        script = (
+            SCOPE_HARNESS
+            + "\n(async () => {\n"
+            + body
+            + "\n})().catch(error => { console.error(error); process.exit(1); });\n"
+        )
+        with TemporaryDirectory() as temp_dir:
+            script_path = Path(temp_dir) / "harness.js"
+            script_path.write_text(script, encoding="utf-8")
+            completed = subprocess.run(
+                [NODE, str(script_path), str(SIDEBAR_JS)],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                timeout=30,
+            )
+        if completed.returncode != 0:
+            self.fail(f"node harness failed:\n{completed.stderr}")
+        return json.loads(completed.stdout)
+
+    def test_an_unresolvable_pin_is_named_and_can_be_cleared_from_the_panel(self):
+        result = self._render(
+            """
+            pane._explorerGitPinnedPath = 'web/static';
+            const markup = renderError('Folder is not inside a Git worktree');
+            panel.click('data-explorer-git-clear-pin');
+            // The clear runs a reload; let its microtasks settle.
+            await Promise.resolve();
+            emit({
+                markup,
+                stillPinned: typeof pane._explorerGitPinnedPath === 'string'
+            });
+            """
+        )
+        self.assertIn("data-explorer-git-clear-pin", result["markup"])
+        self.assertIn("Pinned Git folder", result["markup"])
+        # The path itself, not just the word "pinned".
+        self.assertIn("web/static", result["markup"])
+        self.assertIn('role="status"', result["markup"])
+        # Clear pin clears the pin, rather than toggling it back on.
+        self.assertFalse(result["stillPinned"])
+
+    def test_an_unpinned_pane_gets_no_clear_pin_control(self):
+        """The error is then about the pane's own root, and there is no pin to
+        offer to clear -- an inert control would be worse than none."""
+        result = self._render(
+            """
+            emit({ markup: renderError('Folder is not inside a Git worktree') });
+            """
+        )
+        self.assertNotIn("data-explorer-git-clear-pin", result["markup"])
+        self.assertNotIn("Pinned Git folder", result["markup"])
+
+    def test_a_root_pin_names_the_root_instead_of_naming_nothing(self):
+        """'' and "no pin" ask the server for the same thing, so without a word
+        for it a root pin round-trips perfectly and still reads as lost."""
+        result = self._render(
+            """
+            pane._explorerGitPinnedPath = '';
+            const pinnedAtRoot = renderLoaded();
+            delete pane._explorerGitPinnedPath;
+            const unpinned = renderLoaded();
+            pane._explorerGitPinnedPath = 'web/static/js';
+            const pinnedDeep = renderLoaded();
+            delete pane._explorerGitPinnedPath;
+            pane._explorerGitFollowBrowsing = true;
+            const following = renderLoaded();
+            emit({ pinnedAtRoot, unpinned, pinnedDeep, following });
+            """
+        )
+        self.assertIn("explorer-git-repo-scope", result["pinnedAtRoot"])
+        self.assertIn(">root<", result["pinnedAtRoot"])
+        self.assertIn("Git scope pinned to: root", result["pinnedAtRoot"])
+        # The default scope is the pane's root and needs no word for it.
+        self.assertNotIn("explorer-git-repo-scope", result["unpinned"])
+        self.assertIn(">web/static/js<", result["pinnedDeep"])
+        # Follow names its scope too, and says which control chose it.
+        self.assertIn("Git scope follows the browsed folder", result["following"])
+
+
 if __name__ == "__main__":
     unittest.main()
