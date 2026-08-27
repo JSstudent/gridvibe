@@ -21,6 +21,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 STATIC_JS = REPO_ROOT / "web" / "static" / "js"
 GIT_ACTIVE_JS = STATIC_JS / "explorer-git-active.js"
 EXPLORER_VIEWER_JS = STATIC_JS / "explorer-viewer.js"
+EXPLORER_TREE_JS = STATIC_JS / "explorer-tree.js"
 EXPLORER_GIT_SIDEBAR_JS = STATIC_JS / "explorer-git-sidebar.js"
 TERMINALS_HTML = REPO_ROOT / "templates" / "terminals.html"
 
@@ -281,7 +282,7 @@ const sandbox = {
 };
 sandbox.globalThis = sandbox;
 vm.createContext(sandbox);
-[process.argv[2], process.argv[3], process.argv[4], process.argv[5]].forEach(path => {
+[process.argv[2], process.argv[3], process.argv[4], process.argv[5], process.argv[6]].forEach(path => {
     vm.runInContext(fs.readFileSync(path, 'utf8'), sandbox);
 });
 // In a browser `window` *is* the global; the sandbox keeps them apart, so the
@@ -336,6 +337,7 @@ class ExplorerGitActiveAdapterTestCase(unittest.TestCase):
                     str(ICONS_JS),
                     str(GIT_ACTIVE_JS),
                     str(EXPLORER_VIEWER_JS),
+                    str(EXPLORER_TREE_JS),
                     str(EXPLORER_GIT_SIDEBAR_JS),
                 ],
                 capture_output=True,

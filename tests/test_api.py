@@ -305,6 +305,7 @@ class ApiRoutesTestCase(unittest.TestCase):
             "js/explorer-worker-core.js",
             "js/explorer-worker-client.js",
             "js/explorer-viewer.js",
+            "js/explorer-tree.js",
             "js/explorer-git-sidebar.js",
             "js/explorer-diff.js",
             "js/explorer-tabs.js",
@@ -3249,7 +3250,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         Opening three files in a row must leave the reader on the file they
         were already looking at, so the opener only touches the tab strip.
         """
-        viewer = self._static("js/explorer-viewer.js")
+        tree = self._static("js/explorer-tree.js")
         tabs = self._static("js/explorer-tabs.js")
         opener = tabs[
             tabs.index("function openExplorerFileInBackgroundTab(index, path,"):
@@ -3268,7 +3269,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         # The open-in-new-tab handler routes there and carries the row's Git badge along.
         self.assertIn(
             "git: explorerTreeEntryForPath(terminals[index], path)?.git || null",
-            viewer,
+            tree,
         )
 
     def test_reopening_an_already_open_tab_flashes_it_instead_of_focusing(self):
@@ -14933,18 +14934,22 @@ class ExplorerGitWatchFrontendTestCase(unittest.TestCase):
 
     def test_fs_surface_quiet_refresh_helper_contract(self):
         viewer = self._static("js/explorer-viewer.js")
-        for helper in (
-            "function explorerEntriesSignature(entries)",
-            "async function refreshExplorerDirectoryQuiet(index)",
-            "async function refreshExplorerTreeQuiet(index)",
-            "async function refreshExplorerFilesystemSurfacesQuiet(index)",
+        tree = self._static("js/explorer-tree.js")
+        for source, helpers in (
+            (viewer, (
+                "function explorerEntriesSignature(entries)",
+                "async function refreshExplorerDirectoryQuiet(index)",
+                "async function refreshExplorerFilesystemSurfacesQuiet(index)",
+            )),
+            (tree, ("async function refreshExplorerTreeQuiet(index)",)),
         ):
-            with self.subTest(helper=helper):
-                self.assertIn(helper, viewer)
+            for helper in helpers:
+                with self.subTest(helper=helper):
+                    self.assertIn(helper, source)
         quiet_fn = viewer[
             viewer.index("function explorerEntriesSignature(entries)"):
             viewer.index("function explorerResolveFileView")
-        ]
+        ] + tree[tree.index("const EXPLORER_FS_WATCH_MAX_TREE_NODES"):]
         self.assertIn("cache: 'no-store'", quiet_fn)
         # Quiet: no loading placeholder, no tab/scroll/search reset, and never
         # through the user-initiated load paths.
@@ -14965,10 +14970,13 @@ class ExplorerGitWatchFrontendTestCase(unittest.TestCase):
 
     def test_fs_watch_baseline_is_reset_by_user_initiated_loads(self):
         viewer = self._static("js/explorer-viewer.js")
+        tree = self._static("js/explorer-tree.js")
         self.assertIn("function resetExplorerFsWatchBaseline(pane)", viewer)
         # Every listing/tree load leaves the surfaces current, so the next poll
         # re-bootstraps silently instead of repainting what was just fetched.
-        self.assertEqual(viewer.count("resetExplorerFsWatchBaseline(pane);"), 2)
+        self.assertEqual(
+            (viewer + tree).count("resetExplorerFsWatchBaseline(pane);"), 2
+        )
 
     def test_promoted_preview_tab_keeps_its_git_badge(self):
         tabs = self._static("js/explorer-tabs.js")
@@ -16335,6 +16343,7 @@ class GuardrailAuditFixesTestCase(unittest.TestCase):
         "js/explorer-worker-client.js",
         "js/explorer-worker.js",
         "js/explorer-viewer.js",
+        "js/explorer-tree.js",
         "js/explorer-diff.js",
         "js/explorer-tabs.js",
         "js/explorer-editor.js",
@@ -16439,6 +16448,7 @@ class ExtractedFrontendAssetsTestCase(unittest.TestCase):
         self.assertIn(f"/static/js/terminal-icons.js?v={__version__}", terminals_html)
         self.assertIn(f"/static/js/voice-input.js?v={__version__}", terminals_html)
         self.assertIn(f"/static/js/explorer-viewer.js?v={__version__}", terminals_html)
+        self.assertIn(f"/static/js/explorer-tree.js?v={__version__}", terminals_html)
         self.assertIn(f"/static/js/explorer-git-sidebar.js?v={__version__}", terminals_html)
         self.assertIn(f"/static/js/explorer-editor.js?v={__version__}", terminals_html)
         self.assertIn(f"/static/js/explorer-fs.js?v={__version__}", terminals_html)
@@ -16486,6 +16496,17 @@ class ExtractedFrontendAssetsTestCase(unittest.TestCase):
         self.assertLess(
             terminals_html.index("js/explorer-worker-client.js"),
             terminals_html.index("js/explorer-viewer.js"),
+        )
+        # explorer-tree.js is the Files-tree domain lifted byte-identically out
+        # of explorer-viewer.js and is loaded directly after it.
+        self.assertNotIn("js/explorer-tree.js", launcher_html)
+        self.assertLess(
+            terminals_html.index("js/explorer-viewer.js"),
+            terminals_html.index("js/explorer-tree.js"),
+        )
+        self.assertLess(
+            terminals_html.index("js/explorer-tree.js"),
+            terminals_html.index("js/explorer-git-sidebar.js"),
         )
         # explorer-git-sidebar.js is the Git domain lifted out of
         # explorer-viewer.js by guardrail 6's standing extraction trigger.
@@ -16588,6 +16609,7 @@ class ExtractedFrontendAssetsTestCase(unittest.TestCase):
             "js/terminal-icons.js",
             "js/voice-input.js",
             "js/explorer-viewer.js",
+            "js/explorer-tree.js",
             "js/explorer-diff.js",
             "js/explorer-tabs.js",
             "js/explorer-editor.js",
@@ -18911,6 +18933,7 @@ class ExplorerDownloadTestCase(unittest.TestCase):
         viewer_js = "\n".join(
             (
                 self._static("js/explorer-viewer.js"),
+                self._static("js/explorer-tree.js"),
                 self._static("js/explorer-git-sidebar.js"),
             )
         )

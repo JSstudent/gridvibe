@@ -95,55 +95,14 @@ fixed and recorded as **ISSUE-2026-047** (stage 2, shipped 2026-08-27).
   renders its file rows; Alt-collapse restores the textarea focus and selection.
 - `explorer-git-active.js` / `-menu.js` / `-search.js` are the "new surface gets
   a DOM-free module + a thin adapter" pattern (architecture guardrail 6).
-
-### 0.4 Cross-cutting prerequisite: the `explorer-tree.js` extraction gate
-
-`CLAUDE.md` guardrail 6: *"the **next substantial change to the Files tree**
-extracts `explorer-tree.js` to the same pure-move standard."*
-`explorer-viewer.js` is **7,781 lines** today. Stage 3 changes the tree's row
-markup and stage 4 adds tree context-menu entries — both are that change.
-
-**Recommendation:** do the pure move as **Stage 3a**, before either. Moving
-`explorerTreeRowHtml`, `renderExplorerTreeNodes`, `renderExplorerTreePanel`,
-`toggleExplorerTreeDirectory`, `toggleExplorerTreeLevel`,
-`openExplorerTreeDirectory`, `ensureExplorerTreeState`,
-`explorerTreeRowIsActive`, `explorerTreeEntryForPath` and their siblings out
-byte-identically, with `explorer-viewer.js` a pure deletion and
-`tests/test_explorer_tree_fold.py` / `test_explorer_find.py` passing on their
-existing assertions (only their source-of-truth path changes — still a pure
-move). Doing it *after* stage 3 would mean the move is no longer pure.
+- `explorer-tree.js` is the completed Files-tree pure-move pattern; the lasting
+  extraction rule and its next trigger now live in `CLAUDE.md` and `AGENTS.md`.
 
 ---
 
 ## Stage 3 — The pin is visible where it was made, and re-pinnable on the fly (note 8)
 
-**Risk: medium**, almost all of it in **3a**. Depends on stage 2.
-
-### 3a. Pure move: extract `explorer-tree.js`
-
-**Why now:** guardrail 6's trigger (§0.4). `explorer-viewer.js` is 7,781 lines;
-stage 3b changes the tree's row markup and stage 4 adds tree context-menu
-entries. Doing the move after either means it is no longer pure.
-
-**Solution:** move the Files-tree domain out of `explorer-viewer.js` into
-`web/static/js/explorer-tree.js`, **byte-identically**, loaded directly after
-`explorer-viewer.js` (both stay classic scripts sharing one global scope — the
-same shape `explorer-tabs.js`, `explorer-diff.js` and `explorer-git-sidebar.js`
-already use). `explorer-viewer.js` must be a **pure deletion**.
-
-**Tests:** `tests/test_explorer_tree_fold.py` and `tests/test_explorer_find.py`
-pass **untouched apart from the module path they load**. A move that has to
-change what a test asserts is not a move — stop and re-plan.
-
-**Manual test:** it is a move, so the manual pass is a smoke test: tree renders,
-expands, folds, Alt-folds, the name filter works, open-folder and open-in-tab
-buttons work, right-click still opens the entry menu, in both local and SSH
-panes. Then `make check`.
-
-**Docs:** the repo-layout tree in `CLAUDE.md`, `AGENTS.md` and `README.md` gains
-the file with a one-line description; guardrail 6's "remaining trigger" sentence
-is rewritten to name the **next** condition (candidate: the explorer's file-list
-/ preview surface), because this one has fired.
+**Risk: low.** Depends on stage 2 and the completed Files-tree extraction gate.
 
 ### 3b. The pin marker
 
@@ -616,16 +575,16 @@ narrow variant delivers the note's stated ask without that.
 
 | Stage | Notes | Backend | New persisted field | New endpoint | Files touched | Risk |
 | --- | --- | --- | --- | --- | --- | --- |
-| 3a | (gate) | — | — | — | 2 (pure move) | med |
 | 3b | 8 | — | — | — | 3 + 1 test file | low |
 | 3c | 8 | — | — | — | 4 + the same test file | low |
 | 4 | 11 | yes | `explorer_git_pin_kind` | — | ~12 + 4 test files | med-high |
 | 5 | 13 | yes | `explorer_git_graph_open` | `git/graph` | ~10 + 3 test files | high |
 
 **Hard dependencies:** 3b, 3c and 4 needed 2 — the pin had to be trustworthy before
-it was made visible or extended — and 2 shipped on 2026-08-27. 4's tree menu and 3b's row markup both need 3a; 3c needs 3b, because
-moving the button off "is there a pin" is only honest once the marker and the
-scope chip report where the pin is. 5 is
+it was made visible or extended — and 2 shipped on 2026-08-27. The Files-tree
+extraction gate is complete, so 3b's row markup and 4's tree menu can proceed;
+3c still needs 3b, because moving the button off "is there a pin" is only honest
+once the marker and the scope chip report where the pin is. 5 is
 independent of 3 and 4 and could be scheduled earlier, but it is the largest
 piece and benefits from the scope work landing first.
 

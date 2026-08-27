@@ -4,6 +4,13 @@ All notable changes to GridVibe will be documented in this file.
 
 ## Unreleased
 
+- **Internal — the Files tree now owns its own module.** Files-tree state,
+  loading, row markup, folding, reveal and refresh moved byte-identically from
+  `explorer-viewer.js` into `explorer-tree.js`, which is loaded immediately
+  after the viewer and shares its classic-script scope. The viewer side is a
+  pure deletion; the existing behavioural contracts and the local/SSH manual
+  smoke test passed with no user-visible behaviour change.
+
 - **(fix) Leaving the explorer clears *both* of the Git sidebar's scope controls.** Switching a pane to a terminal already dropped a fixed pin, because a pin names a folder relative to the explorer root it was made under. **Follow browsed folder** was left on — and that turned out to matter more, not less: reopening the explorer lands the pane wherever the shell has walked to, so Follow immediately scoped the Git sidebar to a deep subdirectory of a root you never chose, with the chain button pressed and no pin on screen to explain it. Leaving the explorer now clears the whole scope selection. Restoring a workspace still brings both controls back, and re-pointing a saved row's directory in the launcher still drops the pin alone — a relaunched pane opens at its root, where Follow is indistinguishable from no Follow.
 
 - **(fix) Saving a workspace no longer clears pane settings it was never told about.** Save Workspace writes what the page describes, and the description is filled in with defaults for anything it leaves out. Those defaults were then applied back to the live panes — so a save that did not mention the Git pin, the expanded commits, or any other explorer view state silently switched it off on the running pane, even though the saved preset itself was fine. The pin looked like it had been lost at random, and was one of the reasons the whole thing felt flaky. A save now only changes the live pane for the settings it actually stated; silence leaves the pane alone. Only the page can say a pin was cleared.

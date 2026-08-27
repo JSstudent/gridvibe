@@ -6,7 +6,7 @@ folder, so tidying a tree with a dozen folders open meant a dozen clicks. The
 tree's notion of "this level" is the clicked folder's *siblings* — Alt+clicking
 an open root-level folder therefore folds the whole tree in one gesture.
 
-Executed in Node against the real ``explorer-viewer.js`` rather than asserted as
+Executed in Node against the real ``explorer-tree.js`` rather than asserted as
 source text: what matters is the expanded set the gesture leaves behind, and
 which directory listings it had to fetch to get there.
 """
@@ -18,8 +18,8 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-VIEWER_JS = (
-    Path(__file__).resolve().parent.parent / "web" / "static" / "js" / "explorer-viewer.js"
+TREE_JS = (
+    Path(__file__).resolve().parent.parent / "web" / "static" / "js" / "explorer-tree.js"
 )
 
 NODE = shutil.which("node")
@@ -168,7 +168,7 @@ class ExplorerTreeFoldLevelTestCase(unittest.TestCase):
                 [
                     NODE,
                     str(script_path),
-                    str(VIEWER_JS),
+                    str(TREE_JS),
                     json.dumps(FIXTURE_CHILDREN),
                     json.dumps(cached),
                     json.dumps(sorted(expanded)),
@@ -316,7 +316,7 @@ class ExplorerTreeAnchorScrollTestCase(unittest.TestCase):
                 encoding="utf-8",
             )
             completed = subprocess.run(
-                [NODE, str(script_path), str(VIEWER_JS), str(row_top), str(scroll_top)],
+                [NODE, str(script_path), str(TREE_JS), str(row_top), str(scroll_top)],
                 capture_output=True,
                 text=True,
                 check=False,
