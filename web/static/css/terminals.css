@@ -4720,34 +4720,58 @@
             padding: 8px 10px;
         }
 
-        .explorer-git-repo-branch {
+        .explorer-git-repo-details {
+            display: grid;
+            flex: 1 1 auto;
+            gap: 2px;
+            min-width: 0;
+        }
+
+        .explorer-git-repo-line {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+            min-width: 0;
+            font-size: .74rem;
+        }
+
+        .explorer-git-repo-icon {
+            display: inline-flex;
+            flex: 0 0 14px;
+            align-items: center;
+            justify-content: center;
+            width: 14px;
+            height: 14px;
+            color: var(--explorer-muted);
+        }
+
+        .explorer-git-repo-icon > svg,
+        .explorer-git-repo-icon .explorer-icon,
+        .explorer-git-repo-icon .explorer-icon svg {
+            width: 14px;
+            height: 14px;
+        }
+
+        .explorer-git-repo-icon .explorer-icon {
+            color: inherit;
+        }
+
+        .explorer-git-repo-text {
             min-width: 0;
             overflow: hidden;
             text-overflow: ellipsis;
             white-space: nowrap;
-            font-size: .74rem;
+        }
+
+        .explorer-git-repo-root,
+        .explorer-git-repo-branch {
             font-weight: 700;
             color: var(--explorer-text);
         }
 
-        /* The selected scope, beside the repository it applies to. It gives up
-           its own width before the branch name does — the branch is what
-           identifies the repository, and an ellipsised scope still tells the
-           reader that one is set. */
         .explorer-git-repo-scope {
-            flex: 0 1 auto;
-            min-width: 0;
-            overflow: hidden;
-            text-overflow: ellipsis;
-            white-space: nowrap;
-            margin-right: auto;
             color: var(--explorer-muted);
             font-size: .7rem;
-        }
-
-        .explorer-git-repo-scope::before {
-            content: "·";
-            margin-right: 4px;
         }
 
         .explorer-git-publish-btn,

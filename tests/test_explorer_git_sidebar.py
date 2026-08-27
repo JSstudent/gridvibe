@@ -46,6 +46,8 @@ const sandbox = {
     EXPLORER_GIT_PIN_ICON: '<svg data-icon="pin"></svg>',
     EXPLORER_GIT_FOLLOW_ICON: '<svg data-icon="follow"></svg>',
     EXPLORER_GIT_SEARCH_ICON: '<svg data-icon="search"></svg>',
+    EXPLORER_GIT_TOGGLE_ICON: '<svg data-icon="git"></svg>',
+    EXPLORER_FOLDER_ICON: '<svg data-icon="folder"></svg>',
     terminals: [pane],
     sessionIds: ['session id'],
     document: {
@@ -87,7 +89,7 @@ sandbox.wireExplorerCopyPathMenu = () => {};
     const builtFollow = sandbox.explorerGitRequestUrl(
         'session id', 'state', 'repo one/src', { known: 'abc 123' }
     );
-    const label = sandbox.explorerGitRepoLabel(payload.git);
+    const label = sandbox.explorerGitBranchLabel(payload.git);
     await sandbox.loadExplorerGitRepo(0);
     pane._explorerPath = 'repo one/docs';
     // Root scope is cached across navigation.
@@ -150,7 +152,7 @@ class ExplorerGitSidebarRequestTestCase(unittest.TestCase):
             payload["builtFollow"],
             "/api/explorer/session%20id/git/state?scope=path&path=repo+one%2Fsrc&known=abc+123",
         )
-        self.assertEqual(payload["label"], "repo one · main ↑2 *")
+        self.assertEqual(payload["label"], "main ↑2 *")
         self.assertEqual(
             [call["url"] for call in payload["calls"]],
             [
@@ -237,6 +239,8 @@ const sandbox = {
     EXPLORER_GIT_SEARCH_ICON: '<svg data-icon="search"></svg>',
     EXPLORER_GIT_HASH_ICON: '<svg data-icon="hash"></svg>',
     EXPLORER_GIT_REVERT_ICON: '<svg data-icon="revert"></svg>',
+    EXPLORER_GIT_TOGGLE_ICON: '<svg data-icon="git"></svg>',
+    EXPLORER_FOLDER_ICON: '<svg data-icon="folder"></svg>',
     UI_PLUS_ICON: '<svg data-icon="plus"></svg>',
     UI_MINUS_ICON: '<svg data-icon="minus"></svg>',
     terminals: [pane],
@@ -371,11 +375,23 @@ class ExplorerGitScopeSurfaceTestCase(unittest.TestCase):
         self.assertIn("explorer-git-repo-scope", result["pinnedAtRoot"])
         self.assertIn(">root<", result["pinnedAtRoot"])
         self.assertIn("Git scope pinned to: root", result["pinnedAtRoot"])
+        self.assertIn('data-icon="folder"', result["pinnedAtRoot"])
+        self.assertIn('data-icon="git"', result["pinnedAtRoot"])
+        self.assertIn('data-icon="pin"', result["pinnedAtRoot"])
+        self.assertLess(
+            result["pinnedAtRoot"].index('data-icon="folder"'),
+            result["pinnedAtRoot"].index('data-icon="git"'),
+        )
+        self.assertLess(
+            result["pinnedAtRoot"].index('data-icon="git"'),
+            result["pinnedAtRoot"].index('data-icon="pin"'),
+        )
         # The default scope is the pane's root and needs no word for it.
         self.assertNotIn("explorer-git-repo-scope", result["unpinned"])
         self.assertIn(">web/static/js<", result["pinnedDeep"])
         # Follow names its scope too, and says which control chose it.
         self.assertIn("Git scope follows the browsed folder", result["following"])
+        self.assertIn('data-icon="follow"', result["following"])
 
 
 if __name__ == "__main__":

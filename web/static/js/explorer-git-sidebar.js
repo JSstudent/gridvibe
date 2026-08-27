@@ -125,10 +125,8 @@
         return parts.join(' ');
     }
 
-    function explorerGitRepoLabel(git) {
-        const summary = explorerGitSummaryText(git) || 'Git';
-        const name = String(git?.repo_name || '').trim();
-        return name ? `${name} · ${summary}` : summary;
+    function explorerGitBranchLabel(git) {
+        return explorerGitSummaryText(git) || 'Git';
     }
 
     /* What the repo bar says about the scope every action in this panel acts
@@ -741,7 +739,8 @@
         const commitMessage = typeof pane._explorerGitCommitMessage === 'string' ? pane._explorerGitCommitMessage : '';
         const hasUpstream = git.ahead !== null && git.ahead !== undefined;
         const publishLabel = hasUpstream ? 'Push' : 'Publish branch';
-        const repoBranchText = explorerGitRepoLabel(git);
+        const repoName = String(git.repo_name || '').trim();
+        const repoBranchText = explorerGitBranchLabel(git);
         const following = Boolean(pane._explorerGitFollowBrowsing);
         const pinned = typeof pane._explorerGitPinnedPath === 'string';
         const scopeLabel = explorerGitScopeLabel(explorerGitScopePath(pane));
@@ -796,8 +795,22 @@
             ${errorBanner}
             ${watchPausedBanner}
             <div class="explorer-diff-sidebar-section explorer-git-repo-bar">
-                <span class="explorer-git-repo-branch" title="${escHtml(git.repo_root || repoBranchText)}">${escHtml(repoBranchText)}</span>
-                ${scopeLabel ? `<span class="explorer-git-repo-scope" title="${escHtml(scopeTitle)}">${escHtml(scopeLabel)}</span>` : ''}
+                <div class="explorer-git-repo-details">
+                    ${repoName ? `
+                    <div class="explorer-git-repo-line explorer-git-repo-root" title="${escHtml(git.repo_root || repoName)}">
+                        <span class="explorer-git-repo-icon">${EXPLORER_FOLDER_ICON}</span>
+                        <span class="explorer-git-repo-text">${escHtml(repoName)}</span>
+                    </div>` : ''}
+                    <div class="explorer-git-repo-line explorer-git-repo-branch" title="${escHtml(repoBranchText)}">
+                        <span class="explorer-git-repo-icon">${EXPLORER_GIT_TOGGLE_ICON}</span>
+                        <span class="explorer-git-repo-text">${escHtml(repoBranchText)}</span>
+                    </div>
+                    ${scopeLabel ? `
+                    <div class="explorer-git-repo-line explorer-git-repo-scope" title="${escHtml(scopeTitle)}">
+                        <span class="explorer-git-repo-icon">${following ? EXPLORER_GIT_FOLLOW_ICON : EXPLORER_GIT_PIN_ICON}</span>
+                        <span class="explorer-git-repo-text">${escHtml(scopeLabel)}</span>
+                    </div>` : ''}
+                </div>
                 <button type="button" class="explorer-git-publish-btn" data-explorer-git-publish ${busy ? 'disabled' : ''} title="Push the current branch to its remote">${escHtml(publishLabel)}</button>
             </div>
             <div class="explorer-diff-sidebar-section">
