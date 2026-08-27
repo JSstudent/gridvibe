@@ -122,6 +122,94 @@
             .map(entry => entry.path);
     }
 
+    /* The Git scope pin is a state, not a control: the tree *reports* where the
+       pin is and never moves it, so this is a marker (a <span>) and not a
+       button. Its box and icon match the row's open-in-folder / open-in-tab
+       buttons so the row's controls stay on one baseline — an SVG does not
+       centre by font metrics the way a text glyph would.
+
+       Zero new persisted state: which row wears it is derived from the pane's
+       `_explorerGitPinnedPath` every time it is asked. */
+    const EXPLORER_TREE_PIN_MARK_TITLE = 'Git scope pinned here';
+    const EXPLORER_TREE_PIN_ROOT_MARK_TITLE = 'Git scope pinned to the explorer root';
+
+    function explorerTreePinMarkHtml({ root = false } = {}) {
+        const title = root ? EXPLORER_TREE_PIN_ROOT_MARK_TITLE : EXPLORER_TREE_PIN_MARK_TITLE;
+        return `<span
+                class="explorer-tree-pin-mark"
+                ${root ? 'data-explorer-tree-pin-root' : ''}
+                role="img"
+                title="${title}"
+                aria-label="${title}"
+                ${root ? 'hidden' : ''}
+            >${EXPLORER_GIT_PIN_ICON}</span>`;
+    }
+
+    /* The pane's pinned path, or `null` when nothing is pinned. `''` is a real
+       pin — the explorer root — so the pin's existence is the field's *type*. */
+    function explorerTreePinnedPath(pane) {
+        return typeof pane?._explorerGitPinnedPath === 'string'
+            ? pane._explorerGitPinnedPath
+            : null;
+    }
+
+    function explorerTreeRowIsPinned(pane, path) {
+        const policy = window.GridVibeExplorerGitPin;
+        return Boolean(policy && policy.explorerGitPathIsPinned(explorerTreePinnedPath(pane), path));
+    }
+
+    /* Move the pin marker without rebuilding the tree.
+
+       A pin write changes exactly two rows — the one losing the mark and the
+       one gaining it — and re-rendering `[data-explorer-tree-body]` to say so
+       would empty the panel's scroller, clamping its offset to 0; the
+       capture-phase scroll listener then persists that 0 as the reader's
+       position. So the rows are found by **one** walk over the rendered rows
+       rather than a `querySelector` per row over the whole list (the repaint
+       guardrail), and only the two that disagree with the pin are touched.
+
+       The per-row `querySelector` below is scoped to that row's handful of
+       children, not to the row list, so it is a lookup and not a scan.
+
+       Idempotent: a freshly rendered tree already carries the marker in its
+       row markup, and running this over it changes nothing. */
+    function applyExplorerTreePinMark(index) {
+        const pane = terminals[index];
+        const panel = document.getElementById(`explorer-tree-panel-${index}`);
+        if (!pane || !panel) {
+            return;
+        }
+        /* The body lists the root's *children*, so a pin on the explorer root
+           itself has no row to carry it. The FILES head stands in for the
+           root, and its marker is toggled by attribute rather than added and
+           removed, because the head is built once and left alone — rebuilding
+           it drops the caret out of the name filter beside it. */
+        const rootMark = panel.querySelector('[data-explorer-tree-pin-root]');
+        if (rootMark) {
+            rootMark.hidden = !explorerTreeRowIsPinned(pane, '');
+        }
+        panel.querySelectorAll('.explorer-tree-row').forEach(row => {
+            const wanted = explorerTreeRowIsPinned(pane, row.dataset.explorerContextPath || '');
+            const mark = row.querySelector('.explorer-tree-pin-mark');
+            if (wanted === Boolean(mark)) {
+                return;
+            }
+            if (mark) {
+                mark.remove();
+                return;
+            }
+            /* Immediately left of the row's open control, which is where the
+               marker sits in the row markup. A row with neither (a file row in
+               a filtered result tree) takes it at the end. */
+            const anchor = row.querySelector('.explorer-open-folder-btn, .explorer-open-tab-btn');
+            if (anchor) {
+                anchor.insertAdjacentHTML('beforebegin', explorerTreePinMarkHtml());
+            } else {
+                row.insertAdjacentHTML('beforeend', explorerTreePinMarkHtml());
+            }
+        });
+    }
+
     /* One tree row. `options.nameHtml` supplies already-escaped markup for the
        name (the filter's match highlight); `options.staticChevron` drops the
        fold control, which is what a filtered result tree wants — its folders
@@ -150,6 +238,7 @@
             >${expanded ? UI_CHEVRON_DOWN_ICON : UI_CHEVRON_RIGHT_ICON}</button>`
             : `<span class="explorer-tree-chevron" aria-hidden="true" ${indent}></span>`;
         const badge = explorerGitStatusLabel(entry.git) ? explorerGitBadgeHtml(entry.git) : '';
+        const pinMark = explorerTreeRowIsPinned(pane, path) ? explorerTreePinMarkHtml() : '';
         const openFolder = isDirectory
             ? `<button type="button" class="explorer-search-btn explorer-open-folder-btn" data-explorer-tree-open-folder="${escHtml(path)}" title="Open folder in the explorer list" aria-label="Open folder in the explorer list">${EXPLORER_OPEN_FOLDER_ICON}</button>`
             : '';
@@ -173,6 +262,7 @@
                     <span class="explorer-tree-name">${options.nameHtml || escHtml(entry.name || path)}</span>
                 </button>
                 ${badge}
+                ${pinMark}
                 ${openFolder}
                 ${openTab}
             </div>
@@ -225,6 +315,7 @@
                 <div class="explorer-tree-section">
                     <div class="explorer-tree-head">
                         <div class="explorer-tree-title">Files</div>
+                        ${explorerTreePinMarkHtml({ root: true })}
                         ${typeof explorerTreeSearchHeadHtml === 'function'
                             ? explorerTreeSearchHeadHtml(index)
                             : ''}
@@ -235,6 +326,9 @@
             if (typeof wireExplorerTreeSearchControls === 'function') {
                 wireExplorerTreeSearchControls(index);
             }
+            // The head is built once; nothing renders its marker again, so its
+            // state comes from the one paint that owns it.
+            applyExplorerTreePinMark(index);
         }
         if (typeof syncExplorerTreeSearchControls === 'function') {
             syncExplorerTreeSearchControls(index);

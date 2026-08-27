@@ -4,6 +4,8 @@ All notable changes to GridVibe will be documented in this file.
 
 ## Unreleased
 
+- **(feat) The Files tree shows which folder the Git scope is pinned to.** A pin freezes on the folder you made it in, so navigating away used to leave nothing on screen saying where it was — a restored workspace that came back somewhere else read as a pin that had been lost. The pinned folder's row now carries a pin mark beside its open-in-folder button, and a pin on the explorer root marks the **Files** header, which is what the tree shows in place of a root row. The mark moves without the tree re-rendering, so your scroll position and open folders are untouched, and it appears in the filtered tree too. A pin on a folder that is currently collapsed out of view shows no mark — the Graph header still names the scope, and the tree never expands itself to reveal it.
+
 - **Internal — the Files tree now owns its own module.** Files-tree state,
   loading, row markup, folding, reveal and refresh moved byte-identically from
   `explorer-viewer.js` into `explorer-tree.js`, which is loaded immediately

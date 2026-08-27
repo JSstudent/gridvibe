@@ -93,10 +93,16 @@ fixed and recorded as **ISSUE-2026-047** (stage 2, shipped 2026-08-27).
 - Git search/active/menu state **paints, never re-renders** (the commit textarea
   and search input would lose the caret). Structural commit expansion still
   renders its file rows; Alt-collapse restores the textarea focus and selection.
-- `explorer-git-active.js` / `-menu.js` / `-search.js` are the "new surface gets
-  a DOM-free module + a thin adapter" pattern (architecture guardrail 6).
+- `explorer-git-active.js` / `-menu.js` / `-search.js` / `-pin.js` are the "new
+  surface gets a DOM-free module + a thin adapter" pattern (architecture
+  guardrail 6). `-pin.js` is the newest and the one 3c and 4 extend.
 - `explorer-tree.js` is the completed Files-tree pure-move pattern; the lasting
   extraction rule and its next trigger now live in `CLAUDE.md` and `AGENTS.md`.
+- The Files tree's pin marker (3b) is derived per row from
+  `_explorerGitPinnedPath` and painted onto the two rows that changed — never by
+  rebuilding `[data-explorer-tree-body]`, which resets the tree's scroll. A `''`
+  pin marks the FILES head, because the body lists the root's *children* and has
+  no root row.
 
 ---
 
@@ -104,75 +110,10 @@ fixed and recorded as **ISSUE-2026-047** (stage 2, shipped 2026-08-27).
 
 **Risk: low.** Depends on stage 2 and the completed Files-tree extraction gate.
 
-### 3b. The pin marker
-
-**Problem.** Note 8: nothing in the Files tree shows *which* folder is pinned,
-so a pin made in a folder you have since navigated away from is invisible —
-which is also half of why note 10 reads as "the pin was lost".
-
-**Solution (code + tests):**
-
-- `explorerTreeRowHtml()` renders a **marker, not a button**, immediately left
-  of the open-in-folder button, when the row's path equals the pane's pinned
-  path: `<span class="explorer-tree-pin-mark" title="Git scope pinned here">` +
-  the existing `EXPLORER_GIT_PIN_ICON`. Marker only in this stage — the *action*
-  is stage 4.
-- **Zero new persisted state.** The marker is derived from
-  `_explorerGitPinnedPath`, which stage 2 makes trustworthy. Note 8's
-  *"Persistance/restore must apply"* is satisfied by stage 2, and this is the
-  low-blast property worth protecting: resist adding an
-  `explorer_tree_pin_marked` field.
-- **Paint, never re-render.** A pin write calls a new
-  `applyExplorerTreePinMark(index)` that touches **exactly two rows** — the one
-  losing the mark and the one gaining it — found by one walk over the rendered
-  rows, not a `querySelector` per row (the repaint guardrail). Rebuilding
-  `[data-explorer-tree-body]` would reset the tree panel's scroll to 0, which
-  the capture-phase scroll listener would then persist as the user's position.
-  The marker and 3c's button state move on the same two events (the pin moved,
-  or the browsed folder moved), so both are painted from one
-  `refreshExplorerPinAffordances(index)` rather than from two call sites that
-  can drift apart.
-- A pin whose folder is not currently rendered (collapsed ancestor, or outside
-  the tree) shows no marker. That is honest and costs nothing; the repo bar from
-  stage 2 (H3) still names the scope. Do **not** auto-expand to reveal it.
-- CSS in `terminals.css` beside `.explorer-tree-row .explorer-icon`, colours
-  from `tokens.css`, `display: inline-flex` + an explicit `svg` box matching the
-  neighbouring buttons (guardrail 7 — an SVG does not centre by font metrics).
-  While that block is open, migrate any palette literals it still carries.
-
-**Tests:**
-
-- `tests/test_explorer_tree_pin_mark.py` (new, Node, against the moved module):
-  the marker appears on exactly the pinned path's row; on no row when the pin is
-  unset; on the **root** row for a `''` pin; `applyExplorerTreePinMark` moves the
-  mark between two rows **without** rebuilding the body (assert the row nodes
-  are the same objects afterwards) and leaves the panel's scroll untouched.
-- A source-level assertion is fair here for the markup hooks only
-  (`explorer-tree-pin-mark`, the `title`) — rendered markup and `data-*` /
-  `aria-*` hooks are the documented exception; the behaviour is executed.
-
-**Manual test outline:**
-
-1. Explorer pane on a repo, Files tree open, expand a few levels.
-2. Navigate into `web/static/js`, pin → the pin mark appears on that folder's
-   tree row, left of the open-in-folder button, sized like its neighbours.
-3. Navigate elsewhere (including above the pinned folder) → the mark **stays**
-   on the pinned row.
-4. Scroll the tree, then toggle the pin off and on → the tree does **not** jump;
-   the mark moves without the tree re-rendering.
-5. Collapse the pinned folder's parent → no marker anywhere; the Graph header
-   still names the scope. Expand again → the marker is back.
-6. Pin while browsing the explorer root → the root row carries the marker.
-7. Save Workspace → restart → restore → the marker is on the same row.
-8. Repeat 2, 3 and 7 on an SSH pane.
-9. Check both light and dark explorer themes.
-10. Type a name filter; confirm the filtered tree also shows the marker on the
-    pinned row if it is in the results.
-
-**Docs after verification:** `CHANGELOG.md` `(feat)` bullet; the Git-sidebar
-scope guardrail in `CLAUDE.md` / `AGENTS.md` gains the sentence *"the pinned
-path is marked in the Files tree; the mark is derived, never persisted"*;
-`README.md` screenshot/caption if it shows the tree.
+**3b (the Files-tree pin marker) shipped 2026-08-27** and is documented in
+`CHANGELOG.md`, in the Git-scope guardrail in `CLAUDE.md` / `AGENTS.md`, and in
+`README.md`; it also introduced `web/static/js/explorer-git-pin.js`, the DOM-free
+`explorerGitPathIsPinned()` predicate 3c's button state is meant to share.
 
 ### 3c. The pin button asks "is the pin *here*", not "is there a pin"
 
@@ -185,7 +126,7 @@ it reloads the whole graph for. Worse, the pressed state is the pane's only
 report that a pin exists, so the button reads as "pinned" while standing in a
 folder that has nothing to do with the pin.
 
-That framing only made sense while the pin was invisible. Once 3b marks the
+That framing only made sense while the pin was invisible. Now that 3b marks the
 pinned row and the repo bar names the scope, the *existence* of a pin is
 reported by two surfaces that can say **where**, and the button is free to
 answer the question it is actually next to: **is this folder the pinned one?**
@@ -197,8 +138,9 @@ answer the question it is actually next to: **is this folder the pinned one?**
   — exact string equality, **never** ancestor/prefix matching (a pin on a
   parent is not a pin here, and treating it as one lets the button clear a pin
   the user made somewhere else). `''` is the root and equals `''`. The same
-  predicate answers 3b's marker, so the marked row and the pressed button can
-  never disagree.
+  predicate already answers 3b's marker
+  (`GridVibeExplorerGitPin.explorerGitPathIsPinned`), so the marked row and the
+  pressed button can never disagree.
 
   | state | `aria-pressed` | click does | title |
   | --- | --- | --- | --- |
@@ -240,12 +182,18 @@ answer the question it is actually next to: **is this folder the pinned one?**
   is what keeps "turn Follow off and you land back on the fixed scope"
   predictable. With Follow on the graph already tracks the browsed folder; the
   pin button showing "pin is elsewhere" there is accurate, not confusing.
-- **DOM-free module.** The state table above is policy, not painting, so 3b's
-  marker predicate and this button state go in one new
-  `web/static/js/explorer-git-pin.js` — `explorerGitPathIsPinned(pinnedPath,
-  path)` and `explorerGitPinButtonState(pinnedPath, browsedPath)` ->
-  `{ state, pressed, title, clearAvailable }` — with the sidebar and the tree
+- **DOM-free module.** The state table above is policy, not painting, so the
+  button state joins the predicate 3b already shipped in
+  `web/static/js/explorer-git-pin.js`: add `explorerGitPinButtonState(pinnedPath,
+  browsedPath)` -> `{ state, pressed, title, clearAvailable }` beside
+  `explorerGitPathIsPinned(pinnedPath, path)`, with the sidebar and the tree
   holding paint-only adapters (guardrail 6, the `explorer-git-*.js` pattern).
+- **One paint entry point, already in place.** 3b landed
+  `refreshExplorerPinAffordances(index)` in `explorer-git-sidebar.js`, which
+  today calls only the tree's `applyExplorerTreePinMark(index)`. The button's
+  attribute-only paint goes in there beside it rather than at a second call
+  site, and the navigation repaint below is what makes that function earn its
+  name.
 - **Zero new persisted state**, same as 3b: both states are derived from
   `_explorerGitPinnedPath` and `_explorerPath`.
 - **Identity still applies.** The paint captures the pane object and its
@@ -253,8 +201,9 @@ answer the question it is actually next to: **is this folder the pinned one?**
   sidebar write — a group switch during a pin load must not paint another
   pane's slot.
 
-**Tests** — `tests/test_explorer_git_pin.py` (new, Node; 3b's marker
-assertions live here too rather than in a second file):
+**Tests** — `tests/test_explorer_tree_pin_mark.py` (3b's file: it already
+executes the predicate and the tree marker, so the button state joins it rather
+than opening a second file over the same module):
 
 - `explorerGitPinButtonState`: `here` / `elsewhere` / `none`; a `''` pin while
   browsing the root is `here`; a `''` pin while browsing `web` is `elsewhere`;
@@ -270,9 +219,11 @@ assertions live here too rather than in a second file):
 - The repo bar's **Clear pin** renders only when `pinned && !pinnedHere` and
   goes through the same one writer.
 - The marker and the button agree: for any (pin, browsed) pair, the row the
-  marker lands on is `here` for exactly that browsed path.
+  marker lands on is `here` for exactly that browsed path. 3b's marker
+  assertions must keep passing untouched — a change there would mean the two
+  surfaces stopped sharing one predicate.
 
-**Manual test outline** (extends 3b's):
+**Manual test outline** (extends 3b's, which passed on 2026-08-27):
 
 11. Pin `web/static/js`, then navigate to `docs` → the button is **not**
     pressed, wears the distinct pinned-elsewhere styling, and its title names
@@ -575,16 +526,16 @@ narrow variant delivers the note's stated ask without that.
 
 | Stage | Notes | Backend | New persisted field | New endpoint | Files touched | Risk |
 | --- | --- | --- | --- | --- | --- | --- |
-| 3b | 8 | — | — | — | 3 + 1 test file | low |
-| 3c | 8 | — | — | — | 4 + the same test file | low |
+| 3b | 8 | — | — | — | shipped 2026-08-27 | low |
+| 3c | 8 | — | — | — | 4 + 3b's test file | low |
 | 4 | 11 | yes | `explorer_git_pin_kind` | — | ~12 + 4 test files | med-high |
 | 5 | 13 | yes | `explorer_git_graph_open` | `git/graph` | ~10 + 3 test files | high |
 
 **Hard dependencies:** 3b, 3c and 4 needed 2 — the pin had to be trustworthy before
-it was made visible or extended — and 2 shipped on 2026-08-27. The Files-tree
-extraction gate is complete, so 3b's row markup and 4's tree menu can proceed;
-3c still needs 3b, because moving the button off "is there a pin" is only honest
-once the marker and the scope chip report where the pin is. 5 is
+it was made visible or extended — and 2 shipped on 2026-08-27, followed by 3b.
+The Files-tree extraction gate is complete, so 4's tree menu can proceed; 3c's
+own dependency on 3b is now satisfied, so moving the button off "is there a pin"
+is honest — the marker and the scope chip both report where the pin is. 5 is
 independent of 3 and 4 and could be scheduled earlier, but it is the largest
 piece and benefits from the scope work landing first.
 

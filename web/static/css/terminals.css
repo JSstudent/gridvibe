@@ -2626,7 +2626,10 @@
 
         .explorer-tree-row {
             display: grid;
-            grid-template-columns: auto minmax(0, 1fr) auto auto;
+            /* chevron | name | git badge | pin marker | open control. Each
+               trailing track is `auto`, so a row without one of them simply
+               collapses that column rather than wrapping onto a second line. */
+            grid-template-columns: auto minmax(0, 1fr) auto auto auto;
             align-items: center;
             gap: 4px;
             min-width: 0;
@@ -2723,6 +2726,39 @@
         .explorer-tree-row .explorer-icon svg {
             width: 16px;
             height: 16px;
+        }
+
+        /* The Git scope pin marker. It reports a state and is not a control,
+           so it takes no border, no background and no hover — but it shares
+           the 22px box and 13px icon of the open-in-folder / open-in-tab
+           buttons beside it so the row's right-hand controls stay aligned. An
+           SVG has no font metrics to centre by, hence the explicit flex box.
+           The head's copy stands in for the explorer root, which the tree body
+           (a listing of the root's children) has no row for. */
+        .explorer-tree-pin-mark {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 22px;
+            height: 22px;
+            color: var(--t-accent);
+        }
+
+        /* The class sets `display`, so the UA's own [hidden] rule loses to it:
+           the head's marker is toggled by attribute and needs this to stay
+           hidden while nothing is pinned at the root. */
+        .explorer-tree-pin-mark[hidden] {
+            display: none;
+        }
+
+        .explorer-tree-pin-mark .explorer-btn-icon {
+            display: block;
+            width: 13px;
+            height: 13px;
+        }
+
+        .explorer-tree-head .explorer-tree-pin-mark {
+            flex: 0 0 auto;
         }
 
         .explorer-tree-empty,

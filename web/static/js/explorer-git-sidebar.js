@@ -606,6 +606,21 @@
         return true;
     }
 
+    /* Everything outside the Git panel that reports where the pin is, painted
+       from one place so those surfaces cannot drift apart: today the Files
+       tree's marker, which moves on exactly the same events the panel's own
+       pin affordances do.
+
+       Paint-only and attribute-level by construction. Re-rendering the Git
+       panel for a pin move is not an option — it carries the commit-message
+       textarea and the commit-search input, and a re-render takes the caret —
+       and re-rendering the tree body would reset its scroll. */
+    function refreshExplorerPinAffordances(index) {
+        if (typeof applyExplorerTreePinMark === 'function') {
+            applyExplorerTreePinMark(index);
+        }
+    }
+
     /* One writer for the pin, so the toggle and the error panel's explicit
        Clear pin cannot drift into two slightly different clears. `null` means
        "no pin"; any string (including '') is a pinned path. */
@@ -619,6 +634,12 @@
         } else {
             pane._explorerGitPinnedPath = String(pinnedPath);
         }
+        /* Before the load, not after it: the marker reports a pane field that
+           has already moved, so making the reader wait out a repository round
+           trip to see it would be reporting the request rather than the state.
+           Synchronous, so no identity re-check is owed — nothing has awaited
+           yet and this is still the pane the gesture was made on. */
+        refreshExplorerPinAffordances(index);
         invalidateExplorerGitRepo(index);
         notePanePresentationChanged(index);
         await loadExplorerGitRepo(index);
