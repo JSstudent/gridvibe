@@ -131,6 +131,20 @@ class _PinRouteTestCase(unittest.TestCase):
             },
         )
 
+    def _post_mode(self, session_id, body):
+        """Route the mode switch without letting it start a real shell.
+
+        The transition is what these tests are about; the reconnect it
+        schedules is not. Left unpatched it spawns a live terminal whose
+        working directory *is* the temporary root, and on Windows a running
+        process holding that directory makes ``TemporaryDirectory.cleanup()``
+        fail -- the test asserts everything correctly and then errors in
+        teardown. `test_session_modes.py` patches the same background task for
+        the same reason.
+        """
+        with patch.object(api.socketio, "start_background_task"):
+            return self.client.post(f"/api/sessions/{session_id}/mode", json=body)
+
     def assertPinned(
         self,
         session,
@@ -442,9 +456,7 @@ class PinRefusalTestCase(_PinRouteTestCase):
         group_id, session_ids = self._launch()
         self._scope_the_sidebar(group_id, session_ids, follow=True)
 
-        switched = self.client.post(
-            f"/api/sessions/{session_ids[0]}/mode", json={"mode": "terminal"}
-        )
+        switched = self._post_mode(session_ids[0], {"mode": "terminal"})
         self.assertEqual(switched.status_code, 200, switched.get_json())
         session = api.session_manager.get_session(session_ids[0])
         self.assertFalse(session.explorer_git_pin_active)
@@ -486,13 +498,11 @@ class PinRefusalTestCase(_PinRouteTestCase):
             api.session_manager.get_session(session_ids[0]).explorer_git_follow_browsing
         )
 
-        to_terminal = self.client.post(
-            f"/api/sessions/{session_ids[0]}/mode", json={"startup_mode": "terminal"}
-        )
+        to_terminal = self._post_mode(session_ids[0], {"startup_mode": "terminal"})
         self.assertEqual(to_terminal.status_code, 200, to_terminal.get_json())
-        back = self.client.post(
-            f"/api/sessions/{session_ids[0]}/mode",
-            json={"startup_mode": "explorer", "directory": str(self.root_dir)},
+        back = self._post_mode(
+            session_ids[0],
+            {"startup_mode": "explorer", "directory": str(self.root_dir)},
         )
         self.assertEqual(back.status_code, 200, back.get_json())
         session = api.session_manager.get_session(session_ids[0])
