@@ -114,6 +114,9 @@ const sandbox = {
         body: { dataset: {}, addEventListener() {}, classList: { add() {}, remove() {} } }
     },
     navigator: {},
+    // The worktree probe takes a request slot, so a pane that goes away stops
+    // holding it and a second gesture supersedes the first one's request.
+    AbortController,
     setTimeout,
     clearTimeout,
     setInterval,
@@ -138,8 +141,16 @@ vm.runInContext(fs.readFileSync(process.argv[2], 'utf8'), sandbox);  // viewer
    worktree; `worktree` says what the server would answer. */
 sandbox.explorerGitRequestUrl = (sessionId, endpoint, path, extra, kind) =>
     `/api/explorer/${sessionId}/git/${endpoint}?path=${path}&kind=${kind}`;
+let probeSeq = 0;
 sandbox.fetch = async url => {
     calls.probes.push(String(url));
+    const mine = ++probeSeq;
+    /* For the two-gesture case the *first* probe resolves last, which is the
+       ordering the menu token exists for: without it the superseded handler
+       opens its menu over the one the reader is actually looking at. */
+    if (spec.doubleGesture) {
+        await new Promise(resolve => setTimeout(resolve, mine === 1 ? 20 : 1));
+    }
     return { ok: spec.worktree !== false, json: async () => ({}) };
 };
 sandbox.setExplorerGitPinnedScope = (index, path, kind) => {
@@ -158,9 +169,12 @@ sandbox.refreshExplorerPinAffordances = () => {};
 sandbox.explorerGitScopeNeedsLoad = () => false;
 sandbox.loadExplorerGitRepo = () => {};
 
-// The menu itself: capture the item list instead of building a popup.
+// The menu itself: capture the item list instead of building a popup. Every
+// call is recorded, because "how many menus opened" is the observation a
+// superseded gesture is judged on.
 let offered = [];
-sandbox.showExplorerContextMenu = (x, y, items) => { offered = items; };
+const menus = [];
+sandbox.showExplorerContextMenu = (x, y, items) => { offered = items; menus.push(items); };
 
 const pane = {
     _session: { startup_mode: 'explorer', explorer_root_directory: '/repo' },
@@ -174,6 +188,14 @@ if (spec.pinnedPath !== null && spec.pinnedPath !== undefined) {
     pane._explorerGitPinnedPath = spec.pinnedPath;
     pane._explorerGitPinKind = spec.pinnedKind || 'dir';
 }
+/* The repository the sidebar has already loaded. `repo_path: ''` is the
+   server's word for "the worktree contains the explorer root", which settles
+   the menu's worktree question for every path under it without a request. */
+if (spec.loadedRepoPath !== undefined) {
+    pane._explorerGitRepo = {
+        git: { available: true, repo_path: spec.loadedRepoPath }
+    };
+}
 sandbox.terminals[0] = pane;
 sandbox.sessionIds[0] = 'sess-0';
 
@@ -181,7 +203,7 @@ const row = spec.row ? makeNode(spec.row) : null;
 if (row) {
     row.__row = true;
 }
-const event = {
+const makeEvent = () => ({
     clientX: 10,
     clientY: 10,
     preventDefault() {},
@@ -194,13 +216,22 @@ const event = {
             return null;
         }
     }
-};
+});
 
-Promise.resolve(sandbox.handleExplorerContextMenu(event, 0)).then(async () => {
+const gesture = () => Promise.resolve(sandbox.handleExplorerContextMenu(makeEvent(), 0));
+// Two overlapping right-clicks, started before either can settle.
+const gestures = spec.doubleGesture ? [gesture(), gesture()] : [gesture()];
+
+Promise.all(gestures).then(async () => {
     const git = offered.filter(item => /Git/.test(item.label || ''));
     // Run the chosen entry so the menu's promise is observable, not its text.
     const chosen = spec.click ? git.find(item => item.label === spec.click) : null;
     if (chosen && !chosen.disabled) {
+        // A group switch between opening the menu and clicking it: the slot
+        // now holds another group's pane, and the entry must not write to it.
+        if (spec.replacePaneBeforeClick) {
+            sandbox.terminals[0] = { _explorerMode: 'directory', _explorerPath: '' };
+        }
         await chosen.action();
     }
     process.stdout.write(JSON.stringify({
@@ -212,7 +243,8 @@ Promise.resolve(sandbox.handleExplorerContextMenu(event, 0)).then(async () => {
         })),
         pins: calls.pins,
         follows: calls.follows,
-        probes: calls.probes
+        probes: calls.probes,
+        menuCount: menus.length
     }));
 }).catch(error => {
     console.error(error);
@@ -340,6 +372,78 @@ class ExplorerGitScopeMenuSurfaceTestCase(unittest.TestCase):
     def test_blank_space_in_the_tree_still_names_the_root(self):
         result = self._ask(blank="tree", panePath="web/static", click="Pin Git here")
         self.assertEqual(result["pins"], [{"index": 0, "path": "", "kind": "dir"}])
+
+    # ── What the menu costs to open ────────────────────────────────────────
+    #
+    # The entry has to know whether a prospective pin is inside a worktree, and
+    # the menu does not open until it does. Asking the server every time meant
+    # a right-click on a remote pane highlighted the row and then showed
+    # nothing for the length of a pooled `rev-parse` + `git status`. The
+    # sidebar's loaded repository already answers it for the ordinary case.
+
+    def test_a_row_inside_the_panes_own_repository_opens_without_a_request(self):
+        # repo_path '' is the server's word for "this worktree contains the
+        # explorer root", so every path under the root is inside it.
+        result = self._ask(row=_tree_row("web"), loadedRepoPath="")
+        self.assertEqual(result["probes"], [])
+        self.assertEqual([item["label"] for item in result["git"]][0], "Pin Git here")
+        self.assertFalse(result["git"][0]["disabled"])
+
+    def test_a_file_row_inside_the_panes_own_repository_also_skips_the_request(self):
+        result = self._ask(
+            row=_preview_row("web/api.py", kind="file", entry_kind="file"),
+            loadedRepoPath="",
+        )
+        self.assertEqual(result["probes"], [])
+        self.assertFalse(result["git"][0]["disabled"])
+
+    def test_a_repository_below_the_explorer_root_still_asks(self):
+        # The loaded worktree is a subdirectory, so a sibling folder may be in
+        # no worktree at all and the pane's model cannot say.
+        result = self._ask(row=_tree_row("docs"), loadedRepoPath="web")
+        self.assertEqual(len(result["probes"]), 1)
+
+    def test_a_pane_with_no_loaded_repository_still_asks(self):
+        result = self._ask(row=_tree_row("web"))
+        self.assertEqual(len(result["probes"]), 1)
+
+    def test_a_row_under_dot_git_is_never_answered_optimistically(self):
+        # `rev-parse` inside the repository's own git directory is not in a
+        # worktree, so the fast path must not claim it is.
+        for path in (".git", ".git/hooks", "web/.git/config"):
+            with self.subTest(path=path):
+                result = self._ask(row=_tree_row(path), loadedRepoPath="", worktree=False)
+                self.assertEqual(len(result["probes"]), 1)
+                self.assertTrue(result["git"][0]["disabled"])
+
+    def test_a_path_merely_containing_dot_git_is_not_treated_as_the_git_dir(self):
+        # Segment-wise, not substring: `web/.gitignore` is an ordinary file.
+        result = self._ask(
+            row=_preview_row("web/.gitignore", kind="file", entry_kind="file"),
+            loadedRepoPath="",
+        )
+        self.assertEqual(result["probes"], [])
+
+    def test_a_superseded_right_click_opens_no_menu_of_its_own(self):
+        # Two overlapping gestures where the first probe resolves last. Only
+        # the gesture the reader made most recently may put a menu on screen --
+        # otherwise the stale one lands over it, and over its invoker.
+        result = self._ask(row=_tree_row("web"), doubleGesture=True)
+        self.assertEqual(len(result["probes"]), 2)
+        self.assertEqual(result["menuCount"], 1)
+
+    def test_an_entry_clicked_after_the_slot_changed_hands_writes_nothing(self):
+        # Guardrail 4: the menu can outlive the slot it was opened over, and
+        # these entries write a scope onto the pane the gesture was made on.
+        for label in ("Pin Git here", "Follow Git browsing"):
+            with self.subTest(entry=label):
+                result = self._ask(
+                    row=_tree_row("web"),
+                    click=label,
+                    replacePaneBeforeClick=True,
+                )
+                self.assertEqual(result["pins"], [])
+                self.assertEqual(result["follows"], [])
 
 
 # The page the file render draws into. Every element is the same permissive

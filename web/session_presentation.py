@@ -109,6 +109,11 @@ _EXPLORER_BOOL_FIELDS = frozenset(
         "explorer_search_open",
     }
 )
+# The Git pin, as the one fact it is. The pair is what a pin *is*; the kind
+# qualifies the path in it and postdates both, so it is optional on the way in
+# and never meaningful on its own.
+_EXPLORER_PIN_PAIR = frozenset({"explorer_git_pin_active", "explorer_git_pinned_path"})
+_EXPLORER_PIN_FIELDS = _EXPLORER_PIN_PAIR | {"explorer_git_pin_kind"}
 _EXPLORER_STRING_FIELDS = frozenset(
     {
         "explorer_active_tab",
@@ -934,6 +939,26 @@ def normalize_pane_presentation(data: Any) -> Dict[str, Any]:
         normalized["explorer_theme"] = _normalize_explorer_theme(
             data["explorer_theme"]
         )
+    # Whether a scope is pinned, the root-relative path it names, and whether
+    # that path is a directory or a file are **one fact**. A payload stating
+    # part of it is not a smaller truth, it is an inconsistent one: the live
+    # refresh writes back exactly the fields the page stated, so a lone
+    # `explorer_git_pin_kind` would pair a new kind with a path chosen for the
+    # old one, and a lone path would arrive with no word on whether it is a pin
+    # at all. Same rule the active tab lives by, one field further out.
+    #
+    # `explorer_git_pin_kind` is the exception in one direction only: it
+    # postdates the pair, so a client or a stored record that never learned it
+    # may omit it and keep directory semantics — exactly as the `?kind=`
+    # parameter's own absent-means-`dir` rule does. It may never be stated
+    # *without* the pair.
+    if _EXPLORER_PIN_FIELDS & data.keys():
+        missing = sorted(_EXPLORER_PIN_PAIR - data.keys())
+        if missing:
+            raise PresentationValidationError(
+                f"The Git pin is one fact: '{missing[0]}' must be supplied with "
+                "the rest of the pin"
+            )
     if "explorer_git_pinned_path" in data:
         normalized["explorer_git_pinned_path"] = _normalize_explorer_tab_path(
             data["explorer_git_pinned_path"]
@@ -998,6 +1023,15 @@ def normalize_pane_presentation_fields(config: Any) -> Dict[str, Any]:
         supplied.setdefault("explorer_open_tabs", [])
     if "browser_active_tab" in supplied:
         supplied.setdefault("browser_tabs", [])
+    # Same reasoning for the Git pin: a snapshot written before one half of the
+    # pair existed stores it as ``None``, which is stripped above — so requiring
+    # both here would turn an old file into an unrestorable one rather than a
+    # pane that simply has no pin. The companion defaults to "no pin", which is
+    # what a record missing half of one already means. The dependency itself
+    # stays enforced for live client payloads, where silence is a statement.
+    if supplied.keys() & _EXPLORER_PIN_FIELDS:
+        supplied.setdefault("explorer_git_pin_active", False)
+        supplied.setdefault("explorer_git_pinned_path", "")
     return normalize_pane_presentation(supplied)
 
 

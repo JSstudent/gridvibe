@@ -691,14 +691,41 @@
        notice, because the banner holds one message at a time. */
     function retargetedExplorerRowTitles() {
         return Array.from(document.querySelectorAll('.t-row'))
-            .filter(row => (
+            /* The fallback name has to be the row's position in the *form*, so
+               it is taken before the filter: numbering the survivors instead
+               called the fifth pane "Terminal 1" and pointed the reader at a
+               row they had not touched. */
+            .map((row, index) => ({ row, index }))
+            .filter(({ row }) => (
                 getTerminalCommandMode(row) === 'explorer'
                 && (row.dataset.explorerTabsDir || '')
-                && row.querySelector('.t-dir').value.trim() !== row.dataset.explorerTabsDir
+                && (row.querySelector('.t-dir')?.value || '').trim()
+                    !== row.dataset.explorerTabsDir
             ))
-            .map((row, index) => (
+            .map(({ row, index }) => (
                 row.querySelector('.t-title')?.value.trim() || `Terminal ${index + 1}`
             ));
+    }
+
+    /* The sentence the launch notice folds in, or '' when nothing was dropped.
+       One row is named; several are counted, because the banner holds one
+       message and a list of eight titles would bury the launch itself. */
+    function explorerRetargetLaunchNote(titles) {
+        const names = Array.isArray(titles) ? titles : [];
+        if (!names.length) {
+            return '';
+        }
+        const who = names.length === 1 ? `"${names[0]}"` : `${names.length} panes`;
+        return ' Saved explorer state (pinned Git folder, open tabs)'
+            + ` was not restored for ${who}: the folder was changed after saving.`;
+    }
+
+    /* One notice per launch, at the severity of the worst thing it reports.
+       Discarded saved state is a warning and not an `info`: `info` dismisses
+       itself after six seconds, and nothing else on screen says the pin is
+       gone. */
+    function launchNoticeSeverity(warningCount, retargetedCount) {
+        return (warningCount || retargetedCount) ? 'warning' : 'success';
     }
 
     function collectTerminalDrafts() {
@@ -3628,19 +3655,13 @@
             /* Folded into the launch notice rather than sent as a second one:
                a new notice replaces the current one, so a separate banner here
                would either be wiped by the launch message or wipe it. */
-            const retargetNote = retargetedExplorer.length
-                ? ` Saved explorer state (pinned Git folder, open tabs) was not restored for ${
-                    retargetedExplorer.length === 1
-                        ? `"${retargetedExplorer[0]}"`
-                        : `${retargetedExplorer.length} panes`
-                }: the folder was changed after saving.`
-                : '';
+            const retargetNote = explorerRetargetLaunchNote(retargetedExplorer);
             const launchMessage = (launchWarnings.length
                 ? `${launchIntro} ${launchWarnings.length === 1 ? launchWarnings[0] : `${launchWarnings.length} startup commands were cleared after preflight failed.`}`
                 : launchIntro) + retargetNote;
             showGridVibeNotice(
                 launchMessage,
-                launchWarnings.length ? 'warning' : (retargetNote ? 'info' : 'success')
+                launchNoticeSeverity(launchWarnings.length, retargetedExplorer.length)
             );
             if (data.launch_target === 'web') {
                 setTimeout(async () => {

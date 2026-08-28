@@ -384,6 +384,23 @@ class ScopeIsAFrozenPathTestCase(_PinRouteTestCase):
 class PinRefusalTestCase(_PinRouteTestCase):
     """What must keep failing, and how."""
 
+    @staticmethod
+    def _pin_record(**overrides):
+        """A whole pin record with one field replaced.
+
+        The three fields are one fact and a live payload must state all of it,
+        so a refusal test that supplies a single field would be refused for the
+        wrong reason -- it would prove the completeness rule, not the value
+        rule it is named after.
+        """
+        record = {
+            "explorer_git_pin_active": True,
+            "explorer_git_pinned_path": PINNED_PATH,
+            "explorer_git_pin_kind": PINNED_KIND,
+        }
+        record.update(overrides)
+        return record
+
     def _scope_the_sidebar(self, group_id, session_ids, *, follow):
         """One pinned, optionally following explorer pane, via route 1."""
         response = self.client.post(
@@ -537,7 +554,7 @@ class PinRefusalTestCase(_PinRouteTestCase):
         for hostile in ("../outside", "web/../../etc", "C:/Windows", "docs/../.."):
             with self.subTest(path=hostile):
                 normalized = normalize_pane_presentation(
-                    {"explorer_git_pinned_path": hostile}
+                    self._pin_record(explorer_git_pinned_path=hostile)
                 )
                 self.assertEqual(normalized["explorer_git_pinned_path"], "")
 
@@ -545,13 +562,17 @@ class PinRefusalTestCase(_PinRouteTestCase):
         for hostile in (5, None, ["docs"], {"path": "docs"}):
             with self.subTest(path=hostile):
                 with self.assertRaises(PresentationValidationError):
-                    normalize_pane_presentation({"explorer_git_pinned_path": hostile})
+                    normalize_pane_presentation(
+                        self._pin_record(explorer_git_pinned_path=hostile)
+                    )
 
     def test_an_unknown_pin_kind_is_refused_rather_than_treated_as_a_directory(self):
         for hostile in (None, 5, "folder", "blob", "FILE"):
             with self.subTest(kind=hostile):
                 with self.assertRaises(PresentationValidationError):
-                    normalize_pane_presentation({"explorer_git_pin_kind": hostile})
+                    normalize_pane_presentation(
+                        self._pin_record(explorer_git_pin_kind=hostile)
+                    )
 
     def test_an_older_preset_defaults_the_absent_kind_but_refuses_a_bad_one(self):
         old_entry = web_saved_sessions._normalize_terminal_entries(
@@ -564,6 +585,75 @@ class PinRefusalTestCase(_PinRouteTestCase):
                 [{"startup_mode": "explorer", "explorer_git_pin_kind": "blob"}],
                 minimum_count=1,
             )
+
+    def test_a_live_payload_stating_part_of_the_pin_is_refused(self):
+        """The three fields are one fact, so a partial statement is not a
+        smaller truth -- it is an inconsistent one.
+
+        The live refresh writes back exactly the fields the page stated, so a
+        lone kind would pair a new kind with a path chosen for the old one, and
+        a lone path would arrive with no word on whether it is a pin at all.
+        """
+        for partial in (
+            {"explorer_git_pin_kind": "file"},
+            {"explorer_git_pinned_path": PINNED_PATH},
+            {"explorer_git_pin_active": True},
+            {"explorer_git_pin_active": True, "explorer_git_pin_kind": "file"},
+            {"explorer_git_pinned_path": PINNED_PATH, "explorer_git_pin_kind": "file"},
+        ):
+            with self.subTest(payload=sorted(partial)):
+                with self.assertRaises(PresentationValidationError):
+                    normalize_pane_presentation(partial)
+
+    def test_the_pair_alone_is_a_complete_pin_because_the_kind_postdates_it(self):
+        # The `?kind=` parameter's absent-means-`dir` rule, one layer in: a
+        # client that never learned the field keeps directory semantics rather
+        # than losing its pin.
+        normalized = normalize_pane_presentation({
+            "explorer_git_pin_active": True,
+            "explorer_git_pinned_path": PINNED_PATH,
+        })
+        self.assertEqual(normalized["explorer_git_pinned_path"], PINNED_PATH)
+        self.assertNotIn("explorer_git_pin_kind", normalized)
+
+    def test_a_pane_stating_no_part_of_the_pin_is_left_alone(self):
+        normalized = normalize_pane_presentation({"explorer_git_open": True})
+        for field in (
+            "explorer_git_pin_active",
+            "explorer_git_pinned_path",
+            "explorer_git_pin_kind",
+        ):
+            self.assertNotIn(field, normalized)
+
+    def test_a_stored_record_missing_half_the_pin_restores_as_no_pin(self):
+        """Silence is a statement from the page and an omission from a file.
+
+        A snapshot written before one half of the pair existed stores it as
+        ``None``, which the stored-record path strips -- so refusing it there
+        would turn an old file into an unrestorable pane rather than one that
+        simply has no pin.
+        """
+        from web.session_presentation import normalize_pane_presentation_fields
+
+        restored = normalize_pane_presentation_fields({
+            "startup_mode": "explorer",
+            "explorer_git_pinned_path": PINNED_PATH,
+            "explorer_git_pin_active": None,
+            "explorer_git_pin_kind": None,
+        })
+        self.assertFalse(restored["explorer_git_pin_active"])
+        self.assertEqual(restored["explorer_git_pinned_path"], PINNED_PATH)
+
+    def test_a_stored_record_with_the_pair_and_no_kind_keeps_its_pin(self):
+        from web.session_presentation import normalize_pane_presentation_fields
+
+        restored = normalize_pane_presentation_fields({
+            "startup_mode": "explorer",
+            "explorer_git_pin_active": True,
+            "explorer_git_pinned_path": PINNED_PATH,
+        })
+        self.assertTrue(restored["explorer_git_pin_active"])
+        self.assertEqual(restored["explorer_git_pinned_path"], PINNED_PATH)
 
     def test_the_expanded_commit_set_is_bounded_not_refused(self):
         """Expansion is cosmetic, so it is trimmed to the ceiling rather than

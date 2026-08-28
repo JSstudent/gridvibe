@@ -14892,6 +14892,21 @@ class ExplorerGitWatchFrontendTestCase(unittest.TestCase):
             with self.subTest(gate=gate):
                 self.assertIn(gate, watch)
 
+    def test_git_watch_pending_payload_and_its_scope_are_one_field(self):
+        # A deferred payload has to be applied under the scope it was *fetched*
+        # under, so the payload and that scope are one record. They were three
+        # parallel fields cleared in three places, and one of the three was
+        # missed every time -- leaving a scope behind from a deferral the pane
+        # had already left. Nothing to clear asymmetrically now.
+        watch = self._static("js/explorer-git-watch.js")
+        for parallel_field in (
+            "_explorerGitWatchPendingScope",
+            "_explorerGitWatchPendingScopeKind",
+        ):
+            with self.subTest(field=parallel_field):
+                self.assertNotIn(parallel_field, watch)
+        self.assertIn("_explorerGitWatchPending = { data, scopePath, scopeKind }", watch)
+
     def test_git_watch_adaptive_interval_backoff_and_suspension(self):
         watch = self._static("js/explorer-git-watch.js")
         self.assertIn("EXPLORER_GIT_WATCH_BASE_MS = 5000", watch)
@@ -14920,7 +14935,9 @@ class ExplorerGitWatchFrontendTestCase(unittest.TestCase):
         # (Its behaviour is executed in tests/test_explorer_git_identity.py.)
         self.assertIn("function applyExplorerGitRepoQuiet(", sidebar)
         self.assertIn("requestedScopePath", sidebar)
-        self.assertIn("_explorerGitWatchPendingScope", self._static("js/explorer-git-watch.js"))
+        # The pending payload carries that scope with it, in one record — see
+        # test_git_watch_pending_payload_and_its_scope_are_one_field.
+        self.assertIn("scopePath", self._static("js/explorer-git-watch.js"))
         self.assertIn("_explorerGitRevision", sidebar)
         # Tab badges re-render only when the badge map actually changed — the
         # sync itself moved with the tab domain (explorer-tabs.js).

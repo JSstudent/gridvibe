@@ -60,6 +60,9 @@ class ExplorerGitSearchHarness(unittest.TestCase):
                 [NODE, str(script)],
                 capture_output=True,
                 text=True,
+                # The find's own messages carry em dashes; Node writes UTF-8
+                # whatever the host console's codepage is.
+                encoding="utf-8",
                 timeout=30,
             )
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -137,10 +140,16 @@ class ExplorerGitSearchPlanTestCase(ExplorerGitSearchHarness):
             "    return { count: plan.matchCount, emptyText: plan.emptyText }; }));"
         )
 
+        # A query that is not hexadecimal was never an id, so saying it is
+        # "not in the loaded graph" invites scrolling for a commit that cannot
+        # exist. Two empty results, two messages.
         self.assertEqual(
             plans,
             [
-                {"count": 0, "emptyText": "No commit in the loaded graph"},
+                {
+                    "count": 0,
+                    "emptyText": "Not a commit id — hexadecimal characters only",
+                },
                 {"count": 1, "emptyText": ""},
             ],
         )
@@ -360,17 +369,26 @@ class ExplorerGitSearchHashMarkTestCase(ExplorerGitSearchHarness):
 
 
 class ExplorerGitCollapseAllPlanTestCase(ExplorerGitSearchHarness):
-    def test_collapse_all_empties_an_expansion_set(self):
+    """`changed` is the answer: it is what lets an Alt-click on an
+    already-collapsed graph cost neither a render nor a presentation write."""
+
+    def test_collapse_all_reports_a_change_for_a_populated_expansion_set(self):
         plan = self._run_node(
             "emit(git_search.collapseAllPlan(['commit:a', 'commit:b']));"
         )
 
-        self.assertEqual(plan, {"next": [], "changed": True})
+        self.assertEqual(plan, {"changed": True})
 
-    def test_an_empty_expansion_set_stays_empty_without_a_change(self):
+    def test_an_empty_expansion_set_reports_no_change(self):
         plan = self._run_node("emit(git_search.collapseAllPlan([]));")
 
-        self.assertEqual(plan, {"next": [], "changed": False})
+        self.assertEqual(plan, {"changed": False})
+
+    def test_a_non_list_is_not_a_change_either(self):
+        for value in ("emit(git_search.collapseAllPlan());",
+                      "emit(git_search.collapseAllPlan(null));"):
+            with self.subTest(call=value):
+                self.assertEqual(self._run_node(value), {"changed": False})
 
 
 if __name__ == "__main__":

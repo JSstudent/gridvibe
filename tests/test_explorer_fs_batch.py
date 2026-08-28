@@ -687,5 +687,110 @@ class BatchScopeTestCase(ExplorerControllerHarness):
         self.assertEqual(result["loads"], 0)
 
 
+class GitPinRetargetTestCase(ExplorerControllerHarness):
+    """A rename relocates the Git pin; a delete deliberately does not.
+
+    Every other path the pane holds -- the browsed folder, the open file, the
+    tab paths, the tree's expansion set, the editor's buffer -- already follows
+    a rename. The pin naming the same path and staying behind reported "no
+    longer exists" about a path the user had just watched move.
+
+    A delete is the other case and stays as it is: a deleted pin is not
+    relocatable, and dropping it would silently widen the scope back to the
+    explorer root instead of naming the path with Clear pin beside it.
+    """
+
+    def _reconcile(self, pin, result, kind="dir"):
+        """Run the real reconcile over one mutation result and report the pin.
+
+        `undefined` comes back as JSON `null` through the sentinel below: the
+        pin's *existence* is the field's type, so "absent" and "''" (a pin on
+        the explorer root) have to stay distinguishable in the output.
+        """
+        return self._run_node(
+            f"""
+            const pin = {json.dumps(pin)};
+            if (pin !== null) {{
+                pane._explorerGitPinnedPath = pin;
+                pane._explorerGitPinKind = {json.dumps(kind)};
+            }}
+            sandbox.reconcileExplorerAfterFilesystemMutation(
+                context(), {json.dumps(result)}, sandbox.explorerFilesystemMutationPlan()
+            );
+            emit({{
+                pinned: typeof pane._explorerGitPinnedPath === 'string'
+                    ? pane._explorerGitPinnedPath
+                    : '__absent__',
+                kind: pane._explorerGitPinKind || null
+            }});
+            """
+        )
+
+    @staticmethod
+    def _moved(source, destination):
+        return {
+            "moved": True,
+            "source_path": source,
+            "destination_path": destination,
+        }
+
+    def test_renaming_the_pinned_folder_moves_the_pin_with_it(self):
+        result = self._reconcile("src/old", self._moved("src/old", "src/new"))
+        self.assertEqual(result["pinned"], "src/new")
+        self.assertEqual(result["kind"], "dir")
+
+    def test_renaming_an_ancestor_moves_the_pin_underneath_it(self):
+        result = self._reconcile("src/old/deep", self._moved("src/old", "src/new"))
+        self.assertEqual(result["pinned"], "src/new/deep")
+
+    def test_a_pinned_file_follows_its_own_rename_and_stays_a_file(self):
+        result = self._reconcile(
+            "src/a.js", self._moved("src/a.js", "src/b.js"), kind="file"
+        )
+        self.assertEqual(result["pinned"], "src/b.js")
+        self.assertEqual(result["kind"], "file")
+
+    def test_a_pin_outside_the_renamed_path_is_left_alone(self):
+        result = self._reconcile("docs", self._moved("src/old", "src/new"))
+        self.assertEqual(result["pinned"], "docs")
+
+    def test_a_root_pin_stays_the_root_pin(self):
+        # '' is a real pin and is outside every source path, so it must come
+        # back as '' rather than being retargeted onto the destination.
+        result = self._reconcile("", self._moved("src/old", "src/new"))
+        self.assertEqual(result["pinned"], "")
+
+    def test_no_pin_is_never_turned_into_a_root_pin(self):
+        # The failure the `typeof` guard exists for: an unguarded retarget
+        # returns '' for an absent pin, which every reader would then read as
+        # a pin on the explorer root.
+        result = self._reconcile(None, self._moved("src/old", "src/new"))
+        self.assertEqual(result["pinned"], "__absent__")
+
+    def test_a_delete_leaves_the_pin_naming_the_path_that_is_gone(self):
+        result = self._reconcile("src/old", {"deleted_path": "src/old"})
+        self.assertEqual(result["pinned"], "src/old")
+
+    def test_the_move_that_retargets_the_pin_also_writes_the_presentation(self):
+        # The pin is pane presentation, so a move that changes it has to be
+        # recorded; `persistExplorerTabsToSession` is the funnel that enqueues
+        # the group's ordered transaction.
+        result = self._run_node(
+            """
+            let persisted = 0;
+            sandbox.persistExplorerTabsToSession = () => { persisted += 1; };
+            pane._explorerGitPinnedPath = 'src/old';
+            sandbox.reconcileExplorerAfterFilesystemMutation(
+                context(),
+                { moved: true, source_path: 'src/old', destination_path: 'src/new' },
+                sandbox.explorerFilesystemMutationPlan()
+            );
+            emit({ persisted, pinned: pane._explorerGitPinnedPath });
+            """
+        )
+        self.assertEqual(result["pinned"], "src/new")
+        self.assertEqual(result["persisted"], 1)
+
+
 if __name__ == "__main__":
     unittest.main()

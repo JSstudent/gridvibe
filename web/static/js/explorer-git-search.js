@@ -121,8 +121,15 @@
             perCommit,
             matchCount,
             activeIndex: matchCount ? ((index % matchCount) + matchCount) % matchCount : 0,
+            /* Two different empty results, and one message for both told the
+               reader the wrong thing about half of them: "not in the loaded
+               graph" invites scrolling for a commit that was never an id in
+               the first place. A query that is not hexadecimal is refused as
+               an id rather than searched as a subject, so it says so. */
             emptyText: mode === 'hash' && needle && !matchCount
-                ? 'No commit in the loaded graph'
+                ? (validHashQuery
+                    ? 'No commit in the loaded graph'
+                    : 'Not a commit id — hexadecimal characters only')
                 : ''
         };
     }
@@ -187,11 +194,16 @@
     }
 
     /* Collapse-only by design: expanding every row would also render every
-       commit's file list. The caller gets a fresh expansion list and can skip
-       its presentation write when there was nothing to collapse. */
+       commit's file list.
+
+       `changed` is the whole answer -- the caller owns the live expansion set
+       and clears it in place, so handing back a second, empty copy of it was a
+       field nothing read (guardrail 5). What `changed` buys is the skip: an
+       Alt-click on an already-collapsed graph must not re-render the panel or
+       write the pane's presentation. */
     function collapseAllPlan(expanded) {
         const list = Array.isArray(expanded) ? expanded : [];
-        return { next: [], changed: Boolean(list.length) };
+        return { changed: Boolean(list.length) };
     }
 
     return {

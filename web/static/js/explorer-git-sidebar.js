@@ -85,13 +85,15 @@
        every render refetched the whole repository, and the early return that
        exists to stop that never fired once.
 
-       The server's answer is still worth keeping — it is what the sidebar can
-       show the reader — so it gets its own field rather than overwriting the
-       identity. */
+       The server's answer is not kept at all. It was, briefly, on the grounds
+       that the sidebar could show it -- but the sidebar names the scope from
+       the pane's own pinned path (explorer-git-pin.js), so the field was
+       written on every load and read by nothing (guardrail 5). The payload
+       itself is still on the pane in `_explorerGitRepo` if a surface ever
+       does want it. */
     function explorerGitNoteLoadedScope(
         pane,
         requestedScopePath,
-        data,
         requestedScopeKind = 'dir'
     ) {
         if (!pane) {
@@ -99,7 +101,6 @@
         }
         pane._explorerGitAnchorPath = explorerGitScopeIdentity(requestedScopePath);
         pane._explorerGitAnchorKind = requestedScopeKind === 'file' ? 'file' : 'dir';
-        pane._explorerGitResolvedAnchor = String(data?.anchor_path || '');
     }
 
     /* Does the pane's selected scope still match the model the sidebar is
@@ -192,6 +193,26 @@
        pin had been lost. */
     function explorerGitScopeLabel(scopePath, scopeKind = 'dir') {
         return window.GridVibeExplorerGitPin.explorerGitPinLabel(scopePath, scopeKind);
+    }
+
+    /* The same scope spelled in full, for the places a title or a tooltip can
+       carry the whole path: a file label is only its leaf, and two files with
+       one name in different folders are otherwise one word for two scopes. */
+    function explorerGitScopePathLabel(scopePath) {
+        return window.GridVibeExplorerGitPin.explorerGitPinPathLabel(scopePath);
+    }
+
+    /* The seven characters a commit row shows, and the full id hash mode
+       searches. Written once because the render and the search paint both
+       build the same row: they spelled the fallback differently, so a payload
+       carrying only one of the two fields would have shown one thing and then
+       repainted as another. */
+    function explorerGitCommitShortHash(commit) {
+        return String(commit?.hash || commit?.full_hash || '').slice(0, 7);
+    }
+
+    function explorerGitCommitSearchableHash(commit) {
+        return String(commit?.full_hash || commit?.hash || '');
     }
 
     /* The pin button's three states, read from the module the Files tree's
@@ -506,8 +527,8 @@
             if (!subjectEl || !commit) {
                 return;
             }
-            const hash = commit.full_hash || commit.hash || '';
-            const shortHash = commit.hash || hash;
+            const hash = explorerGitCommitSearchableHash(commit);
+            const shortHash = explorerGitCommitShortHash(commit);
             const ranges = plan.perCommit[rowIndex] || [];
             const subjectHtml = mode === 'subject' && ranges.length
                 ? policy.markedSubjectHtml(
@@ -516,7 +537,7 @@
                 : escHtml(policy.commitSubject(commit));
             const hashHtml = mode === 'hash' && ranges.length
                 ? policy.markedHashHtml(hash, ranges[0])
-                : escHtml(shortHash.slice(0, 7));
+                : escHtml(shortHash);
             const hashMark = policy.hashMarkClass(ranges, ordinal, plan.activeIndex);
             ordinal += ranges.length;
             subjectEl.innerHTML =
@@ -795,7 +816,7 @@
             const pinnedScopeNotice = pinned
                 ? `
                 <div class="explorer-git-scope-notice" role="status">
-                    <span class="explorer-git-scope-notice-text">Pinned Git ${pinnedKind === 'file' ? 'file' : 'folder'}: <span class="explorer-git-scope-notice-path">${escHtml(explorerGitScopeLabel(pane._explorerGitPinnedPath, pinnedKind))}</span></span>
+                    <span class="explorer-git-scope-notice-text">Pinned Git ${pinnedKind === 'file' ? 'file' : 'folder'}: <span class="explorer-git-scope-notice-path" title="${escHtml(explorerGitScopePathLabel(pane._explorerGitPinnedPath))}">${escHtml(explorerGitScopeLabel(pane._explorerGitPinnedPath, pinnedKind))}</span></span>
                     <button type="button" class="explorer-git-clear-pin-btn" data-explorer-git-clear-pin>Clear pin</button>
                 </div>`
                 : '';
@@ -862,8 +883,8 @@
         const effectiveScopeKind = explorerGitScopeKind(pane);
         const effectiveScopePath = explorerGitScopePath(pane);
         const bulkScopeLabel = effectiveScopeKind === 'file'
-            ? `file ${explorerGitScopeLabel(effectiveScopePath, 'file')}`
-            : (effectiveScopePath === null ? 'explorer root' : `folder ${explorerGitScopeLabel(effectiveScopePath)}`);
+            ? `file ${explorerGitScopePathLabel(effectiveScopePath)}`
+            : (effectiveScopePath === null ? 'explorer root' : `folder ${explorerGitScopePathLabel(effectiveScopePath)}`);
         const commitSearch = ensureExplorerGitCommitSearchState(pane);
         const commitSearchMode = commitSearch.mode === 'hash' ? 'hash' : 'subject';
         const searchPolicy = window.GridVibeExplorerGitSearch;
@@ -877,7 +898,7 @@
         const commitRows = commits.length
             ? commits.map((commit, commitIndex) => {
                 const hash = commit.hash || '';
-                const searchableHash = commit.full_hash || hash;
+                const searchableHash = explorerGitCommitSearchableHash(commit);
                 const expanded = hash && expandedCommits.has(
                     window.GridVibeExplorerGitActive.commitKey(hash)
                 );
@@ -890,7 +911,7 @@
                     : escHtml(subject);
                 const hashHtml = commitSearchMode === 'hash' && ranges.length
                     ? searchPolicy.markedHashHtml(searchableHash, ranges[0])
-                    : escHtml(hash ? hash.slice(0, 7) : '');
+                    : escHtml(explorerGitCommitShortHash(commit));
                 const hashMark = searchPolicy
                     ? searchPolicy.hashMarkClass(ranges, searchOrdinal, searchPlan.activeIndex)
                     : '';
@@ -925,7 +946,7 @@
                     <div class="explorer-git-repo-line explorer-git-repo-scope explorer-git-repo-scope-${line.kind}${line.overridden ? ' is-overridden' : ''}" title="${escHtml(line.title)}">
                         <span class="explorer-git-repo-icon">${line.kind === 'follow' ? EXPLORER_GIT_FOLLOW_ICON : EXPLORER_GIT_PIN_ICON}</span>
                         <span class="explorer-git-repo-text">${escHtml(line.label)}</span>
-                        ${line.kind === 'pin' ? `<button type="button" class="explorer-git-clear-pin-btn explorer-git-scope-clear-btn" data-explorer-git-clear-pin data-explorer-git-scope-clear ${line.clearAvailable ? '' : 'hidden'} title="Clear the pinned Git ${line.scopeKind === 'file' ? 'file' : 'folder'}: ${escHtml(line.label)}" aria-label="Clear the pinned Git ${line.scopeKind === 'file' ? 'file' : 'folder'}: ${escHtml(line.label)}">Clear pin</button>` : ''}
+                        ${line.kind === 'pin' ? `<button type="button" class="explorer-git-clear-pin-btn explorer-git-scope-clear-btn" data-explorer-git-clear-pin data-explorer-git-scope-clear ${line.clearAvailable ? '' : 'hidden'} title="Clear the pinned Git ${line.scopeKind === 'file' ? 'file' : 'folder'}: ${escHtml(line.path)}" aria-label="Clear the pinned Git ${line.scopeKind === 'file' ? 'file' : 'folder'}: ${escHtml(line.path)}">Clear pin</button>` : ''}
                     </div>`).join('')}
                 </div>
                 <button type="button" class="explorer-git-publish-btn" data-explorer-git-publish ${busy ? 'disabled' : ''} title="Push the current branch to its remote">${escHtml(publishLabel)}</button>
@@ -1254,7 +1275,6 @@
         pane._explorerGitRepo = null;
         pane._explorerGitAnchorPath = '';
         pane._explorerGitAnchorKind = 'dir';
-        pane._explorerGitResolvedAnchor = '';
         renderExplorerGitPanels(index);
     }
 
@@ -1301,7 +1321,7 @@
             }
             pane._explorerGitRepoLoaded = true;
             pane._explorerGitRepo = data;
-            explorerGitNoteLoadedScope(pane, requestedAnchorPath, data, scopeKind);
+            explorerGitNoteLoadedScope(pane, requestedAnchorPath, scopeKind);
             pane._explorerGitRevision = typeof data.revision === 'string' ? data.revision : '';
             // A user-initiated load re-arms a suspended change-listener watch.
             pane._explorerGitWatchSuspended = false;
@@ -1405,7 +1425,6 @@
             requestedScopePath === undefined
                 ? explorerGitRequestedScope(pane)
                 : requestedScopePath,
-            data,
             requestedScopeKind === undefined
                 ? explorerGitRequestedScopeKind(pane)
                 : requestedScopeKind
@@ -1488,7 +1507,6 @@
         pane._explorerGitRepoLoaded = false;
         pane._explorerGitAnchorPath = '';
         pane._explorerGitAnchorKind = 'dir';
-        pane._explorerGitResolvedAnchor = '';
         pane._explorerGitReloadPending = true;
     }
 
@@ -1518,7 +1536,7 @@
                 pane._explorerGitRepo = data;
                 pane._explorerGitRepoLoaded = true;
                 explorerGitNoteLoadedScope(
-                    pane, explorerGitScopeIdentity(scopePath), data, scopeKind
+                    pane, explorerGitScopeIdentity(scopePath), scopeKind
                 );
                 pane._explorerGitRevision = typeof data.revision === 'string' ? data.revision : '';
                 // A successful GridVibe Git action is authoritative: it re-arms a

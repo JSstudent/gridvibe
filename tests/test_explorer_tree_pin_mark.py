@@ -58,6 +58,25 @@ FIXTURE_CHILDREN = {
     "docs": [],
 }
 
+# The two entry shapes where `entry_kind` and `type` part company, which is
+# exactly where the render and the paint could disagree about which row is the
+# pin:
+#   * a symlink -- `_explorer_entry_kind()` answers "link" while `type`
+#     collapses everything that is not a directory to "file";
+#   * a filtered-tree row whose parent listing is not cached --
+#     `explorerTreeSearchRowsHtml()` passes `entry_kind: ''` for it, and that
+#     is the ordinary case for a search hit deep in the tree.
+# Both go through the same `explorerTreeRowHtml()`, so the divergence is
+# reproduced here by the entry shape rather than by a second row builder.
+DIVERGENT_KIND_CHILDREN = {
+    "": [
+        {"type": "directory", "entry_kind": "directory", "path": "web", "name": "web"},
+        {"type": "file", "entry_kind": "link", "path": "link.txt", "name": "link.txt"},
+        {"type": "file", "entry_kind": "", "path": "notes.md", "name": "notes.md"},
+    ],
+    "web": [],
+}
+
 # The tree's own globals come from explorer-viewer.js and terminal-icons.js on
 # the page; the marker only needs them to render something identifiable.
 SANDBOX = r"""
@@ -163,11 +182,26 @@ function makeOpenControl(className, children) {
     };
 }
 
-function makeRow(path, kind, marked) {
+/* A row stub carrying the attribute set the real row markup carries. Both are
+   present and they are deliberately allowed to disagree: `explorerContextKind`
+   is the entry's `entry_kind` (`directory`/`file`/`link`/`other`, and '' for a
+   filtered row whose parent listing is not cached), while the Git scope
+   attributes are derived from `entry.type`, which knows only directory/file.
+   The paint must read the scope pair -- reading the other field is what made
+   it strip the marker the render had just placed. */
+function makeRow(spec) {
+    const path = spec.path;
+    const kind = spec.kind;
+    const marked = Boolean(spec.marked);
     const children = [];
     const row = {
         nodeId: ++nodeSeq,
-        dataset: { explorerContextPath: path, explorerContextKind: kind },
+        dataset: {
+            explorerContextPath: path,
+            explorerContextKind: spec.entryKind === undefined ? kind : spec.entryKind,
+            explorerGitScopePath: path,
+            explorerGitScopeKind: kind === 'directory' ? 'dir' : 'file'
+        },
         children,
         insertAdjacentHTML(position, markup) {
             if (position !== 'beforeend') { throw new Error('unexpected ' + position); }
@@ -200,7 +234,7 @@ const pinnedKind = process.argv[6] || 'dir';
 const sandbox = loadSandbox(process.argv[2], process.argv[3]);
 installPane(sandbox, {}, [], pinned, pinnedKind);
 
-const rows = rowSpec.map(spec => makeRow(spec.path, spec.kind, Boolean(spec.marked)));
+const rows = rowSpec.map(spec => makeRow(spec));
 const rootMark = { nodeId: ++nodeSeq, hidden: true };
 const panel = {
     scrollTop: 412,
@@ -267,6 +301,99 @@ process.stdout.write(JSON.stringify({
         return open === -1 || at < open;
     }),
     markerCount: (html.match(/explorer-tree-pin-mark/g) || []).length
+}));
+"""
+
+# Render, then paint over what was rendered.
+#
+# The render and the paint each decide which rows wear the marker, and they
+# decided it from two different fields: the markup asks `entry.type`
+# (directory/file) while the paint used to ask `data-explorer-context-kind`,
+# which carries `entry_kind` (directory/file/link/other, and '' for a filtered
+# row whose parent listing is not cached). Wherever those disagree the paint
+# stripped a marker the render had just placed -- and the paint runs on every
+# navigation and every pin write, so the marker appeared once and vanished on
+# the next click.
+#
+# This harness is the agreement itself, executed: the rows the paint walks are
+# built out of the real rendered markup rather than by hand, so the two halves
+# cannot be given different inputs by the test.
+ROUND_TRIP_HARNESS = SANDBOX + r"""
+let nodeSeq = 0;
+
+function attr(markup, name) {
+    const at = markup.indexOf(name + '="');
+    if (at === -1) { return ''; }
+    const from = at + name.length + 2;
+    return markup.slice(from, markup.indexOf('"', from));
+}
+
+/* One row stub per rendered row, carrying that row's own attributes and
+   whether the render gave it a marker. */
+function rowFromMarkup(markup) {
+    const children = [];
+    const row = {
+        nodeId: ++nodeSeq,
+        dataset: {
+            explorerContextPath: attr(markup, 'data-explorer-context-path'),
+            explorerContextKind: attr(markup, 'data-explorer-context-kind'),
+            explorerGitScopePath: attr(markup, 'data-explorer-git-scope-path'),
+            explorerGitScopeKind: attr(markup, 'data-explorer-git-scope-kind')
+        },
+        children,
+        insertAdjacentHTML(position, added) {
+            if (!added.includes('explorer-tree-pin-mark')) { throw new Error('not a mark'); }
+            children.push({ className: 'explorer-tree-pin-mark', remove() {
+                children.splice(children.indexOf(this), 1);
+            } });
+        },
+        querySelector(selector) {
+            const wanted = selector.split(',').map(part => part.trim().replace(/^\./, ''));
+            return children.find(child => wanted.includes(child.className)) || null;
+        }
+    };
+    if (markup.includes('explorer-tree-pin-mark')) {
+        children.push({ className: 'explorer-tree-pin-mark', remove() {
+            children.splice(children.indexOf(this), 1);
+        } });
+    }
+    return row;
+}
+
+const pinned = process.argv[5] === '__none__' ? null : process.argv[5];
+const pinnedKind = process.argv[6] || 'dir';
+const sandbox = loadSandbox(process.argv[2], process.argv[3]);
+installPane(sandbox, JSON.parse(process.argv[4]), ['web'], pinned, pinnedKind);
+
+const html = sandbox.renderExplorerTreeNodes(sandbox.terminals[0], '', 0);
+const rows = html
+    .split('data-explorer-context-path="')
+    .slice(1)
+    .map(part => rowFromMarkup('data-explorer-context-path="' + part));
+
+const hasMark = row => row.children.some(c => c.className === 'explorer-tree-pin-mark');
+const marks = () => rows.filter(hasMark).map(row => row.dataset.explorerContextPath);
+const rendered = marks();
+
+const rootMark = { nodeId: ++nodeSeq, hidden: true };
+const panel = {
+    querySelector: selector => (
+        selector === '[data-explorer-tree-pin-root]' ? rootMark : null
+    ),
+    querySelectorAll: selector => (selector === '.explorer-tree-row' ? rows : [])
+};
+sandbox.document.getElementById = id => (id === 'explorer-tree-panel-0' ? panel : null);
+
+sandbox.applyExplorerTreePinMark(0);
+const painted = marks();
+// A second pass must be a no-op too: the paint is run on every navigation.
+sandbox.applyExplorerTreePinMark(0);
+
+process.stdout.write(JSON.stringify({
+    rendered,
+    painted,
+    repainted: marks(),
+    rootHidden: rootMark.hidden
 }));
 """
 
@@ -726,6 +853,69 @@ class ExplorerTreePinMarkRenderTestCase(unittest.TestCase):
 
 
 @unittest.skipUnless(NODE, "Node.js is required for explorer tree pin mark tests")
+class ExplorerTreePinMarkRenderPaintAgreementTestCase(unittest.TestCase):
+    """The render and the paint answer "is the pin here" the same way.
+
+    They are two halves of one marker: the row markup places it, and the paint
+    moves it afterwards on every navigation and every pin write. If they read
+    different fields, the marker appears on a full render and is stripped by
+    the next click -- so the agreement is asserted by running the paint over
+    the markup the render actually produced, never over rows built by hand.
+    """
+
+    def _round_trip(self, children, pinned, kind="dir"):
+        completed = _run(
+            ROUND_TRIP_HARNESS,
+            str(PIN_JS),
+            str(TREE_JS),
+            json.dumps(children),
+            "__none__" if pinned is None else pinned,
+            kind,
+        )
+        if completed.returncode != 0:
+            self.fail(f"node harness failed:\n{completed.stderr}")
+        return json.loads(completed.stdout)
+
+    def _assert_agrees(self, children, pinned, kind, expected):
+        result = self._round_trip(children, pinned, kind)
+        self.assertEqual(result["rendered"], expected)
+        # The paint neither adds a marker the render withheld nor removes one
+        # the render placed, and running it again changes nothing either.
+        self.assertEqual(result["painted"], result["rendered"])
+        self.assertEqual(result["repainted"], result["rendered"])
+
+    def test_a_symlink_row_keeps_the_marker_the_render_gave_it(self):
+        # entry_kind "link", type "file": the paint must read the row's Git
+        # scope kind ("file"), not its entry kind.
+        self._assert_agrees(DIVERGENT_KIND_CHILDREN, "link.txt", "file", ["link.txt"])
+
+    def test_a_filtered_row_with_no_entry_kind_keeps_its_marker(self):
+        # The shape a search hit takes when its parent listing is not cached.
+        self._assert_agrees(DIVERGENT_KIND_CHILDREN, "notes.md", "file", ["notes.md"])
+
+    def test_the_two_halves_agree_for_every_row_in_the_fixture(self):
+        for path, kind in (
+            ("web", "dir"),
+            ("link.txt", "file"),
+            ("notes.md", "file"),
+            (None, "dir"),
+        ):
+            with self.subTest(pinned=path, kind=kind):
+                self._assert_agrees(
+                    DIVERGENT_KIND_CHILDREN, path, kind, [] if path is None else [path]
+                )
+
+    def test_a_directory_pin_is_unaffected_by_a_file_kind_row_beside_it(self):
+        self._assert_agrees(FIXTURE_CHILDREN, "web/static", "dir", ["web/static"])
+
+    def test_a_root_pin_still_marks_the_head_and_no_row(self):
+        result = self._round_trip(DIVERGENT_KIND_CHILDREN, "", "dir")
+        self.assertEqual(result["rendered"], [])
+        self.assertEqual(result["painted"], [])
+        self.assertFalse(result["rootHidden"])
+
+
+@unittest.skipUnless(NODE, "Node.js is required for explorer tree pin mark tests")
 class ExplorerTreePinMarkPaintTestCase(unittest.TestCase):
     """The move is a paint: two rows change, the tree body does not."""
 
@@ -1147,6 +1337,68 @@ class ExplorerGitScopeLinesTestCase(unittest.TestCase):
         self.assertEqual(pinned["scopeKind"], "file")
         self.assertEqual(followed["label"], "guide.md")
         self.assertIn("browsed file", followed["title"])
+
+    def test_a_file_row_is_short_on_the_row_and_whole_in_its_title(self):
+        """A leaf is what fits the column; a leaf is not what identifies a
+        scope. Two files called app.js in different folders are one label and
+        two pins, and a pin the reader cannot tell from another one reads as a
+        pin that was lost -- which is the failure this row exists to prevent.
+        """
+        pinned = self._lines(
+            "src/components/app.js", "docs", False, "file", "dir"
+        )[0]
+        self.assertEqual(pinned["label"], "app.js")
+        self.assertEqual(pinned["path"], "src/components/app.js")
+        self.assertIn("Git scope pinned to: src/components/app.js", pinned["title"])
+
+        followed = self._lines(None, "docs/deep/guide.md", True, "dir", "file")[0]
+        self.assertEqual(followed["label"], "guide.md")
+        self.assertEqual(followed["path"], "docs/deep/guide.md")
+        self.assertIn("docs/deep/guide.md", followed["title"])
+
+    def test_a_folder_row_has_nothing_to_abbreviate(self):
+        line = self._lines("open5gs/docs", "web", False)[0]
+        self.assertEqual(line["label"], line["path"])
+        self.assertEqual(line["path"], "open5gs/docs")
+
+    def test_the_root_is_named_root_in_the_path_as_well_as_the_label(self):
+        line = self._lines("", "web", False)[0]
+        self.assertEqual(line["label"], "root")
+        self.assertEqual(line["path"], "root")
+
+    def test_the_button_names_where_the_pin_is_in_full(self):
+        # The one place that tells the reader a click is about to *move* the
+        # pin has to say what it would be moved away from.
+        state = self._run(
+            "const api = require(process.argv[2]);"
+            "process.stdout.write(JSON.stringify("
+            "api.explorerGitPinButtonState('src/components/app.js', 'docs', 'file', 'dir')));",
+            str(PIN_JS),
+        )
+        if state.returncode != 0:
+            self.fail(f"node harness failed:\n{state.stderr}")
+        self.assertIn(
+            "pinned: src/components/app.js", json.loads(state.stdout)["title"]
+        )
+
+    def test_a_file_path_that_is_only_separators_still_gets_a_name(self):
+        # `explorerGitPinLabel` has to be total: no leaf to take means the
+        # whole-path spelling stands in, never an empty label.
+        labels = self._run(
+            "const api = require(process.argv[2]);"
+            "process.stdout.write(JSON.stringify(["
+            "api.explorerGitPinLabel('', 'file'),"
+            "api.explorerGitPinLabel('///', 'file'),"
+            "api.explorerGitPinPathLabel('')]));",
+            str(PIN_JS),
+        )
+        if labels.returncode != 0:
+            self.fail(f"node harness failed:\n{labels.stderr}")
+        self.assertEqual(json.loads(labels.stdout), ["root", "///", "root"])
+
+    @staticmethod
+    def _run(script, *args):
+        return _run(script, *args)
 
     def test_both_controls_give_both_rows_pin_first(self):
         lines = self._lines("open5gs/docs", "open5gs/lib", True)

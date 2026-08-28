@@ -1578,6 +1578,15 @@
 
     let _explorerContextMenuInvoker = null;
 
+    /* One gesture at a time. Building the menu can await (the Git scope's
+       worktree probe), and `_explorerContextMenuInvoker` is claimed before
+       that await — so without a token the first of two quick right-clicks
+       could open its menu *after* the second, over the second's invoker and
+       the second's highlighted row. Bumped on entry to every context-menu
+       gesture; a handler whose token has moved is no longer the gesture the
+       reader is making and simply stops. */
+    let _explorerContextMenuToken = 0;
+
     function dismissExplorerContextMenu() {
         const { restoreFocus = true } = arguments[0] || {};
         document.getElementById('explorer-ctx-menu')?.remove();
@@ -1712,11 +1721,47 @@
         showExplorerContextMenu(x, y, items);
     }
 
+    /* Is this path inside a worktree, answered without a request whenever the
+       model the pane is already holding settles it.
+
+       The sidebar's loaded repository reports `repo_path: ''` when the
+       worktree it found *contains* the explorer root — the pane's implicit
+       repository. Every path under that root is therefore inside it, nested
+       repositories and submodules included: those are a different worktree,
+       not the absence of one, and the question here is only whether the row
+       can be a Git scope at all.
+
+       `.git` is the exception and is deliberately excluded: `rev-parse` run
+       inside the repository's own git directory is not in a worktree, so those
+       rows still get the honest answer from the server rather than an
+       optimistic yes the pin would then fail on. */
+    function explorerGitScopeInsidePaneWorktree(pane, path) {
+        if (pane?._explorerGitRepo?.git?.available !== true) {
+            return false;
+        }
+        if (String(pane._explorerGitRepo.git.repo_path || '') !== '') {
+            return false;
+        }
+        return !String(path || '')
+            .split('/')
+            .includes('.git');
+    }
+
+    /* The menu opens on this answer, so the cheap one is taken first: the
+       probe is one `rev-parse` + `git status`, which over SSH is a pooled
+       round trip the reader waits out with the row highlighted and no menu on
+       screen. It is still issued for every case the loaded model cannot
+       settle — a pane whose sidebar has never loaded, a repository that sits
+       *below* the explorer root (where a sibling folder may be in no worktree
+       at all), and anything under `.git`. */
     async function explorerGitScopeAvailableForMenu(index, path, kind) {
         const pane = terminals[index];
         const sessionId = sessionIds[index];
         if (!pane || !sessionId || typeof explorerGitRequestUrl !== 'function') {
             return false;
+        }
+        if (explorerGitScopeInsidePaneWorktree(pane, path)) {
+            return true;
         }
         try {
             const response = await fetch(explorerGitRequestUrl(
@@ -1725,7 +1770,16 @@
                 path,
                 {},
                 kind
-            ), { cache: 'no-store' });
+            ), {
+                cache: 'no-store',
+                /* A slot, not a bare fetch: a pane that is torn down while the
+                   menu is still deciding must stop holding the request, and a
+                   second right-click supersedes the first one's probe rather
+                   than racing it. A superseded probe answers `false` here and
+                   its handler is discarded by the menu token below, so the
+                   answer is never the one that reaches the menu. */
+                signal: explorerRequestSignal(pane, 'gitScopeMenu')
+            });
             return Boolean(response.ok);
         } catch (_) {
             return false;
@@ -1733,6 +1787,8 @@
     }
 
     async function handleExplorerContextMenu(event, index) {
+        // Claimed before anything can await, so a later gesture always wins.
+        const menuToken = ++_explorerContextMenuToken;
         const commitRow = event.target.closest('[data-explorer-git-commit-toggle]');
         if (commitRow) {
             handleExplorerCommitContextMenu(event, commitRow);
@@ -1886,6 +1942,18 @@
         const gitBrowsingSurface = gitScopeSurface === 'tree' || gitScopeSurface === 'preview';
         const gitItems = [];
         if (policy && (gitBrowsingSurface || gitScopeSurface === 'tab')) {
+            /* Guardrail 4: a grid slot is not an identity. These entries write
+               a scope onto the pane the gesture was made on, and the menu can
+               outlive the slot — a group switch rehouses it while the menu is
+               still open, and `index` would then point at whatever pane moved
+               in. Captured here, once, and re-checked when the entry is
+               actually clicked. */
+            const capturedPane = pane;
+            const capturedSessionId = sessionIds[index];
+            const gitTargetIsCurrent = () => (
+                terminals[index] === capturedPane
+                && sessionIds[index] === capturedSessionId
+            );
             let pinItem = policy.explorerGitScopeMenuItem({
                 pinnedPath: typeof pane?._explorerGitPinnedPath === 'string'
                     ? pane._explorerGitPinnedPath
@@ -1897,15 +1965,10 @@
                 worktreeAvailable: true
             });
             if (pinItem?.action === 'pin') {
-                const capturedPane = pane;
-                const capturedSessionId = sessionIds[index];
                 const available = await explorerGitScopeAvailableForMenu(
                     index, gitScopePath, gitScopeKind
                 );
-                if (
-                    terminals[index] !== capturedPane
-                    || sessionIds[index] !== capturedSessionId
-                ) {
+                if (menuToken !== _explorerContextMenuToken || !gitTargetIsCurrent()) {
                     return;
                 }
                 pinItem = policy.explorerGitScopeMenuItem({
@@ -1927,9 +1990,14 @@
                     label: pinItem.label,
                     title: pinBusy ? 'Git sidebar is busy' : pinItem.title,
                     disabled: pinItem.disabled || pinBusy,
-                    action: () => pinItem.action === 'unpin'
-                        ? clearExplorerGitPinnedScope(index)
-                        : setExplorerGitPinnedScope(index, gitScopePath, gitScopeKind)
+                    action: () => {
+                        if (!gitTargetIsCurrent()) {
+                            return false;
+                        }
+                        return pinItem.action === 'unpin'
+                            ? clearExplorerGitPinnedScope(index)
+                            : setExplorerGitPinnedScope(index, gitScopePath, gitScopeKind);
+                    }
                 });
             }
             if (gitBrowsingSurface) {
@@ -1941,7 +2009,11 @@
                     label: followItem.label,
                     title: followItem.title,
                     disabled: followItem.disabled,
-                    action: () => toggleExplorerGitFollowBrowsing(index)
+                    action: () => (
+                        gitTargetIsCurrent()
+                            ? toggleExplorerGitFollowBrowsing(index)
+                            : false
+                    )
                 });
             }
         }

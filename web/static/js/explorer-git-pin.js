@@ -34,20 +34,36 @@
             && explorerGitScopeKind(pinnedKind) === explorerGitScopeKind(pathKind);
     }
 
-    /* How a path is named when it is talked *about* rather than browsed to.
-       `''` is the explorer root and has no spelling of its own, so it borrows
-       one; a non-string is not a path and gets no label at all. The sidebar's
-       scope chip and the pin button's title both read this, so the word for
-       the root is written once. */
+    /* A scope named in full: the root-relative path, with the one borrowed
+       word for the explorer root, which has no spelling of its own. A
+       non-string is not a path and gets no name at all. */
+    function explorerGitPinPathLabel(path) {
+        if (path === null || path === undefined) {
+            return '';
+        }
+        return String(path) || 'root';
+    }
+
+    /* The short name a chip has room for. A folder is already as short as its
+       path; a file gives up its directories, because the sidebar column is
+       narrow and the leaf is what identifies it at a glance.
+
+       That abbreviation is exactly why every *title* built from a scope reads
+       `explorerGitPinPathLabel()` instead: two files called `api.py` in
+       different folders are one label and two scopes, and a pin the reader
+       cannot tell apart from another one reads as a pin that was lost -- the
+       failure the scope row exists to prevent. Short on the row, whole on
+       hover. */
     function explorerGitPinLabel(path, kind = 'dir') {
         if (path === null || path === undefined) {
             return '';
         }
         const value = String(path);
         if (explorerGitScopeKind(kind) === 'file') {
-            return value.replace(/\\/g, '/').split('/').filter(Boolean).pop() || value;
+            return value.replace(/\\/g, '/').split('/').filter(Boolean).pop()
+                || explorerGitPinPathLabel(value);
         }
-        return value || 'root';
+        return explorerGitPinPathLabel(value);
     }
 
     /* The pin button asks "is the pin *here*", not "is there a pin".
@@ -109,7 +125,7 @@
             return {
                 state: 'elsewhere',
                 pressed: false,
-                title: `Pin Git to this ${targetName} (pinned: ${explorerGitPinLabel(pinnedPath, pinnedKind)})`,
+                title: `Pin Git to this ${targetName} (pinned: ${explorerGitPinPathLabel(pinnedPath)})`,
                 clearAvailable: true
             };
         }
@@ -156,13 +172,15 @@
         if (typeof pinnedPath === 'string') {
             const normalizedPinnedKind = explorerGitScopeKind(pinnedKind);
             const label = explorerGitPinLabel(pinnedPath, normalizedPinnedKind);
+            const fullPath = explorerGitPinPathLabel(pinnedPath);
             lines.push({
                 kind: 'pin',
                 scopeKind: normalizedPinnedKind,
                 label,
+                path: fullPath,
                 title: follow
-                    ? `Git scope pinned to: ${label} (overridden while Follow is on)`
-                    : `Git scope pinned to: ${label}`,
+                    ? `Git scope pinned to: ${fullPath} (overridden while Follow is on)`
+                    : `Git scope pinned to: ${fullPath}`,
                 overridden: follow,
                 /* Present wherever the pin is, the pinned folder included:
                    a clear that hides itself where the reader happens to be
@@ -179,15 +197,17 @@
         }
         if (follow) {
             const normalizedBrowsedKind = explorerGitScopeKind(browsedKind);
-            const label = explorerGitPinLabel(
-                browsedPath === null || browsedPath === undefined ? '' : String(browsedPath),
-                normalizedBrowsedKind
-            );
+            const browsed = browsedPath === null || browsedPath === undefined
+                ? ''
+                : String(browsedPath);
+            const label = explorerGitPinLabel(browsed, normalizedBrowsedKind);
+            const fullPath = explorerGitPinPathLabel(browsed);
             lines.push({
                 kind: 'follow',
                 scopeKind: normalizedBrowsedKind,
                 label,
-                title: `Git scope follows the browsed ${normalizedBrowsedKind === 'file' ? 'file' : 'folder'}: ${label}`,
+                path: fullPath,
+                title: `Git scope follows the browsed ${normalizedBrowsedKind === 'file' ? 'file' : 'folder'}: ${fullPath}`,
                 overridden: false,
                 clearAvailable: false
             });
@@ -249,6 +269,7 @@
         explorerGitPathIsPinned,
         explorerGitScopeKind,
         explorerGitPinLabel,
+        explorerGitPinPathLabel,
         explorerGitPinButtonState,
         explorerGitScopeLines,
         explorerGitScopeMenuItem,

@@ -549,8 +549,7 @@ class LoadIdentityTestCase(unittest.TestCase):
             emit({
                 afterFirst,
                 afterSecond: calls.requests.length,
-                anchor: pane._explorerGitAnchorPath,
-                resolved: pane._explorerGitResolvedAnchor
+                anchor: pane._explorerGitAnchorPath
             });
             """
         )
@@ -559,8 +558,13 @@ class LoadIdentityTestCase(unittest.TestCase):
         self.assertEqual(result["anchor"], "docs")
 
     def test_a_pin_the_server_spells_differently_still_counts_as_loaded(self):
-        """The requested scope is the identity; the resolved one is kept
-        beside it as the server's answer, not on top of it."""
+        """The load identity is the scope that was *requested*.
+
+        The server answers with its own resolved spelling of that scope, and
+        storing the answer as the identity meant every later comparison found a
+        difference: such a pane never counted as loaded, so every render
+        refetched the whole repository.
+        """
         result = self._run_node(
             """
             await sandbox.loadExplorerGitRepo(0);
@@ -568,8 +572,7 @@ class LoadIdentityTestCase(unittest.TestCase):
             await sandbox.loadExplorerGitRepo(0);
             emit({
                 requests: calls.requests.length,
-                anchor: pane._explorerGitAnchorPath,
-                resolved: pane._explorerGitResolvedAnchor
+                anchor: pane._explorerGitAnchorPath
             });
             """,
             pinned_path="docs/",
@@ -577,8 +580,6 @@ class LoadIdentityTestCase(unittest.TestCase):
         )
         self.assertEqual(result["requests"], 1)
         self.assertEqual(result["anchor"], "docs/")
-        # The server's answer is preserved rather than discarded.
-        self.assertEqual(result["resolved"], "docs")
 
     def test_a_root_pin_is_loaded_once_and_not_confused_with_no_pin(self):
         result = self._run_node(

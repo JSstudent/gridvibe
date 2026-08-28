@@ -430,10 +430,15 @@ class ExplorerGitScopeSurfaceTestCase(unittest.TestCase):
             emit({ html: renderLoaded() });
             """
         )["html"]
+        # Short on the row, whole on hover: the sidebar column has room for a
+        # leaf, but two files called app.js in different folders are one label
+        # and two scopes, so nothing that *names* the scope may abbreviate it.
         self.assertIn(">app.js<", result)
-        self.assertIn("Git scope pinned to: app.js", result)
+        self.assertIn("Git scope pinned to: web/static/js/app.js", result)
+        self.assertNotIn("Git scope pinned to: app.js<", result)
         for action in ("Stage", "Unstage", "Discard"):
-            self.assertIn(f'{action} all changes in file app.js', result)
+            self.assertIn(f'{action} all changes in file web/static/js/app.js', result)
+        self.assertIn("Clear the pinned Git file: web/static/js/app.js", result)
         self.assertIn("Clear pinned Git file", result)
 
     def test_a_pin_and_a_live_follow_are_two_rows_and_only_one_can_be_cleared(self):

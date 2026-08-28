@@ -198,10 +198,19 @@
             rootMark.hidden = !explorerTreeRowIsPinned(pane, '', 'dir');
         }
         panel.querySelectorAll('.explorer-tree-row').forEach(row => {
+            /* Read the *scope* attributes, which are the ones the row markup
+               derived the marker from — never `data-explorer-context-kind`.
+               That one carries `entry_kind` (`file`/`directory`/`link`/`other`,
+               and `''` for a filtered row whose parent listing is not cached),
+               while the markup asks `entry.type`, which knows only `directory`
+               and `file`. Answering the same question from the other field
+               made this paint disagree with the render for every filtered file
+               row and for every symlink — it stripped the marker the render
+               had just placed. One question, one field. */
             const wanted = explorerTreeRowIsPinned(
                 pane,
-                row.dataset.explorerContextPath || '',
-                row.dataset.explorerContextKind === 'file' ? 'file' : 'dir'
+                row.dataset.explorerGitScopePath || '',
+                row.dataset.explorerGitScopeKind === 'file' ? 'file' : 'dir'
             );
             const mark = row.querySelector('.explorer-tree-pin-mark');
             if (wanted === Boolean(mark)) {
