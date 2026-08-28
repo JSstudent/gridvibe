@@ -1865,18 +1865,27 @@
            disabled with an explanation; unpinning never needs the vanished
            path to resolve. */
         const policy = window.GridVibeExplorerGitPin;
-        const gitScopeSurface = row?.dataset.explorerGitScopeSurface
-            || (blankContext?.surface === 'tree-blank' ? 'tree' : '');
+        /* Blank space in a browsing surface names that surface's own folder:
+           the tree's is the explorer root, the listing's is the folder it is
+           showing, which is what `blankContext.path` already holds. */
+        const blankScopeSurface = blankContext?.surface === 'tree-blank'
+            ? 'tree'
+            : (blankContext?.surface === 'preview-blank' ? 'preview' : '');
+        const gitScopeSurface = row?.dataset.explorerGitScopeSurface || blankScopeSurface;
         const gitScopePath = row?.dataset.explorerGitScopePath
-            ?? (gitScopeSurface === 'tree' ? relativePath : null);
+            ?? (blankScopeSurface ? relativePath : null);
         const gitScopeKind = row?.dataset.explorerGitScopeKind === 'file'
             ? 'file'
             : 'dir';
         const gitTargetCount = gitScopeSurface === 'tab'
             ? 1
             : (row ? selectedTargets.length : 1);
+        /* The two filesystem browsing surfaces. Follow is a property of what
+           the pane is *showing*, so it belongs on both of them and on neither
+           the tab strip nor a commit row. */
+        const gitBrowsingSurface = gitScopeSurface === 'tree' || gitScopeSurface === 'preview';
         const gitItems = [];
-        if (policy && (gitScopeSurface === 'tree' || gitScopeSurface === 'tab')) {
+        if (policy && (gitBrowsingSurface || gitScopeSurface === 'tab')) {
             let pinItem = policy.explorerGitScopeMenuItem({
                 pinnedPath: typeof pane?._explorerGitPinnedPath === 'string'
                     ? pane._explorerGitPinnedPath
@@ -1923,7 +1932,7 @@
                         : setExplorerGitPinnedScope(index, gitScopePath, gitScopeKind)
                 });
             }
-            if (gitScopeSurface === 'tree') {
+            if (gitBrowsingSurface) {
                 const followItem = policy.explorerGitFollowMenuItem(
                     pane?._explorerGitFollowBrowsing,
                     pane?._explorerGitActionBusy || pane?._explorerGitRepoLoading
@@ -4837,12 +4846,21 @@
             end: matchIndex + String(query).length,
             active
         }];
+        /* The listing is a browsing surface exactly as the Files tree is, so
+           its rows carry the same Git scope hooks: a folder or a file here
+           names one exact path, and the pin is one exact path. Without them
+           the two surfaces disagreed about what a right-click can do to a
+           row that is on both of them. Deleted rows carry no context at all
+           and so name no scope either. */
         const contextAttributes = isDeleted ? '' : `
                 data-explorer-copy-path="${escHtml(entry.path || '')}"
                 data-explorer-context-path="${escHtml(entry.path || '')}"
                 data-explorer-context-kind="${escHtml(entry.entry_kind || '')}"
                 data-explorer-context-revision="${escHtml(entry.revision || '')}"
                 data-explorer-context-surface="preview"
+                data-explorer-git-scope-path="${escHtml(entry.path || '')}"
+                data-explorer-git-scope-kind="${isDirectory ? 'dir' : 'file'}"
+                data-explorer-git-scope-surface="preview"
                 ${isDirectory ? '' : `data-explorer-download-path="${escHtml(entry.path || '')}"`}`;
 
         return `
@@ -6507,7 +6525,7 @@
            folder to this exact file; the normal scope identity check keeps a
            fixed directory pin cached. */
         refreshExplorerPinAffordances(index);
-        if (pane._explorerGitSidebarOpen) {
+        if (explorerGitScopeNeedsLoad(pane)) {
             loadExplorerGitRepo(index);
         }
         return true;
@@ -6802,6 +6820,18 @@
         renderExplorerTabStrip(index);
         persistExplorerTabsToSession(index);
         syncExplorerGitActiveRows(index);
+        /* Opening a file is a scope change, exactly as walking into a folder
+           is: a file is a first-class Git scope, so it moves the pin button's
+           "is the pin here" and, with Follow on, the scope every Git request
+           carries. Only the image viewer and the directory listing said so;
+           the ordinary file render did not, which left the Graph sitting on
+           the previous file until the change listener's next poll noticed the
+           revision token had moved — a folder switch updated at once and a
+           file switch updated on an interval. */
+        refreshExplorerPinAffordances(index);
+        if (explorerGitScopeNeedsLoad(pane)) {
+            loadExplorerGitRepo(index);
+        }
         return true;
     }
 
@@ -7280,7 +7310,7 @@
                title until the next load. Attribute-only, beside the tree's
                marker. */
             refreshExplorerPinAffordances(index);
-            if (pane._explorerGitSidebarOpen) {
+            if (explorerGitScopeNeedsLoad(pane)) {
                 loadExplorerGitRepo(index);
             }
             return true;

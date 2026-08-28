@@ -48,6 +48,12 @@ The anchor then feeds two different consumers in `_get_git_repo_summary()` /
 That table is the whole reason note **11** (file-level pin) is a backend change
 and not a client one: only the first consumer needs a directory.
 
+> **Superseded by stage 4 (2026-08-28).** The snippet and the table above
+> describe the code *before* stage 4. `_explorer_git_anchor_paths()` now returns
+> `(root_path, anchor_path, context_dir)` and the scope carries a validated
+> `kind`; the two consumers are fed separately, which is what the table was
+> predicting. Read `CLAUDE.md`'s Git-scope guardrail for the shipped contract.
+
 > **Divergence — resolved 2026-08-27; the document was fixed, not the code.**
 > The pin is a frozen **path** scope: it captures the *browsed folder*,
 > root-relative, at the same granularity Follow has, just not live. `CLAUDE.md`
@@ -58,7 +64,8 @@ and not a client one: only the first consumer needs a directory.
 ### 0.2 What is already persisted
 
 The pin travels as a **pair** — `explorer_git_pin_active` (bool) +
-`explorer_git_pinned_path` (string) — through five stores/paths:
+`explorer_git_pinned_path` (string) — through five stores/paths (stage 4 made it
+a **triple**, adding `explorer_git_pin_kind` along every one of them):
 
 | where | what |
 | --- | --- |
@@ -142,154 +149,56 @@ extends the predicate, the button state and the row model in one place.
 
 ## Stage 4 — Pin & Follow down to file level, and pinning from the tree (note 11)
 
-**Risk: medium-high.** First backend contract change in this plan, plus one new
-persisted field. Depends on stages 2 and 3.
+**Shipped 2026-08-28.** Nothing here is outstanding. The rules it established
+live in the code, in `CHANGELOG.md`, in `README.md`, in the Git-scope guardrail
+in `CLAUDE.md` / `AGENTS.md`, and in `docs/session_state_guideline.md`; the two
+defects the manual pass turned up are **ISSUE-2026-048** and **ISSUE-2026-049**
+in `docs/testing_issues.md`.
 
-### 4.1 Problem
+- **The scope became a `(path, kind)` pair.** `_explorer_git_anchor_paths()`
+  returns `(root_path, anchor_path, context_dir)` — the pathspec and the
+  directory `rev-parse` runs in, separated so a file scope's `status` is not
+  widened back to its parent. `?scope=path&kind=dir|file` is validated against a
+  server-side allowlist; an absent `kind` means `dir`.
+- **`explorer_git_pin_kind` rides every persistence route** beside the existing
+  pair, normalized against the two-value allowlist and refused rather than
+  coerced. The kind decision went the recommended way — an explicit field, not
+  the trailing-slash encoding.
+- **Follow reads the same pair live**, so the scope tracks the open file and
+  widens back on a folder.
+- **The right-click pin** landed through `explorerGitScopeMenuItem()` in the
+  existing `explorer-git-pin.js`: single-entry, never on a commit row, and
+  disabled-not-dropped outside a worktree.
 
-Note 11: *"pin and follow git buttons should also work down to file level, so it
-shows only commits on a open file in preview/explorer tab … Also file tree needs
-a pin option on the right click menu to pin directories/files not in preview or
-tabs."*
+Three things came out of the manual pass rather than the plan:
 
-Today the scope must be a directory: `_explorer_git_anchor_paths()` calls
-`backend.resolve_dir()`, and `_resolve_git_worktree_root()` runs `rev-parse`
-with the anchor as `cwd`. `git status` and `git log --graph` already accept a
-file pathspec — see the table in §0.1. So this is *one* consumer that needs a
-directory, not a redesign.
-
-### 4.2 Solution (code + tests)
-
-**Backend — `web/api.py` + `web/explorer.py`:**
-
-- `_explorer_git_anchor_paths(backend)` returns
-  `(root_path, anchor_path, context_dir)`. The scope kind arrives as
-  `?scope=path&kind=dir|file`, validated against a **server-side allowlist** —
-  an unknown kind is a `400`, exactly the way `GIT_DIFF_CONTEXT_WIDTHS` refuses
-  an unknown context name. An absent `kind` means `dir`, so every existing
-  client request keeps working unchanged.
-- `kind=file` resolves through `backend.resolve_file()`; `context_dir` is
-  `backend.file_dirname(anchor)`. `kind=dir` keeps today's behaviour with
-  `context_dir == anchor_path`.
-- `_get_git_repo_state()`, `_get_git_repo_summary()` and `_git_action_anchor()`
-  take the pair: `context_dir` for `_resolve_git_worktree_root()` and
-  `validate_repo_paths()`, `anchor_path` for `backend.pathspec()`. Root
-  confinement is unchanged and still checked on both.
-- **Behavioural consequence that must be stated in the UI, not just the code:**
-  with a file scope, `Stage All` / `Unstage All` / `Discard All` act on that one
-  file's pathspec, and `Commit` refuses when anything staged lies outside it.
-  That follows the existing "bulk actions obey the selected scope" guardrail
-  exactly, and it is surprising unless the sidebar says so — so the repo bar's
-  scope text (stage 2 H3) shows the **file name**, and the bulk buttons' titles
-  name the scope.
-
-**Client:**
-
-- The pin becomes `{path, kind}`. New persisted field
-  **`explorer_git_pin_kind`** (`"dir"` | `"file"`, default `"dir"`), because a
-  path and what kind of thing it names are **one fact** — the same reasoning
-  `CLAUDE.md` already records for `explorer_root_directory` /
-  `explorer_root_configured`. Inferring the kind from a `stat` per request was
-  considered and rejected: it costs a round trip and answers wrongly for a path
-  that has since been deleted.
-  *Lower-blast fallback if you want no schema change: encode a directory as a
-  trailing `/`. It works, and it violates the "a flag that qualifies a stored
-  value is stored beside it" rule — offered, not recommended.*
-- The field must ride **every** route in §0.2: `sessions/manager.py` (field,
-  `to_dict`, defaults, mutable set), `session_presentation.py`
-  (`PANE_PRESENTATION_FIELDS` + `_EXPLORER_STRING_FIELDS` + a normalizer that
-  refuses anything outside the two values), `runtime_state.py`
-  (`_SESSION_SNAPSHOT_FIELDS`), `saved_sessions.py`
-  (`_LIVE_SESSION_VIEW_FIELDS` + the `startup_mode` gate), `session_modes.py`
-  (cleared with the rest of the pin), `session-persistence.js`, `launcher.js`
-  (dataset + `explorerTabsMatchRoot` gate), and `terminals.js` (describe /
-  launch config / pane build / close overlay). **Stage 2's round-trip test is
-  parametrised, so this is one new entry in it, not a new test file** — that is
-  why stage 2 comes first.
-- **Follow at file level:** when Follow is on and the pane is showing a file
-  (`pane._explorerMode === 'file'` with an `_explorerFilePath`), the scope is
-  that file; when showing a directory, today's browsed folder.
-  `explorerGitScopePath()` gains that branch, and the change listener
-  (`explorer-git-watch.js`) already reloads on a scope change.
-- **Tree context menu:** `handleExplorerContextMenu()` gains **Pin Git here** /
-  **Unpin Git** for a tree row (directories *and* files), placed with the
-  filesystem entries. It obeys 3c's shipped rule on the row rather than on
-  the pane: **Unpin Git** appears only on the row that *is* the pinned path;
-  every other row offers **Pin Git here**, which re-pins in one write, exactly
-  as the Graph header's button does. Rules: **single-entry only** (never a batch target — the
-  same rule Rename lives by); **never** on a commit row (that branch stays
-  path-free — "a commit names a repository object, not a path"); the entry is
-  **disabled, not dropped**, when the row is outside any worktree, with a title
-  saying why.
-- Stage 3b's marker learns the file case — same marker, on a file row.
-
-**Tests:**
-
-- `tests/test_api.py` (extend): `kind=file` scopes status/graph to that file;
-  a garbage `kind` is a `400` and mutates nothing; a `kind=file` path that is a
-  directory is refused; root confinement holds for both kinds; **a refusal
-  mutates nothing** (assert on a whole-pane snapshot, the way
-  `test_session_modes.py` does).
-- `tests/test_git_process_bounds.py` (extend): a file-scoped `git status` /
-  `log` still runs with `GIT_TERMINAL_PROMPT=0` and under the module output
-  ceilings.
-- `tests/test_explorer_git_pin_persistence.py` (stage 2's file): add
-  `explorer_git_pin_kind` to the parametrised round trip, including the
-  explorer→terminal clear and the wrong-value refusal.
-- `tests/test_explorer_fs_batch.py` (extend): the pin entry never appears for a
-  multi-entry selection and never for a commit row.
-- Node: `explorerGitScopePath()` returns the open file under Follow, the browsed
-  folder otherwise, and the pinned pair when Follow is off.
-
-### 4.3 Manual test outline
-
-1. Open a file in the Preview tab. Turn **Follow** on → the Graph shows only
-   that file's commits; the repo bar names the file.
-2. Switch tabs to a different file → the Graph follows it. Open a directory →
-   the Graph widens back to that folder.
-3. Turn Follow off → the Graph returns to the previous fixed scope.
-4. With a file scoped, check the **Changes** and **Staged Changes** lists show
-   only that file, and the bulk buttons' tooltips name the scope.
-5. **Stage All** with a file scope while a *second* file is also modified →
-   only the scoped file is staged. Then **Commit** → it refuses, naming the
-   staged path outside the scope, and tells you to widen the scope or unstage.
-6. **Discard All** with a file scope → only that file is restored; another
-   modified file and every untracked file are untouched. (Do this on a scratch
-   repo.)
-7. Right-click a **file** in the Files tree → **Pin Git here** → the Graph
-   scopes to it and the tree row gets the pin mark.
-8. Right-click a **folder** → **Pin Git here** → folder scope, marker moves.
-9. Right-click the pinned row → **Unpin Git** → scope returns to the explorer
-   root, marker gone.
-10. Select three entries (Ctrl+click), right-click → **no pin entry** at all.
-11. Right-click a commit row in the Graph → still only the two copy entries.
-12. Right-click a file outside any worktree → the pin entry is **greyed out**
-    with an explanatory tooltip, not missing.
-13. Pin a file → Save Workspace → restart → restore → **the file pin comes
-    back**, marker and all.
-14. Pin a file → switch the pane to terminal mode and back → the pin is cleared
-    (deliberate).
-15. Repeat 1, 7, 13 on an **SSH** pane.
-16. Delete the pinned file outside GridVibe, then refresh the sidebar → an
-    explicit message plus **Clear pin**, no crash and no silent widening.
-
-### 4.4 Documentation after verification
-
-- **`CLAUDE.md` + `AGENTS.md`** — the *"The Git sidebar has one selected scope"*
-  guardrail is rewritten: scope is `(path, kind)`; `kind` is validated against a
-  server-side allowlist and anything else is a `400`; `context_dir` is the
-  directory `rev-parse` runs in while `anchor_path` is the pathspec; a file
-  scope narrows every bulk action and the commit refusal accordingly; the pin
-  entry is single-entry, never a batch, never on a commit row.
-- **`docs/session_state_guideline.md`** — `explorer_git_pin_kind` added beside
-  the pair, with the "one fact" rule.
-- **`CHANGELOG.md`** — one `(feat)` bullet, and a **separate** bullet for the
-  bulk behaviour under a file scope, because that is the surprising part.
-- **`docs/testing_issues.md`** — only if the stage uncovers a defect.
+- **The listing needed the menu too.** The plan scoped the entry to the Files
+  tree, but the Preview tab's directory listing is the *other* filesystem
+  browsing surface and shows the same rows. Two surfaces disagreeing about what
+  a row can do is exactly what `explorer-git-pin.js` exists to prevent, so both
+  now carry `data-explorer-git-scope-{path,kind,surface}` and offer identical
+  pin and Follow entries.
+- **ISSUE-2026-048 — a restored Files tree drew open chevrons over empty
+  branches.** Expansion is persisted and the listings behind it are not, and
+  nothing re-read them outside the ancestors of the shown path. The general rule
+  ("a persisted set of keys is not the data behind them") is now in
+  `docs/session_state_guideline.md` under Restore.
+- **ISSUE-2026-049 — Follow re-scoped on an interval when a file was opened.**
+  Only the listing and the image viewer reported the scope change; the ordinary
+  file render did not, so the change listener's poll was doing the work. All
+  three now go through `explorerGitScopeNeedsLoad(pane)`, which also keeps an
+  *unchanged* scope from re-rendering the panel and stealing the commit-message
+  caret.
 
 ---
 
 ## Stage 5 — Branch graph in the Preview panel (note 13)
+
+**Deferred 2026-08-28 — not scheduled.** Everything below is the plan as
+written; nothing about it has been built, and it is kept here rather than
+deleted because it is the only stage still outstanding. It has no dependency on
+stage 4 beyond §5.4 step 9 (which reads better now that a file pin exists), so
+it can be picked up whenever.
 
 **Risk: high.** New backend endpoint, a substantial new frontend surface, and —
 in its full form — a schema widening. Recommend shipping the **narrow variant**
@@ -411,21 +320,19 @@ narrow variant delivers the note's stated ask without that.
 | --- | --- | --- | --- | --- | --- | --- |
 | 3b | 8 | — | — | — | shipped 2026-08-27 | low |
 | 3c | 8 | — | — | — | shipped 2026-08-27 | low |
-| 4 | 11 | yes | `explorer_git_pin_kind` | — | ~12 + 4 test files | med-high |
-| 5 | 13 | yes | `explorer_git_graph_open` | `git/graph` | ~10 + 3 test files | high |
+| 4 | 11 | yes | `explorer_git_pin_kind` | — | shipped 2026-08-28 | med-high |
+| 5 | 13 | yes | `explorer_git_graph_open` | `git/graph` | deferred | high |
 
-**Hard dependencies:** 3b, 3c and 4 needed 2 — the pin had to be trustworthy
-before it was made visible or extended — and 2, 3b and 3c all shipped on
-2026-08-27. The Files-tree extraction gate is complete, so 4's tree menu can
-proceed. 5 is independent of 3 and 4 and could be scheduled earlier, but it is
-the largest piece and benefits from the scope work landing first.
+**Hard dependencies:** all of them are now discharged. 3b, 3c and 4 needed 2 —
+the pin had to be trustworthy before it was made visible or extended — and 2, 3b
+and 3c shipped on 2026-08-27, 4 on 2026-08-28. Stage 5 is independent of 3 and 4
+and can be scheduled whenever; the scope work it benefits from has landed.
 
 **Decisions still open** (pin semantics was decided with stage 2: a frozen
-*path* scope, and the document was corrected):
+*path* scope, and the document was corrected; stage 4's kind field was decided
+with stage 4 — the explicit `explorer_git_pin_kind`, not the trailing slash):
 
-1. **Stage 4's kind field** — explicit `explorer_git_pin_kind` (recommended) or
-   the trailing-slash encoding (smaller, worse).
-2. **Stage 5 shape** — narrow (`explorer_git_graph_open`) first, or straight to
+1. **Stage 5 shape** — narrow (`explorer_git_graph_open`) first, or straight to
    the tab-view-mode variant. Recommendation: narrow.
 
 **Every stage ends with `make check`** (`python tests/run_tests.py` and

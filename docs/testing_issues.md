@@ -1,11 +1,140 @@
 # GridVibe Testing Issues
-Last updated: 2026-08-27
+Last updated: 2026-08-28
 
 ## Open Issues
 
 None.
 
 ## Closed Issues
+
+### Issue ID: ISSUE-2026-048
+- Title: A restored Files tree draws open chevrons over empty branches
+- Priority: High
+- Status: Closed
+- Area: `web/static/js/explorer-tree.js`
+- Assignee: Unassigned
+- Tags: `explorer`, `session`, `persistence`
+- Reported: 2026-08-28
+- Closed: 2026-08-28
+
+Description:
+Reported during the stage-4 manual pass as "the file tree is not saved and
+restored as I've left it — expanded directories get folded after restore", and
+then more precisely on the pin round-trip step: "the pin is preserved OK, but we
+get stuck with an expanded directory chevron and no subdirectories shown."
+
+Which folders are open is persisted (`explorer_tree_expanded`, bounded to 128).
+The listings behind them are not, and must not be — fetched explorer data is
+never persisted. Nothing restored those listings: `loadExplorerTree()` rendered
+the panel and then called `revealExplorerTreePath()`, which only ever walks the
+ancestors of the path the pane is *showing*. Every other restored branch reached
+`renderExplorerTreeNodes()` with no cached children and no load in flight, so it
+emitted nothing at all — the row rendered with its chevron down and an empty
+children container under it.
+
+Steps to reproduce:
+1. Open an explorer pane, open the Files tree, and expand several folders in
+   different branches — at least one that is not an ancestor of the folder or
+   file the Preview tab is showing.
+2. Save Workspace, restart GridVibe, restore.
+3. Look at the branch the pane is not showing.
+
+Expected behavior:
+The tree comes back expanded as it was left, with rows under every open chevron.
+
+Actual behavior / logs:
+The branch containing the shown path came back correctly. Every other expanded
+folder showed a downward chevron above nothing, so the tree read as collapsed
+while its arrows said it was open. On the stage-4 file-pin restore step this made
+a faithfully restored pin look as though it had landed on an empty folder.
+
+Resolution:
+`hydrateExplorerTreeExpansion()` (`web/static/js/explorer-tree.js`) re-lists the
+branches the restored set names, breadth-first from the root, and
+`loadExplorerTree()` runs it before the reveal. Three properties matter:
+
+1. **A folder is fetched only once its parent's listing confirms it is still a
+   directory.** An expansion naming a folder deleted or renamed since the
+   snapshot is therefore never requested, never turned into an error, and never
+   cached against a row that no longer exists — it is dropped from the persisted
+   set instead. A path the walk could not reach is left alone: unproven is not
+   stale.
+2. **The walk is bounded** (`EXPLORER_TREE_RESTORE_MAX_NODES`, 64), for the same
+   reason the watcher's quiet refresh is: each node is one `/entries`, one
+   `git status` on a subtree, and one SFTP round trip on a remote pane.
+3. **The sidebar scroll is re-applied after the last render.** Each listing
+   re-renders the tree body, which clamps the scroller to 0, so the offset the
+   restore had already applied was gone by the time the branches it belonged to
+   existed.
+
+The same walk also runs after a manual expand. A collapse deliberately keeps what
+was open underneath it; inside a session those descendants come back off the
+children cache, but after a restore the cache is empty and only the clicked
+folder's own listing had been fetched — leaving the identical empty-branch
+symptom one level down.
+
+Cover: `tests/test_explorer_tree_fold.py::ExplorerTreeExpansionRestoreTestCase` —
+the restored set is re-listed (including a branch outside the shown path), an
+already-listed tree costs no request, a vanished folder is dropped and never
+fetched, an unproven one is kept, and re-opening a collapsed folder re-lists its
+restored descendants. Four of the six fail without the fix.
+
+### Issue ID: ISSUE-2026-049
+- Title: With Follow on, the Git graph re-scopes on an interval when a file is opened
+- Priority: Medium
+- Status: Closed
+- Area: `web/static/js/explorer-viewer.js`, `web/static/js/explorer-git-sidebar.js`
+- Assignee: Unassigned
+- Tags: `explorer`, `git`
+- Reported: 2026-08-28
+- Closed: 2026-08-28
+
+Description:
+Reported during the stage-4 manual pass: "the file follow is slow and isn't
+instantly updating the graph like we do on swapping directories when Git follow
+is enabled. The graph doesn't update instantly like on directories but takes like
+an interval."
+
+Stage 4 made a file a first-class Git scope, so `explorerGitScopePath()` already
+answered with the open file under Follow. But only `loadExplorerPane()` (the
+directory listing) and `renderExplorerImage()` told the sidebar the scope had
+moved; `renderExplorerFile()` — the path every ordinary file open and every tab
+switch goes through — did not. The scope identity joins the revision token, so
+the change listener's next `git/state` poll eventually saw a changed revision and
+refreshed, which is why the graph updated at all, and why it felt like an
+interval.
+
+Steps to reproduce:
+1. Explorer pane on a repository, Git sidebar open, **Follow** on.
+2. Walk into a subfolder — the Graph re-scopes immediately.
+3. Open a file, or switch to another file's tab — the Graph stays on the previous
+   scope until the background poll fires.
+
+Expected behavior:
+Opening a file re-scopes as immediately as opening a folder does.
+
+Actual behavior / logs:
+A visible lag of up to one poll interval, and inconsistent between two gestures
+that are the same kind of gesture.
+
+Resolution:
+`renderExplorerFile()` now refreshes the pin affordances and asks for the load,
+exactly as the other two render paths do. All three go through one new predicate,
+`explorerGitScopeNeedsLoad(pane)` (`explorer-git-sidebar.js`), which compares the
+pane's selected scope against the scope the loaded model is *for*. That second
+half was necessary rather than tidy: `loadExplorerGitRepo()`'s own "already
+loaded" early return still calls `renderExplorerGitPanels()`, and the Git panel
+carries the commit-message textarea and the commit-search input — so wiring the
+new call site to the old `_explorerGitSidebarOpen` check would have made every
+file open re-render the panel and take the caret out of a commit message being
+typed. Navigation that leaves the scope alone now reaches neither the load nor
+the render.
+
+Cover: `tests/test_explorer_git_scope_surfaces.py::ExplorerGitScopeLoadOnOpenTestCase`
+— the real file render, executed in a Node `vm`, asserting the file-scoped
+`git/repo` request goes out at once on an open and on a file-to-file switch, and
+that a re-open of the already-scoped file and a browse with a fixed pin issue no
+request and render no panel.
 
 ### Issue ID: ISSUE-2026-047
 - Title: A restored explorer pane loses its Git pin "sometimes"

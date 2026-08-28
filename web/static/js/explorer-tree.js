@@ -438,6 +438,14 @@
         pane._explorerTreeErrors.delete(path);
         renderExplorerTreePanel(index);
         await loadExplorerTreeChildren(index, path);
+        /* A collapse keeps what was open underneath, so re-opening a folder
+           can bring expanded descendants back with it. Inside a session their
+           listings are still cached and the branch simply reappears; after a
+           restore nothing is cached, and only the clicked folder's own listing
+           was just fetched — every descendant would come back as an open
+           chevron over nothing. Same walk, and free when the cache already
+           holds the answer. */
+        await hydrateExplorerTreeExpansion(index);
         notePanePresentationChanged(index);
     }
 
@@ -621,6 +629,113 @@
         return true;
     }
 
+    /* Expansion is persisted; the listings behind it are not.
+
+       `_explorerTreeExpanded` comes back from a restore (or from a workspace
+       tab the sidebar is being re-opened on) as a set of paths and nothing
+       else, because fetched data is never persisted. Every folder in it that
+       revealExplorerTreePath() does not happen to walk through therefore
+       renders its chevron open above an empty branch: `renderExplorerTreeNodes`
+       has no cached children for it and no load is in flight, so it emits
+       nothing at all — a tree that reads as folded while every arrow says
+       otherwise. Reveal only ever walks the ancestors of the path the pane is
+       showing, so the rest of the reader's tree has to be re-read here.
+
+       Breadth-first from the root, so a folder is fetched only once its
+       parent's listing has confirmed it is still a directory: an expansion
+       naming a folder that was deleted or renamed since the snapshot is
+       dropped rather than fetched, turned into an error and cached against a
+       row that no longer exists. Bounded for the same reason the watcher's
+       refresh is — each node is one `/entries`, one `git status` on a subtree,
+       and over SFTP that is a round trip apiece. */
+    const EXPLORER_TREE_RESTORE_MAX_NODES = 64;
+
+    async function hydrateExplorerTreeExpansion(index) {
+        const pane = terminals[index];
+        const sessionId = sessionIds[index];
+        if (!pane?._explorerTreeSidebarOpen || !sessionId) {
+            return false;
+        }
+        ensureExplorerTreeState(pane);
+        if (!pane._explorerTreeExpanded.size) {
+            return false;
+        }
+
+        await loadExplorerTreeChildren(index, '');
+        if (terminals[index] !== pane || sessionIds[index] !== sessionId) {
+            return false;
+        }
+
+        const reached = new Set();
+        let level = [''];
+        let budget = EXPLORER_TREE_RESTORE_MAX_NODES;
+        let loaded = false;
+        while (level.length && budget > 0) {
+            const next = [];
+            level.forEach(parent => {
+                const entries = pane._explorerTreeChildren.get(parent);
+                if (!Array.isArray(entries)) {
+                    return;
+                }
+                entries.forEach(entry => {
+                    const path = entry.path || '';
+                    if (entry.type === 'directory' && pane._explorerTreeExpanded.has(path)) {
+                        reached.add(path);
+                        next.push(path);
+                    }
+                });
+            });
+            const pending = next
+                .filter(path => !pane._explorerTreeChildren.has(path))
+                .slice(0, budget);
+            if (pending.length) {
+                budget -= pending.length;
+                loaded = true;
+                await loadExplorerTreeLevelChildren(index, pending);
+                if (terminals[index] !== pane || sessionIds[index] !== sessionId) {
+                    return false;
+                }
+            }
+            level = next;
+        }
+
+        /* An expansion whose parent listing is loaded and does not contain it
+           is gone from disk, not merely unvisited: keeping it would re-open a
+           folder that no longer exists every time the pane is restored. A path
+           the walk never reached because the budget ran out is left alone —
+           unproven is not stale. */
+        let pruned = false;
+        [...pane._explorerTreeExpanded].forEach(path => {
+            if (reached.has(path)) {
+                return;
+            }
+            const siblings = pane._explorerTreeChildren.get(explorerTreeParentPath(path));
+            if (!Array.isArray(siblings)) {
+                return;
+            }
+            if (!siblings.some(entry => entry.type === 'directory' && (entry.path || '') === path)) {
+                pane._explorerTreeExpanded.delete(path);
+                pruned = true;
+            }
+        });
+
+        if (!loaded && !pruned) {
+            return false;
+        }
+        renderExplorerTreePanel(index);
+        /* Every listing above re-rendered the panel body, and rebuilding the
+           body clamps the tree's scroller to 0. The offset the restore already
+           applied is therefore gone by the time the branches it belongs to
+           exist, so it is put back once here, after the last render. */
+        if (typeof restoreExplorerSidebarPresentation === 'function') {
+            restoreExplorerSidebarPresentation(index);
+        }
+        if (pruned) {
+            notePanePresentationChanged(index);
+        }
+        return true;
+    }
+
     async function loadExplorerTree(index) {
         const pane = terminals[index];
         if (!pane) {
@@ -628,6 +743,7 @@
         }
         ensureExplorerTreeState(pane);
         renderExplorerTreePanel(index);
+        await hydrateExplorerTreeExpansion(index);
         await revealExplorerTreePath(index);
     }
 

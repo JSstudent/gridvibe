@@ -102,6 +102,24 @@
         pane._explorerGitResolvedAnchor = String(data?.anchor_path || '');
     }
 
+    /* Does the pane's selected scope still match the model the sidebar is
+       showing? Every browsing surface asks this before calling for a load,
+       because loadExplorerGitRepo()'s own "already loaded" early return is not
+       free: it re-renders the Git panel, and the panel carries the
+       commit-message textarea and the commit-search input, so a render nobody
+       asked for takes the caret out of one of them. Navigation that leaves the
+       scope where it was must therefore reach neither. */
+    function explorerGitScopeNeedsLoad(pane) {
+        if (!pane?._explorerGitSidebarOpen) {
+            return false;
+        }
+        if (!pane._explorerGitRepoLoaded) {
+            return true;
+        }
+        return pane._explorerGitAnchorPath !== explorerGitRequestedScope(pane)
+            || (pane._explorerGitAnchorKind || 'dir') !== explorerGitRequestedScopeKind(pane);
+    }
+
     function explorerGitStatusLabel(git) {
         if (!git || typeof git !== 'object') {
             return '';

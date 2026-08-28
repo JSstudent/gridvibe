@@ -157,6 +157,8 @@ if (action === 'level') {
     run = sandbox.openExplorerTreeDirectory(0, target);
 } else if (action === 'reveal') {
     run = sandbox.revealExplorerTreePath(0, target);
+} else if (action === 'restore') {
+    run = sandbox.loadExplorerTree(0);
 } else {
     run = sandbox.toggleExplorerTreeDirectory(0, target);
 }
@@ -306,6 +308,102 @@ class ExplorerTreeFoldLevelTestCase(unittest.TestCase):
         self.assertEqual(result["expanded"], ["src"])
         self.assertEqual(result["fetched"], ["src"])
         self.assertEqual(result["navigated"], [])
+
+
+@unittest.skipUnless(NODE, "Node.js is required for explorer tree fold tests")
+class ExplorerTreeExpansionRestoreTestCase(unittest.TestCase):
+    """Opening the tree re-lists the expansion a restore handed back.
+
+    Expansion is persisted and the listings behind it are not, so a restored
+    pane holds a set of paths and an empty children cache. The reveal walk only
+    ever opens the ancestors of the path the pane is showing, which left every
+    other restored folder rendering an open chevron above nothing at all --
+    reported as "expanded directories get folded after restore", with the
+    chevron left pointing down over an empty branch.
+    """
+
+    _fold = ExplorerTreeFoldLevelTestCase._fold
+
+    def test_a_restored_expansion_set_is_relisted_when_the_tree_opens(self):
+        # Nothing cached: exactly what a restore hands back.
+        result = self._fold(
+            expanded=["docs", "docs/guides", "src", "src/api"],
+            cached=[],
+            target="",
+            action="restore",
+        )
+        self.assertEqual(
+            result["expanded"], ["docs", "docs/guides", "src", "src/api"]
+        )
+        # The root plus every restored folder, so each open chevron has rows
+        # underneath it.
+        self.assertEqual(
+            result["fetched"], ["", "docs", "docs/guides", "src", "src/api"]
+        )
+
+    def test_a_branch_outside_the_shown_path_is_listed_too(self):
+        # The reveal walk covers src/ because the pane is showing src/api;
+        # docs/ is the branch that used to come back empty.
+        result = self._fold(
+            expanded=["docs", "docs/guides"],
+            cached=[],
+            target="",
+            action="restore",
+        )
+        self.assertEqual(result["fetched"], ["", "docs", "docs/guides"])
+
+    def test_an_already_listed_tree_is_not_refetched(self):
+        # Re-opening the sidebar inside a session: the children cache still
+        # holds every branch, so the walk costs no request at all.
+        result = self._fold(
+            expanded=["docs", "src"],
+            cached=["", "docs", "src"],
+            target="",
+            action="restore",
+        )
+        self.assertEqual(result["fetched"], [])
+        self.assertEqual(result["expanded"], ["docs", "src"])
+        self.assertEqual(result["persisted"], [])
+
+    def test_an_expansion_whose_folder_is_gone_is_dropped_not_fetched(self):
+        # A folder deleted or renamed since the snapshot: its parent's listing
+        # is the proof, so it is never requested and never cached as an error
+        # against a row that no longer exists.
+        result = self._fold(
+            expanded=["src", "src/gone"],
+            cached=[],
+            target="",
+            action="restore",
+        )
+        self.assertEqual(result["expanded"], ["src"])
+        self.assertNotIn("src/gone", result["fetched"])
+        # Dropping a stale path is a change to persisted pane state.
+        self.assertEqual(result["persisted"], [0])
+
+    def test_an_unproven_expansion_is_left_alone(self):
+        # src/ is collapsed, so nothing loads its listing and nothing can say
+        # whether src/api still exists. Unproven is not stale.
+        result = self._fold(
+            expanded=["src/api"],
+            cached=[],
+            target="",
+            action="restore",
+        )
+        self.assertEqual(result["expanded"], ["src/api"])
+        self.assertEqual(result["fetched"], [""])
+
+    def test_reopening_a_collapsed_folder_relists_its_restored_descendants(self):
+        # A collapse keeps what was open underneath it. Inside a session the
+        # descendants come back off the cache; after a restore the cache is
+        # empty, so expanding src/ alone left src/api open above nothing.
+        result = self._fold(
+            expanded=["src/api"],
+            cached=[""],
+            target="src",
+            action="directory",
+        )
+        self.assertEqual(result["expanded"], ["src", "src/api"])
+        self.assertEqual(result["fetched"], ["src", "src/api"])
 
 
 ANCHOR_HARNESS = """
