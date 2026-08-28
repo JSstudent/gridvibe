@@ -215,6 +215,52 @@
         return lines;
     }
 
+    /* What the pane is browsing, as a scope.
+
+       Navigation is not the only way a reader names a path. Singling out one
+       row in a browsing surface names one exactly as precisely as opening it
+       does -- a Ctrl-click highlight, and the context menu's own Follow entry
+       -- and Follow used to ignore both, so choosing Follow on a file row
+       scoped Git to the folder the listing happened to be showing.
+
+       That choice is an *override* over the derived scope, and it is stored
+       together with the derived scope it was made against. The next
+       navigation moves the derived scope, the two no longer agree, and the
+       override is gone -- so "until the next browsing act" needs no
+       invalidation hook anywhere, and a plain re-render (which moves nothing)
+       cannot drop it either. It is a pointer gesture, exactly as the
+       multi-entry selection is, so it is never persisted. */
+    function explorerGitBrowseOverride(path, kind, basePath, baseKind) {
+        if (path === null || path === undefined) {
+            return null;
+        }
+        return {
+            path: String(path),
+            kind: explorerGitScopeKind(kind),
+            basePath: String(basePath === null || basePath === undefined ? '' : basePath),
+            baseKind: explorerGitScopeKind(baseKind)
+        };
+    }
+
+    function explorerGitBrowsedScope(basePath, baseKind, override) {
+        const base = {
+            path: String(basePath === null || basePath === undefined ? '' : basePath),
+            kind: explorerGitScopeKind(baseKind)
+        };
+        if (!override || typeof override.path !== 'string') {
+            return base;
+        }
+        const stillCurrent = String(
+            override.basePath === null || override.basePath === undefined
+                ? ''
+                : override.basePath
+        ) === base.path
+            && explorerGitScopeKind(override.baseKind) === base.kind;
+        return stillCurrent
+            ? { path: override.path, kind: explorerGitScopeKind(override.kind) }
+            : base;
+    }
+
     /* One path-scoping entry for a Files-tree row or an open explorer tab.
        Multi-selection deliberately gets no entry: a pin is one exact path,
        never a batch operation.  A row outside a worktree keeps the entry in
@@ -253,15 +299,53 @@
         };
     }
 
-    function explorerGitFollowMenuItem(following, disabled = false) {
-        const active = Boolean(following);
+    /* Follow, asked about a row rather than about the pane -- the same shape
+       the pin entry already has, and for the same two reasons.
+
+       A multi-entry selection names no one path, so it gets no entry at all:
+       Follow is one exact scope, exactly as the pin is, and picking one of
+       several highlighted rows would be picking arbitrarily.
+
+       And the question is "is Follow *here*", never "is Follow on". While
+       Follow sits on another path this row offers to move it -- in one write,
+       through the same exact-equality predicate the pin button uses -- so the
+       only row that offers to turn Follow off is the row it is actually on.
+       Answering "is Follow on" instead left a reader following folder A with
+       no way to say "follow this file" short of turning Follow off and on
+       again somewhere else. */
+    function explorerGitFollowMenuItem({
+        following = false,
+        followedPath = null,
+        followedKind = 'dir',
+        targetPath = '',
+        targetKind = 'dir',
+        targetCount = 1,
+        disabled = false
+    } = {}) {
+        if (targetCount !== 1) {
+            return null;
+        }
+        const normalizedKind = explorerGitScopeKind(targetKind);
+        const targetName = normalizedKind === 'file' ? 'file' : 'folder';
+        const here = Boolean(following) && explorerGitPathIsPinned(
+            typeof followedPath === 'string' ? followedPath : null,
+            targetPath,
+            followedKind,
+            normalizedKind
+        );
+        if (here) {
+            return {
+                action: 'unfollow',
+                label: 'Unfollow Git browsing',
+                disabled: Boolean(disabled),
+                title: 'Return Git to its fixed pinned or explorer-root scope'
+            };
+        }
         return {
             action: 'follow',
-            label: active ? 'Unfollow Git browsing' : 'Follow Git browsing',
+            label: 'Follow Git browsing',
             disabled: Boolean(disabled),
-            title: active
-                ? 'Return Git to its fixed pinned or explorer-root scope'
-                : 'Follow the file or folder shown in Preview'
+            title: `Follow this ${targetName}, and what the pane browses next`
         };
     }
 
@@ -272,6 +356,8 @@
         explorerGitPinPathLabel,
         explorerGitPinButtonState,
         explorerGitScopeLines,
+        explorerGitBrowseOverride,
+        explorerGitBrowsedScope,
         explorerGitScopeMenuItem,
         explorerGitFollowMenuItem
     };

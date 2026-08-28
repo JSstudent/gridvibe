@@ -41,6 +41,9 @@ from web.session_presentation import (
 ROOT = Path(__file__).resolve().parent.parent
 PERSISTENCE_JS = ROOT / "web" / "static" / "js" / "session-persistence.js"
 SIDEBAR_JS = ROOT / "web" / "static" / "js" / "explorer-git-sidebar.js"
+# The sidebar asks explorer-git-pin.js what the pane is browsing, so the
+# real policy is loaded rather than stubbed.
+PIN_JS = ROOT / "web" / "static" / "js" / "explorer-git-pin.js"
 NODE = shutil.which("node")
 
 # One pinned explorer pane's worth of Git presentation. Every route below is
@@ -701,8 +704,10 @@ const persistence = require(process.argv[2]);
    called here, and it touches nothing but the pane. */
 const sandbox = { console, String, Boolean, Object, JSON, URLSearchParams, encodeURIComponent };
 sandbox.globalThis = sandbox;
+sandbox.window = sandbox;
 vm.createContext(sandbox);
-vm.runInContext(fs.readFileSync(process.argv[3], 'utf8'), sandbox);
+vm.runInContext(fs.readFileSync(process.argv[6], 'utf8'), sandbox);  // git pin policy
+vm.runInContext(fs.readFileSync(process.argv[3], 'utf8'), sandbox);  // git sidebar
 
 const mode = process.argv[4];
 const input = JSON.parse(process.argv[5]);
@@ -786,6 +791,7 @@ if (mode === 'describe') {
                     str(SIDEBAR_JS),
                     mode,
                     json.dumps(payload),
+                    str(PIN_JS),
                 ],
                 capture_output=True,
                 text=True,

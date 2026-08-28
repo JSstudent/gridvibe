@@ -1377,6 +1377,59 @@
             explorerSelections.set(sessionId, selection);
         }
         refreshExplorerSelectionHighlight(index);
+        noteExplorerGitBrowseSelection(index, selection);
+    }
+
+    /* A highlighted row is a browsing act. One highlighted row names one exact
+       path, which is exactly what the Git scope is. Several rows name none —
+       the same reason the pin and Follow entries drop out of a multi-entry
+       menu — so they hand the scope back to plain navigation.
+
+       The kind is read from `data-explorer-git-scope-kind` — the attribute the
+       row's own render wrote — and never from the selection entry's
+       `entry_kind`, which the filtered tree leaves empty for a hit whose
+       parent listing has not been fetched. Deriving one surface's answer from
+       a field another surface does not fill is how the tree's pin marker came
+       to be painted and immediately stripped.
+
+       An *emptied* selection states nothing and moves nothing. Escape drops a
+       highlight, and opening a context menu over an unselected row collapses
+       the selection to that row alone -- neither is navigation, so reading
+       them as "stop following" would have sent the scope back to the folder
+       on every right-click, including the one about to choose Copy path. The
+       next navigation supersedes the override on its own. */
+    function noteExplorerGitBrowseSelection(index, selection) {
+        if (typeof setExplorerGitBrowseTarget !== 'function') {
+            return;
+        }
+        const entries = GridVibeExplorerSelection.isEmpty(selection)
+            ? []
+            : selection.entries;
+        if (!entries.length) {
+            return;
+        }
+        if (entries.length > 1) {
+            setExplorerGitBrowseTarget(index, null);
+            return;
+        }
+        const path = entries[0].path || '';
+        const kind = explorerGitScopeKindForSelectedRow(index, selection.surface, path)
+            || (entries[0].kind === 'directory' ? 'dir' : 'file');
+        setExplorerGitBrowseTarget(index, path, kind);
+    }
+
+    function explorerGitScopeKindForSelectedRow(index, surface, path) {
+        const container = explorerSurfaceContainer(index, surface);
+        if (!container) {
+            return null;
+        }
+        const rows = container.querySelectorAll('[data-explorer-git-scope-path]');
+        for (const node of rows) {
+            if (node.dataset.explorerGitScopePath === path) {
+                return node.dataset.explorerGitScopeKind === 'file' ? 'file' : 'dir';
+            }
+        }
+        return null;
     }
 
     function clearExplorerSelection(sessionId) {
@@ -2001,20 +2054,45 @@
                 });
             }
             if (gitBrowsingSurface) {
-                const followItem = policy.explorerGitFollowMenuItem(
-                    pane?._explorerGitFollowBrowsing,
-                    pane?._explorerGitActionBusy || pane?._explorerGitRepoLoading
-                );
-                gitItems.push({
-                    label: followItem.label,
-                    title: followItem.title,
-                    disabled: followItem.disabled,
-                    action: () => (
-                        gitTargetIsCurrent()
-                            ? toggleExplorerGitFollowBrowsing(index)
-                            : false
-                    )
+                /* Follow obeys the pin's two rules on this row, not on the
+                   pane: no entry at all for a multi-entry selection, and
+                   "is Follow here" rather than "is Follow on", so a row
+                   Follow is not on offers to move it in one write instead of
+                   offering to switch Follow off somewhere else. */
+                const followedScope = explorerGitBrowsingScope(pane);
+                const followItem = policy.explorerGitFollowMenuItem({
+                    following: pane?._explorerGitFollowBrowsing,
+                    followedPath: followedScope.path,
+                    followedKind: followedScope.kind,
+                    targetPath: gitScopePath,
+                    targetKind: gitScopeKind,
+                    targetCount: gitTargetCount,
+                    disabled: pane?._explorerGitActionBusy || pane?._explorerGitRepoLoading
                 });
+                if (followItem) {
+                    gitItems.push({
+                        label: followItem.label,
+                        title: followItem.title,
+                        disabled: followItem.disabled,
+                        action: () => {
+                            if (!gitTargetIsCurrent()) {
+                                return false;
+                            }
+                            if (followItem.action === 'unfollow') {
+                                return toggleExplorerGitFollowBrowsing(index);
+                            }
+                            /* Name the row first, then follow: the scope this
+                               entry promises is this row, not whatever the
+                               listing behind it happens to be showing. When
+                               Follow is already on this is the whole write —
+                               toggling it would switch it off. */
+                            setExplorerGitBrowseTarget(index, gitScopePath, gitScopeKind);
+                            return capturedPane._explorerGitFollowBrowsing
+                                ? true
+                                : toggleExplorerGitFollowBrowsing(index);
+                        }
+                    });
+                }
             }
         }
         if (beforePath.length && pathItems.length) {

@@ -84,7 +84,7 @@ const fs = require('fs');
 const vm = require('vm');
 
 const spec = JSON.parse(process.argv[5]);
-const calls = { pins: [], follows: [], probes: [] };
+const calls = { pins: [], follows: [], probes: [], browseTargets: [] };
 
 function makeNode(dataset) {
     const node = {
@@ -163,6 +163,27 @@ sandbox.clearExplorerGitPinnedScope = index => {
 };
 sandbox.toggleExplorerGitFollowBrowsing = index => {
     calls.follows.push(index);
+    sandbox.terminals[index]._explorerGitFollowBrowsing =
+        !sandbox.terminals[index]._explorerGitFollowBrowsing;
+    return true;
+};
+/* explorer-git-sidebar.js on the page. Kept faithful rather than inert,
+   because what the Follow entry offers depends on where Follow currently is,
+   and what it writes is the browsed scope the next load would carry. */
+sandbox.explorerGitBrowsingScope = pane => {
+    const derived = pane?._explorerMode === 'file' && pane._explorerFilePath
+        ? { path: String(pane._explorerFilePath), kind: 'file' }
+        : { path: String(pane?._explorerPath || ''), kind: 'dir' };
+    return sandbox.GridVibeExplorerGitPin.explorerGitBrowsedScope(
+        derived.path, derived.kind, pane?._explorerGitBrowseTarget || null
+    );
+};
+sandbox.setExplorerGitBrowseTarget = (index, path, kind) => {
+    calls.browseTargets.push({ index, path, kind });
+    const pane = sandbox.terminals[index];
+    const derived = { path: String(pane?._explorerPath || ''), kind: 'dir' };
+    pane._explorerGitBrowseTarget = sandbox.GridVibeExplorerGitPin
+        .explorerGitBrowseOverride(path, kind, derived.path, derived.kind);
     return true;
 };
 sandbox.refreshExplorerPinAffordances = () => {};
@@ -198,6 +219,27 @@ if (spec.loadedRepoPath !== undefined) {
 }
 sandbox.terminals[0] = pane;
 sandbox.sessionIds[0] = 'sess-0';
+
+/* Right-clicking a row that is part of the live selection acts on the whole
+   selection, so a multi-entry selection is how the "several rows name no one
+   path" rule is reached at all. Seeded through the real selection model. */
+if (Array.isArray(spec.selected) && spec.selected.length) {
+    let selection = null;
+    for (const entry of spec.selected) {
+        selection = sandbox.GridVibeExplorerSelection.applyPointerSelection(
+            selection,
+            {
+                sessionId: 'sess-0',
+                rootRevision: 'rev-1',
+                surface: spec.selectedSurface || 'preview',
+                entry: { path: entry.path, kind: entry.kind, revision: 'r1' },
+                ctrlKey: true
+            },
+            spec.selected.map(item => ({ path: item.path, kind: item.kind, revision: 'r1' }))
+        ).selection;
+    }
+    sandbox.storeExplorerSelection(0, selection);
+}
 
 const row = spec.row ? makeNode(spec.row) : null;
 if (row) {
@@ -243,6 +285,7 @@ Promise.all(gestures).then(async () => {
         })),
         pins: calls.pins,
         follows: calls.follows,
+        browseTargets: calls.browseTargets,
         probes: calls.probes,
         menuCount: menus.length
     }));
@@ -357,9 +400,87 @@ class ExplorerGitScopeMenuSurfaceTestCase(unittest.TestCase):
         result = self._ask(row=_preview_row("web"), click="Follow Git browsing")
         self.assertEqual(result["follows"], [0])
         result = self._ask(
-            row=_preview_row("web"), following=True, click="Unfollow Git browsing"
+            row=_preview_row("web"),
+            following=True,
+            panePath="web",
+            click="Unfollow Git browsing",
         )
         self.assertEqual(result["follows"], [0])
+
+    def test_follow_on_a_listing_file_row_scopes_to_that_file(self):
+        """The row the reader pointed at, not the folder the listing shows.
+
+        The pin entry has always named the row; Follow read the pane's derived
+        browsing scope instead, so choosing it on `web/api.py` scoped Git to
+        `web`.
+        """
+        result = self._ask(
+            row=_preview_row("web/api.py", kind="file", entry_kind="file"),
+            panePath="web",
+            click="Follow Git browsing",
+        )
+        self.assertEqual(
+            result["browseTargets"],
+            [{"index": 0, "path": "web/api.py", "kind": "file"}],
+        )
+        self.assertEqual(result["follows"], [0])
+
+    def test_following_elsewhere_moves_follow_here_in_one_write(self):
+        """The pin button's rule: only the followed row offers to unfollow."""
+        result = self._ask(
+            row=_preview_row("web/api.py", kind="file", entry_kind="file"),
+            panePath="web",
+            following=True,
+            click="Follow Git browsing",
+        )
+        self.assertEqual(
+            result["browseTargets"],
+            [{"index": 0, "path": "web/api.py", "kind": "file"}],
+        )
+        # Already following: naming the row is the whole write. Toggling would
+        # switch Follow off.
+        self.assertEqual(result["follows"], [])
+
+    def test_the_followed_row_is_the_only_one_that_offers_to_unfollow(self):
+        followed = self._ask(
+            row=_preview_row("web"), panePath="web", following=True
+        )
+        other = self._ask(
+            row=_preview_row("docs"), panePath="web", following=True
+        )
+        self.assertEqual([item["label"] for item in followed["git"]][1],
+                         "Unfollow Git browsing")
+        self.assertEqual([item["label"] for item in other["git"]][1],
+                         "Follow Git browsing")
+
+    def test_a_multi_entry_selection_offers_neither_pin_nor_follow(self):
+        """Both are one exact path, so several rows name neither."""
+        result = self._ask(
+            row=_preview_row("web/api.py", kind="file", entry_kind="file"),
+            panePath="web",
+            selected=[
+                {"path": "web/api.py", "kind": "file"},
+                {"path": "web/explorer.py", "kind": "file"},
+            ],
+        )
+        self.assertEqual([item["label"] for item in result["git"]], [])
+
+    def test_one_highlighted_row_is_itself_a_browsing_act(self):
+        """A single Ctrl-click names one exact path, so the scope follows it.
+
+        This is what the Graph header's own Follow button reads: it has no row
+        of its own, so "the highlighted file" has to reach it through the
+        pane's browsed scope.
+        """
+        result = self._ask(
+            row=_preview_row("web/api.py", kind="file", entry_kind="file"),
+            panePath="web",
+            selected=[{"path": "web/api.py", "kind": "file"}],
+        )
+        self.assertEqual(
+            result["browseTargets"][0],
+            {"index": 0, "path": "web/api.py", "kind": "file"},
+        )
 
     def test_blank_space_in_the_listing_names_the_folder_it_is_showing(self):
         # The tree's blank space is the explorer root; the listing's is

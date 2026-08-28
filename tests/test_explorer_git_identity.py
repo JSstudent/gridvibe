@@ -26,6 +26,9 @@ from tempfile import TemporaryDirectory
 
 ROOT = Path(__file__).resolve().parent.parent
 SIDEBAR_JS = ROOT / "web" / "static" / "js" / "explorer-git-sidebar.js"
+# The scope policy the sidebar reads through `window`: what the pane is
+# browsing is the policy module's answer, not the sidebar's own.
+PIN_JS = ROOT / "web" / "static" / "js" / "explorer-git-pin.js"
 
 NODE = shutil.which("node")
 
@@ -107,8 +110,10 @@ const sandbox = {
     }
 };
 sandbox.globalThis = sandbox;
+sandbox.window = sandbox;
 vm.createContext(sandbox);
-vm.runInContext(fs.readFileSync(process.argv[2], 'utf8'), sandbox);
+vm.runInContext(fs.readFileSync(process.argv[3], 'utf8'), sandbox);  // git pin policy
+vm.runInContext(fs.readFileSync(process.argv[2], 'utf8'), sandbox);  // git sidebar
 
 /* Overrides go on *after* evaluation: the sidebar's own function declarations
    would otherwise replace same-named stubs put on the sandbox up front. Every
@@ -162,7 +167,7 @@ class ExplorerGitIdentityHarness(unittest.TestCase):
             script_path = Path(script_dir) / "harness.js"
             script_path.write_text(script, encoding="utf-8")
             completed = subprocess.run(
-                [NODE, str(script_path), str(SIDEBAR_JS)],
+                [NODE, str(script_path), str(SIDEBAR_JS), str(PIN_JS)],
                 capture_output=True,
                 text=True,
                 encoding="utf-8",
@@ -530,7 +535,7 @@ class LoadIdentityTestCase(unittest.TestCase):
             script_path = Path(script_dir) / "harness.js"
             script_path.write_text(script, encoding="utf-8")
             completed = subprocess.run(
-                [NODE, str(script_path), str(SIDEBAR_JS)],
+                [NODE, str(script_path), str(SIDEBAR_JS), str(PIN_JS)],
                 capture_output=True,
                 text=True,
                 encoding="utf-8",

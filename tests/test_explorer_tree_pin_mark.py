@@ -716,15 +716,17 @@ const api = require(process.argv[2]);
 const cases = JSON.parse(process.argv[3]);
 process.stdout.write(JSON.stringify({
     menus: cases.map(spec => api.explorerGitScopeMenuItem(spec)),
-    follow: [
-        api.explorerGitFollowMenuItem(false),
-        api.explorerGitFollowMenuItem(true)
-    ]
+    follow: JSON.parse(process.argv[4]).map(spec => api.explorerGitFollowMenuItem(spec))
 }));
 """
 
-    def _ask(self, cases):
-        completed = _run(self.HARNESS, str(PIN_JS), json.dumps(cases))
+    def _ask(self, cases, follow=None):
+        completed = _run(
+            self.HARNESS,
+            str(PIN_JS),
+            json.dumps(cases),
+            json.dumps(follow if follow is not None else []),
+        )
         if completed.returncode != 0:
             self.fail(f"node harness failed:\n{completed.stderr}")
         return json.loads(completed.stdout)
@@ -759,14 +761,159 @@ process.stdout.write(JSON.stringify({
         self.assertTrue(outside["disabled"])
         self.assertIn("not inside a Git worktree", outside["title"])
 
-    def test_multi_selection_has_no_pin_entry_and_follow_has_both_labels(self):
-        result = self._ask(
-            [{"targetPath": "src/app.js", "targetKind": "file", "targetCount": 3}]
-        )
+    def test_multi_selection_drops_the_pin_and_the_follow_entry_alike(self):
+        """Both entries are one exact path, so several rows name neither."""
+        multi = {"targetPath": "src/app.js", "targetKind": "file", "targetCount": 3}
+        result = self._ask([multi], follow=[multi])
         self.assertIsNone(result["menus"][0])
+        self.assertIsNone(result["follow"][0])
+
+    def test_follow_asks_whether_it_is_here_not_whether_it_is_on(self):
+        """The pin button's rule, on the row: only the followed row unfollows.
+
+        Answering "is Follow on" left a reader following one folder with no
+        way to say "follow this file" -- every other row offered to switch
+        Follow off instead of to move it.
+        """
+        off, here, elsewhere, kind_differs = self._ask(
+            [],
+            follow=[
+                {"following": False, "targetPath": "src/app.js", "targetKind": "file"},
+                {
+                    "following": True,
+                    "followedPath": "src/app.js",
+                    "followedKind": "file",
+                    "targetPath": "src/app.js",
+                    "targetKind": "file",
+                },
+                {
+                    "following": True,
+                    "followedPath": "src",
+                    "followedKind": "dir",
+                    "targetPath": "src/app.js",
+                    "targetKind": "file",
+                },
+                {
+                    "following": True,
+                    "followedPath": "src/app.js",
+                    "followedKind": "dir",
+                    "targetPath": "src/app.js",
+                    "targetKind": "file",
+                },
+            ],
+        )["follow"]
+        self.assertEqual(off["action"], "follow")
+        self.assertEqual(here["action"], "unfollow")
+        self.assertEqual(here["label"], "Unfollow Git browsing")
+        self.assertEqual(elsewhere["action"], "follow")
+        self.assertEqual(elsewhere["label"], "Follow Git browsing")
+        self.assertIn("file", elsewhere["title"])
+        # A path is a scope only together with its kind, exactly as the pin is.
+        self.assertEqual(kind_differs["action"], "follow")
+
+    def test_a_disabled_follow_entry_is_disabled_and_never_dropped(self):
+        item = self._ask(
+            [],
+            follow=[{"targetPath": "src", "targetKind": "dir", "disabled": True}],
+        )["follow"][0]
+        self.assertEqual(item["label"], "Follow Git browsing")
+        self.assertTrue(item["disabled"])
+
+
+@unittest.skipUnless(NODE, "Node.js is required for explorer Git scope tests")
+class ExplorerGitBrowseTargetTestCase(unittest.TestCase):
+    """The browsed scope: a highlighted row overrides it until navigation moves.
+
+    Follow used to read navigation alone, so choosing Follow on a file row in
+    the directory listing scoped Git to the folder the listing was showing.
+    The override carries the derived scope it was made against, which is what
+    makes "until the next browsing act" need no invalidation hook: navigation
+    moves the derived scope, the two stop agreeing, and the override is gone.
+    """
+
+    HARNESS = r"""
+const api = require(process.argv[2]);
+const spec = JSON.parse(process.argv[3]);
+process.stdout.write(JSON.stringify(spec.map(step => api.explorerGitBrowsedScope(
+    step.basePath,
+    step.baseKind,
+    step.override === null || step.override === undefined
+        ? null
+        : api.explorerGitBrowseOverride(
+            step.override.path,
+            step.override.kind,
+            step.override.basePath,
+            step.override.baseKind
+        )
+))));
+"""
+
+    def _ask(self, steps):
+        completed = _run(self.HARNESS, str(PIN_JS), json.dumps(steps))
+        if completed.returncode != 0:
+            self.fail(f"node harness failed:\n{completed.stderr}")
+        return json.loads(completed.stdout)
+
+    def test_no_override_is_plain_navigation(self):
         self.assertEqual(
-            [item["label"] for item in result["follow"]],
-            ["Follow Git browsing", "Unfollow Git browsing"],
+            self._ask([{"basePath": "web/static", "baseKind": "dir", "override": None}]),
+            [{"path": "web/static", "kind": "dir"}],
+        )
+
+    def test_a_file_highlighted_in_a_listing_beats_the_folder_it_lists(self):
+        override = {
+            "path": "web/api.py",
+            "kind": "file",
+            "basePath": "web",
+            "baseKind": "dir",
+        }
+        self.assertEqual(
+            self._ask([{"basePath": "web", "baseKind": "dir", "override": override}]),
+            [{"path": "web/api.py", "kind": "file"}],
+        )
+
+    def test_the_next_navigation_supersedes_it_with_nothing_to_clear(self):
+        override = {
+            "path": "web/api.py",
+            "kind": "file",
+            "basePath": "web",
+            "baseKind": "dir",
+        }
+        held, moved_folder, opened_file = self._ask(
+            [
+                {"basePath": "web", "baseKind": "dir", "override": override},
+                {"basePath": "docs", "baseKind": "dir", "override": override},
+                {"basePath": "web/explorer.py", "baseKind": "file", "override": override},
+            ]
+        )
+        self.assertEqual(held, {"path": "web/api.py", "kind": "file"})
+        self.assertEqual(moved_folder, {"path": "docs", "kind": "dir"})
+        self.assertEqual(opened_file, {"path": "web/explorer.py", "kind": "file"})
+
+    def test_the_explorer_root_is_a_real_base_and_a_real_override(self):
+        # '' is a scope, not an absence, exactly as it is for the pin.
+        self.assertEqual(
+            self._ask(
+                [
+                    {
+                        "basePath": "",
+                        "baseKind": "dir",
+                        "override": {
+                            "path": "",
+                            "kind": "dir",
+                            "basePath": "",
+                            "baseKind": "dir",
+                        },
+                    }
+                ]
+            ),
+            [{"path": "", "kind": "dir"}],
+        )
+
+    def test_an_override_is_never_built_from_an_absent_path(self):
+        self.assertEqual(
+            self._ask([{"basePath": "web", "baseKind": "dir", "override": {"path": None}}]),
+            [{"path": "web", "kind": "dir"}],
         )
 
 

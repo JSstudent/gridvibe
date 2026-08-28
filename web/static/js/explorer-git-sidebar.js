@@ -31,11 +31,50 @@
         return `/api/explorer/${encodeURIComponent(sessionId)}/git/${endpoint}${query ? `?${query}` : ''}`;
     }
 
-    function explorerGitBrowsingScope(pane) {
+    /* Where navigation alone has put the pane: the open file, or the folder
+       the listing is showing. */
+    function explorerGitDerivedBrowsingScope(pane) {
         if (pane?._explorerMode === 'file' && pane._explorerFilePath) {
             return { path: String(pane._explorerFilePath), kind: 'file' };
         }
         return { path: String(pane?._explorerPath || ''), kind: 'dir' };
+    }
+
+    /* What the pane is browsing, which is what both header controls are
+       about: the derived scope above, unless the reader has singled out one
+       row since it last moved (explorer-git-pin.js owns that rule). */
+    function explorerGitBrowsingScope(pane) {
+        const derived = explorerGitDerivedBrowsingScope(pane);
+        return window.GridVibeExplorerGitPin.explorerGitBrowsedScope(
+            derived.path, derived.kind, pane?._explorerGitBrowseTarget || null
+        );
+    }
+
+    /* The one writer for that override. `null` gives the derived scope back.
+
+       A gesture that leaves the browsing scope where it was costs nothing —
+       not a paint and not a load — for the same reason navigation that leaves
+       the scope alone does: loadExplorerGitRepo()'s own "already loaded"
+       early return still re-renders the panel, and the panel carries the
+       commit-message textarea. */
+    function setExplorerGitBrowseTarget(index, path, kind = 'dir') {
+        const pane = terminals[index];
+        if (!pane) {
+            return false;
+        }
+        const derived = explorerGitDerivedBrowsingScope(pane);
+        const before = explorerGitBrowsingScope(pane);
+        pane._explorerGitBrowseTarget = window.GridVibeExplorerGitPin
+            .explorerGitBrowseOverride(path, kind, derived.path, derived.kind);
+        const after = explorerGitBrowsingScope(pane);
+        if (before.path === after.path && before.kind === after.kind) {
+            return false;
+        }
+        refreshExplorerPinAffordances(index);
+        if (explorerGitScopeNeedsLoad(pane)) {
+            loadExplorerGitRepo(index);
+        }
+        return true;
     }
 
     function explorerGitScopePath(pane) {
@@ -213,6 +252,19 @@
 
     function explorerGitCommitSearchableHash(commit) {
         return String(commit?.full_hash || commit?.hash || '');
+    }
+
+    /* The follow button's title names the scope it would take, because that
+       scope is no longer always "the browsed folder": a highlighted row and
+       the listing's own folder are both browsing acts, and one of them can be
+       a file. */
+    function explorerGitFollowButtonTitle(pane, following) {
+        if (following) {
+            return 'Use fixed Git scope';
+        }
+        const target = explorerGitBrowsingScope(pane);
+        const pin = window.GridVibeExplorerGitPin;
+        return `Follow the browsed ${target.kind === 'file' ? 'file' : 'folder'} for Git: ${pin.explorerGitPinPathLabel(target.path)}`;
     }
 
     /* The pin button's three states, read from the module the Files tree's
@@ -800,6 +852,7 @@
         }
         if (pane._explorerGitRepoError && !pane._explorerGitRepo) {
             const following = Boolean(pane._explorerGitFollowBrowsing);
+            const followTitle = explorerGitFollowButtonTitle(pane, following);
             const pinned = typeof pane._explorerGitPinnedPath === 'string';
             const pinState = explorerGitPinState(pane);
             const pinnedKind = pane._explorerGitPinKind === 'file' ? 'file' : 'dir';
@@ -828,7 +881,7 @@
                         <span>Graph</span>
                         <span class="explorer-git-section-actions">
                             <button type="button" class="explorer-search-btn explorer-git-pin-toggle${pinState.state === 'elsewhere' ? ' is-pinned-elsewhere' : ''}" data-explorer-git-pin-toggle aria-pressed="${pinState.pressed ? 'true' : 'false'}" title="${escHtml(pinState.title)}" aria-label="${escHtml(pinState.title)}">${EXPLORER_GIT_PIN_ICON}</button>
-                            <button type="button" class="explorer-search-btn explorer-git-follow-toggle" data-explorer-git-follow-toggle aria-pressed="${following ? 'true' : 'false'}" title="${following ? 'Use fixed Git folder' : 'Follow browsed folder for Git'}" aria-label="${following ? 'Use fixed Git folder' : 'Follow browsed folder for Git'}">${EXPLORER_GIT_FOLLOW_ICON}</button>
+                            <button type="button" class="explorer-search-btn explorer-git-follow-toggle" data-explorer-git-follow-toggle aria-pressed="${following ? 'true' : 'false'}" title="${escHtml(followTitle)}" aria-label="${escHtml(followTitle)}">${EXPLORER_GIT_FOLLOW_ICON}</button>
                             <button type="button" class="explorer-search-btn explorer-git-commit-search-toggle" disabled title="Search commit messages" aria-label="Search commit messages">${EXPLORER_GIT_SEARCH_ICON}</button>
                         </span>
                     </div>
@@ -870,6 +923,7 @@
         const repoName = String(git.repo_name || '').trim();
         const repoBranchText = explorerGitBranchLabel(git);
         const following = Boolean(pane._explorerGitFollowBrowsing);
+        const followTitle = explorerGitFollowButtonTitle(pane, following);
         const pinState = explorerGitPinState(pane);
         const browsedScope = explorerGitBrowsingScope(pane);
         const pinnedKind = pane._explorerGitPinKind === 'file' ? 'file' : 'dir';
@@ -983,7 +1037,7 @@
                     <span>Graph</span>
                     <span class="explorer-git-section-actions">
                         <button type="button" class="explorer-search-btn explorer-git-pin-toggle${pinState.state === 'elsewhere' ? ' is-pinned-elsewhere' : ''}" data-explorer-git-pin-toggle aria-pressed="${pinState.pressed ? 'true' : 'false'}" ${busy ? 'disabled' : ''} title="${escHtml(pinState.title)}" aria-label="${escHtml(pinState.title)}">${EXPLORER_GIT_PIN_ICON}</button>
-                        <button type="button" class="explorer-search-btn explorer-git-follow-toggle" data-explorer-git-follow-toggle aria-pressed="${following ? 'true' : 'false'}" ${busy ? 'disabled' : ''} title="${following ? 'Use fixed Git folder' : 'Follow browsed folder for Git'}" aria-label="${following ? 'Use fixed Git folder' : 'Follow browsed folder for Git'}">${EXPLORER_GIT_FOLLOW_ICON}</button>
+                        <button type="button" class="explorer-search-btn explorer-git-follow-toggle" data-explorer-git-follow-toggle aria-pressed="${following ? 'true' : 'false'}" ${busy ? 'disabled' : ''} title="${escHtml(followTitle)}" aria-label="${escHtml(followTitle)}">${EXPLORER_GIT_FOLLOW_ICON}</button>
                         <button type="button" class="explorer-search-btn explorer-git-commit-search-toggle" data-explorer-git-commit-search-toggle aria-expanded="${commitSearch.open ? 'true' : 'false'}" title="Search commit messages" aria-label="Search commit messages">${EXPLORER_GIT_SEARCH_ICON}</button>
                     </span>
                 </div>
