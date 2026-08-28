@@ -4321,6 +4321,23 @@
         return token;
     }
 
+    /* The stamp names the *content*, so anything that puts something else in
+       the panel takes it off on the way in.
+
+       The loader's placeholder, the stale notice and a failure message all
+       replace the panel's subtree without replacing the element, and the stamp
+       left standing describes a render that is no longer on screen. The next
+       paint of that same render then reads as "already showing this" and does
+       nothing — which is how staging a Markdown file stranded the panel on
+       "Rendering preview...": the in-place refresh drops the cached preview,
+       the loader blanks the panel and asks again, and the answer is
+       byte-identical to the render the stamp still named. */
+    function invalidateExplorerPreviewRender(preview) {
+        if (preview && preview.dataset) {
+            delete preview.dataset.explorerPreviewRender;
+        }
+    }
+
     /* A repaint of the Preview panel is not a re-visit of it.
 
        Every path that shows the panel used to run this: selecting the tab,
@@ -4416,6 +4433,7 @@
         if (!preview) {
             return null;
         }
+        invalidateExplorerPreviewRender(preview);
         preview.innerHTML = `
             <div class="explorer-preview-status" role="status">
                 <span>The file changed while the preview was rendering.</span>
@@ -4480,6 +4498,7 @@
                 ? preview
                 : null;
         }
+        invalidateExplorerPreviewRender(preview);
         preview.textContent = 'Rendering preview...';
         const load = (async () => {
             try {
@@ -4524,6 +4543,7 @@
                     return null;
                 }
                 console.error('[GridVibe Sessions] Explorer preview render failed:', error);
+                invalidateExplorerPreviewRender(preview);
                 preview.textContent = error.message || 'Failed to render preview.';
                 return preview;
             }
