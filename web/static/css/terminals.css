@@ -2626,10 +2626,13 @@
 
         .explorer-tree-row {
             display: grid;
-            /* chevron | name | git badge | pin marker | open control. Each
-               trailing track is `auto`, so a row without one of them simply
-               collapses that column rather than wrapping onto a second line. */
-            grid-template-columns: auto minmax(0, 1fr) auto auto auto;
+            /* chevron | name | git badge | pin marker | follow marker | open
+               control. Each trailing track is `auto`, so a row without one of
+               them simply collapses that column rather than wrapping onto a
+               second line -- which is also why a row carrying only the Follow
+               marker looks the same as one carrying only the pin: the mark
+               lands in the earlier track and the empty one collapses. */
+            grid-template-columns: auto minmax(0, 1fr) auto auto auto auto;
             align-items: center;
             gap: 4px;
             min-width: 0;
@@ -2728,14 +2731,22 @@
             height: 16px;
         }
 
-        /* The Git scope pin marker. It reports a state and is not a control,
-           so it takes no border, no background and no hover — but it shares
-           the 22px box and 13px icon of the open-in-folder / open-in-tab
-           buttons beside it so the row's right-hand controls stay aligned. An
-           SVG has no font metrics to centre by, hence the explicit flex box.
-           The head's copy stands in for the explorer root, which the tree body
-           (a listing of the root's children) has no row for. */
-        .explorer-tree-pin-mark {
+        /* The two Git scope markers — the pin, and the chain a live Follow
+           puts on the row it is tracking. Both report a state and are not
+           controls, so they take no border, no background and no hover — but
+           they share the 22px box and 13px icon of the open-in-folder /
+           open-in-tab buttons beside them so the row's right-hand controls
+           stay aligned. An SVG has no font metrics to centre by, hence the
+           explicit flex box. The head's copies stand in for the explorer root,
+           which the tree body (a listing of the root's children) has no row
+           for.
+
+           One rule for both rather than a second copy of the box: the Follow
+           marker is the same affordance answering the other control, and a
+           duplicated declaration is how the two would drift out of alignment
+           with each other and with the buttons they sit beside. */
+        .explorer-tree-pin-mark,
+        .explorer-tree-follow-mark {
             display: inline-flex;
             align-items: center;
             justify-content: center;
@@ -2745,19 +2756,22 @@
         }
 
         /* The class sets `display`, so the UA's own [hidden] rule loses to it:
-           the head's marker is toggled by attribute and needs this to stay
-           hidden while nothing is pinned at the root. */
-        .explorer-tree-pin-mark[hidden] {
+           the head's markers are toggled by attribute and need this to stay
+           hidden while nothing is scoped to the root. */
+        .explorer-tree-pin-mark[hidden],
+        .explorer-tree-follow-mark[hidden] {
             display: none;
         }
 
-        .explorer-tree-pin-mark .explorer-btn-icon {
+        .explorer-tree-pin-mark .explorer-btn-icon,
+        .explorer-tree-follow-mark .explorer-btn-icon {
             display: block;
             width: 13px;
             height: 13px;
         }
 
-        .explorer-tree-head .explorer-tree-pin-mark {
+        .explorer-tree-head .explorer-tree-pin-mark,
+        .explorer-tree-head .explorer-tree-follow-mark {
             flex: 0 0 auto;
         }
 
@@ -4391,9 +4405,15 @@
            Folded away until the header's magnifier asks for it. `display: flex`
            beats the `hidden` attribute's own `display: none`, so the hidden
            state has to be restated here — without this the bar never hides. */
+        /* Stacked under the frozen repo bar, never behind it: both are sticky
+           in the same scroller, so an offset of 0 here would park this bar in
+           the strip the header already owns and the header wins on z-index.
+           The height is published per render by the panel
+           (`observeExplorerGitHeaderHeight()`); the 0px fallback is the
+           repository-error and loading panels, which have no frozen header. */
         .explorer-git-commit-search {
             position: sticky;
-            top: 0;
+            top: var(--explorer-git-header-height, 0px);
             z-index: 1;
             display: flex;
             align-items: center;
@@ -4725,11 +4745,37 @@
             white-space: nowrap;
         }
 
+        /* The panel's frozen header. Repository, branch and the pin/Follow
+           scope lines answer "which repository, and which part of it" — the
+           question every change row and every commit below is read against —
+           so scrolling them away is what made a long graph ambiguous about
+           what it was a graph of. Sticky rather than a second pane above the
+           scroller: the bar keeps its place in the panel's flow, so a short
+           panel is laid out exactly as before and nothing has to be told the
+           header's height.
+
+           It needs an opaque background of its own — a sticky box is painted
+           over the rows sliding beneath it, and the panel's background is on
+           the panel, not on this. The z-index only has to beat the ordinary
+           in-flow rows below it. */
         .explorer-git-repo-bar {
+            position: sticky;
+            top: 0;
+            z-index: 2;
             display: flex;
             align-items: center;
-            justify-content: space-between;
             gap: 8px;
+            padding: 8px 10px;
+            background: var(--explorer-bar-bg);
+        }
+
+        /* Publish/Push, below the frozen header and scrolling away with
+           everything else. Full width in its own grid, matching the Commit
+           button's box: it is no longer competing for a row with the scope
+           lines, so the shape that reads as "the action for this section" is
+           the one the other committing action already uses. */
+        .explorer-git-publish-box {
+            display: grid;
             padding: 8px 10px;
         }
 

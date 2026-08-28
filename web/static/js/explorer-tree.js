@@ -122,16 +122,26 @@
             .map(entry => entry.path);
     }
 
-    /* The Git scope pin is a state, not a control: the tree *reports* where the
-       pin is and never moves it, so this is a marker (a <span>) and not a
-       button. Its box and icon match the row's open-in-folder / open-in-tab
-       buttons so the row's controls stay on one baseline — an SVG does not
-       centre by font metrics the way a text glyph would.
+    /* A Git scope is a state, not a control: the tree *reports* where the pin
+       and Follow point and never moves either, so these are markers (<span>)
+       and not buttons. Their box and icon match the row's open-in-folder /
+       open-in-tab buttons so the row's controls stay on one baseline — an
+       SVG does not centre by font metrics the way a text glyph would.
 
-       Zero new persisted state: which row wears it is derived from the pane's
-       `_explorerGitPinnedPath` every time it is asked. */
+       Two markers rather than one, and a row may wear both: a pin and a live
+       Follow are two scopes, exactly as the repo bar's two lines are.
+       Collapsing them into one mark would hide the pin that Follow is
+       currently overriding — the "the pin was lost" reading the repo bar's
+       paired rows exist to prevent — and would leave the reader unable to
+       tell which of the two controls put the mark there.
+
+       Zero new persisted state: which row wears which is derived from the
+       pane's `_explorerGitPinnedPath` and its live Follow scope every time it
+       is asked. */
     const EXPLORER_TREE_PIN_MARK_TITLE = 'Git scope pinned here';
     const EXPLORER_TREE_PIN_ROOT_MARK_TITLE = 'Git scope pinned to the explorer root';
+    const EXPLORER_TREE_FOLLOW_MARK_TITLE = 'Git scope follows this row';
+    const EXPLORER_TREE_FOLLOW_ROOT_MARK_TITLE = 'Git scope follows the explorer root';
 
     function explorerTreePinMarkHtml({ root = false } = {}) {
         const title = root ? EXPLORER_TREE_PIN_ROOT_MARK_TITLE : EXPLORER_TREE_PIN_MARK_TITLE;
@@ -143,6 +153,20 @@
                 aria-label="${title}"
                 ${root ? 'hidden' : ''}
             >${EXPLORER_GIT_PIN_ICON}</span>`;
+    }
+
+    function explorerTreeFollowMarkHtml({ root = false } = {}) {
+        const title = root
+            ? EXPLORER_TREE_FOLLOW_ROOT_MARK_TITLE
+            : EXPLORER_TREE_FOLLOW_MARK_TITLE;
+        return `<span
+                class="explorer-tree-follow-mark"
+                ${root ? 'data-explorer-tree-follow-root' : ''}
+                role="img"
+                title="${title}"
+                aria-label="${title}"
+                ${root ? 'hidden' : ''}
+            >${EXPLORER_GIT_FOLLOW_ICON}</span>`;
     }
 
     /* The pane's pinned path, or `null` when nothing is pinned. `''` is a real
@@ -167,39 +191,112 @@
         ));
     }
 
-    /* Move the pin marker without rebuilding the tree.
+    /* Where Follow is pointing, or `null` when it is off.
+
+       The tree only *asks*. Which path Follow is on is the Git sidebar's to
+       derive — `explorerGitBrowsingScope()` folds the pane's mode, its open
+       file, its browsed folder and the reader's row override into one answer
+       — and re-deriving any of that here is how a marked row and the repo
+       bar's Follow line would come to name two different paths. Guarded the
+       same way the sidebar guards its call into this file: with no sidebar on
+       the page there is no Follow, so there is nothing to mark. */
+    function explorerTreeFollowedScope(pane) {
+        if (!pane?._explorerGitFollowBrowsing
+            || typeof explorerGitBrowsingScope !== 'function') {
+            return null;
+        }
+        const scope = explorerGitBrowsingScope(pane);
+        if (!scope) {
+            return null;
+        }
+        return {
+            path: String(scope.path === null || scope.path === undefined ? '' : scope.path),
+            kind: scope.kind === 'file' ? 'file' : 'dir'
+        };
+    }
+
+    /* Exact equality against the followed scope, through the same predicate
+       the pin marker and the Graph header's pin button are painted from —
+       "is Follow *here*", never "is Follow on". */
+    function explorerTreeScopeIsFollowed(followed, path, kind = 'dir') {
+        const policy = window.GridVibeExplorerGitPin;
+        return Boolean(followed && policy && policy.explorerGitPathIsPinned(
+            followed.path,
+            path,
+            followed.kind,
+            kind
+        ));
+    }
+
+    /* One marker on one row, added or removed only when it disagrees with the
+       scope. `anchorSelector` is where the row markup would have put it, so a
+       marker arriving by paint lands where a re-render would place it: a
+       comma list resolves in document order, which is what keeps the pin
+       ahead of Follow when the pin is the one arriving second.
+
+       The `querySelector` calls here are scoped to that row's handful of
+       children, not to the row list, so they are lookups and not scans. */
+    function applyExplorerTreeRowMark(row, selector, wanted, markHtml, anchorSelector) {
+        const mark = row.querySelector(selector);
+        if (Boolean(wanted) === Boolean(mark)) {
+            return;
+        }
+        if (mark) {
+            mark.remove();
+            return;
+        }
+        /* A row with no open control (a file row in a filtered result tree)
+           takes the marker at the end. */
+        const anchor = row.querySelector(anchorSelector);
+        if (anchor) {
+            anchor.insertAdjacentHTML('beforebegin', markHtml);
+        } else {
+            row.insertAdjacentHTML('beforeend', markHtml);
+        }
+    }
+
+    /* Move the Git scope markers without rebuilding the tree.
 
        A pin write changes exactly two rows — the one losing the mark and the
-       one gaining it — and re-rendering `[data-explorer-tree-body]` to say so
-       would empty the panel's scroller, clamping its offset to 0; the
-       capture-phase scroll listener then persists that 0 as the reader's
-       position. So the rows are found by **one** walk over the rendered rows
-       rather than a `querySelector` per row over the whole list (the repaint
-       guardrail), and only the two that disagree with the pin are touched.
+       one gaining it — and a Follow move changes at most two more;
+       re-rendering `[data-explorer-tree-body]` to say so would empty the
+       panel's scroller, clamping its offset to 0, and the capture-phase
+       scroll listener then persists that 0 as the reader's position. So the
+       rows are found by **one** walk over the rendered rows rather than a
+       `querySelector` per row over the whole list (the repaint guardrail) —
+       one walk for both markers, never one walk each — and only the rows that
+       disagree are touched.
 
-       The per-row `querySelector` below is scoped to that row's handful of
-       children, not to the row list, so it is a lookup and not a scan.
-
-       Idempotent: a freshly rendered tree already carries the marker in its
+       Idempotent: a freshly rendered tree already carries the markers in its
        row markup, and running this over it changes nothing. */
-    function applyExplorerTreePinMark(index) {
+    function applyExplorerTreeScopeMarks(index) {
         const pane = terminals[index];
         const panel = document.getElementById(`explorer-tree-panel-${index}`);
         if (!pane || !panel) {
             return;
         }
-        /* The body lists the root's *children*, so a pin on the explorer root
-           itself has no row to carry it. The FILES head stands in for the
-           root, and its marker is toggled by attribute rather than added and
-           removed, because the head is built once and left alone — rebuilding
-           it drops the caret out of the name filter beside it. */
-        const rootMark = panel.querySelector('[data-explorer-tree-pin-root]');
-        if (rootMark) {
-            rootMark.hidden = !explorerTreeRowIsPinned(pane, '', 'dir');
+        const followed = explorerTreeFollowedScope(pane);
+        /* The body lists the root's *children*, so a scope on the explorer
+           root itself has no row to carry it. The FILES head stands in for
+           the root, and its markers are toggled by attribute rather than added
+           and removed, because the head is built once and left alone —
+           rebuilding it drops the caret out of the name filter beside it. */
+        const rootPinMark = panel.querySelector('[data-explorer-tree-pin-root]');
+        if (rootPinMark) {
+            rootPinMark.hidden = !explorerTreeRowIsPinned(pane, '', 'dir');
         }
+        const rootFollowMark = panel.querySelector('[data-explorer-tree-follow-root]');
+        if (rootFollowMark) {
+            rootFollowMark.hidden = !explorerTreeScopeIsFollowed(followed, '', 'dir');
+        }
+        // Both markers are constant markup, so they are built once for the
+        // whole walk rather than per row per marker -- the walk runs on every
+        // navigation over every rendered row.
+        const pinMarkHtml = explorerTreePinMarkHtml();
+        const followMarkHtml = explorerTreeFollowMarkHtml();
         panel.querySelectorAll('.explorer-tree-row').forEach(row => {
             /* Read the *scope* attributes, which are the ones the row markup
-               derived the marker from — never `data-explorer-context-kind`.
+               derived the markers from — never `data-explorer-context-kind`.
                That one carries `entry_kind` (`file`/`directory`/`link`/`other`,
                and `''` for a filtered row whose parent listing is not cached),
                while the markup asks `entry.type`, which knows only `directory`
@@ -207,28 +304,22 @@
                made this paint disagree with the render for every filtered file
                row and for every symlink — it stripped the marker the render
                had just placed. One question, one field. */
-            const wanted = explorerTreeRowIsPinned(
-                pane,
-                row.dataset.explorerGitScopePath || '',
-                row.dataset.explorerGitScopeKind === 'file' ? 'file' : 'dir'
+            const path = row.dataset.explorerGitScopePath || '';
+            const kind = row.dataset.explorerGitScopeKind === 'file' ? 'file' : 'dir';
+            applyExplorerTreeRowMark(
+                row,
+                '.explorer-tree-pin-mark',
+                explorerTreeRowIsPinned(pane, path, kind),
+                pinMarkHtml,
+                '.explorer-tree-follow-mark, .explorer-open-folder-btn, .explorer-open-tab-btn'
             );
-            const mark = row.querySelector('.explorer-tree-pin-mark');
-            if (wanted === Boolean(mark)) {
-                return;
-            }
-            if (mark) {
-                mark.remove();
-                return;
-            }
-            /* Immediately left of the row's open control, which is where the
-               marker sits in the row markup. A row with neither (a file row in
-               a filtered result tree) takes it at the end. */
-            const anchor = row.querySelector('.explorer-open-folder-btn, .explorer-open-tab-btn');
-            if (anchor) {
-                anchor.insertAdjacentHTML('beforebegin', explorerTreePinMarkHtml());
-            } else {
-                row.insertAdjacentHTML('beforeend', explorerTreePinMarkHtml());
-            }
+            applyExplorerTreeRowMark(
+                row,
+                '.explorer-tree-follow-mark',
+                explorerTreeScopeIsFollowed(followed, path, kind),
+                followMarkHtml,
+                '.explorer-open-folder-btn, .explorer-open-tab-btn'
+            );
         });
     }
 
@@ -260,9 +351,13 @@
             >${expanded ? UI_CHEVRON_DOWN_ICON : UI_CHEVRON_RIGHT_ICON}</button>`
             : `<span class="explorer-tree-chevron" aria-hidden="true" ${indent}></span>`;
         const badge = explorerGitStatusLabel(entry.git) ? explorerGitBadgeHtml(entry.git) : '';
-        const pinMark = explorerTreeRowIsPinned(
-            pane, path, isDirectory ? 'dir' : 'file'
-        ) ? explorerTreePinMarkHtml() : '';
+        const scopeKind = isDirectory ? 'dir' : 'file';
+        const pinMark = explorerTreeRowIsPinned(pane, path, scopeKind)
+            ? explorerTreePinMarkHtml()
+            : '';
+        const followMark = explorerTreeScopeIsFollowed(
+            explorerTreeFollowedScope(pane), path, scopeKind
+        ) ? explorerTreeFollowMarkHtml() : '';
         const openFolder = isDirectory
             ? `<button type="button" class="explorer-search-btn explorer-open-folder-btn" data-explorer-tree-open-folder="${escHtml(path)}" title="Open folder in the explorer list" aria-label="Open folder in the explorer list">${EXPLORER_OPEN_FOLDER_ICON}</button>`
             : '';
@@ -290,6 +385,7 @@
                 </button>
                 ${badge}
                 ${pinMark}
+                ${followMark}
                 ${openFolder}
                 ${openTab}
             </div>
@@ -343,6 +439,7 @@
                     <div class="explorer-tree-head">
                         <div class="explorer-tree-title">Files</div>
                         ${explorerTreePinMarkHtml({ root: true })}
+                        ${explorerTreeFollowMarkHtml({ root: true })}
                         ${typeof explorerTreeSearchHeadHtml === 'function'
                             ? explorerTreeSearchHeadHtml(index)
                             : ''}
@@ -353,9 +450,9 @@
             if (typeof wireExplorerTreeSearchControls === 'function') {
                 wireExplorerTreeSearchControls(index);
             }
-            // The head is built once; nothing renders its marker again, so its
-            // state comes from the one paint that owns it.
-            applyExplorerTreePinMark(index);
+            // The head is built once; nothing renders its markers again, so
+            // their state comes from the one paint that owns them.
+            applyExplorerTreeScopeMarks(index);
         }
         if (typeof syncExplorerTreeSearchControls === 'function') {
             syncExplorerTreeSearchControls(index);

@@ -186,7 +186,7 @@ sandbox.setExplorerGitBrowseTarget = (index, path, kind) => {
         .explorerGitBrowseOverride(path, kind, derived.path, derived.kind);
     return true;
 };
-sandbox.refreshExplorerPinAffordances = () => {};
+sandbox.refreshExplorerGitScopeAffordances = () => {};
 sandbox.explorerGitScopeNeedsLoad = () => false;
 sandbox.loadExplorerGitRepo = () => {};
 

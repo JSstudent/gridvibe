@@ -70,7 +70,7 @@
         if (before.path === after.path && before.kind === after.kind) {
             return false;
         }
-        refreshExplorerPinAffordances(index);
+        refreshExplorerGitScopeAffordances(index);
         if (explorerGitScopeNeedsLoad(pane)) {
             loadExplorerGitRepo(index);
         }
@@ -732,24 +732,36 @@
             return false;
         }
         pane._explorerGitFollowBrowsing = !Boolean(pane._explorerGitFollowBrowsing);
+        /* Before the load, for the same reason a pin write paints before its
+           own: the Files tree's Follow marker reports a pane field that has
+           already moved, and making the reader wait out a repository round
+           trip to see it would be reporting the request rather than the
+           state. Synchronous — nothing has awaited yet, so this is still the
+           pane the gesture was made on. */
+        refreshExplorerGitScopeAffordances(index);
         invalidateExplorerGitRepo(index);
         notePanePresentationChanged(index);
         await loadExplorerGitRepo(index);
         return true;
     }
 
-    /* Everything outside the Git panel that reports where the pin is, painted
-       from one place so those surfaces cannot drift apart: today the Files
-       tree's marker, which moves on exactly the same events the panel's own
-       pin affordances do.
+    /* Everything outside the Git panel that reports where the *scope* is,
+       painted from one place so those surfaces cannot drift apart: today the
+       Files tree's pin and Follow markers, which move on exactly the same
+       events the panel's own pin affordances do.
+
+       Both markers, not just the pin: Follow moves on plain navigation, which
+       is the one thing that changes a scope without reloading the repository,
+       so a Follow marker left out of here would sit on the folder the reader
+       walked away from until the next load re-rendered the tree.
 
        Paint-only and attribute-level by construction. Re-rendering the Git
-       panel for a pin move is not an option — it carries the commit-message
+       panel for a scope move is not an option — it carries the commit-message
        textarea and the commit-search input, and a re-render takes the caret —
        and re-rendering the tree body would reset its scroll. */
-    function refreshExplorerPinAffordances(index) {
-        if (typeof applyExplorerTreePinMark === 'function') {
-            applyExplorerTreePinMark(index);
+    function refreshExplorerGitScopeAffordances(index) {
+        if (typeof applyExplorerTreeScopeMarks === 'function') {
+            applyExplorerTreeScopeMarks(index);
         }
         applyExplorerGitPinButtonState(index);
     }
@@ -809,7 +821,7 @@
            trip to see it would be reporting the request rather than the state.
            Synchronous, so no identity re-check is owed — nothing has awaited
            yet and this is still the pane the gesture was made on. */
-        refreshExplorerPinAffordances(index);
+        refreshExplorerGitScopeAffordances(index);
         invalidateExplorerGitRepo(index);
         notePanePresentationChanged(index);
         await loadExplorerGitRepo(index);
@@ -839,6 +851,68 @@
         return setExplorerGitPinnedScope(index, null);
     }
 
+    /* How far down the panel a second sticky box has to start.
+
+       The Graph's commit find is sticky too, and it must stack *below* the
+       frozen repo bar rather than behind it: two sticky boxes at `top: 0` in
+       one scroller claim the same strip, and the header wins on z-index, so
+       the bar the reader is typing in would slide out of sight behind it —
+       the one thing "a control the user is operating stays on screen"
+       forbids.
+
+       CSS cannot ask a sibling for its height, and this header's is genuinely
+       variable: a repository line that may be absent, a branch line, and
+       nought to two scope lines. So the header publishes its height as a
+       custom property the find bar's `top` reads.
+
+       Measured by ResizeObserver rather than by reading `offsetHeight` after
+       the render, for two reasons. The panel is routinely rendered while
+       `hidden` — a background group, a sidebar the reader has not opened —
+       where every box measures 0, and writing that 0 in as the offset would
+       stick the find bar behind the header for as long as the render stood;
+       the observer answers when the box actually acquires a size. And a read
+       straight after the `innerHTML` write is a forced synchronous layout on
+       every poll of the change listener, which repaints this panel quietly
+       and often.
+
+       One observer per pane, re-pointed at each render's header, because the
+       panel element outlives its contents. `offsetHeight` inside the callback
+       is a border-box integer read at a point where layout is already clean;
+       `contentRect` would drop the bar's own 8px padding. */
+    function observeExplorerGitHeaderHeight(index) {
+        const panel = document.getElementById(`explorer-git-panel-${index}`);
+        if (!panel) {
+            return;
+        }
+        const header = panel.querySelector('.explorer-git-repo-bar');
+        if (!header) {
+            /* Loading, and the repository-error panel: no frozen header, so
+               nothing below it is owed an offset. Clearing rather than
+               keeping the last one, because the find bar is still rendered on
+               the error panel and would otherwise start below a header that
+               is not there. */
+            panel._explorerGitHeaderObserver?.disconnect();
+            panel.style?.removeProperty('--explorer-git-header-height');
+            delete panel._explorerGitHeaderHeight;
+            return;
+        }
+        if (typeof window.ResizeObserver !== 'function') {
+            return;
+        }
+        if (!panel._explorerGitHeaderObserver) {
+            panel._explorerGitHeaderObserver = new window.ResizeObserver(entries => {
+                const height = Math.max(0, Math.round(entries[0]?.target?.offsetHeight || 0));
+                if (height === panel._explorerGitHeaderHeight) {
+                    return;
+                }
+                panel._explorerGitHeaderHeight = height;
+                panel.style?.setProperty('--explorer-git-header-height', `${height}px`);
+            });
+        }
+        panel._explorerGitHeaderObserver.disconnect();
+        panel._explorerGitHeaderObserver.observe(header);
+    }
+
     function renderExplorerGitPanel(index) {
         const pane = terminals[index];
         const panel = document.getElementById(`explorer-git-panel-${index}`);
@@ -848,6 +922,7 @@
         wireExplorerCopyPathMenu(panel, index);
         if (pane._explorerGitRepoLoading) {
             panel.innerHTML = '<div class="explorer-diff-sidebar-empty">Loading repository...</div>';
+            observeExplorerGitHeaderHeight(index);
             return;
         }
         if (pane._explorerGitRepoError && !pane._explorerGitRepo) {
@@ -895,6 +970,7 @@
             panel.querySelector('[data-explorer-git-clear-pin]')?.addEventListener('click', () => {
                 clearExplorerGitPinnedScope(index);
             });
+            observeExplorerGitHeaderHeight(index);
             return;
         }
 
@@ -982,6 +1058,15 @@
             }).join('')
             : '<div class="explorer-diff-sidebar-empty">No commits in this scope.</div>';
 
+        /* The repo bar is the panel's frozen header (see the sticky rule in
+           terminals.css): repository, branch, and the pin/Follow scope lines
+           are the facts every row further down is *about*, so they stay on
+           screen while the change lists and the graph scroll under them.
+
+           Publish/Push is deliberately not in it. It is the one mutation in
+           this panel that reaches a remote, and freezing it would leave it
+           under the pointer at every scroll position; it sits in its own
+           section immediately below and scrolls away like everything else. */
         panel.innerHTML = `
             ${errorBanner}
             ${watchPausedBanner}
@@ -1003,6 +1088,8 @@
                         ${line.kind === 'pin' ? `<button type="button" class="explorer-git-clear-pin-btn explorer-git-scope-clear-btn" data-explorer-git-clear-pin data-explorer-git-scope-clear ${line.clearAvailable ? '' : 'hidden'} title="Clear the pinned Git ${line.scopeKind === 'file' ? 'file' : 'folder'}: ${escHtml(line.path)}" aria-label="Clear the pinned Git ${line.scopeKind === 'file' ? 'file' : 'folder'}: ${escHtml(line.path)}">Clear pin</button>` : ''}
                     </div>`).join('')}
                 </div>
+            </div>
+            <div class="explorer-diff-sidebar-section explorer-git-publish-box">
                 <button type="button" class="explorer-git-publish-btn" data-explorer-git-publish ${busy ? 'disabled' : ''} title="Push the current branch to its remote">${escHtml(publishLabel)}</button>
             </div>
             <div class="explorer-diff-sidebar-section">
@@ -1229,6 +1316,7 @@
                 notePanePresentationChanged(index);
             });
         });
+        observeExplorerGitHeaderHeight(index);
         paintExplorerGitActiveRows(index);
     }
 

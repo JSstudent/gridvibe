@@ -1,28 +1,41 @@
-"""The Files tree marks the folder the Git scope is pinned to.
+"""The Files tree marks where the Git scope is: the pin, and a live Follow.
 
 A pin captures the folder that was being browsed and then freezes there, so
 navigating away used to leave nothing on screen saying *where* it was: the
 Graph header's pin button reported only that a pin existed. A restored
 workspace that came back in some other folder therefore read as a pin that had
-been lost.
+been lost. Follow has the mirrored problem -- it is a mode with no fixed
+path, so the only report that it was on at all was a pressed button in a
+sidebar the reader may not have open.
 
-The marker is derived, never persisted -- it is ``_explorerGitPinnedPath``
-answered per row -- and it moves by painting exactly the two rows that disagree
-with the pin, because rebuilding ``[data-explorer-tree-body]`` empties the
+Both markers are derived, never persisted -- the pin is
+``_explorerGitPinnedPath`` answered per row, Follow is the sidebar's own
+browsing scope answered per row -- and they move by painting exactly the rows
+that disagree, because rebuilding ``[data-explorer-tree-body]`` empties the
 tree's scroller and the capture-phase scroll listener would persist that
-clamped 0 as the reader's position.
+clamped 0 as the reader's position. One walk paints both.
 
-The Graph header's pin button is the marker's other half and lives here for
+A row may wear both, and that is the point: while Follow is on it overrides
+the pin without replacing it, so collapsing the two into one mark would hide
+the pin that is still there -- the "pin was lost" reading these markers exist
+to prevent.
+
+The Graph header's pin button is the pin marker's other half and lives here for
 that reason: both surfaces answer "is the pin *here*" from the one predicate in
 ``explorer-git-pin.js``, and a second test file over the same module is how
 they would come to disagree. The button asks *here*, not *is there a pin* -- so
 it is pressed only while the browsed folder is the pinned one, re-pins from
 anywhere else in a single write, and never clears a pin made somewhere else.
+The Follow marker answers "is Follow *here*" through the same predicate, which
+is why it is asserted here rather than beside it.
 
 Executed in Node against the real modules: the predicate, the row markup, the
-paint and the click are run, not read. Only the markup hooks themselves
-(``explorer-tree-pin-mark``, the title) are asserted as text, which is the
-documented exception for rendered markup.
+paint and the click are run, not read. Where Follow is pointing is taken from
+the real ``explorer-git-sidebar.js`` derivation rather than restated, since a
+marker naming a different path from the repo bar's Follow row is the failure
+worth catching. Only the markup hooks themselves
+(``explorer-tree-pin-mark``, ``explorer-tree-follow-mark``, the titles) are
+asserted as text, which is the documented exception for rendered markup.
 """
 
 import json
@@ -101,6 +114,7 @@ function makeSandbox() {
         sessionIds: [],
         EXPLORER_TREE_INDENT_PX: 12,
         EXPLORER_GIT_PIN_ICON: '<svg class="explorer-btn-icon" data-icon="pin"></svg>',
+        EXPLORER_GIT_FOLLOW_ICON: '<svg class="explorer-btn-icon" data-icon="follow"></svg>',
         EXPLORER_OPEN_FOLDER_ICON: '<svg class="explorer-btn-icon"></svg>',
         EXPLORER_OPEN_TAB_ICON: '<svg class="explorer-btn-icon"></svg>',
         EXPLORER_FOLDER_ICON: '<span class="explorer-icon"></span>',
@@ -247,7 +261,7 @@ const panel = {
 sandbox.document.getElementById = id => (id === 'explorer-tree-panel-0' ? panel : null);
 
 const before = rows.map(row => row.nodeId);
-sandbox.applyExplorerTreePinMark(0);
+sandbox.applyExplorerTreeScopeMarks(0);
 
 const hasMark = row => row.children.some(c => c.className === 'explorer-tree-pin-mark');
 
@@ -384,10 +398,10 @@ const panel = {
 };
 sandbox.document.getElementById = id => (id === 'explorer-tree-panel-0' ? panel : null);
 
-sandbox.applyExplorerTreePinMark(0);
+sandbox.applyExplorerTreeScopeMarks(0);
 const painted = marks();
 // A second pass must be a no-op too: the paint is run on every navigation.
-sandbox.applyExplorerTreePinMark(0);
+sandbox.applyExplorerTreeScopeMarks(0);
 
 process.stdout.write(JSON.stringify({
     rendered,
@@ -508,7 +522,7 @@ vm.runInContext(`
 // The tree's own paint has its own cases below; here it is only counted, so
 // that "both surfaces move together" is an observation.
 const treeMarks = [];
-sandbox.applyExplorerTreePinMark = index => { treeMarks.push(index); };
+sandbox.applyExplorerTreeScopeMarks = index => { treeMarks.push(index); };
 
 /* The regression the end state cannot show: an unpin followed by a pin leaves
    the same pane field as one write. Count them. */
@@ -529,7 +543,7 @@ async function main() {
     } else if (spec.action === 'clear') {
         await sandbox.clearExplorerGitPinnedScope(0);
     } else {
-        sandbox.refreshExplorerPinAffordances(0);
+        sandbox.refreshExplorerGitScopeAffordances(0);
     }
     process.stdout.write(JSON.stringify({
         rendered,
@@ -1583,6 +1597,405 @@ class ExplorerGitScopeLinesTestCase(unittest.TestCase):
         # without a word for it round-trips perfectly and still reads as lost.
         self.assertEqual(self._lines("", "web", False)[0]["label"], "root")
         self.assertEqual(self._lines(None, "", True)[0]["label"], "root")
+
+
+# The Follow marker, end to end: the real row builder renders it, and the real
+# paint is then run over the rows the render produced. Where Follow points is
+# not restated here -- `explorer-git-sidebar.js` is loaded so the marker is
+# placed by the same `explorerGitBrowsingScope()` the repo bar's Follow row is
+# built from.
+FOLLOW_HARNESS = SANDBOX + r"""
+let nodeSeq = 0;
+
+function attr(markup, name) {
+    const at = markup.indexOf(name + '="');
+    if (at === -1) { return ''; }
+    const from = at + name.length + 2;
+    return markup.slice(from, markup.indexOf('"', from));
+}
+
+function markClassOf(markup) {
+    if (markup.includes('explorer-tree-follow-mark')) { return 'explorer-tree-follow-mark'; }
+    if (markup.includes('explorer-tree-pin-mark')) { return 'explorer-tree-pin-mark'; }
+    throw new Error('not a scope marker: ' + markup);
+}
+
+/* Every child a row can hold, each able to take a marker immediately before
+   itself -- which is how the paint places one, and the only way the ordering
+   between the two markers can be observed. */
+function makeNode(className, children) {
+    const node = {
+        nodeId: ++nodeSeq,
+        className,
+        remove() {
+            const at = children.indexOf(node);
+            if (at !== -1) { children.splice(at, 1); }
+        },
+        insertAdjacentHTML(position, markup) {
+            if (position !== 'beforebegin') { throw new Error('unexpected ' + position); }
+            children.splice(children.indexOf(node), 0, makeNode(markClassOf(markup), children));
+        }
+    };
+    return node;
+}
+
+const ROW_SLOTS = [
+    'explorer-tree-pin-mark',
+    'explorer-tree-follow-mark',
+    'explorer-open-folder-btn',
+    'explorer-open-tab-btn'
+];
+
+/* One row stub per rendered row, its children rebuilt in the order the markup
+   put them in -- so "the render placed the pin ahead of Follow" and "the paint
+   put a late arrival back in that order" are the same observation. */
+function rowFromMarkup(markup) {
+    const children = [];
+    ROW_SLOTS
+        .map(name => [name, markup.indexOf(name)])
+        .filter(pair => pair[1] !== -1)
+        .sort((a, b) => a[1] - b[1])
+        .forEach(pair => { children.push(makeNode(pair[0], children)); });
+    return {
+        nodeId: ++nodeSeq,
+        dataset: {
+            explorerContextPath: attr(markup, 'data-explorer-context-path'),
+            explorerContextKind: attr(markup, 'data-explorer-context-kind'),
+            explorerGitScopePath: attr(markup, 'data-explorer-git-scope-path'),
+            explorerGitScopeKind: attr(markup, 'data-explorer-git-scope-kind')
+        },
+        children,
+        insertAdjacentHTML(position, added) {
+            if (position !== 'beforeend') { throw new Error('unexpected ' + position); }
+            children.push(makeNode(markClassOf(added), children));
+        },
+        querySelector(selector) {
+            const wanted = selector.split(',').map(part => part.trim().replace(/^\./, ''));
+            return children.find(child => wanted.includes(child.className)) || null;
+        }
+    };
+}
+
+const spec = JSON.parse(process.argv[5]);
+const sandbox = makeSandbox();
+vm.createContext(sandbox);
+vm.runInContext(fs.readFileSync(process.argv[2], 'utf8'), sandbox);
+vm.runInContext(fs.readFileSync(process.argv[3], 'utf8'), sandbox);
+// The real "where is Follow pointing" derivation, not a restatement of it.
+vm.runInContext(fs.readFileSync(process.argv[4], 'utf8'), sandbox);
+
+sandbox.__spec = spec;
+vm.runInContext(`
+    sessionIds[0] = 'sess-0';
+    terminals[0] = {
+        _explorerTreeExpanded: new Set(['web']),
+        _explorerTreeChildren: new Map(Object.entries(__spec.children)),
+        _explorerTreeErrors: new Map(),
+        _explorerTreeLoading: new Set(),
+        _explorerGitFollowBrowsing: __spec.following,
+        _explorerMode: __spec.mode,
+        _explorerPath: __spec.path,
+        _explorerFilePath: __spec.filePath,
+        _explorerGitBrowseTarget: __spec.browseTarget
+    };
+    if (__spec.pinned !== null) {
+        terminals[0]._explorerGitPinnedPath = __spec.pinned;
+        terminals[0]._explorerGitPinKind = __spec.pinnedKind;
+    }
+`, sandbox);
+
+const html = sandbox.renderExplorerTreeNodes(sandbox.terminals[0], '', 0);
+const rows = html
+    .split('data-explorer-context-path="')
+    .slice(1)
+    .map(part => rowFromMarkup('data-explorer-context-path="' + part));
+
+const wearing = cls => rows
+    .filter(row => row.children.some(child => child.className === cls))
+    .map(row => row.dataset.explorerContextPath);
+const pinMarks = () => wearing('explorer-tree-pin-mark');
+const followMarks = () => wearing('explorer-tree-follow-mark');
+// In every row holding both, the pin comes first -- the order the row markup
+// uses, which a marker arriving later by paint must not invert.
+const orderHeld = () => rows.every(row => {
+    const pinAt = row.children.findIndex(c => c.className === 'explorer-tree-pin-mark');
+    const followAt = row.children.findIndex(c => c.className === 'explorer-tree-follow-mark');
+    const openAt = row.children.findIndex(c => String(c.className).startsWith('explorer-open-'));
+    if (pinAt !== -1 && followAt !== -1 && pinAt > followAt) { return false; }
+    if (openAt === -1) { return true; }
+    return (pinAt === -1 || pinAt < openAt) && (followAt === -1 || followAt < openAt);
+});
+
+const rendered = { pin: pinMarks(), follow: followMarks(), order: orderHeld() };
+
+const rootPinMark = { nodeId: ++nodeSeq, hidden: true };
+const rootFollowMark = { nodeId: ++nodeSeq, hidden: true };
+const panel = {
+    scrollTop: 412,
+    querySelector: selector => {
+        if (selector === '[data-explorer-tree-pin-root]') { return rootPinMark; }
+        if (selector === '[data-explorer-tree-follow-root]') { return rootFollowMark; }
+        return null;
+    },
+    querySelectorAll: selector => (selector === '.explorer-tree-row' ? rows : [])
+};
+sandbox.document.getElementById = id => (id === 'explorer-tree-panel-0' ? panel : null);
+
+const beforeIds = rows.map(row => row.nodeId);
+sandbox.applyExplorerTreeScopeMarks(0);
+const painted = { pin: pinMarks(), follow: followMarks(), order: orderHeld() };
+
+// A second pass is a no-op: the paint runs on every navigation.
+sandbox.applyExplorerTreeScopeMarks(0);
+const repainted = { pin: pinMarks(), follow: followMarks(), order: orderHeld() };
+
+// Then move Follow somewhere else and paint again, without re-rendering: this
+// is the move the marker exists to make visible.
+let moved = null;
+if (spec.moveTo !== undefined) {
+    sandbox.terminals[0]._explorerPath = spec.moveTo;
+    sandbox.terminals[0]._explorerMode = 'directory';
+    sandbox.terminals[0]._explorerFilePath = '';
+    sandbox.terminals[0]._explorerGitBrowseTarget = null;
+    sandbox.applyExplorerTreeScopeMarks(0);
+    moved = { pin: pinMarks(), follow: followMarks(), order: orderHeld() };
+}
+
+process.stdout.write(JSON.stringify({
+    html,
+    rendered,
+    painted,
+    repainted,
+    moved,
+    rowIdsUnchanged: JSON.stringify(beforeIds) === JSON.stringify(rows.map(row => row.nodeId)),
+    rootPinHidden: rootPinMark.hidden,
+    rootFollowHidden: rootFollowMark.hidden,
+    scrollTop: panel.scrollTop
+}));
+"""
+
+# Turning Follow on is a scope move, and the tree has to hear about it before
+# the repository round trip it also starts.
+FOLLOW_TOGGLE_HARNESS = r"""
+const fs = require('fs');
+const vm = require('vm');
+
+const order = [];
+const sandbox = {
+    console,
+    document: {
+        getElementById: () => null,
+        querySelector: () => null,
+        querySelectorAll: () => [],
+        addEventListener() {},
+        body: { dataset: {}, addEventListener() {} }
+    },
+    navigator: {},
+    setTimeout,
+    clearTimeout,
+    requestAnimationFrame: () => 0,
+    fetch: () => Promise.reject(new Error('a Follow toggle may issue no request of its own')),
+    terminals: [],
+    sessionIds: [],
+    notePanePresentationChanged: () => { order.push('presentation'); },
+    applyExplorerTreeScopeMarks: () => { order.push('tree'); },
+    escHtml: value => String(value == null ? '' : value)
+};
+sandbox.globalThis = sandbox;
+sandbox.window = sandbox;
+vm.createContext(sandbox);
+vm.runInContext(fs.readFileSync(process.argv[2], 'utf8'), sandbox);
+vm.runInContext(fs.readFileSync(process.argv[3], 'utf8'), sandbox);
+
+vm.runInContext(`
+    sessionIds[0] = 'sess-0';
+    terminals[0] = { _explorerPath: 'web/static' };
+`, sandbox);
+sandbox.invalidateExplorerGitRepo = () => { order.push('invalidate'); };
+sandbox.loadExplorerGitRepo = async () => { order.push('load'); };
+
+async function main() {
+    await sandbox.toggleExplorerGitFollowBrowsing(0);
+    process.stdout.write(JSON.stringify({
+        order,
+        following: Boolean(sandbox.terminals[0]._explorerGitFollowBrowsing)
+    }));
+}
+main().catch(error => { console.error(error); process.exit(1); });
+"""
+
+
+@unittest.skipUnless(NODE, "Node.js is required for explorer tree scope mark tests")
+class ExplorerTreeFollowMarkTestCase(unittest.TestCase):
+    """Follow puts the chain on the row it is tracking, and only that row."""
+
+    def _marks(self, **spec):
+        payload = {
+            "children": FIXTURE_CHILDREN,
+            "following": True,
+            "mode": "directory",
+            "path": "",
+            "filePath": "",
+            "browseTarget": None,
+            "pinned": None,
+            "pinnedKind": "dir",
+        }
+        payload.update(spec)
+        completed = _run(
+            FOLLOW_HARNESS,
+            str(PIN_JS),
+            str(TREE_JS),
+            str(SIDEBAR_JS),
+            json.dumps(payload),
+        )
+        if completed.returncode != 0:
+            self.fail(f"node harness failed:\n{completed.stderr}")
+        return json.loads(completed.stdout)
+
+    def test_the_chain_lands_on_exactly_the_followed_folder(self):
+        result = self._marks(path="web")
+        self.assertEqual(result["rendered"]["follow"], ["web"])
+        self.assertEqual(result["painted"]["follow"], ["web"])
+
+    def test_follow_off_marks_nothing_anywhere(self):
+        result = self._marks(following=False, path="web")
+        self.assertEqual(result["rendered"]["follow"], [])
+        self.assertEqual(result["painted"]["follow"], [])
+        self.assertTrue(result["rootFollowHidden"])
+
+    def test_following_an_open_file_marks_the_file_and_not_its_folder(self):
+        # A file is a first-class Git scope, so Follow tracks the open file
+        # rather than the folder the listing happens to be showing.
+        result = self._marks(mode="file", filePath="readme.md", path="")
+        self.assertEqual(result["rendered"]["follow"], ["readme.md"])
+        self.assertEqual(result["painted"]["follow"], ["readme.md"])
+
+    def test_a_row_singled_out_in_the_listing_beats_the_folder_it_lists(self):
+        # The browse override is a pointer gesture over the derived scope, and
+        # the marker reports the scope Git actually uses -- not the derivation.
+        result = self._marks(
+            path="",
+            browseTarget={
+                "path": "docs",
+                "kind": "dir",
+                "basePath": "",
+                "baseKind": "dir",
+            },
+        )
+        self.assertEqual(result["painted"]["follow"], ["docs"])
+
+    def test_following_the_explorer_root_marks_the_head_and_no_row(self):
+        # The body lists the root's *children*, so the root has no row of its
+        # own; the FILES head stands in for it, by attribute.
+        result = self._marks(path="")
+        self.assertEqual(result["rendered"]["follow"], [])
+        self.assertEqual(result["painted"]["follow"], [])
+        self.assertFalse(result["rootFollowHidden"])
+
+    def test_following_a_folder_that_is_not_rendered_marks_nothing(self):
+        # A collapsed ancestor, or a path outside the tree entirely: the tree
+        # reports the scope, it never expands itself to reach it.
+        self.assertEqual(self._marks(path="web/static/js")["painted"]["follow"], [])
+        self.assertEqual(self._marks(path="elsewhere")["painted"]["follow"], [])
+
+    def test_an_ancestor_of_the_followed_folder_is_not_marked(self):
+        result = self._marks(path="web/static")
+        self.assertEqual(result["painted"]["follow"], ["web/static"])
+
+    def test_the_marker_is_a_span_carrying_the_documented_hooks(self):
+        html = self._marks(path="web")["html"]
+        self.assertIn('class="explorer-tree-follow-mark"', html)
+        self.assertIn('title="Git scope follows this row"', html)
+        self.assertIn('aria-label="Git scope follows this row"', html)
+        marker_at = html.index("explorer-tree-follow-mark")
+        self.assertEqual(html.rfind("<span", 0, marker_at), html.rfind("<", 0, marker_at))
+
+
+@unittest.skipUnless(NODE, "Node.js is required for explorer tree scope mark tests")
+class ExplorerTreeScopeMarksTogetherTestCase(unittest.TestCase):
+    """A pin and a live Follow are two scopes, and the tree says so."""
+
+    def _marks(self, **spec):
+        payload = {
+            "children": FIXTURE_CHILDREN,
+            "following": True,
+            "mode": "directory",
+            "path": "",
+            "filePath": "",
+            "browseTarget": None,
+            "pinned": None,
+            "pinnedKind": "dir",
+        }
+        payload.update(spec)
+        completed = _run(
+            FOLLOW_HARNESS,
+            str(PIN_JS),
+            str(TREE_JS),
+            str(SIDEBAR_JS),
+            json.dumps(payload),
+        )
+        if completed.returncode != 0:
+            self.fail(f"node harness failed:\n{completed.stderr}")
+        return json.loads(completed.stdout)
+
+    def test_a_pin_and_a_follow_on_different_rows_are_two_marks(self):
+        result = self._marks(pinned="docs", path="web")
+        self.assertEqual(result["painted"]["pin"], ["docs"])
+        self.assertEqual(result["painted"]["follow"], ["web"])
+
+    def test_a_pin_the_follow_is_standing_on_keeps_its_own_mark(self):
+        # Follow overrides the pin while it is on; it does not replace it, and
+        # a row that dropped the pin mark would read as a pin that was lost.
+        result = self._marks(pinned="web", path="web")
+        self.assertEqual(result["painted"]["pin"], ["web"])
+        self.assertEqual(result["painted"]["follow"], ["web"])
+
+    def test_the_pin_stays_ahead_of_the_follow_and_both_precede_the_open_control(self):
+        for spec in ({"pinned": "web", "path": "web"}, {"pinned": "docs", "path": "web"}):
+            result = self._marks(**spec)
+            self.assertTrue(result["rendered"]["order"], spec)
+            self.assertTrue(result["painted"]["order"], spec)
+
+    def test_a_follow_arriving_by_paint_lands_where_the_render_would_put_it(self):
+        # The pin is rendered into the row and Follow is painted in afterwards
+        # by the move below, which is the ordering the paint has to reproduce.
+        result = self._marks(pinned="web", path="docs", moveTo="web")
+        self.assertEqual(result["painted"]["follow"], ["docs"])
+        self.assertEqual(result["moved"]["follow"], ["web"])
+        self.assertEqual(result["moved"]["pin"], ["web"])
+        self.assertTrue(result["moved"]["order"])
+
+    def test_the_marks_move_without_rebuilding_the_rows_or_touching_the_scroll(self):
+        result = self._marks(pinned="docs", path="docs", moveTo="web")
+        self.assertEqual(result["moved"]["follow"], ["web"])
+        self.assertTrue(result["rowIdsUnchanged"])
+        self.assertEqual(result["scrollTop"], 412)
+
+    def test_painting_what_is_already_shown_changes_nothing(self):
+        result = self._marks(pinned="docs", path="web")
+        self.assertEqual(result["rendered"], result["painted"])
+        self.assertEqual(result["painted"], result["repainted"])
+
+
+@unittest.skipUnless(NODE, "Node.js is required for explorer tree scope mark tests")
+class ExplorerGitFollowToggleTestCase(unittest.TestCase):
+    """Turning Follow on moves the tree's marker before the repository loads."""
+
+    def _toggle(self):
+        completed = _run(FOLLOW_TOGGLE_HARNESS, str(PIN_JS), str(SIDEBAR_JS))
+        if completed.returncode != 0:
+            self.fail(f"node harness failed:\n{completed.stderr}")
+        return json.loads(completed.stdout)
+
+    def test_the_tree_is_painted_before_the_repository_round_trip(self):
+        # The marker reports a pane field that has already moved, so waiting
+        # out the load to show it would be reporting the request, not the
+        # state -- the same rule the pin write already follows.
+        result = self._toggle()
+        self.assertTrue(result["following"])
+        self.assertIn("tree", result["order"])
+        self.assertIn("load", result["order"])
+        self.assertLess(result["order"].index("tree"), result["order"].index("load"))
 
 
 if __name__ == "__main__":

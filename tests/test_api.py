@@ -1764,6 +1764,81 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("function explorerGitPublish(index)", html)
         self.assertIn("Staged Changes", html)
 
+    def test_terminals_page_git_sidebar_freezes_its_scope_header(self):
+        """Repository, branch and scope stay on screen; Publish scrolls away.
+
+        Which repository and which part of it is what every change row and
+        every commit below is read against, so the repo bar is sticky. Publish
+        is the one action here that reaches a remote and is deliberately not
+        frozen with it -- it moved into its own section immediately below.
+        """
+        sidebar = self._static("js/explorer-git-sidebar.js")
+        css = self._static("css/terminals.css")
+
+        # The button is no longer inside the frozen header: the repo bar's
+        # section is closed before the publish section opens.
+        bar_at = sidebar.index("explorer-diff-sidebar-section explorer-git-repo-bar")
+        publish_box_at = sidebar.index("explorer-git-publish-box", bar_at)
+        publish_at = sidebar.index("data-explorer-git-publish", bar_at)
+        self.assertNotIn("data-explorer-git-publish", sidebar[bar_at:publish_box_at])
+        self.assertLess(publish_box_at, publish_at)
+
+        repo_bar_css = css[css.index(".explorer-git-repo-bar {"):]
+        repo_bar_css = repo_bar_css[: repo_bar_css.index("}")]
+        self.assertIn("position: sticky;", repo_bar_css)
+        self.assertIn("top: 0;", repo_bar_css)
+        # A sticky box is painted over what slides beneath it, so it needs an
+        # opaque background of its own -- from a token, never a literal.
+        self.assertIn("background: var(--explorer-bar-bg);", repo_bar_css)
+        self.assertNotRegex(repo_bar_css, r":\s*#[0-9a-fA-F]{3,6}\b")
+
+        # The Graph's commit find is sticky too and stacks *below* the frozen
+        # header rather than behind it, on a height the panel publishes.
+        search_css = css[css.index(".explorer-git-commit-search {"):]
+        search_css = search_css[: search_css.index("}")]
+        self.assertIn("top: var(--explorer-git-header-height, 0px);", search_css)
+        self.assertIn("--explorer-git-header-height", sidebar)
+        self.assertIn("function observeExplorerGitHeaderHeight(index)", sidebar)
+
+    def test_terminals_page_files_tree_marks_the_pin_and_the_follow(self):
+        """Both Git scopes are reported on the row they are on.
+
+        Follow is a mode with no fixed path of its own, so a pressed button in
+        a sidebar the reader may not have open was the only thing saying it was
+        on at all. The chain now sits on the row it is tracking, beside the pin
+        marker and sharing its rule rather than restating the box.
+        """
+        tree = self._static("js/explorer-tree.js")
+        sidebar = self._static("js/explorer-git-sidebar.js")
+        css = self._static("css/terminals.css")
+
+        # The markup hooks the CSS and the paint both key on.
+        self.assertIn('class="explorer-tree-follow-mark"', tree)
+        self.assertIn("data-explorer-tree-follow-root", tree)
+        self.assertIn("Git scope follows this row", tree)
+        self.assertIn("EXPLORER_GIT_FOLLOW_ICON", tree)
+
+        # One rule for both markers, so they cannot drift out of alignment
+        # with each other or with the row controls beside them (guardrail 7).
+        self.assertIn(
+            ".explorer-tree-pin-mark,\n        .explorer-tree-follow-mark {", css
+        )
+        self.assertIn(
+            ".explorer-tree-pin-mark[hidden],\n        .explorer-tree-follow-mark[hidden] {",
+            css,
+        )
+
+        # Both markers move on the one cross-surface paint, and a Follow
+        # toggle reaches it before the repository round trip it also starts.
+        self.assertIn("function refreshExplorerGitScopeAffordances(index)", sidebar)
+        self.assertIn("applyExplorerTreeScopeMarks(index);", sidebar)
+        toggle = sidebar[sidebar.index("async function toggleExplorerGitFollowBrowsing(index)"):]
+        toggle = toggle[: toggle.index("\n    /*")]
+        self.assertLess(
+            toggle.index("refreshExplorerGitScopeAffordances(index);"),
+            toggle.index("await loadExplorerGitRepo(index);"),
+        )
+
     def test_terminals_page_vendors_highlightjs_source_highlighting(self):
         """The Source viewer highlights
         the whole document once with the pinned Highlight.js build and keeps the

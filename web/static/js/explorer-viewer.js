@@ -6674,7 +6674,7 @@
            header pin target and a live Follow request from the containing
            folder to this exact file; the normal scope identity check keeps a
            fixed directory pin cached. */
-        refreshExplorerPinAffordances(index);
+        refreshExplorerGitScopeAffordances(index);
         if (explorerGitScopeNeedsLoad(pane)) {
             loadExplorerGitRepo(index);
         }
@@ -6978,7 +6978,7 @@
            the previous file until the change listener's next poll noticed the
            revision token had moved — a folder switch updated at once and a
            file switch updated on an interval. */
-        refreshExplorerPinAffordances(index);
+        refreshExplorerGitScopeAffordances(index);
         if (explorerGitScopeNeedsLoad(pane)) {
             loadExplorerGitRepo(index);
         }
@@ -7459,7 +7459,7 @@
                button would otherwise keep a stale pressed state and a stale
                title until the next load. Attribute-only, beside the tree's
                marker. */
-            refreshExplorerPinAffordances(index);
+            refreshExplorerGitScopeAffordances(index);
             if (explorerGitScopeNeedsLoad(pane)) {
                 loadExplorerGitRepo(index);
             }
