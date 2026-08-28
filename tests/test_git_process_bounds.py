@@ -729,6 +729,33 @@ class ExplorerGitIncompleteResultTestCase(unittest.TestCase):
 
 
 class ExplorerGitScopePathspecTestCase(unittest.TestCase):
+    def test_file_scope_uses_parent_for_discovery_and_file_for_status_and_log(self):
+        backend = _QueuedGitBackend(
+            _git_result(stdout=b"/repo\ntrue\n"),
+            _git_result(stdout=b""),
+            _git_result(stdout=b""),
+        )
+        backend.canonical_repo_root = lambda value: value
+        backend.pathspec = lambda _repo, scope: scope.removeprefix("/repo/")
+        parent = "/repo/src"
+        file_path = "/repo/src/app.py"
+
+        context, _statuses = web_explorer._get_git_context(
+            backend, "/repo", parent, file_path
+        )
+        commits = web_explorer._bounded_git_graph_log(
+            backend, context["repo_root"], backend.pathspec("/repo", file_path)
+        )
+
+        self.assertTrue(context["available"])
+        self.assertEqual(commits, [])
+        discovery, status, graph = backend.calls
+        self.assertEqual(discovery[1]["cwd"], parent)
+        self.assertEqual(status[1]["cwd"], "/repo")
+        self.assertEqual(status[0][-1], "src/app.py")
+        self.assertEqual(graph[1]["cwd"], "/repo")
+        self.assertEqual(graph[0][-1], "src/app.py")
+
     def test_bulk_action_uses_one_local_or_remote_scope_pathspec(self):
         local_root = os.path.abspath(os.path.join(os.sep, "repo"))
         cases = (

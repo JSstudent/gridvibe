@@ -23,6 +23,7 @@ EXPLORER_MAX_OPEN_TABS = 12
 EXPLORER_MAX_TAB_PATH_LENGTH = 4096
 EXPLORER_TAB_VIEW_MODES = ("source", "preview", "diff")
 EXPLORER_DIFF_MODES = ("worktree", "staged")
+EXPLORER_GIT_PIN_KINDS = ("dir", "file")
 EXPLORER_MAX_TAB_VIEW_IDENTITY_LENGTH = 64
 EXPLORER_MAX_DIFF_COMMIT_LENGTH = 64
 EXPLORER_MAX_MARKDOWN_FOLDS = 256
@@ -75,6 +76,7 @@ PANE_PRESENTATION_FIELDS = frozenset(
         "explorer_git_follow_browsing",
         "explorer_git_pin_active",
         "explorer_git_pinned_path",
+        "explorer_git_pin_kind",
         "explorer_search_open",
         "explorer_sidebar_width",
         "explorer_sidebar_scroll",
@@ -111,6 +113,7 @@ _EXPLORER_STRING_FIELDS = frozenset(
     {
         "explorer_active_tab",
         "explorer_git_pinned_path",
+        "explorer_git_pin_kind",
         "explorer_md_preset",
         "explorer_md_font",
         "explorer_source_font",
@@ -290,6 +293,15 @@ def _normalize_explorer_md_choice(
 
 def _normalize_explorer_theme(value: Any) -> str:
     return "light" if str(value or "").strip() == "light" else "dark"
+
+
+def _normalize_explorer_git_pin_kind(value: Any) -> str:
+    """Accept only the two persisted Git pin path kinds."""
+    if value not in EXPLORER_GIT_PIN_KINDS:
+        raise PresentationValidationError(
+            "'explorer_git_pin_kind' must be 'dir' or 'file'"
+        )
+    return value
 
 
 def _normalize_explorer_tab_font_size(value: Any) -> int:
@@ -925,6 +937,10 @@ def normalize_pane_presentation(data: Any) -> Dict[str, Any]:
     if "explorer_git_pinned_path" in data:
         normalized["explorer_git_pinned_path"] = _normalize_explorer_tab_path(
             data["explorer_git_pinned_path"]
+        )
+    if "explorer_git_pin_kind" in data:
+        normalized["explorer_git_pin_kind"] = _normalize_explorer_git_pin_kind(
+            data["explorer_git_pin_kind"]
         )
 
     if "browser_tabs" in data:

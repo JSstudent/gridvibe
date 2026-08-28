@@ -238,13 +238,14 @@
     const PANE_MODE_EXPLORER = 'explorer';
     const PANE_MODE_BROWSER = 'browser';
 
-    /* ── The Git pin pair ────────────────────────────────────────────────
-       `explorer_git_pin_active` and `explorer_git_pinned_path` are one fact
-       in two fields: whether a scope is pinned, and the root-relative path it
-       names. They have to be read off a live pane and written back onto a
+    /* ── The Git pin record ──────────────────────────────────────────────
+       `explorer_git_pin_active`, `explorer_git_pinned_path`, and
+       `explorer_git_pin_kind` are one fact: whether a scope is pinned, the
+       root-relative path it names, and whether that path is a directory or a
+       file. They have to be read off a live pane and written back onto a
        rebuilt one at five points on the terminals page — the live describe,
        the Save Workspace launch config, both pane builds, and the
-       close-driven overlay — and each spelled the same pair of ternaries out
+       close-driven overlay — and each spelled the same record-building logic out
        by hand. A pin that survives four of those and not the fifth is
        indistinguishable, from the user's side, from a pin that was never
        saved, which is most of what "it seems flaky" was describing. One
@@ -258,7 +259,8 @@
         const pinned = typeof pane?._explorerGitPinnedPath === 'string';
         return {
             active: pinned,
-            path: pinned ? pane._explorerGitPinnedPath : ''
+            path: pinned ? pane._explorerGitPinnedPath : '',
+            kind: pinned && pane._explorerGitPinKind === 'file' ? 'file' : 'dir'
         };
     }
 
@@ -272,6 +274,13 @@
             : undefined;
     }
 
+    function explorerGitPinKindFromSession(session) {
+        return session && session.explorer_git_pin_active
+            && session.explorer_git_pin_kind === 'file'
+            ? 'file'
+            : 'dir';
+    }
+
     function buildPanePresentation(pane) {
         const sessionId = String((pane && pane.sessionId) || '').trim();
         if (!sessionId) return null;
@@ -283,6 +292,7 @@
             entry.explorer_git_follow_browsing = Boolean(explorer.gitFollowBrowsing);
             entry.explorer_git_pin_active = Boolean(explorer.gitPinActive);
             entry.explorer_git_pinned_path = String(explorer.gitPinnedPath || '');
+            entry.explorer_git_pin_kind = explorer.gitPinKind === 'file' ? 'file' : 'dir';
             entry.explorer_search_open = Boolean(explorer.searchOpen);
             entry.explorer_sidebar_width = Number.isInteger(explorer.sidebarWidth)
                 ? explorer.sidebarWidth
@@ -531,6 +541,7 @@
         createPresentationController,
         explorerGitPinDescriptor,
         explorerGitPinnedPathFromSession,
+        explorerGitPinKindFromSession,
         buildGroupPresentationPayload,
         buildWorkspacePresentationPayload,
         CONTINUOUS_UPDATE_FLOOR_MS,

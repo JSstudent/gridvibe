@@ -113,6 +113,7 @@
         explorer_git_follow_browsing: false,
         explorer_git_pin_active: false,
         explorer_git_pinned_path: '',
+        explorer_git_pin_kind: 'dir',
         explorer_search_open: false,
         explorer_open_tabs: [],
         explorer_active_tab: '',
@@ -759,6 +760,10 @@
                 explorer_git_pinned_path: commandMode === 'explorer' && explorerTabsMatchRoot
                     ? (row.dataset.explorerGitPinnedPath || '')
                     : '',
+                explorer_git_pin_kind: commandMode === 'explorer' && explorerTabsMatchRoot
+                    && row.dataset.explorerGitPinKind === 'file'
+                    ? 'file'
+                    : 'dir',
                 explorer_search_open: commandMode === 'explorer' && row.dataset.explorerSearchOpen === 'true',
                 explorer_open_tabs: commandMode === 'explorer' && explorerTabsMatchRoot
                     ? parseStringArrayDataset(row.dataset.explorerOpenTabs)
@@ -1814,6 +1819,7 @@
                     data-explorer-git-follow-browsing="${terminal.explorer_git_follow_browsing ? 'true' : 'false'}"
                     data-explorer-git-pin-active="${terminal.explorer_git_pin_active ? 'true' : 'false'}"
                     data-explorer-git-pinned-path="${escHtml(terminal.explorer_git_pinned_path || '')}"
+                    data-explorer-git-pin-kind="${terminal.explorer_git_pin_kind === 'file' ? 'file' : 'dir'}"
                     data-explorer-search-open="${terminal.explorer_search_open ? 'true' : 'false'}"
                     data-explorer-open-tabs="${escHtml(JSON.stringify(Array.isArray(terminal.explorer_open_tabs) ? terminal.explorer_open_tabs : []))}"
                     data-explorer-tabs-dir="${escHtml(terminal.directory || '')}"

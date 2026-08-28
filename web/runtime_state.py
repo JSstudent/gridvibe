@@ -183,6 +183,7 @@ _SESSION_SNAPSHOT_FIELDS = (
     "explorer_git_follow_browsing",
     "explorer_git_pin_active",
     "explorer_git_pinned_path",
+    "explorer_git_pin_kind",
     "explorer_search_open",
     "explorer_sidebar_width",
     "explorer_sidebar_scroll",

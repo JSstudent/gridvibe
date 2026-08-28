@@ -1712,13 +1712,35 @@
         showExplorerContextMenu(x, y, items);
     }
 
-    function handleExplorerContextMenu(event, index) {
+    async function explorerGitScopeAvailableForMenu(index, path, kind) {
+        const pane = terminals[index];
+        const sessionId = sessionIds[index];
+        if (!pane || !sessionId || typeof explorerGitRequestUrl !== 'function') {
+            return false;
+        }
+        try {
+            const response = await fetch(explorerGitRequestUrl(
+                sessionId,
+                'state',
+                path,
+                {},
+                kind
+            ), { cache: 'no-store' });
+            return Boolean(response.ok);
+        } catch (_) {
+            return false;
+        }
+    }
+
+    async function handleExplorerContextMenu(event, index) {
         const commitRow = event.target.closest('[data-explorer-git-commit-toggle]');
         if (commitRow) {
             handleExplorerCommitContextMenu(event, commitRow);
             return;
         }
-        const row = event.target.closest('[data-explorer-copy-path]');
+        const row = event.target.closest(
+            '[data-explorer-copy-path], [data-explorer-git-scope-path]'
+        );
         const pane = terminals[index];
         let blankContext = null;
         let blankTarget = null;
@@ -1791,7 +1813,11 @@
            path per line — the same read the single-row entries perform. */
         const multiTarget = selectedTargets.length > 1;
         const targetRoot = explorerRootDirectory(index);
-        const pathItems = multiTarget
+        const offersPathEntries = Boolean(blankContext)
+            || (row && row.dataset.explorerCopyPath !== undefined);
+        const pathItems = !offersPathEntries
+            ? []
+            : (multiTarget
             ? [{
                 label: `Copy ${selectedTargets.length} paths`,
                 action: () => _copyText(selectedTargets
@@ -1801,7 +1827,7 @@
                 label: `Copy ${selectedTargets.length} relative paths`,
                 action: () => _copyText(selectedTargets.map(entry => entry.path).join('\n'))
             }]
-            : [{ label: 'Copy path', action: () => _copyText(absolutePath || relativePath) }];
+            : [{ label: 'Copy path', action: () => _copyText(absolutePath || relativePath) }]);
         if (!multiTarget && relativePath) {
             pathItems.push({ label: 'Copy relative path', action: () => _copyText(relativePath) });
         }
@@ -1830,13 +1856,95 @@
                 action: () => downloadExplorerFiles(index, downloadTargets)
             });
         }
-        if (beforePath.length) {
+
+        /* Git pinning is one exact path, never a selection action. Files-tree
+           rows and open file tabs share the same policy, while commit rows
+           returned through their path-free branch above and can never reach
+           this block. A prospective pin is verified through the existing
+           read-only state route so an outside-worktree row stays in the menu
+           disabled with an explanation; unpinning never needs the vanished
+           path to resolve. */
+        const policy = window.GridVibeExplorerGitPin;
+        const gitScopeSurface = row?.dataset.explorerGitScopeSurface
+            || (blankContext?.surface === 'tree-blank' ? 'tree' : '');
+        const gitScopePath = row?.dataset.explorerGitScopePath
+            ?? (gitScopeSurface === 'tree' ? relativePath : null);
+        const gitScopeKind = row?.dataset.explorerGitScopeKind === 'file'
+            ? 'file'
+            : 'dir';
+        const gitTargetCount = gitScopeSurface === 'tab'
+            ? 1
+            : (row ? selectedTargets.length : 1);
+        const gitItems = [];
+        if (policy && (gitScopeSurface === 'tree' || gitScopeSurface === 'tab')) {
+            let pinItem = policy.explorerGitScopeMenuItem({
+                pinnedPath: typeof pane?._explorerGitPinnedPath === 'string'
+                    ? pane._explorerGitPinnedPath
+                    : null,
+                pinnedKind: pane?._explorerGitPinKind,
+                targetPath: gitScopePath,
+                targetKind: gitScopeKind,
+                targetCount: gitTargetCount,
+                worktreeAvailable: true
+            });
+            if (pinItem?.action === 'pin') {
+                const capturedPane = pane;
+                const capturedSessionId = sessionIds[index];
+                const available = await explorerGitScopeAvailableForMenu(
+                    index, gitScopePath, gitScopeKind
+                );
+                if (
+                    terminals[index] !== capturedPane
+                    || sessionIds[index] !== capturedSessionId
+                ) {
+                    return;
+                }
+                pinItem = policy.explorerGitScopeMenuItem({
+                    pinnedPath: typeof pane?._explorerGitPinnedPath === 'string'
+                        ? pane._explorerGitPinnedPath
+                        : null,
+                    pinnedKind: pane?._explorerGitPinKind,
+                    targetPath: gitScopePath,
+                    targetKind: gitScopeKind,
+                    targetCount: gitTargetCount,
+                    worktreeAvailable: available
+                });
+            }
+            if (pinItem) {
+                const pinBusy = Boolean(
+                    pane?._explorerGitActionBusy || pane?._explorerGitRepoLoading
+                );
+                gitItems.push({
+                    label: pinItem.label,
+                    title: pinBusy ? 'Git sidebar is busy' : pinItem.title,
+                    disabled: pinItem.disabled || pinBusy,
+                    action: () => pinItem.action === 'unpin'
+                        ? clearExplorerGitPinnedScope(index)
+                        : setExplorerGitPinnedScope(index, gitScopePath, gitScopeKind)
+                });
+            }
+            if (gitScopeSurface === 'tree') {
+                const followItem = policy.explorerGitFollowMenuItem(
+                    pane?._explorerGitFollowBrowsing,
+                    pane?._explorerGitActionBusy || pane?._explorerGitRepoLoading
+                );
+                gitItems.push({
+                    label: followItem.label,
+                    title: followItem.title,
+                    disabled: followItem.disabled,
+                    action: () => toggleExplorerGitFollowBrowsing(index)
+                });
+            }
+        }
+        if (beforePath.length && pathItems.length) {
             pathItems[0].separatorBefore = true;
         }
-        if (afterPath.length) {
+        if (gitItems.length) {
+            gitItems[0].separatorBefore = true;
+        } else if (afterPath.length) {
             afterPath[0].separatorBefore = true;
         }
-        const items = [...beforePath, ...pathItems, ...afterPath];
+        const items = [...beforePath, ...pathItems, ...gitItems, ...afterPath];
         let x = event.clientX;
         let y = event.clientY;
         if (x <= 0 && y <= 0) {
@@ -1852,7 +1960,11 @@
             return;
         }
         panel.dataset.contextMenuWired = 'true';
-        panel.addEventListener('contextmenu', event => handleExplorerContextMenu(event, index));
+        panel.addEventListener('contextmenu', event => {
+            handleExplorerContextMenu(event, index).catch(error => {
+                console.error('[GridVibe Sessions] Explorer context menu failed:', error);
+            });
+        });
     }
 
     function wireExplorerCopyPathMenu(panel, index) {
@@ -6390,6 +6502,14 @@
         renderExplorerTabStrip(index);
         persistExplorerTabsToSession(index);
         syncExplorerGitActiveRows(index);
+        /* A file is now a first-class Git scope. Opening one changes both the
+           header pin target and a live Follow request from the containing
+           folder to this exact file; the normal scope identity check keeps a
+           fixed directory pin cached. */
+        refreshExplorerPinAffordances(index);
+        if (pane._explorerGitSidebarOpen) {
+            loadExplorerGitRepo(index);
+        }
         return true;
     }
 

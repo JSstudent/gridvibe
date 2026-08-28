@@ -2441,13 +2441,24 @@ def _get_git_context(
     backend: Any,
     root_path: str,
     current_path: str,
+    anchor_path: Optional[str] = None,
 ) -> Tuple[Dict[str, Any], Dict[str, Dict[str, Any]]]:
-    """Return repository metadata and path statuses for an explorer directory."""
+    """Return repository metadata and statuses for one selected Git path.
+
+    ``current_path`` is always a directory and is used only as the context in
+    which Git discovers the worktree.  ``anchor_path`` is the directory or
+    file pathspec the caller selected.  Keeping those two roles separate lets
+    a file scope use its parent for ``rev-parse`` without widening ``status``
+    back to that parent.
+    """
+    selected_path = anchor_path or current_path
     repo_root, detect_error = _resolve_git_worktree_root(backend, current_path)
     if repo_root is None:
         return _empty_explorer_git_context(detect_error), {}
 
     validation_error = backend.validate_repo_paths(repo_root, root_path, current_path)
+    if not validation_error:
+        validation_error = backend.validate_repo_paths(repo_root, root_path, selected_path)
     if validation_error:
         return _empty_explorer_git_context(validation_error), {}
 
@@ -2458,7 +2469,7 @@ def _get_git_context(
         "--branch",
         "--untracked-files=all",
         "--",
-        backend.pathspec(repo_root, current_path),
+        backend.pathspec(repo_root, selected_path),
     ]
     try:
         status_result = backend.run_git(status_args, cwd=repo_root, timeout=2.0)
@@ -2872,10 +2883,16 @@ def _get_git_repo_state(
     backend: Any,
     root_path: str,
     current_path: Optional[str] = None,
+    context_dir: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Return the sidebar's semantic Git state without the commit graph."""
     anchor_path = current_path or root_path
-    git_context, statuses = _get_git_context(backend, root_path, anchor_path)
+    git_context, statuses = _get_git_context(
+        backend,
+        root_path,
+        context_dir or anchor_path,
+        anchor_path,
+    )
     if not git_context.get("available"):
         raise ValueError(git_context.get("error") or "Folder is not inside a Git worktree")
     repo_root = str(git_context["repo_root"])
@@ -2895,10 +2912,11 @@ def _get_git_repo_summary(
     backend: Any,
     root_path: str,
     current_path: Optional[str] = None,
+    context_dir: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Return changed files and a bounded commit graph for the browsed path."""
     anchor_path = current_path or root_path
-    state = _get_git_repo_state(backend, root_path, anchor_path)
+    state = _get_git_repo_state(backend, root_path, anchor_path, context_dir)
     repo_root = str(state["git"]["repo_root"])
     anchor_pathspec = backend.pathspec(repo_root, anchor_path)
     commits = _bounded_git_graph_log(backend, repo_root, anchor_pathspec)
@@ -2964,13 +2982,17 @@ def _git_action_anchor(
     backend: Any,
     root_path: str,
     current_path: Optional[str] = None,
+    context_dir: Optional[str] = None,
 ) -> Tuple[str, str]:
     """Resolve and validate one explorer Git mutation anchor."""
     anchor_path = current_path or root_path
-    repo_root, detect_error = _resolve_git_worktree_root(backend, anchor_path)
+    detection_path = context_dir or anchor_path
+    repo_root, detect_error = _resolve_git_worktree_root(backend, detection_path)
     if repo_root is None:
         raise ValueError(detect_error or "Folder is not inside a Git worktree")
-    validation_error = backend.validate_repo_paths(repo_root, root_path, anchor_path)
+    validation_error = backend.validate_repo_paths(repo_root, root_path, detection_path)
+    if not validation_error:
+        validation_error = backend.validate_repo_paths(repo_root, root_path, anchor_path)
     if validation_error:
         raise ValueError(validation_error)
     return str(repo_root), anchor_path
@@ -2980,9 +3002,12 @@ def _git_action_repo_root(
     backend: Any,
     root_path: str,
     current_path: Optional[str] = None,
+    context_dir: Optional[str] = None,
 ) -> str:
     """Return the repository root for an explorer Git mutation, or raise."""
-    repo_root, _anchor_path = _git_action_anchor(backend, root_path, current_path)
+    repo_root, _anchor_path = _git_action_anchor(
+        backend, root_path, current_path, context_dir
+    )
     return repo_root
 
 
@@ -2990,9 +3015,12 @@ def _git_action_scope(
     backend: Any,
     root_path: str,
     current_path: Optional[str] = None,
+    context_dir: Optional[str] = None,
 ) -> Tuple[str, str]:
     """Return a validated repository root and its selected Git pathspec."""
-    repo_root, anchor_path = _git_action_anchor(backend, root_path, current_path)
+    repo_root, anchor_path = _git_action_anchor(
+        backend, root_path, current_path, context_dir
+    )
     return repo_root, backend.pathspec(repo_root, anchor_path)
 
 
@@ -3021,9 +3049,10 @@ def _git_stage_path(
     root_path: str,
     file_path: str,
     current_path: Optional[str] = None,
+    context_dir: Optional[str] = None,
 ) -> None:
     """Stage one worktree path inside an explorer repository."""
-    repo_root = _git_action_repo_root(backend, root_path, current_path)
+    repo_root = _git_action_repo_root(backend, root_path, current_path, context_dir)
     pathspec = backend.pathspec(repo_root, file_path)
     try:
         result = backend.run_git(["add", "--", pathspec], cwd=repo_root, write=True)
@@ -3039,9 +3068,10 @@ def _git_unstage_path(
     root_path: str,
     file_path: str,
     current_path: Optional[str] = None,
+    context_dir: Optional[str] = None,
 ) -> None:
     """Unstage one path inside an explorer repository."""
-    repo_root = _git_action_repo_root(backend, root_path, current_path)
+    repo_root = _git_action_repo_root(backend, root_path, current_path, context_dir)
     pathspec = backend.pathspec(repo_root, file_path)
     if _git_has_head(backend, repo_root):
         args = ["reset", "--quiet", "HEAD", "--", pathspec]
@@ -3060,13 +3090,16 @@ def _git_stage_all_paths(
     backend: Any,
     root_path: str,
     current_path: Optional[str] = None,
+    context_dir: Optional[str] = None,
 ) -> None:
     """Stage every working-tree change in the selected explorer Git scope.
 
     Bulk form of _git_stage_path (ISSUE-2026-032): runs ``git add --all``
     with the selected pathspec so hidden sibling changes remain untouched.
     """
-    repo_root, scope_pathspec = _git_action_scope(backend, root_path, current_path)
+    repo_root, scope_pathspec = _git_action_scope(
+        backend, root_path, current_path, context_dir
+    )
     try:
         result = backend.run_git(
             ["add", "--all", "--", scope_pathspec],
@@ -3084,6 +3117,7 @@ def _git_unstage_all_paths(
     backend: Any,
     root_path: str,
     current_path: Optional[str] = None,
+    context_dir: Optional[str] = None,
 ) -> None:
     """Unstage every staged change in the selected explorer Git scope.
 
@@ -3092,7 +3126,9 @@ def _git_unstage_all_paths(
     there is no HEAD to reset against, so the same fallback the single-path
     helper uses applies -- ``git rm --cached -r`` over the selected pathspec.
     """
-    repo_root, scope_pathspec = _git_action_scope(backend, root_path, current_path)
+    repo_root, scope_pathspec = _git_action_scope(
+        backend, root_path, current_path, context_dir
+    )
     if _git_has_head(backend, repo_root):
         args = ["reset", "--quiet", "HEAD", "--", scope_pathspec]
     else:
@@ -3114,6 +3150,7 @@ def _git_revert_path(
     root_path: str,
     file_path: str,
     current_path: Optional[str] = None,
+    context_dir: Optional[str] = None,
 ) -> None:
     """Discard one file's unstaged worktree changes.
 
@@ -3124,7 +3161,7 @@ def _git_revert_path(
     files are refused. A file with no unstaged change is a clear error instead
     of a no-op that would look like a broken action.
     """
-    repo_root = _git_action_repo_root(backend, root_path, current_path)
+    repo_root = _git_action_repo_root(backend, root_path, current_path, context_dir)
     pathspec = backend.pathspec(repo_root, file_path)
     try:
         status = backend.run_git(
@@ -3228,6 +3265,7 @@ def _git_discard_all_paths(
     backend: Any,
     root_path: str,
     current_path: Optional[str] = None,
+    context_dir: Optional[str] = None,
 ) -> None:
     """Discard tracked unstaged changes in the selected explorer Git scope.
 
@@ -3236,7 +3274,9 @@ def _git_discard_all_paths(
     staged content is preserved and untracked files are left in place —
     never ``git clean``.
     """
-    repo_root, scope_pathspec = _git_action_scope(backend, root_path, current_path)
+    repo_root, scope_pathspec = _git_action_scope(
+        backend, root_path, current_path, context_dir
+    )
     try:
         status = backend.run_git(
             [
@@ -3283,12 +3323,15 @@ def _git_commit(
     root_path: str,
     message: str,
     current_path: Optional[str] = None,
+    context_dir: Optional[str] = None,
 ) -> None:
     """Commit staged changes only when none are hidden outside the scope."""
     commit_message = str(message or "").strip()
     if not commit_message:
         raise ValueError("Commit message is required")
-    repo_root, scope_pathspec = _git_action_scope(backend, root_path, current_path)
+    repo_root, scope_pathspec = _git_action_scope(
+        backend, root_path, current_path, context_dir
+    )
     try:
         staged = backend.run_git(
             ["diff", "--cached", "--no-renames", "--name-only", "-z"],
@@ -3339,9 +3382,10 @@ def _git_publish(
     backend: Any,
     root_path: str,
     current_path: Optional[str] = None,
+    context_dir: Optional[str] = None,
 ) -> None:
     """Push the current branch; publish remains branch-wide in a narrowed scope."""
-    repo_root = _git_action_repo_root(backend, root_path, current_path)
+    repo_root = _git_action_repo_root(backend, root_path, current_path, context_dir)
     try:
         upstream = backend.run_git(
             ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],

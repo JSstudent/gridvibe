@@ -382,6 +382,7 @@ def apply_pane_mode_change(
         # chain pressed and no pin to explain it.
         "explorer_git_pin_active": False,
         "explorer_git_pinned_path": "",
+        "explorer_git_pin_kind": "dir",
         "explorer_git_follow_browsing": False,
         "initial_command": "",
         "initial_command_mode": "command",

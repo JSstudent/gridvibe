@@ -1,22 +1,23 @@
-"""The Git pin pair, carried through every route that can lose it.
+"""The Git pin record, carried through every route that can lose it.
 
-The pin is one fact in two fields -- ``explorer_git_pin_active`` and
-``explorer_git_pinned_path`` -- and the fields already exist in every store.
+The pin is one fact in three fields -- ``explorer_git_pin_active``,
+``explorer_git_pinned_path`` and ``explorer_git_pin_kind`` -- and every store
+must carry them together.
 That is precisely what made the "the pin is saved sometimes" report hard to
 place: nothing is missing, so the defect has to be an ordering, identity or
 resolution one somewhere along a chain that runs client -> transaction -> store
 -> restore -> client. The cure is a round trip that is *executed* on each of the
 four durable routes rather than a field inventory that is read.
 
-The pin is a **frozen path scope**: it captures whatever folder was being
-browsed, root-relative, and stays there until it is cleared. It is deliberately
-not the repository root -- a pin on a subdirectory is the point of it -- so a
-pin naming a folder outside any worktree round-trips faithfully and the sidebar
-then reports that the folder has no worktree. That is the pin working, not the
-pin being lost, and ``ScopeIsAFrozenPathTestCase`` below is what keeps the two
-readings from being confused again.
+The pin is a **frozen path scope**: it captures a root-relative file or folder
+and stays there until it is cleared. It is deliberately not the repository
+root -- a pin on a narrower path is the point of it -- so a pin outside any
+worktree round-trips faithfully and the sidebar then reports that it has no
+worktree. That is the pin working, not the pin being lost, and
+``ScopeIsAFrozenPathTestCase`` below is what keeps the two readings from being
+confused again.
 
-``explorer_git_expanded`` rides the same chain and is asserted beside the pair
+``explorer_git_expanded`` rides the same chain and is asserted beside the record
 on every route, because "which commits were open" is lost the same silent way.
 """
 
@@ -44,7 +45,8 @@ NODE = shutil.which("node")
 
 # One pinned explorer pane's worth of Git presentation. Every route below is
 # handed exactly this and is expected to give exactly this back.
-PINNED_PATH = "web/static/js"
+PINNED_PATH = "web/static/js/pinned.js"
+PINNED_KIND = "file"
 EXPANDED = ["explorer:abcdef1", "explorer:1234567"]
 
 
@@ -60,6 +62,7 @@ class _PinRouteTestCase(unittest.TestCase):
         self.addCleanup(self.temp_dir.cleanup)
         self.root_dir = Path(self.temp_dir.name) / "root"
         (self.root_dir / "web" / "static" / "js").mkdir(parents=True)
+        (self.root_dir / PINNED_PATH).write_text("pinned\n", encoding="utf-8")
         self.state_path = Path(self.temp_dir.name) / "runtime_state.json"
         self.saved_path = Path(self.temp_dir.name) / "saved_sessions.json"
         for module, attribute, value in (
@@ -93,7 +96,15 @@ class _PinRouteTestCase(unittest.TestCase):
         sessions = api.session_manager.get_group_sessions(group_id)
         return group_id, [session.session_id for session in sessions]
 
-    def _pin(self, group_id, session_ids, *, path=PINNED_PATH, revision=0):
+    def _pin(
+        self,
+        group_id,
+        session_ids,
+        *,
+        path=PINNED_PATH,
+        kind=PINNED_KIND,
+        revision=0,
+    ):
         """Route 1: the live presentation transaction the page actually posts."""
         return self.client.post(
             "/api/session-presentation",
@@ -109,6 +120,7 @@ class _PinRouteTestCase(unittest.TestCase):
                         "explorer_git_follow_browsing": False,
                         "explorer_git_pin_active": True,
                         "explorer_git_pinned_path": path,
+                        "explorer_git_pin_kind": kind,
                         "explorer_git_expanded": list(EXPANDED),
                     }
                     for session_id in session_ids
@@ -116,13 +128,21 @@ class _PinRouteTestCase(unittest.TestCase):
             },
         )
 
-    def assertPinned(self, session, *, path=PINNED_PATH, expanded=EXPANDED):
-        """The pair *and* the expansion, read off a live session object."""
+    def assertPinned(
+        self,
+        session,
+        *,
+        path=PINNED_PATH,
+        kind=PINNED_KIND,
+        expanded=EXPANDED,
+    ):
+        """The pin record *and* expansion, read off a live session object."""
         self.assertTrue(
             session.explorer_git_pin_active,
             "the pin flag did not survive this route",
         )
         self.assertEqual(session.explorer_git_pinned_path, path)
+        self.assertEqual(session.explorer_git_pin_kind, kind)
         self.assertEqual(list(session.explorer_git_expanded), list(expanded))
 
 
@@ -140,6 +160,7 @@ class LivePresentationRouteTestCase(_PinRouteTestCase):
         payload = session.to_dict()
         self.assertTrue(payload["explorer_git_pin_active"])
         self.assertEqual(payload["explorer_git_pinned_path"], PINNED_PATH)
+        self.assertEqual(payload["explorer_git_pin_kind"], PINNED_KIND)
         self.assertEqual(payload["explorer_git_expanded"], EXPANDED)
 
 
@@ -155,6 +176,7 @@ class WorkspaceSnapshotRouteTestCase(_PinRouteTestCase):
         pane = stored["workspaces"]["default"]["groups"][0]["sessions"][0]
         self.assertTrue(pane["explorer_git_pin_active"])
         self.assertEqual(pane["explorer_git_pinned_path"], PINNED_PATH)
+        self.assertEqual(pane["explorer_git_pin_kind"], PINNED_KIND)
         self.assertEqual(pane["explorer_git_expanded"], EXPANDED)
 
         # The process ends here; everything below is the next run.
@@ -194,6 +216,7 @@ class SavedPresetRouteTestCase(_PinRouteTestCase):
             "explorer_git_follow_browsing": False,
             "explorer_git_pin_active": True,
             "explorer_git_pinned_path": PINNED_PATH,
+            "explorer_git_pin_kind": PINNED_KIND,
             "explorer_git_expanded": list(EXPANDED),
         }
         for field_name in omit_fields:
@@ -222,12 +245,14 @@ class SavedPresetRouteTestCase(_PinRouteTestCase):
         preset = saved.get_json()["config"]["terminals"][0]
         self.assertTrue(preset["explorer_git_pin_active"])
         self.assertEqual(preset["explorer_git_pinned_path"], PINNED_PATH)
+        self.assertEqual(preset["explorer_git_pin_kind"], PINNED_KIND)
         self.assertEqual(preset["explorer_git_expanded"], EXPANDED)
         # And on disk, which is what the next run reads.
         on_disk = json.loads(self.saved_path.read_text(encoding="utf-8"))
         stored = on_disk["sessions"][0]["config"]["terminals"][0]
         self.assertTrue(stored["explorer_git_pin_active"])
         self.assertEqual(stored["explorer_git_pinned_path"], PINNED_PATH)
+        self.assertEqual(stored["explorer_git_pin_kind"], PINNED_KIND)
 
         self.client.delete("/api/sessions")
         api.session_manager.reset_sessions()
@@ -267,6 +292,7 @@ class SavedPresetRouteTestCase(_PinRouteTestCase):
             omit_fields=(
                 "explorer_git_pin_active",
                 "explorer_git_pinned_path",
+                "explorer_git_pin_kind",
                 "explorer_git_expanded",
             ),
         )
@@ -305,6 +331,7 @@ class CloseDrivenRebuildRouteTestCase(_PinRouteTestCase):
         )
         self.assertTrue(entry["explorer_git_pin_active"])
         self.assertEqual(entry["explorer_git_pinned_path"], PINNED_PATH)
+        self.assertEqual(entry["explorer_git_pin_kind"], PINNED_KIND)
         self.assertEqual(entry["explorer_git_expanded"], EXPANDED)
 
 
@@ -319,7 +346,7 @@ class ScopeIsAFrozenPathTestCase(_PinRouteTestCase):
 
     def test_a_subdirectory_pin_is_stored_as_that_subdirectory(self):
         group_id, session_ids = self._launch()
-        self._pin(group_id, session_ids, path="web/static/js")
+        self._pin(group_id, session_ids, path="web/static/js", kind="dir")
 
         session = api.session_manager.get_session(session_ids[0])
         self.assertEqual(session.explorer_git_pinned_path, "web/static/js")
@@ -328,7 +355,7 @@ class ScopeIsAFrozenPathTestCase(_PinRouteTestCase):
         """The ambiguous one: `active` is the whole difference between "pinned
         to the root" and "not pinned", because the path both carry is ''."""
         group_id, session_ids = self._launch()
-        self._pin(group_id, session_ids, path="")
+        self._pin(group_id, session_ids, path="", kind="dir")
 
         session = api.session_manager.get_session(session_ids[0])
         self.assertTrue(session.explorer_git_pin_active)
@@ -339,7 +366,7 @@ class ScopeIsAFrozenPathTestCase(_PinRouteTestCase):
         missing worktree. Rewriting the pin to something that *does* resolve
         would be the persistence layer inventing a scope nobody chose."""
         group_id, session_ids = self._launch()
-        self._pin(group_id, session_ids, path="web/static")
+        self._pin(group_id, session_ids, path="web/static", kind="dir")
 
         web_runtime_state.capture_workspace(api.session_manager, origin="manual")
         self.client.delete("/api/sessions")
@@ -373,6 +400,7 @@ class PinRefusalTestCase(_PinRouteTestCase):
                         "explorer_git_follow_browsing": follow,
                         "explorer_git_pin_active": True,
                         "explorer_git_pinned_path": PINNED_PATH,
+                        "explorer_git_pin_kind": PINNED_KIND,
                         "explorer_git_expanded": list(EXPANDED),
                     }
                     for session_id in session_ids
@@ -401,10 +429,12 @@ class PinRefusalTestCase(_PinRouteTestCase):
         session = api.session_manager.get_session(session_ids[0])
         self.assertFalse(session.explorer_git_pin_active)
         self.assertEqual(session.explorer_git_pinned_path, "")
+        self.assertEqual(session.explorer_git_pin_kind, "dir")
         self.assertFalse(session.explorer_git_follow_browsing)
         payload = switched.get_json()
         self.assertFalse(payload["explorer_git_pin_active"])
         self.assertEqual(payload["explorer_git_pinned_path"], "")
+        self.assertEqual(payload["explorer_git_pin_kind"], "dir")
         self.assertFalse(payload["explorer_git_follow_browsing"])
 
     def test_follow_alone_does_not_survive_the_round_trip_either(self):
@@ -426,6 +456,7 @@ class PinRefusalTestCase(_PinRouteTestCase):
                         "explorer_git_follow_browsing": True,
                         "explorer_git_pin_active": False,
                         "explorer_git_pinned_path": "",
+                        "explorer_git_pin_kind": "dir",
                     }
                 ],
             },
@@ -516,6 +547,24 @@ class PinRefusalTestCase(_PinRouteTestCase):
                 with self.assertRaises(PresentationValidationError):
                     normalize_pane_presentation({"explorer_git_pinned_path": hostile})
 
+    def test_an_unknown_pin_kind_is_refused_rather_than_treated_as_a_directory(self):
+        for hostile in (None, 5, "folder", "blob", "FILE"):
+            with self.subTest(kind=hostile):
+                with self.assertRaises(PresentationValidationError):
+                    normalize_pane_presentation({"explorer_git_pin_kind": hostile})
+
+    def test_an_older_preset_defaults_the_absent_kind_but_refuses_a_bad_one(self):
+        old_entry = web_saved_sessions._normalize_terminal_entries(
+            [{"startup_mode": "explorer"}], minimum_count=1
+        )[0]
+        self.assertEqual(old_entry["explorer_git_pin_kind"], "dir")
+
+        with self.assertRaises(PresentationValidationError):
+            web_saved_sessions._normalize_terminal_entries(
+                [{"startup_mode": "explorer", "explorer_git_pin_kind": "blob"}],
+                minimum_count=1,
+            )
+
     def test_the_expanded_commit_set_is_bounded_not_refused(self):
         """Expansion is cosmetic, so it is trimmed to the ceiling rather than
         costing the pane the pin travelling beside it."""
@@ -524,6 +573,7 @@ class PinRefusalTestCase(_PinRouteTestCase):
             {
                 "explorer_git_pin_active": True,
                 "explorer_git_pinned_path": PINNED_PATH,
+                "explorer_git_pin_kind": PINNED_KIND,
                 "explorer_git_expanded": oversized,
             }
         )
@@ -531,6 +581,7 @@ class PinRefusalTestCase(_PinRouteTestCase):
             len(normalized["explorer_git_expanded"]), EXPLORER_MAX_GIT_EXPANDED
         )
         self.assertEqual(normalized["explorer_git_pinned_path"], PINNED_PATH)
+        self.assertEqual(normalized["explorer_git_pin_kind"], PINNED_KIND)
 
 
 @unittest.skipUnless(NODE, "Node.js is required for the client pin round trip")
@@ -571,6 +622,7 @@ if (mode === 'describe') {
     const pane = { _explorerGitFollowBrowsing: false };
     if (input.pinnedPath !== null) {
         pane._explorerGitPinnedPath = input.pinnedPath;
+        pane._explorerGitPinKind = input.pinnedKind;
     }
     const pin = persistence.explorerGitPinDescriptor(pane);
     const payload = persistence.buildGroupPresentationPayload({
@@ -585,6 +637,7 @@ if (mode === 'describe') {
                 gitFollowBrowsing: false,
                 gitPinActive: pin.active,
                 gitPinnedPath: pin.path,
+                gitPinKind: pin.kind,
                 openTabs: [],
                 activeTab: ''
             }
@@ -594,15 +647,39 @@ if (mode === 'describe') {
         scopeBefore: sandbox.explorerGitScopePath(pane),
         payload
     }));
-} else {
+} else if (mode === 'rebuild') {
     // The pane the page rebuilds from the session record the server returned.
     const rebuilt = {
         _explorerGitFollowBrowsing: Boolean(input.explorer_git_follow_browsing),
-        _explorerGitPinnedPath: persistence.explorerGitPinnedPathFromSession(input)
+        _explorerGitPinnedPath: persistence.explorerGitPinnedPathFromSession(input),
+        _explorerGitPinKind: persistence.explorerGitPinKindFromSession(input)
     };
     process.stdout.write(JSON.stringify({
         scopeAfter: sandbox.explorerGitScopePath(rebuilt),
+        scopeKindAfter: sandbox.explorerGitScopeKind(rebuilt),
         pinnedType: typeof rebuilt._explorerGitPinnedPath
+    }));
+} else {
+    const followedFile = {
+        _explorerGitFollowBrowsing: true,
+        _explorerMode: 'file',
+        _explorerFilePath: 'src/app.js',
+        _explorerPath: 'src'
+    };
+    const followedFolder = {
+        _explorerGitFollowBrowsing: true,
+        _explorerMode: 'directory',
+        _explorerPath: 'src'
+    };
+    process.stdout.write(JSON.stringify({
+        file: {
+            path: sandbox.explorerGitScopePath(followedFile),
+            kind: sandbox.explorerGitScopeKind(followedFile)
+        },
+        folder: {
+            path: sandbox.explorerGitScopePath(followedFolder),
+            kind: sandbox.explorerGitScopeKind(followedFolder)
+        }
     }));
 }
 """
@@ -629,7 +706,7 @@ if (mode === 'describe') {
             self.fail(f"node harness failed:\n{completed.stderr}")
         return json.loads(completed.stdout)
 
-    def _round_trip(self, pinned_path):
+    def _round_trip(self, pinned_path, pinned_kind=PINNED_KIND):
         group_id, session_ids = self._launch()
         described = self._node(
             "describe",
@@ -638,6 +715,7 @@ if (mode === 'describe') {
                 "groupId": group_id,
                 "sessionId": session_ids[0],
                 "pinnedPath": pinned_path,
+                "pinnedKind": pinned_kind,
             },
         )
         accepted = self.client.post(
@@ -653,22 +731,31 @@ if (mode === 'describe') {
 
         self.assertEqual(described["scopeBefore"], PINNED_PATH)
         self.assertEqual(rebuilt["scopeAfter"], PINNED_PATH)
+        self.assertEqual(rebuilt["scopeKindAfter"], PINNED_KIND)
 
     def test_a_root_pin_comes_back_as_a_pin_and_not_as_no_pin(self):
         """H3's ambiguity, executed: '' and `null` are different scopes and the
         page must not collapse one into the other over a rebuild."""
-        described, rebuilt = self._round_trip("")
+        described, rebuilt = self._round_trip("", "dir")
 
         self.assertEqual(described["scopeBefore"], "")
         self.assertEqual(rebuilt["scopeAfter"], "")
+        self.assertEqual(rebuilt["scopeKindAfter"], "dir")
         self.assertEqual(rebuilt["pinnedType"], "string")
 
     def test_an_unpinned_pane_stays_unpinned_rather_than_pinning_itself_to_root(self):
-        described, rebuilt = self._round_trip(None)
+        described, rebuilt = self._round_trip(None, "dir")
 
         self.assertIsNone(described["scopeBefore"])
         self.assertIsNone(rebuilt["scopeAfter"])
+        self.assertEqual(rebuilt["scopeKindAfter"], "dir")
         self.assertEqual(rebuilt["pinnedType"], "undefined")
+
+    def test_follow_uses_the_open_file_and_falls_back_to_the_browsed_folder(self):
+        scopes = self._node("scope", {})
+
+        self.assertEqual(scopes["file"], {"path": "src/app.js", "kind": "file"})
+        self.assertEqual(scopes["folder"], {"path": "src", "kind": "dir"})
 
 
 if __name__ == "__main__":

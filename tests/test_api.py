@@ -2031,6 +2031,11 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn('id="explorer-viewer-${index}"', html)
         self.assertIn("data-explorer-tab-open", html)
         self.assertIn("data-explorer-tab-close", html)
+        # Every tab that names a file exposes the shared Git-scope menu hook,
+        # including Preview; pinned tabs retain their copy/download hooks too.
+        self.assertIn("data-explorer-git-scope-path=", html)
+        self.assertIn('data-explorer-git-scope-kind="file"', html)
+        self.assertIn('data-explorer-git-scope-surface="tab"', html)
         # An open-in-new-tab control on each tree file row opens a pinned tab (event-isolated)
         # in the background — see the focus contract test below.
         self.assertIn("data-explorer-tree-open-tab", html)
@@ -7630,6 +7635,124 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("initial", payload["commits"][0]["line"])
         self.assertEqual(payload["commits"][0]["files"][0]["path"], "README.md")
         self.assertEqual(payload["commits"][0]["files"][0]["git"]["status"], "added")
+
+    def test_explorer_git_file_scope_narrows_status_and_graph_to_that_file(self):
+        repo_dir = self._init_committed_repo()
+        other = repo_dir / "other.txt"
+        other.write_text("other\n", encoding="utf-8")
+        self._run_git(repo_dir, "add", "other.txt")
+        self._run_git(repo_dir, "commit", "-m", "other only")
+        readme = repo_dir / "README.md"
+        readme.write_text("# Project\nchanged\n", encoding="utf-8")
+        other.write_text("other changed\n", encoding="utf-8")
+        session_id = self._create_explorer_session(repo_dir)
+
+        response = self.client.get(
+            f"/api/explorer/{session_id}/git/repo",
+            query_string={"scope": "path", "kind": "file", "path": "README.md"},
+        )
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        payload = response.get_json()
+        self.assertEqual(payload["anchor_path"].replace("\\", "/"), "README.md")
+        self.assertEqual(
+            [item["path"].replace("\\", "/") for item in payload["changes"]],
+            ["README.md"],
+        )
+        subjects = [commit.get("subject") or commit.get("line", "") for commit in payload["commits"]]
+        self.assertFalse(any("other only" in subject for subject in subjects))
+        self.assertTrue(any("initial" in subject for subject in subjects))
+
+    def test_explorer_git_file_scope_rejects_bad_kind_directory_and_escape_without_mutation(self):
+        repo_dir = self._init_committed_repo()
+        readme = repo_dir / "README.md"
+        readme.write_text("# Project\nchanged\n", encoding="utf-8")
+        outside = Path(self.temp_dir.name) / "outside.txt"
+        outside.write_text("outside\n", encoding="utf-8")
+        session_id = self._create_explorer_session(repo_dir)
+        pane_before = api.session_manager.get_session(session_id).to_dict()
+        index_before = self._run_git(repo_dir, "diff", "--cached").stdout
+
+        refusals = (
+            {"scope": "path", "kind": "blob", "path": "README.md"},
+            {"scope": "path", "kind": "file", "path": ""},
+            {"scope": "path", "kind": "file", "path": "../outside.txt"},
+        )
+        for query in refusals:
+            with self.subTest(query=query):
+                response = self.client.post(
+                    f"/api/explorer/{session_id}/git/stage-all",
+                    query_string=query,
+                    json={},
+                )
+                self.assertEqual(response.status_code, 400, response.get_json())
+
+        self.assertEqual(
+            api.session_manager.get_session(session_id).to_dict(), pane_before
+        )
+        self.assertEqual(self._run_git(repo_dir, "diff", "--cached").stdout, index_before)
+        self.assertEqual(readme.read_text(encoding="utf-8"), "# Project\nchanged\n")
+        self.assertEqual(outside.read_text(encoding="utf-8"), "outside\n")
+
+    def test_explorer_git_file_scope_bulk_actions_and_commit_stay_on_one_file(self):
+        repo_dir = self._init_committed_repo()
+        other = repo_dir / "other.txt"
+        other.write_text("other\n", encoding="utf-8")
+        self._run_git(repo_dir, "add", "other.txt")
+        self._run_git(repo_dir, "commit", "-m", "add other")
+        readme = repo_dir / "README.md"
+        readme.write_text("# Project\nreadme changed\n", encoding="utf-8")
+        other.write_text("other changed\n", encoding="utf-8")
+        untracked = repo_dir / "untracked.txt"
+        untracked.write_text("leave me\n", encoding="utf-8")
+        session_id = self._create_explorer_session(repo_dir)
+        query = {"scope": "path", "kind": "file", "path": "README.md"}
+
+        staged = self.client.post(
+            f"/api/explorer/{session_id}/git/stage-all",
+            query_string=query,
+            json={},
+        )
+        self.assertEqual(staged.status_code, 200, staged.get_json())
+        self.assertEqual(
+            self._run_git(repo_dir, "diff", "--cached", "--name-only").stdout.decode().split(),
+            ["README.md"],
+        )
+
+        self._run_git(repo_dir, "add", "other.txt")
+        refused = self.client.post(
+            f"/api/explorer/{session_id}/git/commit",
+            query_string=query,
+            json={"message": "must not commit hidden staged work"},
+        )
+        self.assertEqual(refused.status_code, 400, refused.get_json())
+        self.assertIn("outside", refused.get_json()["error"].lower())
+        self.assertEqual(
+            set(self._run_git(repo_dir, "diff", "--cached", "--name-only").stdout.decode().split()),
+            {"README.md", "other.txt"},
+        )
+
+        unstaged = self.client.post(
+            f"/api/explorer/{session_id}/git/unstage-all",
+            query_string=query,
+            json={},
+        )
+        self.assertEqual(unstaged.status_code, 200, unstaged.get_json())
+        self.assertEqual(
+            self._run_git(repo_dir, "diff", "--cached", "--name-only").stdout.decode().split(),
+            ["other.txt"],
+        )
+
+        self._run_git(repo_dir, "reset", "--quiet", "HEAD", "--", "other.txt")
+        discarded = self.client.post(
+            f"/api/explorer/{session_id}/git/discard-all",
+            query_string=query,
+            json={},
+        )
+        self.assertEqual(discarded.status_code, 200, discarded.get_json())
+        self.assertEqual(readme.read_text(encoding="utf-8"), "# Project\n")
+        self.assertEqual(other.read_text(encoding="utf-8"), "other changed\n")
+        self.assertEqual(untracked.read_text(encoding="utf-8"), "leave me\n")
 
     def test_explorer_git_repo_expands_untracked_directories_to_files(self):
         repo_dir = self._init_committed_repo()
@@ -14545,7 +14668,11 @@ class ExplorerGitRevisionTestCase(unittest.TestCase):
                     get_summary.assert_called_once()
                     self.assertEqual(
                         get_summary.call_args.args[1:],
-                        (str(root.resolve()), str(expected_anchor)),
+                        (
+                            str(root.resolve()),
+                            str(expected_anchor),
+                            str(expected_anchor),
+                        ),
                     )
 
 

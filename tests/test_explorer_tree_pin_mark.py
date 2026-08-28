@@ -49,11 +49,11 @@ NODE = shutil.which("node")
 # is an observation over a tree that has somewhere else to put the marker.
 FIXTURE_CHILDREN = {
     "": [
-        {"type": "directory", "path": "docs", "name": "docs"},
-        {"type": "directory", "path": "web", "name": "web"},
-        {"type": "file", "path": "readme.md", "name": "readme.md"},
+        {"type": "directory", "entry_kind": "directory", "path": "docs", "name": "docs"},
+        {"type": "directory", "entry_kind": "directory", "path": "web", "name": "web"},
+        {"type": "file", "entry_kind": "file", "path": "readme.md", "name": "readme.md"},
     ],
-    "web": [{"type": "directory", "path": "web/static", "name": "static"}],
+    "web": [{"type": "directory", "entry_kind": "directory", "path": "web/static", "name": "static"}],
     "web/static": [],
     "docs": [],
 }
@@ -111,8 +111,8 @@ function loadSandbox(pinJs, treeJs) {
 
 /* The tree state is gated on `instanceof Set`/`Map`, which fails across vm
    realms, so the pane is assembled inside the context. */
-function installPane(sandbox, fixture, expanded, pinned) {
-    sandbox.__fixture = { fixture, expanded, pinned };
+function installPane(sandbox, fixture, expanded, pinned, pinnedKind = 'dir') {
+    sandbox.__fixture = { fixture, expanded, pinned, pinnedKind };
     vm.runInContext(`
         sessionIds[0] = 'sess-0';
         terminals[0] = {
@@ -123,6 +123,7 @@ function installPane(sandbox, fixture, expanded, pinned) {
         };
         if (__fixture.pinned !== null) {
             terminals[0]._explorerGitPinnedPath = __fixture.pinned;
+            terminals[0]._explorerGitPinKind = __fixture.pinnedKind;
         }
     `, sandbox);
     return sandbox;
@@ -166,7 +167,7 @@ function makeRow(path, kind, marked) {
     const children = [];
     const row = {
         nodeId: ++nodeSeq,
-        dataset: { explorerContextPath: path },
+        dataset: { explorerContextPath: path, explorerContextKind: kind },
         children,
         insertAdjacentHTML(position, markup) {
             if (position !== 'beforeend') { throw new Error('unexpected ' + position); }
@@ -194,9 +195,10 @@ function makeRow(path, kind, marked) {
 
 const pinned = process.argv[4] === '__none__' ? null : process.argv[4];
 const rowSpec = JSON.parse(process.argv[5]);
+const pinnedKind = process.argv[6] || 'dir';
 
 const sandbox = loadSandbox(process.argv[2], process.argv[3]);
-installPane(sandbox, {}, [], pinned);
+installPane(sandbox, {}, [], pinned, pinnedKind);
 
 const rows = rowSpec.map(spec => makeRow(spec.path, spec.kind, Boolean(spec.marked)));
 const rootMark = { nodeId: ++nodeSeq, hidden: true };
@@ -237,8 +239,9 @@ process.stdout.write(JSON.stringify({
 # The rendered tree body, straight out of the real row builder.
 RENDER_HARNESS = SANDBOX + r"""
 const pinned = process.argv[5] === '__none__' ? null : process.argv[5];
+const pinnedKind = process.argv[6] || 'dir';
 const sandbox = loadSandbox(process.argv[2], process.argv[3]);
-installPane(sandbox, JSON.parse(process.argv[4]), ['web'], pinned);
+installPane(sandbox, JSON.parse(process.argv[4]), ['web'], pinned, pinnedKind);
 
 const html = sandbox.renderExplorerTreeNodes(sandbox.terminals[0], '', 0);
 // Which rows carry the marker: `split` hands back the markup between one row's
@@ -519,7 +522,7 @@ PREDICATE_HARNESS = r"""
 const api = require(process.argv[2]);
 const cases = JSON.parse(process.argv[3]);
 process.stdout.write(JSON.stringify(
-    cases.map(([pinned, path]) => api.explorerGitPathIsPinned(pinned, path))
+    cases.map(args => api.explorerGitPathIsPinned(...args))
 ));
 """
 
@@ -566,18 +569,92 @@ class ExplorerGitPinPredicateTestCase(unittest.TestCase):
         # `''` is falsy and is a pin; `null`/`undefined` are the absence of one.
         self.assertEqual(self._ask([[None, ""], [None, "docs"]]), [False, False])
 
+    def test_the_same_path_with_a_different_kind_is_not_the_pin(self):
+        self.assertEqual(
+            self._ask(
+                [
+                    ["src/app.js", "src/app.js", "file", "file"],
+                    ["src/app.js", "src/app.js", "file", "dir"],
+                    ["src", "src", "dir", "file"],
+                ]
+            ),
+            [True, False, False],
+        )
+
+
+@unittest.skipUnless(NODE, "Node.js is required for explorer Git menu tests")
+class ExplorerGitScopeMenuPolicyTestCase(unittest.TestCase):
+    HARNESS = r"""
+const api = require(process.argv[2]);
+const cases = JSON.parse(process.argv[3]);
+process.stdout.write(JSON.stringify({
+    menus: cases.map(spec => api.explorerGitScopeMenuItem(spec)),
+    follow: [
+        api.explorerGitFollowMenuItem(false),
+        api.explorerGitFollowMenuItem(true)
+    ]
+}));
+"""
+
+    def _ask(self, cases):
+        completed = _run(self.HARNESS, str(PIN_JS), json.dumps(cases))
+        if completed.returncode != 0:
+            self.fail(f"node harness failed:\n{completed.stderr}")
+        return json.loads(completed.stdout)
+
+    def test_pin_unpin_and_disabled_outside_worktree_are_one_menu_policy(self):
+        result = self._ask(
+            [
+                {
+                    "pinnedPath": "src/app.js",
+                    "pinnedKind": "file",
+                    "targetPath": "src/app.js",
+                    "targetKind": "file",
+                },
+                {
+                    "pinnedPath": "src/app.js",
+                    "pinnedKind": "file",
+                    "targetPath": "src/lib.js",
+                    "targetKind": "file",
+                },
+                {
+                    "targetPath": "outside.txt",
+                    "targetKind": "file",
+                    "worktreeAvailable": False,
+                },
+            ]
+        )
+        unpin, repin, outside = result["menus"]
+        self.assertEqual(unpin["label"], "Unpin Git")
+        self.assertEqual(unpin["action"], "unpin")
+        self.assertEqual(repin["label"], "Pin Git here")
+        self.assertFalse(repin["disabled"])
+        self.assertTrue(outside["disabled"])
+        self.assertIn("not inside a Git worktree", outside["title"])
+
+    def test_multi_selection_has_no_pin_entry_and_follow_has_both_labels(self):
+        result = self._ask(
+            [{"targetPath": "src/app.js", "targetKind": "file", "targetCount": 3}]
+        )
+        self.assertIsNone(result["menus"][0])
+        self.assertEqual(
+            [item["label"] for item in result["follow"]],
+            ["Follow Git browsing", "Unfollow Git browsing"],
+        )
+
 
 @unittest.skipUnless(NODE, "Node.js is required for explorer tree pin mark tests")
 class ExplorerTreePinMarkRenderTestCase(unittest.TestCase):
     """The rendered tree: which row wears the marker, and how many do."""
 
-    def _render(self, pinned):
+    def _render(self, pinned, kind="dir"):
         completed = _run(
             RENDER_HARNESS,
             str(PIN_JS),
             str(TREE_JS),
             json.dumps(FIXTURE_CHILDREN),
             "__none__" if pinned is None else pinned,
+            kind,
         )
         if completed.returncode != 0:
             self.fail(f"node harness failed:\n{completed.stderr}")
@@ -625,11 +702,27 @@ class ExplorerTreePinMarkRenderTestCase(unittest.TestCase):
         marker_at = html.index("explorer-tree-pin-mark")
         self.assertEqual(html.rfind("<span", 0, marker_at), html.rfind("<", 0, marker_at))
 
+    def test_each_tree_row_exposes_its_exact_git_scope_to_the_shared_menu(self):
+        html = self._render(None)["html"]
+        self.assertIn('data-explorer-git-scope-path="web"', html)
+        self.assertIn('data-explorer-git-scope-kind="dir"', html)
+        self.assertIn('data-explorer-git-scope-path="readme.md"', html)
+        self.assertIn('data-explorer-git-scope-kind="file"', html)
+        self.assertEqual(
+            html.count('data-explorer-git-scope-surface="tree"'),
+            html.count('data-explorer-context-path="'),
+        )
+
     def test_the_marker_sits_immediately_left_of_the_open_control(self):
         # Per row, not per document: every row carries an open control, so the
         # comparison is only meaningful inside the row that has the marker.
         self.assertTrue(self._render("web")["markBeforeOpen"])
-        self.assertTrue(self._render("readme.md")["markBeforeOpen"])
+        self.assertTrue(self._render("readme.md", "file")["markBeforeOpen"])
+
+    def test_a_file_pin_marks_the_file_row_and_not_a_same_spelled_directory(self):
+        result = self._render("readme.md", "file")
+        self.assertEqual(result["marked"], ["readme.md"])
+        self.assertEqual(result["markerCount"], 1)
 
 
 @unittest.skipUnless(NODE, "Node.js is required for explorer tree pin mark tests")
@@ -642,13 +735,14 @@ class ExplorerTreePinMarkPaintTestCase(unittest.TestCase):
         {"path": "readme.md", "kind": "file"},
     ]
 
-    def _paint(self, pinned, rows=None):
+    def _paint(self, pinned, rows=None, kind="dir"):
         completed = _run(
             PAINT_HARNESS,
             str(PIN_JS),
             str(TREE_JS),
             "__none__" if pinned is None else pinned,
             json.dumps(self.ROWS if rows is None else rows),
+            kind,
         )
         if completed.returncode != 0:
             self.fail(f"node harness failed:\n{completed.stderr}")
@@ -673,7 +767,7 @@ class ExplorerTreePinMarkPaintTestCase(unittest.TestCase):
         self.assertEqual(result["scrollTop"], 412)
 
     def test_a_file_row_can_carry_the_mark_beside_its_open_in_tab_button(self):
-        result = self._paint("readme.md")
+        result = self._paint("readme.md", kind="file")
         self.assertEqual(result["marked"], ["readme.md"])
         self.assertTrue(result["markBeforeOpen"])
 
@@ -719,8 +813,11 @@ class ExplorerGitPinButtonStateTestCase(unittest.TestCase):
         self.assertEqual(state["state"], "here")
         self.assertTrue(state["pressed"])
         self.assertEqual(state["title"], "Clear pinned Git folder")
-        # The button is the clear, so the chip must not offer a second one.
-        self.assertFalse(state["clearAvailable"])
+        # And the named clear stands beside it. It used to be withheld here on
+        # the grounds that the pressed button already clears -- which took the
+        # only *named* way to unpin away at exactly the folder a reader is
+        # standing in when they decide to.
+        self.assertTrue(state["clearAvailable"])
 
     def test_a_pin_elsewhere_is_not_pressed_and_names_where_it_is(self):
         state = self._state("web/static/js", "docs")
@@ -896,15 +993,26 @@ class ExplorerGitPinButtonPaintTestCase(unittest.TestCase):
         # And the button the reader may be hovering is the same node.
         self.assertEqual(result["buttonNodeId"], self._paint("docs", "web")["buttonNodeId"])
 
-    def test_the_scope_chip_s_clear_pin_is_shown_only_from_elsewhere(self):
-        # Toggled by `hidden`, never added and removed, so it can appear on a
-        # navigation that renders nothing.
+    def test_the_scope_chip_s_clear_pin_is_shown_wherever_a_pin_is(self):
+        # Toggled by `hidden`, never added and removed, so a write can move it
+        # before the reload has re-rendered the panel. It answers "is there a
+        # pin", so the pinned folder shows it too and plain navigation between
+        # the two never takes it away.
         self.assertFalse(self._paint("docs", "web")["scopeClearHidden"])
-        self.assertTrue(self._paint("docs", "docs", scope_clear_hidden=False)["scopeClearHidden"])
+        self.assertFalse(self._paint("docs", "docs")["scopeClearHidden"])
+        # No pin, nothing to clear: an inert control is worse than none.
         self.assertTrue(self._paint(None, "web", scope_clear_hidden=False)["scopeClearHidden"])
 
     def test_the_scope_chip_s_clear_goes_through_the_one_writer(self):
         result = self._act_clear("web/static/js", "docs")
+        self.assertIsNone(result["pinnedAfter"])
+        self.assertEqual(result["writes"], [None])
+        self.assertEqual(result["loads"], 1)
+
+    def test_the_scope_chip_s_clear_also_unpins_the_folder_being_browsed(self):
+        # The row's clear and the pressed button are two doors to one write:
+        # standing on the pin, either one removes it, and neither re-pins.
+        result = self._act_clear("docs", "docs")
         self.assertIsNone(result["pinnedAfter"])
         self.assertEqual(result["writes"], [None])
         self.assertEqual(result["loads"], 1)
@@ -967,12 +1075,12 @@ class ExplorerGitPinPanelMarkupTestCase(unittest.TestCase):
         self.assertEqual(result["scopeClearCount"], 1)
         self.assertFalse(result["scopeClearHidden"])
 
-    def test_the_clear_pin_is_present_but_hidden_while_the_pin_is_here(self):
-        # Present, so a navigation can reveal it without a re-render; hidden,
-        # because the button itself is the clear while the pin is here.
+    def test_the_clear_pin_is_offered_on_the_pinned_folder_too(self):
+        # Still exactly one, and visible: the pressed button is a shortcut to
+        # the same write, not the only way out of a pin.
         result = self._render("docs", "docs")
         self.assertEqual(result["scopeClearCount"], 1)
-        self.assertTrue(result["scopeClearHidden"])
+        self.assertFalse(result["scopeClearHidden"])
 
     def test_following_without_a_pin_carries_no_clear_at_all(self):
         # Follow gets its own row and names its scope, but Clear pin belongs to
@@ -992,14 +1100,18 @@ class ExplorerGitScopeLinesTestCase(unittest.TestCase):
     pointed at the wrong one of the two.
     """
 
-    def _lines(self, pinned, browsed, following):
+    def _lines(self, pinned, browsed, following, pinned_kind="dir", browsed_kind="dir"):
         script = (
             "const api = require(process.argv[2]);"
-            "const [pinned, browsed, following] = JSON.parse(process.argv[3]);"
+            "const args = JSON.parse(process.argv[3]);"
             "process.stdout.write(JSON.stringify("
-            "api.explorerGitScopeLines(pinned, browsed, following)));"
+            "api.explorerGitScopeLines(...args)));"
         )
-        completed = _run(script, str(PIN_JS), json.dumps([pinned, browsed, following]))
+        completed = _run(
+            script,
+            str(PIN_JS),
+            json.dumps([pinned, browsed, following, pinned_kind, browsed_kind]),
+        )
         if completed.returncode != 0:
             self.fail(f"node harness failed:\n{completed.stderr}")
         return json.loads(completed.stdout)
@@ -1024,6 +1136,18 @@ class ExplorerGitScopeLinesTestCase(unittest.TestCase):
         # Nothing to clear: there is no pin.
         self.assertFalse(lines[0]["clearAvailable"])
 
+    def test_file_scopes_name_the_file_and_record_its_kind(self):
+        pinned = self._lines(
+            "src/components/app.js", "docs/guide.md", False, "file", "file"
+        )[0]
+        followed = self._lines(
+            None, "docs/guide.md", True, "dir", "file"
+        )[0]
+        self.assertEqual(pinned["label"], "app.js")
+        self.assertEqual(pinned["scopeKind"], "file")
+        self.assertEqual(followed["label"], "guide.md")
+        self.assertIn("browsed file", followed["title"])
+
     def test_both_controls_give_both_rows_pin_first(self):
         lines = self._lines("open5gs/docs", "open5gs/lib", True)
         self.assertEqual([line["kind"] for line in lines], ["pin", "follow"])
@@ -1047,11 +1171,13 @@ class ExplorerGitScopeLinesTestCase(unittest.TestCase):
             if following:
                 self.assertFalse(by_kind["follow"]["clearAvailable"])
 
-    def test_the_pin_row_offers_no_clear_while_the_pin_is_here(self):
-        # The pressed pin button is the clear there; a second control for one
-        # action is what the row is meant to stop.
-        line = self._lines("open5gs/docs", "open5gs/docs", False)[0]
-        self.assertFalse(line["clearAvailable"])
+    def test_the_pin_row_offers_its_clear_from_the_pinned_folder_too(self):
+        # Clear pin answers "is there a pin", not "is the pin elsewhere", so
+        # walking in and out of the pinned folder never moves the control the
+        # reader reaches for -- the browsed path does not enter into it.
+        for browsed in ("open5gs/docs", "open5gs/lib", "", None):
+            line = self._lines("open5gs/docs", browsed, False)[0]
+            self.assertTrue(line["clearAvailable"], browsed)
 
     def test_a_root_pin_and_a_root_follow_are_both_named_root(self):
         # '' and "no pin" ask the server for the same thing, so a root pin

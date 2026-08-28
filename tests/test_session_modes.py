@@ -60,6 +60,7 @@ _PANE_FIELDS = (
     "explorer_git_follow_browsing",
     "explorer_git_pin_active",
     "explorer_git_pinned_path",
+    "explorer_git_pin_kind",
     "initial_command",
     "initial_command_mode",
     "startup_mode",

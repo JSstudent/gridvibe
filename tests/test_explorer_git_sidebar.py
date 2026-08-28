@@ -420,6 +420,22 @@ class ExplorerGitScopeSurfaceTestCase(unittest.TestCase):
         self.assertIn("Git scope follows the browsed folder", result["following"])
         self.assertIn('data-icon="follow"', result["following"])
 
+    def test_a_file_scope_names_the_file_and_bulk_tooltips_name_that_scope(self):
+        result = self._render(
+            """
+            pane._explorerMode = 'file';
+            pane._explorerFilePath = 'web/static/js/app.js';
+            pane._explorerGitPinnedPath = 'web/static/js/app.js';
+            pane._explorerGitPinKind = 'file';
+            emit({ html: renderLoaded() });
+            """
+        )["html"]
+        self.assertIn(">app.js<", result)
+        self.assertIn("Git scope pinned to: app.js", result)
+        for action in ("Stage", "Unstage", "Discard"):
+            self.assertIn(f'{action} all changes in file app.js', result)
+        self.assertIn("Clear pinned Git file", result)
+
     def test_a_pin_and_a_live_follow_are_two_rows_and_only_one_can_be_cleared(self):
         """One row showed the *effective* scope, so with Follow on it named the
         browsed folder, wore the chain icon, and still carried Clear pin -- an

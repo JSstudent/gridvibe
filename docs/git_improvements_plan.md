@@ -126,6 +126,13 @@ in `CHANGELOG.md`, in `README.md`, and in the Git-scope guardrail in `CLAUDE.md`
   wore the chain icon and still carried a **Clear pin** for a path that was not
   on the row. Split into one row per control via `explorerGitScopeLines()`, pin
   first, with the clear only ever on the row that names the path it clears.
+- **3c follow-up 2, from the same pass** — that clear was then withheld while
+  the pin was *here*, on the grounds that the pressed button already clears
+  there. It made the one named control vanish at the only folder a reader is
+  standing in when they decide to unpin, leaving a button whose pressed state
+  had stopped meaning "a pin exists" everywhere else. `clearAvailable` now
+  asks "is there a pin" and ignores the browsed path; `pressed` keeps asking
+  "is the pin here".
 
 What stage 4 inherits: `explorer-git-pin.js` is now the module both the tree
 marker and the two Graph-header/repo-bar surfaces read, so a file-level pin

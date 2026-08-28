@@ -405,8 +405,10 @@
         }
         const data = pane._explorerGitWatchPending;
         const scopePath = pane._explorerGitWatchPendingScope;
+        const scopeKind = pane._explorerGitWatchPendingScopeKind;
         pane._explorerGitWatchPending = null;
         pane._explorerGitWatchPendingScope = undefined;
+        pane._explorerGitWatchPendingScopeKind = undefined;
         // A GridVibe Git action may have applied this exact state meanwhile.
         if (data.revision && data.revision === pane._explorerGitRevision) {
             return;
@@ -416,7 +418,7 @@
            deferral outlives a scope change, and labelling old data with the
            new scope would make the pane look loaded for a scope it has never
            asked the server about. */
-        applyExplorerGitRepoQuiet(index, data, scopePath);
+        applyExplorerGitRepoQuiet(index, data, scopePath, scopeKind);
     }
 
     function explorerFileWatchOnFailure(pane, status) {
@@ -536,6 +538,7 @@
 
     async function explorerGitWatchApplyRefresh(index, pane, sessionId) {
         const scopePath = explorerGitRequestedScope(pane);
+        const scopeKind = explorerGitRequestedScopeKind(pane);
         const data = await refreshExplorerGitRepoQuiet(index);
         if (terminals[index] !== pane || sessionIds[index] !== sessionId) {
             return;
@@ -553,6 +556,7 @@
         // newest state is ever applied.
         pane._explorerGitWatchPending = data;
         pane._explorerGitWatchPendingScope = scopePath;
+        pane._explorerGitWatchPendingScopeKind = scopeKind;
         explorerGitWatchFlushPending(index);
     }
 
@@ -577,12 +581,14 @@
                 ? pane._explorerGitRevision
                 : pane._explorerFsWatchRevision) || '';
             const scopePath = explorerGitScopePath(pane);
+            const scopeKind = explorerGitScopeKind(pane);
             const response = await fetch(
                 explorerGitRequestUrl(
                     sessionId,
                     'state',
                     scopePath,
-                    { known }
+                    { known },
+                    scopeKind
                 ),
                 { cache: 'no-store' }
             );
@@ -592,6 +598,7 @@
                 terminals[index] !== pane
                 || sessionIds[index] !== sessionId
                 || explorerGitScopePath(pane) !== scopePath
+                || explorerGitScopeKind(pane) !== scopeKind
             ) {
                 return;
             }
@@ -605,6 +612,7 @@
                 terminals[index] !== pane
                 || sessionIds[index] !== sessionId
                 || explorerGitScopePath(pane) !== scopePath
+                || explorerGitScopeKind(pane) !== scopeKind
             ) {
                 return;
             }

@@ -2301,6 +2301,7 @@
                     gitFollowBrowsing: Boolean(terminal?._explorerGitFollowBrowsing),
                     gitPinActive: pin.active,
                     gitPinnedPath: pin.path,
+                    gitPinKind: pin.kind,
                     searchOpen: Boolean(terminal?._explorerSearchSidebarOpen),
                     sidebarWidth: sidebar.width,
                     sidebarScroll: sidebar.scroll,
@@ -2476,6 +2477,10 @@
         return window.GridVibeSessionPersistence.explorerGitPinnedPathFromSession(session);
     }
 
+    function sessionPinKind(session) {
+        return window.GridVibeSessionPersistence.explorerGitPinKindFromSession(session);
+    }
+
     function buildWorkspaceTerminalEntry(terminal, index, connectionMode) {
         const session = terminal?._session || {};
         const rawStartupMode = String(session.startup_mode || '').trim();
@@ -2545,6 +2550,7 @@
                 : false,
             explorer_git_pin_active: startupMode === 'explorer' && explorerPin.active,
             explorer_git_pinned_path: startupMode === 'explorer' ? explorerPin.path : '',
+            explorer_git_pin_kind: startupMode === 'explorer' ? explorerPin.kind : 'dir',
             explorer_search_open: startupMode === 'explorer' ? Boolean(terminal?._explorerSearchSidebarOpen) : false,
             explorer_sidebar_width: explorerSidebar.width,
             explorer_sidebar_scroll: explorerSidebar.scroll,
@@ -5056,6 +5062,7 @@
                 _explorerGitSidebarOpen: Boolean(session.explorer_git_open),
                 _explorerGitFollowBrowsing: Boolean(session.explorer_git_follow_browsing),
                 _explorerGitPinnedPath: sessionPinnedPath(session),
+                _explorerGitPinKind: sessionPinKind(session),
                 _explorerPath: explorerInitialPreviewDirectory(session),
                 _explorerSearchSidebarOpen: Boolean(session.explorer_search_open),
                 _explorerSidebarWidth: Number(session.explorer_sidebar_width) || 260,
@@ -6223,6 +6230,7 @@
             _explorerGitSidebarOpen: Boolean(session.explorer_git_open),
             _explorerGitFollowBrowsing: Boolean(session.explorer_git_follow_browsing),
             _explorerGitPinnedPath: sessionPinnedPath(session),
+            _explorerGitPinKind: sessionPinKind(session),
             _explorerPath: explorerInitialPreviewDirectory(session),
             _explorerSearchSidebarOpen: Boolean(session.explorer_search_open),
             _explorerSidebarWidth: Number(session.explorer_sidebar_width) || 260,
@@ -6608,6 +6616,7 @@
                     explorer_git_follow_browsing: Boolean(pane._explorerGitFollowBrowsing),
                     explorer_git_pin_active: pin.active,
                     explorer_git_pinned_path: pin.path,
+                    explorer_git_pin_kind: pin.kind,
                     explorer_search_open: Boolean(pane._explorerSearchSidebarOpen),
                     explorer_sidebar_width: sidebar.width,
                     explorer_sidebar_scroll: sidebar.scroll,
@@ -7432,6 +7441,7 @@
                         entry.explorer_git_follow_browsing = snapshot.explorer_git_follow_browsing;
                         entry.explorer_git_pin_active = snapshot.explorer_git_pin_active;
                         entry.explorer_git_pinned_path = snapshot.explorer_git_pinned_path;
+                        entry.explorer_git_pin_kind = snapshot.explorer_git_pin_kind;
                         entry.explorer_search_open = snapshot.explorer_search_open;
                         entry.explorer_sidebar_width = snapshot.explorer_sidebar_width;
                         entry.explorer_sidebar_scroll = snapshot.explorer_sidebar_scroll;

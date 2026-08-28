@@ -46,6 +46,7 @@ from web.session_presentation import (  # noqa: F401 - compatibility re-exports
     _normalize_explorer_active_tab,
     _normalize_explorer_diff_target,
     _normalize_explorer_git_expanded,
+    _normalize_explorer_git_pin_kind,
     _normalize_explorer_line_wrap,
     _normalize_explorer_markdown_folds,
     _normalize_explorer_md_choice,
@@ -98,6 +99,7 @@ def _default_terminal_entries():
             "explorer_git_follow_browsing": False,
             "explorer_git_pin_active": False,
             "explorer_git_pinned_path": "",
+            "explorer_git_pin_kind": "dir",
             "explorer_search_open": False,
             "explorer_sidebar_width": EXPLORER_SIDEBAR_WIDTH_MIN + 80,
             "explorer_sidebar_scroll": {},
@@ -244,6 +246,9 @@ def _normalize_terminal_entries(
                 "explorer_git_pinned_path": _normalize_explorer_tab_path(
                     entry.get("explorer_git_pinned_path")
                 ),
+                "explorer_git_pin_kind": _normalize_explorer_git_pin_kind(
+                    entry.get("explorer_git_pin_kind", "dir")
+                ),
                 "explorer_search_open": bool(entry.get("explorer_search_open")),
                 "explorer_sidebar_width": _normalize_explorer_sidebar_width(
                     entry.get("explorer_sidebar_width")
@@ -285,6 +290,7 @@ _LIVE_SESSION_VIEW_FIELDS = (
     "explorer_git_follow_browsing",
     "explorer_git_pin_active",
     "explorer_git_pinned_path",
+    "explorer_git_pin_kind",
     "explorer_search_open",
     "explorer_sidebar_width",
     "explorer_sidebar_scroll",
@@ -506,6 +512,11 @@ def _merge_workspace_session_config(
             workspace_terminal["explorer_git_pinned_path"]
             if startup_mode == "explorer"
             else ""
+        )
+        saved_terminal["explorer_git_pin_kind"] = (
+            workspace_terminal["explorer_git_pin_kind"]
+            if startup_mode == "explorer"
+            else "dir"
         )
         saved_terminal["explorer_search_open"] = (
             startup_mode == "explorer" and workspace_terminal.get("explorer_search_open", False)

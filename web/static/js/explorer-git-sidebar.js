@@ -7,11 +7,20 @@
    stood in explorer-viewer.js; both files remain classic scripts sharing one
    global scope. Loaded directly after explorer-viewer.js. */
 
-    function explorerGitRequestUrl(sessionId, endpoint, scopePath, extra = {}) {
+    function explorerGitRequestUrl(
+        sessionId,
+        endpoint,
+        scopePath,
+        extra = {},
+        scopeKind = 'dir'
+    ) {
         const params = new URLSearchParams();
         if (scopePath !== null && scopePath !== undefined) {
             params.set('scope', 'path');
             params.set('path', String(scopePath || ''));
+            if (scopeKind === 'file') {
+                params.set('kind', 'file');
+            }
         }
         Object.entries(extra || {}).forEach(([key, value]) => {
             if (value !== null && value !== undefined && String(value) !== '') {
@@ -22,13 +31,30 @@
         return `/api/explorer/${encodeURIComponent(sessionId)}/git/${endpoint}${query ? `?${query}` : ''}`;
     }
 
+    function explorerGitBrowsingScope(pane) {
+        if (pane?._explorerMode === 'file' && pane._explorerFilePath) {
+            return { path: String(pane._explorerFilePath), kind: 'file' };
+        }
+        return { path: String(pane?._explorerPath || ''), kind: 'dir' };
+    }
+
     function explorerGitScopePath(pane) {
         if (pane?._explorerGitFollowBrowsing) {
-            return String(pane._explorerPath || '');
+            return explorerGitBrowsingScope(pane).path;
         }
         return typeof pane?._explorerGitPinnedPath === 'string'
             ? pane._explorerGitPinnedPath
             : null;
+    }
+
+    function explorerGitScopeKind(pane) {
+        if (pane?._explorerGitFollowBrowsing) {
+            return explorerGitBrowsingScope(pane).kind;
+        }
+        return typeof pane?._explorerGitPinnedPath === 'string'
+            && pane._explorerGitPinKind === 'file'
+            ? 'file'
+            : 'dir';
     }
 
     /* A scope as a plain string: `null` (no pin, not following) and ''
@@ -40,6 +66,10 @@
 
     function explorerGitRequestedScope(pane) {
         return explorerGitScopeIdentity(explorerGitScopePath(pane));
+    }
+
+    function explorerGitRequestedScopeKind(pane) {
+        return explorerGitScopeKind(pane);
     }
 
     /* Two different questions, and answering both with one field is what made
@@ -58,11 +88,17 @@
        The server's answer is still worth keeping — it is what the sidebar can
        show the reader — so it gets its own field rather than overwriting the
        identity. */
-    function explorerGitNoteLoadedScope(pane, requestedScopePath, data) {
+    function explorerGitNoteLoadedScope(
+        pane,
+        requestedScopePath,
+        data,
+        requestedScopeKind = 'dir'
+    ) {
         if (!pane) {
             return;
         }
         pane._explorerGitAnchorPath = explorerGitScopeIdentity(requestedScopePath);
+        pane._explorerGitAnchorKind = requestedScopeKind === 'file' ? 'file' : 'dir';
         pane._explorerGitResolvedAnchor = String(data?.anchor_path || '');
     }
 
@@ -136,8 +172,8 @@
        pin ask the server for exactly the same thing: without a word for it,
        pinning at the root round-trips perfectly and still reads as though the
        pin had been lost. */
-    function explorerGitScopeLabel(scopePath) {
-        return window.GridVibeExplorerGitPin.explorerGitPinLabel(scopePath);
+    function explorerGitScopeLabel(scopePath, scopeKind = 'dir') {
+        return window.GridVibeExplorerGitPin.explorerGitPinLabel(scopePath, scopeKind);
     }
 
     /* The pin button's three states, read from the module the Files tree's
@@ -151,9 +187,12 @@
        module exists to prevent, and it is a page script loaded before this
        one. */
     function explorerGitPinState(pane) {
+        const target = explorerGitBrowsingScope(pane);
         return window.GridVibeExplorerGitPin.explorerGitPinButtonState(
             typeof pane?._explorerGitPinnedPath === 'string' ? pane._explorerGitPinnedPath : null,
-            String(pane?._explorerPath || '')
+            target.path,
+            pane?._explorerGitPinKind === 'file' ? 'file' : 'dir',
+            target.kind
         );
     }
 
@@ -636,8 +675,9 @@
        commit-message textarea and the commit-search input, and re-rendering
        it takes the caret. The repo bar's Clear pin is toggled by `hidden`
        rather than added and removed for the same reason the tree's root
-       marker is — it must be able to appear on a navigation that renders
-       nothing. */
+       marker is — it must be able to move on a write whose reload has not
+       re-rendered the panel yet. It now tracks the pin's *existence* rather
+       than where the pane is standing, so plain navigation leaves it alone. */
     function applyExplorerGitPinButtonState(index) {
         const pane = terminals[index];
         const panel = document.getElementById(`explorer-git-panel-${index}`);
@@ -658,18 +698,20 @@
         }
     }
 
-    /* One writer for the pin, so the toggle and the error panel's explicit
-       Clear pin cannot drift into two slightly different clears. `null` means
-       "no pin"; any string (including '') is a pinned path. */
-    async function setExplorerGitPinnedScope(index, pinnedPath) {
+    /* One writer for the pin, so the header, menus, and explicit Clear pin
+       cannot drift into different records. `null` means "no pin"; any string
+       (including '') is a pinned path and carries its file/directory kind. */
+    async function setExplorerGitPinnedScope(index, pinnedPath, pinnedKind = 'dir') {
         const pane = terminals[index];
         if (!pane || pane._explorerGitActionBusy || pane._explorerGitRepoLoading) {
             return false;
         }
         if (pinnedPath === null) {
             delete pane._explorerGitPinnedPath;
+            delete pane._explorerGitPinKind;
         } else {
             pane._explorerGitPinnedPath = String(pinnedPath);
+            pane._explorerGitPinKind = pinnedKind === 'file' ? 'file' : 'dir';
         }
         /* Before the load, not after it: the marker reports a pane field that
            has already moved, so making the reader wait out a repository round
@@ -683,20 +725,22 @@
         return true;
     }
 
-    /* Pin *here*: clear only when the pin is the folder being browsed,
-       otherwise pin this folder — including when a pin already exists
+    /* Pin *here*: clear only when the pin is the file or folder being browsed,
+       otherwise pin this path — including when a pin already exists
        somewhere else, which is one write and not an unpin followed by a pin.
        Two writes would mean two invalidate + load round trips, a visible
        flash at the intermediate root scope, and two presentation writes for
        one gesture. Never an ancestor match, so this can never clear a pin the
-       user made in another folder. */
+       user made on another path. */
     function toggleExplorerGitPinHere(index) {
         const pane = terminals[index];
+        const target = explorerGitBrowsingScope(pane);
         return setExplorerGitPinnedScope(
             index,
             explorerGitPinState(pane).state === 'here'
                 ? null
-                : String(pane?._explorerPath || '')
+                : target.path,
+            target.kind
         );
     }
 
@@ -719,6 +763,7 @@
             const following = Boolean(pane._explorerGitFollowBrowsing);
             const pinned = typeof pane._explorerGitPinnedPath === 'string';
             const pinState = explorerGitPinState(pane);
+            const pinnedKind = pane._explorerGitPinKind === 'file' ? 'file' : 'dir';
             /* A pin is faithfully re-applied on restore, including one made in
                a folder that is not inside any worktree — that is the pin
                working, not the pin being lost. But a bare "Folder is not
@@ -732,7 +777,7 @@
             const pinnedScopeNotice = pinned
                 ? `
                 <div class="explorer-git-scope-notice" role="status">
-                    <span class="explorer-git-scope-notice-text">Pinned Git folder: <span class="explorer-git-scope-notice-path">${escHtml(explorerGitScopeLabel(pane._explorerGitPinnedPath))}</span></span>
+                    <span class="explorer-git-scope-notice-text">Pinned Git ${pinnedKind === 'file' ? 'file' : 'folder'}: <span class="explorer-git-scope-notice-path">${escHtml(explorerGitScopeLabel(pane._explorerGitPinnedPath, pinnedKind))}</span></span>
                     <button type="button" class="explorer-git-clear-pin-btn" data-explorer-git-clear-pin>Clear pin</button>
                 </div>`
                 : '';
@@ -787,11 +832,20 @@
         const repoBranchText = explorerGitBranchLabel(git);
         const following = Boolean(pane._explorerGitFollowBrowsing);
         const pinState = explorerGitPinState(pane);
+        const browsedScope = explorerGitBrowsingScope(pane);
+        const pinnedKind = pane._explorerGitPinKind === 'file' ? 'file' : 'dir';
         const scopeLines = window.GridVibeExplorerGitPin.explorerGitScopeLines(
             typeof pane._explorerGitPinnedPath === 'string' ? pane._explorerGitPinnedPath : null,
-            String(pane._explorerPath || ''),
-            following
+            browsedScope.path,
+            following,
+            pinnedKind,
+            browsedScope.kind
         );
+        const effectiveScopeKind = explorerGitScopeKind(pane);
+        const effectiveScopePath = explorerGitScopePath(pane);
+        const bulkScopeLabel = effectiveScopeKind === 'file'
+            ? `file ${explorerGitScopeLabel(effectiveScopePath, 'file')}`
+            : (effectiveScopePath === null ? 'explorer root' : `folder ${explorerGitScopeLabel(effectiveScopePath)}`);
         const commitSearch = ensureExplorerGitCommitSearchState(pane);
         const commitSearchMode = commitSearch.mode === 'hash' ? 'hash' : 'subject';
         const searchPolicy = window.GridVibeExplorerGitSearch;
@@ -853,7 +907,7 @@
                     <div class="explorer-git-repo-line explorer-git-repo-scope explorer-git-repo-scope-${line.kind}${line.overridden ? ' is-overridden' : ''}" title="${escHtml(line.title)}">
                         <span class="explorer-git-repo-icon">${line.kind === 'follow' ? EXPLORER_GIT_FOLLOW_ICON : EXPLORER_GIT_PIN_ICON}</span>
                         <span class="explorer-git-repo-text">${escHtml(line.label)}</span>
-                        ${line.kind === 'pin' ? `<button type="button" class="explorer-git-clear-pin-btn explorer-git-scope-clear-btn" data-explorer-git-clear-pin data-explorer-git-scope-clear ${line.clearAvailable ? '' : 'hidden'} title="Clear the pinned Git folder: ${escHtml(line.label)}" aria-label="Clear the pinned Git folder: ${escHtml(line.label)}">Clear pin</button>` : ''}
+                        ${line.kind === 'pin' ? `<button type="button" class="explorer-git-clear-pin-btn explorer-git-scope-clear-btn" data-explorer-git-clear-pin data-explorer-git-scope-clear ${line.clearAvailable ? '' : 'hidden'} title="Clear the pinned Git ${line.scopeKind === 'file' ? 'file' : 'folder'}: ${escHtml(line.label)}" aria-label="Clear the pinned Git ${line.scopeKind === 'file' ? 'file' : 'folder'}: ${escHtml(line.label)}">Clear pin</button>` : ''}
                     </div>`).join('')}
                 </div>
                 <button type="button" class="explorer-git-publish-btn" data-explorer-git-publish ${busy ? 'disabled' : ''} title="Push the current branch to its remote">${escHtml(publishLabel)}</button>
@@ -862,7 +916,7 @@
                 <div class="explorer-diff-sidebar-title explorer-git-section-title">
                     <span>Staged Changes</span>
                     <span class="explorer-git-section-actions">
-                        <button type="button" class="explorer-search-btn explorer-git-unstage-btn explorer-git-unstage-all-btn" data-explorer-git-unstage-all ${(busy || !staged.length) ? 'disabled' : ''} title="Unstage all changes" aria-label="Unstage all changes">${UI_MINUS_ICON}</button>
+                        <button type="button" class="explorer-search-btn explorer-git-unstage-btn explorer-git-unstage-all-btn" data-explorer-git-unstage-all ${(busy || !staged.length) ? 'disabled' : ''} title="Unstage all changes in ${escHtml(bulkScopeLabel)}" aria-label="Unstage all changes">${UI_MINUS_ICON}</button>
                     </span>
                 </div>
                 <div class="explorer-diff-commit-files explorer-git-change-list">
@@ -877,8 +931,8 @@
                 <div class="explorer-diff-sidebar-title explorer-git-section-title">
                     <span>Changes</span>
                     <span class="explorer-git-section-actions">
-                        <button type="button" class="explorer-search-btn explorer-git-revert-btn explorer-git-discard-all-btn" data-explorer-git-discard-all ${(busy || !discardable.length) ? 'disabled' : ''} title="Discard all changes" aria-label="Discard all changes">${EXPLORER_GIT_REVERT_ICON}</button>
-                        <button type="button" class="explorer-search-btn explorer-git-stage-btn explorer-git-stage-all-btn" data-explorer-git-stage-all ${(busy || !unstaged.length) ? 'disabled' : ''} title="Stage all changes" aria-label="Stage all changes">${UI_PLUS_ICON}</button>
+                        <button type="button" class="explorer-search-btn explorer-git-revert-btn explorer-git-discard-all-btn" data-explorer-git-discard-all ${(busy || !discardable.length) ? 'disabled' : ''} title="Discard all changes in ${escHtml(bulkScopeLabel)}" aria-label="Discard all changes">${EXPLORER_GIT_REVERT_ICON}</button>
+                        <button type="button" class="explorer-search-btn explorer-git-stage-btn explorer-git-stage-all-btn" data-explorer-git-stage-all ${(busy || !unstaged.length) ? 'disabled' : ''} title="Stage all changes in ${escHtml(bulkScopeLabel)}" aria-label="Stage all changes">${UI_PLUS_ICON}</button>
                     </span>
                 </div>
                 <div class="explorer-diff-commit-files explorer-git-change-list">
@@ -954,12 +1008,16 @@
         panel.querySelector('[data-explorer-git-pin-toggle]')?.addEventListener('click', () => {
             toggleExplorerGitPinHere(index);
         });
-        /* The one always-reachable clear. The button no longer clears a pin
-           you have navigated away from, so without this a pin on a folder
-           that is collapsed, deleted, or outside the current root would be
-           unclearable. Same writer as the button; no modifier gesture, since
-           Alt already means level-fold here and an invisible gesture is not
-           an affordance. */
+        /* The one always-reachable clear, and it is offered wherever a pin
+           is — including on the pinned folder itself, where the pressed
+           button is a second way to the same write. The button no longer
+           clears a pin you have navigated away from, so without this a pin
+           on a folder that is collapsed, deleted, or outside the current
+           root would be unclearable; and a clear that appeared only from
+           elsewhere went missing at the one folder a reader stands in when
+           they decide to unpin. Same writer as the button; no modifier
+           gesture, since Alt already means level-fold here and an invisible
+           gesture is not an affordance. */
         panel.querySelector('[data-explorer-git-clear-pin]')?.addEventListener('click', () => {
             clearExplorerGitPinnedScope(index);
         });
@@ -1177,6 +1235,7 @@
         pane._explorerGitRepoError = '';
         pane._explorerGitRepo = null;
         pane._explorerGitAnchorPath = '';
+        pane._explorerGitAnchorKind = 'dir';
         pane._explorerGitResolvedAnchor = '';
         renderExplorerGitPanels(index);
     }
@@ -1192,10 +1251,12 @@
         const pane = terminals[index];
         const sessionId = sessionIds[index];
         const scopePath = explorerGitScopePath(pane);
+        const scopeKind = explorerGitScopeKind(pane);
         const requestedAnchorPath = explorerGitScopeIdentity(scopePath);
         /* Like compared with like: both sides are the scope that was, or would
            be, *requested* — never the resolved spelling the server answers with. */
-        const loadedForPath = pane?._explorerGitAnchorPath === requestedAnchorPath;
+        const loadedForPath = pane?._explorerGitAnchorPath === requestedAnchorPath
+            && (pane?._explorerGitAnchorKind || 'dir') === scopeKind;
         if (!pane || !sessionId || (pane._explorerGitRepoLoaded && loadedForPath) || pane._explorerGitRepoLoading) {
             renderExplorerGitPanels(index);
             return;
@@ -1206,7 +1267,7 @@
         renderExplorerGitPanels(index);
         try {
             const response = await fetch(
-                explorerGitRequestUrl(sessionId, 'repo', scopePath)
+                explorerGitRequestUrl(sessionId, 'repo', scopePath, {}, scopeKind)
             );
             const data = await response.json();
             if (!response.ok) {
@@ -1216,12 +1277,13 @@
                 terminals[index] !== pane
                 || sessionIds[index] !== sessionId
                 || explorerGitScopePath(pane) !== scopePath
+                || explorerGitScopeKind(pane) !== scopeKind
             ) {
                 return;
             }
             pane._explorerGitRepoLoaded = true;
             pane._explorerGitRepo = data;
-            explorerGitNoteLoadedScope(pane, requestedAnchorPath, data);
+            explorerGitNoteLoadedScope(pane, requestedAnchorPath, data, scopeKind);
             pane._explorerGitRevision = typeof data.revision === 'string' ? data.revision : '';
             // A user-initiated load re-arms a suspended change-listener watch.
             pane._explorerGitWatchSuspended = false;
@@ -1231,6 +1293,7 @@
                 terminals[index] === pane
                 && sessionIds[index] === sessionId
                 && explorerGitScopePath(pane) === scopePath
+                && explorerGitScopeKind(pane) === scopeKind
             ) {
                 console.error('[GridVibe Sessions] Explorer Git repository failed:', error);
                 pane._explorerGitRepoError = error.message || 'Failed to load Git repository.';
@@ -1241,7 +1304,10 @@
                 renderExplorerGitPanels(index);
                 if (
                     pane._explorerGitSidebarOpen
-                    && explorerGitScopePath(pane) !== scopePath
+                    && (
+                        explorerGitScopePath(pane) !== scopePath
+                        || explorerGitScopeKind(pane) !== scopeKind
+                    )
                 ) {
                     loadExplorerGitRepo(index);
                 }
@@ -1260,6 +1326,7 @@
         const pane = terminals[index];
         const sessionId = sessionIds[index];
         const scopePath = explorerGitScopePath(pane);
+        const scopeKind = explorerGitScopeKind(pane);
         if (!pane || !sessionId || pane._explorerGitRepoLoading || pane._explorerGitRepoRefreshing) {
             return null;
         }
@@ -1268,7 +1335,7 @@
         panel?.classList.add('git-refreshing');
         try {
             const response = await fetch(
-                explorerGitRequestUrl(sessionId, 'repo', scopePath),
+                explorerGitRequestUrl(sessionId, 'repo', scopePath, {}, scopeKind),
                 { cache: 'no-store' }
             );
             const data = await response.json();
@@ -1279,6 +1346,7 @@
                 terminals[index] !== pane
                 || sessionIds[index] !== sessionId
                 || explorerGitScopePath(pane) !== scopePath
+                || explorerGitScopeKind(pane) !== scopeKind
             ) {
                 return null;
             }
@@ -1291,7 +1359,12 @@
         }
     }
 
-    function applyExplorerGitRepoQuiet(index, data, requestedScopePath) {
+    function applyExplorerGitRepoQuiet(
+        index,
+        data,
+        requestedScopePath,
+        requestedScopeKind
+    ) {
         /* Swap a quietly fetched Git payload into the sidebar in place: one
            panel render, scroll/focus preserved, tab badges re-rendered only
            when the badge map actually changed (syncExplorerTabGitFromRepo
@@ -1314,7 +1387,10 @@
             requestedScopePath === undefined
                 ? explorerGitRequestedScope(pane)
                 : requestedScopePath,
-            data
+            data,
+            requestedScopeKind === undefined
+                ? explorerGitRequestedScopeKind(pane)
+                : requestedScopeKind
         );
         pane._explorerGitRevision = typeof data.revision === 'string' ? data.revision : '';
         syncExplorerTabGitFromRepo(index, data);
@@ -1351,7 +1427,12 @@
 
     function explorerGitCaptureIdentity(index) {
         const pane = terminals[index];
-        return { pane, sessionId: sessionIds[index], scopePath: explorerGitScopePath(pane) };
+        return {
+            pane,
+            sessionId: sessionIds[index],
+            scopePath: explorerGitScopePath(pane),
+            scopeKind: explorerGitScopeKind(pane)
+        };
     }
 
     function explorerGitIdentityState(index, identity) {
@@ -1361,7 +1442,10 @@
         if (terminals[index] !== identity.pane || sessionIds[index] !== identity.sessionId) {
             return EXPLORER_GIT_IDENTITY_PANE_REPLACED;
         }
-        if (explorerGitScopePath(identity.pane) !== identity.scopePath) {
+        if (
+            explorerGitScopePath(identity.pane) !== identity.scopePath
+            || explorerGitScopeKind(identity.pane) !== identity.scopeKind
+        ) {
             return EXPLORER_GIT_IDENTITY_SCOPE_CHANGED;
         }
         return EXPLORER_GIT_IDENTITY_CURRENT;
@@ -1385,13 +1469,14 @@
         }
         pane._explorerGitRepoLoaded = false;
         pane._explorerGitAnchorPath = '';
+        pane._explorerGitAnchorKind = 'dir';
         pane._explorerGitResolvedAnchor = '';
         pane._explorerGitReloadPending = true;
     }
 
     async function performExplorerGitAction(index, endpoint, body) {
         const identity = explorerGitCaptureIdentity(index);
-        const { pane, sessionId, scopePath } = identity;
+        const { pane, sessionId, scopePath, scopeKind } = identity;
         if (!pane || !sessionId || pane._explorerGitActionBusy) {
             return false;
         }
@@ -1400,7 +1485,9 @@
         renderExplorerGitPanels(index);
         let succeeded = false;
         try {
-            const response = await fetch(explorerGitRequestUrl(sessionId, endpoint, scopePath), {
+            const response = await fetch(explorerGitRequestUrl(
+                sessionId, endpoint, scopePath, {}, scopeKind
+            ), {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(body || {}),
@@ -1413,7 +1500,7 @@
                 pane._explorerGitRepo = data;
                 pane._explorerGitRepoLoaded = true;
                 explorerGitNoteLoadedScope(
-                    pane, explorerGitScopeIdentity(scopePath), data
+                    pane, explorerGitScopeIdentity(scopePath), data, scopeKind
                 );
                 pane._explorerGitRevision = typeof data.revision === 'string' ? data.revision : '';
                 // A successful GridVibe Git action is authoritative: it re-arms a

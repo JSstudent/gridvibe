@@ -153,9 +153,18 @@
             : null;
     }
 
-    function explorerTreeRowIsPinned(pane, path) {
+    function explorerTreePinnedKind(pane) {
+        return pane?._explorerGitPinKind === 'file' ? 'file' : 'dir';
+    }
+
+    function explorerTreeRowIsPinned(pane, path, kind = 'dir') {
         const policy = window.GridVibeExplorerGitPin;
-        return Boolean(policy && policy.explorerGitPathIsPinned(explorerTreePinnedPath(pane), path));
+        return Boolean(policy && policy.explorerGitPathIsPinned(
+            explorerTreePinnedPath(pane),
+            path,
+            explorerTreePinnedKind(pane),
+            kind
+        ));
     }
 
     /* Move the pin marker without rebuilding the tree.
@@ -186,10 +195,14 @@
            it drops the caret out of the name filter beside it. */
         const rootMark = panel.querySelector('[data-explorer-tree-pin-root]');
         if (rootMark) {
-            rootMark.hidden = !explorerTreeRowIsPinned(pane, '');
+            rootMark.hidden = !explorerTreeRowIsPinned(pane, '', 'dir');
         }
         panel.querySelectorAll('.explorer-tree-row').forEach(row => {
-            const wanted = explorerTreeRowIsPinned(pane, row.dataset.explorerContextPath || '');
+            const wanted = explorerTreeRowIsPinned(
+                pane,
+                row.dataset.explorerContextPath || '',
+                row.dataset.explorerContextKind === 'file' ? 'file' : 'dir'
+            );
             const mark = row.querySelector('.explorer-tree-pin-mark');
             if (wanted === Boolean(mark)) {
                 return;
@@ -238,7 +251,9 @@
             >${expanded ? UI_CHEVRON_DOWN_ICON : UI_CHEVRON_RIGHT_ICON}</button>`
             : `<span class="explorer-tree-chevron" aria-hidden="true" ${indent}></span>`;
         const badge = explorerGitStatusLabel(entry.git) ? explorerGitBadgeHtml(entry.git) : '';
-        const pinMark = explorerTreeRowIsPinned(pane, path) ? explorerTreePinMarkHtml() : '';
+        const pinMark = explorerTreeRowIsPinned(
+            pane, path, isDirectory ? 'dir' : 'file'
+        ) ? explorerTreePinMarkHtml() : '';
         const openFolder = isDirectory
             ? `<button type="button" class="explorer-search-btn explorer-open-folder-btn" data-explorer-tree-open-folder="${escHtml(path)}" title="Open folder in the explorer list" aria-label="Open folder in the explorer list">${EXPLORER_OPEN_FOLDER_ICON}</button>`
             : '';
@@ -254,6 +269,9 @@
                 data-explorer-context-kind="${escHtml(entry.entry_kind || '')}"
                 data-explorer-context-revision="${escHtml(entry.revision || '')}"
                 data-explorer-context-surface="tree"
+                data-explorer-git-scope-path="${escHtml(path)}"
+                data-explorer-git-scope-kind="${isDirectory ? 'dir' : 'file'}"
+                data-explorer-git-scope-surface="tree"
                 ${isDirectory ? '' : `data-explorer-download-path="${escHtml(path)}"`}
             >
                 ${chevron}
