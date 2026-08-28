@@ -426,10 +426,16 @@
             const closeButton = isPreview
                 ? ''
                 : `<button type="button" class="explorer-tab-close" data-explorer-tab-close="${escHtml(tab.id)}" title="Close tab" aria-label="Close ${escHtml(label)}">×</button>`;
-            /* A pinned tab joins the shared path context menu. No filesystem
-               context kind is exposed, so it stays free of create/move/delete
-               actions; its separate Git-scope hook adds pin/re-pin/unpin. */
-            const copyPath = (!isPreview && tab.path)
+            /* A tab that names a file joins the shared path context menu --
+               the permanent Preview tab included, because the file it is
+               showing names a path exactly as precisely as a pinned tab does,
+               and its own Git-scope hook below has always said so by asking
+               `tab.path` alone. Withholding copy/download there left one tab
+               offering to pin a path it would not spell. A Preview tab showing
+               a directory listing names no file and gets neither hook. No
+               filesystem context kind is exposed either way, so the tab menu
+               stays free of create/move/delete actions. */
+            const copyPath = tab.path
                 ? ` data-explorer-copy-path="${escHtml(tab.path)}" data-explorer-download-path="${escHtml(tab.path)}"`
                 : '';
             const gitScope = tab.path

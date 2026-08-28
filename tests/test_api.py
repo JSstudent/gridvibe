@@ -2655,16 +2655,21 @@ class ApiRoutesTestCase(unittest.TestCase):
         )
 
     def test_terminals_page_tab_strip_copy_path_and_locate_in_tree(self):
-        """Pinned tabs get the copy-path menu and a locate-in-tree double-click."""
+        """A tab naming a file gets the copy-path menu and a locate-in-tree double-click."""
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
         html = self._page_html(response)
-        # A pinned tab joins the shared copy-path menu (the tree and Git rows
-        # carry the same hook); the permanent Preview tab does not, and no
-        # context kind is exposed, so the tab menu stays copy-only.
-        self.assertIn("const copyPath = (!isPreview && tab.path)", html)
+        # The tab strip carries the shared copy-path hook (the tree and Git
+        # rows carry the same one), paired with the download hook so a tab can
+        # offer the read as well as the path. No filesystem context kind is
+        # exposed, so the tab menu stays copy-only. Which tabs actually carry
+        # it -- every tab that names a file, the permanent Preview tab
+        # included -- is asserted on the rendered strip in
+        # tests/test_explorer_tab_menu.py.
         self.assertIn('data-explorer-copy-path="${escHtml(tab.path)}"', html)
+        self.assertIn('data-explorer-download-path="${escHtml(tab.path)}"', html)
+        self.assertNotIn("data-explorer-context-kind=\"${escHtml(tab", html)
         wire = html[
             html.index("function wireExplorerTabStripInteractions(index, tabEl)"):
             html.index("function clearExplorerTabDragMarkers(index)")
