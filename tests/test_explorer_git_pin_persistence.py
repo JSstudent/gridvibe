@@ -40,6 +40,7 @@ from web.session_presentation import (
 
 ROOT = Path(__file__).resolve().parent.parent
 PERSISTENCE_JS = ROOT / "web" / "static" / "js" / "session-persistence.js"
+SHARED_JS = ROOT / "web" / "static" / "js" / "shared.js"
 SIDEBAR_JS = ROOT / "web" / "static" / "js" / "explorer-git-sidebar.js"
 # The sidebar asks explorer-git-pin.js what the pane is browsing, so the
 # real policy is loaded rather than stubbed.
@@ -51,6 +52,78 @@ NODE = shutil.which("node")
 PINNED_PATH = "web/static/js/pinned.js"
 PINNED_KIND = "file"
 EXPANDED = ["explorer:abcdef1", "explorer:1234567"]
+
+
+@unittest.skipUnless(NODE, "Node.js is required for shared launch-field tests")
+class SharedPaneLaunchFieldsTestCase(unittest.TestCase):
+    """The launcher and in-workspace picker share this final launch boundary."""
+
+    def test_explorer_git_scopes_reach_the_launch_request(self):
+        harness = r"""
+const fs = require('fs');
+const vm = require('vm');
+
+const sandbox = {
+    console,
+    document: {
+        getElementById: () => null,
+        addEventListener: () => {}
+    }
+};
+sandbox.globalThis = sandbox;
+sandbox.window = sandbox;
+vm.createContext(sandbox);
+vm.runInContext(fs.readFileSync(process.argv[2], 'utf8'), sandbox);
+
+const explorer = sandbox.buildPaneLaunchFields({
+    startup_mode: 'explorer',
+    explorer_git_follow_browsing: true,
+    explorer_git_pin_active: true,
+    explorer_git_pinned_path: 'src/client',
+    explorer_git_pin_kind: 'dir',
+    explorer_open_tabs: [],
+    explorer_active_tab: '',
+    explorer_tab_views: {
+        '__preview__': { path: 'src/client/app.js' }
+    }
+});
+const terminal = sandbox.buildPaneLaunchFields({
+    startup_mode: 'terminal',
+    explorer_git_follow_browsing: true,
+    explorer_git_pin_active: true,
+    explorer_git_pinned_path: 'must-not-leak',
+    explorer_git_pin_kind: 'file'
+});
+process.stdout.write(JSON.stringify({ explorer, terminal }));
+"""
+        with TemporaryDirectory() as script_dir:
+            script_path = Path(script_dir) / "harness.js"
+            script_path.write_text(harness, encoding="utf-8")
+            completed = subprocess.run(
+                [NODE, str(script_path), str(SHARED_JS)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        if completed.returncode != 0:
+            self.fail(f"node harness failed:\n{completed.stderr}")
+
+        result = json.loads(completed.stdout)
+        explorer = result["explorer"]
+        self.assertTrue(explorer["explorer_git_follow_browsing"])
+        self.assertTrue(explorer["explorer_git_pin_active"])
+        self.assertEqual(explorer["explorer_git_pinned_path"], "src/client")
+        self.assertEqual(explorer["explorer_git_pin_kind"], "dir")
+        self.assertEqual(
+            explorer["explorer_tab_views"]["__preview__"]["path"],
+            "src/client/app.js",
+        )
+
+        terminal = result["terminal"]
+        self.assertFalse(terminal["explorer_git_follow_browsing"])
+        self.assertFalse(terminal["explorer_git_pin_active"])
+        self.assertEqual(terminal["explorer_git_pinned_path"], "")
+        self.assertEqual(terminal["explorer_git_pin_kind"], "dir")
 
 
 class _PinRouteTestCase(unittest.TestCase):
