@@ -64,6 +64,12 @@ EXPLORER_FILE_PREVIEW_MAX_BYTES = 10 * 1024 * 1024
 EXPLORER_GIT_DIFF_MAX_BYTES = 256 * 1024
 EXPLORER_GIT_DIFF_MAX_LINES = 4000
 EXPLORER_GIT_LOG_MAX_COMMITS = 60
+# How far the Graph's "Show more" may walk back. The page above is the default
+# read; this is the ceiling, a protective floor on one bounded `git log` rather
+# than a preference, so it lives here beside the page and not in config.json.
+# A caller may ask for anything up to it and nothing past it.
+EXPLORER_GIT_LOG_MAX_PAGES = 5
+EXPLORER_GIT_LOG_LIMIT_MAX = EXPLORER_GIT_LOG_MAX_COMMITS * EXPLORER_GIT_LOG_MAX_PAGES
 EXPLORER_GIT_REVISION_LENGTH = 16
 
 # The sidebar's commit rows are parsed field-by-field rather than scraped out
@@ -72,7 +78,7 @@ EXPLORER_GIT_REVISION_LENGTH = 16
 # `%x1f` is a git format escape (git expands it), so the argument itself stays
 # plain text and needs no special quoting on the SSH path.
 _GIT_LOG_FIELD_SEPARATOR = "\x1f"
-_GIT_LOG_GRAPH_FORMAT = "--format=%x1f%H%x1f%h%x1f%D%x1f%s"
+_GIT_LOG_GRAPH_FORMAT = "--format=%x1f%H%x1f%h%x1f%D%x1f%an%x1f%aI%x1f%s"
 
 
 def _is_explorer_session(session: Any) -> bool:
@@ -2655,15 +2661,25 @@ def _git_diff_args_for_mode(
     raise ValueError("Invalid Git diff mode")
 
 
-def _parse_git_graph_log(raw_output: bytes) -> List[Dict[str, Any]]:
+def _parse_git_graph_log(
+    raw_output: bytes,
+    limit: int = EXPLORER_GIT_LOG_MAX_COMMITS,
+) -> List[Dict[str, Any]]:
     """Parse bounded `git log --graph` output for the diff sidebar.
 
-    Each commit line is the graph prefix followed by four unit-separated
-    fields — full hash, abbreviated hash, ref decorations, subject. The
-    explicit separator is what lets a subject keep its own spaces and
-    parentheses while the full object id travels beside the short one the
-    rows display and the file lists join on. Graph-only connector lines carry
-    no separator and are skipped.
+    Each commit line is the graph prefix followed by six unit-separated
+    fields — full hash, abbreviated hash, ref decorations, author name,
+    author date and subject. The explicit separator is what lets a subject
+    keep its own spaces and parentheses while the full object id travels
+    beside the short one the rows display and the file lists join on. The
+    subject is last and takes the whole remainder, so a separator inside it
+    cannot shift the fields ahead of it. Graph-only connector lines carry no
+    separator and are skipped.
+
+    The author name and date are the commit hover card's fields and nothing
+    else's. They stay out of the sidebar's revision token deliberately: that
+    token is what the change listener polls, and an amended author would
+    otherwise refetch the whole repository on every poll.
     """
     commits: List[Dict[str, Any]] = []
     for raw_line in raw_output.decode("utf-8", errors="replace").split("\n"):
@@ -2671,10 +2687,10 @@ def _parse_git_graph_log(raw_output: bytes) -> List[Dict[str, Any]]:
         graph, separator, payload = line.partition(_GIT_LOG_FIELD_SEPARATOR)
         if not separator:
             continue
-        fields = payload.split(_GIT_LOG_FIELD_SEPARATOR, 3)
-        if len(fields) != 4:
+        fields = payload.split(_GIT_LOG_FIELD_SEPARATOR, 5)
+        if len(fields) != 6:
             continue
-        full_hash, short_hash, refs, subject = fields
+        full_hash, short_hash, refs, author, authored_at, subject = fields
         if not full_hash or not short_hash:
             continue
         # `--oneline --decorate` renders decorations ahead of the subject, and
@@ -2688,9 +2704,12 @@ def _parse_git_graph_log(raw_output: bytes) -> List[Dict[str, Any]]:
                 "full_hash": full_hash,
                 "subject": decorated,
                 "message": subject,
+                "refs": refs,
+                "author": author,
+                "authored_at": authored_at,
             }
         )
-    return commits[:EXPLORER_GIT_LOG_MAX_COMMITS]
+    return commits[:max(1, int(limit))]
 
 
 def _parse_git_name_status_log(raw_output: bytes) -> Dict[str, List[Dict[str, Any]]]:
@@ -2727,12 +2746,17 @@ def _parse_git_name_status_log(raw_output: bytes) -> Dict[str, List[Dict[str, An
     return files_by_commit
 
 
-def _git_commit_files_log(backend: Any, repo_root: str, pathspec: str) -> Dict[str, List[Dict[str, Any]]]:
+def _git_commit_files_log(
+    backend: Any,
+    repo_root: str,
+    pathspec: str,
+    limit: int = EXPLORER_GIT_LOG_MAX_COMMITS,
+) -> Dict[str, List[Dict[str, Any]]]:
     """Return changed files for each displayed commit."""
     result = backend.run_git(
         [
             "log",
-            f"--max-count={EXPLORER_GIT_LOG_MAX_COMMITS}",
+            f"--max-count={max(1, int(limit))}",
             "--format=%x1e%h",
             "--name-status",
             "--",
@@ -2783,8 +2807,19 @@ def _attach_commit_files(
     return commits
 
 
-def _bounded_git_graph_log(backend: Any, repo_root: str, pathspec: str) -> List[Dict[str, Any]]:
-    """Return a bounded commit graph for the explorer root scope."""
+def _bounded_git_graph_log(
+    backend: Any,
+    repo_root: str,
+    pathspec: str,
+    limit: int = EXPLORER_GIT_LOG_MAX_COMMITS,
+) -> Tuple[List[Dict[str, Any]], bool]:
+    """Return a bounded commit graph for the explorer root scope.
+
+    Reads one commit past `limit` and hands back whether it found one, so the
+    Graph's "Show more" reports the truth about a scope that ends exactly on a
+    page boundary. The extra row is dropped before the caller sees it.
+    """
+    page = max(1, int(limit))
     result = backend.run_git(
         [
             "log",
@@ -2792,7 +2827,7 @@ def _bounded_git_graph_log(backend: Any, repo_root: str, pathspec: str) -> List[
             "--decorate",
             "--date-order",
             _GIT_LOG_GRAPH_FORMAT,
-            f"--max-count={EXPLORER_GIT_LOG_MAX_COMMITS}",
+            f"--max-count={page + 1}",
             "--",
             pathspec,
         ],
@@ -2801,8 +2836,9 @@ def _bounded_git_graph_log(backend: Any, repo_root: str, pathspec: str) -> List[
     )
     _require_complete_git_result(result, "Git graph")
     if result.returncode != 0:
-        return []
-    return _parse_git_graph_log(result.stdout)
+        return [], False
+    probed = _parse_git_graph_log(result.stdout, page + 1)
+    return probed[:page], len(probed) > page
 
 
 def _explorer_git_changed_files(
@@ -2908,19 +2944,46 @@ def _get_git_repo_state(
     }
 
 
+def normalized_git_log_limit(value: Any) -> int:
+    """Return one validated commit-graph read size, or raise.
+
+    A refusal rather than a clamp, exactly as an unknown Git diff context name
+    is: a caller that asks for more than the ceiling has misunderstood the
+    bound, and silently serving it a shorter graph would leave its "Show more"
+    control asking for the same page for ever. Absent means the default page.
+    """
+    if value is None or value == "":
+        return EXPLORER_GIT_LOG_MAX_COMMITS
+    try:
+        limit = int(str(value).strip())
+    except (TypeError, ValueError):
+        raise ValueError("Invalid Git commit limit") from None
+    if limit < 1 or limit > EXPLORER_GIT_LOG_LIMIT_MAX:
+        raise ValueError("Invalid Git commit limit")
+    return limit
+
+
 def _get_git_repo_summary(
     backend: Any,
     root_path: str,
     current_path: Optional[str] = None,
     context_dir: Optional[str] = None,
+    limit: int = EXPLORER_GIT_LOG_MAX_COMMITS,
 ) -> Dict[str, Any]:
-    """Return changed files and a bounded commit graph for the browsed path."""
+    """Return changed files and a bounded commit graph for the browsed path.
+
+    `limit` is how far back the Graph has been expanded. It travels on every
+    route that answers with this summary — the mutations included — because a
+    stage or a commit that replied with the default page would silently
+    collapse a graph the reader had expanded.
+    """
     anchor_path = current_path or root_path
     state = _get_git_repo_state(backend, root_path, anchor_path, context_dir)
     repo_root = str(state["git"]["repo_root"])
     anchor_pathspec = backend.pathspec(repo_root, anchor_path)
-    commits = _bounded_git_graph_log(backend, repo_root, anchor_pathspec)
-    commit_files = _git_commit_files_log(backend, repo_root, anchor_pathspec)
+    page = max(1, int(limit))
+    commits, has_more = _bounded_git_graph_log(backend, repo_root, anchor_pathspec, page)
+    commit_files = _git_commit_files_log(backend, repo_root, anchor_pathspec, page)
     return {
         **state,
         "commits": _attach_commit_files(
@@ -2928,6 +2991,13 @@ def _get_git_repo_summary(
             commit_files,
             lambda item: _commit_file_payload(backend, root_path, repo_root, item),
         ),
+        # The page ladder is published rather than assumed by the client, so
+        # the ceiling has exactly one owner and no constant is duplicated
+        # across the boundary.
+        "commit_limit": page,
+        "commit_page": EXPLORER_GIT_LOG_MAX_COMMITS,
+        "commit_limit_max": EXPLORER_GIT_LOG_LIMIT_MAX,
+        "commit_has_more": has_more,
     }
 
 

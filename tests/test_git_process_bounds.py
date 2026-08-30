@@ -743,12 +743,13 @@ class ExplorerGitScopePathspecTestCase(unittest.TestCase):
         context, _statuses = web_explorer._get_git_context(
             backend, "/repo", parent, file_path
         )
-        commits = web_explorer._bounded_git_graph_log(
+        commits, has_more = web_explorer._bounded_git_graph_log(
             backend, context["repo_root"], backend.pathspec("/repo", file_path)
         )
 
         self.assertTrue(context["available"])
         self.assertEqual(commits, [])
+        self.assertFalse(has_more)
         discovery, status, graph = backend.calls
         self.assertEqual(discovery[1]["cwd"], parent)
         self.assertEqual(status[1]["cwd"], "/repo")

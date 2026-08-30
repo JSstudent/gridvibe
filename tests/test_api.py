@@ -8932,9 +8932,11 @@ class ApiRoutesTestCase(unittest.TestCase):
 
     def test_parse_git_graph_log_skips_connector_only_lines(self):
         commits = web_explorer._parse_git_graph_log(
-            b"* \x1fa1b2c3d4e5f60718293a4b5c6d7e8f9012345678\x1fa1b2c3d\x1f\x1finitial\n"
+            b"* \x1fa1b2c3d4e5f60718293a4b5c6d7e8f9012345678\x1fa1b2c3d\x1f\x1f"
+            b"Ada\x1f2026-08-01T09:15:00+02:00\x1finitial\n"
             b"|\\\n"
-            b"| * \x1fb2c3d4e5f60718293a4b5c6d7e8f90123456789a\x1fb2c3d4e\x1f\x1fbranch work\n"
+            b"| * \x1fb2c3d4e5f60718293a4b5c6d7e8f90123456789a\x1fb2c3d4e\x1f\x1f"
+            b"Grace\x1f2026-08-02T11:30:00+02:00\x1fbranch work\n"
             b"|/\n"
         )
 
@@ -8951,10 +8953,19 @@ class ApiRoutesTestCase(unittest.TestCase):
                 "b2c3d4e5f60718293a4b5c6d7e8f90123456789a",
             ],
         )
+        # The hover card's two fields ride beside them, parsed rather than
+        # scraped back out of the rendered line.
+        self.assertEqual([commit["author"] for commit in commits], ["Ada", "Grace"])
+        self.assertEqual(
+            [commit["authored_at"] for commit in commits],
+            ["2026-08-01T09:15:00+02:00", "2026-08-02T11:30:00+02:00"],
+        )
 
     def test_parse_git_graph_log_separates_decorations_from_the_message(self):
         commits = web_explorer._parse_git_graph_log(
-            b"* \x1f" + b"a" * 40 + b"\x1faaaaaaa\x1fHEAD -> main, tag: v1.2\x1f(fix) ship it\n"
+            b"* \x1f" + b"a" * 40
+            + b"\x1faaaaaaa\x1fHEAD -> main, tag: v1.2"
+            + b"\x1fAda\x1f2026-08-01T09:15:00+02:00\x1f(fix) ship it\n"
         )
 
         self.assertEqual(len(commits), 1)
@@ -8964,15 +8975,94 @@ class ApiRoutesTestCase(unittest.TestCase):
         # ...while the copyable message is the subject the author actually
         # wrote, including a leading "(fix)" that is part of it.
         self.assertEqual(commits[0]["message"], "(fix) ship it")
+        # ...and the decoration keeps its own field, never re-derived by
+        # stripping parentheses the subject may legitimately begin with.
+        self.assertEqual(commits[0]["refs"], "HEAD -> main, tag: v1.2")
 
     def test_parse_git_graph_log_keeps_a_subject_with_spacing(self):
         commits = web_explorer._parse_git_graph_log(
-            b"* \x1f" + b"b" * 40 + b"\x1fbbbbbbb\x1f\x1ffix:  two  spaces and (parens)\n"
+            b"* \x1f" + b"b" * 40
+            + b"\x1fbbbbbbb\x1f\x1fAda\x1f2026-08-01T09:15:00+02:00"
+            + b"\x1ffix:  two  spaces and (parens)\n"
         )
 
         self.assertEqual(commits[0]["message"], "fix:  two  spaces and (parens)")
         self.assertEqual(commits[0]["subject"], "fix:  two  spaces and (parens)")
 
+    def test_parse_git_graph_log_keeps_a_separator_inside_the_subject(self):
+        # The subject is the last field and takes the whole remainder, so a
+        # unit separator an author managed to type cannot shift the fields
+        # ahead of it out of alignment.
+        commits = web_explorer._parse_git_graph_log(
+            b"* \x1f" + b"c" * 40
+            + b"\x1fccccccc\x1f\x1fAda\x1f2026-08-01T09:15:00+02:00"
+            + b"\x1fodd \x1f subject\n"
+        )
+
+        self.assertEqual(commits[0]["author"], "Ada")
+        self.assertEqual(commits[0]["message"], "odd \x1f subject")
+
+    def test_git_graph_log_reads_one_past_the_page_to_report_more(self):
+        # "Show more" must tell the truth about a scope that ends exactly on a
+        # page boundary, so the runner probes one extra commit and drops it.
+        def rows(count):
+            return b"".join(
+                b"* \x1f" + f"{n:040d}".encode()
+                + b"\x1f" + f"{n:07d}".encode()
+                + b"\x1f\x1fAda\x1f2026-08-01T09:15:00+02:00\x1fwork\n"
+                for n in range(count)
+            )
+
+        class _Backend:
+            def __init__(self, output):
+                self.output = output
+                self.args = None
+
+            def run_git(self, args, cwd=None, timeout=None):
+                self.args = args
+                return SimpleNamespace(
+                    returncode=0,
+                    stdout=self.output,
+                    stderr=b"",
+                    completed=True,
+                    stdout_truncated=False,
+                    stderr_truncated=False,
+                    output_limited=False,
+                )
+
+        full = _Backend(rows(4))
+        commits, has_more = web_explorer._bounded_git_graph_log(full, "/repo", ".", 3)
+        self.assertEqual(len(commits), 3)
+        self.assertTrue(has_more)
+        self.assertIn("--max-count=4", full.args)
+
+        exact = _Backend(rows(3))
+        commits, has_more = web_explorer._bounded_git_graph_log(exact, "/repo", ".", 3)
+        self.assertEqual(len(commits), 3)
+        self.assertFalse(has_more)
+
+    def test_git_log_limit_refuses_anything_past_the_ceiling(self):
+        # A refusal, not a clamp: a client silently served a shorter graph
+        # would keep asking for the same page for ever.
+        self.assertEqual(
+            web_explorer.normalized_git_log_limit(None),
+            web_explorer.EXPLORER_GIT_LOG_MAX_COMMITS,
+        )
+        self.assertEqual(
+            web_explorer.normalized_git_log_limit(
+                str(web_explorer.EXPLORER_GIT_LOG_LIMIT_MAX)
+            ),
+            web_explorer.EXPLORER_GIT_LOG_LIMIT_MAX,
+        )
+        for rejected in (
+            "0",
+            "-5",
+            "abc",
+            str(web_explorer.EXPLORER_GIT_LOG_LIMIT_MAX + 1),
+        ):
+            with self.subTest(limit=rejected):
+                with self.assertRaisesRegex(ValueError, "Invalid Git commit limit"):
+                    web_explorer.normalized_git_log_limit(rejected)
     def test_explorer_git_diff_rejects_invalid_mode_and_outside_root(self):
         repo_dir = Path(self.temp_dir.name) / "repo"
         repo_dir.mkdir()
@@ -14699,6 +14789,47 @@ class ExplorerGitRevisionTestCase(unittest.TestCase):
         self.assertNotIn(commit_revision, {repo_revision, stage_revision})
         self.assertEqual(commit_revision, self._git_state(session_id).get_json()["revision"])
 
+    def test_commit_graph_page_travels_and_an_out_of_range_page_mutates_nothing(self):
+        root = Path(self.temp_dir.name) / "paged"
+        root.mkdir(parents=True)
+        (root / "README.md").write_text("# paged\n", encoding="utf-8")
+        session_id = self._create_explorer_session(root)
+        summary = {
+            "anchor_path": "",
+            "git": {},
+            "changes": [],
+            "commits": [],
+            "revision": "0123456789abcdef",
+        }
+        expanded = web_explorer.EXPLORER_GIT_LOG_MAX_COMMITS * 2
+
+        with patch.object(
+            api, "_get_git_repo_summary", return_value=summary
+        ) as get_summary:
+            response = self.client.get(
+                f"/api/explorer/{session_id}/git/repo",
+                query_string={"limit": str(expanded)},
+            )
+
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(get_summary.call_args.args[-1], expanded)
+
+        # Past the ceiling the request is refused, and refused *before* the
+        # mutation runs -- a bad page must never leave the worktree changed.
+        with patch.object(api, "_git_stage_all_paths") as action, patch.object(
+            api, "_get_git_repo_summary", return_value=summary
+        ) as get_summary:
+            refused = self.client.post(
+                f"/api/explorer/{session_id}/git/stage-all",
+                query_string={"limit": str(web_explorer.EXPLORER_GIT_LOG_LIMIT_MAX + 1)},
+                json={},
+            )
+
+            self.assertEqual(refused.status_code, 400)
+            self.assertIn("Invalid Git commit limit", refused.get_json()["error"])
+            action.assert_not_called()
+            get_summary.assert_not_called()
+
     def test_all_git_mutations_share_the_selected_root_or_followed_anchor(self):
         root = Path(self.temp_dir.name) / "root"
         current = root / "nested"
@@ -14746,12 +14877,15 @@ class ExplorerGitRevisionTestCase(unittest.TestCase):
                     self.assertEqual(action.call_args.args[1], str(root.resolve()))
                     self.assertEqual(action.call_args.args[-1], str(expected_anchor))
                     get_summary.assert_called_once()
+                    # The commit-graph page rides on every mutation answer
+                    # too, or a stage would collapse an expanded Graph.
                     self.assertEqual(
                         get_summary.call_args.args[1:],
                         (
                             str(root.resolve()),
                             str(expected_anchor),
                             str(expected_anchor),
+                            web_explorer.EXPLORER_GIT_LOG_MAX_COMMITS,
                         ),
                     )
 

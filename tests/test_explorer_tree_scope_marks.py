@@ -458,7 +458,10 @@ const panel = {
         if (selector === '[data-explorer-git-scope-clear]') { return scopeClear; }
         return null;
     },
-    querySelectorAll: () => []
+    querySelectorAll: () => [],
+    // The commit cards' one delegated placement listener is attached to the
+    // panel by every render.
+    addEventListener() {}
 };
 
 const sandbox = {
@@ -582,7 +585,10 @@ const panel = {
     set innerHTML(value) { html = value; },
     classList: { add() {}, remove() {} },
     querySelector: () => null,
-    querySelectorAll: () => []
+    querySelectorAll: () => [],
+    // The commit cards' one delegated placement listener is attached to the
+    // panel by every render.
+    addEventListener() {}
 };
 
 const sandbox = {

@@ -121,15 +121,19 @@
             perCommit,
             matchCount,
             activeIndex: matchCount ? ((index % matchCount) + matchCount) % matchCount : 0,
-            /* Two different empty results, and one message for both told the
-               reader the wrong thing about half of them: "not in the loaded
-               graph" invites scrolling for a commit that was never an id in
-               the first place. A query that is not hexadecimal is refused as
-               an id rather than searched as a subject, so it says so. */
-            emptyText: mode === 'hash' && needle && !matchCount
-                ? (validHashQuery
-                    ? 'No commit in the loaded graph'
-                    : 'Not a commit id — hexadecimal characters only')
+            /* Three different empty results, and one message for all of
+               them told the reader the wrong thing about two: "not in the
+               loaded graph" invites scrolling for a commit that was never an
+               id in the first place, while saying nothing at all leaves a
+               subject search looking like the find itself had failed. A query
+               that is not hexadecimal is refused as an id rather than
+               searched as a subject, so it says so; every other empty result
+               names the bound, because the graph is a page of the history and
+               "Show more" is directly below this message. */
+            emptyText: needle && !matchCount
+                ? (mode === 'hash' && !validHashQuery
+                    ? 'Not a commit id — hexadecimal characters only'
+                    : 'No commit in the loaded graph')
                 : ''
         };
     }

@@ -64,6 +64,12 @@
             --explorer-bg: #0f141b;
             --explorer-bar-bg: #151c24;
             --explorer-border: #2b3744;
+            /* A floating surface sits *on* the panel instead of dividing
+               it, so it needs a rim the eye reads as an edge rather than
+               the hairline that separates two rows. Its own step, in both
+               themes, because --explorer-border is calibrated against the
+               panel it borders and is too quiet to close a card over it. */
+            --explorer-float-border: #55697e;
             --explorer-row-border: #1f2a35;
             --explorer-row-hover: #182636;
             --explorer-row-active: #17324a;
@@ -134,6 +140,7 @@
             --explorer-bg: #ffffff;
             --explorer-bar-bg: #f6f8fb;
             --explorer-border: #cfd6df;
+            --explorer-float-border: #93a1b4;
             --explorer-row-border: #e8edf3;
             --explorer-row-hover: #edf6ff;
             --explorer-row-active: #dbeafe;
@@ -155,6 +162,7 @@
             --explorer-bg: #0f141b;
             --explorer-bar-bg: #151c24;
             --explorer-border: #2b3744;
+            --explorer-float-border: #55697e;
             --explorer-row-border: #1f2a35;
             --explorer-row-hover: #182636;
             --explorer-row-active: #17324a;
@@ -173,6 +181,7 @@
             --explorer-bg: #ffffff;
             --explorer-bar-bg: #f6f8fb;
             --explorer-border: #cfd6df;
+            --explorer-float-border: #93a1b4;
             --explorer-row-border: #e8edf3;
             --explorer-row-hover: #edf6ff;
             --explorer-row-active: #dbeafe;
@@ -194,6 +203,7 @@
             --explorer-bg: #0f141b;
             --explorer-bar-bg: #151c24;
             --explorer-border: #2b3744;
+            --explorer-float-border: #55697e;
             --explorer-row-border: #1f2a35;
             --explorer-row-hover: #182636;
             --explorer-row-active: #17324a;
@@ -4665,6 +4675,165 @@
         .explorer-diff-commit-hash {
             color: var(--t-accent);
             font-weight: 700;
+        }
+
+        /* The commit hover card.
+
+           Anchored to its own row and out of flow, so it never joins the row's
+           three-column grid and moving into it costs the graph no reflow. It
+           is revealed by CSS on hover and keyboard focus alone: a scope may
+           carry three hundred rows, and a pointer handler per row to position
+           a floating box is the cost this avoids -- which side it opens on is
+           the one thing CSS cannot answer, and that is settled by a single
+           delegated listener on the panel (see wireExplorerGitCommitCards).
+           Left/right rather than a width, so the card can never be wider than
+           the sidebar it is in. */
+        .explorer-diff-commit {
+            position: relative;
+        }
+
+        .explorer-git-commit-card {
+            position: absolute;
+            z-index: 4;
+            top: calc(100% - 2px);
+            left: 7px;
+            right: 8px;
+            display: grid;
+            gap: 7px;
+            padding: 9px 11px;
+            border: 1px solid var(--explorer-float-border);
+            border-radius: var(--gv-radius-s);
+            background: var(--explorer-bg);
+            box-shadow: var(--gv-dialog-shadow);
+            color: var(--explorer-text);
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            font-size: .69rem;
+            font-weight: 400;
+            line-height: 1.45;
+            text-align: left;
+            white-space: normal;
+            opacity: 0;
+            visibility: hidden;
+            pointer-events: none;
+            transition: opacity .12s ease, visibility .12s ease;
+        }
+
+        /* Delayed on the way in, immediate on the way out: a card that
+           appeared instantly would flash down the whole graph while the
+           reader is only scanning subjects. */
+        /* Flipped above its row once it no longer fits below -- the panel
+           is a scroller, and a card opened from one of the last rows would
+           otherwise be clipped by its bottom edge. The class is written by
+           the delegated listener; the rule that decides it is
+           GridVibeExplorerGitGraph.cardPlacement(). */
+        .explorer-git-commit-card.is-above {
+            top: auto;
+            bottom: calc(100% - 2px);
+        }
+
+        .explorer-diff-commit:hover .explorer-git-commit-card,
+        .explorer-diff-commit:focus-visible .explorer-git-commit-card {
+            opacity: 1;
+            visibility: visible;
+            transition-delay: .35s;
+        }
+
+        .explorer-git-commit-card-message {
+            font-size: .74rem;
+            font-weight: 600;
+            line-height: 1.35;
+            overflow-wrap: anywhere;
+        }
+
+        .explorer-git-commit-card-rows {
+            display: grid;
+            grid-template-columns: auto minmax(0, 1fr);
+            gap: 2px 10px;
+            padding-top: 7px;
+            border-top: 1px solid var(--explorer-row-border);
+        }
+
+        .explorer-git-commit-card-row {
+            display: contents;
+        }
+
+        .explorer-git-commit-card-label {
+            color: var(--explorer-muted);
+            font-size: .64rem;
+            text-transform: uppercase;
+            letter-spacing: .04em;
+        }
+
+        .explorer-git-commit-card-value {
+            min-width: 0;
+            overflow-wrap: anywhere;
+        }
+
+        .explorer-git-commit-card-value.is-mono {
+            font-family: Consolas, Monaco, 'Courier New', monospace;
+            font-size: .65rem;
+            color: var(--explorer-muted);
+        }
+
+        .explorer-git-commit-card-hint {
+            color: var(--explorer-muted);
+            font-size: .64rem;
+            font-style: italic;
+        }
+
+        /* "Show more", and the two wordless states that replace it. Part of
+           the list rather than a floating affordance: it belongs to the end of
+           the graph, and is only reachable by having scrolled there. */
+        .explorer-git-graph-more {
+            display: grid;
+            justify-items: center;
+            gap: 4px;
+            padding: 8px 10px 12px 7px;
+        }
+
+        .explorer-git-graph-more-btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 6px;
+            padding: 4px 12px;
+            border: 1px solid var(--explorer-border);
+            border-radius: var(--gv-radius-s);
+            background: transparent;
+            color: var(--explorer-text);
+            font: inherit;
+            font-size: .7rem;
+            cursor: pointer;
+        }
+
+        .explorer-git-graph-more-btn:hover:not(:disabled),
+        .explorer-git-graph-more-btn:focus-visible:not(:disabled) {
+            border-color: var(--t-accent);
+            background: var(--explorer-row-active);
+        }
+
+        .explorer-git-graph-more-btn:disabled {
+            opacity: .55;
+            cursor: default;
+        }
+
+        .explorer-git-graph-more-chevron {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            color: var(--explorer-muted);
+        }
+
+        .explorer-git-graph-more-chevron svg {
+            display: block;
+            width: 12px;
+            height: 12px;
+        }
+
+        .explorer-git-graph-more-detail {
+            color: var(--explorer-muted);
+            font-size: .65rem;
+            text-align: center;
         }
 
         .explorer-diff-commit-files {

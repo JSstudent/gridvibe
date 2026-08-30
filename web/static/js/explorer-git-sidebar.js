@@ -140,6 +140,48 @@
         }
         pane._explorerGitAnchorPath = explorerGitScopeIdentity(requestedScopePath);
         pane._explorerGitAnchorKind = requestedScopeKind === 'file' ? 'file' : 'dir';
+        /* The page is part of that identity, and it is read off the pane
+           rather than passed in because every caller sets it before it asks:
+           the model on the pane is the model for the page that was requested,
+           whichever of the three request paths brought it back. */
+        pane._explorerGitAnchorLimit = Number(pane._explorerGitCommitLimit) || 0;
+    }
+
+    /* How far back the Graph has been expanded, and the scope that expansion
+       was made in.
+
+       Two fields rather than one because "expanded to 180" is only meaningful
+       beside "of this scope": the pin, Follow browsing and plain navigation
+       under Follow all repoint the panel at another graph, and carrying a
+       reader's expansion onto a scope they never expanded would silently make
+       every folder they walk into a three-page read. A mutation deliberately
+       does *not* clear it -- staging a file is not a new graph, and collapsing
+       the reader's expansion under them for it would be the worse surprise.
+
+       Runtime-only and per pane, like the commit find's query: it is a control
+       position, not pane presentation, so nothing persists it. */
+    function explorerGitCommitScopeKey(pane) {
+        return `${explorerGitRequestedScope(pane)}
+${explorerGitRequestedScopeKind(pane)}`;
+    }
+
+    function explorerGitDropStaleCommitLimit(pane) {
+        if (!pane) {
+            return;
+        }
+        if (pane._explorerGitCommitLimitScope !== explorerGitCommitScopeKey(pane)) {
+            delete pane._explorerGitCommitLimit;
+            delete pane._explorerGitCommitLimitScope;
+        }
+    }
+
+    /* The page every request for this pane's repository summary carries --
+       the reads and the mutations alike, because a stage that answered with
+       the default page would collapse a graph the reader had expanded. An
+       unexpanded pane sends nothing and takes the server's own default. */
+    function explorerGitCommitLimitParams(pane) {
+        const limit = Number(pane?._explorerGitCommitLimit);
+        return Number.isFinite(limit) && limit > 0 ? { limit: String(limit) } : {};
     }
 
     /* Does the pane's selected scope still match the model the sidebar is
@@ -252,6 +294,119 @@
 
     function explorerGitCommitSearchableHash(commit) {
         return String(commit?.full_hash || commit?.hash || '');
+    }
+
+    /* The commit row's hover card, painted from GridVibeExplorerGitGraph's
+       DOM-free model.
+
+       It replaces a native `title`, which could neither be styled nor hold
+       more than the one line the row was already showing. It lives *inside*
+       the row button and out of flow, so it never joins the row's grid and
+       never moves a pixel of the graph; hover and keyboard focus reveal it
+       through CSS alone, so no pointer handler and no measurement runs for a
+       list that may be three hundred rows long.
+
+       aria-hidden, with the same facts handed to the button as its label:
+       inside a button every one of these words would otherwise be read out as
+       part of the control's name, twice over. */
+    function explorerGitCommitCardHtml(card) {
+        if (!card) {
+            return '';
+        }
+        const rows = (card.rows || []).map(row => `
+                <span class="explorer-git-commit-card-row">
+                    <span class="explorer-git-commit-card-label">${escHtml(row.label)}</span>
+                    <span class="explorer-git-commit-card-value${row.mono ? ' is-mono' : ''}">${escHtml(row.value)}</span>
+                </span>`).join('');
+        return `
+            <span class="explorer-git-commit-card" aria-hidden="true">
+                <span class="explorer-git-commit-card-message">${escHtml(card.message)}</span>
+                ${rows ? `<span class="explorer-git-commit-card-rows">${rows}</span>` : ''}
+                <span class="explorer-git-commit-card-hint">${escHtml(card.hint)}</span>
+            </span>`;
+    }
+
+    /* The card's paint-only placement adapter.
+
+       One delegated listener per panel, not one per row: a scope may carry
+       three hundred commits, and the whole reason the card is revealed by CSS
+       is that nothing should run while the reader is merely scanning subjects.
+       This runs on the pointer actually entering a row, and only when the row
+       it entered is a different one.
+
+       The panel element outlives its contents (renderExplorerGitPanel rewrites
+       innerHTML), so the listener is attached once and guarded by a flag, the
+       way the header's ResizeObserver is. `focusin` carries the keyboard, which
+       reveals the same card through :focus-visible.
+
+       The card is `visibility: hidden`, not `display: none`, precisely so it
+       still has a box to measure here before it is shown. */
+    function applyExplorerGitCommitCardPlacement(row) {
+        const policy = window.GridVibeExplorerGitGraph;
+        const card = row?.querySelector('.explorer-git-commit-card');
+        const panel = row?.closest('.explorer-git-panel');
+        if (!policy || !card || !panel) {
+            return;
+        }
+        const rowBox = row.getBoundingClientRect();
+        const panelBox = panel.getBoundingClientRect();
+        const placement = policy.cardPlacement({
+            rowTop: rowBox.top,
+            rowBottom: rowBox.bottom,
+            viewTop: panelBox.top,
+            viewBottom: panelBox.bottom,
+            cardHeight: card.offsetHeight,
+            // The 2px the card overlaps its row by, in both directions.
+            gap: 2
+        });
+        card.classList.toggle('is-above', placement === 'above');
+    }
+
+    function wireExplorerGitCommitCards(index) {
+        const panel = document.getElementById(`explorer-git-panel-${index}`);
+        if (!panel || panel._explorerGitCardPlacementWired) {
+            return;
+        }
+        panel._explorerGitCardPlacementWired = true;
+        const place = event => {
+            const row = event.target?.closest?.('.explorer-diff-commit');
+            if (!row || row === panel._explorerGitCardPlacementRow) {
+                return;
+            }
+            panel._explorerGitCardPlacementRow = row;
+            applyExplorerGitCommitCardPlacement(row);
+        };
+        panel.addEventListener('pointerover', place);
+        panel.addEventListener('focusin', place);
+        /* The remembered row is a live node from the render that is being
+           replaced, so it is dropped when the pointer leaves the panel --
+           otherwise re-entering the same visual row after a repaint would
+           compare against a detached node and skip the measurement. */
+        panel.addEventListener('pointerleave', () => {
+            panel._explorerGitCardPlacementRow = null;
+        });
+    }
+
+    /* The Graph's "Show more", and the two wordless states that replace it.
+
+       Rendered as part of the panel like every other row: it is not sticky and
+       not a floating affordance, because it belongs to the end of the list and
+       is only reachable by having scrolled there. The chevron points down for
+       the same reason the commit rows' does -- there is more below. */
+    function explorerGitGraphMoreHtml(plan) {
+        if (!plan || !plan.visible) {
+            return '';
+        }
+        const button = plan.label
+            ? `<button type="button" class="explorer-git-graph-more-btn" data-explorer-git-show-more ${plan.canLoadMore ? '' : 'disabled'} title="Read further back in this scope's history" aria-label="Show more commits">
+                    <span class="explorer-git-graph-more-label">${escHtml(plan.label)}</span>
+                    <span class="explorer-git-graph-more-chevron" aria-hidden="true">${UI_CHEVRON_DOWN_ICON}</span>
+                </button>`
+            : '';
+        const detail = plan.detail
+            ? `<span class="explorer-git-graph-more-detail" role="status">${escHtml(plan.detail)}</span>`
+            : '';
+        return `<div class="explorer-git-graph-more${plan.atCeiling ? ' is-at-ceiling' : ''}">${button}${detail}</div>`;
     }
 
     /* The follow button's title names the scope it would take, because that
@@ -920,6 +1075,7 @@
             return;
         }
         wireExplorerCopyPathMenu(panel, index);
+        wireExplorerGitCommitCards(index);
         if (pane._explorerGitRepoLoading) {
             panel.innerHTML = '<div class="explorer-diff-sidebar-empty">Loading repository...</div>';
             observeExplorerGitHeaderHeight(index);
@@ -1024,6 +1180,13 @@
             )
             : { perCommit: commits.map(() => []), matchCount: 0, activeIndex: 0, emptyText: '' };
         commitSearch.activeIndex = searchPlan.activeIndex;
+        const graphPolicy = window.GridVibeExplorerGitGraph;
+        /* One clock for the whole pass: the hover cards' "3 days ago" is read
+           once per render, so every row on screen agrees about now. */
+        const renderedAt = Date.now();
+        const pagePlan = graphPolicy
+            ? graphPolicy.pagePlan(repo, { loading: Boolean(pane._explorerGitCommitPageLoading) })
+            : null;
         let searchOrdinal = 0;
         const commitRows = commits.length
             ? commits.map((commit, commitIndex) => {
@@ -1046,12 +1209,15 @@
                     ? searchPolicy.hashMarkClass(ranges, searchOrdinal, searchPlan.activeIndex)
                     : '';
                 searchOrdinal += ranges.length;
-                const rowTitle = `${commit.line || ''}${expanded ? ' (Alt: collapse all)' : ''}`;
+                const card = graphPolicy
+                    ? graphPolicy.commitCard(commit, { expanded, now: renderedAt })
+                    : null;
                 return `
-                    <button type="button" class="explorer-diff-commit" data-explorer-git-commit-toggle="${escHtml(hash)}" data-explorer-git-commit-full="${escHtml(commit.full_hash || '')}" data-explorer-git-commit-message="${escHtml(commit.message || '')}" ${hash ? '' : 'disabled'} title="${escHtml(rowTitle)}" aria-expanded="${expanded ? 'true' : 'false'}">
+                    <button type="button" class="explorer-diff-commit" data-explorer-git-commit-toggle="${escHtml(hash)}" data-explorer-git-commit-full="${escHtml(commit.full_hash || '')}" data-explorer-git-commit-message="${escHtml(commit.message || '')}" ${hash ? '' : 'disabled'} aria-label="${escHtml(card ? card.summary : (commit.line || ''))}" aria-expanded="${expanded ? 'true' : 'false'}">
                         <span class="explorer-diff-commit-graph">${explorerGitGraphHtml(commit.graph)}</span>
                         <span class="explorer-diff-commit-toggle" aria-hidden="true">${expanded ? UI_CHEVRON_DOWN_ICON : UI_CHEVRON_RIGHT_ICON}</span>
                         <span class="explorer-diff-commit-subject"><span class="explorer-diff-commit-hash${hashMark}">${hashHtml}</span> ${subjectHtml}</span>
+                        ${explorerGitCommitCardHtml(card)}
                     </button>
                     ${expanded ? `<div class="explorer-diff-commit-files">${renderExplorerGitFileRows(index, commit.files, { emptyText: 'No files recorded for this commit.', commitHash: hash })}</div>` : ''}
                 `;
@@ -1147,6 +1313,7 @@
                 </div>
                 <span class="explorer-git-commit-search-empty" data-explorer-git-commit-search-empty role="status" aria-live="polite" ${(commitSearch.open && searchPlan.emptyText) ? '' : 'hidden'}>${escHtml(searchPlan.emptyText || '')}</span>
                 ${commitRows}
+                ${explorerGitGraphMoreHtml(pagePlan)}
             </div>
         `;
         const commitMessageInput = panel.querySelector(`#explorer-git-commit-message-${index}`);
@@ -1206,6 +1373,9 @@
         });
         panel.querySelector('[data-explorer-git-commit-search-next]')?.addEventListener('click', () => {
             stepExplorerGitCommitSearch(index, 1);
+        });
+        panel.querySelector('[data-explorer-git-show-more]')?.addEventListener('click', () => {
+            loadMoreExplorerGitCommits(index);
         });
         panel.querySelector('[data-explorer-git-commit-search-clear]')?.addEventListener('click', () => {
             clearExplorerGitCommitSearch(index);
@@ -1417,6 +1587,7 @@
         pane._explorerGitRepo = null;
         pane._explorerGitAnchorPath = '';
         pane._explorerGitAnchorKind = 'dir';
+        pane._explorerGitAnchorLimit = 0;
         renderExplorerGitPanels(index);
     }
 
@@ -1430,13 +1601,20 @@
     async function loadExplorerGitRepo(index) {
         const pane = terminals[index];
         const sessionId = sessionIds[index];
+        // Before the URL is built: an expansion belongs to the scope it was
+        // made in, and this is the one place every scope move passes through.
+        explorerGitDropStaleCommitLimit(pane);
         const scopePath = explorerGitScopePath(pane);
         const scopeKind = explorerGitScopeKind(pane);
         const requestedAnchorPath = explorerGitScopeIdentity(scopePath);
+        const requestedLimit = Number(pane?._explorerGitCommitLimit) || 0;
         /* Like compared with like: both sides are the scope that was, or would
-           be, *requested* — never the resolved spelling the server answers with. */
+           be, *requested* — never the resolved spelling the server answers with.
+           The page joins that identity, so "Show more" is a real reload rather
+           than an early return on the model it is trying to grow. */
         const loadedForPath = pane?._explorerGitAnchorPath === requestedAnchorPath
-            && (pane?._explorerGitAnchorKind || 'dir') === scopeKind;
+            && (pane?._explorerGitAnchorKind || 'dir') === scopeKind
+            && (Number(pane?._explorerGitAnchorLimit) || 0) === requestedLimit;
         if (!pane || !sessionId || (pane._explorerGitRepoLoaded && loadedForPath) || pane._explorerGitRepoLoading) {
             renderExplorerGitPanels(index);
             return;
@@ -1447,7 +1625,13 @@
         renderExplorerGitPanels(index);
         try {
             const response = await fetch(
-                explorerGitRequestUrl(sessionId, 'repo', scopePath, {}, scopeKind)
+                explorerGitRequestUrl(
+                    sessionId,
+                    'repo',
+                    scopePath,
+                    explorerGitCommitLimitParams(pane),
+                    scopeKind
+                )
             );
             const data = await response.json();
             if (!response.ok) {
@@ -1495,6 +1679,85 @@
         }
     }
 
+    /* One panel render that leaves the reader where they were standing.
+
+       renderExplorerGitPanel() rewrites the panel's innerHTML, and emptying a
+       scroller clamps it to 0 -- fine for a first paint, wrong for a repaint
+       of a list the reader has scrolled to the bottom of to reach the control
+       they just pressed. */
+    function repaintExplorerGitPanelInPlace(index) {
+        const panel = document.getElementById(`explorer-git-panel-${index}`);
+        const scrollTop = panel ? panel.scrollTop : 0;
+        renderExplorerGitPanel(index);
+        if (panel) {
+            panel.scrollTop = Math.min(scrollTop, panel.scrollHeight);
+        }
+    }
+
+    /* "Show more": read one page further back in the same scope.
+
+       A quiet reload rather than loadExplorerGitRepo(), for the same reason
+       the change listener uses one -- the Loading placeholder would replace a
+       panel the reader is standing at the bottom of, and the quiet swap puts
+       both the panel's scroll offset and the commit-message caret back. The
+       page moves before the request so the request carries it, and the panel
+       repaints at once so the button reports the read it has started rather
+       than the state it is leaving.
+
+       Everything the answer touches is bound to the captured identity. The
+       busy flag is cleared on the pane that asked wherever it now lives -- a
+       flag left set is a control that can never act again -- while the
+       repaint and the swap address the slot and are skipped once the slot has
+       changed hands. A failure puts the page back, so the model on the pane
+       and the page it is the model *for* cannot disagree. */
+    async function loadMoreExplorerGitCommits(index) {
+        const identity = explorerGitCaptureIdentity(index);
+        const pane = identity.pane;
+        const policy = window.GridVibeExplorerGitGraph;
+        if (!pane || !policy || pane._explorerGitCommitPageLoading) {
+            return false;
+        }
+        const plan = policy.pagePlan(pane._explorerGitRepo, {});
+        if (!plan.canLoadMore || !plan.nextLimit) {
+            return false;
+        }
+        const previousLimit = pane._explorerGitCommitLimit;
+        const previousScope = pane._explorerGitCommitLimitScope;
+        pane._explorerGitCommitLimit = plan.nextLimit;
+        pane._explorerGitCommitLimitScope = explorerGitCommitScopeKey(pane);
+        pane._explorerGitCommitPageLoading = true;
+        repaintExplorerGitPanelInPlace(index);
+        let painted = false;
+        try {
+            const data = await refreshExplorerGitRepoQuiet(index);
+            /* Cleared before the swap paints, not after: the swap is the one
+               render that restores the scroll, so a second one behind it
+               would take the reader back to the top to change a label. */
+            delete pane._explorerGitCommitPageLoading;
+            if (!data) {
+                pane._explorerGitCommitLimit = previousLimit;
+                pane._explorerGitCommitLimitScope = previousScope;
+                return false;
+            }
+            if (!explorerGitIdentityIsCurrent(index, identity)) {
+                return false;
+            }
+            painted = applyExplorerGitRepoQuiet(
+                index, data, identity.scopePath, identity.scopeKind
+            );
+            return true;
+        } catch (error) {
+            pane._explorerGitCommitLimit = previousLimit;
+            pane._explorerGitCommitLimitScope = previousScope;
+            return false;
+        } finally {
+            delete pane._explorerGitCommitPageLoading;
+            if (!painted && explorerGitIdentityIsCurrent(index, identity)) {
+                repaintExplorerGitPanelInPlace(index);
+            }
+        }
+    }
+
     async function refreshExplorerGitRepoQuiet(index) {
         /* Background variant of loadExplorerGitRepo for the Git change
            listener (explorer-git-watch.js): forced (no _explorerGitRepoLoaded
@@ -1515,7 +1778,13 @@
         panel?.classList.add('git-refreshing');
         try {
             const response = await fetch(
-                explorerGitRequestUrl(sessionId, 'repo', scopePath, {}, scopeKind),
+                explorerGitRequestUrl(
+                    sessionId,
+                    'repo',
+                    scopePath,
+                    explorerGitCommitLimitParams(pane),
+                    scopeKind
+                ),
                 { cache: 'no-store' }
             );
             const data = await response.json();
@@ -1649,6 +1918,7 @@
         pane._explorerGitRepoLoaded = false;
         pane._explorerGitAnchorPath = '';
         pane._explorerGitAnchorKind = 'dir';
+        pane._explorerGitAnchorLimit = 0;
         pane._explorerGitReloadPending = true;
     }
 
@@ -1664,7 +1934,11 @@
         let succeeded = false;
         try {
             const response = await fetch(explorerGitRequestUrl(
-                sessionId, endpoint, scopePath, {}, scopeKind
+                sessionId,
+                endpoint,
+                scopePath,
+                explorerGitCommitLimitParams(pane),
+                scopeKind
             ), {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },

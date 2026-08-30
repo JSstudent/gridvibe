@@ -142,6 +142,7 @@ from web.explorer import (  # noqa: F401 - some names re-exported for backwards 
     get_explorer_file_payload,
     get_explorer_file_preview_payload,
     get_explorer_file_state_payload,
+    normalized_git_log_limit,
     open_path_in_os_file_manager,
     read_explorer_file_preview,
     save_explorer_file_payload,
@@ -1668,6 +1669,18 @@ def _explorer_git_anchor_paths(backend: Any) -> Tuple[str, str, str]:
     return resolved_root, anchor_path, anchor_path
 
 
+def _explorer_git_commit_limit() -> int:
+    """Resolve how far back this request wants the commit graph read.
+
+    The Graph's "Show more" is the only caller that asks for anything but the
+    default page, and it asks on every route that answers with a repository
+    summary — the mutations included, or a stage would collapse an expanded
+    graph back to one page. The bound itself belongs to web/explorer.py; an
+    out-of-range value is a 400 that reads nothing, never a silent clamp.
+    """
+    return normalized_git_log_limit(request.args.get("limit"))
+
+
 @app.route('/api/explorer/<session_id>/git/repo', methods=['GET'])
 def get_explorer_git_repo(session_id: str):
     """Return bounded read-only Git repository metadata for the diff sidebar."""
@@ -1677,7 +1690,10 @@ def get_explorer_git_repo(session_id: str):
 
     def handler(backend: Any) -> Dict[str, Any]:
         root_path, anchor_path, context_dir = _explorer_git_anchor_paths(backend)
-        summary = _get_git_repo_summary(backend, root_path, anchor_path, context_dir)
+        commit_limit = _explorer_git_commit_limit()
+        summary = _get_git_repo_summary(
+            backend, root_path, anchor_path, context_dir, commit_limit
+        )
         return {"root": root_path, **summary}
 
     return _explorer_route_response(session, handler)
@@ -1716,9 +1732,12 @@ def stage_explorer_git_file(session_id: str):
 
     def handler(backend: Any) -> Dict[str, Any]:
         root_path, anchor_path, context_dir = _explorer_git_anchor_paths(backend)
+        commit_limit = _explorer_git_commit_limit()
         _target_root, file_path = backend.resolve_candidate(requested_path, allow_empty_root=False)
         _git_stage_path(backend, root_path, file_path, anchor_path, context_dir)
-        summary = _get_git_repo_summary(backend, root_path, anchor_path, context_dir)
+        summary = _get_git_repo_summary(
+            backend, root_path, anchor_path, context_dir, commit_limit
+        )
         return {"root": root_path, **summary}
 
     return _explorer_route_response(session, handler)
@@ -1735,9 +1754,12 @@ def unstage_explorer_git_file(session_id: str):
 
     def handler(backend: Any) -> Dict[str, Any]:
         root_path, anchor_path, context_dir = _explorer_git_anchor_paths(backend)
+        commit_limit = _explorer_git_commit_limit()
         _target_root, file_path = backend.resolve_candidate(requested_path, allow_empty_root=False)
         _git_unstage_path(backend, root_path, file_path, anchor_path, context_dir)
-        summary = _get_git_repo_summary(backend, root_path, anchor_path, context_dir)
+        summary = _get_git_repo_summary(
+            backend, root_path, anchor_path, context_dir, commit_limit
+        )
         return {"root": root_path, **summary}
 
     return _explorer_route_response(session, handler)
@@ -1752,8 +1774,11 @@ def stage_all_explorer_git(session_id: str):
 
     def handler(backend: Any) -> Dict[str, Any]:
         root_path, anchor_path, context_dir = _explorer_git_anchor_paths(backend)
+        commit_limit = _explorer_git_commit_limit()
         _git_stage_all_paths(backend, root_path, anchor_path, context_dir)
-        summary = _get_git_repo_summary(backend, root_path, anchor_path, context_dir)
+        summary = _get_git_repo_summary(
+            backend, root_path, anchor_path, context_dir, commit_limit
+        )
         return {"root": root_path, **summary}
 
     return _explorer_route_response(session, handler)
@@ -1768,8 +1793,11 @@ def unstage_all_explorer_git(session_id: str):
 
     def handler(backend: Any) -> Dict[str, Any]:
         root_path, anchor_path, context_dir = _explorer_git_anchor_paths(backend)
+        commit_limit = _explorer_git_commit_limit()
         _git_unstage_all_paths(backend, root_path, anchor_path, context_dir)
-        summary = _get_git_repo_summary(backend, root_path, anchor_path, context_dir)
+        summary = _get_git_repo_summary(
+            backend, root_path, anchor_path, context_dir, commit_limit
+        )
         return {"root": root_path, **summary}
 
     return _explorer_route_response(session, handler)
@@ -1784,8 +1812,11 @@ def discard_all_explorer_git(session_id: str):
 
     def handler(backend: Any) -> Dict[str, Any]:
         root_path, anchor_path, context_dir = _explorer_git_anchor_paths(backend)
+        commit_limit = _explorer_git_commit_limit()
         _git_discard_all_paths(backend, root_path, anchor_path, context_dir)
-        summary = _get_git_repo_summary(backend, root_path, anchor_path, context_dir)
+        summary = _get_git_repo_summary(
+            backend, root_path, anchor_path, context_dir, commit_limit
+        )
         return {"root": root_path, **summary}
 
     return _explorer_route_response(session, handler)
@@ -1802,9 +1833,12 @@ def revert_explorer_git_file(session_id: str):
 
     def handler(backend: Any) -> Dict[str, Any]:
         root_path, anchor_path, context_dir = _explorer_git_anchor_paths(backend)
+        commit_limit = _explorer_git_commit_limit()
         _target_root, file_path = backend.resolve_candidate(requested_path, allow_empty_root=False)
         _git_revert_path(backend, root_path, file_path, anchor_path, context_dir)
-        summary = _get_git_repo_summary(backend, root_path, anchor_path, context_dir)
+        summary = _get_git_repo_summary(
+            backend, root_path, anchor_path, context_dir, commit_limit
+        )
         return {"root": root_path, **summary}
 
     return _explorer_route_response(session, handler)
@@ -1821,8 +1855,11 @@ def commit_explorer_git(session_id: str):
 
     def handler(backend: Any) -> Dict[str, Any]:
         root_path, anchor_path, context_dir = _explorer_git_anchor_paths(backend)
+        commit_limit = _explorer_git_commit_limit()
         _git_commit(backend, root_path, message, anchor_path, context_dir)
-        summary = _get_git_repo_summary(backend, root_path, anchor_path, context_dir)
+        summary = _get_git_repo_summary(
+            backend, root_path, anchor_path, context_dir, commit_limit
+        )
         return {"root": root_path, **summary}
 
     return _explorer_route_response(session, handler)
@@ -1837,8 +1874,11 @@ def publish_explorer_git(session_id: str):
 
     def handler(backend: Any) -> Dict[str, Any]:
         root_path, anchor_path, context_dir = _explorer_git_anchor_paths(backend)
+        commit_limit = _explorer_git_commit_limit()
         _git_publish(backend, root_path, anchor_path, context_dir)
-        summary = _get_git_repo_summary(backend, root_path, anchor_path, context_dir)
+        summary = _get_git_repo_summary(
+            backend, root_path, anchor_path, context_dir, commit_limit
+        )
         return {"root": root_path, **summary}
 
     return _explorer_route_response(session, handler)

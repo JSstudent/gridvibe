@@ -115,7 +115,10 @@ sandbox.wireExplorerCopyPathMenu = () => {};
     pane._explorerGitRepo = null;
     const errorPanel = {
         innerHTML: '',
-        querySelector: () => null
+        querySelector: () => null,
+        // The commit cards' one delegated placement listener is attached to
+        // the panel by every render, the error panel included.
+        addEventListener: () => {}
     };
     sandbox.document.getElementById = () => errorPanel;
     sandbox.renderExplorerGitPanel(0);
