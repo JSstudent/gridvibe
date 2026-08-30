@@ -4,6 +4,8 @@ All notable changes to GridVibe will be documented in this file.
 
 ## Unreleased
 
+## 1.10.0 - 2026-08-30
+
 - **(feat) The Git graph reads further back on demand.** Graph has always shown the newest 60 commits in the selected scope, which is also everything the commit find can search — so a search that came up empty could not tell you whether the commit was absent or merely further back than the page you had. **Show more** at the end of the list reads another 60 each time, up to 300, and every request the sidebar makes afterwards keeps the page you expanded to, so staging a file or committing no longer collapses the graph back under you. When there is nothing left to load the button is replaced by the total it ended on, and at the 300 ceiling it says the graph stops there rather than implying the history does. A find that matches nothing now says so in both subject and id mode, right above the control that widens the search.
 
 - **(feat) Hovering a commit row shows who wrote it and when.** The row has space for an abbreviated hash and a truncated subject, and the tooltip behind it was the same one line again. It is now a card in the app's own styling: the full message, the author, the date with a relative age beside it, the full object id, and any branch or tag decoration on the commit. The date is shown in the author's own time zone, the way `git log` shows it, so a commit never appears to move to another day for someone reading from elsewhere. A field the repository did not record is left out rather than shown as unknown, and the card opens above the row when there is no room below it, so the last commits in a scrolled list are not cut off.
