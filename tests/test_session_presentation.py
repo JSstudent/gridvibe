@@ -488,6 +488,7 @@ class GroupPresentationPayloadTestCase(_NodeHarnessMixin, unittest.TestCase):
             "gitFollowBrowsing": True,
             "gitPinActive": True,
             "gitPinnedPath": "repo/src",
+            "gitPinKind": "file",
             "searchOpen": True,
             "sidebarWidth": 312,
             "sidebarScroll": {"tree": {"x": 0, "y": 0.4}},
@@ -548,6 +549,7 @@ class GroupPresentationPayloadTestCase(_NodeHarnessMixin, unittest.TestCase):
                 "explorer_git_follow_browsing": True,
                 "explorer_git_pin_active": True,
                 "explorer_git_pinned_path": "repo/src",
+                "explorer_git_pin_kind": "file",
                 "explorer_search_open": True,
                 "explorer_sidebar_width": 312,
                 "explorer_sidebar_scroll": {"tree": {"x": 0, "y": 0.4}},
@@ -714,6 +716,7 @@ class PresentationWiringTestCase(_NodeHarnessMixin, unittest.TestCase):
                             "gitFollowBrowsing": True,
                             "gitPinActive": True,
                             "gitPinnedPath": "nested/repo",
+                            "gitPinKind": "dir",
                             "searchOpen": False,
                             "openTabs": ["docs/new.md"],
                             "activeTab": "docs/new.md",
@@ -771,6 +774,7 @@ class PresentationWiringTestCase(_NodeHarnessMixin, unittest.TestCase):
         self.assertTrue(stored["Files"]["explorer_git_follow_browsing"])
         self.assertTrue(stored["Files"]["explorer_git_pin_active"])
         self.assertEqual(stored["Files"]["explorer_git_pinned_path"], "nested/repo")
+        self.assertEqual(stored["Files"]["explorer_git_pin_kind"], "dir")
         self.assertEqual(
             stored["Preview"]["browser_tabs"],
             ["http://127.0.0.1:3000", "http://127.0.0.1:8080"],

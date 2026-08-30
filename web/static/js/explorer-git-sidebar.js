@@ -7,11 +7,20 @@
    stood in explorer-viewer.js; both files remain classic scripts sharing one
    global scope. Loaded directly after explorer-viewer.js. */
 
-    function explorerGitRequestUrl(sessionId, endpoint, scopePath, extra = {}) {
+    function explorerGitRequestUrl(
+        sessionId,
+        endpoint,
+        scopePath,
+        extra = {},
+        scopeKind = 'dir'
+    ) {
         const params = new URLSearchParams();
         if (scopePath !== null && scopePath !== undefined) {
             params.set('scope', 'path');
             params.set('path', String(scopePath || ''));
+            if (scopeKind === 'file') {
+                params.set('kind', 'file');
+            }
         }
         Object.entries(extra || {}).forEach(([key, value]) => {
             if (value !== null && value !== undefined && String(value) !== '') {
@@ -22,13 +31,175 @@
         return `/api/explorer/${encodeURIComponent(sessionId)}/git/${endpoint}${query ? `?${query}` : ''}`;
     }
 
+    /* Where navigation alone has put the pane: the open file, or the folder
+       the listing is showing. */
+    function explorerGitDerivedBrowsingScope(pane) {
+        if (pane?._explorerMode === 'file' && pane._explorerFilePath) {
+            return { path: String(pane._explorerFilePath), kind: 'file' };
+        }
+        return { path: String(pane?._explorerPath || ''), kind: 'dir' };
+    }
+
+    /* What the pane is browsing, which is what both header controls are
+       about: the derived scope above, unless the reader has singled out one
+       row since it last moved (explorer-git-pin.js owns that rule). */
+    function explorerGitBrowsingScope(pane) {
+        const derived = explorerGitDerivedBrowsingScope(pane);
+        return window.GridVibeExplorerGitPin.explorerGitBrowsedScope(
+            derived.path, derived.kind, pane?._explorerGitBrowseTarget || null
+        );
+    }
+
+    /* The one writer for that override. `null` gives the derived scope back.
+
+       A gesture that leaves the browsing scope where it was costs nothing —
+       not a paint and not a load — for the same reason navigation that leaves
+       the scope alone does: loadExplorerGitRepo()'s own "already loaded"
+       early return still re-renders the panel, and the panel carries the
+       commit-message textarea. */
+    function setExplorerGitBrowseTarget(index, path, kind = 'dir') {
+        const pane = terminals[index];
+        if (!pane) {
+            return false;
+        }
+        const derived = explorerGitDerivedBrowsingScope(pane);
+        const before = explorerGitBrowsingScope(pane);
+        pane._explorerGitBrowseTarget = window.GridVibeExplorerGitPin
+            .explorerGitBrowseOverride(path, kind, derived.path, derived.kind);
+        const after = explorerGitBrowsingScope(pane);
+        if (before.path === after.path && before.kind === after.kind) {
+            return false;
+        }
+        refreshExplorerGitScopeAffordances(index);
+        if (explorerGitScopeNeedsLoad(pane)) {
+            loadExplorerGitRepo(index);
+        }
+        return true;
+    }
+
     function explorerGitScopePath(pane) {
         if (pane?._explorerGitFollowBrowsing) {
-            return String(pane._explorerPath || '');
+            return explorerGitBrowsingScope(pane).path;
         }
         return typeof pane?._explorerGitPinnedPath === 'string'
             ? pane._explorerGitPinnedPath
             : null;
+    }
+
+    function explorerGitScopeKind(pane) {
+        if (pane?._explorerGitFollowBrowsing) {
+            return explorerGitBrowsingScope(pane).kind;
+        }
+        return typeof pane?._explorerGitPinnedPath === 'string'
+            && pane._explorerGitPinKind === 'file'
+            ? 'file'
+            : 'dir';
+    }
+
+    /* A scope as a plain string: `null` (no pin, not following) and ''
+       (pinned at the explorer root) both go out as the root and are therefore
+       the same load identity, even though they are different pane states. */
+    function explorerGitScopeIdentity(scopePath) {
+        return scopePath === null || scopePath === undefined ? '' : String(scopePath);
+    }
+
+    function explorerGitRequestedScope(pane) {
+        return explorerGitScopeIdentity(explorerGitScopePath(pane));
+    }
+
+    function explorerGitRequestedScopeKind(pane) {
+        return explorerGitScopeKind(pane);
+    }
+
+    /* Two different questions, and answering both with one field is what made
+       a pin look permanently unloaded.
+
+       `_explorerGitAnchorPath` is the load identity: "which scope is the model
+       on this pane the model *for*". It is compared against the scope the next
+       load would request, so it has to be the scope that *was* requested.
+       `data.anchor_path` is the server's answer — the resolved, root-relative
+       spelling of that scope — and it is a different string whenever the
+       request's spelling was not already canonical. Storing the answer and
+       comparing it to the question meant such a pane never counted as loaded:
+       every render refetched the whole repository, and the early return that
+       exists to stop that never fired once.
+
+       The server's answer is not kept at all. It was, briefly, on the grounds
+       that the sidebar could show it -- but the sidebar names the scope from
+       the pane's own pinned path (explorer-git-pin.js), so the field was
+       written on every load and read by nothing (guardrail 5). The payload
+       itself is still on the pane in `_explorerGitRepo` if a surface ever
+       does want it. */
+    function explorerGitNoteLoadedScope(
+        pane,
+        requestedScopePath,
+        requestedScopeKind = 'dir'
+    ) {
+        if (!pane) {
+            return;
+        }
+        pane._explorerGitAnchorPath = explorerGitScopeIdentity(requestedScopePath);
+        pane._explorerGitAnchorKind = requestedScopeKind === 'file' ? 'file' : 'dir';
+        /* The page is part of that identity, and it is read off the pane
+           rather than passed in because every caller sets it before it asks:
+           the model on the pane is the model for the page that was requested,
+           whichever of the three request paths brought it back. */
+        pane._explorerGitAnchorLimit = Number(pane._explorerGitCommitLimit) || 0;
+    }
+
+    /* How far back the Graph has been expanded, and the scope that expansion
+       was made in.
+
+       Two fields rather than one because "expanded to 180" is only meaningful
+       beside "of this scope": the pin, Follow browsing and plain navigation
+       under Follow all repoint the panel at another graph, and carrying a
+       reader's expansion onto a scope they never expanded would silently make
+       every folder they walk into a three-page read. A mutation deliberately
+       does *not* clear it -- staging a file is not a new graph, and collapsing
+       the reader's expansion under them for it would be the worse surprise.
+
+       Runtime-only and per pane, like the commit find's query: it is a control
+       position, not pane presentation, so nothing persists it. */
+    function explorerGitCommitScopeKey(pane) {
+        return `${explorerGitRequestedScope(pane)}
+${explorerGitRequestedScopeKind(pane)}`;
+    }
+
+    function explorerGitDropStaleCommitLimit(pane) {
+        if (!pane) {
+            return;
+        }
+        if (pane._explorerGitCommitLimitScope !== explorerGitCommitScopeKey(pane)) {
+            delete pane._explorerGitCommitLimit;
+            delete pane._explorerGitCommitLimitScope;
+        }
+    }
+
+    /* The page every request for this pane's repository summary carries --
+       the reads and the mutations alike, because a stage that answered with
+       the default page would collapse a graph the reader had expanded. An
+       unexpanded pane sends nothing and takes the server's own default. */
+    function explorerGitCommitLimitParams(pane) {
+        const limit = Number(pane?._explorerGitCommitLimit);
+        return Number.isFinite(limit) && limit > 0 ? { limit: String(limit) } : {};
+    }
+
+    /* Does the pane's selected scope still match the model the sidebar is
+       showing? Every browsing surface asks this before calling for a load,
+       because loadExplorerGitRepo()'s own "already loaded" early return is not
+       free: it re-renders the Git panel, and the panel carries the
+       commit-message textarea and the commit-search input, so a render nobody
+       asked for takes the caret out of one of them. Navigation that leaves the
+       scope where it was must therefore reach neither. */
+    function explorerGitScopeNeedsLoad(pane) {
+        if (!pane?._explorerGitSidebarOpen) {
+            return false;
+        }
+        if (!pane._explorerGitRepoLoaded) {
+            return true;
+        }
+        return pane._explorerGitAnchorPath !== explorerGitRequestedScope(pane)
+            || (pane._explorerGitAnchorKind || 'dir') !== explorerGitRequestedScopeKind(pane);
     }
 
     function explorerGitStatusLabel(git) {
@@ -90,10 +261,185 @@
         return parts.join(' ');
     }
 
-    function explorerGitRepoLabel(git) {
-        const summary = explorerGitSummaryText(git) || 'Git';
-        const name = String(git?.repo_name || '').trim();
-        return name ? `${name} · ${summary}` : summary;
+    function explorerGitBranchLabel(git) {
+        return explorerGitSummaryText(git) || 'Git';
+    }
+
+    /* What the repo bar says about the scope every action in this panel acts
+       on. An unpinned, non-following pane is scoped to the explorer root by
+       default and gets no word for it — naming the default on every pane is
+       noise. A pin made *at* the root does get one, because a root pin and no
+       pin ask the server for exactly the same thing: without a word for it,
+       pinning at the root round-trips perfectly and still reads as though the
+       pin had been lost. */
+    function explorerGitScopeLabel(scopePath, scopeKind = 'dir') {
+        return window.GridVibeExplorerGitPin.explorerGitPinLabel(scopePath, scopeKind);
+    }
+
+    /* The same scope spelled in full, for the places a title or a tooltip can
+       carry the whole path: a file label is only its leaf, and two files with
+       one name in different folders are otherwise one word for two scopes. */
+    function explorerGitScopePathLabel(scopePath) {
+        return window.GridVibeExplorerGitPin.explorerGitPinPathLabel(scopePath);
+    }
+
+    /* The seven characters a commit row shows, and the full id hash mode
+       searches. Written once because the render and the search paint both
+       build the same row: they spelled the fallback differently, so a payload
+       carrying only one of the two fields would have shown one thing and then
+       repainted as another. */
+    function explorerGitCommitShortHash(commit) {
+        return String(commit?.hash || commit?.full_hash || '').slice(0, 7);
+    }
+
+    function explorerGitCommitSearchableHash(commit) {
+        return String(commit?.full_hash || commit?.hash || '');
+    }
+
+    /* The commit row's hover card, painted from GridVibeExplorerGitGraph's
+       DOM-free model.
+
+       It replaces a native `title`, which could neither be styled nor hold
+       more than the one line the row was already showing. It lives *inside*
+       the row button and out of flow, so it never joins the row's grid and
+       never moves a pixel of the graph; hover and keyboard focus reveal it
+       through CSS alone, so no pointer handler and no measurement runs for a
+       list that may be three hundred rows long.
+
+       aria-hidden, with the same facts handed to the button as its label:
+       inside a button every one of these words would otherwise be read out as
+       part of the control's name, twice over. */
+    function explorerGitCommitCardHtml(card) {
+        if (!card) {
+            return '';
+        }
+        const rows = (card.rows || []).map(row => `
+                <span class="explorer-git-commit-card-row">
+                    <span class="explorer-git-commit-card-label">${escHtml(row.label)}</span>
+                    <span class="explorer-git-commit-card-value${row.mono ? ' is-mono' : ''}">${escHtml(row.value)}</span>
+                </span>`).join('');
+        return `
+            <span class="explorer-git-commit-card" aria-hidden="true">
+                <span class="explorer-git-commit-card-message">${escHtml(card.message)}</span>
+                ${rows ? `<span class="explorer-git-commit-card-rows">${rows}</span>` : ''}
+                <span class="explorer-git-commit-card-hint">${escHtml(card.hint)}</span>
+            </span>`;
+    }
+
+    /* The card's paint-only placement adapter.
+
+       One delegated listener per panel, not one per row: a scope may carry
+       three hundred commits, and the whole reason the card is revealed by CSS
+       is that nothing should run while the reader is merely scanning subjects.
+       This runs on the pointer actually entering a row, and only when the row
+       it entered is a different one.
+
+       The panel element outlives its contents (renderExplorerGitPanel rewrites
+       innerHTML), so the listener is attached once and guarded by a flag, the
+       way the header's ResizeObserver is. `focusin` carries the keyboard, which
+       reveals the same card through :focus-visible.
+
+       The card is `visibility: hidden`, not `display: none`, precisely so it
+       still has a box to measure here before it is shown. */
+    function applyExplorerGitCommitCardPlacement(row) {
+        const policy = window.GridVibeExplorerGitGraph;
+        const card = row?.querySelector('.explorer-git-commit-card');
+        const panel = row?.closest('.explorer-git-panel');
+        if (!policy || !card || !panel) {
+            return;
+        }
+        const rowBox = row.getBoundingClientRect();
+        const panelBox = panel.getBoundingClientRect();
+        const placement = policy.cardPlacement({
+            rowTop: rowBox.top,
+            rowBottom: rowBox.bottom,
+            viewTop: panelBox.top,
+            viewBottom: panelBox.bottom,
+            cardHeight: card.offsetHeight,
+            // The 2px the card overlaps its row by, in both directions.
+            gap: 2
+        });
+        card.classList.toggle('is-above', placement === 'above');
+    }
+
+    function wireExplorerGitCommitCards(index) {
+        const panel = document.getElementById(`explorer-git-panel-${index}`);
+        if (!panel || panel._explorerGitCardPlacementWired) {
+            return;
+        }
+        panel._explorerGitCardPlacementWired = true;
+        const place = event => {
+            const row = event.target?.closest?.('.explorer-diff-commit');
+            if (!row || row === panel._explorerGitCardPlacementRow) {
+                return;
+            }
+            panel._explorerGitCardPlacementRow = row;
+            applyExplorerGitCommitCardPlacement(row);
+        };
+        panel.addEventListener('pointerover', place);
+        panel.addEventListener('focusin', place);
+        /* The remembered row is a live node from the render that is being
+           replaced, so it is dropped when the pointer leaves the panel --
+           otherwise re-entering the same visual row after a repaint would
+           compare against a detached node and skip the measurement. */
+        panel.addEventListener('pointerleave', () => {
+            panel._explorerGitCardPlacementRow = null;
+        });
+    }
+
+    /* The Graph's "Show more", and the two wordless states that replace it.
+
+       Rendered as part of the panel like every other row: it is not sticky and
+       not a floating affordance, because it belongs to the end of the list and
+       is only reachable by having scrolled there. The chevron points down for
+       the same reason the commit rows' does -- there is more below. */
+    function explorerGitGraphMoreHtml(plan) {
+        if (!plan || !plan.visible) {
+            return '';
+        }
+        const button = plan.label
+            ? `<button type="button" class="explorer-git-graph-more-btn" data-explorer-git-show-more ${plan.canLoadMore ? '' : 'disabled'} title="Read further back in this scope's history" aria-label="Show more commits">
+                    <span class="explorer-git-graph-more-label">${escHtml(plan.label)}</span>
+                    <span class="explorer-git-graph-more-chevron" aria-hidden="true">${UI_CHEVRON_DOWN_ICON}</span>
+                </button>`
+            : '';
+        const detail = plan.detail
+            ? `<span class="explorer-git-graph-more-detail" role="status">${escHtml(plan.detail)}</span>`
+            : '';
+        return `<div class="explorer-git-graph-more${plan.atCeiling ? ' is-at-ceiling' : ''}">${button}${detail}</div>`;
+    }
+
+    /* The follow button's title names the scope it would take, because that
+       scope is no longer always "the browsed folder": a highlighted row and
+       the listing's own folder are both browsing acts, and one of them can be
+       a file. */
+    function explorerGitFollowButtonTitle(pane, following) {
+        if (following) {
+            return 'Use fixed Git scope';
+        }
+        const target = explorerGitBrowsingScope(pane);
+        const pin = window.GridVibeExplorerGitPin;
+        return `Follow the browsed ${target.kind === 'file' ? 'file' : 'folder'} for Git: ${pin.explorerGitPinPathLabel(target.path)}`;
+    }
+
+    /* The pin button's three states, read from the module the Files tree's
+       marker is painted from (explorer-git-pin.js) so the pressed button and
+       the marked row cannot disagree. Reading the pane here rather than in
+       the module keeps the module free of pane shape: what it is handed is a
+       pinned path and a browsed path.
+
+       Delegated outright, with no local fallback: a second copy of the state
+       table -- or of the word for the root -- is exactly the disagreement the
+       module exists to prevent, and it is a page script loaded before this
+       one. */
+    function explorerGitPinState(pane) {
+        const target = explorerGitBrowsingScope(pane);
+        return window.GridVibeExplorerGitPin.explorerGitPinButtonState(
+            typeof pane?._explorerGitPinnedPath === 'string' ? pane._explorerGitPinnedPath : null,
+            target.path,
+            pane?._explorerGitPinKind === 'file' ? 'file' : 'dir',
+            target.kind
+        );
     }
 
     function updateExplorerGitSummary(index, git) {
@@ -319,15 +665,49 @@
     ───────────────────────────────────────────── */
     function ensureExplorerGitCommitSearchState(pane) {
         if (!pane._explorerGitCommitSearch) {
-            pane._explorerGitCommitSearch = { query: '', activeIndex: 0, open: false };
+            pane._explorerGitCommitSearch = {
+                query: '', activeIndex: 0, open: false, mode: 'subject'
+            };
         }
         return pane._explorerGitCommitSearch;
     }
 
-    function explorerGitCommitSearchCountText(query, plan) {
-        return query
-            ? `${plan.matchCount ? plan.activeIndex + 1 : 0}/${plan.matchCount}`
-            : '';
+    function explorerGitCommitSearchCountText(state, plan) {
+        if (!state.query) {
+            return '';
+        }
+        if (plan.emptyText) {
+            return '';
+        }
+        return `${plan.matchCount ? plan.activeIndex + 1 : 0}/${plan.matchCount}`;
+    }
+
+    function explorerGitCommitMessageFocusState(index) {
+        const input = document.getElementById(`explorer-git-commit-message-${index}`);
+        if (!input || document.activeElement !== input) {
+            return null;
+        }
+        return {
+            start: typeof input.selectionStart === 'number' ? input.selectionStart : 0,
+            end: typeof input.selectionEnd === 'number' ? input.selectionEnd : 0
+        };
+    }
+
+    function restoreExplorerGitCommitMessageFocus(index, state) {
+        if (!state) {
+            return;
+        }
+        const input = document.getElementById(`explorer-git-commit-message-${index}`);
+        if (!input) {
+            return;
+        }
+        input.focus();
+        try {
+            input.setSelectionRange(state.start, state.end);
+        } catch (error) {
+            // A textarea supports selection, but focus restoration must stay
+            // harmless if a test double or browser implementation does not.
+        }
     }
 
     /* Paint only, for the same reason as paintExplorerGitActiveRows below:
@@ -342,9 +722,10 @@
             return;
         }
         const state = ensureExplorerGitCommitSearchState(pane);
+        const mode = state.mode === 'hash' ? 'hash' : 'subject';
         const repo = pane._explorerGitRepo || {};
         const commits = Array.isArray(repo.commits) ? repo.commits : [];
-        const plan = policy.searchPlan(commits, state.query, state.activeIndex);
+        const plan = policy.searchPlan(commits, state.query, state.activeIndex, { mode });
         state.activeIndex = plan.activeIndex;
         let ordinal = 0;
         panel.querySelectorAll('[data-explorer-git-commit-toggle]').forEach((row, rowIndex) => {
@@ -353,22 +734,38 @@
             if (!subjectEl || !commit) {
                 return;
             }
-            const hash = commit.hash || '';
+            const hash = explorerGitCommitSearchableHash(commit);
+            const shortHash = explorerGitCommitShortHash(commit);
             const ranges = plan.perCommit[rowIndex] || [];
-            const subjectHtml = ranges.length
+            const subjectHtml = mode === 'subject' && ranges.length
                 ? policy.markedSubjectHtml(
                     policy.commitSubject(commit), ranges, ordinal, plan.activeIndex
                 )
                 : escHtml(policy.commitSubject(commit));
+            const hashHtml = mode === 'hash' && ranges.length
+                ? policy.markedHashHtml(hash, ranges[0])
+                : escHtml(shortHash);
             const hashMark = policy.hashMarkClass(ranges, ordinal, plan.activeIndex);
             ordinal += ranges.length;
             subjectEl.innerHTML =
-                `<span class="explorer-diff-commit-hash${hashMark}">${escHtml(hash ? hash.slice(0, 7) : '')}</span> `
+                `<span class="explorer-diff-commit-hash${hashMark}">${hashHtml}</span> `
                 + subjectHtml;
         });
         const count = panel.querySelector('[data-explorer-git-commit-search-count]');
         if (count) {
-            count.textContent = explorerGitCommitSearchCountText(state.query, plan);
+            count.textContent = explorerGitCommitSearchCountText(state, plan);
+        }
+        const empty = panel.querySelector('[data-explorer-git-commit-search-empty]');
+        if (empty) {
+            empty.textContent = plan.emptyText || '';
+            empty.hidden = !state.open || !plan.emptyText;
+        }
+        const modeButton = panel.querySelector('[data-explorer-git-commit-search-mode]');
+        if (modeButton) {
+            const hashMode = mode === 'hash';
+            modeButton.setAttribute('aria-pressed', hashMode ? 'true' : 'false');
+            modeButton.title = hashMode ? 'Search commit subjects' : 'Search commit ids';
+            modeButton.setAttribute('aria-label', modeButton.title);
         }
         panel.querySelectorAll(
             '[data-explorer-git-commit-search-prev], [data-explorer-git-commit-search-next]'
@@ -376,7 +773,10 @@
             button.disabled = plan.matchCount === 0;
         });
         if (scroll && plan.matchCount) {
-            const active = panel.querySelector('.explorer-diff-commit .explorer-search-match.active');
+            const active = panel.querySelector(
+                '.explorer-diff-commit .explorer-search-match.active, '
+                + '.explorer-diff-commit-hash.explorer-git-commit-search-hit.active'
+            );
             if (active) {
                 requestAnimationFrame(() => {
                     scrollExplorerGitCommitRowIntoView(panel, active);
@@ -487,26 +887,185 @@
             return false;
         }
         pane._explorerGitFollowBrowsing = !Boolean(pane._explorerGitFollowBrowsing);
+        /* Before the load, for the same reason a pin write paints before its
+           own: the Files tree's Follow marker reports a pane field that has
+           already moved, and making the reader wait out a repository round
+           trip to see it would be reporting the request rather than the
+           state. Synchronous — nothing has awaited yet, so this is still the
+           pane the gesture was made on. */
+        refreshExplorerGitScopeAffordances(index);
         invalidateExplorerGitRepo(index);
         notePanePresentationChanged(index);
         await loadExplorerGitRepo(index);
         return true;
     }
 
-    async function toggleExplorerGitPinnedScope(index) {
+    /* Everything outside the Git panel that reports where the *scope* is,
+       painted from one place so those surfaces cannot drift apart: today the
+       Files tree's pin and Follow markers, which move on exactly the same
+       events the panel's own pin affordances do.
+
+       Both markers, not just the pin: Follow moves on plain navigation, which
+       is the one thing that changes a scope without reloading the repository,
+       so a Follow marker left out of here would sit on the folder the reader
+       walked away from until the next load re-rendered the tree.
+
+       Paint-only and attribute-level by construction. Re-rendering the Git
+       panel for a scope move is not an option — it carries the commit-message
+       textarea and the commit-search input, and a re-render takes the caret —
+       and re-rendering the tree body would reset its scroll. */
+    function refreshExplorerGitScopeAffordances(index) {
+        if (typeof applyExplorerTreeScopeMarks === 'function') {
+            applyExplorerTreeScopeMarks(index);
+        }
+        applyExplorerGitPinButtonState(index);
+    }
+
+    /* The pin button, painted attribute-only.
+
+       Two things move it. A pin write, which the tree marker answers beside
+       it; and plain navigation, which changes `pinnedHere` while leaving the
+       Git model untouched — with Follow off nothing reloads, so without this
+       the button would keep a stale pressed state and a stale title until the
+       next load.
+
+       Attributes and a class, never a re-render: the panel carries the
+       commit-message textarea and the commit-search input, and re-rendering
+       it takes the caret. The repo bar's Clear pin is toggled by `hidden`
+       rather than added and removed for the same reason the tree's root
+       marker is — it must be able to move on a write whose reload has not
+       re-rendered the panel yet. It now tracks the pin's *existence* rather
+       than where the pane is standing, so plain navigation leaves it alone. */
+    function applyExplorerGitPinButtonState(index) {
+        const pane = terminals[index];
+        const panel = document.getElementById(`explorer-git-panel-${index}`);
+        if (!pane || !panel) {
+            return;
+        }
+        const state = explorerGitPinState(pane);
+        const button = panel.querySelector('[data-explorer-git-pin-toggle]');
+        if (button) {
+            button.setAttribute('aria-pressed', state.pressed ? 'true' : 'false');
+            button.title = state.title;
+            button.setAttribute('aria-label', state.title);
+            button.classList.toggle('is-pinned-elsewhere', state.state === 'elsewhere');
+        }
+        const scopeClear = panel.querySelector('[data-explorer-git-scope-clear]');
+        if (scopeClear) {
+            scopeClear.hidden = !state.clearAvailable;
+        }
+    }
+
+    /* One writer for the pin, so the header, menus, and explicit Clear pin
+       cannot drift into different records. `null` means "no pin"; any string
+       (including '') is a pinned path and carries its file/directory kind. */
+    async function setExplorerGitPinnedScope(index, pinnedPath, pinnedKind = 'dir') {
         const pane = terminals[index];
         if (!pane || pane._explorerGitActionBusy || pane._explorerGitRepoLoading) {
             return false;
         }
-        if (typeof pane._explorerGitPinnedPath === 'string') {
+        if (pinnedPath === null) {
             delete pane._explorerGitPinnedPath;
+            delete pane._explorerGitPinKind;
         } else {
-            pane._explorerGitPinnedPath = String(pane._explorerPath || '');
+            pane._explorerGitPinnedPath = String(pinnedPath);
+            pane._explorerGitPinKind = pinnedKind === 'file' ? 'file' : 'dir';
         }
+        /* Before the load, not after it: the marker reports a pane field that
+           has already moved, so making the reader wait out a repository round
+           trip to see it would be reporting the request rather than the state.
+           Synchronous, so no identity re-check is owed — nothing has awaited
+           yet and this is still the pane the gesture was made on. */
+        refreshExplorerGitScopeAffordances(index);
         invalidateExplorerGitRepo(index);
         notePanePresentationChanged(index);
         await loadExplorerGitRepo(index);
         return true;
+    }
+
+    /* Pin *here*: clear only when the pin is the file or folder being browsed,
+       otherwise pin this path — including when a pin already exists
+       somewhere else, which is one write and not an unpin followed by a pin.
+       Two writes would mean two invalidate + load round trips, a visible
+       flash at the intermediate root scope, and two presentation writes for
+       one gesture. Never an ancestor match, so this can never clear a pin the
+       user made on another path. */
+    function toggleExplorerGitPinHere(index) {
+        const pane = terminals[index];
+        const target = explorerGitBrowsingScope(pane);
+        return setExplorerGitPinnedScope(
+            index,
+            explorerGitPinState(pane).state === 'here'
+                ? null
+                : target.path,
+            target.kind
+        );
+    }
+
+    function clearExplorerGitPinnedScope(index) {
+        return setExplorerGitPinnedScope(index, null);
+    }
+
+    /* How far down the panel a second sticky box has to start.
+
+       The Graph's commit find is sticky too, and it must stack *below* the
+       frozen repo bar rather than behind it: two sticky boxes at `top: 0` in
+       one scroller claim the same strip, and the header wins on z-index, so
+       the bar the reader is typing in would slide out of sight behind it —
+       the one thing "a control the user is operating stays on screen"
+       forbids.
+
+       CSS cannot ask a sibling for its height, and this header's is genuinely
+       variable: a repository line that may be absent, a branch line, and
+       nought to two scope lines. So the header publishes its height as a
+       custom property the find bar's `top` reads.
+
+       Measured by ResizeObserver rather than by reading `offsetHeight` after
+       the render, for two reasons. The panel is routinely rendered while
+       `hidden` — a background group, a sidebar the reader has not opened —
+       where every box measures 0, and writing that 0 in as the offset would
+       stick the find bar behind the header for as long as the render stood;
+       the observer answers when the box actually acquires a size. And a read
+       straight after the `innerHTML` write is a forced synchronous layout on
+       every poll of the change listener, which repaints this panel quietly
+       and often.
+
+       One observer per pane, re-pointed at each render's header, because the
+       panel element outlives its contents. `offsetHeight` inside the callback
+       is a border-box integer read at a point where layout is already clean;
+       `contentRect` would drop the bar's own 8px padding. */
+    function observeExplorerGitHeaderHeight(index) {
+        const panel = document.getElementById(`explorer-git-panel-${index}`);
+        if (!panel) {
+            return;
+        }
+        const header = panel.querySelector('.explorer-git-repo-bar');
+        if (!header) {
+            /* Loading, and the repository-error panel: no frozen header, so
+               nothing below it is owed an offset. Clearing rather than
+               keeping the last one, because the find bar is still rendered on
+               the error panel and would otherwise start below a header that
+               is not there. */
+            panel._explorerGitHeaderObserver?.disconnect();
+            panel.style?.removeProperty('--explorer-git-header-height');
+            delete panel._explorerGitHeaderHeight;
+            return;
+        }
+        if (typeof window.ResizeObserver !== 'function') {
+            return;
+        }
+        if (!panel._explorerGitHeaderObserver) {
+            panel._explorerGitHeaderObserver = new window.ResizeObserver(entries => {
+                const height = Math.max(0, Math.round(entries[0]?.target?.offsetHeight || 0));
+                if (height === panel._explorerGitHeaderHeight) {
+                    return;
+                }
+                panel._explorerGitHeaderHeight = height;
+                panel.style?.setProperty('--explorer-git-header-height', `${height}px`);
+            });
+        }
+        panel._explorerGitHeaderObserver.disconnect();
+        panel._explorerGitHeaderObserver.observe(header);
     }
 
     function renderExplorerGitPanel(index) {
@@ -516,34 +1075,58 @@
             return;
         }
         wireExplorerCopyPathMenu(panel, index);
+        wireExplorerGitCommitCards(index);
         if (pane._explorerGitRepoLoading) {
             panel.innerHTML = '<div class="explorer-diff-sidebar-empty">Loading repository...</div>';
+            observeExplorerGitHeaderHeight(index);
             return;
         }
         if (pane._explorerGitRepoError && !pane._explorerGitRepo) {
             const following = Boolean(pane._explorerGitFollowBrowsing);
+            const followTitle = explorerGitFollowButtonTitle(pane, following);
             const pinned = typeof pane._explorerGitPinnedPath === 'string';
-            const pinTitle = pinned
-                ? 'Clear pinned Git folder'
-                : 'Pin Git to the current folder';
+            const pinState = explorerGitPinState(pane);
+            const pinnedKind = pane._explorerGitPinKind === 'file' ? 'file' : 'dir';
+            /* A pin is faithfully re-applied on restore, including one made in
+               a folder that is not inside any worktree — that is the pin
+               working, not the pin being lost. But a bare "Folder is not
+               inside a Git worktree" names no folder, and the pinned one may
+               be nowhere near where the pane is now browsing, so the message
+               reads as a bug in the pane rather than as a scope the user
+               chose. Name the scope, and put the one action that resolves it
+               next to it. In-pane and role="status": a pin is a state that
+               lasts as long as the pin does, not an event for the launcher's
+               banner. */
+            const pinnedScopeNotice = pinned
+                ? `
+                <div class="explorer-git-scope-notice" role="status">
+                    <span class="explorer-git-scope-notice-text">Pinned Git ${pinnedKind === 'file' ? 'file' : 'folder'}: <span class="explorer-git-scope-notice-path" title="${escHtml(explorerGitScopePathLabel(pane._explorerGitPinnedPath))}">${escHtml(explorerGitScopeLabel(pane._explorerGitPinnedPath, pinnedKind))}</span></span>
+                    <button type="button" class="explorer-git-clear-pin-btn" data-explorer-git-clear-pin>Clear pin</button>
+                </div>`
+                : '';
             panel.innerHTML = `
                 <div class="explorer-diff-sidebar-error">${escHtml(pane._explorerGitRepoError)}</div>
+                ${pinnedScopeNotice}
                 <div class="explorer-diff-sidebar-section">
                     <div class="explorer-diff-sidebar-title explorer-git-section-title">
                         <span>Graph</span>
                         <span class="explorer-git-section-actions">
-                            <button type="button" class="explorer-search-btn explorer-git-pin-toggle" data-explorer-git-pin-toggle aria-pressed="${pinned ? 'true' : 'false'}" title="${pinTitle}" aria-label="${pinTitle}">${EXPLORER_GIT_PIN_ICON}</button>
-                            <button type="button" class="explorer-search-btn explorer-git-follow-toggle" data-explorer-git-follow-toggle aria-pressed="${following ? 'true' : 'false'}" title="${following ? 'Use fixed Git folder' : 'Follow browsed folder for Git'}" aria-label="${following ? 'Use fixed Git folder' : 'Follow browsed folder for Git'}">${EXPLORER_GIT_FOLLOW_ICON}</button>
+                            <button type="button" class="explorer-search-btn explorer-git-pin-toggle${pinState.state === 'elsewhere' ? ' is-pinned-elsewhere' : ''}" data-explorer-git-pin-toggle aria-pressed="${pinState.pressed ? 'true' : 'false'}" title="${escHtml(pinState.title)}" aria-label="${escHtml(pinState.title)}">${EXPLORER_GIT_PIN_ICON}</button>
+                            <button type="button" class="explorer-search-btn explorer-git-follow-toggle" data-explorer-git-follow-toggle aria-pressed="${following ? 'true' : 'false'}" title="${escHtml(followTitle)}" aria-label="${escHtml(followTitle)}">${EXPLORER_GIT_FOLLOW_ICON}</button>
                             <button type="button" class="explorer-search-btn explorer-git-commit-search-toggle" disabled title="Search commit messages" aria-label="Search commit messages">${EXPLORER_GIT_SEARCH_ICON}</button>
                         </span>
                     </div>
                 </div>`;
             panel.querySelector('[data-explorer-git-pin-toggle]')?.addEventListener('click', () => {
-                toggleExplorerGitPinnedScope(index);
+                toggleExplorerGitPinHere(index);
             });
             panel.querySelector('[data-explorer-git-follow-toggle]')?.addEventListener('click', () => {
                 toggleExplorerGitFollowBrowsing(index);
             });
+            panel.querySelector('[data-explorer-git-clear-pin]')?.addEventListener('click', () => {
+                clearExplorerGitPinnedScope(index);
+            });
+            observeExplorerGitHeaderHeight(index);
             return;
         }
 
@@ -569,22 +1152,46 @@
         const commitMessage = typeof pane._explorerGitCommitMessage === 'string' ? pane._explorerGitCommitMessage : '';
         const hasUpstream = git.ahead !== null && git.ahead !== undefined;
         const publishLabel = hasUpstream ? 'Push' : 'Publish branch';
-        const repoBranchText = explorerGitRepoLabel(git);
+        const repoName = String(git.repo_name || '').trim();
+        const repoBranchText = explorerGitBranchLabel(git);
         const following = Boolean(pane._explorerGitFollowBrowsing);
-        const pinned = typeof pane._explorerGitPinnedPath === 'string';
-        const pinTitle = pinned
-            ? 'Clear pinned Git folder'
-            : 'Pin Git to the current folder';
+        const followTitle = explorerGitFollowButtonTitle(pane, following);
+        const pinState = explorerGitPinState(pane);
+        const browsedScope = explorerGitBrowsingScope(pane);
+        const pinnedKind = pane._explorerGitPinKind === 'file' ? 'file' : 'dir';
+        const scopeLines = window.GridVibeExplorerGitPin.explorerGitScopeLines(
+            typeof pane._explorerGitPinnedPath === 'string' ? pane._explorerGitPinnedPath : null,
+            browsedScope.path,
+            following,
+            pinnedKind,
+            browsedScope.kind
+        );
+        const effectiveScopeKind = explorerGitScopeKind(pane);
+        const effectiveScopePath = explorerGitScopePath(pane);
+        const bulkScopeLabel = effectiveScopeKind === 'file'
+            ? `file ${explorerGitScopePathLabel(effectiveScopePath)}`
+            : (effectiveScopePath === null ? 'explorer root' : `folder ${explorerGitScopePathLabel(effectiveScopePath)}`);
         const commitSearch = ensureExplorerGitCommitSearchState(pane);
+        const commitSearchMode = commitSearch.mode === 'hash' ? 'hash' : 'subject';
         const searchPolicy = window.GridVibeExplorerGitSearch;
         const searchPlan = searchPolicy
-            ? searchPolicy.searchPlan(commits, commitSearch.query, commitSearch.activeIndex)
-            : { perCommit: commits.map(() => []), matchCount: 0, activeIndex: 0 };
+            ? searchPolicy.searchPlan(
+                commits, commitSearch.query, commitSearch.activeIndex, { mode: commitSearchMode }
+            )
+            : { perCommit: commits.map(() => []), matchCount: 0, activeIndex: 0, emptyText: '' };
         commitSearch.activeIndex = searchPlan.activeIndex;
+        const graphPolicy = window.GridVibeExplorerGitGraph;
+        /* One clock for the whole pass: the hover cards' "3 days ago" is read
+           once per render, so every row on screen agrees about now. */
+        const renderedAt = Date.now();
+        const pagePlan = graphPolicy
+            ? graphPolicy.pagePlan(repo, { loading: Boolean(pane._explorerGitCommitPageLoading) })
+            : null;
         let searchOrdinal = 0;
         const commitRows = commits.length
             ? commits.map((commit, commitIndex) => {
                 const hash = commit.hash || '';
+                const searchableHash = explorerGitCommitSearchableHash(commit);
                 const expanded = hash && expandedCommits.has(
                     window.GridVibeExplorerGitActive.commitKey(hash)
                 );
@@ -592,36 +1199,70 @@
                     ? searchPolicy.commitSubject(commit)
                     : (commit.subject || commit.line || '');
                 const ranges = searchPlan.perCommit[commitIndex] || [];
-                const subjectHtml = ranges.length
+                const subjectHtml = commitSearchMode === 'subject' && ranges.length
                     ? searchPolicy.markedSubjectHtml(subject, ranges, searchOrdinal, searchPlan.activeIndex)
                     : escHtml(subject);
+                const hashHtml = commitSearchMode === 'hash' && ranges.length
+                    ? searchPolicy.markedHashHtml(searchableHash, ranges[0])
+                    : escHtml(explorerGitCommitShortHash(commit));
                 const hashMark = searchPolicy
                     ? searchPolicy.hashMarkClass(ranges, searchOrdinal, searchPlan.activeIndex)
                     : '';
                 searchOrdinal += ranges.length;
+                const card = graphPolicy
+                    ? graphPolicy.commitCard(commit, { expanded, now: renderedAt })
+                    : null;
                 return `
-                    <button type="button" class="explorer-diff-commit" data-explorer-git-commit-toggle="${escHtml(hash)}" data-explorer-git-commit-full="${escHtml(commit.full_hash || '')}" data-explorer-git-commit-message="${escHtml(commit.message || '')}" ${hash ? '' : 'disabled'} title="${escHtml(commit.line || '')}" aria-expanded="${expanded ? 'true' : 'false'}">
+                    <button type="button" class="explorer-diff-commit" data-explorer-git-commit-toggle="${escHtml(hash)}" data-explorer-git-commit-full="${escHtml(commit.full_hash || '')}" data-explorer-git-commit-message="${escHtml(commit.message || '')}" ${hash ? '' : 'disabled'} aria-label="${escHtml(card ? card.summary : (commit.line || ''))}" aria-expanded="${expanded ? 'true' : 'false'}">
                         <span class="explorer-diff-commit-graph">${explorerGitGraphHtml(commit.graph)}</span>
                         <span class="explorer-diff-commit-toggle" aria-hidden="true">${expanded ? UI_CHEVRON_DOWN_ICON : UI_CHEVRON_RIGHT_ICON}</span>
-                        <span class="explorer-diff-commit-subject"><span class="explorer-diff-commit-hash${hashMark}">${escHtml(hash ? hash.slice(0, 7) : '')}</span> ${subjectHtml}</span>
+                        <span class="explorer-diff-commit-subject"><span class="explorer-diff-commit-hash${hashMark}">${hashHtml}</span> ${subjectHtml}</span>
+                        ${explorerGitCommitCardHtml(card)}
                     </button>
                     ${expanded ? `<div class="explorer-diff-commit-files">${renderExplorerGitFileRows(index, commit.files, { emptyText: 'No files recorded for this commit.', commitHash: hash })}</div>` : ''}
                 `;
             }).join('')
             : '<div class="explorer-diff-sidebar-empty">No commits in this scope.</div>';
 
+        /* The repo bar is the panel's frozen header (see the sticky rule in
+           terminals.css): repository, branch, and the pin/Follow scope lines
+           are the facts every row further down is *about*, so they stay on
+           screen while the change lists and the graph scroll under them.
+
+           Publish/Push is deliberately not in it. It is the one mutation in
+           this panel that reaches a remote, and freezing it would leave it
+           under the pointer at every scroll position; it sits in its own
+           section immediately below and scrolls away like everything else. */
         panel.innerHTML = `
             ${errorBanner}
             ${watchPausedBanner}
             <div class="explorer-diff-sidebar-section explorer-git-repo-bar">
-                <span class="explorer-git-repo-branch" title="${escHtml(git.repo_root || repoBranchText)}">${escHtml(repoBranchText)}</span>
+                <div class="explorer-git-repo-details">
+                    ${repoName ? `
+                    <div class="explorer-git-repo-line explorer-git-repo-root" title="${escHtml(git.repo_root || repoName)}">
+                        <span class="explorer-git-repo-icon">${EXPLORER_FOLDER_ICON}</span>
+                        <span class="explorer-git-repo-text">${escHtml(repoName)}</span>
+                    </div>` : ''}
+                    <div class="explorer-git-repo-line explorer-git-repo-branch" title="${escHtml(repoBranchText)}">
+                        <span class="explorer-git-repo-icon">${EXPLORER_GIT_TOGGLE_ICON}</span>
+                        <span class="explorer-git-repo-text">${escHtml(repoBranchText)}</span>
+                    </div>
+                    ${scopeLines.map(line => `
+                    <div class="explorer-git-repo-line explorer-git-repo-scope explorer-git-repo-scope-${line.kind}${line.overridden ? ' is-overridden' : ''}" title="${escHtml(line.title)}">
+                        <span class="explorer-git-repo-icon">${line.kind === 'follow' ? EXPLORER_GIT_FOLLOW_ICON : EXPLORER_GIT_PIN_ICON}</span>
+                        <span class="explorer-git-repo-text">${escHtml(line.label)}</span>
+                        ${line.kind === 'pin' ? `<button type="button" class="explorer-git-clear-pin-btn explorer-git-scope-clear-btn" data-explorer-git-clear-pin data-explorer-git-scope-clear ${line.clearAvailable ? '' : 'hidden'} title="Clear the pinned Git ${line.scopeKind === 'file' ? 'file' : 'folder'}: ${escHtml(line.path)}" aria-label="Clear the pinned Git ${line.scopeKind === 'file' ? 'file' : 'folder'}: ${escHtml(line.path)}">Clear pin</button>` : ''}
+                    </div>`).join('')}
+                </div>
+            </div>
+            <div class="explorer-diff-sidebar-section explorer-git-publish-box">
                 <button type="button" class="explorer-git-publish-btn" data-explorer-git-publish ${busy ? 'disabled' : ''} title="Push the current branch to its remote">${escHtml(publishLabel)}</button>
             </div>
             <div class="explorer-diff-sidebar-section">
                 <div class="explorer-diff-sidebar-title explorer-git-section-title">
                     <span>Staged Changes</span>
                     <span class="explorer-git-section-actions">
-                        <button type="button" class="explorer-search-btn explorer-git-unstage-btn explorer-git-unstage-all-btn" data-explorer-git-unstage-all ${(busy || !staged.length) ? 'disabled' : ''} title="Unstage all changes" aria-label="Unstage all changes">${UI_MINUS_ICON}</button>
+                        <button type="button" class="explorer-search-btn explorer-git-unstage-btn explorer-git-unstage-all-btn" data-explorer-git-unstage-all ${(busy || !staged.length) ? 'disabled' : ''} title="Unstage all changes in ${escHtml(bulkScopeLabel)}" aria-label="Unstage all changes">${UI_MINUS_ICON}</button>
                     </span>
                 </div>
                 <div class="explorer-diff-commit-files explorer-git-change-list">
@@ -636,8 +1277,8 @@
                 <div class="explorer-diff-sidebar-title explorer-git-section-title">
                     <span>Changes</span>
                     <span class="explorer-git-section-actions">
-                        <button type="button" class="explorer-search-btn explorer-git-revert-btn explorer-git-discard-all-btn" data-explorer-git-discard-all ${(busy || !discardable.length) ? 'disabled' : ''} title="Discard all changes" aria-label="Discard all changes">${EXPLORER_GIT_REVERT_ICON}</button>
-                        <button type="button" class="explorer-search-btn explorer-git-stage-btn explorer-git-stage-all-btn" data-explorer-git-stage-all ${(busy || !unstaged.length) ? 'disabled' : ''} title="Stage all changes" aria-label="Stage all changes">${UI_PLUS_ICON}</button>
+                        <button type="button" class="explorer-search-btn explorer-git-revert-btn explorer-git-discard-all-btn" data-explorer-git-discard-all ${(busy || !discardable.length) ? 'disabled' : ''} title="Discard all changes in ${escHtml(bulkScopeLabel)}" aria-label="Discard all changes">${EXPLORER_GIT_REVERT_ICON}</button>
+                        <button type="button" class="explorer-search-btn explorer-git-stage-btn explorer-git-stage-all-btn" data-explorer-git-stage-all ${(busy || !unstaged.length) ? 'disabled' : ''} title="Stage all changes in ${escHtml(bulkScopeLabel)}" aria-label="Stage all changes">${UI_PLUS_ICON}</button>
                     </span>
                 </div>
                 <div class="explorer-diff-commit-files explorer-git-change-list">
@@ -648,8 +1289,8 @@
                 <div class="explorer-diff-sidebar-title explorer-git-section-title">
                     <span>Graph</span>
                     <span class="explorer-git-section-actions">
-                        <button type="button" class="explorer-search-btn explorer-git-pin-toggle" data-explorer-git-pin-toggle aria-pressed="${pinned ? 'true' : 'false'}" ${busy ? 'disabled' : ''} title="${pinTitle}" aria-label="${pinTitle}">${EXPLORER_GIT_PIN_ICON}</button>
-                        <button type="button" class="explorer-search-btn explorer-git-follow-toggle" data-explorer-git-follow-toggle aria-pressed="${following ? 'true' : 'false'}" ${busy ? 'disabled' : ''} title="${following ? 'Use fixed Git folder' : 'Follow browsed folder for Git'}" aria-label="${following ? 'Use fixed Git folder' : 'Follow browsed folder for Git'}">${EXPLORER_GIT_FOLLOW_ICON}</button>
+                        <button type="button" class="explorer-search-btn explorer-git-pin-toggle${pinState.state === 'elsewhere' ? ' is-pinned-elsewhere' : ''}" data-explorer-git-pin-toggle aria-pressed="${pinState.pressed ? 'true' : 'false'}" ${busy ? 'disabled' : ''} title="${escHtml(pinState.title)}" aria-label="${escHtml(pinState.title)}">${EXPLORER_GIT_PIN_ICON}</button>
+                        <button type="button" class="explorer-search-btn explorer-git-follow-toggle" data-explorer-git-follow-toggle aria-pressed="${following ? 'true' : 'false'}" ${busy ? 'disabled' : ''} title="${escHtml(followTitle)}" aria-label="${escHtml(followTitle)}">${EXPLORER_GIT_FOLLOW_ICON}</button>
                         <button type="button" class="explorer-search-btn explorer-git-commit-search-toggle" data-explorer-git-commit-search-toggle aria-expanded="${commitSearch.open ? 'true' : 'false'}" title="Search commit messages" aria-label="Search commit messages">${EXPLORER_GIT_SEARCH_ICON}</button>
                     </span>
                 </div>
@@ -664,12 +1305,15 @@
                         aria-label="Search commit messages"
                         value="${escHtml(commitSearch.query)}"
                     >
-                    <span class="explorer-search-count" data-explorer-git-commit-search-count>${explorerGitCommitSearchCountText(commitSearch.query, searchPlan)}</span>
+                    <span class="explorer-search-count" data-explorer-git-commit-search-count>${explorerGitCommitSearchCountText(commitSearch, searchPlan)}</span>
+                    <button type="button" class="explorer-search-btn explorer-git-commit-search-mode" data-explorer-git-commit-search-mode aria-pressed="${commitSearchMode === 'hash' ? 'true' : 'false'}" title="${commitSearchMode === 'hash' ? 'Search commit subjects' : 'Search commit ids'}" aria-label="${commitSearchMode === 'hash' ? 'Search commit subjects' : 'Search commit ids'}">${EXPLORER_GIT_HASH_ICON}</button>
                     <button type="button" class="explorer-search-btn" data-explorer-git-commit-search-prev ${searchPlan.matchCount ? '' : 'disabled'} title="Previous match" aria-label="Previous match">↑</button>
                     <button type="button" class="explorer-search-btn" data-explorer-git-commit-search-next ${searchPlan.matchCount ? '' : 'disabled'} title="Next match" aria-label="Next match">↓</button>
                     <button type="button" class="explorer-search-btn" data-explorer-git-commit-search-clear title="Clear search" aria-label="Clear search">×</button>
                 </div>
+                <span class="explorer-git-commit-search-empty" data-explorer-git-commit-search-empty role="status" aria-live="polite" ${(commitSearch.open && searchPlan.emptyText) ? '' : 'hidden'}>${escHtml(searchPlan.emptyText || '')}</span>
                 ${commitRows}
+                ${explorerGitGraphMoreHtml(pagePlan)}
             </div>
         `;
         const commitMessageInput = panel.querySelector(`#explorer-git-commit-message-${index}`);
@@ -699,17 +1343,39 @@
         panel.querySelector('[data-explorer-git-commit-search-toggle]')?.addEventListener('click', () => {
             setExplorerGitCommitSearchOpen(index, 'toggle');
         });
+        panel.querySelector('[data-explorer-git-commit-search-mode]')?.addEventListener('click', () => {
+            const state = ensureExplorerGitCommitSearchState(pane);
+            state.mode = state.mode === 'hash' ? 'subject' : 'hash';
+            state.activeIndex = 0;
+            paintExplorerGitCommitSearch(index);
+        });
         panel.querySelector('[data-explorer-git-follow-toggle]')?.addEventListener('click', () => {
             toggleExplorerGitFollowBrowsing(index);
         });
         panel.querySelector('[data-explorer-git-pin-toggle]')?.addEventListener('click', () => {
-            toggleExplorerGitPinnedScope(index);
+            toggleExplorerGitPinHere(index);
+        });
+        /* The one always-reachable clear, and it is offered wherever a pin
+           is — including on the pinned folder itself, where the pressed
+           button is a second way to the same write. The button no longer
+           clears a pin you have navigated away from, so without this a pin
+           on a folder that is collapsed, deleted, or outside the current
+           root would be unclearable; and a clear that appeared only from
+           elsewhere went missing at the one folder a reader stands in when
+           they decide to unpin. Same writer as the button; no modifier
+           gesture, since Alt already means level-fold here and an invisible
+           gesture is not an affordance. */
+        panel.querySelector('[data-explorer-git-clear-pin]')?.addEventListener('click', () => {
+            clearExplorerGitPinnedScope(index);
         });
         panel.querySelector('[data-explorer-git-commit-search-prev]')?.addEventListener('click', () => {
             stepExplorerGitCommitSearch(index, -1);
         });
         panel.querySelector('[data-explorer-git-commit-search-next]')?.addEventListener('click', () => {
             stepExplorerGitCommitSearch(index, 1);
+        });
+        panel.querySelector('[data-explorer-git-show-more]')?.addEventListener('click', () => {
+            loadMoreExplorerGitCommits(index);
         });
         panel.querySelector('[data-explorer-git-commit-search-clear]')?.addEventListener('click', () => {
             clearExplorerGitCommitSearch(index);
@@ -781,12 +1447,32 @@
             });
         });
         panel.querySelectorAll('[data-explorer-git-commit-toggle]').forEach(button => {
-            button.addEventListener('click', () => {
+            button.addEventListener('mousedown', event => {
+                if (event.altKey) {
+                    /* Keep the textarea active until the click handler captures
+                       its selection. The render below replaces that textarea. */
+                    event.preventDefault();
+                }
+            });
+            button.addEventListener('click', event => {
                 const commit = button.dataset.explorerGitCommitToggle || '';
                 if (!commit) {
                     return;
                 }
                 const expanded = ensureExplorerDiffExpandedCommits(pane);
+                if (event.altKey) {
+                    const focusState = explorerGitCommitMessageFocusState(index);
+                    const plan = window.GridVibeExplorerGitSearch.collapseAllPlan(
+                        Array.from(expanded)
+                    );
+                    if (plan.changed) {
+                        expanded.clear();
+                        renderExplorerGitPanel(index);
+                        notePanePresentationChanged(index);
+                        restoreExplorerGitCommitMessageFocus(index, focusState);
+                    }
+                    return;
+                }
                 const key = window.GridVibeExplorerGitActive.commitKey(commit);
                 /* Collapsing the commit holding the open diff is final: this
                    pane has already recorded it as revealed, so the reveal in
@@ -800,6 +1486,7 @@
                 notePanePresentationChanged(index);
             });
         });
+        observeExplorerGitHeaderHeight(index);
         paintExplorerGitActiveRows(index);
     }
 
@@ -899,6 +1586,8 @@
         pane._explorerGitRepoError = '';
         pane._explorerGitRepo = null;
         pane._explorerGitAnchorPath = '';
+        pane._explorerGitAnchorKind = 'dir';
+        pane._explorerGitAnchorLimit = 0;
         renderExplorerGitPanels(index);
     }
 
@@ -912,9 +1601,20 @@
     async function loadExplorerGitRepo(index) {
         const pane = terminals[index];
         const sessionId = sessionIds[index];
+        // Before the URL is built: an expansion belongs to the scope it was
+        // made in, and this is the one place every scope move passes through.
+        explorerGitDropStaleCommitLimit(pane);
         const scopePath = explorerGitScopePath(pane);
-        const requestedAnchorPath = scopePath === null ? '' : scopePath;
-        const loadedForPath = pane?._explorerGitAnchorPath === requestedAnchorPath;
+        const scopeKind = explorerGitScopeKind(pane);
+        const requestedAnchorPath = explorerGitScopeIdentity(scopePath);
+        const requestedLimit = Number(pane?._explorerGitCommitLimit) || 0;
+        /* Like compared with like: both sides are the scope that was, or would
+           be, *requested* — never the resolved spelling the server answers with.
+           The page joins that identity, so "Show more" is a real reload rather
+           than an early return on the model it is trying to grow. */
+        const loadedForPath = pane?._explorerGitAnchorPath === requestedAnchorPath
+            && (pane?._explorerGitAnchorKind || 'dir') === scopeKind
+            && (Number(pane?._explorerGitAnchorLimit) || 0) === requestedLimit;
         if (!pane || !sessionId || (pane._explorerGitRepoLoaded && loadedForPath) || pane._explorerGitRepoLoading) {
             renderExplorerGitPanels(index);
             return;
@@ -925,7 +1625,13 @@
         renderExplorerGitPanels(index);
         try {
             const response = await fetch(
-                explorerGitRequestUrl(sessionId, 'repo', scopePath)
+                explorerGitRequestUrl(
+                    sessionId,
+                    'repo',
+                    scopePath,
+                    explorerGitCommitLimitParams(pane),
+                    scopeKind
+                )
             );
             const data = await response.json();
             if (!response.ok) {
@@ -935,12 +1641,13 @@
                 terminals[index] !== pane
                 || sessionIds[index] !== sessionId
                 || explorerGitScopePath(pane) !== scopePath
+                || explorerGitScopeKind(pane) !== scopeKind
             ) {
                 return;
             }
             pane._explorerGitRepoLoaded = true;
             pane._explorerGitRepo = data;
-            pane._explorerGitAnchorPath = String(data.anchor_path || '');
+            explorerGitNoteLoadedScope(pane, requestedAnchorPath, scopeKind);
             pane._explorerGitRevision = typeof data.revision === 'string' ? data.revision : '';
             // A user-initiated load re-arms a suspended change-listener watch.
             pane._explorerGitWatchSuspended = false;
@@ -950,6 +1657,7 @@
                 terminals[index] === pane
                 && sessionIds[index] === sessionId
                 && explorerGitScopePath(pane) === scopePath
+                && explorerGitScopeKind(pane) === scopeKind
             ) {
                 console.error('[GridVibe Sessions] Explorer Git repository failed:', error);
                 pane._explorerGitRepoError = error.message || 'Failed to load Git repository.';
@@ -960,10 +1668,92 @@
                 renderExplorerGitPanels(index);
                 if (
                     pane._explorerGitSidebarOpen
-                    && explorerGitScopePath(pane) !== scopePath
+                    && (
+                        explorerGitScopePath(pane) !== scopePath
+                        || explorerGitScopeKind(pane) !== scopeKind
+                    )
                 ) {
                     loadExplorerGitRepo(index);
                 }
+            }
+        }
+    }
+
+    /* One panel render that leaves the reader where they were standing.
+
+       renderExplorerGitPanel() rewrites the panel's innerHTML, and emptying a
+       scroller clamps it to 0 -- fine for a first paint, wrong for a repaint
+       of a list the reader has scrolled to the bottom of to reach the control
+       they just pressed. */
+    function repaintExplorerGitPanelInPlace(index) {
+        const panel = document.getElementById(`explorer-git-panel-${index}`);
+        const scrollTop = panel ? panel.scrollTop : 0;
+        renderExplorerGitPanel(index);
+        if (panel) {
+            panel.scrollTop = Math.min(scrollTop, panel.scrollHeight);
+        }
+    }
+
+    /* "Show more": read one page further back in the same scope.
+
+       A quiet reload rather than loadExplorerGitRepo(), for the same reason
+       the change listener uses one -- the Loading placeholder would replace a
+       panel the reader is standing at the bottom of, and the quiet swap puts
+       both the panel's scroll offset and the commit-message caret back. The
+       page moves before the request so the request carries it, and the panel
+       repaints at once so the button reports the read it has started rather
+       than the state it is leaving.
+
+       Everything the answer touches is bound to the captured identity. The
+       busy flag is cleared on the pane that asked wherever it now lives -- a
+       flag left set is a control that can never act again -- while the
+       repaint and the swap address the slot and are skipped once the slot has
+       changed hands. A failure puts the page back, so the model on the pane
+       and the page it is the model *for* cannot disagree. */
+    async function loadMoreExplorerGitCommits(index) {
+        const identity = explorerGitCaptureIdentity(index);
+        const pane = identity.pane;
+        const policy = window.GridVibeExplorerGitGraph;
+        if (!pane || !policy || pane._explorerGitCommitPageLoading) {
+            return false;
+        }
+        const plan = policy.pagePlan(pane._explorerGitRepo, {});
+        if (!plan.canLoadMore || !plan.nextLimit) {
+            return false;
+        }
+        const previousLimit = pane._explorerGitCommitLimit;
+        const previousScope = pane._explorerGitCommitLimitScope;
+        pane._explorerGitCommitLimit = plan.nextLimit;
+        pane._explorerGitCommitLimitScope = explorerGitCommitScopeKey(pane);
+        pane._explorerGitCommitPageLoading = true;
+        repaintExplorerGitPanelInPlace(index);
+        let painted = false;
+        try {
+            const data = await refreshExplorerGitRepoQuiet(index);
+            /* Cleared before the swap paints, not after: the swap is the one
+               render that restores the scroll, so a second one behind it
+               would take the reader back to the top to change a label. */
+            delete pane._explorerGitCommitPageLoading;
+            if (!data) {
+                pane._explorerGitCommitLimit = previousLimit;
+                pane._explorerGitCommitLimitScope = previousScope;
+                return false;
+            }
+            if (!explorerGitIdentityIsCurrent(index, identity)) {
+                return false;
+            }
+            painted = applyExplorerGitRepoQuiet(
+                index, data, identity.scopePath, identity.scopeKind
+            );
+            return true;
+        } catch (error) {
+            pane._explorerGitCommitLimit = previousLimit;
+            pane._explorerGitCommitLimitScope = previousScope;
+            return false;
+        } finally {
+            delete pane._explorerGitCommitPageLoading;
+            if (!painted && explorerGitIdentityIsCurrent(index, identity)) {
+                repaintExplorerGitPanelInPlace(index);
             }
         }
     }
@@ -979,6 +1769,7 @@
         const pane = terminals[index];
         const sessionId = sessionIds[index];
         const scopePath = explorerGitScopePath(pane);
+        const scopeKind = explorerGitScopeKind(pane);
         if (!pane || !sessionId || pane._explorerGitRepoLoading || pane._explorerGitRepoRefreshing) {
             return null;
         }
@@ -987,7 +1778,13 @@
         panel?.classList.add('git-refreshing');
         try {
             const response = await fetch(
-                explorerGitRequestUrl(sessionId, 'repo', scopePath),
+                explorerGitRequestUrl(
+                    sessionId,
+                    'repo',
+                    scopePath,
+                    explorerGitCommitLimitParams(pane),
+                    scopeKind
+                ),
                 { cache: 'no-store' }
             );
             const data = await response.json();
@@ -998,6 +1795,7 @@
                 terminals[index] !== pane
                 || sessionIds[index] !== sessionId
                 || explorerGitScopePath(pane) !== scopePath
+                || explorerGitScopeKind(pane) !== scopeKind
             ) {
                 return null;
             }
@@ -1010,7 +1808,12 @@
         }
     }
 
-    function applyExplorerGitRepoQuiet(index, data) {
+    function applyExplorerGitRepoQuiet(
+        index,
+        data,
+        requestedScopePath,
+        requestedScopeKind
+    ) {
         /* Swap a quietly fetched Git payload into the sidebar in place: one
            panel render, scroll/focus preserved, tab badges re-rendered only
            when the badge map actually changed (syncExplorerTabGitFromRepo
@@ -1028,7 +1831,15 @@
             : null;
         pane._explorerGitRepo = data;
         pane._explorerGitRepoLoaded = true;
-        pane._explorerGitAnchorPath = String(data.anchor_path || '');
+        explorerGitNoteLoadedScope(
+            pane,
+            requestedScopePath === undefined
+                ? explorerGitRequestedScope(pane)
+                : requestedScopePath,
+            requestedScopeKind === undefined
+                ? explorerGitRequestedScopeKind(pane)
+                : requestedScopeKind
+        );
         pane._explorerGitRevision = typeof data.revision === 'string' ? data.revision : '';
         syncExplorerTabGitFromRepo(index, data);
         renderExplorerGitPanel(index);
@@ -1064,7 +1875,12 @@
 
     function explorerGitCaptureIdentity(index) {
         const pane = terminals[index];
-        return { pane, sessionId: sessionIds[index], scopePath: explorerGitScopePath(pane) };
+        return {
+            pane,
+            sessionId: sessionIds[index],
+            scopePath: explorerGitScopePath(pane),
+            scopeKind: explorerGitScopeKind(pane)
+        };
     }
 
     function explorerGitIdentityState(index, identity) {
@@ -1074,7 +1890,10 @@
         if (terminals[index] !== identity.pane || sessionIds[index] !== identity.sessionId) {
             return EXPLORER_GIT_IDENTITY_PANE_REPLACED;
         }
-        if (explorerGitScopePath(identity.pane) !== identity.scopePath) {
+        if (
+            explorerGitScopePath(identity.pane) !== identity.scopePath
+            || explorerGitScopeKind(identity.pane) !== identity.scopeKind
+        ) {
             return EXPLORER_GIT_IDENTITY_SCOPE_CHANGED;
         }
         return EXPLORER_GIT_IDENTITY_CURRENT;
@@ -1098,12 +1917,14 @@
         }
         pane._explorerGitRepoLoaded = false;
         pane._explorerGitAnchorPath = '';
+        pane._explorerGitAnchorKind = 'dir';
+        pane._explorerGitAnchorLimit = 0;
         pane._explorerGitReloadPending = true;
     }
 
     async function performExplorerGitAction(index, endpoint, body) {
         const identity = explorerGitCaptureIdentity(index);
-        const { pane, sessionId, scopePath } = identity;
+        const { pane, sessionId, scopePath, scopeKind } = identity;
         if (!pane || !sessionId || pane._explorerGitActionBusy) {
             return false;
         }
@@ -1112,7 +1933,13 @@
         renderExplorerGitPanels(index);
         let succeeded = false;
         try {
-            const response = await fetch(explorerGitRequestUrl(sessionId, endpoint, scopePath), {
+            const response = await fetch(explorerGitRequestUrl(
+                sessionId,
+                endpoint,
+                scopePath,
+                explorerGitCommitLimitParams(pane),
+                scopeKind
+            ), {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(body || {}),
@@ -1124,7 +1951,9 @@
             if (explorerGitIdentityIsCurrent(index, identity)) {
                 pane._explorerGitRepo = data;
                 pane._explorerGitRepoLoaded = true;
-                pane._explorerGitAnchorPath = String(data.anchor_path || '');
+                explorerGitNoteLoadedScope(
+                    pane, explorerGitScopeIdentity(scopePath), scopeKind
+                );
                 pane._explorerGitRevision = typeof data.revision === 'string' ? data.revision : '';
                 // A successful GridVibe Git action is authoritative: it re-arms a
                 // suspended change-listener watch and resets its baseline.

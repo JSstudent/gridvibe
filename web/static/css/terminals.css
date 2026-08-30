@@ -64,11 +64,18 @@
             --explorer-bg: #0f141b;
             --explorer-bar-bg: #151c24;
             --explorer-border: #2b3744;
+            /* A floating surface sits *on* the panel instead of dividing
+               it, so it needs a rim the eye reads as an edge rather than
+               the hairline that separates two rows. Its own step, in both
+               themes, because --explorer-border is calibrated against the
+               panel it borders and is too quiet to close a card over it. */
+            --explorer-float-border: #55697e;
             --explorer-row-border: #1f2a35;
             --explorer-row-hover: #182636;
             --explorer-row-active: #17324a;
             --explorer-text: #e6edf3;
             --explorer-muted: #94a3b8;
+            --explorer-warning: #fbbf24;
             --explorer-folder: #f0b35b;
             --explorer-file: #9fb2c8;
         }
@@ -133,11 +140,13 @@
             --explorer-bg: #ffffff;
             --explorer-bar-bg: #f6f8fb;
             --explorer-border: #cfd6df;
+            --explorer-float-border: #93a1b4;
             --explorer-row-border: #e8edf3;
             --explorer-row-hover: #edf6ff;
             --explorer-row-active: #dbeafe;
             --explorer-text: #111827;
             --explorer-muted: #5f6f85;
+            --explorer-warning: #b45309;
             --explorer-folder: #c56f05;
             --explorer-file: #64748b;
             /* Default (non-overridden) panes follow the app theme; the
@@ -153,11 +162,13 @@
             --explorer-bg: #0f141b;
             --explorer-bar-bg: #151c24;
             --explorer-border: #2b3744;
+            --explorer-float-border: #55697e;
             --explorer-row-border: #1f2a35;
             --explorer-row-hover: #182636;
             --explorer-row-active: #17324a;
             --explorer-text: #e6edf3;
             --explorer-muted: #94a3b8;
+            --explorer-warning: #fbbf24;
             --explorer-folder: #f0b35b;
             --explorer-file: #9fb2c8;
             --explorer-btn-bg: #181818;
@@ -170,11 +181,13 @@
             --explorer-bg: #ffffff;
             --explorer-bar-bg: #f6f8fb;
             --explorer-border: #cfd6df;
+            --explorer-float-border: #93a1b4;
             --explorer-row-border: #e8edf3;
             --explorer-row-hover: #edf6ff;
             --explorer-row-active: #dbeafe;
             --explorer-text: #111827;
             --explorer-muted: #5f6f85;
+            --explorer-warning: #b45309;
             --explorer-folder: #c56f05;
             --explorer-file: #64748b;
             /* Toolbar-button surface follows the pane's OWN theme, not the app
@@ -190,11 +203,13 @@
             --explorer-bg: #0f141b;
             --explorer-bar-bg: #151c24;
             --explorer-border: #2b3744;
+            --explorer-float-border: #55697e;
             --explorer-row-border: #1f2a35;
             --explorer-row-hover: #182636;
             --explorer-row-active: #17324a;
             --explorer-text: #e6edf3;
             --explorer-muted: #94a3b8;
+            --explorer-warning: #fbbf24;
             --explorer-folder: #f0b35b;
             --explorer-file: #9fb2c8;
             --explorer-btn-bg: #181818;
@@ -2621,7 +2636,13 @@
 
         .explorer-tree-row {
             display: grid;
-            grid-template-columns: auto minmax(0, 1fr) auto auto;
+            /* chevron | name | git badge | pin marker | follow marker | open
+               control. Each trailing track is `auto`, so a row without one of
+               them simply collapses that column rather than wrapping onto a
+               second line -- which is also why a row carrying only the Follow
+               marker looks the same as one carrying only the pin: the mark
+               lands in the earlier track and the empty one collapses. */
+            grid-template-columns: auto minmax(0, 1fr) auto auto auto auto;
             align-items: center;
             gap: 4px;
             min-width: 0;
@@ -2718,6 +2739,50 @@
         .explorer-tree-row .explorer-icon svg {
             width: 16px;
             height: 16px;
+        }
+
+        /* The two Git scope markers — the pin, and the chain a live Follow
+           puts on the row it is tracking. Both report a state and are not
+           controls, so they take no border, no background and no hover — but
+           they share the 22px box and 13px icon of the open-in-folder /
+           open-in-tab buttons beside them so the row's right-hand controls
+           stay aligned. An SVG has no font metrics to centre by, hence the
+           explicit flex box. The head's copies stand in for the explorer root,
+           which the tree body (a listing of the root's children) has no row
+           for.
+
+           One rule for both rather than a second copy of the box: the Follow
+           marker is the same affordance answering the other control, and a
+           duplicated declaration is how the two would drift out of alignment
+           with each other and with the buttons they sit beside. */
+        .explorer-tree-pin-mark,
+        .explorer-tree-follow-mark {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 22px;
+            height: 22px;
+            color: var(--t-accent);
+        }
+
+        /* The class sets `display`, so the UA's own [hidden] rule loses to it:
+           the head's markers are toggled by attribute and need this to stay
+           hidden while nothing is scoped to the root. */
+        .explorer-tree-pin-mark[hidden],
+        .explorer-tree-follow-mark[hidden] {
+            display: none;
+        }
+
+        .explorer-tree-pin-mark .explorer-btn-icon,
+        .explorer-tree-follow-mark .explorer-btn-icon {
+            display: block;
+            width: 13px;
+            height: 13px;
+        }
+
+        .explorer-tree-head .explorer-tree-pin-mark,
+        .explorer-tree-head .explorer-tree-follow-mark {
+            flex: 0 0 auto;
         }
 
         .explorer-tree-empty,
@@ -4350,9 +4415,15 @@
            Folded away until the header's magnifier asks for it. `display: flex`
            beats the `hidden` attribute's own `display: none`, so the hidden
            state has to be restated here — without this the bar never hides. */
+        /* Stacked under the frozen repo bar, never behind it: both are sticky
+           in the same scroller, so an offset of 0 here would park this bar in
+           the strip the header already owns and the header wins on z-index.
+           The height is published per render by the panel
+           (`observeExplorerGitHeaderHeight()`); the 0px fallback is the
+           repository-error and loading panels, which have no frozen header. */
         .explorer-git-commit-search {
             position: sticky;
-            top: 0;
+            top: var(--explorer-git-header-height, 0px);
             z-index: 1;
             display: flex;
             align-items: center;
@@ -4363,6 +4434,39 @@
 
         .explorer-git-commit-search[hidden] {
             display: none;
+        }
+
+        .explorer-git-commit-search-empty {
+            display: block;
+            padding: 0 10px 6px;
+            background: var(--explorer-bar-bg);
+            color: var(--explorer-muted);
+            font-size: .7rem;
+            line-height: 1.25;
+            text-align: left;
+            white-space: normal;
+        }
+
+        .explorer-git-commit-search-empty[hidden] {
+            display: none;
+        }
+
+        .explorer-git-commit-search-mode {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .explorer-git-commit-search-mode .explorer-btn-icon {
+            display: block;
+            width: 14px;
+            height: 14px;
+        }
+
+        .explorer-git-commit-search-mode[aria-pressed="true"] {
+            border-color: var(--t-accent);
+            color: var(--t-accent);
+            background: var(--explorer-row-active);
         }
 
         /* The Graph header's fixed-scope pin, follow toggle, and magnifier.
@@ -4411,6 +4515,19 @@
             background: var(--explorer-row-active);
         }
 
+        /* The pin button's third state. `aria-pressed` is binary and stays
+           bound to "the pin is here", so "there is a pin, somewhere else"
+           needs its own mark beside it -- without one it is indistinguishable
+           from "no pin" and nothing warns that a click is about to *move* the
+           pin. Border and a dashed underline rather than colour alone
+           (guardrail 7), inside the existing 22px box so no icon metric
+           changes. */
+        .explorer-git-pin-toggle.is-pinned-elsewhere {
+            border-color: var(--explorer-warning);
+            color: var(--explorer-warning);
+            border-style: dashed;
+        }
+
         .explorer-diff-sidebar-empty,
         .explorer-diff-sidebar-error {
             padding: 8px 10px;
@@ -4419,11 +4536,50 @@
         }
 
         .explorer-diff-sidebar-error {
-            color: #b45309;
+            color: var(--explorer-warning);
         }
 
-        .explorer-pane[data-explorer-theme="dark"] .explorer-diff-sidebar-error {
-            color: #fbbf24;
+        /* The pinned scope, named beside the error that is about it. A pin is
+           re-applied faithfully across a restart, so a pin made outside any
+           worktree comes back and the panel reports exactly that — this line
+           is what turns "Folder is not inside a Git worktree" from a pane that
+           looks broken into a scope with a name and a way out. */
+        .explorer-git-scope-notice {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+            padding: 0 10px 8px;
+            color: var(--explorer-muted);
+            font-size: .72rem;
+        }
+
+        .explorer-git-scope-notice-text {
+            min-width: 0;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .explorer-git-scope-notice-path {
+            color: var(--explorer-text);
+            font-weight: 700;
+        }
+
+        .explorer-git-clear-pin-btn {
+            flex: 0 0 auto;
+            border: 1px solid var(--explorer-btn-border);
+            border-radius: 5px;
+            background: var(--explorer-btn-bg);
+            color: var(--explorer-btn-text);
+            cursor: pointer;
+            font: inherit;
+            font-size: .7rem;
+            padding: 3px 8px;
+        }
+
+        .explorer-git-clear-pin-btn:hover {
+            background: var(--explorer-btn-hover-bg);
         }
 
         /* Quiet background refresh (explorer-git-watch.js): a class toggle on
@@ -4521,6 +4677,165 @@
             font-weight: 700;
         }
 
+        /* The commit hover card.
+
+           Anchored to its own row and out of flow, so it never joins the row's
+           three-column grid and moving into it costs the graph no reflow. It
+           is revealed by CSS on hover and keyboard focus alone: a scope may
+           carry three hundred rows, and a pointer handler per row to position
+           a floating box is the cost this avoids -- which side it opens on is
+           the one thing CSS cannot answer, and that is settled by a single
+           delegated listener on the panel (see wireExplorerGitCommitCards).
+           Left/right rather than a width, so the card can never be wider than
+           the sidebar it is in. */
+        .explorer-diff-commit {
+            position: relative;
+        }
+
+        .explorer-git-commit-card {
+            position: absolute;
+            z-index: 4;
+            top: calc(100% - 2px);
+            left: 7px;
+            right: 8px;
+            display: grid;
+            gap: 7px;
+            padding: 9px 11px;
+            border: 1px solid var(--explorer-float-border);
+            border-radius: var(--gv-radius-s);
+            background: var(--explorer-bg);
+            box-shadow: var(--gv-dialog-shadow);
+            color: var(--explorer-text);
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            font-size: .69rem;
+            font-weight: 400;
+            line-height: 1.45;
+            text-align: left;
+            white-space: normal;
+            opacity: 0;
+            visibility: hidden;
+            pointer-events: none;
+            transition: opacity .12s ease, visibility .12s ease;
+        }
+
+        /* Delayed on the way in, immediate on the way out: a card that
+           appeared instantly would flash down the whole graph while the
+           reader is only scanning subjects. */
+        /* Flipped above its row once it no longer fits below -- the panel
+           is a scroller, and a card opened from one of the last rows would
+           otherwise be clipped by its bottom edge. The class is written by
+           the delegated listener; the rule that decides it is
+           GridVibeExplorerGitGraph.cardPlacement(). */
+        .explorer-git-commit-card.is-above {
+            top: auto;
+            bottom: calc(100% - 2px);
+        }
+
+        .explorer-diff-commit:hover .explorer-git-commit-card,
+        .explorer-diff-commit:focus-visible .explorer-git-commit-card {
+            opacity: 1;
+            visibility: visible;
+            transition-delay: .35s;
+        }
+
+        .explorer-git-commit-card-message {
+            font-size: .74rem;
+            font-weight: 600;
+            line-height: 1.35;
+            overflow-wrap: anywhere;
+        }
+
+        .explorer-git-commit-card-rows {
+            display: grid;
+            grid-template-columns: auto minmax(0, 1fr);
+            gap: 2px 10px;
+            padding-top: 7px;
+            border-top: 1px solid var(--explorer-row-border);
+        }
+
+        .explorer-git-commit-card-row {
+            display: contents;
+        }
+
+        .explorer-git-commit-card-label {
+            color: var(--explorer-muted);
+            font-size: .64rem;
+            text-transform: uppercase;
+            letter-spacing: .04em;
+        }
+
+        .explorer-git-commit-card-value {
+            min-width: 0;
+            overflow-wrap: anywhere;
+        }
+
+        .explorer-git-commit-card-value.is-mono {
+            font-family: Consolas, Monaco, 'Courier New', monospace;
+            font-size: .65rem;
+            color: var(--explorer-muted);
+        }
+
+        .explorer-git-commit-card-hint {
+            color: var(--explorer-muted);
+            font-size: .64rem;
+            font-style: italic;
+        }
+
+        /* "Show more", and the two wordless states that replace it. Part of
+           the list rather than a floating affordance: it belongs to the end of
+           the graph, and is only reachable by having scrolled there. */
+        .explorer-git-graph-more {
+            display: grid;
+            justify-items: center;
+            gap: 4px;
+            padding: 8px 10px 12px 7px;
+        }
+
+        .explorer-git-graph-more-btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 6px;
+            padding: 4px 12px;
+            border: 1px solid var(--explorer-border);
+            border-radius: var(--gv-radius-s);
+            background: transparent;
+            color: var(--explorer-text);
+            font: inherit;
+            font-size: .7rem;
+            cursor: pointer;
+        }
+
+        .explorer-git-graph-more-btn:hover:not(:disabled),
+        .explorer-git-graph-more-btn:focus-visible:not(:disabled) {
+            border-color: var(--t-accent);
+            background: var(--explorer-row-active);
+        }
+
+        .explorer-git-graph-more-btn:disabled {
+            opacity: .55;
+            cursor: default;
+        }
+
+        .explorer-git-graph-more-chevron {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            color: var(--explorer-muted);
+        }
+
+        .explorer-git-graph-more-chevron svg {
+            display: block;
+            width: 12px;
+            height: 12px;
+        }
+
+        .explorer-git-graph-more-detail {
+            color: var(--explorer-muted);
+            font-size: .65rem;
+            text-align: center;
+        }
+
         .explorer-diff-commit-files {
             display: grid;
             padding: 1px 0 4px 28px;
@@ -4599,22 +4914,113 @@
             white-space: nowrap;
         }
 
+        /* The panel's frozen header. Repository, branch and the pin/Follow
+           scope lines answer "which repository, and which part of it" — the
+           question every change row and every commit below is read against —
+           so scrolling them away is what made a long graph ambiguous about
+           what it was a graph of. Sticky rather than a second pane above the
+           scroller: the bar keeps its place in the panel's flow, so a short
+           panel is laid out exactly as before and nothing has to be told the
+           header's height.
+
+           It needs an opaque background of its own — a sticky box is painted
+           over the rows sliding beneath it, and the panel's background is on
+           the panel, not on this. The z-index only has to beat the ordinary
+           in-flow rows below it. */
         .explorer-git-repo-bar {
+            position: sticky;
+            top: 0;
+            z-index: 2;
             display: flex;
             align-items: center;
-            justify-content: space-between;
             gap: 8px;
+            padding: 8px 10px;
+            background: var(--explorer-bar-bg);
+        }
+
+        /* Publish/Push, below the frozen header and scrolling away with
+           everything else. Full width in its own grid, matching the Commit
+           button's box: it is no longer competing for a row with the scope
+           lines, so the shape that reads as "the action for this section" is
+           the one the other committing action already uses. */
+        .explorer-git-publish-box {
+            display: grid;
             padding: 8px 10px;
         }
 
-        .explorer-git-repo-branch {
+        .explorer-git-repo-details {
+            display: grid;
+            flex: 1 1 auto;
+            gap: 2px;
+            min-width: 0;
+        }
+
+        .explorer-git-repo-line {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+            min-width: 0;
+            font-size: .74rem;
+        }
+
+        .explorer-git-repo-icon {
+            display: inline-flex;
+            flex: 0 0 14px;
+            align-items: center;
+            justify-content: center;
+            width: 14px;
+            height: 14px;
+            color: var(--explorer-muted);
+        }
+
+        .explorer-git-repo-icon > svg,
+        .explorer-git-repo-icon .explorer-icon,
+        .explorer-git-repo-icon .explorer-icon svg {
+            width: 14px;
+            height: 14px;
+        }
+
+        .explorer-git-repo-icon .explorer-icon {
+            color: inherit;
+        }
+
+        .explorer-git-repo-text {
             min-width: 0;
             overflow: hidden;
             text-overflow: ellipsis;
             white-space: nowrap;
-            font-size: .74rem;
+        }
+
+        .explorer-git-repo-root,
+        .explorer-git-repo-branch {
             font-weight: 700;
             color: var(--explorer-text);
+        }
+
+        .explorer-git-repo-scope {
+            color: var(--explorer-muted);
+            font-size: .7rem;
+        }
+
+        /* A pin and a live Follow are two scopes on two rows, and while Follow
+           is on it is the one in effect -- so the pin row stands down without
+           leaving, since turning Follow off lands back on it. The row's own
+           title says so in words; this only makes the ranking visible. */
+        .explorer-git-repo-scope.is-overridden {
+            opacity: .55;
+        }
+
+        /* The scope chip's Clear pin: the one always-reachable clear once the
+           pin button became "pin here". Sized down to sit inside the chip's
+           line rather than beside the error panel's message. */
+        .explorer-git-scope-clear-btn {
+            margin-left: 6px;
+            padding: 1px 6px;
+            font-size: .65rem;
+        }
+
+        .explorer-git-scope-clear-btn[hidden] {
+            display: none;
         }
 
         .explorer-git-publish-btn,
@@ -4927,6 +5333,7 @@
            always-visible short hash carries the same tint — and the same
            active variant — as the marks inside the subject. */
         .explorer-search-match,
+        .explorer-git-commit-hash-match,
         .explorer-diff-commit-hash.explorer-git-commit-search-hit {
             border-radius: 2px;
             background: rgb(var(--gv-match-rgb));
@@ -4934,6 +5341,7 @@
         }
 
         .explorer-search-match.active,
+        .explorer-diff-commit-hash.explorer-git-commit-search-hit.active .explorer-git-commit-hash-match,
         .explorer-diff-commit-hash.explorer-git-commit-search-hit.active {
             background: rgb(var(--gv-match-active-rgb));
             color: var(--gv-match-ink);

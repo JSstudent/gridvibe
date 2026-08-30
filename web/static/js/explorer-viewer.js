@@ -1377,6 +1377,59 @@
             explorerSelections.set(sessionId, selection);
         }
         refreshExplorerSelectionHighlight(index);
+        noteExplorerGitBrowseSelection(index, selection);
+    }
+
+    /* A highlighted row is a browsing act. One highlighted row names one exact
+       path, which is exactly what the Git scope is. Several rows name none —
+       the same reason the pin and Follow entries drop out of a multi-entry
+       menu — so they hand the scope back to plain navigation.
+
+       The kind is read from `data-explorer-git-scope-kind` — the attribute the
+       row's own render wrote — and never from the selection entry's
+       `entry_kind`, which the filtered tree leaves empty for a hit whose
+       parent listing has not been fetched. Deriving one surface's answer from
+       a field another surface does not fill is how the tree's pin marker came
+       to be painted and immediately stripped.
+
+       An *emptied* selection states nothing and moves nothing. Escape drops a
+       highlight, and opening a context menu over an unselected row collapses
+       the selection to that row alone -- neither is navigation, so reading
+       them as "stop following" would have sent the scope back to the folder
+       on every right-click, including the one about to choose Copy path. The
+       next navigation supersedes the override on its own. */
+    function noteExplorerGitBrowseSelection(index, selection) {
+        if (typeof setExplorerGitBrowseTarget !== 'function') {
+            return;
+        }
+        const entries = GridVibeExplorerSelection.isEmpty(selection)
+            ? []
+            : selection.entries;
+        if (!entries.length) {
+            return;
+        }
+        if (entries.length > 1) {
+            setExplorerGitBrowseTarget(index, null);
+            return;
+        }
+        const path = entries[0].path || '';
+        const kind = explorerGitScopeKindForSelectedRow(index, selection.surface, path)
+            || (entries[0].kind === 'directory' ? 'dir' : 'file');
+        setExplorerGitBrowseTarget(index, path, kind);
+    }
+
+    function explorerGitScopeKindForSelectedRow(index, surface, path) {
+        const container = explorerSurfaceContainer(index, surface);
+        if (!container) {
+            return null;
+        }
+        const rows = container.querySelectorAll('[data-explorer-git-scope-path]');
+        for (const node of rows) {
+            if (node.dataset.explorerGitScopePath === path) {
+                return node.dataset.explorerGitScopeKind === 'file' ? 'file' : 'dir';
+            }
+        }
+        return null;
     }
 
     function clearExplorerSelection(sessionId) {
@@ -1578,6 +1631,15 @@
 
     let _explorerContextMenuInvoker = null;
 
+    /* One gesture at a time. Building the menu can await (the Git scope's
+       worktree probe), and `_explorerContextMenuInvoker` is claimed before
+       that await — so without a token the first of two quick right-clicks
+       could open its menu *after* the second, over the second's invoker and
+       the second's highlighted row. Bumped on entry to every context-menu
+       gesture; a handler whose token has moved is no longer the gesture the
+       reader is making and simply stops. */
+    let _explorerContextMenuToken = 0;
+
     function dismissExplorerContextMenu() {
         const { restoreFocus = true } = arguments[0] || {};
         document.getElementById('explorer-ctx-menu')?.remove();
@@ -1712,13 +1774,82 @@
         showExplorerContextMenu(x, y, items);
     }
 
-    function handleExplorerContextMenu(event, index) {
+    /* Is this path inside a worktree, answered without a request whenever the
+       model the pane is already holding settles it.
+
+       The sidebar's loaded repository reports `repo_path: ''` when the
+       worktree it found *contains* the explorer root — the pane's implicit
+       repository. Every path under that root is therefore inside it, nested
+       repositories and submodules included: those are a different worktree,
+       not the absence of one, and the question here is only whether the row
+       can be a Git scope at all.
+
+       `.git` is the exception and is deliberately excluded: `rev-parse` run
+       inside the repository's own git directory is not in a worktree, so those
+       rows still get the honest answer from the server rather than an
+       optimistic yes the pin would then fail on. */
+    function explorerGitScopeInsidePaneWorktree(pane, path) {
+        if (pane?._explorerGitRepo?.git?.available !== true) {
+            return false;
+        }
+        if (String(pane._explorerGitRepo.git.repo_path || '') !== '') {
+            return false;
+        }
+        return !String(path || '')
+            .split('/')
+            .includes('.git');
+    }
+
+    /* The menu opens on this answer, so the cheap one is taken first: the
+       probe is one `rev-parse` + `git status`, which over SSH is a pooled
+       round trip the reader waits out with the row highlighted and no menu on
+       screen. It is still issued for every case the loaded model cannot
+       settle — a pane whose sidebar has never loaded, a repository that sits
+       *below* the explorer root (where a sibling folder may be in no worktree
+       at all), and anything under `.git`. */
+    async function explorerGitScopeAvailableForMenu(index, path, kind) {
+        const pane = terminals[index];
+        const sessionId = sessionIds[index];
+        if (!pane || !sessionId || typeof explorerGitRequestUrl !== 'function') {
+            return false;
+        }
+        if (explorerGitScopeInsidePaneWorktree(pane, path)) {
+            return true;
+        }
+        try {
+            const response = await fetch(explorerGitRequestUrl(
+                sessionId,
+                'state',
+                path,
+                {},
+                kind
+            ), {
+                cache: 'no-store',
+                /* A slot, not a bare fetch: a pane that is torn down while the
+                   menu is still deciding must stop holding the request, and a
+                   second right-click supersedes the first one's probe rather
+                   than racing it. A superseded probe answers `false` here and
+                   its handler is discarded by the menu token below, so the
+                   answer is never the one that reaches the menu. */
+                signal: explorerRequestSignal(pane, 'gitScopeMenu')
+            });
+            return Boolean(response.ok);
+        } catch (_) {
+            return false;
+        }
+    }
+
+    async function handleExplorerContextMenu(event, index) {
+        // Claimed before anything can await, so a later gesture always wins.
+        const menuToken = ++_explorerContextMenuToken;
         const commitRow = event.target.closest('[data-explorer-git-commit-toggle]');
         if (commitRow) {
             handleExplorerCommitContextMenu(event, commitRow);
             return;
         }
-        const row = event.target.closest('[data-explorer-copy-path]');
+        const row = event.target.closest(
+            '[data-explorer-copy-path], [data-explorer-git-scope-path]'
+        );
         const pane = terminals[index];
         let blankContext = null;
         let blankTarget = null;
@@ -1791,7 +1922,11 @@
            path per line — the same read the single-row entries perform. */
         const multiTarget = selectedTargets.length > 1;
         const targetRoot = explorerRootDirectory(index);
-        const pathItems = multiTarget
+        const offersPathEntries = Boolean(blankContext)
+            || (row && row.dataset.explorerCopyPath !== undefined);
+        const pathItems = !offersPathEntries
+            ? []
+            : (multiTarget
             ? [{
                 label: `Copy ${selectedTargets.length} paths`,
                 action: () => _copyText(selectedTargets
@@ -1801,7 +1936,7 @@
                 label: `Copy ${selectedTargets.length} relative paths`,
                 action: () => _copyText(selectedTargets.map(entry => entry.path).join('\n'))
             }]
-            : [{ label: 'Copy path', action: () => _copyText(absolutePath || relativePath) }];
+            : [{ label: 'Copy path', action: () => _copyText(absolutePath || relativePath) }]);
         if (!multiTarget && relativePath) {
             pathItems.push({ label: 'Copy relative path', action: () => _copyText(relativePath) });
         }
@@ -1830,13 +1965,145 @@
                 action: () => downloadExplorerFiles(index, downloadTargets)
             });
         }
-        if (beforePath.length) {
+
+        /* Git pinning is one exact path, never a selection action. Files-tree
+           rows and open file tabs share the same policy, while commit rows
+           returned through their path-free branch above and can never reach
+           this block. A prospective pin is verified through the existing
+           read-only state route so an outside-worktree row stays in the menu
+           disabled with an explanation; unpinning never needs the vanished
+           path to resolve. */
+        const policy = window.GridVibeExplorerGitPin;
+        /* Blank space in a browsing surface names that surface's own folder:
+           the tree's is the explorer root, the listing's is the folder it is
+           showing, which is what `blankContext.path` already holds. */
+        const blankScopeSurface = blankContext?.surface === 'tree-blank'
+            ? 'tree'
+            : (blankContext?.surface === 'preview-blank' ? 'preview' : '');
+        const gitScopeSurface = row?.dataset.explorerGitScopeSurface || blankScopeSurface;
+        const gitScopePath = row?.dataset.explorerGitScopePath
+            ?? (blankScopeSurface ? relativePath : null);
+        const gitScopeKind = row?.dataset.explorerGitScopeKind === 'file'
+            ? 'file'
+            : 'dir';
+        const gitTargetCount = gitScopeSurface === 'tab'
+            ? 1
+            : (row ? selectedTargets.length : 1);
+        /* The two filesystem browsing surfaces. Follow is a property of what
+           the pane is *showing*, so it belongs on both of them and on neither
+           the tab strip nor a commit row. */
+        const gitBrowsingSurface = gitScopeSurface === 'tree' || gitScopeSurface === 'preview';
+        const gitItems = [];
+        if (policy && (gitBrowsingSurface || gitScopeSurface === 'tab')) {
+            /* Guardrail 4: a grid slot is not an identity. These entries write
+               a scope onto the pane the gesture was made on, and the menu can
+               outlive the slot — a group switch rehouses it while the menu is
+               still open, and `index` would then point at whatever pane moved
+               in. Captured here, once, and re-checked when the entry is
+               actually clicked. */
+            const capturedPane = pane;
+            const capturedSessionId = sessionIds[index];
+            const gitTargetIsCurrent = () => (
+                terminals[index] === capturedPane
+                && sessionIds[index] === capturedSessionId
+            );
+            let pinItem = policy.explorerGitScopeMenuItem({
+                pinnedPath: typeof pane?._explorerGitPinnedPath === 'string'
+                    ? pane._explorerGitPinnedPath
+                    : null,
+                pinnedKind: pane?._explorerGitPinKind,
+                targetPath: gitScopePath,
+                targetKind: gitScopeKind,
+                targetCount: gitTargetCount,
+                worktreeAvailable: true
+            });
+            if (pinItem?.action === 'pin') {
+                const available = await explorerGitScopeAvailableForMenu(
+                    index, gitScopePath, gitScopeKind
+                );
+                if (menuToken !== _explorerContextMenuToken || !gitTargetIsCurrent()) {
+                    return;
+                }
+                pinItem = policy.explorerGitScopeMenuItem({
+                    pinnedPath: typeof pane?._explorerGitPinnedPath === 'string'
+                        ? pane._explorerGitPinnedPath
+                        : null,
+                    pinnedKind: pane?._explorerGitPinKind,
+                    targetPath: gitScopePath,
+                    targetKind: gitScopeKind,
+                    targetCount: gitTargetCount,
+                    worktreeAvailable: available
+                });
+            }
+            if (pinItem) {
+                const pinBusy = Boolean(
+                    pane?._explorerGitActionBusy || pane?._explorerGitRepoLoading
+                );
+                gitItems.push({
+                    label: pinItem.label,
+                    title: pinBusy ? 'Git sidebar is busy' : pinItem.title,
+                    disabled: pinItem.disabled || pinBusy,
+                    action: () => {
+                        if (!gitTargetIsCurrent()) {
+                            return false;
+                        }
+                        return pinItem.action === 'unpin'
+                            ? clearExplorerGitPinnedScope(index)
+                            : setExplorerGitPinnedScope(index, gitScopePath, gitScopeKind);
+                    }
+                });
+            }
+            if (gitBrowsingSurface) {
+                /* Follow obeys the pin's two rules on this row, not on the
+                   pane: no entry at all for a multi-entry selection, and
+                   "is Follow here" rather than "is Follow on", so a row
+                   Follow is not on offers to move it in one write instead of
+                   offering to switch Follow off somewhere else. */
+                const followedScope = explorerGitBrowsingScope(pane);
+                const followItem = policy.explorerGitFollowMenuItem({
+                    following: pane?._explorerGitFollowBrowsing,
+                    followedPath: followedScope.path,
+                    followedKind: followedScope.kind,
+                    targetPath: gitScopePath,
+                    targetKind: gitScopeKind,
+                    targetCount: gitTargetCount,
+                    disabled: pane?._explorerGitActionBusy || pane?._explorerGitRepoLoading
+                });
+                if (followItem) {
+                    gitItems.push({
+                        label: followItem.label,
+                        title: followItem.title,
+                        disabled: followItem.disabled,
+                        action: () => {
+                            if (!gitTargetIsCurrent()) {
+                                return false;
+                            }
+                            if (followItem.action === 'unfollow') {
+                                return toggleExplorerGitFollowBrowsing(index);
+                            }
+                            /* Name the row first, then follow: the scope this
+                               entry promises is this row, not whatever the
+                               listing behind it happens to be showing. When
+                               Follow is already on this is the whole write —
+                               toggling it would switch it off. */
+                            setExplorerGitBrowseTarget(index, gitScopePath, gitScopeKind);
+                            return capturedPane._explorerGitFollowBrowsing
+                                ? true
+                                : toggleExplorerGitFollowBrowsing(index);
+                        }
+                    });
+                }
+            }
+        }
+        if (beforePath.length && pathItems.length) {
             pathItems[0].separatorBefore = true;
         }
-        if (afterPath.length) {
+        if (gitItems.length) {
+            gitItems[0].separatorBefore = true;
+        } else if (afterPath.length) {
             afterPath[0].separatorBefore = true;
         }
-        const items = [...beforePath, ...pathItems, ...afterPath];
+        const items = [...beforePath, ...pathItems, ...gitItems, ...afterPath];
         let x = event.clientX;
         let y = event.clientY;
         if (x <= 0 && y <= 0) {
@@ -1852,7 +2119,11 @@
             return;
         }
         panel.dataset.contextMenuWired = 'true';
-        panel.addEventListener('contextmenu', event => handleExplorerContextMenu(event, index));
+        panel.addEventListener('contextmenu', event => {
+            handleExplorerContextMenu(event, index).catch(error => {
+                console.error('[GridVibe Sessions] Explorer context menu failed:', error);
+            });
+        });
     }
 
     function wireExplorerCopyPathMenu(panel, index) {
@@ -2257,581 +2528,6 @@
         }
     }
 
-    function ensureExplorerTreeState(pane) {
-        if (!(pane._explorerTreeExpanded instanceof Set)) {
-            pane._explorerTreeExpanded = new Set();
-        }
-        if (!(pane._explorerTreeChildren instanceof Map)) {
-            pane._explorerTreeChildren = new Map();
-        }
-        if (!(pane._explorerTreeErrors instanceof Map)) {
-            pane._explorerTreeErrors = new Map();
-        }
-        if (!(pane._explorerTreeLoading instanceof Set)) {
-            pane._explorerTreeLoading = new Set();
-        }
-        return pane;
-    }
-
-    /* `refresh` re-reads a directory the tree has already cached. The cached
-       rows stay on screen for the whole round trip — a re-read the reader did
-       not ask for must not blank the folder they are looking at — so the
-       loading placeholder is only rendered when there is nothing to show. */
-    async function loadExplorerTreeChildren(index, path, { refresh = false } = {}) {
-        const pane = terminals[index];
-        const sessionId = sessionIds[index];
-        if (!pane || !sessionId) {
-            return [];
-        }
-
-        ensureExplorerTreeState(pane);
-        const key = String(path || '');
-        const cached = pane._explorerTreeChildren.get(key);
-        if (cached && !refresh) {
-            return cached;
-        }
-        if (pane._explorerTreeLoading.has(key)) {
-            return [];
-        }
-
-        pane._explorerTreeLoading.add(key);
-        pane._explorerTreeErrors.delete(key);
-        if (!cached) {
-            renderExplorerTreePanel(index);
-        }
-        try {
-            const entriesUrl = `/api/explorer/${encodeURIComponent(sessionId)}/entries`;
-            // Always send an explicit path (empty === the explorer root) so the tree stays
-            // anchored to the configured root. Omitting it makes the backend fall back to the
-            // session's current directory, which strands the tree on a subdirectory after the
-            // pane re-enters explorer mode from a deeper terminal cwd.
-            const response = await fetch(`${entriesUrl}?path=${encodeURIComponent(key)}`);
-            const data = await response.json();
-            if (!response.ok) {
-                throw new Error(data.error || 'Failed to load directory');
-            }
-            updateExplorerFilesystemRootRevision(index, data.root_revision || '');
-            const entries = (Array.isArray(data.entries) ? data.entries : []).filter(entry => !entry.deleted);
-            pane._explorerTreeChildren.set(key, entries);
-            return entries;
-        } catch (error) {
-            console.error('[GridVibe Sessions] Explorer tree load failed:', error);
-            pane._explorerTreeErrors.set(key, error.message || 'Failed to load directory.');
-            return [];
-        } finally {
-            pane._explorerTreeLoading.delete(key);
-            renderExplorerTreePanel(index);
-        }
-    }
-
-    function explorerTreeRowIsActive(pane, entry) {
-        const path = entry.path || '';
-        if (entry.type === 'directory') {
-            return pane._explorerMode !== 'file' && (pane._explorerPath || '') === path;
-        }
-        return pane._explorerMode === 'file' && (pane._explorerFilePath || '') === path;
-    }
-
-    /* Find a tree row's entry record by path in the loaded children of its
-       parent directory. Used to carry the row's Git status onto a tab the row
-       opens; null whenever that directory is not loaded. */
-    function explorerTreeEntryForPath(pane, path) {
-        const value = String(path || '');
-        if (!value || !(pane?._explorerTreeChildren instanceof Map)) {
-            return null;
-        }
-        const entries = pane._explorerTreeChildren.get(explorerTreeParentPath(value));
-        if (!Array.isArray(entries)) {
-            return null;
-        }
-        return entries.find(entry => (entry.path || '') === value) || null;
-    }
-
-    /* The directory a tree path sits in; '' for a root-level entry, which is
-       also the key its children are cached under. */
-    function explorerTreeParentPath(path) {
-        const value = String(path || '');
-        const separator = value.lastIndexOf('/');
-        return separator === -1 ? '' : value.slice(0, separator);
-    }
-
-    /* Every directory sharing this path's parent, itself included — the set an
-       Alt+click fans a fold out over. Empty whenever the parent's listing is
-       not loaded, which leaves the gesture a no-op rather than a guess. */
-    function explorerTreeSiblingDirectories(pane, path) {
-        const entries = pane._explorerTreeChildren.get(explorerTreeParentPath(path));
-        if (!Array.isArray(entries)) {
-            return [];
-        }
-        return entries
-            .filter(entry => entry.type === 'directory' && entry.path)
-            .map(entry => entry.path);
-    }
-
-    /* One tree row. `options.nameHtml` supplies already-escaped markup for the
-       name (the filter's match highlight); `options.staticChevron` drops the
-       fold control, which is what a filtered result tree wants — its folders
-       are always expanded, so an arrow there would toggle nothing. */
-    function explorerTreeRowHtml(pane, entry, depth, options = {}) {
-        const isDirectory = entry.type === 'directory';
-        const path = entry.path || '';
-        const expanded = isDirectory && pane._explorerTreeExpanded.has(path);
-        const active = explorerTreeRowIsActive(pane, entry);
-        const action = isDirectory
-            ? `data-explorer-tree-dir="${escHtml(path)}"`
-            : `data-explorer-tree-file="${escHtml(path)}"`;
-        /* The fold arrow is its own control: it expands/collapses in place and
-           never navigates, so browsing the tree can't evict whatever the
-           Preview tab is showing. Only the name button opens the target. */
-        const indent = `style="padding-left:${7 + depth * EXPLORER_TREE_INDENT_PX}px"`;
-        const chevron = isDirectory && !options.staticChevron
-            ? `<button
-                type="button"
-                class="explorer-tree-chevron-btn"
-                data-explorer-tree-chevron="${escHtml(path)}"
-                aria-expanded="${expanded ? 'true' : 'false'}"
-                title="${expanded ? 'Collapse folder (Alt: collapse all at this level)' : 'Expand folder (Alt: expand all at this level)'}"
-                aria-label="${expanded ? 'Collapse' : 'Expand'} ${escHtml(entry.name || path)}"
-                ${indent}
-            >${expanded ? UI_CHEVRON_DOWN_ICON : UI_CHEVRON_RIGHT_ICON}</button>`
-            : `<span class="explorer-tree-chevron" aria-hidden="true" ${indent}></span>`;
-        const badge = explorerGitStatusLabel(entry.git) ? explorerGitBadgeHtml(entry.git) : '';
-        const openFolder = isDirectory
-            ? `<button type="button" class="explorer-search-btn explorer-open-folder-btn" data-explorer-tree-open-folder="${escHtml(path)}" title="Open folder in the explorer list" aria-label="Open folder in the explorer list">${EXPLORER_OPEN_FOLDER_ICON}</button>`
-            : '';
-        const openTab = isDirectory
-            ? ''
-            : `<button type="button" class="explorer-search-btn explorer-open-tab-btn" data-explorer-tree-open-tab="${escHtml(path)}" title="Open in a new tab" aria-label="Open ${escHtml(entry.name || path)} in a new tab">${EXPLORER_OPEN_TAB_ICON}</button>`;
-
-        return `
-            <div
-                class="explorer-tree-row${active ? ' active' : ''}"
-                data-explorer-copy-path="${escHtml(path)}"
-                data-explorer-context-path="${escHtml(path)}"
-                data-explorer-context-kind="${escHtml(entry.entry_kind || '')}"
-                data-explorer-context-revision="${escHtml(entry.revision || '')}"
-                data-explorer-context-surface="tree"
-                ${isDirectory ? '' : `data-explorer-download-path="${escHtml(path)}"`}
-            >
-                ${chevron}
-                <button type="button" class="explorer-tree-main" ${action} title="${escHtml(path)}">
-                    ${isDirectory ? EXPLORER_FOLDER_ICON : explorerFileTypeIconHtml(entry.name || path)}
-                    <span class="explorer-tree-name">${options.nameHtml || escHtml(entry.name || path)}</span>
-                </button>
-                ${badge}
-                ${openFolder}
-                ${openTab}
-            </div>
-        `;
-    }
-
-    function renderExplorerTreeNodes(pane, path, depth) {
-        const indent = `style="padding-left:${10 + depth * EXPLORER_TREE_INDENT_PX}px"`;
-        const error = pane._explorerTreeErrors.get(path);
-        if (error) {
-            return `<div class="explorer-tree-error" ${indent}>${escHtml(error)}</div>`;
-        }
-
-        const entries = pane._explorerTreeChildren.get(path);
-        // A folder being re-read keeps showing what it has; only a folder with
-        // nothing cached yet is worth a placeholder.
-        if (!entries) {
-            return pane._explorerTreeLoading.has(path)
-                ? `<div class="explorer-tree-loading" ${indent}>Loading...</div>`
-                : '';
-        }
-        if (!entries.length) {
-            return `<div class="explorer-tree-empty" ${indent}>Empty folder.</div>`;
-        }
-
-        return entries.map(entry => {
-            const row = explorerTreeRowHtml(pane, entry, depth);
-            if (entry.type !== 'directory' || !pane._explorerTreeExpanded.has(entry.path || '')) {
-                return row;
-            }
-            const children = renderExplorerTreeNodes(pane, entry.path || '', depth + 1);
-            return `${row}<div class="explorer-tree-children">${children}</div>`;
-        }).join('');
-    }
-
-    function renderExplorerTreePanel(index) {
-        const pane = terminals[index];
-        const panel = document.getElementById(`explorer-tree-panel-${index}`);
-        if (!pane || !panel) {
-            return;
-        }
-        wireExplorerCopyPathMenu(panel, index);
-
-        ensureExplorerTreeState(pane);
-        /* The head — "FILES" plus the name filter — is built once and left
-           alone: rebuilding it on every render would drop the caret out of the
-           filter box on the keystroke that triggered the render. */
-        if (!panel.querySelector('.explorer-tree-section')) {
-            panel.innerHTML = `
-                <div class="explorer-tree-section">
-                    <div class="explorer-tree-head">
-                        <div class="explorer-tree-title">Files</div>
-                        ${typeof explorerTreeSearchHeadHtml === 'function'
-                            ? explorerTreeSearchHeadHtml(index)
-                            : ''}
-                    </div>
-                    <div class="explorer-tree-children" data-explorer-tree-body></div>
-                </div>
-            `;
-            if (typeof wireExplorerTreeSearchControls === 'function') {
-                wireExplorerTreeSearchControls(index);
-            }
-        }
-        if (typeof syncExplorerTreeSearchControls === 'function') {
-            syncExplorerTreeSearchControls(index);
-        }
-        const body = panel.querySelector('[data-explorer-tree-body]');
-        if (!body) {
-            return;
-        }
-        /* With a filter query typed, the body is the filtered result tree
-           instead of the browsable one — same row markup, same click targets. */
-        body.innerHTML = (typeof explorerTreeSearchActive === 'function'
-            && explorerTreeSearchActive(pane))
-            ? renderExplorerTreeSearchNodes(index)
-            : renderExplorerTreeNodes(pane, '', 0);
-        panel.querySelectorAll('[data-explorer-tree-chevron]').forEach(button => {
-            button.addEventListener('click', event => {
-                event.stopPropagation();
-                const path = button.dataset.explorerTreeChevron || '';
-                if (event.altKey) {
-                    toggleExplorerTreeLevel(index, path);
-                } else {
-                    toggleExplorerTreeDirectory(index, path);
-                }
-            });
-        });
-        panel.querySelectorAll('.explorer-tree-main').forEach(button => {
-            button.addEventListener('mousedown', event => {
-                if (event.shiftKey) {
-                    event.preventDefault();
-                }
-            });
-        });
-        panel.querySelectorAll('[data-explorer-tree-dir]').forEach(button => {
-            button.addEventListener('click', event => {
-                const row = button.closest('.explorer-tree-row');
-                if (handleExplorerRowSelectionClick(event, index, 'tree', row)) {
-                    return;
-                }
-                openExplorerTreeDirectory(index, button.dataset.explorerTreeDir || '');
-            });
-        });
-        panel.querySelectorAll('[data-explorer-tree-file]').forEach(button => {
-            button.addEventListener('click', event => {
-                const row = button.closest('.explorer-tree-row');
-                if (handleExplorerRowSelectionClick(event, index, 'tree', row)) {
-                    return;
-                }
-                openExplorerFile(index, button.dataset.explorerTreeFile || '');
-            });
-        });
-        panel.querySelectorAll('[data-explorer-tree-open-folder]').forEach(button => {
-            button.addEventListener('click', event => {
-                event.stopPropagation();
-                loadExplorerPane(index, button.dataset.explorerTreeOpenFolder || '');
-            });
-        });
-        panel.querySelectorAll('[data-explorer-tree-open-tab]').forEach(button => {
-            button.addEventListener('click', event => {
-                event.stopPropagation();
-                const path = button.dataset.explorerTreeOpenTab || '';
-                openExplorerFileInBackgroundTab(index, path, {
-                    git: explorerTreeEntryForPath(terminals[index], path)?.git || null
-                });
-            });
-        });
-        if (typeof refreshExplorerFilesystemCutSource === 'function') {
-            refreshExplorerFilesystemCutSource(index);
-        }
-        refreshExplorerSelectionHighlight(index);
-    }
-
-    /* Fold arrow only: expand or collapse in place. It never touches the
-       Preview tab, so the tree can be browsed without losing the open file. */
-    async function toggleExplorerTreeDirectory(index, path) {
-        const pane = terminals[index];
-        if (!pane || !path) {
-            return;
-        }
-
-        ensureExplorerTreeState(pane);
-        if (pane._explorerTreeExpanded.has(path)) {
-            pane._explorerTreeExpanded.delete(path);
-            renderExplorerTreePanel(index);
-            notePanePresentationChanged(index);
-            return;
-        }
-
-        pane._explorerTreeExpanded.add(path);
-        pane._explorerTreeErrors.delete(path);
-        renderExplorerTreePanel(index);
-        await loadExplorerTreeChildren(index, path);
-        notePanePresentationChanged(index);
-    }
-
-    /* Expanding a whole level is one directory listing per folder, so run a few
-       at a time: a wide level over SFTP should not fire a request per folder at
-       once. Already-visited folders come back from the children cache free. */
-    const EXPLORER_TREE_LEVEL_LOAD_CONCURRENCY = 4;
-
-    async function loadExplorerTreeLevelChildren(index, paths) {
-        const queue = paths.slice();
-        const workers = [];
-        const width = Math.min(EXPLORER_TREE_LEVEL_LOAD_CONCURRENCY, queue.length);
-        for (let worker = 0; worker < width; worker += 1) {
-            workers.push((async () => {
-                while (queue.length) {
-                    await loadExplorerTreeChildren(index, queue.shift());
-                }
-            })());
-        }
-        await Promise.all(workers);
-    }
-
-    /* Drop a folder and everything expanded beneath it, so re-opening it later
-       gives a collapsed folder instead of restoring the old subtree. */
-    function collapseExplorerTreeSubtree(pane, path) {
-        const prefix = `${path}/`;
-        pane._explorerTreeExpanded.forEach(value => {
-            if (value === path || value.startsWith(prefix)) {
-                pane._explorerTreeExpanded.delete(value);
-            }
-        });
-    }
-
-    /* Alt+click on a fold arrow fans the toggle out to every directory sharing
-       the clicked one's parent — the Files tree's answer to the Markdown source
-       view's fold-all-at-this-level. The new state mirrors the clicked row, so
-       Alt+clicking an open root-level folder folds the whole tree in one
-       gesture. Collapsing forgets the level's deeper expansions rather than
-       just hiding them: "fold everything I opened" should hand back a clean
-       tree, not spring the old subtree back on the next click. */
-    async function toggleExplorerTreeLevel(index, path) {
-        const pane = terminals[index];
-        if (!pane || !path) {
-            return;
-        }
-
-        ensureExplorerTreeState(pane);
-        const siblings = explorerTreeSiblingDirectories(pane, path);
-        if (!siblings.length) {
-            return;
-        }
-
-        if (pane._explorerTreeExpanded.has(path)) {
-            siblings.forEach(sibling => collapseExplorerTreeSubtree(pane, sibling));
-            renderExplorerTreePanel(index);
-            /* Folding a level removes most of the rows under the scroll
-               position, and the browser answers a shrunken scroll height by
-               clamping scrollTop to the new bottom — so the tree lands
-               somewhere unrelated to the folder that was just clicked. The
-               clicked row is the one thing the gesture is about, so it becomes
-               the anchor. */
-            scrollExplorerTreeRowIntoView(index, path);
-            notePanePresentationChanged(index);
-            return;
-        }
-
-        siblings.forEach(sibling => {
-            pane._explorerTreeExpanded.add(sibling);
-            pane._explorerTreeErrors.delete(sibling);
-        });
-        renderExplorerTreePanel(index);
-        scrollExplorerTreeRowIntoView(index, path);
-        await loadExplorerTreeLevelChildren(index, siblings);
-        /* Siblings listed above the clicked one insert their children between
-           it and the top of the panel, so re-anchor once the level has filled
-           in. Both calls leave a row that is already visible alone. */
-        scrollExplorerTreeRowIntoView(index, path);
-        notePanePresentationChanged(index);
-    }
-
-    /* Directory name click: browse it in the Preview tab, and expand it so the
-       tree matches what the pane now shows. Never collapses — collapsing is
-       the fold arrow's job, so an open directory can be re-opened safely. */
-    async function openExplorerTreeDirectory(index, path) {
-        const pane = terminals[index];
-        if (!pane || !path) {
-            return;
-        }
-
-        ensureExplorerTreeState(pane);
-        let childrenLoading = Promise.resolve();
-        if (!pane._explorerTreeExpanded.has(path)) {
-            pane._explorerTreeExpanded.add(path);
-            pane._explorerTreeErrors.delete(path);
-            renderExplorerTreePanel(index);
-            childrenLoading = loadExplorerTreeChildren(index, path);
-        }
-        await loadExplorerPane(index, path);
-        await childrenLoading;
-    }
-
-    /* Expand every ancestor of the pane's current directory or open file — or
-       of an explicit path, which the tab strip's locate-in-tree gesture uses
-       to point at a tab's file without depending on what the viewer shows. */
-    async function revealExplorerTreePath(index, targetPath = '') {
-        const pane = terminals[index];
-        if (!pane?._explorerTreeSidebarOpen) {
-            return;
-        }
-
-        ensureExplorerTreeState(pane);
-        const target = targetPath || (pane._explorerMode === 'file'
-            ? (pane._explorerFilePath || '')
-            : (pane._explorerPath || ''));
-        const segments = String(target).split('/').filter(Boolean);
-        /* Expand ancestors so the target's own row becomes visible; whether
-           the target directory itself expands stays a tree-click decision —
-           otherwise navigating on click (2.d) would undo a collapse. */
-        segments.pop();
-
-        await loadExplorerTreeChildren(index, '');
-        let current = '';
-        for (const segment of segments) {
-            current = current ? `${current}/${segment}` : segment;
-            pane._explorerTreeExpanded.add(current);
-            await loadExplorerTreeChildren(index, current);
-        }
-        renderExplorerTreePanel(index);
-        /* Expanding the ancestors is only half the reveal: in a long tree the
-           target's row can still sit outside the panel's scrolled viewport,
-           which leaves its `.active` highlight off screen. */
-        scrollExplorerTreeRowIntoView(index, target);
-    }
-
-    /* The tree row for a path (file or directory), or the row marked `.active`
-       when no path is given. Matched by iterating the rendered buttons rather
-       than with an attribute selector, because paths carry quotes and
-       brackets. Null whenever the row is not rendered — a collapsed or still
-       loading branch. */
-    function explorerTreeRowElement(panel, path) {
-        if (!panel) {
-            return null;
-        }
-        if (!path) {
-            return panel.querySelector('.explorer-tree-row.active');
-        }
-        const button = Array
-            .from(panel.querySelectorAll('[data-explorer-tree-file], [data-explorer-tree-dir]'))
-            .find(entry => (entry.dataset.explorerTreeFile ?? entry.dataset.explorerTreeDir) === path);
-        return button?.closest('.explorer-tree-row') || null;
-    }
-
-    /* Scroll the tree panel — and only it, which is why this does the maths
-       instead of calling `scrollIntoView`, whose `nearest` also scrolls every
-       other ancestor — by the minimum needed to show a row, leaving one row of
-       margin so the target never lands flush against an edge. A row already in
-       view is left alone, so clicking around inside the tree never jumps.
-       Returns the row so callers can decorate it. */
-    function scrollExplorerTreeRowIntoView(index, path = '') {
-        const panel = document.getElementById(`explorer-tree-panel-${index}`);
-        const row = panel && !panel.hidden ? explorerTreeRowElement(panel, path) : null;
-        if (!row) {
-            return null;
-        }
-        const panelBox = panel.getBoundingClientRect();
-        const rowBox = row.getBoundingClientRect();
-        const margin = Math.min(rowBox.height, Math.max(0, (panelBox.height - rowBox.height) / 2));
-        if (rowBox.top < panelBox.top + margin) {
-            panel.scrollTop -= (panelBox.top + margin) - rowBox.top;
-        } else if (rowBox.bottom > panelBox.bottom - margin) {
-            panel.scrollTop += rowBox.bottom - (panelBox.bottom - margin);
-        }
-        return row;
-    }
-
-    /* Scroll a file's tree row into view and flash it. The row's own `.active`
-       styling still marks the open file; this only draws the eye to it after
-       the tree scrolls. A row that is not rendered (a collapsed or still
-       loading branch) is left alone — the expansion above is the visible
-       part of the reveal. */
-    function focusExplorerTreeRow(index, path) {
-        const row = path ? scrollExplorerTreeRowIntoView(index, path) : null;
-        if (!row) {
-            return false;
-        }
-        row.classList.add('explorer-tree-located');
-        window.setTimeout(() => row.classList.remove('explorer-tree-located'), 1200);
-        return true;
-    }
-
-    async function loadExplorerTree(index) {
-        const pane = terminals[index];
-        if (!pane) {
-            return;
-        }
-        ensureExplorerTreeState(pane);
-        renderExplorerTreePanel(index);
-        await revealExplorerTreePath(index);
-    }
-
-    /* Drop cached children but keep expansion state, then refetch what is visible. */
-    async function reloadExplorerTree(index) {
-        const pane = terminals[index];
-        if (!pane?._explorerTreeSidebarOpen) {
-            return;
-        }
-
-        ensureExplorerTreeState(pane);
-        pane._explorerTreeChildren.clear();
-        pane._explorerTreeErrors.clear();
-        renderExplorerTreePanel(index);
-
-        const expanded = [...pane._explorerTreeExpanded]
-            .sort((left, right) => left.split('/').length - right.split('/').length);
-        await loadExplorerTreeChildren(index, '');
-        for (const path of expanded) {
-            await loadExplorerTreeChildren(index, path);
-        }
-        resetExplorerFsWatchBaseline(pane);
-        renderExplorerTreePanel(index);
-        /* A reload means the tree on disk moved under us (a create, a delete, a
-           rename). With a filter typed, its result set is what the panel is
-           showing, so it has to be re-read too — once, on the same explicit
-           trigger, never on a timer. */
-        if (typeof explorerTreeSearchActive === 'function' && explorerTreeSearchActive(pane)) {
-            await runExplorerTreeSearch(index);
-        }
-    }
-
-    /* One file's row, re-read in place. Saving changes a file's *contents*, so
-       the set of paths the tree draws cannot have moved — only that one row
-       can (its Git badge turns a clean file modified, and its filesystem
-       revision is what the delete/move guards check). Running the full
-       reloadExplorerTree() for that dropped every cached directory, flashed a
-       near-empty panel, refetched one request per expanded folder and left the
-       reader scrolled back to the top of a tree they had navigated by hand.
-
-       So only the file's own directory is re-read, its rows stay on screen for
-       the round trip, every other folder keeps its cache and its expansion,
-       and the panel's scroll is put back afterwards — the rebuild that follows
-       the response resets it, the same way it resets on any tree render. A
-       file whose directory the tree has not loaded has no row to refresh. */
-    async function refreshExplorerTreeFileEntry(index, path) {
-        const pane = terminals[index];
-        const target = String(path || '');
-        if (!pane?._explorerTreeSidebarOpen || !target) {
-            return;
-        }
-        ensureExplorerTreeState(pane);
-        const cut = target.lastIndexOf('/');
-        const parent = cut === -1 ? '' : target.slice(0, cut);
-        if (!pane._explorerTreeChildren.has(parent)) {
-            return;
-        }
-        const panel = document.getElementById(`explorer-tree-panel-${index}`);
-        const viewport = captureScrollMetrics(panel);
-        await loadExplorerTreeChildren(index, parent, { refresh: true });
-        applyScrollMetrics(document.getElementById(`explorer-tree-panel-${index}`), viewport);
-    }
-
     /* Baseline for the open-file change listener (explorer-git-watch.js), set
        from every file load and save. A non-empty value is what arms the watch,
        so clearing it (directory listing, image viewer, commit diff, empty
@@ -2932,8 +2628,6 @@
        the file viewer, the editor buffer, or the tab strip; a pane showing a
        file only refreshes its tree sidebar. */
 
-    const EXPLORER_FS_WATCH_MAX_TREE_NODES = 16;
-
     /* Everything the listing and tree rows actually render, hashed. A poll
        that fires for a change outside the browsed directory (or outside the
        expanded tree) therefore costs one fetch and zero repaints. */
@@ -3012,65 +2706,6 @@
             list.scrollTop = Math.min(scrollTop, Math.max(0, list.scrollHeight - list.clientHeight));
             list.scrollLeft = scrollLeft;
         }
-        return true;
-    }
-
-    /* The tree nodes a re-render would actually paint: the root plus every
-       expanded directory whose children are cached, shallowest first. Bounded
-       because each node costs one `/entries` (one `git status` on a subtree) —
-       a deeply expanded tree refreshes its visible top and leaves the rest to
-       the manual Refresh, which is strictly better than today's fully stale
-       tree. */
-    function explorerTreeQuietRefreshKeys(pane) {
-        const keys = [''];
-        [...pane._explorerTreeExpanded]
-            .filter(path => path && pane._explorerTreeChildren.has(path))
-            .sort((left, right) => left.split('/').length - right.split('/').length)
-            .forEach(path => keys.push(path));
-        return keys.slice(0, EXPLORER_FS_WATCH_MAX_TREE_NODES);
-    }
-
-    /* Refetch the visible tree nodes into a scratch map, then swap them in one
-       render — unlike reloadExplorerTree, the panel never empties, never shows
-       `Loading...`, and keeps its scroll offset and expansion state. */
-    async function refreshExplorerTreeQuiet(index) {
-        const pane = terminals[index];
-        const sessionId = sessionIds[index];
-        if (!pane || !sessionId || !pane._explorerTreeSidebarOpen) {
-            return true;
-        }
-        ensureExplorerTreeState(pane);
-        if (!pane._explorerTreeChildren.size) {
-            return true; // Never loaded: the watcher does not bootstrap it.
-        }
-        const fetched = new Map();
-        let changed = false;
-        for (const key of explorerTreeQuietRefreshKeys(pane)) {
-            const data = await explorerFetchEntriesQuiet(index, key);
-            if (terminals[index] !== pane || sessionIds[index] !== sessionId) {
-                return false;
-            }
-            if (!data) {
-                return false;
-            }
-            const entries = (Array.isArray(data.entries) ? data.entries : [])
-                .filter(entry => !entry.deleted);
-            fetched.set(key, entries);
-            if (explorerEntriesSignature(entries)
-                !== explorerEntriesSignature(pane._explorerTreeChildren.get(key))) {
-                changed = true;
-            }
-        }
-        if (!changed) {
-            return true;
-        }
-        const metrics = captureScrollMetrics(document.getElementById(`explorer-tree-panel-${index}`));
-        fetched.forEach((entries, key) => {
-            pane._explorerTreeChildren.set(key, entries);
-            pane._explorerTreeErrors.delete(key);
-        });
-        renderExplorerTreePanel(index);
-        applyScrollMetrics(document.getElementById(`explorer-tree-panel-${index}`), metrics);
         return true;
     }
 
@@ -4957,6 +4592,23 @@
         return token;
     }
 
+    /* The stamp names the *content*, so anything that puts something else in
+       the panel takes it off on the way in.
+
+       The loader's placeholder, the stale notice and a failure message all
+       replace the panel's subtree without replacing the element, and the stamp
+       left standing describes a render that is no longer on screen. The next
+       paint of that same render then reads as "already showing this" and does
+       nothing — which is how staging a Markdown file stranded the panel on
+       "Rendering preview...": the in-place refresh drops the cached preview,
+       the loader blanks the panel and asks again, and the answer is
+       byte-identical to the render the stamp still named. */
+    function invalidateExplorerPreviewRender(preview) {
+        if (preview && preview.dataset) {
+            delete preview.dataset.explorerPreviewRender;
+        }
+    }
+
     /* A repaint of the Preview panel is not a re-visit of it.
 
        Every path that shows the panel used to run this: selecting the tab,
@@ -5052,6 +4704,7 @@
         if (!preview) {
             return null;
         }
+        invalidateExplorerPreviewRender(preview);
         preview.innerHTML = `
             <div class="explorer-preview-status" role="status">
                 <span>The file changed while the preview was rendering.</span>
@@ -5116,6 +4769,7 @@
                 ? preview
                 : null;
         }
+        invalidateExplorerPreviewRender(preview);
         preview.textContent = 'Rendering preview...';
         const load = (async () => {
             try {
@@ -5160,6 +4814,7 @@
                     return null;
                 }
                 console.error('[GridVibe Sessions] Explorer preview render failed:', error);
+                invalidateExplorerPreviewRender(preview);
                 preview.textContent = error.message || 'Failed to render preview.';
                 return preview;
             }
@@ -5341,12 +4996,21 @@
             end: matchIndex + String(query).length,
             active
         }];
+        /* The listing is a browsing surface exactly as the Files tree is, so
+           its rows carry the same Git scope hooks: a folder or a file here
+           names one exact path, and the pin is one exact path. Without them
+           the two surfaces disagreed about what a right-click can do to a
+           row that is on both of them. Deleted rows carry no context at all
+           and so name no scope either. */
         const contextAttributes = isDeleted ? '' : `
                 data-explorer-copy-path="${escHtml(entry.path || '')}"
                 data-explorer-context-path="${escHtml(entry.path || '')}"
                 data-explorer-context-kind="${escHtml(entry.entry_kind || '')}"
                 data-explorer-context-revision="${escHtml(entry.revision || '')}"
                 data-explorer-context-surface="preview"
+                data-explorer-git-scope-path="${escHtml(entry.path || '')}"
+                data-explorer-git-scope-kind="${isDirectory ? 'dir' : 'file'}"
+                data-explorer-git-scope-surface="preview"
                 ${isDirectory ? '' : `data-explorer-download-path="${escHtml(entry.path || '')}"`}`;
 
         return `
@@ -7006,6 +6670,14 @@
         renderExplorerTabStrip(index);
         persistExplorerTabsToSession(index);
         syncExplorerGitActiveRows(index);
+        /* A file is now a first-class Git scope. Opening one changes both the
+           header pin target and a live Follow request from the containing
+           folder to this exact file; the normal scope identity check keeps a
+           fixed directory pin cached. */
+        refreshExplorerGitScopeAffordances(index);
+        if (explorerGitScopeNeedsLoad(pane)) {
+            loadExplorerGitRepo(index);
+        }
         return true;
     }
 
@@ -7298,6 +6970,18 @@
         renderExplorerTabStrip(index);
         persistExplorerTabsToSession(index);
         syncExplorerGitActiveRows(index);
+        /* Opening a file is a scope change, exactly as walking into a folder
+           is: a file is a first-class Git scope, so it moves the pin button's
+           "is the pin here" and, with Follow on, the scope every Git request
+           carries. Only the image viewer and the directory listing said so;
+           the ordinary file render did not, which left the Graph sitting on
+           the previous file until the change listener's next poll noticed the
+           revision token had moved — a folder switch updated at once and a
+           file switch updated on an interval. */
+        refreshExplorerGitScopeAffordances(index);
+        if (explorerGitScopeNeedsLoad(pane)) {
+            loadExplorerGitRepo(index);
+        }
         return true;
     }
 
@@ -7769,7 +7453,14 @@
             // A listing is not a diff, so the Git sidebar's highlight goes out
             // with the file the viewer just left.
             paintExplorerGitActiveRows(index);
-            if (pane._explorerGitSidebarOpen) {
+            /* Walking into another folder moves the pin button between "pin
+               is here" and "pin is elsewhere" while leaving the Git model
+               untouched — with Follow off nothing below reloads, so the
+               button would otherwise keep a stale pressed state and a stale
+               title until the next load. Attribute-only, beside the tree's
+               marker. */
+            refreshExplorerGitScopeAffordances(index);
+            if (explorerGitScopeNeedsLoad(pane)) {
                 loadExplorerGitRepo(index);
             }
             return true;

@@ -78,6 +78,41 @@ Workspace **chrome** (`topbar_visible`, `active_group_id`, native zoom,
 `md_preset` / `md_font` / `source_font`) is a third, separately revisioned
 thing, owned by the workspace rather than by a group.
 
+### Fields That Are One Fact In Two
+
+Some state needs a second field to be readable at all. The rule for every such
+pair is the same: **capture, normalize, store and restore them together, and
+never re-derive one from the other.** Splitting a pair across a restart is how
+a value comes back wearing the wrong meaning.
+
+- **`explorer_root_directory` + `explorer_root_configured`** — a root, and
+  whether anybody *chose* it. The flag qualifies **the root actually stored**,
+  never the candidate it was chosen among, so a derived root cannot come back
+  looking like a configured one and pin the pane for good.
+- **`explorer_git_pin_active` + `explorer_git_pinned_path` +
+  `explorer_git_pin_kind`** — the Git sidebar's frozen path scope, as three
+  fields for one fact. `''` is a real pinned path — the explorer root itself —
+  so the flag is the *whole* difference between "pinned at the root" and "not
+  pinned", and neither field can be inferred from the other. `explorer_git_pin_kind`
+  (`"dir"` | `"file"`, default `"dir"`) is the third: a path and **what kind of
+  thing it names** are one fact, the same rule `explorer_root_directory` /
+  `explorer_root_configured` lives by, and the same path scoped as a file and as
+  a directory are two different scopes that ask the server two different
+  questions. Inferring the kind from a `stat` at read time was considered and
+  rejected — it costs a round trip, and it answers *wrongly* for a path that has
+  since been deleted, which is exactly the case the pin has to survive in order
+  to be reported and cleared. `web/session_presentation.py` normalizes it against
+  the two-value allowlist and **raises** on anything else rather than falling back
+  to `"dir"`, because a coerced kind would silently re-point the scope. The path
+  is relative to the root it was captured under, which makes a pin meaningless
+  under a different root: a route that **re-derives** the pane's root drops all
+  three, and drops `explorer_git_follow_browsing` with them, while a route that
+  hands the same root back (a restore) restores every one. The saved value is
+  applied faithfully even when it resolves to no worktree, or to nothing at all —
+  the sidebar *reports* that and offers **Clear pin**, because widening to a
+  repository root, or to the deleted file's folder, would silently discard a
+  scope the user chose.
+
 ---
 
 ## Live Presentation Sync (browser to server)
@@ -200,6 +235,17 @@ server state.**
 - Browser mode grants **one named tab per user gesture**, so a multi-workspace
   restore must still attempt every workspace and report refusals once per
   batch.
+- **A persisted set of keys is not the data behind them, and whatever restores
+  it owes that data a re-read.** Fetched data is never persisted, so a field
+  like `explorer_tree_expanded` comes back as a set of paths with nothing under
+  them; a surface that renders "open" from the set and its rows from a cache the
+  restore left empty draws an open control over nothing, which reads as the
+  state having been *lost* rather than as data still arriving. The Files tree is
+  the worked example: opening the sidebar re-lists the branches the restored set
+  names, breadth-first from the root so a path is only fetched once its parent's
+  listing confirms it still exists — and a path that listing disproves is
+  dropped from the set rather than requested. Bound the walk: each node is a
+  round trip, and a persisted set is bounded but not small.
 
 ---
 
@@ -274,6 +320,13 @@ that then *types* its `initial_command` at the prompt.
 - `tests/test_multi_workspace.py` — capture, restore, close/forget, labels, and
   the launcher save path. It is the behavioural cover for `web/workspaces.py`
   and must pass untouched across any refactor of that module.
+- `tests/test_explorer_git_pin_persistence.py` — the Git pin triple and
+  `explorer_git_expanded` carried through all four routes that can lose them
+  (live presentation, workspace snapshot, saved preset, close-driven rebuild),
+  executed rather than inventoried, plus the client's own round trip in Node.
+  The round trip is parametrised over the pin's kind, so a file pin and a folder
+  pin are the same test rather than two, and an out-of-allowlist
+  `explorer_git_pin_kind` is asserted to be refused rather than coerced.
 - `tests/test_saved_session_store.py` — preset and encryption-key durability.
 - `tests/test_backend_concurrency_contract.py` — the RuntimeConfig publication,
   workspace-label claim, and pooled-SSH reservation guardrails.

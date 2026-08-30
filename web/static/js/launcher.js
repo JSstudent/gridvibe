@@ -113,6 +113,7 @@
         explorer_git_follow_browsing: false,
         explorer_git_pin_active: false,
         explorer_git_pinned_path: '',
+        explorer_git_pin_kind: 'dir',
         explorer_search_open: false,
         explorer_open_tabs: [],
         explorer_active_tab: '',
@@ -677,6 +678,56 @@
         }
     }
 
+    /* Which explorer rows have had their directory edited away from the root
+       their saved state was captured under.
+
+       `collectTerminalDrafts()` drops that state — the pinned Git folder, the
+       open tabs and their views — because the paths in it are relative to a
+       root that is no longer the row's. That is right, and until now it was
+       also completely silent: the workspace relaunched with the pin simply
+       gone, which is indistinguishable from a pin that failed to save. Counted
+       here rather than inside the draft builder, which runs on every count and
+       layout change; the launch reports it once, folded into the one launch
+       notice, because the banner holds one message at a time. */
+    function retargetedExplorerRowTitles() {
+        return Array.from(document.querySelectorAll('.t-row'))
+            /* The fallback name has to be the row's position in the *form*, so
+               it is taken before the filter: numbering the survivors instead
+               called the fifth pane "Terminal 1" and pointed the reader at a
+               row they had not touched. */
+            .map((row, index) => ({ row, index }))
+            .filter(({ row }) => (
+                getTerminalCommandMode(row) === 'explorer'
+                && (row.dataset.explorerTabsDir || '')
+                && (row.querySelector('.t-dir')?.value || '').trim()
+                    !== row.dataset.explorerTabsDir
+            ))
+            .map(({ row, index }) => (
+                row.querySelector('.t-title')?.value.trim() || `Terminal ${index + 1}`
+            ));
+    }
+
+    /* The sentence the launch notice folds in, or '' when nothing was dropped.
+       One row is named; several are counted, because the banner holds one
+       message and a list of eight titles would bury the launch itself. */
+    function explorerRetargetLaunchNote(titles) {
+        const names = Array.isArray(titles) ? titles : [];
+        if (!names.length) {
+            return '';
+        }
+        const who = names.length === 1 ? `"${names[0]}"` : `${names.length} panes`;
+        return ' Saved explorer state (pinned Git folder, open tabs)'
+            + ` was not restored for ${who}: the folder was changed after saving.`;
+    }
+
+    /* One notice per launch, at the severity of the worst thing it reports.
+       Discarded saved state is a warning and not an `info`: `info` dismisses
+       itself after six seconds, and nothing else on screen says the pin is
+       gone. */
+    function launchNoticeSeverity(warningCount, retargetedCount) {
+        return (warningCount || retargetedCount) ? 'warning' : 'success';
+    }
+
     function collectTerminalDrafts() {
         const rows = Array.from(document.querySelectorAll('.t-row'));
         if (!rows.length) {
@@ -736,6 +787,10 @@
                 explorer_git_pinned_path: commandMode === 'explorer' && explorerTabsMatchRoot
                     ? (row.dataset.explorerGitPinnedPath || '')
                     : '',
+                explorer_git_pin_kind: commandMode === 'explorer' && explorerTabsMatchRoot
+                    && row.dataset.explorerGitPinKind === 'file'
+                    ? 'file'
+                    : 'dir',
                 explorer_search_open: commandMode === 'explorer' && row.dataset.explorerSearchOpen === 'true',
                 explorer_open_tabs: commandMode === 'explorer' && explorerTabsMatchRoot
                     ? parseStringArrayDataset(row.dataset.explorerOpenTabs)
@@ -1791,6 +1846,7 @@
                     data-explorer-git-follow-browsing="${terminal.explorer_git_follow_browsing ? 'true' : 'false'}"
                     data-explorer-git-pin-active="${terminal.explorer_git_pin_active ? 'true' : 'false'}"
                     data-explorer-git-pinned-path="${escHtml(terminal.explorer_git_pinned_path || '')}"
+                    data-explorer-git-pin-kind="${terminal.explorer_git_pin_kind === 'file' ? 'file' : 'dir'}"
                     data-explorer-search-open="${terminal.explorer_search_open ? 'true' : 'false'}"
                     data-explorer-open-tabs="${escHtml(JSON.stringify(Array.isArray(terminal.explorer_open_tabs) ? terminal.explorer_open_tabs : []))}"
                     data-explorer-tabs-dir="${escHtml(terminal.directory || '')}"
@@ -3507,6 +3563,9 @@
     }
 
     async function launchSessions() {
+        /* Read before the launch: `buildTerminalRows` rewrites the rows once
+           the group is open, and the edited directory is gone with them. */
+        const retargetedExplorer = retargetedExplorerRowTitles();
         const config = collectFormConfig();
         const button = document.getElementById('launchBtn');
         const sessionName = buildDefaultSessionName();
@@ -3593,10 +3652,17 @@
             const launchedName = String(data.group?.name || sessionName || '').trim();
             const launchIntro = `Launching ${data.count} ${getConnectionModeLabel(config.connection_mode)} terminals`
                 + (launchedName ? ` in "${launchedName}".` : '.');
-            const launchMessage = launchWarnings.length
+            /* Folded into the launch notice rather than sent as a second one:
+               a new notice replaces the current one, so a separate banner here
+               would either be wiped by the launch message or wipe it. */
+            const retargetNote = explorerRetargetLaunchNote(retargetedExplorer);
+            const launchMessage = (launchWarnings.length
                 ? `${launchIntro} ${launchWarnings.length === 1 ? launchWarnings[0] : `${launchWarnings.length} startup commands were cleared after preflight failed.`}`
-                : launchIntro;
-            showGridVibeNotice(launchMessage, launchWarnings.length ? 'warning' : 'success');
+                : launchIntro) + retargetNote;
+            showGridVibeNotice(
+                launchMessage,
+                launchNoticeSeverity(launchWarnings.length, retargetedExplorer.length)
+            );
             if (data.launch_target === 'web') {
                 setTimeout(async () => {
                     const workspaceId = String(data.workspace_id || 'default');

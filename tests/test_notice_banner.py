@@ -507,5 +507,158 @@ class UpdateCheckReportsOnceTestCase(unittest.TestCase):
         self.assertTrue(result["restartRequested"])
 
 
+@unittest.skipUnless(NODE, "Node.js is required for notice banner tests")
+class LaunchRetargetNoticeTestCase(unittest.TestCase):
+    """Editing a saved row's directory drops its explorer state, and says so.
+
+    The three functions behind that report are sliced out of launcher.js and
+    run: which rows were retargeted, the sentence naming them, and the severity
+    the one launch notice goes out at. They are separate from the launch itself
+    precisely so they can be executed -- the launch is a network round trip and
+    a window open.
+    """
+
+    def _slice(self, source: str, start: str, end: str) -> str:
+        begin = source.index(start)
+        return source[begin:source.index(end, begin)]
+
+    def _run(self, body: str, rows=()):
+        launcher_js = LAUNCHER_JS.read_text(encoding="utf-8")
+        functions = self._slice(
+            launcher_js,
+            "    function retargetedExplorerRowTitles()",
+            "    function collectTerminalDrafts()",
+        )
+        harness = (
+            """
+            const ROWS = JSON.parse(process.argv[2]);
+            /* A launcher row: its title and subdirectory inputs, plus the
+               directory its saved explorer state was captured under. */
+            function makeRow(spec) {
+                return {
+                    dataset: { explorerTabsDir: spec.tabsDir },
+                    querySelector(selector) {
+                        if (selector === '.t-title') {
+                            return spec.title === null
+                                ? null
+                                : { value: spec.title };
+                        }
+                        if (selector === '.t-dir') {
+                            return spec.dir === null ? null : { value: spec.dir };
+                        }
+                        return null;
+                    },
+                    __mode: spec.mode
+                };
+            }
+            const rows = ROWS.map(makeRow);
+            const document = { querySelectorAll: () => rows };
+            function getTerminalCommandMode(row) { return row.__mode; }
+            """
+            + functions
+            + body
+        )
+        with TemporaryDirectory() as script_dir:
+            script_path = Path(script_dir) / "harness.js"
+            script_path.write_text(harness, encoding="utf-8")
+            completed = subprocess.run(
+                [NODE, str(script_path), json.dumps(list(rows))],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                check=False,
+            )
+        if completed.returncode != 0:
+            self.fail(f"node harness failed:\n{completed.stderr}")
+        return json.loads(completed.stdout)
+
+    @staticmethod
+    def _row(mode="explorer", title="", tabs_dir="src", directory="src"):
+        return {"mode": mode, "title": title, "tabsDir": tabs_dir, "dir": directory}
+
+    def _titles(self, rows):
+        return self._run(
+            "process.stdout.write(JSON.stringify(retargetedExplorerRowTitles()));",
+            rows,
+        )
+
+    def test_only_a_row_whose_directory_moved_is_reported(self):
+        titles = self._titles([
+            self._row(title="Kept", tabs_dir="src", directory="src"),
+            self._row(title="Moved", tabs_dir="src", directory="docs"),
+        ])
+        self.assertEqual(titles, ["Moved"])
+
+    def test_a_row_with_no_saved_explorer_state_is_never_reported(self):
+        # Nothing was captured under a previous root, so nothing was dropped.
+        titles = self._titles([self._row(title="Fresh", tabs_dir="", directory="docs")])
+        self.assertEqual(titles, [])
+
+    def test_a_non_explorer_row_is_never_reported(self):
+        titles = self._titles([
+            self._row(mode="command", title="Shell", tabs_dir="src", directory="docs"),
+        ])
+        self.assertEqual(titles, [])
+
+    def test_an_untitled_row_is_named_by_its_position_in_the_form(self):
+        # The bug this pins: numbering the *survivors* called the fifth pane
+        # "Terminal 1" and pointed the reader at a row they never touched.
+        titles = self._titles([
+            self._row(title="A", tabs_dir="src", directory="src"),
+            self._row(title="B", tabs_dir="src", directory="src"),
+            self._row(title="", tabs_dir="src", directory="docs"),
+        ])
+        self.assertEqual(titles, ["Terminal 3"])
+
+    def test_several_untitled_rows_keep_their_own_form_positions(self):
+        titles = self._titles([
+            self._row(title="", tabs_dir="src", directory="src"),
+            self._row(title="", tabs_dir="src", directory="docs"),
+            self._row(title="", tabs_dir="src", directory="web"),
+        ])
+        self.assertEqual(titles, ["Terminal 2", "Terminal 3"])
+
+    def test_a_row_missing_its_directory_input_is_read_without_throwing(self):
+        titles = self._titles([
+            self._row(title="Odd", tabs_dir="src", directory=None),
+        ])
+        self.assertEqual(titles, ["Odd"])
+
+    def test_the_note_names_one_pane_and_counts_several(self):
+        result = self._run(
+            """
+            process.stdout.write(JSON.stringify({
+                none: explorerRetargetLaunchNote([]),
+                one: explorerRetargetLaunchNote(['Docs']),
+                many: explorerRetargetLaunchNote(['Docs', 'Web', 'Api'])
+            }));
+            """
+        )
+        self.assertEqual(result["none"], "")
+        self.assertIn('"Docs"', result["one"])
+        self.assertIn("3 panes", result["many"])
+        for note in (result["one"], result["many"]):
+            self.assertIn("was not restored", note)
+            self.assertIn("the folder was changed after saving", note)
+
+    def test_discarded_state_is_a_warning_and_not_an_auto_dismissing_info(self):
+        # `info` and `success` dismiss themselves after six seconds; a report
+        # that saved state was thrown away has to stay until it is read.
+        result = self._run(
+            """
+            process.stdout.write(JSON.stringify({
+                clean: launchNoticeSeverity(0, 0),
+                retargeted: launchNoticeSeverity(0, 1),
+                preflight: launchNoticeSeverity(2, 0),
+                both: launchNoticeSeverity(1, 1)
+            }));
+            """
+        )
+        self.assertEqual(result["clean"], "success")
+        self.assertEqual(result["retargeted"], "warning")
+        self.assertEqual(result["preflight"], "warning")
+        self.assertEqual(result["both"], "warning")
+
+
 if __name__ == "__main__":
     unittest.main()

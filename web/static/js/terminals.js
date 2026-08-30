@@ -2291,6 +2291,7 @@
             /* The pane object, not just its slot: this describes cached groups
                too, and a detached pane has no slot in `terminals`. */
             const sidebar = explorerSidebarPresentation(index, terminal);
+            const pin = panePinDescriptor(terminal);
             return {
                 sessionId,
                 mode: 'explorer',
@@ -2298,10 +2299,9 @@
                     treeOpen: Boolean(terminal?._explorerTreeSidebarOpen),
                     gitOpen: Boolean(terminal?._explorerGitSidebarOpen),
                     gitFollowBrowsing: Boolean(terminal?._explorerGitFollowBrowsing),
-                    gitPinActive: typeof terminal?._explorerGitPinnedPath === 'string',
-                    gitPinnedPath: typeof terminal?._explorerGitPinnedPath === 'string'
-                        ? terminal._explorerGitPinnedPath
-                        : '',
+                    gitPinActive: pin.active,
+                    gitPinnedPath: pin.path,
+                    gitPinKind: pin.kind,
                     searchOpen: Boolean(terminal?._explorerSearchSidebarOpen),
                     sidebarWidth: sidebar.width,
                     sidebarScroll: sidebar.scroll,
@@ -2399,13 +2399,23 @@
         return controller ? controller.noteGroupChange(groupId, options) : false;
     }
 
-    /* Called from the explorer and browser modules, which only ever act on the
-       group currently mounted in the grid. */
+    /* Called from the explorer and browser modules for a pane addressed by its
+       grid slot. */
     function notePanePresentationChanged(index, options) {
-        if (!terminals[index]) {
+        const pane = terminals[index];
+        if (!pane) {
             return false;
         }
-        return noteGroupPresentationChanged(visibleGroupId || activeGroupId, options);
+        /* Guardrail 4: a grid slot is not an identity. The pane's own session
+           names the group its presentation belongs to; `visibleGroupId` only
+           says where the grid is currently pointing, and an answer landing
+           during a group switch would bump the incoming group's revision while
+           leaving the pane's own group unwritten. They are the same id in
+           every ordinary case — this is the one that is not ordinary. */
+        const groupId = String(pane._session?.group_id || '').trim()
+            || visibleGroupId
+            || activeGroupId;
+        return noteGroupPresentationChanged(groupId, options);
     }
 
     function noteWorkspacePresentationChanged(options) {
@@ -2454,6 +2464,23 @@
 
     window.gridvibeFlushLivePresentation = flushLivePresentation;
 
+    /* The Git pin pair travels across a rebuild at five points on this page.
+       `session-persistence.js` owns the mapping in both directions — it is
+       loaded ahead of this file and is a hard requirement of the page, so
+       these read it directly rather than degrading into a private copy of the
+       rule, which is exactly the drift the extraction removes. */
+    function panePinDescriptor(pane) {
+        return window.GridVibeSessionPersistence.explorerGitPinDescriptor(pane);
+    }
+
+    function sessionPinnedPath(session) {
+        return window.GridVibeSessionPersistence.explorerGitPinnedPathFromSession(session);
+    }
+
+    function sessionPinKind(session) {
+        return window.GridVibeSessionPersistence.explorerGitPinKindFromSession(session);
+    }
+
     function buildWorkspaceTerminalEntry(terminal, index, connectionMode) {
         const session = terminal?._session || {};
         const rawStartupMode = String(session.startup_mode || '').trim();
@@ -2501,6 +2528,7 @@
         const explorerTheme = startupMode === 'explorer'
             ? explorerPaneLiveTheme(terminal, explorerSlot)
             : '';
+        const explorerPin = panePinDescriptor(terminal);
 
         return {
             /* Request-only identity: the backend strips this before persisting
@@ -2520,12 +2548,9 @@
             explorer_git_follow_browsing: startupMode === 'explorer'
                 ? Boolean(terminal?._explorerGitFollowBrowsing)
                 : false,
-            explorer_git_pin_active: startupMode === 'explorer'
-                && typeof terminal?._explorerGitPinnedPath === 'string',
-            explorer_git_pinned_path: startupMode === 'explorer'
-                && typeof terminal?._explorerGitPinnedPath === 'string'
-                ? terminal._explorerGitPinnedPath
-                : '',
+            explorer_git_pin_active: startupMode === 'explorer' && explorerPin.active,
+            explorer_git_pinned_path: startupMode === 'explorer' ? explorerPin.path : '',
+            explorer_git_pin_kind: startupMode === 'explorer' ? explorerPin.kind : 'dir',
             explorer_search_open: startupMode === 'explorer' ? Boolean(terminal?._explorerSearchSidebarOpen) : false,
             explorer_sidebar_width: explorerSidebar.width,
             explorer_sidebar_scroll: explorerSidebar.scroll,
@@ -5036,9 +5061,8 @@
                 _explorerTreeSidebarOpen: Boolean(session.explorer_tree_open),
                 _explorerGitSidebarOpen: Boolean(session.explorer_git_open),
                 _explorerGitFollowBrowsing: Boolean(session.explorer_git_follow_browsing),
-                _explorerGitPinnedPath: session.explorer_git_pin_active
-                    ? String(session.explorer_git_pinned_path || '')
-                    : undefined,
+                _explorerGitPinnedPath: sessionPinnedPath(session),
+                _explorerGitPinKind: sessionPinKind(session),
                 _explorerPath: explorerInitialPreviewDirectory(session),
                 _explorerSearchSidebarOpen: Boolean(session.explorer_search_open),
                 _explorerSidebarWidth: Number(session.explorer_sidebar_width) || 260,
@@ -6205,9 +6229,8 @@
             _explorerTreeSidebarOpen: Boolean(session.explorer_tree_open),
             _explorerGitSidebarOpen: Boolean(session.explorer_git_open),
             _explorerGitFollowBrowsing: Boolean(session.explorer_git_follow_browsing),
-            _explorerGitPinnedPath: session.explorer_git_pin_active
-                ? String(session.explorer_git_pinned_path || '')
-                : undefined,
+            _explorerGitPinnedPath: sessionPinnedPath(session),
+            _explorerGitPinKind: sessionPinKind(session),
             _explorerPath: explorerInitialPreviewDirectory(session),
             _explorerSearchSidebarOpen: Boolean(session.explorer_search_open),
             _explorerSidebarWidth: Number(session.explorer_sidebar_width) || 260,
@@ -6585,15 +6608,15 @@
                 const sidebar = explorerSidebarPresentation(index);
                 const previewTab = explorerPreviewTab(pane);
                 const previewActive = pane._explorerActiveTabId === EXPLORER_PREVIEW_TAB_ID;
+                const pin = panePinDescriptor(pane);
                 stateBySessionId[sessionId] = {
                     type: 'explorer',
                     explorer_tree_open: Boolean(pane._explorerTreeSidebarOpen),
                     explorer_git_open: Boolean(pane._explorerGitSidebarOpen),
                     explorer_git_follow_browsing: Boolean(pane._explorerGitFollowBrowsing),
-                    explorer_git_pin_active: typeof pane._explorerGitPinnedPath === 'string',
-                    explorer_git_pinned_path: typeof pane._explorerGitPinnedPath === 'string'
-                        ? pane._explorerGitPinnedPath
-                        : '',
+                    explorer_git_pin_active: pin.active,
+                    explorer_git_pinned_path: pin.path,
+                    explorer_git_pin_kind: pin.kind,
                     explorer_search_open: Boolean(pane._explorerSearchSidebarOpen),
                     explorer_sidebar_width: sidebar.width,
                     explorer_sidebar_scroll: sidebar.scroll,
@@ -7418,6 +7441,7 @@
                         entry.explorer_git_follow_browsing = snapshot.explorer_git_follow_browsing;
                         entry.explorer_git_pin_active = snapshot.explorer_git_pin_active;
                         entry.explorer_git_pinned_path = snapshot.explorer_git_pinned_path;
+                        entry.explorer_git_pin_kind = snapshot.explorer_git_pin_kind;
                         entry.explorer_search_open = snapshot.explorer_search_open;
                         entry.explorer_sidebar_width = snapshot.explorer_sidebar_width;
                         entry.explorer_sidebar_scroll = snapshot.explorer_sidebar_scroll;

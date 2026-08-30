@@ -483,6 +483,14 @@ class PreviewRepaintTestCase(NodeHarnessMixin, unittest.TestCase):
                 dataset: {},
                 get innerHTML() { return preview._html; },
                 set innerHTML(value) { preview.writes += 1; preview._html = value; },
+                // A real panel loses its children to a textContent write just
+                // as it does to an innerHTML one — which is what the loader's
+                // placeholder and a failure message do to it.
+                get textContent() { return preview._html; },
+                set textContent(value) {
+                    preview.writes += 1;
+                    preview._html = String(value);
+                },
                 classList: { add() {}, remove() {}, contains: () => false },
                 addEventListener() {},
                 querySelectorAll: () => [],
@@ -528,6 +536,46 @@ class PreviewRepaintTestCase(NodeHarnessMixin, unittest.TestCase):
         # A render that actually moved still repaints.
         self.assertEqual(result["afterNewRender"], 2)
         self.assertEqual(result["showing"], "<h1>Notes</h1><p>and more</p>")
+
+    def test_a_panel_holding_the_loaders_placeholder_repaints_the_same_render(self):
+        """The stamp names the render, so foreign markup takes it off.
+
+        Staging a Markdown file is the case that found this: the in-place
+        refresh drops the cached preview, the loader blanks the panel to
+        "Rendering preview..." and asks again, and the answer is byte-identical
+        to the render the panel was still stamped with. The paint then read
+        that as "already showing this" and did nothing, leaving the reader on
+        the placeholder with nothing left on screen able to move it.
+        """
+        result = self._preview(
+            "sandbox.sessionIds[0] = 's0';"
+            "sandbox.requestExplorerPanelScrollRestore = () => {};"
+            "let resolveFetch = null;"
+            "sandbox.fetch = () => new Promise(resolve => { resolveFetch = resolve; });"
+            "(async () => {"
+            "  sandbox.paintExplorerPreview(0);"
+            "  const stamped = preview.innerHTML;"
+            # What the in-place refresh does to the pane: the file moved, so
+            # the render it is holding describes the old bytes.
+            "  pane._explorerPreviewHtml = '';"
+            "  pane._explorerPreviewLoaded = false;"
+            "  const load = sandbox.ensureExplorerPreviewLoaded(0);"
+            "  const whileLoading = preview.innerHTML;"
+            "  resolveFetch({ ok: true, json: async () => ({"
+            "    preview_html: '<h1>Notes</h1>'"
+            "  }) });"
+            "  await load;"
+            "  console.log(JSON.stringify({"
+            "    stamped, whileLoading, showing: preview.innerHTML"
+            "  }));"
+            "})();"
+        )
+
+        self.assertEqual(result["stamped"], "<h1>Notes</h1>")
+        self.assertEqual(result["whileLoading"], "Rendering preview...")
+        # The render that arrived is the one the panel was stamped with, and it
+        # still has to be painted: the placeholder is not that render.
+        self.assertEqual(result["showing"], "<h1>Notes</h1>")
 
     def test_a_reused_panel_has_the_find_marks_taken_out_of_it(self):
         """A repaint dropped them with the subtree; a reused panel cannot."""

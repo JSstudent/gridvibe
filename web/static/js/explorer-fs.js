@@ -871,6 +871,28 @@
                     ))
                 );
             }
+            /* The Git pin follows the path it names, exactly as the tabs, the
+               browsed folder and the open file above it do. A rename relocates
+               the thing the pin points at rather than removing it, so a pin
+               left on the old spelling reports "no longer exists" about a path
+               the user has just watched move — and the pane is holding the new
+               one everywhere else.
+
+               `typeof` is the pin's existence, so this must never turn a
+               missing pin into `''` (a root pin) — hence the guard rather than
+               a bare assignment. A root pin is outside every source path and
+               `explorerFilesystemRetargetPath` hands it straight back.
+
+               Deliberately only on the move branch. A *deleted* pin is not
+               relocatable, and dropping it there would silently widen the
+               scope back to the explorer root; the sidebar reports it by name
+               with Clear pin beside it instead, which is the documented
+               behaviour for a pin whose path has gone. */
+            if (typeof pane._explorerGitPinnedPath === 'string') {
+                pane._explorerGitPinnedPath = explorerFilesystemRetargetPath(
+                    pane._explorerGitPinnedPath, removedPath, createdPath
+                );
+            }
             const edit = explorerEditState(pane);
             if (edit?.path) {
                 edit.path = explorerFilesystemRetargetPath(

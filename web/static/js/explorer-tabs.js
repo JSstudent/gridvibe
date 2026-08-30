@@ -426,15 +426,23 @@
             const closeButton = isPreview
                 ? ''
                 : `<button type="button" class="explorer-tab-close" data-explorer-tab-close="${escHtml(tab.id)}" title="Close tab" aria-label="Close ${escHtml(label)}">×</button>`;
-            /* A pinned tab joins the shared copy-path context menu (the tree
-               and Git rows carry the same hook). No context kind is exposed,
-               so the tab menu stays read-only — copy and download only, no
-               filesystem mutations. */
-            const copyPath = (!isPreview && tab.path)
+            /* A tab that names a file joins the shared path context menu --
+               the permanent Preview tab included, because the file it is
+               showing names a path exactly as precisely as a pinned tab does,
+               and its own Git-scope hook below has always said so by asking
+               `tab.path` alone. Withholding copy/download there left one tab
+               offering to pin a path it would not spell. A Preview tab showing
+               a directory listing names no file and gets neither hook. No
+               filesystem context kind is exposed either way, so the tab menu
+               stays free of create/move/delete actions. */
+            const copyPath = tab.path
                 ? ` data-explorer-copy-path="${escHtml(tab.path)}" data-explorer-download-path="${escHtml(tab.path)}"`
                 : '';
+            const gitScope = tab.path
+                ? ` data-explorer-git-scope-path="${escHtml(tab.path)}" data-explorer-git-scope-kind="file" data-explorer-git-scope-surface="tab"`
+                : '';
             return `
-                <div class="explorer-tab${active ? ' active' : ''}${isPreview ? ' preview' : ''}${dirty ? ' is-dirty' : ''}" role="tab" aria-selected="${active ? 'true' : 'false'}"${tabStates.length ? ' aria-label="' + escHtml(`${label} (${tabStates.join(', ')})`) + '"' : ''} data-explorer-tab="${escHtml(tab.id)}"${copyPath}${isPreview ? '' : ' draggable="true"'} title="${escHtml(`${dirty ? '● ' : ''}${gitLabel ? `${gitLabel} ` : ''}${tab.path || label}`)}">
+                <div class="explorer-tab${active ? ' active' : ''}${isPreview ? ' preview' : ''}${dirty ? ' is-dirty' : ''}" role="tab" aria-selected="${active ? 'true' : 'false'}"${tabStates.length ? ' aria-label="' + escHtml(`${label} (${tabStates.join(', ')})`) + '"' : ''} data-explorer-tab="${escHtml(tab.id)}"${copyPath}${gitScope}${isPreview ? '' : ' draggable="true"'} title="${escHtml(`${dirty ? '● ' : ''}${gitLabel ? `${gitLabel} ` : ''}${tab.path || label}`)}">
                     <button type="button" class="explorer-tab-main" data-explorer-tab-open="${escHtml(tab.id)}">
                         ${icon}
                         <span class="explorer-tab-name">${escHtml(label)}</span>

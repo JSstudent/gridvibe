@@ -21,6 +21,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 STATIC_JS = REPO_ROOT / "web" / "static" / "js"
 GIT_ACTIVE_JS = STATIC_JS / "explorer-git-active.js"
 EXPLORER_VIEWER_JS = STATIC_JS / "explorer-viewer.js"
+EXPLORER_TREE_JS = STATIC_JS / "explorer-tree.js"
 EXPLORER_GIT_SIDEBAR_JS = STATIC_JS / "explorer-git-sidebar.js"
 TERMINALS_HTML = REPO_ROOT / "templates" / "terminals.html"
 
@@ -281,7 +282,7 @@ const sandbox = {
 };
 sandbox.globalThis = sandbox;
 vm.createContext(sandbox);
-[process.argv[2], process.argv[3], process.argv[4], process.argv[5]].forEach(path => {
+[process.argv[2], process.argv[3], process.argv[4], process.argv[5], process.argv[6]].forEach(path => {
     vm.runInContext(fs.readFileSync(path, 'utf8'), sandbox);
 });
 // In a browser `window` *is* the global; the sandbox keeps them apart, so the
@@ -336,6 +337,7 @@ class ExplorerGitActiveAdapterTestCase(unittest.TestCase):
                     str(ICONS_JS),
                     str(GIT_ACTIVE_JS),
                     str(EXPLORER_VIEWER_JS),
+                    str(EXPLORER_TREE_JS),
                     str(EXPLORER_GIT_SIDEBAR_JS),
                 ],
                 capture_output=True,
@@ -430,6 +432,26 @@ class ExplorerGitActiveAdapterTestCase(unittest.TestCase):
         )
         # Unchanged for a pane nobody can name: the caller has nothing to send.
         self.assertEqual(result["bySlot"]["gitExpanded"], [])
+
+    def test_collapse_render_restores_the_commit_message_caret(self):
+        result = self._run_node(
+            "const original = { selectionStart: 4, selectionEnd: 9 };"
+            "const replacement = {"
+            "  focused: 0, selection: null,"
+            "  focus() { this.focused += 1; },"
+            "  setSelectionRange(start, end) { this.selection = [start, end]; }"
+            "};"
+            "sandbox.document.activeElement = original;"
+            "sandbox.document.getElementById = () => original;"
+            "const state = sandbox.explorerGitCommitMessageFocusState(0);"
+            "sandbox.document.getElementById = () => replacement;"
+            "sandbox.restoreExplorerGitCommitMessageFocus(0, state);"
+            "emit({ state, focused: replacement.focused, selection: replacement.selection });"
+        )
+
+        self.assertEqual(result["state"], {"start": 4, "end": 9})
+        self.assertEqual(result["focused"], 1)
+        self.assertEqual(result["selection"], [4, 9])
 
 
 class ExplorerGitActiveWiringTestCase(unittest.TestCase):

@@ -238,6 +238,49 @@
     const PANE_MODE_EXPLORER = 'explorer';
     const PANE_MODE_BROWSER = 'browser';
 
+    /* ── The Git pin record ──────────────────────────────────────────────
+       `explorer_git_pin_active`, `explorer_git_pinned_path`, and
+       `explorer_git_pin_kind` are one fact: whether a scope is pinned, the
+       root-relative path it names, and whether that path is a directory or a
+       file. They have to be read off a live pane and written back onto a
+       rebuilt one at five points on the terminals page — the live describe,
+       the Save Workspace launch config, both pane builds, and the
+       close-driven overlay — and each spelled the same record-building logic out
+       by hand. A pin that survives four of those and not the fifth is
+       indistinguishable, from the user's side, from a pin that was never
+       saved, which is most of what "it seems flaky" was describing. One
+       mapping, executed by the tests, instead of five copies.
+
+       The pane's own truth is the *type* of `_explorerGitPinnedPath`: a
+       string (including '') means pinned, `undefined` means not pinned. That
+       is what makes a pin at the explorer root a real, distinguishable state
+       rather than a silent no-op. */
+    function explorerGitPinDescriptor(pane) {
+        const pinned = typeof pane?._explorerGitPinnedPath === 'string';
+        return {
+            active: pinned,
+            path: pinned ? pane._explorerGitPinnedPath : '',
+            kind: pinned && pane._explorerGitPinKind === 'file' ? 'file' : 'dir'
+        };
+    }
+
+    /* The inverse: what a rebuilt pane's `_explorerGitPinnedPath` should be,
+       given the session record the server just handed back. `undefined` is
+       deliberate and load-bearing — assigning '' would make every unpinned
+       explorer pane report itself as pinned to its root. */
+    function explorerGitPinnedPathFromSession(session) {
+        return session && session.explorer_git_pin_active
+            ? String(session.explorer_git_pinned_path || '')
+            : undefined;
+    }
+
+    function explorerGitPinKindFromSession(session) {
+        return session && session.explorer_git_pin_active
+            && session.explorer_git_pin_kind === 'file'
+            ? 'file'
+            : 'dir';
+    }
+
     function buildPanePresentation(pane) {
         const sessionId = String((pane && pane.sessionId) || '').trim();
         if (!sessionId) return null;
@@ -249,6 +292,7 @@
             entry.explorer_git_follow_browsing = Boolean(explorer.gitFollowBrowsing);
             entry.explorer_git_pin_active = Boolean(explorer.gitPinActive);
             entry.explorer_git_pinned_path = String(explorer.gitPinnedPath || '');
+            entry.explorer_git_pin_kind = explorer.gitPinKind === 'file' ? 'file' : 'dir';
             entry.explorer_search_open = Boolean(explorer.searchOpen);
             entry.explorer_sidebar_width = Number.isInteger(explorer.sidebarWidth)
                 ? explorer.sidebarWidth
@@ -495,6 +539,9 @@
     return {
         createPresentationQueue,
         createPresentationController,
+        explorerGitPinDescriptor,
+        explorerGitPinnedPathFromSession,
+        explorerGitPinKindFromSession,
         buildGroupPresentationPayload,
         buildWorkspacePresentationPayload,
         CONTINUOUS_UPDATE_FLOOR_MS,

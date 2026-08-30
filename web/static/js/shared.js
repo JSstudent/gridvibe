@@ -337,6 +337,8 @@
             ? requestedMode
             : resolvePaneStartupMode(terminal);
         const shellFlagsAllowed = !['explorer', 'browser'].includes(resolvedStartupMode);
+        const explorerPinActive = resolvedStartupMode === 'explorer'
+            && Boolean(terminal?.explorer_git_pin_active);
         return {
             initial_command: resolvedStartupMode === 'explorer' ? null : (terminal?.initial_command || null),
             initial_command_mode: resolvedStartupMode === 'explorer' || resolvedStartupMode === 'browser'
@@ -353,6 +355,19 @@
             agent_auto_mode: resolvedStartupMode === 'agent' && Boolean(terminal?.agent_auto_mode),
             explorer_tree_open: resolvedStartupMode === 'explorer' ? Boolean(terminal?.explorer_tree_open) : false,
             explorer_git_open: resolvedStartupMode === 'explorer' ? Boolean(terminal?.explorer_git_open) : false,
+            /* Both saved-session launch surfaces end here. Keep the Git scope
+               beside the Preview tab record that gives Follow its live path;
+               omitting it here made a correct preset relaunch at root. */
+            explorer_git_follow_browsing: resolvedStartupMode === 'explorer'
+                && Boolean(terminal?.explorer_git_follow_browsing),
+            explorer_git_pin_active: explorerPinActive,
+            explorer_git_pinned_path: explorerPinActive
+                ? String(terminal?.explorer_git_pinned_path || '')
+                : '',
+            explorer_git_pin_kind: explorerPinActive
+                && terminal?.explorer_git_pin_kind === 'file'
+                ? 'file'
+                : 'dir',
             explorer_search_open: resolvedStartupMode === 'explorer' ? Boolean(terminal?.explorer_search_open) : false,
             explorer_open_tabs: resolvedStartupMode === 'explorer' && Array.isArray(terminal?.explorer_open_tabs)
                 ? terminal.explorer_open_tabs

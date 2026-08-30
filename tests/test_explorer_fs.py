@@ -1635,6 +1635,9 @@ class ExplorerFilesystemFrontendContractTestCase(unittest.TestCase):
         cls.viewer = (root / "web/static/js/explorer-viewer.js").read_text(
             encoding="utf-8"
         )
+        cls.tree = (root / "web/static/js/explorer-tree.js").read_text(
+            encoding="utf-8"
+        )
         cls.controller = (root / "web/static/js/explorer-fs.js").read_text(
             encoding="utf-8"
         )
@@ -1649,26 +1652,28 @@ class ExplorerFilesystemFrontendContractTestCase(unittest.TestCase):
         )
 
     def test_tree_and_preview_rows_share_context_metadata(self):
+        surfaces = self.viewer + self.tree
         for attribute in (
             "data-explorer-context-path",
             "data-explorer-context-kind",
             "data-explorer-context-revision",
             "data-explorer-context-surface",
         ):
-            self.assertGreaterEqual(self.viewer.count(attribute), 2)
-        self.assertIn('data-explorer-context-surface="tree"', self.viewer)
+            self.assertGreaterEqual(surfaces.count(attribute), 2)
+        self.assertIn('data-explorer-context-surface="tree"', self.tree)
         self.assertIn('data-explorer-context-surface="preview"', self.viewer)
         self.assertIn("wireExplorerContextMenu(list, index);", self.viewer)
 
     def test_context_menu_supports_disabled_danger_and_keyboard_focus(self):
-        self.assertIn("button.disabled = Boolean(disabled);", self.viewer)
-        self.assertIn("button.setAttribute('aria-disabled'", self.viewer)
-        self.assertIn("button.classList.add('danger');", self.viewer)
-        self.assertIn("button:not(:disabled)", self.viewer)
-        self.assertIn("!button.classList.contains('danger')", self.viewer)
-        self.assertIn("button.textContent = label;", self.viewer)
-        self.assertIn("event.clientX", self.viewer)
-        self.assertIn("row.getBoundingClientRect()", self.viewer)
+        source = self.viewer + self.tree
+        self.assertIn("button.disabled = Boolean(disabled);", source)
+        self.assertIn("button.setAttribute('aria-disabled'", source)
+        self.assertIn("button.classList.add('danger');", source)
+        self.assertIn("button:not(:disabled)", source)
+        self.assertIn("!button.classList.contains('danger')", source)
+        self.assertIn("button.textContent = label;", source)
+        self.assertIn("event.clientX", source)
+        self.assertIn("row.getBoundingClientRect()", source)
 
     def test_controller_is_session_scoped_confirmed_and_lifecycle_bound(self):
         self.assertIn("const explorerFilesystemClipboards = new Map();", self.controller)
@@ -1756,7 +1761,11 @@ class ExplorerFilesystemFrontendContractTestCase(unittest.TestCase):
         # The DOM-free selection model is a dependency of both the viewer's
         # click adapter and the controller's batch runners, so it loads ahead
         # of both.
-        for dependent in ("js/explorer-viewer.js", "js/explorer-fs.js"):
+        for dependent in (
+            "js/explorer-viewer.js",
+            "js/explorer-tree.js",
+            "js/explorer-fs.js",
+        ):
             self.assertLess(
                 self.template.index("js/explorer-selection.js"),
                 self.template.index(dependent),

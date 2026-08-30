@@ -8,10 +8,11 @@ filesystem revision the delete/move guards check moves with its mtime).
 Reloading the whole tree for that dropped every cached directory, flashed a
 near-empty panel, spent one request per expanded folder and left the reader
 scrolled back to the top of a tree they had navigated by hand. These tests run
-the real viewer and extracted Git-sidebar scripts in Node and pin the narrower contract: one
-request, for one directory; every other folder keeps its cache and its
-expansion; the rows being re-read stay on screen for the round trip; and the
-panel's scroll survives the rebuild that follows.
+the real viewer, extracted Files-tree, and extracted Git-sidebar scripts in
+Node and pin the narrower contract: one request, for one directory; every
+other folder keeps its cache and its expansion; the rows being re-read stay on
+screen for the round trip; and the panel's scroll survives the rebuild that
+follows.
 """
 
 import json
@@ -26,6 +27,7 @@ STATIC_JS = Path(__file__).resolve().parent.parent / "web" / "static" / "js"
 # constants — the tree renders against the real ones rather than stand-ins.
 ICONS_JS = STATIC_JS / "terminal-icons.js"
 VIEWER_JS = STATIC_JS / "explorer-viewer.js"
+TREE_JS = STATIC_JS / "explorer-tree.js"
 GIT_SIDEBAR_JS = STATIC_JS / "explorer-git-sidebar.js"
 NODE = shutil.which("node")
 
@@ -96,7 +98,7 @@ const sandbox = {
 };
 sandbox.globalThis = sandbox;
 vm.createContext(sandbox);
-[process.argv[2], process.argv[3], process.argv[4]].forEach(path => {
+[process.argv[2], process.argv[3], process.argv[4], process.argv[5]].forEach(path => {
     vm.runInContext(fs.readFileSync(path, 'utf8'), sandbox);
 });
 
@@ -205,6 +207,7 @@ class ExplorerSaveTreeRefreshTestCase(unittest.TestCase):
                     str(script_path),
                     str(ICONS_JS),
                     str(VIEWER_JS),
+                    str(TREE_JS),
                     str(GIT_SIDEBAR_JS),
                 ],
                 capture_output=True,

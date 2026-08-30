@@ -1,4 +1,4 @@
-"""Alt+click on a Files-tree fold arrow folds or unfolds a whole level.
+"""Behavioral contracts for Files-tree navigation and fold controls.
 
 The Markdown source view has fanned a fold out over every heading sharing the
 clicked heading's level for a while; the Files tree only ever toggled the one
@@ -6,9 +6,13 @@ folder, so tidying a tree with a dozen folders open meant a dozen clicks. The
 tree's notion of "this level" is the clicked folder's *siblings* — Alt+clicking
 an open root-level folder therefore folds the whole tree in one gesture.
 
-Executed in Node against the real ``explorer-viewer.js`` rather than asserted as
-source text: what matters is the expanded set the gesture leaves behind, and
-which directory listings it had to fetch to get there.
+Folder-name navigation is independent of those controls: it opens the folder
+in Preview without changing the tree's expanded set. Preview's reveal then
+opens only the ancestors required to show its destination.
+
+Executed in Node against the real ``explorer-tree.js`` rather than asserted as
+source text: what matters is the expanded set each gesture leaves behind, the
+Preview destination, and which directory listings it had to fetch to get there.
 """
 
 import json
@@ -18,8 +22,8 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-VIEWER_JS = (
-    Path(__file__).resolve().parent.parent / "web" / "static" / "js" / "explorer-viewer.js"
+TREE_JS = (
+    Path(__file__).resolve().parent.parent / "web" / "static" / "js" / "explorer-tree.js"
 )
 
 NODE = shutil.which("node")
@@ -106,9 +110,14 @@ sandbox.fetch = async (url) => {
 };
 // Owned by other modules; the fold only needs them to be callable.
 const persisted = [];
+const navigated = [];
 sandbox.notePanePresentationChanged = index => persisted.push(index);
 sandbox.updateExplorerFilesystemRootRevision = () => {};
 sandbox.refreshExplorerFilesystemCutSource = () => {};
+sandbox.loadExplorerPane = async (index, path) => {
+    navigated.push({ index, path });
+    return true;
+};
 
 vm.createContext(sandbox);
 vm.runInContext(fs.readFileSync(process.argv[2], 'utf8'), sandbox);
@@ -120,6 +129,9 @@ sandbox.__fixture = { children, cached, expanded };
 vm.runInContext(`
     sessionIds[0] = 'sess-0';
     terminals[0] = {
+        _explorerTreeSidebarOpen: true,
+        _explorerMode: 'directory',
+        _explorerPath: '',
         _explorerTreeExpanded: new Set(__fixture.expanded),
         _explorerTreeChildren: new Map(
             __fixture.cached.map(path => [path, __fixture.children[path]])
@@ -138,16 +150,26 @@ sandbox.scrollExplorerTreeRowIntoView = (paneIndex, path) => {
     return scrolled(paneIndex, path);
 };
 
-const run = action === 'level'
-    ? sandbox.toggleExplorerTreeLevel(0, target)
-    : sandbox.toggleExplorerTreeDirectory(0, target);
+let run;
+if (action === 'level') {
+    run = sandbox.toggleExplorerTreeLevel(0, target);
+} else if (action === 'open') {
+    run = sandbox.openExplorerTreeDirectory(0, target);
+} else if (action === 'reveal') {
+    run = sandbox.revealExplorerTreePath(0, target);
+} else if (action === 'restore') {
+    run = sandbox.loadExplorerTree(0);
+} else {
+    run = sandbox.toggleExplorerTreeDirectory(0, target);
+}
 
 Promise.resolve(run).then(() => {
     process.stdout.write(JSON.stringify({
         expanded: Array.from(sandbox.terminals[0]._explorerTreeExpanded).sort(),
         fetched: fetched.slice().sort(),
         anchored,
-        persisted
+        persisted,
+        navigated
     }));
 });
 """
@@ -168,7 +190,7 @@ class ExplorerTreeFoldLevelTestCase(unittest.TestCase):
                 [
                     NODE,
                     str(script_path),
-                    str(VIEWER_JS),
+                    str(TREE_JS),
                     json.dumps(FIXTURE_CHILDREN),
                     json.dumps(cached),
                     json.dumps(sorted(expanded)),
@@ -260,6 +282,128 @@ class ExplorerTreeFoldLevelTestCase(unittest.TestCase):
             action="directory",
         )
         self.assertEqual(result["expanded"], ["docs", "src/api"])
+        self.assertEqual(result["navigated"], [])
+        self.assertEqual(result["persisted"], [0])
+
+    def test_a_folder_name_opens_preview_without_changing_tree_expansion(self):
+        result = self._fold(
+            expanded=["src", "src/api"],
+            target="docs",
+            action="open",
+        )
+
+        self.assertEqual(result["navigated"], [{"index": 0, "path": "docs"}])
+        self.assertEqual(result["expanded"], ["src", "src/api"])
+        self.assertEqual(result["fetched"], [])
+        self.assertEqual(result["persisted"], [])
+
+    def test_preview_navigation_expands_ancestors_but_not_the_destination(self):
+        result = self._fold(
+            expanded=[],
+            cached=[""],
+            target="src/api",
+            action="reveal",
+        )
+
+        self.assertEqual(result["expanded"], ["src"])
+        self.assertEqual(result["fetched"], ["src"])
+        self.assertEqual(result["navigated"], [])
+
+
+@unittest.skipUnless(NODE, "Node.js is required for explorer tree fold tests")
+class ExplorerTreeExpansionRestoreTestCase(unittest.TestCase):
+    """Opening the tree re-lists the expansion a restore handed back.
+
+    Expansion is persisted and the listings behind it are not, so a restored
+    pane holds a set of paths and an empty children cache. The reveal walk only
+    ever opens the ancestors of the path the pane is showing, which left every
+    other restored folder rendering an open chevron above nothing at all --
+    reported as "expanded directories get folded after restore", with the
+    chevron left pointing down over an empty branch.
+    """
+
+    _fold = ExplorerTreeFoldLevelTestCase._fold
+
+    def test_a_restored_expansion_set_is_relisted_when_the_tree_opens(self):
+        # Nothing cached: exactly what a restore hands back.
+        result = self._fold(
+            expanded=["docs", "docs/guides", "src", "src/api"],
+            cached=[],
+            target="",
+            action="restore",
+        )
+        self.assertEqual(
+            result["expanded"], ["docs", "docs/guides", "src", "src/api"]
+        )
+        # The root plus every restored folder, so each open chevron has rows
+        # underneath it.
+        self.assertEqual(
+            result["fetched"], ["", "docs", "docs/guides", "src", "src/api"]
+        )
+
+    def test_a_branch_outside_the_shown_path_is_listed_too(self):
+        # The reveal walk covers src/ because the pane is showing src/api;
+        # docs/ is the branch that used to come back empty.
+        result = self._fold(
+            expanded=["docs", "docs/guides"],
+            cached=[],
+            target="",
+            action="restore",
+        )
+        self.assertEqual(result["fetched"], ["", "docs", "docs/guides"])
+
+    def test_an_already_listed_tree_is_not_refetched(self):
+        # Re-opening the sidebar inside a session: the children cache still
+        # holds every branch, so the walk costs no request at all.
+        result = self._fold(
+            expanded=["docs", "src"],
+            cached=["", "docs", "src"],
+            target="",
+            action="restore",
+        )
+        self.assertEqual(result["fetched"], [])
+        self.assertEqual(result["expanded"], ["docs", "src"])
+        self.assertEqual(result["persisted"], [])
+
+    def test_an_expansion_whose_folder_is_gone_is_dropped_not_fetched(self):
+        # A folder deleted or renamed since the snapshot: its parent's listing
+        # is the proof, so it is never requested and never cached as an error
+        # against a row that no longer exists.
+        result = self._fold(
+            expanded=["src", "src/gone"],
+            cached=[],
+            target="",
+            action="restore",
+        )
+        self.assertEqual(result["expanded"], ["src"])
+        self.assertNotIn("src/gone", result["fetched"])
+        # Dropping a stale path is a change to persisted pane state.
+        self.assertEqual(result["persisted"], [0])
+
+    def test_an_unproven_expansion_is_left_alone(self):
+        # src/ is collapsed, so nothing loads its listing and nothing can say
+        # whether src/api still exists. Unproven is not stale.
+        result = self._fold(
+            expanded=["src/api"],
+            cached=[],
+            target="",
+            action="restore",
+        )
+        self.assertEqual(result["expanded"], ["src/api"])
+        self.assertEqual(result["fetched"], [""])
+
+    def test_reopening_a_collapsed_folder_relists_its_restored_descendants(self):
+        # A collapse keeps what was open underneath it. Inside a session the
+        # descendants come back off the cache; after a restore the cache is
+        # empty, so expanding src/ alone left src/api open above nothing.
+        result = self._fold(
+            expanded=["src/api"],
+            cached=[""],
+            target="src",
+            action="directory",
+        )
+        self.assertEqual(result["expanded"], ["src", "src/api"])
+        self.assertEqual(result["fetched"], ["src", "src/api"])
 
 
 ANCHOR_HARNESS = """
@@ -316,7 +460,7 @@ class ExplorerTreeAnchorScrollTestCase(unittest.TestCase):
                 encoding="utf-8",
             )
             completed = subprocess.run(
-                [NODE, str(script_path), str(VIEWER_JS), str(row_top), str(scroll_top)],
+                [NODE, str(script_path), str(TREE_JS), str(row_top), str(scroll_top)],
                 capture_output=True,
                 text=True,
                 check=False,

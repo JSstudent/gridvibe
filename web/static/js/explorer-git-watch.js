@@ -402,13 +402,18 @@
         if (explorerGitWatchDeferralActive(index, pane)) {
             return;
         }
-        const data = pane._explorerGitWatchPending;
+        const { data, scopePath, scopeKind } = pane._explorerGitWatchPending;
         pane._explorerGitWatchPending = null;
         // A GridVibe Git action may have applied this exact state meanwhile.
         if (data.revision && data.revision === pane._explorerGitRevision) {
             return;
         }
-        applyExplorerGitRepoQuiet(index, data);
+        /* The payload's load identity is the scope it was *fetched* under, not
+           whatever the pane's scope is by the time a deferred flush runs — a
+           deferral outlives a scope change, and labelling old data with the
+           new scope would make the pane look loaded for a scope it has never
+           asked the server about. */
+        applyExplorerGitRepoQuiet(index, data, scopePath, scopeKind);
     }
 
     function explorerFileWatchOnFailure(pane, status) {
@@ -527,6 +532,8 @@
     }
 
     async function explorerGitWatchApplyRefresh(index, pane, sessionId) {
+        const scopePath = explorerGitRequestedScope(pane);
+        const scopeKind = explorerGitRequestedScopeKind(pane);
         const data = await refreshExplorerGitRepoQuiet(index);
         if (terminals[index] !== pane || sessionIds[index] !== sessionId) {
             return;
@@ -540,9 +547,14 @@
         if (data.revision && data.revision === pane._explorerGitRevision) {
             return;
         }
-        // A newer pending payload simply replaces the older one — only the
-        // newest state is ever applied.
-        pane._explorerGitWatchPending = data;
+        /* A newer pending payload simply replaces the older one — only the
+           newest state is ever applied.
+
+           The payload and the scope it was fetched under are one record, in
+           one field: three parallel fields were cleared in three places and
+           one of them was always missed, leaving a scope from a deferral the
+           pane had already left behind. */
+        pane._explorerGitWatchPending = { data, scopePath, scopeKind };
         explorerGitWatchFlushPending(index);
     }
 
@@ -567,12 +579,14 @@
                 ? pane._explorerGitRevision
                 : pane._explorerFsWatchRevision) || '';
             const scopePath = explorerGitScopePath(pane);
+            const scopeKind = explorerGitScopeKind(pane);
             const response = await fetch(
                 explorerGitRequestUrl(
                     sessionId,
                     'state',
                     scopePath,
-                    { known }
+                    { known },
+                    scopeKind
                 ),
                 { cache: 'no-store' }
             );
@@ -582,6 +596,7 @@
                 terminals[index] !== pane
                 || sessionIds[index] !== sessionId
                 || explorerGitScopePath(pane) !== scopePath
+                || explorerGitScopeKind(pane) !== scopeKind
             ) {
                 return;
             }
@@ -595,6 +610,7 @@
                 terminals[index] !== pane
                 || sessionIds[index] !== sessionId
                 || explorerGitScopePath(pane) !== scopePath
+                || explorerGitScopeKind(pane) !== scopeKind
             ) {
                 return;
             }

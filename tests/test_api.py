@@ -305,6 +305,7 @@ class ApiRoutesTestCase(unittest.TestCase):
             "js/explorer-worker-core.js",
             "js/explorer-worker-client.js",
             "js/explorer-viewer.js",
+            "js/explorer-tree.js",
             "js/explorer-git-sidebar.js",
             "js/explorer-diff.js",
             "js/explorer-tabs.js",
@@ -794,7 +795,14 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("Boolean(terminal?._explorerTreeSidebarOpen)", entry_html)
         self.assertIn("Boolean(terminal?._explorerGitSidebarOpen)", entry_html)
         self.assertIn("Boolean(terminal?._explorerGitFollowBrowsing)", entry_html)
-        self.assertIn("terminal._explorerGitPinnedPath", entry_html)
+        # The pin pair travels, and travels through the one shared mapping --
+        # the five points that carry it across a rebuild each used to spell it
+        # out, and a pin that survives four of them reads as a pin that was
+        # never saved. The mapping's own behaviour is executed in
+        # tests/test_explorer_git_pin_persistence.py.
+        self.assertIn("explorer_git_pin_active", entry_html)
+        self.assertIn("explorer_git_pinned_path", entry_html)
+        self.assertIn("panePinDescriptor(terminal)", entry_html)
         cache_state_start = html.index("function captureCachedPaneUiState()")
         cache_state_end = html.index("function restoreCachedPaneUiState", cache_state_start)
         cache_state_html = html[cache_state_start:cache_state_end]
@@ -807,7 +815,11 @@ class ApiRoutesTestCase(unittest.TestCase):
             "_explorerGitFollowBrowsing: Boolean(session.explorer_git_follow_browsing)",
             html,
         )
-        self.assertIn("_explorerGitPinnedPath: session.explorer_git_pin_active", html)
+        # A rebuilt pane reads its pin back through the same shared mapping,
+        # whose `undefined`-means-unpinned rule is what keeps an unpinned pane
+        # from rebuilding as one pinned to its own root.
+        self.assertIn("_explorerGitPinnedPath: sessionPinnedPath(session)", html)
+        self.assertIn("explorerGitPinnedPathFromSession", self._static("js/session-persistence.js"))
         self.assertIn("_explorerSearchSidebarOpen: Boolean(session.explorer_search_open)", html)
         self.assertIn("workspace_only: true", save_handler_html)
         self.assertIn("source_saved_session_id: saveTarget.id || undefined", save_handler_html)
@@ -1752,6 +1764,81 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("function explorerGitPublish(index)", html)
         self.assertIn("Staged Changes", html)
 
+    def test_terminals_page_git_sidebar_freezes_its_scope_header(self):
+        """Repository, branch and scope stay on screen; Publish scrolls away.
+
+        Which repository and which part of it is what every change row and
+        every commit below is read against, so the repo bar is sticky. Publish
+        is the one action here that reaches a remote and is deliberately not
+        frozen with it -- it moved into its own section immediately below.
+        """
+        sidebar = self._static("js/explorer-git-sidebar.js")
+        css = self._static("css/terminals.css")
+
+        # The button is no longer inside the frozen header: the repo bar's
+        # section is closed before the publish section opens.
+        bar_at = sidebar.index("explorer-diff-sidebar-section explorer-git-repo-bar")
+        publish_box_at = sidebar.index("explorer-git-publish-box", bar_at)
+        publish_at = sidebar.index("data-explorer-git-publish", bar_at)
+        self.assertNotIn("data-explorer-git-publish", sidebar[bar_at:publish_box_at])
+        self.assertLess(publish_box_at, publish_at)
+
+        repo_bar_css = css[css.index(".explorer-git-repo-bar {"):]
+        repo_bar_css = repo_bar_css[: repo_bar_css.index("}")]
+        self.assertIn("position: sticky;", repo_bar_css)
+        self.assertIn("top: 0;", repo_bar_css)
+        # A sticky box is painted over what slides beneath it, so it needs an
+        # opaque background of its own -- from a token, never a literal.
+        self.assertIn("background: var(--explorer-bar-bg);", repo_bar_css)
+        self.assertNotRegex(repo_bar_css, r":\s*#[0-9a-fA-F]{3,6}\b")
+
+        # The Graph's commit find is sticky too and stacks *below* the frozen
+        # header rather than behind it, on a height the panel publishes.
+        search_css = css[css.index(".explorer-git-commit-search {"):]
+        search_css = search_css[: search_css.index("}")]
+        self.assertIn("top: var(--explorer-git-header-height, 0px);", search_css)
+        self.assertIn("--explorer-git-header-height", sidebar)
+        self.assertIn("function observeExplorerGitHeaderHeight(index)", sidebar)
+
+    def test_terminals_page_files_tree_marks_the_pin_and_the_follow(self):
+        """Both Git scopes are reported on the row they are on.
+
+        Follow is a mode with no fixed path of its own, so a pressed button in
+        a sidebar the reader may not have open was the only thing saying it was
+        on at all. The chain now sits on the row it is tracking, beside the pin
+        marker and sharing its rule rather than restating the box.
+        """
+        tree = self._static("js/explorer-tree.js")
+        sidebar = self._static("js/explorer-git-sidebar.js")
+        css = self._static("css/terminals.css")
+
+        # The markup hooks the CSS and the paint both key on.
+        self.assertIn('class="explorer-tree-follow-mark"', tree)
+        self.assertIn("data-explorer-tree-follow-root", tree)
+        self.assertIn("Git scope follows this row", tree)
+        self.assertIn("EXPLORER_GIT_FOLLOW_ICON", tree)
+
+        # One rule for both markers, so they cannot drift out of alignment
+        # with each other or with the row controls beside them (guardrail 7).
+        self.assertIn(
+            ".explorer-tree-pin-mark,\n        .explorer-tree-follow-mark {", css
+        )
+        self.assertIn(
+            ".explorer-tree-pin-mark[hidden],\n        .explorer-tree-follow-mark[hidden] {",
+            css,
+        )
+
+        # Both markers move on the one cross-surface paint, and a Follow
+        # toggle reaches it before the repository round trip it also starts.
+        self.assertIn("function refreshExplorerGitScopeAffordances(index)", sidebar)
+        self.assertIn("applyExplorerTreeScopeMarks(index);", sidebar)
+        toggle = sidebar[sidebar.index("async function toggleExplorerGitFollowBrowsing(index)"):]
+        toggle = toggle[: toggle.index("\n    /*")]
+        self.assertLess(
+            toggle.index("refreshExplorerGitScopeAffordances(index);"),
+            toggle.index("await loadExplorerGitRepo(index);"),
+        )
+
     def test_terminals_page_vendors_highlightjs_source_highlighting(self):
         """The Source viewer highlights
         the whole document once with the pinned Highlight.js build and keeps the
@@ -2019,6 +2106,11 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn('id="explorer-viewer-${index}"', html)
         self.assertIn("data-explorer-tab-open", html)
         self.assertIn("data-explorer-tab-close", html)
+        # Every tab that names a file exposes the shared Git-scope menu hook,
+        # including Preview; pinned tabs retain their copy/download hooks too.
+        self.assertIn("data-explorer-git-scope-path=", html)
+        self.assertIn('data-explorer-git-scope-kind="file"', html)
+        self.assertIn('data-explorer-git-scope-surface="tab"', html)
         # An open-in-new-tab control on each tree file row opens a pinned tab (event-isolated)
         # in the background — see the focus contract test below.
         self.assertIn("data-explorer-tree-open-tab", html)
@@ -2548,51 +2640,6 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("assignedTab.id === EXPLORER_PREVIEW_TAB_ID", html)
         self.assertIn("assignedTab.preferredMode || ''", html)
         self.assertIn("const preferredFileView = restoredMode || carriedMode;", html)
-
-    def test_terminals_page_tree_directory_click_browses_in_preview(self):
-        """A Files-tree directory *name* click browses it in the Preview tab;
-        the fold arrow beside it is a separate expand/collapse-only control."""
-        response = self.client.get("/terminals")
-
-        self.assertEqual(response.status_code, 200)
-        html = self._page_html(response)
-        toggle = html[
-            html.index("async function toggleExplorerTreeDirectory(index, path)"):
-            html.index("const EXPLORER_TREE_LEVEL_LOAD_CONCURRENCY")
-        ]
-        # The fold arrow is its own button and never navigates the Preview tab,
-        # so browsing the tree cannot evict the file the pane is showing.
-        self.assertIn("data-explorer-tree-chevron", html)
-        # It routes two gestures: a plain click folds the one directory, Alt
-        # folds every directory at that level. What each of them does to the
-        # expanded set is executed in tests/test_explorer_tree_fold.py.
-        chevron_handler = html[html.index("panel.querySelectorAll('[data-explorer-tree-chevron]')"):]
-        chevron_handler = chevron_handler[: chevron_handler.index("});")]
-        self.assertIn("event.altKey", chevron_handler)
-        self.assertIn("toggleExplorerTreeLevel(index, path)", chevron_handler)
-        self.assertIn("toggleExplorerTreeDirectory(index, path)", chevron_handler)
-        self.assertNotIn("loadExplorerPane(", chevron_handler)
-        self.assertNotIn("loadExplorerPane(", toggle)
-        self.assertIn("pane._explorerTreeExpanded.delete(path);", toggle)
-        # The name button navigates and expands, but never collapses.
-        open_dir = html[
-            html.index("async function openExplorerTreeDirectory(index, path)"):
-            html.index("async function revealExplorerTreePath(index, targetPath = '')")
-        ]
-        self.assertEqual(open_dir.count("await loadExplorerPane(index, path);"), 1)
-        self.assertNotIn("pane._explorerTreeExpanded.delete(path);", open_dir)
-        self.assertIn(
-            "openExplorerTreeDirectory(index, button.dataset.explorerTreeDir || '');",
-            html,
-        )
-        # Navigating still reveals the target row, but no longer force-expands
-        # the directory itself (that would undo the collapse click).
-        reveal = html[
-            html.index("async function revealExplorerTreePath(index, targetPath = '')"):
-            html.index("function focusExplorerTreeRow(index, path)")
-        ]
-        self.assertIn("segments.pop();", reveal)
-        self.assertNotIn("if (pane._explorerMode === 'file') {", reveal)
         # Directory navigation captures the outgoing tab's mode + scroll
         # before the loading placeholder guts the viewer (2.e parity with
         # openExplorerFile).
@@ -2601,6 +2648,16 @@ class ApiRoutesTestCase(unittest.TestCase):
             load_pane.index("explorerCaptureActiveTabView(index);"),
             load_pane.index("renderExplorerMessage(index, 'Loading directory...');"),
         )
+
+    def test_terminals_page_tree_directory_and_chevron_are_separate_controls(self):
+        """Folder navigation and tree folding have distinct button hooks."""
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = self._page_html(response)
+        # These are separate buttons rather than one row-wide click target.
+        self.assertIn("data-explorer-tree-chevron", html)
+        self.assertIn("data-explorer-tree-dir", html)
 
     def test_terminals_page_explorer_breadcrumb_navigation(self):
         """2.d (OD-3): the path label is a breadcrumb; ancestors browse in Preview."""
@@ -2673,16 +2730,21 @@ class ApiRoutesTestCase(unittest.TestCase):
         )
 
     def test_terminals_page_tab_strip_copy_path_and_locate_in_tree(self):
-        """Pinned tabs get the copy-path menu and a locate-in-tree double-click."""
+        """A tab naming a file gets the copy-path menu and a locate-in-tree double-click."""
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
         html = self._page_html(response)
-        # A pinned tab joins the shared copy-path menu (the tree and Git rows
-        # carry the same hook); the permanent Preview tab does not, and no
-        # context kind is exposed, so the tab menu stays copy-only.
-        self.assertIn("const copyPath = (!isPreview && tab.path)", html)
+        # The tab strip carries the shared copy-path hook (the tree and Git
+        # rows carry the same one), paired with the download hook so a tab can
+        # offer the read as well as the path. No filesystem context kind is
+        # exposed, so the tab menu stays copy-only. Which tabs actually carry
+        # it -- every tab that names a file, the permanent Preview tab
+        # included -- is asserted on the rendered strip in
+        # tests/test_explorer_tab_menu.py.
         self.assertIn('data-explorer-copy-path="${escHtml(tab.path)}"', html)
+        self.assertIn('data-explorer-download-path="${escHtml(tab.path)}"', html)
+        self.assertNotIn("data-explorer-context-kind=\"${escHtml(tab", html)
         wire = html[
             html.index("function wireExplorerTabStripInteractions(index, tabEl)"):
             html.index("function clearExplorerTabDragMarkers(index)")
@@ -3238,7 +3300,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         Opening three files in a row must leave the reader on the file they
         were already looking at, so the opener only touches the tab strip.
         """
-        viewer = self._static("js/explorer-viewer.js")
+        tree = self._static("js/explorer-tree.js")
         tabs = self._static("js/explorer-tabs.js")
         opener = tabs[
             tabs.index("function openExplorerFileInBackgroundTab(index, path,"):
@@ -3257,7 +3319,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         # The open-in-new-tab handler routes there and carries the row's Git badge along.
         self.assertIn(
             "git: explorerTreeEntryForPath(terminals[index], path)?.git || null",
-            viewer,
+            tree,
         )
 
     def test_reopening_an_already_open_tab_flashes_it_instead_of_focusing(self):
@@ -7654,6 +7716,124 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(payload["commits"][0]["files"][0]["path"], "README.md")
         self.assertEqual(payload["commits"][0]["files"][0]["git"]["status"], "added")
 
+    def test_explorer_git_file_scope_narrows_status_and_graph_to_that_file(self):
+        repo_dir = self._init_committed_repo()
+        other = repo_dir / "other.txt"
+        other.write_text("other\n", encoding="utf-8")
+        self._run_git(repo_dir, "add", "other.txt")
+        self._run_git(repo_dir, "commit", "-m", "other only")
+        readme = repo_dir / "README.md"
+        readme.write_text("# Project\nchanged\n", encoding="utf-8")
+        other.write_text("other changed\n", encoding="utf-8")
+        session_id = self._create_explorer_session(repo_dir)
+
+        response = self.client.get(
+            f"/api/explorer/{session_id}/git/repo",
+            query_string={"scope": "path", "kind": "file", "path": "README.md"},
+        )
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        payload = response.get_json()
+        self.assertEqual(payload["anchor_path"].replace("\\", "/"), "README.md")
+        self.assertEqual(
+            [item["path"].replace("\\", "/") for item in payload["changes"]],
+            ["README.md"],
+        )
+        subjects = [commit.get("subject") or commit.get("line", "") for commit in payload["commits"]]
+        self.assertFalse(any("other only" in subject for subject in subjects))
+        self.assertTrue(any("initial" in subject for subject in subjects))
+
+    def test_explorer_git_file_scope_rejects_bad_kind_directory_and_escape_without_mutation(self):
+        repo_dir = self._init_committed_repo()
+        readme = repo_dir / "README.md"
+        readme.write_text("# Project\nchanged\n", encoding="utf-8")
+        outside = Path(self.temp_dir.name) / "outside.txt"
+        outside.write_text("outside\n", encoding="utf-8")
+        session_id = self._create_explorer_session(repo_dir)
+        pane_before = api.session_manager.get_session(session_id).to_dict()
+        index_before = self._run_git(repo_dir, "diff", "--cached").stdout
+
+        refusals = (
+            {"scope": "path", "kind": "blob", "path": "README.md"},
+            {"scope": "path", "kind": "file", "path": ""},
+            {"scope": "path", "kind": "file", "path": "../outside.txt"},
+        )
+        for query in refusals:
+            with self.subTest(query=query):
+                response = self.client.post(
+                    f"/api/explorer/{session_id}/git/stage-all",
+                    query_string=query,
+                    json={},
+                )
+                self.assertEqual(response.status_code, 400, response.get_json())
+
+        self.assertEqual(
+            api.session_manager.get_session(session_id).to_dict(), pane_before
+        )
+        self.assertEqual(self._run_git(repo_dir, "diff", "--cached").stdout, index_before)
+        self.assertEqual(readme.read_text(encoding="utf-8"), "# Project\nchanged\n")
+        self.assertEqual(outside.read_text(encoding="utf-8"), "outside\n")
+
+    def test_explorer_git_file_scope_bulk_actions_and_commit_stay_on_one_file(self):
+        repo_dir = self._init_committed_repo()
+        other = repo_dir / "other.txt"
+        other.write_text("other\n", encoding="utf-8")
+        self._run_git(repo_dir, "add", "other.txt")
+        self._run_git(repo_dir, "commit", "-m", "add other")
+        readme = repo_dir / "README.md"
+        readme.write_text("# Project\nreadme changed\n", encoding="utf-8")
+        other.write_text("other changed\n", encoding="utf-8")
+        untracked = repo_dir / "untracked.txt"
+        untracked.write_text("leave me\n", encoding="utf-8")
+        session_id = self._create_explorer_session(repo_dir)
+        query = {"scope": "path", "kind": "file", "path": "README.md"}
+
+        staged = self.client.post(
+            f"/api/explorer/{session_id}/git/stage-all",
+            query_string=query,
+            json={},
+        )
+        self.assertEqual(staged.status_code, 200, staged.get_json())
+        self.assertEqual(
+            self._run_git(repo_dir, "diff", "--cached", "--name-only").stdout.decode().split(),
+            ["README.md"],
+        )
+
+        self._run_git(repo_dir, "add", "other.txt")
+        refused = self.client.post(
+            f"/api/explorer/{session_id}/git/commit",
+            query_string=query,
+            json={"message": "must not commit hidden staged work"},
+        )
+        self.assertEqual(refused.status_code, 400, refused.get_json())
+        self.assertIn("outside", refused.get_json()["error"].lower())
+        self.assertEqual(
+            set(self._run_git(repo_dir, "diff", "--cached", "--name-only").stdout.decode().split()),
+            {"README.md", "other.txt"},
+        )
+
+        unstaged = self.client.post(
+            f"/api/explorer/{session_id}/git/unstage-all",
+            query_string=query,
+            json={},
+        )
+        self.assertEqual(unstaged.status_code, 200, unstaged.get_json())
+        self.assertEqual(
+            self._run_git(repo_dir, "diff", "--cached", "--name-only").stdout.decode().split(),
+            ["other.txt"],
+        )
+
+        self._run_git(repo_dir, "reset", "--quiet", "HEAD", "--", "other.txt")
+        discarded = self.client.post(
+            f"/api/explorer/{session_id}/git/discard-all",
+            query_string=query,
+            json={},
+        )
+        self.assertEqual(discarded.status_code, 200, discarded.get_json())
+        self.assertEqual(readme.read_text(encoding="utf-8"), "# Project\n")
+        self.assertEqual(other.read_text(encoding="utf-8"), "other changed\n")
+        self.assertEqual(untracked.read_text(encoding="utf-8"), "leave me\n")
+
     def test_explorer_git_repo_expands_untracked_directories_to_files(self):
         repo_dir = self._init_committed_repo()
         nested_dir = repo_dir / "new" / "nested"
@@ -8752,9 +8932,11 @@ class ApiRoutesTestCase(unittest.TestCase):
 
     def test_parse_git_graph_log_skips_connector_only_lines(self):
         commits = web_explorer._parse_git_graph_log(
-            b"* \x1fa1b2c3d4e5f60718293a4b5c6d7e8f9012345678\x1fa1b2c3d\x1f\x1finitial\n"
+            b"* \x1fa1b2c3d4e5f60718293a4b5c6d7e8f9012345678\x1fa1b2c3d\x1f\x1f"
+            b"Ada\x1f2026-08-01T09:15:00+02:00\x1finitial\n"
             b"|\\\n"
-            b"| * \x1fb2c3d4e5f60718293a4b5c6d7e8f90123456789a\x1fb2c3d4e\x1f\x1fbranch work\n"
+            b"| * \x1fb2c3d4e5f60718293a4b5c6d7e8f90123456789a\x1fb2c3d4e\x1f\x1f"
+            b"Grace\x1f2026-08-02T11:30:00+02:00\x1fbranch work\n"
             b"|/\n"
         )
 
@@ -8771,10 +8953,19 @@ class ApiRoutesTestCase(unittest.TestCase):
                 "b2c3d4e5f60718293a4b5c6d7e8f90123456789a",
             ],
         )
+        # The hover card's two fields ride beside them, parsed rather than
+        # scraped back out of the rendered line.
+        self.assertEqual([commit["author"] for commit in commits], ["Ada", "Grace"])
+        self.assertEqual(
+            [commit["authored_at"] for commit in commits],
+            ["2026-08-01T09:15:00+02:00", "2026-08-02T11:30:00+02:00"],
+        )
 
     def test_parse_git_graph_log_separates_decorations_from_the_message(self):
         commits = web_explorer._parse_git_graph_log(
-            b"* \x1f" + b"a" * 40 + b"\x1faaaaaaa\x1fHEAD -> main, tag: v1.2\x1f(fix) ship it\n"
+            b"* \x1f" + b"a" * 40
+            + b"\x1faaaaaaa\x1fHEAD -> main, tag: v1.2"
+            + b"\x1fAda\x1f2026-08-01T09:15:00+02:00\x1f(fix) ship it\n"
         )
 
         self.assertEqual(len(commits), 1)
@@ -8784,15 +8975,94 @@ class ApiRoutesTestCase(unittest.TestCase):
         # ...while the copyable message is the subject the author actually
         # wrote, including a leading "(fix)" that is part of it.
         self.assertEqual(commits[0]["message"], "(fix) ship it")
+        # ...and the decoration keeps its own field, never re-derived by
+        # stripping parentheses the subject may legitimately begin with.
+        self.assertEqual(commits[0]["refs"], "HEAD -> main, tag: v1.2")
 
     def test_parse_git_graph_log_keeps_a_subject_with_spacing(self):
         commits = web_explorer._parse_git_graph_log(
-            b"* \x1f" + b"b" * 40 + b"\x1fbbbbbbb\x1f\x1ffix:  two  spaces and (parens)\n"
+            b"* \x1f" + b"b" * 40
+            + b"\x1fbbbbbbb\x1f\x1fAda\x1f2026-08-01T09:15:00+02:00"
+            + b"\x1ffix:  two  spaces and (parens)\n"
         )
 
         self.assertEqual(commits[0]["message"], "fix:  two  spaces and (parens)")
         self.assertEqual(commits[0]["subject"], "fix:  two  spaces and (parens)")
 
+    def test_parse_git_graph_log_keeps_a_separator_inside_the_subject(self):
+        # The subject is the last field and takes the whole remainder, so a
+        # unit separator an author managed to type cannot shift the fields
+        # ahead of it out of alignment.
+        commits = web_explorer._parse_git_graph_log(
+            b"* \x1f" + b"c" * 40
+            + b"\x1fccccccc\x1f\x1fAda\x1f2026-08-01T09:15:00+02:00"
+            + b"\x1fodd \x1f subject\n"
+        )
+
+        self.assertEqual(commits[0]["author"], "Ada")
+        self.assertEqual(commits[0]["message"], "odd \x1f subject")
+
+    def test_git_graph_log_reads_one_past_the_page_to_report_more(self):
+        # "Show more" must tell the truth about a scope that ends exactly on a
+        # page boundary, so the runner probes one extra commit and drops it.
+        def rows(count):
+            return b"".join(
+                b"* \x1f" + f"{n:040d}".encode()
+                + b"\x1f" + f"{n:07d}".encode()
+                + b"\x1f\x1fAda\x1f2026-08-01T09:15:00+02:00\x1fwork\n"
+                for n in range(count)
+            )
+
+        class _Backend:
+            def __init__(self, output):
+                self.output = output
+                self.args = None
+
+            def run_git(self, args, cwd=None, timeout=None):
+                self.args = args
+                return SimpleNamespace(
+                    returncode=0,
+                    stdout=self.output,
+                    stderr=b"",
+                    completed=True,
+                    stdout_truncated=False,
+                    stderr_truncated=False,
+                    output_limited=False,
+                )
+
+        full = _Backend(rows(4))
+        commits, has_more = web_explorer._bounded_git_graph_log(full, "/repo", ".", 3)
+        self.assertEqual(len(commits), 3)
+        self.assertTrue(has_more)
+        self.assertIn("--max-count=4", full.args)
+
+        exact = _Backend(rows(3))
+        commits, has_more = web_explorer._bounded_git_graph_log(exact, "/repo", ".", 3)
+        self.assertEqual(len(commits), 3)
+        self.assertFalse(has_more)
+
+    def test_git_log_limit_refuses_anything_past_the_ceiling(self):
+        # A refusal, not a clamp: a client silently served a shorter graph
+        # would keep asking for the same page for ever.
+        self.assertEqual(
+            web_explorer.normalized_git_log_limit(None),
+            web_explorer.EXPLORER_GIT_LOG_MAX_COMMITS,
+        )
+        self.assertEqual(
+            web_explorer.normalized_git_log_limit(
+                str(web_explorer.EXPLORER_GIT_LOG_LIMIT_MAX)
+            ),
+            web_explorer.EXPLORER_GIT_LOG_LIMIT_MAX,
+        )
+        for rejected in (
+            "0",
+            "-5",
+            "abc",
+            str(web_explorer.EXPLORER_GIT_LOG_LIMIT_MAX + 1),
+        ):
+            with self.subTest(limit=rejected):
+                with self.assertRaisesRegex(ValueError, "Invalid Git commit limit"):
+                    web_explorer.normalized_git_log_limit(rejected)
     def test_explorer_git_diff_rejects_invalid_mode_and_outside_root(self):
         repo_dir = Path(self.temp_dir.name) / "repo"
         repo_dir.mkdir()
@@ -14519,6 +14789,47 @@ class ExplorerGitRevisionTestCase(unittest.TestCase):
         self.assertNotIn(commit_revision, {repo_revision, stage_revision})
         self.assertEqual(commit_revision, self._git_state(session_id).get_json()["revision"])
 
+    def test_commit_graph_page_travels_and_an_out_of_range_page_mutates_nothing(self):
+        root = Path(self.temp_dir.name) / "paged"
+        root.mkdir(parents=True)
+        (root / "README.md").write_text("# paged\n", encoding="utf-8")
+        session_id = self._create_explorer_session(root)
+        summary = {
+            "anchor_path": "",
+            "git": {},
+            "changes": [],
+            "commits": [],
+            "revision": "0123456789abcdef",
+        }
+        expanded = web_explorer.EXPLORER_GIT_LOG_MAX_COMMITS * 2
+
+        with patch.object(
+            api, "_get_git_repo_summary", return_value=summary
+        ) as get_summary:
+            response = self.client.get(
+                f"/api/explorer/{session_id}/git/repo",
+                query_string={"limit": str(expanded)},
+            )
+
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(get_summary.call_args.args[-1], expanded)
+
+        # Past the ceiling the request is refused, and refused *before* the
+        # mutation runs -- a bad page must never leave the worktree changed.
+        with patch.object(api, "_git_stage_all_paths") as action, patch.object(
+            api, "_get_git_repo_summary", return_value=summary
+        ) as get_summary:
+            refused = self.client.post(
+                f"/api/explorer/{session_id}/git/stage-all",
+                query_string={"limit": str(web_explorer.EXPLORER_GIT_LOG_LIMIT_MAX + 1)},
+                json={},
+            )
+
+            self.assertEqual(refused.status_code, 400)
+            self.assertIn("Invalid Git commit limit", refused.get_json()["error"])
+            action.assert_not_called()
+            get_summary.assert_not_called()
+
     def test_all_git_mutations_share_the_selected_root_or_followed_anchor(self):
         root = Path(self.temp_dir.name) / "root"
         current = root / "nested"
@@ -14566,9 +14877,16 @@ class ExplorerGitRevisionTestCase(unittest.TestCase):
                     self.assertEqual(action.call_args.args[1], str(root.resolve()))
                     self.assertEqual(action.call_args.args[-1], str(expected_anchor))
                     get_summary.assert_called_once()
+                    # The commit-graph page rides on every mutation answer
+                    # too, or a stage would collapse an expanded Graph.
                     self.assertEqual(
                         get_summary.call_args.args[1:],
-                        (str(root.resolve()), str(expected_anchor)),
+                        (
+                            str(root.resolve()),
+                            str(expected_anchor),
+                            str(expected_anchor),
+                            web_explorer.EXPLORER_GIT_LOG_MAX_COMMITS,
+                        ),
                     )
 
 
@@ -14788,6 +15106,21 @@ class ExplorerGitWatchFrontendTestCase(unittest.TestCase):
             with self.subTest(gate=gate):
                 self.assertIn(gate, watch)
 
+    def test_git_watch_pending_payload_and_its_scope_are_one_field(self):
+        # A deferred payload has to be applied under the scope it was *fetched*
+        # under, so the payload and that scope are one record. They were three
+        # parallel fields cleared in three places, and one of the three was
+        # missed every time -- leaving a scope behind from a deferral the pane
+        # had already left. Nothing to clear asymmetrically now.
+        watch = self._static("js/explorer-git-watch.js")
+        for parallel_field in (
+            "_explorerGitWatchPendingScope",
+            "_explorerGitWatchPendingScopeKind",
+        ):
+            with self.subTest(field=parallel_field):
+                self.assertNotIn(parallel_field, watch)
+        self.assertIn("_explorerGitWatchPending = { data, scopePath, scopeKind }", watch)
+
     def test_git_watch_adaptive_interval_backoff_and_suspension(self):
         watch = self._static("js/explorer-git-watch.js")
         self.assertIn("EXPLORER_GIT_WATCH_BASE_MS = 5000", watch)
@@ -14811,7 +15144,14 @@ class ExplorerGitWatchFrontendTestCase(unittest.TestCase):
         self.assertIn("git-refreshing", quiet_fn)
         self.assertNotIn("_explorerGitRepoLoading = true", quiet_fn)
         self.assertIn("cache: 'no-store'", quiet_fn)
-        self.assertIn("function applyExplorerGitRepoQuiet(index, data)", sidebar)
+        # The quiet apply exists and takes the scope its payload was fetched
+        # under, so a deferred flush cannot label old data with a new scope.
+        # (Its behaviour is executed in tests/test_explorer_git_identity.py.)
+        self.assertIn("function applyExplorerGitRepoQuiet(", sidebar)
+        self.assertIn("requestedScopePath", sidebar)
+        # The pending payload carries that scope with it, in one record — see
+        # test_git_watch_pending_payload_and_its_scope_are_one_field.
+        self.assertIn("scopePath", self._static("js/explorer-git-watch.js"))
         self.assertIn("_explorerGitRevision", sidebar)
         # Tab badges re-render only when the badge map actually changed — the
         # sync itself moved with the tab domain (explorer-tabs.js).
@@ -14917,18 +15257,22 @@ class ExplorerGitWatchFrontendTestCase(unittest.TestCase):
 
     def test_fs_surface_quiet_refresh_helper_contract(self):
         viewer = self._static("js/explorer-viewer.js")
-        for helper in (
-            "function explorerEntriesSignature(entries)",
-            "async function refreshExplorerDirectoryQuiet(index)",
-            "async function refreshExplorerTreeQuiet(index)",
-            "async function refreshExplorerFilesystemSurfacesQuiet(index)",
+        tree = self._static("js/explorer-tree.js")
+        for source, helpers in (
+            (viewer, (
+                "function explorerEntriesSignature(entries)",
+                "async function refreshExplorerDirectoryQuiet(index)",
+                "async function refreshExplorerFilesystemSurfacesQuiet(index)",
+            )),
+            (tree, ("async function refreshExplorerTreeQuiet(index)",)),
         ):
-            with self.subTest(helper=helper):
-                self.assertIn(helper, viewer)
+            for helper in helpers:
+                with self.subTest(helper=helper):
+                    self.assertIn(helper, source)
         quiet_fn = viewer[
             viewer.index("function explorerEntriesSignature(entries)"):
             viewer.index("function explorerResolveFileView")
-        ]
+        ] + tree[tree.index("const EXPLORER_FS_WATCH_MAX_TREE_NODES"):]
         self.assertIn("cache: 'no-store'", quiet_fn)
         # Quiet: no loading placeholder, no tab/scroll/search reset, and never
         # through the user-initiated load paths.
@@ -14949,10 +15293,13 @@ class ExplorerGitWatchFrontendTestCase(unittest.TestCase):
 
     def test_fs_watch_baseline_is_reset_by_user_initiated_loads(self):
         viewer = self._static("js/explorer-viewer.js")
+        tree = self._static("js/explorer-tree.js")
         self.assertIn("function resetExplorerFsWatchBaseline(pane)", viewer)
         # Every listing/tree load leaves the surfaces current, so the next poll
         # re-bootstraps silently instead of repainting what was just fetched.
-        self.assertEqual(viewer.count("resetExplorerFsWatchBaseline(pane);"), 2)
+        self.assertEqual(
+            (viewer + tree).count("resetExplorerFsWatchBaseline(pane);"), 2
+        )
 
     def test_promoted_preview_tab_keeps_its_git_badge(self):
         tabs = self._static("js/explorer-tabs.js")
@@ -16319,6 +16666,7 @@ class GuardrailAuditFixesTestCase(unittest.TestCase):
         "js/explorer-worker-client.js",
         "js/explorer-worker.js",
         "js/explorer-viewer.js",
+        "js/explorer-tree.js",
         "js/explorer-diff.js",
         "js/explorer-tabs.js",
         "js/explorer-editor.js",
@@ -16423,6 +16771,7 @@ class ExtractedFrontendAssetsTestCase(unittest.TestCase):
         self.assertIn(f"/static/js/terminal-icons.js?v={__version__}", terminals_html)
         self.assertIn(f"/static/js/voice-input.js?v={__version__}", terminals_html)
         self.assertIn(f"/static/js/explorer-viewer.js?v={__version__}", terminals_html)
+        self.assertIn(f"/static/js/explorer-tree.js?v={__version__}", terminals_html)
         self.assertIn(f"/static/js/explorer-git-sidebar.js?v={__version__}", terminals_html)
         self.assertIn(f"/static/js/explorer-editor.js?v={__version__}", terminals_html)
         self.assertIn(f"/static/js/explorer-fs.js?v={__version__}", terminals_html)
@@ -16470,6 +16819,17 @@ class ExtractedFrontendAssetsTestCase(unittest.TestCase):
         self.assertLess(
             terminals_html.index("js/explorer-worker-client.js"),
             terminals_html.index("js/explorer-viewer.js"),
+        )
+        # explorer-tree.js is the Files-tree domain lifted byte-identically out
+        # of explorer-viewer.js and is loaded directly after it.
+        self.assertNotIn("js/explorer-tree.js", launcher_html)
+        self.assertLess(
+            terminals_html.index("js/explorer-viewer.js"),
+            terminals_html.index("js/explorer-tree.js"),
+        )
+        self.assertLess(
+            terminals_html.index("js/explorer-tree.js"),
+            terminals_html.index("js/explorer-git-sidebar.js"),
         )
         # explorer-git-sidebar.js is the Git domain lifted out of
         # explorer-viewer.js by guardrail 6's standing extraction trigger.
@@ -16572,6 +16932,7 @@ class ExtractedFrontendAssetsTestCase(unittest.TestCase):
             "js/terminal-icons.js",
             "js/voice-input.js",
             "js/explorer-viewer.js",
+            "js/explorer-tree.js",
             "js/explorer-diff.js",
             "js/explorer-tabs.js",
             "js/explorer-editor.js",
@@ -18895,6 +19256,7 @@ class ExplorerDownloadTestCase(unittest.TestCase):
         viewer_js = "\n".join(
             (
                 self._static("js/explorer-viewer.js"),
+                self._static("js/explorer-tree.js"),
                 self._static("js/explorer-git-sidebar.js"),
             )
         )

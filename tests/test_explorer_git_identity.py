@@ -26,6 +26,9 @@ from tempfile import TemporaryDirectory
 
 ROOT = Path(__file__).resolve().parent.parent
 SIDEBAR_JS = ROOT / "web" / "static" / "js" / "explorer-git-sidebar.js"
+# The scope policy the sidebar reads through `window`: what the pane is
+# browsing is the policy module's answer, not the sidebar's own.
+PIN_JS = ROOT / "web" / "static" / "js" / "explorer-git-pin.js"
 
 NODE = shutil.which("node")
 
@@ -107,8 +110,10 @@ const sandbox = {
     }
 };
 sandbox.globalThis = sandbox;
+sandbox.window = sandbox;
 vm.createContext(sandbox);
-vm.runInContext(fs.readFileSync(process.argv[2], 'utf8'), sandbox);
+vm.runInContext(fs.readFileSync(process.argv[3], 'utf8'), sandbox);  // git pin policy
+vm.runInContext(fs.readFileSync(process.argv[2], 'utf8'), sandbox);  // git sidebar
 
 /* Overrides go on *after* evaluation: the sidebar's own function declarations
    would otherwise replace same-named stubs put on the sandbox up front. Every
@@ -162,7 +167,7 @@ class ExplorerGitIdentityHarness(unittest.TestCase):
             script_path = Path(script_dir) / "harness.js"
             script_path.write_text(script, encoding="utf-8")
             completed = subprocess.run(
-                [NODE, str(script_path), str(SIDEBAR_JS)],
+                [NODE, str(script_path), str(SIDEBAR_JS), str(PIN_JS)],
                 capture_output=True,
                 text=True,
                 encoding="utf-8",
@@ -441,6 +446,174 @@ class ScopeIdentityTestCase(ExplorerGitIdentityHarness):
         )
         self.assertEqual(result["state"], "pane-replaced")
         self.assertEqual(result["missing"], "pane-replaced")
+
+
+LOAD_HARNESS_PREAMBLE = """
+const fs = require('fs');
+const vm = require('vm');
+
+const calls = { requests: [], renders: [] };
+
+/* A freshly rebuilt pane: nothing loaded, a pin already re-applied from the
+   restored session record. This is the state a restored workspace starts in. */
+function makePane(pinnedPath) {
+    const pane = {
+        _explorerMode: 'directory',
+        _explorerPath: 'browsed',
+        _explorerGitSidebarOpen: true,
+        _explorerGitFollowBrowsing: false,
+        _explorerGitRepoLoaded: false,
+        _explorerGitRepoLoading: false,
+        _explorerGitRepo: null,
+        _explorerGitAnchorPath: '',
+        _explorerGitRepoError: ''
+    };
+    if (pinnedPath !== null) {
+        pane._explorerGitPinnedPath = pinnedPath;
+    }
+    return pane;
+}
+
+const pane = makePane(PINNED_PATH);
+
+// What the server answers with. `anchor_path` is the *resolved* spelling and
+// is deliberately allowed to differ from the requested one.
+let answer = { anchor_path: RESOLVED_ANCHOR, revision: 'rev-1' };
+
+const sandbox = {
+    console: { error() {}, warn() {}, log() {} },
+    Promise, Set, Map, JSON, Number, String, Boolean, Array, Object, Error,
+    URLSearchParams, encodeURIComponent,
+    terminals: [pane],
+    sessionIds: ['session-1'],
+    document: { getElementById: () => null },
+    fetch: async (url) => {
+        calls.requests.push(url);
+        return { ok: true, status: 200, json: async () => answer };
+    }
+};
+sandbox.globalThis = sandbox;
+vm.createContext(sandbox);
+vm.runInContext(fs.readFileSync(process.argv[2], 'utf8'), sandbox);
+
+sandbox.renderExplorerGitPanels = index => { calls.renders.push(index); };
+sandbox.renderExplorerGitPanel = index => { calls.renders.push(index); };
+sandbox.syncExplorerGitActiveRows = () => {};
+sandbox.syncExplorerTabGitFromRepo = () => {};
+sandbox.notePanePresentationChanged = () => {};
+
+const emit = (payload) => process.stdout.write(JSON.stringify(payload));
+"""
+
+
+@unittest.skipUnless(NODE, "Node.js is required for explorer Git identity tests")
+class LoadIdentityTestCase(unittest.TestCase):
+    """Which scope the pane's loaded model is the model *for*.
+
+    The load's early return compares "the scope the next request would carry"
+    against a field the pane holds. Those have to be the same kind of thing.
+    The server's ``anchor_path`` is the *resolved* spelling of the scope, and
+    it is a different string whenever the requested spelling was not already
+    canonical -- so storing the answer and comparing it to the question left
+    such a pane permanently un-loaded: the early return never fired, and every
+    render refetched the whole repository behind a pin that looked, from the
+    outside, like it had simply not been restored.
+    """
+
+    def _run_node(self, body, *, pinned_path="docs", resolved_anchor="docs"):
+        preamble = (
+            LOAD_HARNESS_PREAMBLE.replace("PINNED_PATH", json.dumps(pinned_path))
+            .replace("RESOLVED_ANCHOR", json.dumps(resolved_anchor))
+        )
+        script = (
+            preamble
+            + "\n(async () => {\n"
+            + body
+            + "\n})().catch(error => { console.error(error); process.exit(1); });\n"
+        )
+        with TemporaryDirectory() as script_dir:
+            script_path = Path(script_dir) / "harness.js"
+            script_path.write_text(script, encoding="utf-8")
+            completed = subprocess.run(
+                [NODE, str(script_path), str(SIDEBAR_JS), str(PIN_JS)],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                check=False,
+            )
+        if completed.returncode != 0:
+            self.fail(f"node harness failed:\n{completed.stderr}")
+        return json.loads(completed.stdout)
+
+    def test_a_second_load_of_an_unchanged_scope_issues_no_request(self):
+        result = self._run_node(
+            """
+            await sandbox.loadExplorerGitRepo(0);
+            const afterFirst = calls.requests.length;
+            await sandbox.loadExplorerGitRepo(0);
+            emit({
+                afterFirst,
+                afterSecond: calls.requests.length,
+                anchor: pane._explorerGitAnchorPath
+            });
+            """
+        )
+        self.assertEqual(result["afterFirst"], 1)
+        self.assertEqual(result["afterSecond"], 1)
+        self.assertEqual(result["anchor"], "docs")
+
+    def test_a_pin_the_server_spells_differently_still_counts_as_loaded(self):
+        """The load identity is the scope that was *requested*.
+
+        The server answers with its own resolved spelling of that scope, and
+        storing the answer as the identity meant every later comparison found a
+        difference: such a pane never counted as loaded, so every render
+        refetched the whole repository.
+        """
+        result = self._run_node(
+            """
+            await sandbox.loadExplorerGitRepo(0);
+            await sandbox.loadExplorerGitRepo(0);
+            await sandbox.loadExplorerGitRepo(0);
+            emit({
+                requests: calls.requests.length,
+                anchor: pane._explorerGitAnchorPath
+            });
+            """,
+            pinned_path="docs/",
+            resolved_anchor="docs",
+        )
+        self.assertEqual(result["requests"], 1)
+        self.assertEqual(result["anchor"], "docs/")
+
+    def test_a_root_pin_is_loaded_once_and_not_confused_with_no_pin(self):
+        result = self._run_node(
+            """
+            await sandbox.loadExplorerGitRepo(0);
+            const pinnedRequest = calls.requests[0];
+            await sandbox.loadExplorerGitRepo(0);
+            emit({ requests: calls.requests.length, pinnedRequest });
+            """,
+            pinned_path="",
+            resolved_anchor="",
+        )
+        self.assertEqual(result["requests"], 1)
+        # A root pin still travels as an explicit scope, not as an omitted one.
+        self.assertIn("scope=path", result["pinnedRequest"])
+
+    def test_a_changed_scope_is_reloaded_rather_than_served_from_the_old_model(self):
+        result = self._run_node(
+            """
+            await sandbox.loadExplorerGitRepo(0);
+            pane._explorerGitPinnedPath = 'web';
+            answer = { anchor_path: 'web', revision: 'rev-2' };
+            await sandbox.loadExplorerGitRepo(0);
+            emit({ requests: calls.requests, anchor: pane._explorerGitAnchorPath });
+            """
+        )
+        self.assertEqual(len(result["requests"]), 2)
+        self.assertIn("path=web", result["requests"][1])
+        self.assertEqual(result["anchor"], "web")
 
 
 if __name__ == "__main__":
