@@ -1,15 +1,25 @@
-/* GridVibeExplorerGitMenu — the Git sidebar's commit-row context menu model.
+/* GridVibeExplorerGitMenu — what may be copied off a commit row, and what each
+   control says about it.
 
    A commit row is not a filesystem entry: it names an immutable object in the
    repository, not a path under the explorer root. So it does not join the
    multi-entry selection (explorer-selection.js), it is never a batch target,
-   and every entry here is a *read* of data the sidebar already fetched — the
-   menu issues no request and touches nothing on disk, which keeps it well
-   inside the explorer's read-only contract.
+   and every affordance here is a *read* of data the sidebar already fetched —
+   nothing here issues a request or touches anything on disk, which keeps it
+   well inside the explorer's read-only contract.
 
-   DOM-free and require()-able from Node so the entries and the clipboard text
-   they carry are executed by tests rather than asserted as source text. The
-   page's DOM adapter lives in explorer-viewer.js. */
+   These two entries used to be a context menu of their own, opened by the
+   right-click that also had an instant hover card competing with it for the
+   same row. One gesture now answers both: the right-click opens the commit
+   card, and these are the copy buttons inside it (explorer-git-graph.js says
+   which of the card's rows hosts one). The module survives the move because
+   what a click puts on the clipboard is a decision, not a paint — and it is
+   the *only* answer to that question, so the card cannot offer a hash the
+   menu would have refused.
+
+   DOM-free and require()-able from Node so the affordances and the clipboard
+   text they carry are executed by tests rather than asserted as source text.
+   The page's DOM adapter lives in explorer-git-sidebar.js. */
 (function (root, factory) {
     const api = factory();
     if (typeof module === 'object' && module.exports) module.exports = api;
@@ -51,36 +61,42 @@
         return text(commit && commit.message).trim();
     }
 
-    /* Menu entries in the shape showExplorerContextMenu() consumes. An entry
-       whose value is missing is offered disabled rather than dropped, so the
-       menu keeps a stable shape and a row that lost its data says so instead
-       of silently shrinking. `copy` is the caller's clipboard function; it is
-       injected so this stays DOM-free and the tests can observe the exact
-       string each entry would put on the clipboard. */
-    function commitMenuItems(commit, copy) {
+    /* The card's two copy controls, keyed by the slot each one sits in: the
+       card's message line, and whichever row explorer-git-graph.js tagged
+       `copy: 'hash'`.
+
+       An affordance whose value is missing is offered *disabled* rather than
+       dropped, exactly as the menu entry it replaces was: the card keeps a
+       stable shape and a row that lost its data says so, instead of the
+       control quietly not being there. `copy` is the caller's clipboard
+       function; it is injected so this stays DOM-free and the tests can
+       observe the exact string each button would put on the clipboard. */
+    function commitCopyActions(commit, copy) {
         const id = commitId(commit);
         const message = commitMessage(commit);
         const copyText = typeof copy === 'function' ? copy : () => {};
-        return [
-            {
+        return {
+            hash: {
+                key: 'hash',
                 label: 'Copy commit hash',
                 title: id ? `Copy ${id}` : 'This row has no commit id',
                 disabled: !id,
                 action: () => copyText(id)
             },
-            {
+            message: {
+                key: 'message',
                 label: 'Copy commit message',
                 title: message ? `Copy "${message}"` : 'This row has no commit message',
                 disabled: !message,
                 action: () => copyText(message)
             }
-        ];
+        };
     }
 
     return {
         COMMIT_ID_PATTERN,
         commitId,
         commitMessage,
-        commitMenuItems
+        commitCopyActions
     };
 }));

@@ -296,95 +296,280 @@ ${explorerGitRequestedScopeKind(pane)}`;
         return String(commit?.full_hash || commit?.hash || '');
     }
 
-    /* The commit row's hover card, painted from GridVibeExplorerGitGraph's
-       DOM-free model.
+    /* The commit row's card, painted from GridVibeExplorerGitGraph's DOM-free
+       model and opened by the row's own right-click.
 
        It replaces a native `title`, which could neither be styled nor hold
-       more than the one line the row was already showing. It lives *inside*
-       the row button and out of flow, so it never joins the row's grid and
-       never moves a pixel of the graph; hover and keyboard focus reveal it
-       through CSS alone, so no pointer handler and no measurement runs for a
-       list that may be three hundred rows long.
+       more than the one line the row was already showing. It used to appear
+       on hover, on a delay, while a separate context menu on the same row
+       offered the two copy entries -- one row answering to two gestures, and
+       the more useful of the two arriving uninvited while the reader was
+       merely scanning subjects. The right-click now opens the card, and the
+       copy entries are controls *inside* it.
 
-       aria-hidden, with the same facts handed to the button as its label:
-       inside a button every one of these words would otherwise be read out as
-       part of the control's name, twice over. */
-    function explorerGitCommitCardHtml(card) {
+       That makes it a surface the reader operates rather than one they only
+       read, and three things follow.
+
+       It cannot live inside the row button -- a button inside a button is not
+       a control anybody can click. And it cannot live inside the Git panel
+       either, which is where it used to hang: that panel is a scroller, so
+       anything laid out in it is capped at the sidebar's width, and the full
+       forty-character object id -- the one field a reader comes to this card
+       to copy -- wrapped onto two lines in any sidebar narrower than about
+       360px. Widening it in place would have handed the whole graph a
+       horizontal scrollbar instead. So it goes on `document.body` and is
+       positioned in viewport coordinates, exactly as the context menu it
+       replaces does, and is sized by its own content: it is never narrower
+       than the row it hangs off and never wider than the ceiling in
+       terminals.css.
+
+       Living outside the panel is what makes the *dismissals* load-bearing
+       rather than incidental. A card laid out inside the panel died with the
+       panel's innerHTML and moved with its scroll; this one does neither, so
+       a re-render, a scroll of the list under it, a group switch and a pane
+       release each have to say so.
+
+       It is also no longer aria-hidden: the row button keeps carrying the same
+       facts as its accessible name, because the card is only on screen while
+       the reader keeps it there.
+
+       Nothing is emitted per row any more. A scope may carry three hundred
+       commits, and rendering three hundred cards to show at most one is the
+       cost the old markup paid on every repaint. */
+    let _explorerGitCommitCard = null;
+    let _explorerGitCommitCardRow = null;
+    let _explorerGitCommitCardPane = null;
+
+    /* Which pane the open card belongs to, for the three callers that have
+       to tell "mine" from "somebody else's": the panel about to rewrite its
+       own innerHTML, the group being cached off screen, and the pane being
+       discarded. The card is bound to the pane object rather than to its grid
+       slot or its panel id, for the reason every post-await write in this
+       file is. */
+    function explorerGitCommitCardPane() {
+        return _explorerGitCommitCardPane;
+    }
+
+    /* One copy control. The slot is emitted whether or not it holds a button:
+       the card's rows are `display: contents` over a three-column grid, so a
+       row that contributed two cells instead of three would slide every row
+       below it one column across. */
+    function explorerGitCommitCopyHtml(action) {
+        if (!action) {
+            return '<span class="explorer-git-commit-card-copy-slot"></span>';
+        }
+        return `<span class="explorer-git-commit-card-copy-slot"><button type="button" class="explorer-search-btn explorer-git-commit-card-copy" data-explorer-git-commit-copy="${escHtml(action.key)}"${action.disabled ? ' disabled' : ''} title="${escHtml(action.title)}" aria-label="${escHtml(action.label)}">${UI_COPY_ICON}</button></span>`;
+    }
+
+    function explorerGitCommitCardHtml(card, actions) {
         if (!card) {
             return '';
         }
+        const copy = actions || {};
         const rows = (card.rows || []).map(row => `
                 <span class="explorer-git-commit-card-row">
                     <span class="explorer-git-commit-card-label">${escHtml(row.label)}</span>
                     <span class="explorer-git-commit-card-value${row.mono ? ' is-mono' : ''}">${escHtml(row.value)}</span>
+                    ${explorerGitCommitCopyHtml(row.copy ? copy[row.copy] : null)}
                 </span>`).join('');
+        /* One at a time, so it is addressable by id -- which is what lets the
+           change listener ask "is a floating surface open over a row?" with a
+           getElementById on every poll rather than a class query over the
+           document. */
         return `
-            <span class="explorer-git-commit-card" aria-hidden="true">
-                <span class="explorer-git-commit-card-message">${escHtml(card.message)}</span>
+            <span class="explorer-git-commit-card" id="explorer-git-commit-card" role="group" aria-label="Commit details" tabindex="-1">
+                <span class="explorer-git-commit-card-head">
+                    <span class="explorer-git-commit-card-message">${escHtml(card.message)}</span>
+                    ${explorerGitCommitCopyHtml(copy.message)}
+                </span>
                 ${rows ? `<span class="explorer-git-commit-card-rows">${rows}</span>` : ''}
                 <span class="explorer-git-commit-card-hint">${escHtml(card.hint)}</span>
             </span>`;
     }
 
-    /* The card's paint-only placement adapter.
+    /* Where the card goes, in the viewport's own coordinates.
 
-       One delegated listener per panel, not one per row: a scope may carry
-       three hundred commits, and the whole reason the card is revealed by CSS
-       is that nothing should run while the reader is merely scanning subjects.
-       This runs on the pointer actually entering a row, and only when the row
-       it entered is a different one.
+       Two answers, and only one of them is a decision. Which *side* of the row
+       it opens on is GridVibeExplorerGitGraph.cardPlacement()'s, still
+       measured against the Git panel and not the window: the card may be wider
+       than the sidebar, but there is no reason for it to leave the sidebar
+       vertically, and a card opened from one of the last rows would otherwise
+       run off the bottom of the pane. The horizontal position has no decision
+       in it at all -- the row's own left edge, pulled back inside the window
+       if a wide card would hang off the right of it.
 
-       The panel element outlives its contents (renderExplorerGitPanel rewrites
-       innerHTML), so the listener is attached once and guarded by a flag, the
-       way the header's ResizeObserver is. `focusin` carries the keyboard, which
-       reveals the same card through :focus-visible.
-
-       The card is `visibility: hidden`, not `display: none`, precisely so it
-       still has a box to measure here before it is shown. */
-    function applyExplorerGitCommitCardPlacement(row) {
+       The floor is written first because it is one of the things that decides
+       how tall the card is, and the side is chosen on its height. It is the
+       row's width, so a commit with little to report still reads as a card
+       belonging to that row rather than a small box beside it; `max-content`
+       and the CSS ceiling settle everything above the floor. The card is
+       `visibility: hidden` until all of this is written, not `display: none`,
+       precisely so it has a box to measure. */
+    function applyExplorerGitCommitCardPlacement(card, row) {
         const policy = window.GridVibeExplorerGitGraph;
-        const card = row?.querySelector('.explorer-git-commit-card');
         const panel = row?.closest('.explorer-git-panel');
         if (!policy || !card || !panel) {
             return;
         }
         const rowBox = row.getBoundingClientRect();
+        card.style.minWidth = `${Math.round(rowBox.width)}px`;
+        const cardBox = card.getBoundingClientRect();
         const panelBox = panel.getBoundingClientRect();
         const placement = policy.cardPlacement({
             rowTop: rowBox.top,
             rowBottom: rowBox.bottom,
             viewTop: panelBox.top,
             viewBottom: panelBox.bottom,
-            cardHeight: card.offsetHeight,
+            cardHeight: cardBox.height,
             // The 2px the card overlaps its row by, in both directions.
             gap: 2
         });
-        card.classList.toggle('is-above', placement === 'above');
+        const rightmost = Math.max(8, window.innerWidth - cardBox.width - 8);
+        card.style.left = `${Math.round(Math.max(8, Math.min(rowBox.left, rightmost)))}px`;
+        card.style.top = placement === 'above'
+            ? `${Math.round(rowBox.top - cardBox.height + 2)}px`
+            : `${Math.round(rowBox.bottom - 2)}px`;
     }
 
-    function wireExplorerGitCommitCards(index) {
-        const panel = document.getElementById(`explorer-git-panel-${index}`);
-        if (!panel || panel._explorerGitCardPlacementWired) {
+    /* Dismissal is the context menu's, because the card is now the same kind
+       of thing: one at a time, Escape and an outside press close it, and the
+       gesture hands focus back to the row that opened it.
+
+       What is *not* the context menu's is the third listener. The menu names
+       no row, so nothing about the page moving underneath it makes it wrong;
+       this card is pinned to one, and a scroll of the list that row is in
+       leaves it pointing at a row that has moved out from under it. Only a
+       scroll that actually contains the row: the pane has several scrollers,
+       and taking the card away when one of the others moves would be a
+       disappearance the reader cannot account for.
+
+       The row, not the card, is what every handler tests for staleness. The
+       card is on `document.body` and so stays connected whatever happens to
+       the panel; the row leaving the document is what says this card is about
+       a pane the reader can no longer see. */
+    function dismissExplorerGitCommitCard(options) {
+        const { restoreFocus = true } = options || {};
+        document.removeEventListener('keydown', _explorerGitCommitCardKeydown, true);
+        document.removeEventListener('mousedown', _explorerGitCommitCardOutside, true);
+        document.removeEventListener('scroll', _explorerGitCommitCardScroll, true);
+        _explorerGitCommitCard?.remove();
+        const row = _explorerGitCommitCardRow;
+        _explorerGitCommitCard = null;
+        _explorerGitCommitCardRow = null;
+        _explorerGitCommitCardPane = null;
+        row?.classList.remove('is-card-open');
+        if (restoreFocus && row?.isConnected) {
+            row.focus({ preventScroll: true });
+        }
+    }
+
+    function _explorerGitCommitCardStale() {
+        if (_explorerGitCommitCard && _explorerGitCommitCardRow?.isConnected) {
+            return false;
+        }
+        dismissExplorerGitCommitCard({ restoreFocus: false });
+        return true;
+    }
+
+    function _explorerGitCommitCardOutside(event) {
+        if (_explorerGitCommitCardStale()) {
             return;
         }
-        panel._explorerGitCardPlacementWired = true;
-        const place = event => {
-            const row = event.target?.closest?.('.explorer-diff-commit');
-            if (!row || row === panel._explorerGitCardPlacementRow) {
-                return;
-            }
-            panel._explorerGitCardPlacementRow = row;
-            applyExplorerGitCommitCardPlacement(row);
+        if (!_explorerGitCommitCard.contains(event.target)) {
+            dismissExplorerGitCommitCard({ restoreFocus: false });
+        }
+    }
+
+    function _explorerGitCommitCardKeydown(event) {
+        if (_explorerGitCommitCardStale()) {
+            return;
+        }
+        if (event.key === 'Escape') {
+            event.preventDefault();
+            dismissExplorerGitCommitCard();
+        }
+    }
+
+    function _explorerGitCommitCardScroll(event) {
+        if (_explorerGitCommitCardStale()) {
+            return;
+        }
+        if (event.target?.contains?.(_explorerGitCommitCardRow)) {
+            dismissExplorerGitCommitCard({ restoreFocus: false });
+        }
+    }
+
+    /* Open the card for one commit row.
+
+       The facts come from the loaded model, matched on the row's own hash --
+       the row carries only the three values the copy controls need, and the
+       author, date and refs the card exists to show are in the payload the
+       sidebar already fetched. A row whose commit is no longer in that model
+       still gets a card built from what the row itself carries, rather than a
+       gesture that silently does nothing. */
+    function openExplorerGitCommitCard(index, row) {
+        const pane = terminals[index];
+        const panel = document.getElementById(`explorer-git-panel-${index}`);
+        const policy = window.GridVibeExplorerGitGraph;
+        if (!pane || !panel || !row || !policy || !panel.contains(row)) {
+            return;
+        }
+        dismissExplorerGitCommitCard({ restoreFocus: false });
+        const hash = row.dataset.explorerGitCommitToggle || '';
+        const loaded = (pane._explorerGitRepo?.commits || [])
+            .find(commit => String(commit.hash || '') === hash);
+        const record = loaded || {
+            hash,
+            full_hash: row.dataset.explorerGitCommitFull || '',
+            message: row.dataset.explorerGitCommitMessage || ''
         };
-        panel.addEventListener('pointerover', place);
-        panel.addEventListener('focusin', place);
-        /* The remembered row is a live node from the render that is being
-           replaced, so it is dropped when the pointer leaves the panel --
-           otherwise re-entering the same visual row after a repaint would
-           compare against a detached node and skip the measurement. */
-        panel.addEventListener('pointerleave', () => {
-            panel._explorerGitCardPlacementRow = null;
+        const expanded = Boolean(hash && ensureExplorerDiffExpandedCommits(pane).has(
+            window.GridVibeExplorerGitActive.commitKey(hash)
+        ));
+        const actions = window.GridVibeExplorerGitMenu.commitCopyActions({
+            hash: String(record.hash || ''),
+            fullHash: String(record.full_hash || ''),
+            message: String(record.message || '')
+        }, _copyText);
+        document.body.insertAdjacentHTML('beforeend', explorerGitCommitCardHtml(
+            policy.commitCard(record, { expanded, now: Date.now() }),
+            actions
+        ));
+        const card = document.getElementById('explorer-git-commit-card');
+        if (!card) {
+            return;
+        }
+        /* The palette follows the *pane*, not the app. A pane can be toggled
+           to the opposite theme, and its own `data-explorer-theme` block is
+           what carries --explorer-float-border and the rest; on document.body
+           the card is outside that block, so it wears the pane's theme
+           explicitly or it comes out in the other one. */
+        const paneTheme = row.closest('.explorer-pane')?.dataset.explorerTheme;
+        if (paneTheme) {
+            card.dataset.explorerTheme = paneTheme;
+        }
+        _explorerGitCommitCard = card;
+        _explorerGitCommitCardRow = row;
+        _explorerGitCommitCardPane = pane;
+        row.classList.add('is-card-open');
+        card.querySelectorAll('[data-explorer-git-commit-copy]').forEach(button => {
+            button.addEventListener('click', () => {
+                actions[button.dataset.explorerGitCommitCopy]?.action();
+                /* Copy and close, the way the menu entry this replaces did:
+                   the surface going away is the only acknowledgement a
+                   clipboard write gets. */
+                dismissExplorerGitCommitCard();
+            });
         });
+        applyExplorerGitCommitCardPlacement(card, row);
+        card.classList.add('is-open');
+        const first = card.querySelector('button:not(:disabled)');
+        (first || card).focus({ preventScroll: true });
+        window.setTimeout(() => {
+            document.addEventListener('mousedown', _explorerGitCommitCardOutside, true);
+        }, 0);
+        document.addEventListener('keydown', _explorerGitCommitCardKeydown, true);
+        document.addEventListener('scroll', _explorerGitCommitCardScroll, true);
     }
 
     /* The Graph's "Show more", and the two wordless states that replace it.
@@ -1075,7 +1260,12 @@ ${explorerGitRequestedScopeKind(pane)}`;
             return;
         }
         wireExplorerCopyPathMenu(panel, index);
-        wireExplorerGitCommitCards(index);
+        /* The card no longer lives in this panel, so the innerHTML below
+           takes the row it is pinned to and leaves the card floating over
+           whatever replaces it. */
+        if (_explorerGitCommitCardPane === pane) {
+            dismissExplorerGitCommitCard({ restoreFocus: false });
+        }
         if (pane._explorerGitRepoLoading) {
             panel.innerHTML = '<div class="explorer-diff-sidebar-empty">Loading repository...</div>';
             observeExplorerGitHeaderHeight(index);
@@ -1181,8 +1371,9 @@ ${explorerGitRequestedScopeKind(pane)}`;
             : { perCommit: commits.map(() => []), matchCount: 0, activeIndex: 0, emptyText: '' };
         commitSearch.activeIndex = searchPlan.activeIndex;
         const graphPolicy = window.GridVibeExplorerGitGraph;
-        /* One clock for the whole pass: the hover cards' "3 days ago" is read
-           once per render, so every row on screen agrees about now. */
+        /* One clock for the whole pass: the "3 days ago" in every row's
+           accessible name is read once per render, so every row on screen
+           agrees about now. */
         const renderedAt = Date.now();
         const pagePlan = graphPolicy
             ? graphPolicy.pagePlan(repo, { loading: Boolean(pane._explorerGitCommitPageLoading) })
@@ -1209,6 +1400,9 @@ ${explorerGitRequestedScopeKind(pane)}`;
                     ? searchPolicy.hashMarkClass(ranges, searchOrdinal, searchPlan.activeIndex)
                     : '';
                 searchOrdinal += ranges.length;
+                /* Built for the row button's accessible name, not for a
+                   card: the card itself is created on demand by the
+                   right-click (openExplorerGitCommitCard). */
                 const card = graphPolicy
                     ? graphPolicy.commitCard(commit, { expanded, now: renderedAt })
                     : null;
@@ -1217,7 +1411,6 @@ ${explorerGitRequestedScopeKind(pane)}`;
                         <span class="explorer-diff-commit-graph">${explorerGitGraphHtml(commit.graph)}</span>
                         <span class="explorer-diff-commit-toggle" aria-hidden="true">${expanded ? UI_CHEVRON_DOWN_ICON : UI_CHEVRON_RIGHT_ICON}</span>
                         <span class="explorer-diff-commit-subject"><span class="explorer-diff-commit-hash${hashMark}">${hashHtml}</span> ${subjectHtml}</span>
-                        ${explorerGitCommitCardHtml(card)}
                     </button>
                     ${expanded ? `<div class="explorer-diff-commit-files">${renderExplorerGitFileRows(index, commit.files, { emptyText: 'No files recorded for this commit.', commitHash: hash })}</div>` : ''}
                 `;
