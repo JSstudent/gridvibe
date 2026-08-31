@@ -14,7 +14,7 @@ python-socketio>=5.16.4
 python-engineio>=4.13.5
 
 # Encryption for saved session passwords
-cryptography>=50.0.0
+cryptography>=50.0.1
 cffi>=2.1.1
 
 # Local Windows terminals (ConPTY; skipped on other platforms)
