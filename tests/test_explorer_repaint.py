@@ -21,6 +21,10 @@ the DOM agrees with them. The contracts:
   that may have moved;
 * the Markdown Preview panel is repainted only when its render moved, and a
   reused panel has the find's marks taken out of it explicitly;
+* the Diff panel obeys the same rule -- opening one changed file asks it to
+  render three times and it paints once, which is what stops a large file's
+  diff being torn down and rebuilt a Source build after the reader is already
+  looking at it;
 * the in-place editor's underlay replaces the rows a keystroke moved instead of
   re-tokenizing the whole draft on every animation frame, and it renumbers the
   rows a new line shifted.
@@ -40,6 +44,10 @@ VIEWER_JS = STATIC_JS / "explorer-viewer.js"
 # live in explorer-tabs.js — the page loads the pair together, so does this.
 TABS_JS = STATIC_JS / "explorer-tabs.js"
 OVERLAY_JS = STATIC_JS / "explorer-edit-overlay.js"
+# The Diff panel is its own surface with its own render stamp; its fallback
+# renderer parses through the shared worker core, so the pair load together.
+DIFF_JS = STATIC_JS / "explorer-diff.js"
+WORKER_CORE_JS = STATIC_JS / "explorer-worker-core.js"
 
 NODE = shutil.which("node")
 
@@ -1559,6 +1567,262 @@ class EditUnderlayRepaintTestCase(NodeHarnessMixin, unittest.TestCase):
         self.assertEqual(result["beforeAnswer"], 1)
         self.assertEqual(result["underlayWrites"], 2)
         self.assertIn("hljs-keyword", result["first"])
+
+
+DIFF_SANDBOX = """
+const fs = require('fs');
+const vm = require('vm');
+const core = require(process.argv[3]);
+
+// A Diff panel that reports what it was told: every write to it is counted,
+// whichever way the render puts content in, and the stamp lives on the
+// element rather than on the markup exactly as it does on the page.
+function makeDiffPanel() {
+    return {
+        writes: 0,
+        _html: '',
+        dataset: {},
+        classList: { toggle() {}, add() {}, remove() {}, contains: () => false },
+        addEventListener() {},
+        querySelector: () => null,
+        querySelectorAll: () => [],
+        get innerHTML() { return this._html; },
+        set innerHTML(value) { this.writes += 1; this._html = String(value); },
+        get textContent() { return this._html; },
+        set textContent(value) { this.writes += 1; this._html = String(value); }
+    };
+}
+
+function makeDiffSandbox(code, options) {
+    const settings = options || {};
+    const sandbox = {
+        console,
+        // No Diff2HtmlUI and no hljs, so the render lands in the handwritten
+        // side-by-side fallback -- the same markup the large tier paints, and
+        // the one every undo control is wired onto.
+        window: { GridVibeExplorerWorkerCore: core },
+        document: {
+            getElementById: id => (id === 'explorer-diff-code-0' ? code : null),
+            createElement: () => ({
+                className: '',
+                dataset: {},
+                _html: '',
+                get innerHTML() { return this._html; },
+                set innerHTML(value) { this._html = String(value); },
+                querySelector: () => null,
+                querySelectorAll: () => [],
+                appendChild() {},
+                addEventListener() {}
+            })
+        },
+        terminals: [],
+        sessionIds: ['s0'],
+        marksCleared: 0,
+        searchRepaints: 0,
+        fetches: [],
+        explorerTierPolicy: () => ({
+            diffTierForContent: () => 'small',
+            diffTierNotice: () => null,
+            diffTierConfigOverrides: () => ({})
+        }),
+        explorerLineWrapPreference: () => Boolean(settings.wrap && settings.wrap()),
+        explorerRequestSignal: () => undefined,
+        cancelExplorerRequestSlot() {},
+        explorerIsAbortError: error => error && error.name === 'AbortError',
+        normalizeExplorerLanguage: value => value || '',
+        explorerCodeLanguage: () => '',
+        highlightExplorerCode: value => String(value || ''),
+        escHtml: value => String(value == null ? '' : value)
+            .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'),
+        explorerDiffCacheKey: (path, commit, mode) =>
+            [path || '', commit || '', mode || ''].join('|'),
+        activeExplorerFileView: () => 'diff',
+        explorerFindTab: () => null,
+        explorerMatchingTabView: () => null,
+        explorerCurrentContentRevisions: () => ({}),
+        explorerPanelScrollTarget: () => null,
+        applyScrollMetrics() {},
+        applyExplorerPendingDiffScroll() {},
+        setTimeout,
+        clearTimeout,
+        URLSearchParams
+    };
+    // The find repaint loadExplorerDiff() runs on arrival, reproduced rather
+    // than stubbed away: its empty-query branch is a second render request for
+    // the patch that has just been painted.
+    sandbox.explorerClearSearchMarks = () => { sandbox.marksCleared += 1; };
+    sandbox.applyExplorerSearch = index => {
+        sandbox.searchRepaints += 1;
+        return sandbox.renderExplorerDiff(index);
+    };
+    sandbox.fetch = () => {
+        sandbox.fetches.push(1);
+        return Promise.resolve({
+            ok: true,
+            json: async () => ({ diff: sandbox.servedDiff })
+        });
+    };
+    sandbox.globalThis = sandbox;
+    return sandbox;
+}
+
+const PATCH = ['@@ -1,2 +1,2 @@', ' context', '-old line', '+new line'].join(
+    String.fromCharCode(10)
+);
+"""
+
+
+@unittest.skipUnless(NODE, "Node.js is required for explorer repaint tests")
+class DiffRepaintTestCase(NodeHarnessMixin, unittest.TestCase):
+    """The Diff panel is rebuilt only when the render moved.
+
+    Opening one changed file from the Git sidebar asks this panel to render
+    three times: when the patch arrives, from the find repaint that follows it,
+    and once more when restoreExplorerFileScroll() re-enters
+    setExplorerFileView(index, 'diff'). The third waits on
+    whenExplorerSourceRendered(), which is immediate for a document built in
+    one pass and a whole frame-sliced build long for one that is not -- so on a
+    large file the panel was torn down and rebuilt about a hundred
+    milliseconds after the reader was already looking at it. The patch's own
+    size never came into it, which is why a one-line change to a 7,000-line
+    file flickered and the same change to a short file did not.
+    """
+
+    def _diff(self, script: str):
+        return self._run_node(
+            DIFF_SANDBOX
+            + """
+            const code = makeDiffPanel();
+            const wrapState = { on: false };
+            const sandbox = makeDiffSandbox(code, { wrap: () => wrapState.on });
+            vm.createContext(sandbox);
+            vm.runInContext(fs.readFileSync(process.argv[2], 'utf8'), sandbox);
+            const pane = {
+                _explorerMode: 'file',
+                _explorerFilePath: 'web/static/js/explorer-viewer.js',
+                _explorerDiffMode: 'worktree'
+            };
+            sandbox.terminals[0] = pane;
+            sandbox.servedDiff = PATCH;
+            const emit = value => console.log(JSON.stringify(value));
+            """
+            + script,
+            str(DIFF_JS),
+            str(WORKER_CORE_JS),
+        )
+
+    def test_opening_a_changed_file_paints_the_diff_once(self):
+        """One patch, three render requests, one paint.
+
+        The second is the arrival find repaint and the third is the re-entry a
+        finished Source build triggers -- the one that lands late enough to be
+        seen. Both have to cost nothing, and the panel has to be still showing
+        the patch afterwards rather than a placeholder.
+        """
+        result = self._diff(
+            "(async () => {"
+            "  await sandbox.loadExplorerDiff(0);"
+            "  const afterArrival = code.writes;"
+            "  const afterArrivalMarkup = code.innerHTML;"
+            # What restoreExplorerFileScroll() -> setExplorerFileView() does
+            # once the frame-sliced Source build has finished: ask again for a
+            # patch that is already loaded and already on screen.
+            "  await sandbox.loadExplorerDiff(0);"
+            "  emit({"
+            "    afterArrival,"
+            "    afterReentry: code.writes,"
+            "    fetches: sandbox.fetches.length,"
+            "    searchRepaints: sandbox.searchRepaints,"
+            "    marksCleared: sandbox.marksCleared,"
+            "    keptTheDiff: code.innerHTML === afterArrivalMarkup,"
+            "    showing: code.innerHTML.includes('explorer-diff-row')"
+            "  });"
+            "})();"
+        )
+
+        # The loader's placeholder and the one render of the patch.
+        self.assertEqual(result["afterArrival"], 2)
+        # The find repaint asked, and the re-entry asked again: neither painted.
+        self.assertEqual(result["searchRepaints"], 1)
+        self.assertEqual(result["afterReentry"], 2)
+        # A skipped render is still where the find's marks come off, since a
+        # rebuild is no longer there to drop them with the subtree.
+        self.assertEqual(result["marksCleared"], 2)
+        self.assertTrue(result["keptTheDiff"])
+        self.assertTrue(result["showing"])
+        # The already-loaded patch is never refetched.
+        self.assertEqual(result["fetches"], 1)
+
+    def test_a_render_that_moved_still_rebuilds_the_panel(self):
+        """The stamp is not a licence to stop rendering.
+
+        Everything the markup is derived from is in it: the patch itself, and
+        the wrap preference, whose toggle exists to re-run the wrapped-row
+        height sync that only a fresh render performs.
+        """
+        result = self._diff(
+            "(async () => {"
+            "  const pane = sandbox.terminals[0];"
+            "  pane._explorerDiffContent = PATCH;"
+            "  await sandbox.renderExplorerDiff(0);"
+            "  await sandbox.renderExplorerDiff(0);"
+            "  const afterRepeat = code.writes;"
+            "  wrapState.on = true;"
+            "  await sandbox.renderExplorerDiff(0);"
+            "  const afterWrap = code.writes;"
+            "  pane._explorerDiffContent = PATCH.replace('new line', 'newer line');"
+            "  await sandbox.renderExplorerDiff(0);"
+            "  emit({"
+            "    afterRepeat,"
+            "    afterWrap,"
+            "    afterNewPatch: code.writes,"
+            "    showing: code.innerHTML.includes('newer line')"
+            "  });"
+            "})();"
+        )
+
+        self.assertEqual(result["afterRepeat"], 1)
+        self.assertEqual(result["afterWrap"], 2)
+        self.assertEqual(result["afterNewPatch"], 3)
+        self.assertTrue(result["showing"])
+
+    def test_the_loaders_placeholder_takes_the_stamp_off(self):
+        """The Markdown preview's stranding bug, in the panel beside it.
+
+        An in-place refresh drops the loaded patch and asks again; the loader
+        blanks the panel to "Loading diff..." and the answer comes back
+        byte-identical to the render the panel was still stamped with. Reading
+        that as "already showing this" would leave the reader on the
+        placeholder with nothing left able to move it.
+        """
+        result = self._diff(
+            "(async () => {"
+            "  const pane = sandbox.terminals[0];"
+            "  await sandbox.loadExplorerDiff(0);"
+            "  const stamped = code.innerHTML;"
+            # updateExplorerFileInPlace(): the file moved, so the cache is
+            # dropped and the identical patch is fetched again.
+            "  pane._explorerDiffLoaded = false;"
+            "  pane._explorerDiffCacheKey = '';"
+            "  const load = sandbox.loadExplorerDiff(0);"
+            "  const whileLoading = code.innerHTML;"
+            "  await load;"
+            "  emit({"
+            "    stamped: stamped.includes('explorer-diff-row'),"
+            "    whileLoading,"
+            "    showing: code.innerHTML.includes('explorer-diff-row'),"
+            "    fetches: sandbox.fetches.length"
+            "  });"
+            "})();"
+        )
+
+        self.assertTrue(result["stamped"])
+        self.assertEqual(result["whileLoading"], "Loading diff...")
+        # The render that arrived is the one the panel was stamped with, and it
+        # still has to be painted: the placeholder is not that render.
+        self.assertTrue(result["showing"])
+        self.assertEqual(result["fetches"], 2)
+
 
 
 if __name__ == "__main__":
