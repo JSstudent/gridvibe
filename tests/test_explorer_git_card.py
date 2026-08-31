@@ -631,6 +631,13 @@ for (const action of spec.actions) {
         const row = commitRow(action.commit);
         if (row && action.rowTop !== undefined) row.rectTop = action.rowTop;
         if (row && action.rowWidth !== undefined) row.rectWidth = action.rowWidth;
+        /* The whole gesture, in the order the browser delivers it: a
+           secondary mousedown reaches the document-level outside-press
+           listener before the contextmenu event reaches the panel. Firing
+           only the second half would test a right-click nobody can make, and
+           would hide the fact that the press alone used to close the card the
+           contextmenu was about to toggle. */
+        fireDocument('mousedown', { target: row, button: 2 });
         // Through the panel's own delegated listener, so the dispatch is
         // exercised too -- including the branch that decides a commit row is
         // not a filesystem entry.
@@ -639,6 +646,13 @@ for (const action of spec.actions) {
             clientX: 10,
             clientY: 10,
             preventDefault() {}
+        });
+    } else if (action.do === 'press-row') {
+        // Half a gesture on purpose: the press without the contextmenu that
+        // would follow it, so the suppression rule can be seen on its own.
+        fireDocument('mousedown', {
+            target: commitRow(action.commit),
+            button: action.button === undefined ? 0 : action.button
         });
     } else if (action.do === 'copy') {
         const button = documentBody.querySelectorAll('[data-explorer-git-commit-copy]')
@@ -1036,6 +1050,69 @@ class ExplorerGitCommitCardDismissalTestCase(ExplorerGitCommitCardHarness):
         ])
 
         self.assertEqual(steps[2]["cards"], 1)
+
+    def test_right_clicking_the_same_row_again_closes_the_card(self):
+        # The gesture is a toggle on the row it names. Closing used to need
+        # empty space to press in -- an odd thing to have to go looking for
+        # when the row that opened the card is right there under the pointer.
+        steps = self._run([
+            {"do": "render"},
+            {"do": "contextmenu", "commit": SHORT_HASH},
+            {"do": "contextmenu", "commit": SHORT_HASH},
+        ])
+
+        self.assertEqual(steps[1]["cards"], 1)
+        self.assertEqual(steps[2]["cards"], 0)
+        self.assertEqual(steps[2]["markedRows"], 0)
+        # Closed the way Escape closes it: the row gets the keyboard back.
+        self.assertEqual(steps[2]["focused"], SHORT_HASH)
+        self.assertEqual(
+            steps[2]["docListeners"], {"mousedown": 0, "keydown": 0, "scroll": 0}
+        )
+
+    def test_the_toggle_opens_again_on_a_third_right_click(self):
+        # A toggle, not a one-way dismissal: nothing about the closed state
+        # may stop the next press building the card again.
+        steps = self._run([
+            {"do": "render"},
+            {"do": "contextmenu", "commit": SHORT_HASH},
+            {"do": "contextmenu", "commit": SHORT_HASH},
+            {"do": "contextmenu", "commit": SHORT_HASH},
+        ])
+
+        self.assertEqual(steps[3]["cards"], 1)
+        self.assertEqual(steps[3]["markedRows"], 1)
+        self.assertEqual(steps[3]["message"], MESSAGE)
+        self.assertEqual(
+            steps[3]["docListeners"], {"mousedown": 1, "keydown": 1, "scroll": 1}
+        )
+
+    def test_the_secondary_press_alone_leaves_the_card_standing(self):
+        # The press is the first half of the toggling right-click and arrives
+        # before the contextmenu event. Letting the outside-press listener act
+        # on it closed the card the contextmenu then rebuilt, which is a
+        # toggle that never closes anything.
+        steps = self._run([
+            {"do": "render"},
+            {"do": "contextmenu", "commit": SHORT_HASH},
+            {"do": "press-row", "commit": SHORT_HASH, "button": 2},
+        ])
+
+        self.assertEqual(steps[2]["cards"], 1)
+
+    def test_a_primary_press_on_that_same_row_still_closes_it(self):
+        # Only the secondary button is spared: a left click on the row is a
+        # press outside the card and nothing follows it.
+        steps = self._run([
+            {"do": "render"},
+            {"do": "contextmenu", "commit": SHORT_HASH},
+            {"do": "press-row", "commit": SHORT_HASH, "button": 0},
+        ])
+
+        self.assertEqual(steps[2]["cards"], 0)
+        self.assertEqual(
+            steps[2]["docListeners"], {"mousedown": 0, "keydown": 0, "scroll": 0}
+        )
 
     def test_a_second_right_click_replaces_the_first_card(self):
         # One at a time, the way the menu it replaces was.

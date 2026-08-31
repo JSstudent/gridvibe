@@ -475,9 +475,19 @@ ${explorerGitRequestedScopeKind(pane)}`;
         if (_explorerGitCommitCardStale()) {
             return;
         }
-        if (!_explorerGitCommitCard.contains(event.target)) {
-            dismissExplorerGitCommitCard({ restoreFocus: false });
+        if (_explorerGitCommitCard.contains(event.target)) {
+            return;
         }
+        /* A secondary press on the card's *own* row is the first half of the
+           right-click that toggles it, and the contextmenu event carrying the
+           second half has not been delivered yet. Dismissing here would take
+           the card away and let that second half build it straight back, so
+           the gesture the reader made would never close anything. Every other
+           press dismisses, this row's primary button included. */
+        if (event.button === 2 && _explorerGitCommitCardRow.contains(event.target)) {
+            return;
+        }
+        dismissExplorerGitCommitCard({ restoreFocus: false });
     }
 
     function _explorerGitCommitCardKeydown(event) {
@@ -512,6 +522,15 @@ ${explorerGitRequestedScopeKind(pane)}`;
         const panel = document.getElementById(`explorer-git-panel-${index}`);
         const policy = window.GridVibeExplorerGitGraph;
         if (!pane || !panel || !row || !policy || !panel.contains(row)) {
+            return;
+        }
+        /* The gesture toggles on the row it names: right-clicking the row
+           whose card is already open closes it, so the reader puts it away
+           with the same press rather than having to find empty space to click
+           in. A different row still replaces the card, and the focus goes back
+           to the row exactly as Escape's dismissal leaves it. */
+        if (_explorerGitCommitCardRow === row) {
+            dismissExplorerGitCommitCard();
             return;
         }
         dismissExplorerGitCommitCard({ restoreFocus: false });
