@@ -902,6 +902,14 @@
                    group being attached in its place. It resumes on the way
                    back with its position and its queued readers intact. */
                 explorerSuspendSourceRenderJob(terminal);
+                /* The commit card is not suspended, it is closed: it floats on
+                   document.body pinned to a row that is about to be detached,
+                   so leaving it would hang one group's card over the group
+                   arriving in its place. Only this pane's. */
+                if (typeof explorerGitCommitCardPane === 'function'
+                    && explorerGitCommitCardPane() === terminal) {
+                    dismissExplorerGitCommitCard({ restoreFocus: false });
+                }
             } else {
                 terminal._cachedExplorerScroll = null;
             }

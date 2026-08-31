@@ -1,4 +1,4 @@
-"""Behavioral coverage for the Git sidebar's commit hover card and page ladder.
+"""Behavioral coverage for the Git sidebar's commit card and page ladder.
 
 `explorer-git-graph.js` is DOM-free and require()-able, so both policies are
 executed in Node rather than asserted as source text.
@@ -7,7 +7,10 @@ The card's rules: it reads the author, the authored date and the object id off
 the row the sidebar already loaded, renders the timestamp in the *author's*
 own offset (so a reader in another zone never sees a commit move across a date
 boundary), and drops a row it has nothing to report for instead of printing an
-"unknown" that reads as a recorded fact.
+"unknown" that reads as a recorded fact. It also says which of its rows hosts
+a copy control — and only that; what the control copies is
+`explorer-git-menu.js`'s answer, and the card that paints both is covered in
+`test_explorer_git_card.py`.
 
 The ladder's rules: every number comes from the server's answer, never from a
 constant mirrored on this side; the button disappears at the end of the
@@ -167,8 +170,8 @@ class ExplorerGitCommitCardTestCase(ExplorerGitGraphHarness):
         self.assertIn("Alt-click", hints[1])
 
     def test_the_button_label_carries_the_same_facts_as_one_line(self):
-        # The card is aria-hidden inside the row button, so the accessible name
-        # has to say everything the card does.
+        # The card is only on screen while the reader keeps it there, so the
+        # row's own accessible name has to say everything the card does.
         summary = self._run_node(
             "emit(graph.commitCard(commit, { now: NOW }).summary);"
         )
@@ -177,9 +180,50 @@ class ExplorerGitCommitCardTestCase(ExplorerGitGraphHarness):
         self.assertIn("Ada Lovelace", summary)
         self.assertIn("28 Aug 2026", summary)
 
+    def test_the_object_id_is_the_one_row_that_hosts_a_copy_control(self):
+        # Tagged, not found by label: the adapter must never match on a word
+        # the card also prints. The message line's control is structural, so it
+        # needs no tag of its own.
+        rows = self._run_node(
+            "emit(graph.commitCard(commit, { now: NOW }).rows"
+            "  .map(row => [row.label, row.copy || null]));"
+        )
+
+        self.assertEqual(
+            rows,
+            [
+                ["Author", None],
+                ["Date", None],
+                ["Commit", "hash"],
+                ["Refs", None],
+            ],
+        )
+
+    def test_a_row_carrying_only_a_short_hash_still_hosts_the_control(self):
+        # The control is offered on whatever id the log carried; whether it is
+        # usable is explorer-git-menu.js's call, not this one's.
+        rows = self._run_node(
+            "const bare = { hash: 'abc1234', message: 'no metadata' };"
+            "emit(graph.commitCard(bare, { now: NOW }).rows"
+            "  .map(row => [row.label, row.value, row.copy || null]));"
+        )
+
+        self.assertEqual(rows, [["Commit", "abc1234", "hash"]])
+
+    def test_a_commit_with_no_id_at_all_hosts_no_copy_control(self):
+        # The row is dropped, so there is nothing for a control to sit on --
+        # the card is shorter rather than carrying a control over nothing.
+        rows = self._run_node(
+            "const bare = { author: 'Ada', message: 'no id' };"
+            "emit(graph.commitCard(bare, { now: NOW }).rows"
+            "  .map(row => row.copy || null));"
+        )
+
+        self.assertEqual(rows, [None])
+
 
 class ExplorerGitCardPlacementTestCase(ExplorerGitGraphHarness):
-    """Which side of its row the hover card opens on.
+    """Which side of its row the card opens on.
 
     The panel is a scroller, so a card opened from one of the last rows would
     be clipped by its bottom edge -- an affordance nobody can read.

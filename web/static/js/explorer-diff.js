@@ -858,9 +858,12 @@
     const EXPLORER_DIFF_UNPARSEABLE_HTML =
         '<span class="explorer-diff-empty">Diff view unavailable — the diff renderer failed to load. Reload the page to try again.</span>';
 
-    function paintExplorerSideBySideDiff(index, code, banner, model) {
+    function paintExplorerSideBySideDiff(index, code, banner, model, token) {
         code.innerHTML = banner + renderExplorerSideBySideDiffModel(index, model);
         wireExplorerDiffUndoControls(index, code);
+        if (token) {
+            code.dataset.explorerDiffRender = token;
+        }
     }
 
     /* Only the large tier comes here: small/medium diffs still use Diff2Html's
@@ -868,10 +871,10 @@
        the page retains HTML creation and the undo wiring. A matching pending
        job is shared by repaint/search callers; a different patch aborts it.
        The cache is the parsed model, never rendered HTML or user state. */
-    function renderExplorerLargeDiff(index, pane, code, diff, banner) {
+    function renderExplorerLargeDiff(index, pane, code, diff, banner, token) {
         const cached = pane._explorerDiffModelCache;
         if (cached && cached.diff === diff) {
-            paintExplorerSideBySideDiff(index, code, banner, cached.model);
+            paintExplorerSideBySideDiff(index, code, banner, cached.model, token);
             return Promise.resolve(true);
         }
         const previous = pane._explorerDiffParsePending;
@@ -890,7 +893,7 @@
                 return Promise.resolve(false);
             }
             pane._explorerDiffModelCache = { diff, model };
-            paintExplorerSideBySideDiff(index, code, banner, model);
+            paintExplorerSideBySideDiff(index, code, banner, model, token);
             return Promise.resolve(true);
         }
 
@@ -910,7 +913,7 @@
                 return false;
             }
             pane._explorerDiffModelCache = { diff, model };
-            paintExplorerSideBySideDiff(index, code, banner, model);
+            paintExplorerSideBySideDiff(index, code, banner, model, token);
             return true;
         }).catch(error => {
             if (pane._explorerDiffParsePending !== pending) {
@@ -931,23 +934,102 @@
                 return false;
             }
             pane._explorerDiffModelCache = { diff, model };
-            paintExplorerSideBySideDiff(index, code, banner, model);
+            paintExplorerSideBySideDiff(index, code, banner, model, token);
             return true;
         });
         return pending.promise;
     }
 
+    /* One counter for the whole page, exactly as _explorerSourceRenderToken
+       serves the Source rows: a stamp only has to be *different* when the
+       render would be, and minting it from a counter costs nothing where
+       hashing a 256 KiB patch on every call would.
+
+       Both halves of the pair below have the same owner as the render, so
+       nothing outside this file can stamp the panel or clear the stamp. */
+    let _explorerDiffRenderToken = 0;
+
+    /* What the panel on screen is a render *of*.
+
+       Everything the rendered markup derives from and nothing else: the patch,
+       the identity it was fetched under, the size tier, the wrap preference —
+       a wrap toggle re-runs the wrapped-row height sync, which only happens on
+       a fresh render — and whether the undo affordances were wired onto it.
+       explorerCanUndoDiffLine() folds every input to that last one (the open
+       editor, the busy flag, the file revision, the Git status), so a change
+       in any of them mints a new token and rebuilds.
+
+       Held on the pane rather than recomputed, so a repeat call is a pair of
+       string comparisons: `_explorerDiffContent` is a stable reference that
+       changes whenever the patch does, which makes the first of them a
+       short-circuited identity check in the common case and a correct value
+       check in every other. */
+    function explorerDiffRenderToken(pane, tier, wrapLines) {
+        const diff = pane._explorerDiffContent || '';
+        const identity = [
+            pane._explorerFilePath || '',
+            pane._explorerDiffCommit || '',
+            pane._explorerDiffMode || '',
+            tier,
+            wrapLines ? 'wrap' : 'nowrap',
+            pane._explorerDiffTruncated ? 'truncated' : 'whole',
+            explorerCanUndoDiffLine(pane) ? 'undo' : 'read-only'
+        ].join('\u0000');
+        const cached = pane._explorerDiffRenderIdentity;
+        if (cached && cached.diff === diff && cached.identity === identity) {
+            return cached.token;
+        }
+        _explorerDiffRenderToken += 1;
+        const token = String(_explorerDiffRenderToken);
+        pane._explorerDiffRenderIdentity = { diff, identity, token };
+        return token;
+    }
+
+    /* The stamp names the *content*, so anything that puts something else in
+       the panel takes it off on the way in: the loader's placeholder, the
+       large tier's "Rendering…", a failure message, the empty-diff sentence.
+       A stamp left standing over one of those would read as "already showing
+       this" and strand the panel on the placeholder — the way the Markdown
+       preview was once stranded on "Rendering preview...". */
+    function invalidateExplorerDiffRender(code) {
+        if (code && code.dataset) {
+            delete code.dataset.explorerDiffRender;
+        }
+    }
+
+    /* A repaint of the Diff panel is not a re-render of it.
+
+       Opening a changed file rebuilt this panel three times: once when the
+       patch arrived, once from the find repaint loadExplorerDiff() runs
+       immediately afterwards, and once more when restoreExplorerFileScroll()
+       re-entered setExplorerFileView(index, 'diff'). The first two land in the
+       same task and only cost work; the third does not. It waits on
+       whenExplorerSourceRendered(), which is immediate for a document small
+       enough to build in one pass and a whole frame-sliced build long for one
+       that is not — so on a large file the panel was torn down and rebuilt
+       about a hundred milliseconds after the reader was already looking at it,
+       clamping the scroller to 0 on the way out and restoring an offset on the
+       way back in. That is the whole of "the diff flickers on large files":
+       the delay was the *Source* build's, and the patch's own size never came
+       into it, which is why it showed on a one-line change to a 7,000-line
+       file.
+
+       So a panel already showing this exact render is left alone, and the
+       find's <mark> wrappers are taken off explicitly — a rebuild used to
+       drop them with the subtree. Same rule, same reason and same shape as
+       paintExplorerPreview(). */
     function renderExplorerDiff(index) {
         const pane = terminals[index];
         const code = document.getElementById(`explorer-diff-code-${index}`);
         if (!pane || !code) {
             return Promise.resolve(false);
         }
-        disconnectExplorerDiffLayout(code.querySelector('.explorer-diff2html'));
         const wrapLines = explorerLineWrapPreference(index, 'diff');
         code.classList.toggle('wrap-lines', wrapLines);
         const diff = pane._explorerDiffContent || '';
         if (!diff) {
+            disconnectExplorerDiffLayout(code.querySelector('.explorer-diff2html'));
+            invalidateExplorerDiffRender(code);
             if (pane._explorerDiffParsePending) {
                 pane._explorerDiffParsePending = null;
                 cancelExplorerRequestSlot(pane, 'diffParse');
@@ -964,6 +1046,13 @@
            be worse. */
         const tier = explorerTierPolicy()?.diffTierForContent(diff) || 'small';
         pane._explorerDiffTier = tier;
+        const token = explorerDiffRenderToken(pane, tier, wrapLines);
+        if (code.dataset && code.dataset.explorerDiffRender === token) {
+            explorerClearSearchMarks(code);
+            return Promise.resolve(true);
+        }
+        disconnectExplorerDiffLayout(code.querySelector('.explorer-diff2html'));
+        invalidateExplorerDiffRender(code);
         const banner = explorerDiffTruncationBannerHtml(pane) + explorerDiffTierBannerHtml(tier);
         /* The large tier goes straight to GridVibe's own side-by-side markup:
            not because diff2html would fail, but because at this size its parse,
@@ -973,15 +1062,24 @@
            degradation costs emphasis and colour and never a mutation
            affordance. */
         if (tier === 'large') {
-            return renderExplorerLargeDiff(index, pane, code, diff, banner);
+            return renderExplorerLargeDiff(index, pane, code, diff, banner, token);
         }
         if (pane._explorerDiffParsePending) {
             pane._explorerDiffParsePending = null;
             cancelExplorerRequestSlot(pane, 'diffParse');
         }
-        if (!renderExplorerDiffWithDiff2Html(index, code, diff, banner, tier)) {
-            code.innerHTML = banner + renderExplorerSideBySideDiff(index, diff);
+        /* Stamped only over a render that actually laid the patch out. The
+           unparseable message is a state a later attempt has to be able to
+           replace, so it is deliberately left unstamped. */
+        let rendered = renderExplorerDiffWithDiff2Html(index, code, diff, banner, tier);
+        if (!rendered) {
+            const markup = renderExplorerSideBySideDiff(index, diff);
+            code.innerHTML = banner + markup;
             wireExplorerDiffUndoControls(index, code);
+            rendered = markup !== EXPLORER_DIFF_UNPARSEABLE_HTML;
+        }
+        if (rendered && code.dataset) {
+            code.dataset.explorerDiffRender = token;
         }
         return Promise.resolve(true);
     }
@@ -1148,6 +1246,7 @@
             return;
         }
 
+        invalidateExplorerDiffRender(code);
         code.textContent = 'Loading diff...';
         const load = (async () => {
             try {
@@ -1208,6 +1307,7 @@
                     return;
                 }
                 console.error('[GridVibe Sessions] Explorer Git diff failed:', error);
+                invalidateExplorerDiffRender(code);
                 code.innerHTML = `<span class="explorer-diff-empty">${escHtml(error.message || 'Failed to load Git diff.')}</span>`;
             }
         })();

@@ -1913,13 +1913,14 @@ class ApiRoutesTestCase(unittest.TestCase):
         # and no explicit re-highlight.
         self.assertIn("ui.draw();", html)
         self.assertNotIn("ui.highlightCode();", html)
-        # Diff2Html remains synchronous for small/medium patches. The large
-        # tier's handwritten parse goes through the shared worker and only its
-        # DOM adapter stays on the page, preserving both undo affordances —
-        # which tests/test_explorer_workers.py drives end to end
-        # (test_large_diff_paints_a_status_then_the_worker_model_with_undo)
-        # rather than reading the branch out of this file.
-        self.assertIn("code.innerHTML = banner + renderExplorerSideBySideDiff(index, diff);", html)
+        # Diff2Html remains synchronous for small/medium patches, falling back
+        # to the handwritten side-by-side renderer on the page when it is
+        # unavailable. The large tier's parse goes through the shared worker
+        # and only its DOM adapter stays here, preserving both undo
+        # affordances. Both branches are driven end to end rather than read out
+        # of this file — tests/test_explorer_workers.py for the worker path and
+        # the missing-core degradation, and DiffRepaintTestCase in
+        # tests/test_explorer_repaint.py for the synchronous fallback render.
         self.assertIn("function renderExplorerSideBySideDiff(index, diff)", html)
         # Truncation is captured from the API and surfaced without blocking.
         self.assertIn("pane._explorerDiffTruncated = Boolean(data.truncated);", html)
@@ -1956,6 +1957,18 @@ class ApiRoutesTestCase(unittest.TestCase):
             "            position: sticky;\n"
             "            z-index: 2;\n"
             "            left: 0;",
+            html,
+        )
+        # ...and the code cell claims the table's excess width. Auto layout
+        # otherwise hands a share of that excess to the number column whenever
+        # the code content is narrower than the side (one- or two-word lines);
+        # the number cell's own max-width then holds its box at 4em and the
+        # rest of that column paints as a blank gap in front of every code
+        # line, differently on each side since each side is its own table
+        # (docs/images/huge_diff_indent.PNG).
+        self.assertIn(
+            ".explorer-diff2html .d2h-diff-table td + td {\n"
+            "            width: 100%;",
             html,
         )
         self.assertIn("padding: 0 .5em;", html)

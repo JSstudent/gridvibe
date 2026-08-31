@@ -1687,6 +1687,8 @@
 
     function showExplorerContextMenu(x, y, items) {
         dismissExplorerContextMenu();
+        // One transient surface at a time, whichever kind it is.
+        dismissExplorerGitCommitCard({ restoreFocus: false });
         const menu = document.createElement('div');
         menu.id = 'explorer-ctx-menu';
         menu.setAttribute('role', 'menu');
@@ -1752,26 +1754,20 @@
        root, so it takes its own branch: no selection, no filesystem entries,
        and no path copies. The expanded file rows below a commit are siblings
        of this button rather than children, so they still reach the entry
-       menu below. */
-    function handleExplorerCommitContextMenu(event, commitRow) {
+       menu below.
+
+       What it opens is the commit card, not a menu. The two copy entries this
+       gesture used to offer are controls inside that card, which also reports
+       the author, date, object id and refs the row has no room for -- one
+       gesture for one row, instead of a menu here and a card that arrived on
+       its own from a hover. The card is pinned to its row rather than to the
+       pointer, so the click coordinates are not needed and the keyboard's
+       context-menu key (which reports none) reaches exactly the same
+       surface. */
+    function handleExplorerCommitContextMenu(event, commitRow, index) {
         event.preventDefault();
-        document.querySelectorAll('.explorer-context-target')
-            .forEach(node => node.classList.remove('explorer-context-target'));
-        commitRow.classList.add('explorer-context-target');
-        _explorerContextMenuInvoker = commitRow;
-        const items = window.GridVibeExplorerGitMenu.commitMenuItems({
-            hash: commitRow.dataset.explorerGitCommitToggle || '',
-            fullHash: commitRow.dataset.explorerGitCommitFull || '',
-            message: commitRow.dataset.explorerGitCommitMessage || ''
-        }, _copyText);
-        let x = event.clientX;
-        let y = event.clientY;
-        if (x <= 0 && y <= 0) {
-            const rect = commitRow.getBoundingClientRect();
-            x = rect.left + Math.min(24, rect.width);
-            y = rect.top + Math.min(rect.height, 24);
-        }
-        showExplorerContextMenu(x, y, items);
+        dismissExplorerContextMenu({ restoreFocus: false });
+        openExplorerGitCommitCard(index, commitRow);
     }
 
     /* Is this path inside a worktree, answered without a request whenever the
@@ -1844,7 +1840,7 @@
         const menuToken = ++_explorerContextMenuToken;
         const commitRow = event.target.closest('[data-explorer-git-commit-toggle]');
         if (commitRow) {
-            handleExplorerCommitContextMenu(event, commitRow);
+            handleExplorerCommitContextMenu(event, commitRow, index);
             return;
         }
         const row = event.target.closest(
@@ -3095,8 +3091,12 @@
         }
         button.dataset.bound = 'true';
         button.addEventListener('click', () => {
+            /* The gate is the registered mode list, never a literal pair: the
+               button is rendered, labelled and press-stated from
+               EXPLORER_LINE_WRAP_MODES, so a second list here is how Source
+               came to draw a working control that did nothing when clicked. */
             const mode = button.dataset.explorerWrapMode;
-            if (mode === 'preview' || mode === 'diff') {
+            if (EXPLORER_LINE_WRAP_MODES.includes(mode)) {
                 setExplorerLineWrapPreference(index, mode, !explorerLineWrapPreference(index, mode));
             }
         });
@@ -4135,6 +4135,14 @@
         explorerCancelSourceRenderJob(pane);
         pane._explorerSourceRenderCallbacks = [];
         cancelExplorerRequestSlots(pane);
+        /* A discarded pane must not leave a commit card holding its two
+           document-level listeners, and there is no row left to hand focus
+           back to. Only this pane's card: releasing a cached group must not
+           close one the reader has open in the group they are looking at. */
+        if (typeof explorerGitCommitCardPane === 'function'
+            && explorerGitCommitCardPane() === pane) {
+            dismissExplorerGitCommitCard({ restoreFocus: false });
+        }
     }
 
     /* The unit a frame emits rows in, and how long a frame may spend emitting

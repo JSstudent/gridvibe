@@ -1,5 +1,5 @@
 /* GridVibeExplorerGitGraph -- the Graph section's two non-search policies:
-   what a commit's hover card says, and how far back the list may be read.
+   what a commit's card says, and how far back the list may be read.
 
    Both are here rather than in explorer-git-sidebar.js for the reason
    explorer-git-pin.js is: they are decisions with no DOM in them, and the
@@ -7,11 +7,18 @@
    and require()-able from Node, so the date arithmetic and the page ladder
    are executed by tests rather than asserted as source text.
 
-   The hover card replaces a native `title`, which cannot be styled and cannot
+   The card replaces a native `title`, which cannot be styled and cannot
    usefully hold more than one line. It reports what a commit row has no room
    to show -- author, when, the full object id, any ref decoration -- from
    fields the sidebar has already loaded, so nothing here issues a request or
-   widens the explorer's read-only contract.
+   widens the explorer's read-only contract. It is opened by the row's
+   right-click rather than by hovering it: a card that appeared under the
+   pointer while the reader was only scanning subjects was an interruption,
+   and it also left two different gestures answering for one row. It is a
+   surface the reader operates, so it carries the two copy controls that used
+   to be a context menu of their own -- but *what* they copy is
+   explorer-git-menu.js's answer and stays there; all this says is which row
+   hosts one.
 
    The page ladder is deliberately *derived from the server's answer* rather
    than from constants mirrored on this side. The ceiling belongs to
@@ -130,8 +137,20 @@
                 title: iso
             });
         }
+        /* The object id is the row the hash copy control sits on. Tagged
+           rather than found by label, so the adapter never matches on a word
+           that is also what the card prints; the message line's control is
+           structural (the message is the card's own first slot) and needs no
+           tag. Both are offered whatever the row carries -- a value the log
+           did not supply makes the control *disabled*, which is
+           explorer-git-menu.js's call, not this one's. */
         if (fullHash || shortHash) {
-            rows.push({ label: 'Commit', value: fullHash || shortHash, mono: true });
+            rows.push({
+                label: 'Commit',
+                value: fullHash || shortHash,
+                mono: true,
+                copy: 'hash'
+            });
         }
         if (refs) {
             rows.push({ label: 'Refs', value: refs });
@@ -146,9 +165,9 @@
                 ? 'Click to collapse · Alt-click collapses every commit'
                 : 'Click to list this commit’s files',
             /* The same facts as one line, for the row button's accessible
-               name. The card itself is hidden from assistive technology: it
-               lives inside the button, so every word in it would otherwise be
-               read out as part of the control's name a second time. */
+               name. The card is only on screen for as long as the reader
+               keeps it there, so the row still has to be able to say what it
+               is without one. */
             summary: [message]
                 .concat(rows.map(row => row.label + ': ' + row.value))
                 .filter(Boolean)
@@ -156,7 +175,7 @@
         };
     }
 
-    /* Which side of its row the hover card opens on.
+    /* Which side of its row the card opens on.
 
        Below by default, because that is where the eye is already travelling.
        But the panel is a scroller, and a card opened from one of the last

@@ -177,7 +177,8 @@
             --explorer-btn-hover-bg: #202020;
         }
 
-        .explorer-pane[data-explorer-theme="light"] {
+        .explorer-pane[data-explorer-theme="light"],
+        .explorer-git-commit-card[data-explorer-theme="light"] {
             --explorer-bg: #ffffff;
             --explorer-bar-bg: #f6f8fb;
             --explorer-border: #cfd6df;
@@ -192,14 +193,21 @@
             --explorer-file: #64748b;
             /* Toolbar-button surface follows the pane's OWN theme, not the app
                theme (notes 2). Without this, a pane toggled opposite the app
-               keeps the app theme's button look and clashes with its surface. */
+               keeps the app theme's button look and clashes with its surface.
+
+               The commit card is named beside the pane because it is the one
+               explorer surface that is *not* inside it: it floats on
+               document.body, so it is outside this block unless it says which
+               pane it came from, and a pane toggled opposite the app would
+               open a card in the other theme. */
             --explorer-btn-bg: #f3f4f6;
             --explorer-btn-text: #1f2937;
             --explorer-btn-border: #aeb7c2;
             --explorer-btn-hover-bg: #e5e7eb;
         }
 
-        .explorer-pane[data-explorer-theme="dark"] {
+        .explorer-pane[data-explorer-theme="dark"],
+        .explorer-git-commit-card[data-explorer-theme="dark"] {
             --explorer-bg: #0f141b;
             --explorer-bar-bg: #151c24;
             --explorer-border: #2b3744;
@@ -220,7 +228,8 @@
 
         :root,
         [data-theme="dark"],
-        .explorer-pane[data-explorer-theme="dark"] {
+        .explorer-pane[data-explorer-theme="dark"],
+        .explorer-git-commit-card[data-explorer-theme="dark"] {
             --git-lane-0: #58a6ff;
             --git-lane-1: #7ee787;
             --git-lane-2: #d2a8ff;
@@ -257,7 +266,8 @@
         }
 
         [data-theme="light"],
-        .explorer-pane[data-explorer-theme="light"] {
+        .explorer-pane[data-explorer-theme="light"],
+        .explorer-git-commit-card[data-explorer-theme="light"] {
             --git-lane-0: #0969da;
             --git-lane-1: #1a7f37;
             --git-lane-2: #8250df;
@@ -297,7 +307,8 @@
         [data-theme="dark"],
         [data-theme="light"],
         .explorer-pane[data-explorer-theme="dark"],
-        .explorer-pane[data-explorer-theme="light"] {
+        .explorer-pane[data-explorer-theme="light"],
+        .explorer-git-commit-card[data-explorer-theme="light"] {
             --md-preset-paper-bg: #f4ecd8;
             --md-preset-paper-ink: #433422;
             --md-preset-paper-muted: #6b5a43;
@@ -4677,27 +4688,42 @@
             font-weight: 700;
         }
 
-        /* The commit hover card.
+        /* The commit card, opened by the row's right-click.
 
-           Anchored to its own row and out of flow, so it never joins the row's
-           three-column grid and moving into it costs the graph no reflow. It
-           is revealed by CSS on hover and keyboard focus alone: a scope may
-           carry three hundred rows, and a pointer handler per row to position
-           a floating box is the cost this avoids -- which side it opens on is
-           the one thing CSS cannot answer, and that is settled by a single
-           delegated listener on the panel (see wireExplorerGitCommitCards).
-           Left/right rather than a width, so the card can never be wider than
-           the sidebar it is in. */
-        .explorer-diff-commit {
-            position: relative;
+           It floats on document.body rather than inside the Git panel, and
+           that is the whole reason it can be read. The panel is a scroller, so
+           a card laid out in it is capped at the sidebar's width, and the full
+           forty-character object id -- the field a reader opens this card to
+           copy -- wrapped onto two lines in any sidebar narrower than about
+           360px; widening it in place would have given the whole graph a
+           horizontal scrollbar instead.
+
+           So it is sized by its own content and never by its container: at
+           least as wide as the row it hangs off (written as a `min-width` by
+           openExplorerGitCommitCard, which is the only thing that knows how
+           wide that row is), at most the ceiling below, and `max-content`
+           between the two. `top`/`left` are written by the same function --
+           the side is GridVibeExplorerGitGraph.cardPlacement()'s answer, and
+           fixed coordinates are the only way to keep the card pinned to a row
+           it no longer lives inside.
+
+           It no longer appears on hover. It is revealed once it is placed,
+           which is why the hidden state is `visibility` and not
+           `display: none` -- it has to have a box to be measured first. */
+        .explorer-diff-commit.is-card-open {
+            border-left-color: var(--t-accent);
+            background: var(--explorer-row-active);
         }
 
         .explorer-git-commit-card {
-            position: absolute;
-            z-index: 4;
-            top: calc(100% - 2px);
-            left: 7px;
-            right: 8px;
+            position: fixed;
+            /* Over every pane and dialog, under the context menu, the way any
+               transient floating surface in this app is. */
+            z-index: 9998;
+            top: 0;
+            left: 0;
+            width: max-content;
+            max-width: min(560px, calc(100vw - 16px));
             display: grid;
             gap: 7px;
             padding: 9px 11px;
@@ -4714,28 +4740,26 @@
             white-space: normal;
             opacity: 0;
             visibility: hidden;
-            pointer-events: none;
-            transition: opacity .12s ease, visibility .12s ease;
+            transition: opacity .1s ease;
         }
 
-        /* Delayed on the way in, immediate on the way out: a card that
-           appeared instantly would flash down the whole graph while the
-           reader is only scanning subjects. */
-        /* Flipped above its row once it no longer fits below -- the panel
-           is a scroller, and a card opened from one of the last rows would
-           otherwise be clipped by its bottom edge. The class is written by
-           the delegated listener; the rule that decides it is
-           GridVibeExplorerGitGraph.cardPlacement(). */
-        .explorer-git-commit-card.is-above {
-            top: auto;
-            bottom: calc(100% - 2px);
-        }
-
-        .explorer-diff-commit:hover .explorer-git-commit-card,
-        .explorer-diff-commit:focus-visible .explorer-git-commit-card {
+        .explorer-git-commit-card.is-open {
             opacity: 1;
             visibility: visible;
-            transition-delay: .35s;
+        }
+
+        .explorer-git-commit-card:focus,
+        .explorer-git-commit-card:focus-visible {
+            outline: none;
+        }
+
+        /* The message and its copy control share one line, and the control
+           keeps its column while the subject wraps under it. */
+        .explorer-git-commit-card-head {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) auto;
+            align-items: start;
+            gap: 8px;
         }
 
         .explorer-git-commit-card-message {
@@ -4745,9 +4769,13 @@
             overflow-wrap: anywhere;
         }
 
+        /* Three columns, and every row emits all three: the rows are
+           `display: contents`, so one that skipped its copy cell would push
+           every row below it a column across. */
         .explorer-git-commit-card-rows {
             display: grid;
-            grid-template-columns: auto minmax(0, 1fr);
+            grid-template-columns: auto minmax(0, 1fr) auto;
+            align-items: start;
             gap: 2px 10px;
             padding-top: 7px;
             border-top: 1px solid var(--explorer-row-border);
@@ -4769,10 +4797,46 @@
             overflow-wrap: anywhere;
         }
 
+        /* The one value that must not wrap, and the reason the card sizes
+           itself: a forty-character object id broken across two lines is
+           harder to read than the abbreviation on the row above it. Nothing
+           clips it -- `max-content` widens the card to hold it. */
         .explorer-git-commit-card-value.is-mono {
             font-family: Consolas, Monaco, 'Courier New', monospace;
             font-size: .65rem;
             color: var(--explorer-muted);
+            white-space: nowrap;
+        }
+
+        /* The slot is always there; the button in it is not. Reserved rather
+           than `auto`, so a card whose rows carry no control keeps the same
+           text column as one whose rows do. */
+        .explorer-git-commit-card-copy-slot {
+            display: inline-flex;
+            align-items: center;
+            justify-content: flex-end;
+            min-width: 22px;
+        }
+
+        .explorer-git-commit-card-copy {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            width: 22px;
+            height: 22px;
+        }
+
+        .explorer-git-commit-card-copy svg {
+            display: block;
+            width: 13px;
+            height: 13px;
+            pointer-events: none;
+        }
+
+        .explorer-git-commit-card-copy:not(:disabled):hover,
+        .explorer-git-commit-card-copy:focus-visible {
+            border-color: var(--t-accent);
+            color: var(--t-accent);
         }
 
         .explorer-git-commit-card-hint {
@@ -5642,6 +5706,23 @@
             max-width: 4em;
         }
 
+        /* Auto layout hands a table's excess width to its *columns*, and the
+           number column takes a share of it whenever the code column's content
+           is narrower than the side — a file whose lines are one or two words
+           (docs/images/huge_diff_indent.PNG). The cell's own `max-width: 4em`
+           then holds the gutter box at 4em while its column is several times
+           that, so the remainder paints as a gap in front of every code line;
+           and because each side is its own table the two sides distribute
+           independently, so their gaps differ and the columns stop lining up.
+           A percentage width on the code cell claims the excess for it instead,
+           leaving the number column at 4em. Do NOT reach for
+           `table-layout: fixed` here: it caps the table at 100% and takes away
+           the horizontal scrolling long lines depend on — and on its own it
+           reproduces this very gap (see the wrapped-mode note below). */
+        .explorer-diff2html .d2h-diff-table td + td {
+            width: 100%;
+        }
+
         /* Wrapped mode keeps Diff2Html's syntax + intraline markup. The existing
            4em number cell reserves the gutter; JS equalises each pair of row
            heights after wrapping so the two sides cannot drift vertically. */
@@ -5670,8 +5751,10 @@
            .d2h-diff-table as a belt-and-braces guard. The number cell's own
            `max-width: 4em` keeps its box at 4em while fixed layout hands the
            column an equal half of the side, so the gutter renders 4em wide
-           with the rest of its column left as a blank gap before the code
-           (docs/images/diff_empty_space.png). */
+           with the rest of its column left as a blank gap before the code —
+           the same gap docs/images/huge_diff_indent.PNG shows auto layout
+           producing on narrow content, answered above by giving the code cell
+           the percentage width. */
         .explorer-diff-content.wrap-lines
         .explorer-diff2html
         .d2h-info .d2h-code-side-line {

@@ -256,11 +256,19 @@
         }
     }
 
-    /* Shared half of the deferral gates: a menu or modal is anchored to (or
-       decides about) a row that must not move, and a pointer that is down is a
-       drag, a selection, or a click in progress. */
+    /* Shared half of the deferral gates: a menu, a card or a modal is anchored
+       to (or decides about) a row that must not move, and a pointer that is
+       down is a drag, a selection, or a click in progress. */
     function explorerWatchInteractionActive() {
         if (document.getElementById('explorer-ctx-menu')) {
+            return true;
+        }
+        /* The commit card is the same kind of thing: pinned to one row, and
+           closed by the re-render that would move it. It is named here rather
+           than caught by the panel-focus gate below because it does not live
+           in the panel -- it floats on document.body, so a focused copy
+           control inside it is not `panel.contains(activeElement)`. */
+        if (document.getElementById('explorer-git-commit-card')) {
             return true;
         }
         const confirmModal = document.getElementById('genericConfirmModal');

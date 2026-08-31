@@ -1,11 +1,68 @@
 # GridVibe Testing Issues
-Last updated: 2026-08-28
+Last updated: 2026-08-31
 
 ## Open Issues
 
 None.
 
 ## Closed Issues
+
+### Issue ID: ISSUE-2026-050
+- Title: Repository-search hits open large files at the top instead of at the hit
+- Priority: High
+- Status: Closed
+- Area: `web/static/js/explorer-search.js`
+- Assignee: Unassigned
+- Tags: `explorer`, `search`
+- Reported: 2026-08-31
+- Closed: 2026-08-31
+
+Description:
+Reported as "clicking results from the Ctrl+Shift+F repository find seems to be
+broken on large files. We get thrown to the top of the file no matter the result
+selected. Seems to be OK with smaller/normal files", against hits in
+`web/static/js/explorer-viewer.js`.
+
+Activating a hit opens the file and then does two DOM reads on the row it names:
+`scrollExplorerSourceToLine()` scrolls to it and flashes it, and
+`paintExplorerSearchHitMatches()` tints the matched substring on it. Both ran in
+the same task the open returned in. `openExplorerFile()` returns once the render
+has been *started*, and above ~4,000 rows the Source view emits its rows over
+animation frames — so on exactly the files a repository-wide search is most
+useful for, the row did not exist yet. Both reads asked for it by
+`[data-explorer-line]`, got `null`, and returned silently. Nothing failed, and
+nothing moved the reader off the top of the freshly rendered file.
+
+Steps to reproduce:
+1. Explorer pane on this repository; `Ctrl+Shift+F`, search for something with
+   hits in `web/static/js/explorer-viewer.js`.
+2. Click a hit deep in that file.
+
+Expected behavior:
+The file opens with the hit's line centred, flashed, and its matched text tinted
+— as it already did for a short file.
+
+Actual behavior / logs:
+The file opens at line 1. No flash, no tint, no error. Re-clicking the same hit
+once the file is already open behaves the same way, because the open re-renders.
+
+Resolution:
+Both reads moved into `revealExplorerSearchHit()`, queued through the viewer's
+existing `whenExplorerSourceRendered()` — immediate when no build is in flight,
+so every smaller file keeps the ordering it has always had, and after the
+render's own scroll restore, which is what makes the hit the last writer of the
+position rather than a competitor with it. The queued reveal captures the pane
+and the path the render landed on and re-checks both before touching the DOM, so
+a slot that changed hands or a pane that has since opened something else is not
+scrolled. The large-file tier is unchanged: it builds no rows at all, and its
+in-pane notice already states that Find is unavailable there.
+
+Cover: `tests/test_explorer_search_hit.py` — the real `activateExplorerSearchHit`
+executed in a Node `vm`, with the build completed afterwards: nothing is scrolled
+or painted while a build is in flight (including when the outgoing rows are still
+reachable by selector), exactly the hit's row is scrolled and flashed when it
+lands, a one-pass file is still revealed in the activating task, and a replaced
+slot or a pane showing another file is left alone.
 
 ### Issue ID: ISSUE-2026-048
 - Title: A restored Files tree draws open chevrons over empty branches
