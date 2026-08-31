@@ -574,8 +574,39 @@
            Markdown Preview or Diff view. */
         clearExplorerSearch(index, { focus: false });
         setExplorerFileView(index, 'source');
-        scrollExplorerSourceToLine(index, line);
-        paintExplorerSearchHitMatches(index, line, match);
+        revealExplorerSearchHit(index, pane, line, match);
+    }
+
+    /* The row a hit names is read after the build that produces it, never in
+       the task that asked for it.
+
+       openExplorerFile() returns once the render has been *started*, and a
+       Source view above ~4,000 rows is emitted over animation frames, so on
+       exactly the files a repository search is most useful for the row did
+       not exist yet. Both reads below ask for it by [data-explorer-line], got
+       null, and returned silently: no scroll, no flash and no match tint,
+       leaving the reader at the top of the file where the render had just put
+       them. A smaller file renders in one pass and worked, which is what made
+       this read as "hits are broken on large files".
+
+       whenExplorerSourceRendered() is the queue that already exists for
+       exactly this -- immediate when no build is in flight, so the one-pass
+       ordering every smaller file has always had is unchanged -- and it runs
+       after the render's own scroll restore, which is what makes the hit the
+       last writer of the position rather than a competitor with it. */
+    function revealExplorerSearchHit(index, pane, line, match) {
+        /* The path the render actually landed on, not the one that was asked
+           for: a grid slot is not an identity, and a build can outlive a group
+           switch or a second open. Paint only while this is still the pane
+           that asked and still the file it asked about. */
+        const path = pane._explorerFilePath;
+        whenExplorerSourceRendered(index, () => {
+            if (terminals[index] !== pane || pane._explorerFilePath !== path) {
+                return;
+            }
+            scrollExplorerSourceToLine(index, line);
+            paintExplorerSearchHitMatches(index, line, match);
+        });
     }
 
     function scrollExplorerSourceToLine(index, line) {
