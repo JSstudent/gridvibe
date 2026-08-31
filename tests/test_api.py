@@ -1958,6 +1958,18 @@ class ApiRoutesTestCase(unittest.TestCase):
             "            left: 0;",
             html,
         )
+        # ...and the code cell claims the table's excess width. Auto layout
+        # otherwise hands a share of that excess to the number column whenever
+        # the code content is narrower than the side (one- or two-word lines);
+        # the number cell's own max-width then holds its box at 4em and the
+        # rest of that column paints as a blank gap in front of every code
+        # line, differently on each side since each side is its own table
+        # (docs/images/huge_diff_indent.PNG).
+        self.assertIn(
+            ".explorer-diff2html .d2h-diff-table td + td {\n"
+            "            width: 100%;",
+            html,
+        )
         self.assertIn("padding: 0 .5em;", html)
         self.assertIn(".explorer-diff-horizontal-scrollbars {", html)
         self.assertIn("position: sticky;", html)

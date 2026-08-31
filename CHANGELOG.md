@@ -4,6 +4,8 @@ All notable changes to GridVibe will be documented in this file.
 
 ## Unreleased
 
+- **(fix) The Diff view no longer indents code away from the line numbers.** A file whose lines are short — one or two words, a list, a plain log — showed a wide blank strip between the line number and the code on both sides, and the strip was a different width on each side, so the two columns did not line up. The line-number gutter is a fixed 4em, but the diff's table hands out whatever width is left over between its columns, and once the code is narrower than half the pane there is a lot left over: the gutter's column took a share of it while the gutter itself stayed 4em, leaving the remainder as dead space. The code column now claims that space, so the gutter stays 4em and the code starts right beside it whatever the lines contain. Long lines are unaffected and still scroll horizontally per side.
+
 ## 1.10.0 - 2026-08-30
 
 - **(feat) The Git graph reads further back on demand.** Graph has always shown the newest 60 commits in the selected scope, which is also everything the commit find can search — so a search that came up empty could not tell you whether the commit was absent or merely further back than the page you had. **Show more** at the end of the list reads another 60 each time, up to 300, and every request the sidebar makes afterwards keeps the page you expanded to, so staging a file or committing no longer collapses the graph back under you. When there is nothing left to load the button is replaced by the total it ended on, and at the 300 ceiling it says the graph stops there rather than implying the history does. A find that matches nothing now says so in both subject and id mode, right above the control that widens the search.

@@ -5642,6 +5642,23 @@
             max-width: 4em;
         }
 
+        /* Auto layout hands a table's excess width to its *columns*, and the
+           number column takes a share of it whenever the code column's content
+           is narrower than the side — a file whose lines are one or two words
+           (docs/images/huge_diff_indent.PNG). The cell's own `max-width: 4em`
+           then holds the gutter box at 4em while its column is several times
+           that, so the remainder paints as a gap in front of every code line;
+           and because each side is its own table the two sides distribute
+           independently, so their gaps differ and the columns stop lining up.
+           A percentage width on the code cell claims the excess for it instead,
+           leaving the number column at 4em. Do NOT reach for
+           `table-layout: fixed` here: it caps the table at 100% and takes away
+           the horizontal scrolling long lines depend on — and on its own it
+           reproduces this very gap (see the wrapped-mode note below). */
+        .explorer-diff2html .d2h-diff-table td + td {
+            width: 100%;
+        }
+
         /* Wrapped mode keeps Diff2Html's syntax + intraline markup. The existing
            4em number cell reserves the gutter; JS equalises each pair of row
            heights after wrapping so the two sides cannot drift vertically. */
@@ -5670,8 +5687,10 @@
            .d2h-diff-table as a belt-and-braces guard. The number cell's own
            `max-width: 4em` keeps its box at 4em while fixed layout hands the
            column an equal half of the side, so the gutter renders 4em wide
-           with the rest of its column left as a blank gap before the code
-           (docs/images/diff_empty_space.png). */
+           with the rest of its column left as a blank gap before the code —
+           the same gap docs/images/huge_diff_indent.PNG shows auto layout
+           producing on narrow content, answered above by giving the code cell
+           the percentage width. */
         .explorer-diff-content.wrap-lines
         .explorer-diff2html
         .d2h-info .d2h-code-side-line {
