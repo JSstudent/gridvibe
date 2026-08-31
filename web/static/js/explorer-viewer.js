@@ -3095,8 +3095,12 @@
         }
         button.dataset.bound = 'true';
         button.addEventListener('click', () => {
+            /* The gate is the registered mode list, never a literal pair: the
+               button is rendered, labelled and press-stated from
+               EXPLORER_LINE_WRAP_MODES, so a second list here is how Source
+               came to draw a working control that did nothing when clicked. */
             const mode = button.dataset.explorerWrapMode;
-            if (mode === 'preview' || mode === 'diff') {
+            if (EXPLORER_LINE_WRAP_MODES.includes(mode)) {
                 setExplorerLineWrapPreference(index, mode, !explorerLineWrapPreference(index, mode));
             }
         });
