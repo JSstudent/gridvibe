@@ -567,6 +567,17 @@
     });
 
     const EXPLORER_C_LIKE_LANGUAGES = new Set(['c', 'cpp', 'csharp', 'css', 'go', 'java', 'javascript', 'kotlin', 'php', 'rust', 'swift', 'typescript']);
+    /* The documents this lexer meets that are prose rather than code. One
+       consequence each, and they are not the same consequence. Here, an
+       apostrophe is an apostrophe: "version's interval" is not an unclosed
+       string literal, and reading it as one coloured the rest of the line —
+       every line of prose carrying a contraction. Double quotes, backticks and
+       numbers still mean what they look like and keep their colours. And in
+       the Markdown preview, a fenced block declared text/markdown is left
+       alone entirely, since a code fence is where the reader has said the
+       content is *not* prose. Markdown headings are coloured either way —
+       those come from the fence-aware heading map, not from this lexer. */
+    const EXPLORER_PROSE_LANGUAGES = new Set(['text', 'markdown']);
     const EXPLORER_HASH_COMMENT_LANGUAGES = new Set(['config', 'dockerfile', 'dotenv', 'gitignore', 'ini', 'makefile', 'python', 'ruby', 'shell', 'powershell', 'yaml', 'toml']);
     const EXPLORER_LOG_LEVELS = new Set(['TRACE', 'DEBUG', 'INFO', 'WARN', 'WARNING', 'ERROR', 'CRITICAL', 'FATAL']);
     const EXPLORER_EDITOR_FONT_MIN = 10;
@@ -833,6 +844,15 @@
         return `<span class="${className}">${explorerMarkedEscHtml(text, absoluteStart, searchRanges)}</span>`;
     }
 
+    /* A quote that never closes ends at its own line. Only the triple-quoted
+       form below is a deliberate multi-line construct; every other string
+       this lexer meets is single-line in every language it serves, and
+       running an unclosed one to the end of the buffer is what let one
+       apostrophe colour a whole fenced block in the Markdown preview -- the
+       one call site that hands this lexer more than a single line. The
+       Source view feeds it one line at a time, so there the cap only makes
+       the two agree. An escape at the end of a line escapes the newline, not
+       the first character of the next one. */
     function explorerReadStringToken(content, start) {
         const quote = content[start];
         let index = start + 1;
@@ -846,8 +866,8 @@
             }
             return content.slice(start, Math.min(index + 3, content.length));
         }
-        while (index < content.length) {
-            if (content[index] === '\\') {
+        while (index < content.length && content[index] !== '\n') {
+            if (content[index] === '\\' && content[index + 1] !== '\n') {
                 index += 2;
                 continue;
             }
@@ -856,7 +876,7 @@
                 break;
             }
         }
-        return content.slice(start, index);
+        return content.slice(start, Math.min(index, content.length));
     }
 
     function explorerLogLevelClass(level) {
@@ -940,6 +960,7 @@
         const keywords = new Set(EXPLORER_CODE_KEYWORDS[normalizedLanguage] || []);
         const builtins = new Set(EXPLORER_CODE_BUILTINS[normalizedLanguage] || []);
         const caseInsensitiveKeywords = normalizedLanguage === 'sql';
+        const proseDocument = EXPLORER_PROSE_LANGUAGES.has(normalizedLanguage);
         let output = '';
         let index = 0;
 
@@ -979,7 +1000,9 @@
                 continue;
             }
 
-            if (current === '"' || current === "'" || (current === '`' && !['json', 'jsonl', 'yaml', 'toml'].includes(normalizedLanguage))) {
+            if (current === '"'
+                || (current === "'" && !proseDocument)
+                || (current === '`' && !['json', 'jsonl', 'yaml', 'toml'].includes(normalizedLanguage))) {
                 const token = explorerReadStringToken(content, index);
                 output += explorerCodeSpan('explorer-code-string', token, absoluteStart + index, searchRanges);
                 index += token.length;
@@ -4429,8 +4452,9 @@
             const pre = code.parentElement;
             pre.classList.add('explorer-preview-code');
             pre.dataset.lang = language.toUpperCase();
-            // Plain text/markdown blocks stay unstyled; string/number rules would mislead there.
-            if (language === 'text' || language === 'markdown') {
+            // Plain text/markdown blocks stay unstyled; string/number rules
+            // would mislead there.
+            if (EXPLORER_PROSE_LANGUAGES.has(language)) {
                 return;
             }
             code.innerHTML = highlightExplorerCode(code.textContent, language);
