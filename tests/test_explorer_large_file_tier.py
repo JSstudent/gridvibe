@@ -343,7 +343,7 @@ class ExplorerLargeFileTierTestCase(unittest.TestCase):
         self.assertIn("Find is unavailable in this view.", notice)
         for turned_off in ("syntax highlighting", "line numbers", "change marks"):
             self.assertIn(turned_off, notice)
-        self.assertIn("Download and Edit still work.", notice)
+        self.assertIn("Download, Upload and Edit still work.", notice)
         # A control that cannot answer is not offered.
         self.assertFalse(rendered["allowsFind"])
 

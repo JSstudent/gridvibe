@@ -1172,6 +1172,181 @@ class BrowserModeWindowTestCase(unittest.TestCase):
         server_thread.join.assert_called_once()
 
 
+class UploadBridgeTestCase(unittest.TestCase):
+    """Native-window explorer upload bridge — save_download's mirror.
+
+    The page cannot read a local path, so the launcher opens the picker and
+    posts the bytes. Everything worth asserting here is a boundary: which URLs
+    it will post to, that the body is streamed rather than assembled, and that
+    a failure is reported with the server's own verdict about whether anything
+    was written.
+    """
+
+    def _make_api_with_window(self, dialog_result):
+        api_bridge = webview_launcher.GridVibeApi("http://127.0.0.1:5050")
+        window = Mock()
+        window.create_file_dialog.return_value = dialog_result
+        api_bridge._attach_session_window(window)
+        return api_bridge, window
+
+    def _write(self, directory, name, payload):
+        path = os.path.join(directory, name)
+        Path(path).write_bytes(payload)
+        return path
+
+    def test_picker_returns_names_and_sizes_for_every_readable_selection(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            first = self._write(tmp, "a.txt", b"aaa")
+            second = self._write(tmp, "b.bin", b"bbbb")
+            missing = os.path.join(tmp, "gone.txt")
+            api_bridge, window = self._make_api_with_window([first, second, missing])
+
+            with patch.object(webview_launcher, "webview", Mock()):
+                result = api_bridge.select_upload_files()
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(
+                [(row["name"], row["size"]) for row in result["files"]],
+                [("a.txt", 3), ("b.bin", 4)],
+            )
+            self.assertTrue(window.create_file_dialog.call_args.kwargs["allow_multiple"])
+
+    def test_a_cancelled_picker_is_the_users_answer_not_a_failure(self):
+        api_bridge, _ = self._make_api_with_window(None)
+        with patch.object(webview_launcher, "webview", Mock()):
+            result = api_bridge.select_upload_files()
+        self.assertFalse(result["ok"])
+        self.assertTrue(result["cancelled"])
+
+    def test_it_posts_only_to_this_apps_own_upload_route(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = self._write(tmp, "a.txt", b"x")
+            api_bridge, _ = self._make_api_with_window(None)
+            for url in ("/api/app-config", "http://evil.example/api/explorer/a/upload",
+                        "/api/explorer/abc/download"):
+                with self.subTest(url=url):
+                    with patch.object(webview_launcher, "urlopen") as urlopen:
+                        result = api_bridge.upload_file(url, source, {})
+                    self.assertFalse(result["ok"])
+                    self.assertIs(result["mutated"], False)
+                    urlopen.assert_not_called()
+
+    def test_the_body_is_streamed_and_carries_the_fields_the_route_expects(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = self._write(tmp, "logo.bin", b"\x00\x01\x02\x03payload")
+            api_bridge, _ = self._make_api_with_window(None)
+            answer = Mock()
+            answer.status = 200
+            answer.read.return_value = b'{"destination_path": "docs/logo.bin"}'
+            answer.__enter__ = Mock(return_value=answer)
+            answer.__exit__ = Mock(return_value=False)
+
+            sent = {}
+
+            def _drain(request, timeout=None):
+                # Drained here, inside the request, because that is where the
+                # real client reads it — the source handle is closed by the
+                # time upload_file returns, which is the point of streaming.
+                body = request.data
+                sent["request"] = request
+                sent["streamed"] = not isinstance(body, (bytes, bytearray))
+                sent["length"] = body.length
+                chunks = []
+                while True:
+                    chunk = body.read(7)
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                sent["bytes"] = b"".join(chunks)
+                return answer
+
+            with patch.object(webview_launcher, "urlopen", side_effect=_drain):
+                result = api_bridge.upload_file(
+                    "/api/explorer/abc/upload",
+                    source,
+                    {
+                        "root_revision": "rev-1",
+                        "destination_directory": "docs",
+                        "name": "logo.bin",
+                    },
+                )
+
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["data"]["destination_path"], "docs/logo.bin")
+            request = sent["request"]
+            self.assertEqual(
+                request.full_url, "http://127.0.0.1:5050/api/explorer/abc/upload"
+            )
+            self.assertTrue(
+                request.get_header("Content-type").startswith("multipart/form-data; boundary=")
+            )
+            # The body is a reader, never a bytes: a 100 MB file must not be
+            # held in this process for the length of the POST.
+            self.assertTrue(sent["streamed"])
+            self.assertEqual(int(request.get_header("Content-length")), sent["length"])
+            drained = sent["bytes"]
+            self.assertEqual(len(drained), sent["length"])
+            self.assertIn(b'name="root_revision"\r\n\r\nrev-1', drained)
+            self.assertIn(b'name="destination_directory"\r\n\r\ndocs', drained)
+            self.assertIn(b'filename="logo.bin"', drained)
+            self.assertIn(b"\x00\x01\x02\x03payload", drained)
+
+    def test_a_file_past_the_ceiling_never_opens_a_connection(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = self._write(tmp, "big.bin", b"x" * 64)
+            api_bridge, _ = self._make_api_with_window(None)
+            with patch.object(webview_launcher, "EXPLORER_UPLOAD_MAX_BYTES", 8):
+                with patch.object(webview_launcher, "urlopen") as urlopen:
+                    result = api_bridge.upload_file(
+                        "/api/explorer/abc/upload", source, {"name": "big.bin"}
+                    )
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["code"], "upload_too_large")
+            urlopen.assert_not_called()
+
+    def test_a_server_refusal_is_relayed_with_its_own_mutation_verdict(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = self._write(tmp, "a.txt", b"x")
+            api_bridge, _ = self._make_api_with_window(None)
+            body = io.BytesIO(
+                b'{"error": "a.txt already exists here", '
+                b'"code": "destination_exists", "mutated": false}'
+            )
+            http_error = HTTPError(
+                "http://127.0.0.1:5050/x", 409, "Conflict", {}, body
+            )
+            with patch.object(webview_launcher, "urlopen", side_effect=http_error):
+                result = api_bridge.upload_file(
+                    "/api/explorer/abc/upload", source, {"name": "a.txt"}
+                )
+
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["status"], 409)
+            self.assertEqual(result["code"], "destination_exists")
+            # Retry-safe because the server said so — never because the bridge
+            # assumed it.
+            self.assertIs(result["mutated"], False)
+
+    def test_a_missing_source_is_refused_without_a_request(self):
+        api_bridge, _ = self._make_api_with_window(None)
+        with patch.object(webview_launcher, "urlopen") as urlopen:
+            result = api_bridge.upload_file(
+                "/api/explorer/abc/upload", "/no/such/file.txt", {"name": "file.txt"}
+            )
+        self.assertFalse(result["ok"])
+        self.assertIs(result["mutated"], False)
+        urlopen.assert_not_called()
+
+    def test_a_file_that_shrinks_mid_send_fails_instead_of_sending_short(self):
+        # Content-Length is already on the wire, so a short body would hang the
+        # connection and a padded one would upload bytes nobody chose.
+        body = webview_launcher._MultipartUploadBody(b"", io.BytesIO(b"ab"), 8, b"--end")
+
+        self.assertEqual(body.read(8), b"ab")
+        with self.assertRaises(OSError):
+            body.read(8)
+
+
 class SaveDownloadBridgeTestCase(unittest.TestCase):
     """Native-window explorer download bridge (WebView2 blocks anchor downloads)."""
 

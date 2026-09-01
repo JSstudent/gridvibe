@@ -2140,7 +2140,8 @@
         .explorer-git-toggle,
         .explorer-tree-toggle,
         .explorer-search-toggle,
-        .explorer-os-open {
+        .explorer-os-open,
+        .explorer-bar-upload {
             width: 30px;
             height: 28px;
             display: inline-flex;
@@ -2154,7 +2155,8 @@
             cursor: pointer;
         }
 
-        .explorer-toggle-icon {
+        .explorer-toggle-icon,
+        .explorer-bar-upload svg {
             width: 17px;
             height: 17px;
             display: block;
@@ -2169,18 +2171,21 @@
             background: var(--explorer-row-active);
         }
 
-        /* The OS-open button is a momentary action (no pressed state), so it
-           earns its prominence from hover/active/focus feedback instead — which
-           also makes it read clearly against the bar in both themes. */
+        /* Momentary bar actions (no pressed state): OS-open and Upload earn
+           their prominence from hover/active/focus feedback instead — which
+           also makes them read clearly against the bar in both themes. */
         .explorer-os-open:hover,
-        .explorer-os-open:focus-visible {
+        .explorer-os-open:focus-visible,
+        .explorer-bar-upload:hover,
+        .explorer-bar-upload:focus-visible {
             border-color: var(--t-accent);
             color: var(--t-accent);
             background: var(--explorer-row-active);
             outline: none;
         }
 
-        .explorer-os-open:active {
+        .explorer-os-open:active,
+        .explorer-bar-upload:active {
             transform: translateY(1px);
         }
 
@@ -3373,7 +3378,11 @@
             cursor: default;
         }
 
+        /* Upload joins download's rule rather than restating it: the two are
+           one pair of controls and a second copy of the box is how they come
+           to drift a pixel apart. */
         .explorer-download-btn,
+        .explorer-upload-btn,
         .explorer-md-appearance-btn,
         .explorer-line-wrap-btn {
             width: 28px;
@@ -3390,6 +3399,7 @@
         }
 
         .explorer-download-btn:hover,
+        .explorer-upload-btn:hover,
         .explorer-md-appearance-btn:hover,
         .explorer-md-appearance-btn[aria-expanded="true"],
         .explorer-line-wrap-btn:hover,
@@ -3442,6 +3452,7 @@
         }
 
         .explorer-download-btn svg,
+        .explorer-upload-btn svg,
         .explorer-md-appearance-btn svg,
         .explorer-line-wrap-btn svg {
             width: 14px;
@@ -3645,7 +3656,8 @@
            zoom, they only restyle the surface), so their buttons are not dimmed
            with the disabled chrome. */
         .explorer-editor.is-editing .explorer-editor-tab,
-        .explorer-editor.is-editing .explorer-download-btn {
+        .explorer-editor.is-editing .explorer-download-btn,
+        .explorer-editor.is-editing .explorer-upload-btn {
             opacity: .5;
         }
 

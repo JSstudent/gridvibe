@@ -444,22 +444,18 @@
         bar.appendChild(actions);
     }
 
-    async function explorerFilesystemRequest(context, route, body) {
+    /* One door for every mutation transport: the guard, the token claim and the
+       "the answer never arrived" shape are the same whether the request is this
+       module's JSON POST or an upload's multipart body sent through the native
+       bridge. A transport added beside them goes through here too, or a batch
+       gains a request the in-flight set never learns about. */
+    async function explorerFilesystemSend(context, send) {
         if (!isExplorerFsActionContextCurrent(context)
             || !markExplorerFilesystemRequestStarted(context)) {
             return null;
         }
         try {
-            const response = await fetch(
-                `/api/explorer/${encodeURIComponent(context.sessionId)}/${route}`,
-                {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(body)
-                }
-            );
-            const data = await response.json().catch(() => ({}));
-            return { response, data };
+            return await send();
         } catch (error) {
             return {
                 response: null,
@@ -470,6 +466,21 @@
                 }
             };
         }
+    }
+
+    function explorerFilesystemRequest(context, route, body) {
+        return explorerFilesystemSend(context, async () => {
+            const response = await fetch(
+                `/api/explorer/${encodeURIComponent(context.sessionId)}/${route}`,
+                {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(body)
+                }
+            );
+            const data = await response.json().catch(() => ({}));
+            return { response, data };
+        });
     }
 
     function setExplorerNameDialogBusy(busy) {
@@ -1006,8 +1017,16 @@
             if (!isExplorerFsActionContextCurrent(context)) {
                 break;
             }
-            const { route, body } = buildRequest(entry);
-            const result = await explorerFilesystemRequest(context, route, body);
+            /* A descriptor may carry its own `send` instead of a route and a
+               body — an upload's multipart POST, or the native window's
+               bridge, neither of which is a JSON body. Everything else about
+               the batch is identical, which is the point: the plan, the
+               per-request identity guard and the one report do not care how
+               the bytes went out. */
+            const descriptor = buildRequest(entry);
+            const result = descriptor.send
+                ? await explorerFilesystemSend(context, descriptor.send)
+                : await explorerFilesystemRequest(context, descriptor.route, descriptor.body);
             if (!result) {
                 break;
             }
@@ -1033,13 +1052,19 @@
     /* Report an N-request batch through the existing error bar — one message,
        one surface — synthesising the `mutated` flag the bar uses to decide
        between Retry and Refresh. A retry replays only the entries that failed. */
-    function reportExplorerFilesystemBatch(context, verb, results, retryEntries) {
+    function reportExplorerFilesystemBatch(
+        context, verb, results, retryEntries, options = {}
+    ) {
         const outcome = GridVibeExplorerSelection.batchOutcome(verb, results);
         if (!isExplorerFsActionContextCurrent(context)) {
             return outcome;
         }
         if (outcome.ok) {
-            showTerminalToast(outcome.toast, 'success');
+            /* `successNote` is for an outcome that succeeded but is not what
+               the caller literally asked for — an upload the server numbered.
+               It joins the one toast rather than opening a second surface. */
+            const note = String(options.successNote || '');
+            showTerminalToast(note ? `${outcome.toast} — ${note}` : outcome.toast, 'success');
             return outcome;
         }
         showExplorerFilesystemError(
@@ -1228,6 +1253,308 @@
         }
     }
 
+    /* ─────────────────────────────────────────────
+       Upload — download's mirror on the write side.
+
+       Every surface that offers a download offers this, and one rule decides
+       where the bytes land (`explorer-upload.js`, DOM-free and Node-tested): a
+       folder names itself, a file names the folder it sits in, blank space
+       names the folder that surface is showing. Nothing here can name a file,
+       so nothing here can overwrite one — the server refuses a collision and
+       the batch reports it by name.
+
+       A batch is N atomic single-file requests, exactly as every other
+       explorer mutation batch is: one busy hold, one confirmation, one
+       deferred refresh, and a retry that replays only the files that failed.
+    ───────────────────────────────────────────── */
+
+    const explorerUploadPickers = new Map();
+
+    function explorerUploadPolicy() {
+        return window.GridVibeExplorerUpload || null;
+    }
+
+    /* The destination for a gesture made on one surface. `null` withholds the
+       affordance: a surface that cannot name a folder must not fall back to
+       the explorer root, which is the one place the user was demonstrably not
+       looking when they asked. */
+    function explorerUploadDestinationFor(index, rowContext) {
+        const policy = explorerUploadPolicy();
+        const pane = terminals[index];
+        if (!policy || !pane) {
+            return null;
+        }
+        return policy.uploadDestination({
+            surface: String(rowContext?.surface || ''),
+            kind: String(rowContext?.kind || ''),
+            path: String(rowContext?.path || ''),
+            listingPath: pane._explorerPath || ''
+        });
+    }
+
+    /* Ask the OS for files. Two transports, one shape.
+
+       In the native window the page cannot open a picker WebView2 will honour
+       any more than it can call `window.prompt`, so the dialog is the
+       launcher's — the same reason a download is saved through the bridge
+       rather than through an `<a download>` click. The bridge hands back
+       paths; the bytes are read and POSTed by the launcher, through this
+       server's own endpoint, so the route's root confinement, its name rules
+       and its size cap all still apply.
+
+       In the browser it is a hidden `<input type="file" multiple>`, clicked
+       inside the gesture that asked for it — nothing may await before that
+       click, or the browser drops the picker on the floor. */
+    function openExplorerUploadPicker(context) {
+        if (isPywebviewAvailable() && window.pywebview.api.select_upload_files) {
+            return Promise.resolve(window.pywebview.api.select_upload_files(
+                typeof CURRENT_WORKSPACE_ID === 'undefined' ? 'default' : CURRENT_WORKSPACE_ID
+            )).then(result => {
+                if (!result || result.cancelled || !result.ok) {
+                    return { cancelled: true, files: [], error: result?.error || '' };
+                }
+                return {
+                    cancelled: false,
+                    files: (result.files || []).map(entry => ({
+                        name: String(entry?.name || ''),
+                        size: Number(entry?.size) || 0,
+                        sourcePath: String(entry?.path || '')
+                    }))
+                };
+            }).catch(error => (
+                { cancelled: true, files: [], error: error?.message || String(error) }
+            ));
+        }
+        return new Promise(resolve => {
+            explorerUploadPickers.get(context.sessionId)?.remove();
+            const input = document.createElement('input');
+            input.type = 'file';
+            input.multiple = true;
+            input.hidden = true;
+            explorerUploadPickers.set(context.sessionId, input);
+            let settled = false;
+            const finish = (files) => {
+                if (settled) {
+                    return;
+                }
+                settled = true;
+                if (explorerUploadPickers.get(context.sessionId) === input) {
+                    explorerUploadPickers.delete(context.sessionId);
+                }
+                input.remove();
+                resolve({
+                    cancelled: !files.length,
+                    files: files.map(file => ({
+                        name: String(file.name || ''),
+                        size: Number(file.size) || 0,
+                        blob: file
+                    }))
+                });
+            };
+            input.addEventListener('change', () => finish(Array.from(input.files || [])));
+            /* Not emitted by every engine, so it is an early exit rather than
+               the only way out; a `change` carrying no files settles the rest. */
+            input.addEventListener('cancel', () => finish([]));
+            document.body.appendChild(input);
+            input.click();
+        });
+    }
+
+    /* One file, one request. The native transport posts the same multipart
+       body from the launcher and answers in the same `{response, data}` shape
+       the JSON path uses, so the batch runner, the plan and the report cannot
+       tell the two apart. */
+    function explorerUploadRequestDescriptor(context, destination, entry) {
+        const relativeUrl = `/api/explorer/${encodeURIComponent(context.sessionId)}/upload`;
+        /* Which handle this entry carries is the policy module's answer, not a
+           property read off the entry here: an accepted entry wraps the picked
+           object rather than being it. */
+        const source = explorerUploadPolicy()?.uploadEntrySource(entry) || null;
+        const fields = {
+            root_revision: context.rootRevision,
+            destination_directory: destination,
+            name: entry.name
+        };
+        if (!source) {
+            return {
+                send: async () => ({
+                    response: { ok: false, status: 0 },
+                    data: {
+                        error: `${entry.name || 'The file'} is no longer available to upload.`,
+                        code: 'invalid_request',
+                        mutated: false
+                    }
+                })
+            };
+        }
+        if (source.sourcePath) {
+            return {
+                send: async () => {
+                    const result = await window.pywebview.api.upload_file(
+                        relativeUrl,
+                        source.sourcePath,
+                        fields,
+                        typeof CURRENT_WORKSPACE_ID === 'undefined' ? 'default' : CURRENT_WORKSPACE_ID
+                    );
+                    return {
+                        response: { ok: Boolean(result?.ok), status: Number(result?.status) || 0 },
+                        data: result?.ok
+                            ? (result.data || {})
+                            : {
+                                error: result?.error || 'The file could not be uploaded.',
+                                code: result?.code || 'io_error',
+                                mutated: result?.mutated === true
+                            }
+                    };
+                }
+            };
+        }
+        return {
+            send: async () => {
+                const body = new FormData();
+                Object.entries(fields).forEach(([key, value]) => body.append(key, value));
+                body.append('file', source.blob, entry.name);
+                const response = await fetch(relativeUrl, { method: 'POST', body });
+                const data = await response.json().catch(() => ({}));
+                return { response, data };
+            }
+        };
+    }
+
+    async function uploadExplorerFiles(context, destination, entries, options = {}) {
+        const policy = explorerUploadPolicy();
+        if (!policy || !entries.length) {
+            return;
+        }
+        const label = entries.length > 1
+            ? `Uploading ${entries.length}…`
+            : 'Uploading file…';
+        if (!setExplorerFilesystemBusy(context, label)) {
+            return;
+        }
+        /* A rejection notice already on the bar names files this batch was
+           never going to send, so clearing it here would delete the only
+           report they got — and the success toast that follows would then be
+           the whole story. A batch failure still replaces it: that one is
+           retryable and more urgent. */
+        if (!options.keepExistingError) {
+            clearExplorerFilesystemError(context.index);
+        }
+        const plan = explorerFilesystemMutationPlan();
+        try {
+            if (!isExplorerFsActionContextCurrent(context)) {
+                return;
+            }
+            const confirmCopy = policy.uploadConfirmCopy(entries, destination);
+            if (confirmCopy) {
+                const owner = `explorer-upload:${context.sessionId}:${context.token}`;
+                context.paneRef._explorerFsBusy.owner = owner;
+                const confirmed = await openGenericConfirmModal({
+                    title: confirmCopy.title,
+                    copy: confirmCopy.copy,
+                    note: 'Each file is uploaded separately. An existing file is never replaced — a name already in use is numbered instead.',
+                    confirmLabel: confirmCopy.confirmLabel,
+                    owner
+                });
+                if (!confirmed || !isExplorerFsActionContextCurrent(context)) {
+                    return;
+                }
+            }
+            const results = await runExplorerFilesystemBatch(
+                context,
+                entries,
+                entry => explorerUploadRequestDescriptor(context, destination, entry),
+                plan
+            );
+            await applyExplorerFilesystemMutationPlan(context, plan);
+            reportExplorerFilesystemBatch(
+                context,
+                'Uploaded',
+                results,
+                failed => () => uploadExplorerFiles(context, destination, failed),
+                { successNote: policy.uploadRenameNote(results) }
+            );
+        } finally {
+            clearExplorerFilesystemBusy(context);
+        }
+    }
+
+    /* The one entry point every upload affordance calls: the header buttons in
+       the file and image views, and the context menu on every browsing
+       surface. It claims its own action context, so the picker's answer is
+       checked against the token the picker itself opened under — the menu's
+       build-time context can be several gestures old by the time a file is
+       chosen. */
+    function startExplorerUpload(index, rowContext) {
+        const policy = explorerUploadPolicy();
+        const destination = explorerUploadDestinationFor(index, rowContext);
+        if (!policy || destination === null) {
+            return false;
+        }
+        /* No root revision means the pane has not read its root yet, and an
+           upload without one cannot be checked against the root it was aimed
+           at. The menu simply withholds its entries in that state, but a
+           *button* that quietly does nothing reads as a broken button, so the
+           refusal is returned for the caller to say out loud. */
+        const context = explorerFilesystemActionContext(index, rowContext || {});
+        if (!context) {
+            return false;
+        }
+        openExplorerUploadPicker(context).then(picked => {
+            if (picked.cancelled) {
+                if (picked.error) {
+                    showTerminalToast(`Upload failed: ${picked.error}`, 'error');
+                }
+                return;
+            }
+            if (!isExplorerFsActionContextCurrent(context)) {
+                return;
+            }
+            const plan = policy.uploadPlan(picked.files);
+            /* Refused before anything was sent, so it is reported before the
+               batch rather than folded into its count — "uploaded 3 of 3" has
+               to stay true about the files that were actually attempted. */
+            clearExplorerFilesystemError(context.index);
+            if (plan.rejected.length) {
+                showExplorerFilesystemError(
+                    context,
+                    { error: policy.uploadRejectionMessage(plan.rejected), mutated: false }
+                );
+            }
+            if (!plan.accepted.length) {
+                return;
+            }
+            return uploadExplorerFiles(context, destination, plan.accepted, {
+                keepExistingError: plan.rejected.length > 0
+            });
+        });
+        return true;
+    }
+
+    /* The explorer bar's upload button: whatever the bar is showing is what it
+       uploads into — the listed folder, or the open file's folder — which is
+       the same rule the reveal-in-OS button beside it already follows. */
+    function startExplorerPaneUpload(index) {
+        const pane = terminals[index];
+        if (!pane) {
+            return false;
+        }
+        const openFile = pane._explorerMode === 'file' ? (pane._explorerFilePath || '') : '';
+        return startExplorerUpload(index, openFile
+            ? { surface: 'bar', kind: 'file', path: openFile }
+            : { surface: 'bar', kind: 'directory', path: pane._explorerPath || '' });
+    }
+
+    /* One refusal message for both buttons. A menu entry can be withheld, but
+       a button that silently does nothing reads as broken, and the only way it
+       refuses is a pane that has not read its root revision yet. */
+    function reportRefusedExplorerUpload(started) {
+        if (!started) {
+            showTerminalToast('Refresh the explorer before uploading', 'error');
+        }
+        return started;
+    }
+
     function hasActiveExplorerFilesystemOperation(index) {
         const sessionId = sessionIds[index];
         return Boolean(sessionId && explorerFilesystemInFlightSessions.has(sessionId));
@@ -1249,6 +1576,8 @@
         if (explorerNameDialogState?.context?.sessionId === key) {
             closeExplorerNameDialog();
         }
+        explorerUploadPickers.get(key)?.remove();
+        explorerUploadPickers.delete(key);
         clearExplorerFilesystemClipboard(key);
         clearExplorerSelection(key);
         explorerFilesystemActionTokens.delete(key);

@@ -1962,6 +1962,48 @@
             });
         }
 
+        /* Upload sits directly under Download because it is the same read
+           inverted, and it is offered from every surface Download is: the
+           Files tree, the Preview listing, the tab strip and the Git
+           sidebar's rows — plus the blank space of both browsing surfaces and
+           every folder row, which is where "upload into *this* folder" is the
+           only sentence a reader would think to say.
+
+           It is never a selection action: an upload has one destination, and
+           several selected rows name several. The right-clicked row is what
+           picks the folder — a folder names itself, anything else names the
+           folder it sits in — so the entry always states which folder it
+           found. Nothing here names a file, so nothing here can overwrite
+           one. */
+        const uploadPolicy = window.GridVibeExplorerUpload;
+        if (uploadPolicy && offersPathEntries && typeof startExplorerUpload === 'function') {
+            const uploadSurface = blankContext
+                ? blankContext.surface
+                : (rowSurface
+                    || (row?.dataset.explorerGitScopeSurface === 'tab' ? 'tab' : 'git'));
+            const uploadContext = {
+                surface: uploadSurface,
+                kind: blankContext
+                    ? 'directory'
+                    : (row?.dataset.explorerContextKind || 'file'),
+                path: blankContext
+                    ? blankContext.path
+                    : (row?.dataset.explorerContextPath || relativePath)
+            };
+            const uploadDestination = uploadPolicy.uploadDestination(
+                Object.assign({}, uploadContext, {
+                    listingPath: pane?._explorerPath || ''
+                })
+            );
+            if (uploadDestination !== null) {
+                pathItems.push({
+                    label: 'Upload files…',
+                    title: `Upload files from this computer into ${uploadPolicy.destinationLabel(uploadDestination)}`,
+                    action: () => startExplorerUpload(index, uploadContext)
+                });
+            }
+        }
+
         /* Git pinning is one exact path, never a selection action. Files-tree
            rows and open file tabs share the same policy, while commit rows
            returned through their path-free branch above and can never reach
@@ -6259,6 +6301,21 @@
         reportExplorerDownloadBatch(results);
     }
 
+    /* Both file-view headers wire their upload button the same way, and the
+       destination is the open file's own folder — the answer the reader
+       expects from a button sitting on a file. The DOM-free rule derives it;
+       nothing here re-derives a path. */
+    function wireExplorerUploadButton(list, index, path) {
+        const button = list.querySelector(`[data-explorer-upload="${index}"]`);
+        if (!button || typeof startExplorerUpload !== 'function') {
+            button?.remove();
+            return;
+        }
+        button.addEventListener('click', () => reportRefusedExplorerUpload(
+            startExplorerUpload(index, { surface: 'file-view', kind: 'file', path })
+        ));
+    }
+
     function getDownloadBaseName(fullPath) {
         return String(fullPath || '').split(/[\\/]/).pop() || '';
     }
@@ -6644,6 +6701,7 @@
                         <div class="explorer-editor-meta" data-explorer-image-meta="${index}">${escHtml(baseMeta)}</div>
                     </div>
                     <button type="button" class="explorer-download-btn" data-explorer-download="${index}" title="Download file" aria-label="Download file">${EXPLORER_DOWNLOAD_ICON}</button>
+                    <button type="button" class="explorer-upload-btn" data-explorer-upload="${index}" title="Upload files into this file's folder" aria-label="Upload files into this file's folder">${EXPLORER_UPLOAD_ICON}</button>
                 </div>
                 <div class="explorer-editor-body">
                     <div class="explorer-image-view" id="explorer-image-${index}">
@@ -6657,6 +6715,7 @@
         if (downloadButton) {
             downloadButton.addEventListener('click', () => downloadExplorerFile(index));
         }
+        wireExplorerUploadButton(list, index, path);
         const image = viewer.querySelector('.explorer-image');
         if (image) {
             /* Ctrl+scroll zooms the image (notes 3); double-click resets it. */
@@ -6889,6 +6948,7 @@
                     <button type="button" class="explorer-md-appearance-btn" data-explorer-md-appearance="${index}" title="Appearance" aria-label="Viewer appearance" aria-haspopup="menu" aria-expanded="false">${EXPLORER_MD_APPEARANCE_ICON}</button>
                     ${explorerEditorControlsHtml(index)}
                     <button type="button" class="explorer-download-btn" data-explorer-download="${index}" title="Download file" aria-label="Download file">${EXPLORER_DOWNLOAD_ICON}</button>
+                    <button type="button" class="explorer-upload-btn" data-explorer-upload="${index}" title="Upload files into this file's folder" aria-label="Upload files into this file's folder">${EXPLORER_UPLOAD_ICON}</button>
                     ${findAvailable ? `<div class="explorer-editor-search" data-explorer-search="${index}">
                         <input
                             type="search"
@@ -6951,6 +7011,7 @@
                 downloadExplorerFile(index);
             });
         }
+        wireExplorerUploadButton(list, index, path);
         list.querySelectorAll('[data-explorer-file-view]').forEach(button => {
             button.addEventListener('click', () => {
                 if (button.dataset.explorerFileView === 'diff') {

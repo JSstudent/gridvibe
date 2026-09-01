@@ -211,7 +211,7 @@
                 'the overview ruler'
             ],
             findNote: 'Find is unavailable in this view.',
-            retained: 'Download and Edit still work.'
+            retained: 'Download, Upload and Edit still work.'
         };
     }
 
@@ -222,7 +222,7 @@
         if (tier !== 'large') {
             return true;
         }
-        return capability === 'download' || capability === 'edit';
+        return capability === 'download' || capability === 'upload' || capability === 'edit';
     }
 
     /* The large tier's content, split into its bounded chunks. Text, not
