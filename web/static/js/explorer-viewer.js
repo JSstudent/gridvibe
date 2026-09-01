@@ -2371,6 +2371,21 @@
         ensureExplorerTreeState(pane);
         const scroll = { ...(pane._explorerSidebarScroll || {}) };
         ['tree', 'git'].forEach(panel => {
+            /* A rebuild empties its panel, the browser clamps the scroller to
+               0, and it reports that clamp as a `scroll` event a task later —
+               which the capture-phase listener wireExplorerSidebarPresentation()
+               installed answers with this very function. Storing the clamp
+               would hand the rebuild's own side effect to the restore queued
+               behind it, which is how a tree reload came back at the top even
+               once it had the reader's offset in hand. Source guards its
+               capture on `_explorerSourceRenderJob` for exactly this; an
+               in-flight tree rebuild is the same fact, so the stored point
+               stands until the rebuild has put its branches back. */
+            if (panel === 'tree'
+                && typeof explorerTreeRebuildInFlight === 'function'
+                && explorerTreeRebuildInFlight(pane)) {
+                return;
+            }
             const metrics = captureScrollMetrics(
                 document.getElementById(`explorer-${panel}-panel-${index}`)
             );

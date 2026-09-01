@@ -246,6 +246,17 @@ server state.**
   listing confirms it still exists — and a path that listing disproves is
   dropped from the set rather than requested. Bound the walk: each node is a
   round trip, and a persisted set is bounded but not small.
+- **A restore owns where a surface opens, so nothing after it may re-aim that
+  surface.** `explorer_tree_expanded` and the `tree` entry of
+  `explorer_sidebar_scroll` are one restore between them: the set says which
+  branches exist to scroll through and the point says where in them the reader
+  was. The re-listing walk above is followed by the reveal that expands the
+  ancestors of whatever file the pane is showing, and the reveal used to scroll
+  that row into view unconditionally — so the offset was applied and then
+  overwritten a render later, and every restored pane opened its tree parked on
+  the Preview tab's file. The reveal now expands and does not scroll whenever a
+  stored point exists; a pane with no stored point is a first show, where the
+  file it is showing is the only thing there is to point at.
 
 ---
 

@@ -2019,7 +2019,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         # Presence, not signature — pinning the parameter list only broke this
         # page test when the loader gained its cached-directory refresh option.
         self.assertIn("function loadExplorerTreeChildren(", html)
-        self.assertIn("function revealExplorerTreePath(index, targetPath = '')", html)
+        self.assertIn("function revealExplorerTreePath(", html)
         self.assertIn("function reloadExplorerTree(index)", html)
         # A save re-reads one directory rather than dropping the whole tree.
         self.assertIn("function refreshExplorerTreeFileEntry(index, path)", html)
@@ -2781,10 +2781,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertNotIn("openExplorerFile(", reveal)
         # The reveal targets an explicit path instead of whatever the viewer
         # happens to show, and the panel setters hand back the open promise.
-        self.assertIn(
-            "async function revealExplorerTreePath(index, targetPath = '')",
-            html,
-        )
+        self.assertIn("async function revealExplorerTreePath(", html)
         self.assertIn("return setExplorerSidebarPanelOpen(index, 'tree', open);", html)
         self.assertIn("function focusExplorerTreeRow(index, path)", html)
         # Flashing is layered on the shared scroll helper, which every reveal
@@ -2797,7 +2794,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("scrollExplorerTreeRowIntoView(index, path)", focus)
         self.assertIn("explorer-tree-located", focus)
         reveal_path = html[
-            html.index("async function revealExplorerTreePath(index, targetPath = '')"):
+            html.index("async function revealExplorerTreePath("):
             html.index("function explorerTreeRowElement(panel, path)")
         ]
         self.assertIn("scrollExplorerTreeRowIntoView(index, target);", reveal_path)
