@@ -140,9 +140,10 @@ When the pane cannot say where it is — the shell never answered, or the pane i
 | **Fold a level** | `Alt`-click a folder's fold arrow in the Files tree to fold or unfold **every folder beside it** at once. The new state mirrors the folder you clicked, so `Alt`-clicking any open top-level folder folds the whole tree in one go. Folding a level also forgets what was open inside it, so those folders reopen clean, and the tree scrolls to keep the folder you clicked in view instead of jumping once its rows disappear. |
 | **Restore fidelity** | Saved sessions and workspaces preserve the explorer root, ordered file tabs, Preview/Source/Diff intent, per-panel and directory scroll, wrapping, folds, sidebar width/scroll, Files-tree expansion, Git commit expansion, theme, and workspace-wide Markdown/source appearance. Content-relative scroll and folds restore only when their file, directory, or rendered Diff revision still matches; queries and fetched results are always refetched, never stored. |
 | **Manage files** | Create, copy, move, rename, and delete from the context menu. Every write stays inside the explorer root; collisions never overwrite existing files, and deletion requires confirmation. |
-| **Select several** | `Ctrl`-click rows to add or remove them, `Shift`-click for a range. Right-click inside the selection and Copy, Cut, Delete, Download, and Copy path act on all of it, with one confirmation and one result for the batch; right-click anywhere else drops back to that single row. A plain click still just opens the file. Rename stays single-entry. |
+| **Upload files** | Send files from your computer into the explorer through the usual file picker — offered anywhere the download button or **Download file** is offered, plus every folder row and the blank space of the Files tree and the listing, and a button in the explorer bar for the folder you are looking at. A folder uploads into itself, a file uploads into the folder it sits in, and the menu entry always names the folder it found. Works on a local repo folder and over SFTP, with multi-select in one go: each file is its own transfer, capped at 100 MB, with one confirmation past ten files and one result for the batch. **An existing file is never replaced** — a name already in use is numbered instead (`report (1).pdf` beside `report.pdf`), so uploading a newer version keeps the old one until you delete it yourself, and the result says which name it used. |
+| **Select several** | `Ctrl`-click rows to add or remove them, `Shift`-click for a range. Right-click inside the selection and Copy, Cut, Delete, Download, and Copy path act on all of it, with one confirmation and one result for the batch; right-click anywhere else drops back to that single row. A plain click still just opens the file. Rename stays single-entry, and so does Upload — it has one destination folder, which the row you right-clicked picks. |
 
-Uploading, cross-root transfers, and Git checkout, pull, or merge are intentionally left to the terminal.
+Cross-root transfers and Git checkout, pull, or merge are intentionally left to the terminal.
 
 ## Switching a Local Repo Pane's Shell
 
@@ -185,6 +186,7 @@ GridVibe does not proxy pages or bypass `X-Frame-Options`/CSP, so sites that blo
 | 🗂️ | Files tree sidebar |
 | ⎇ | Git changes and history sidebar |
 | 🔍 | Repository search sidebar (`Ctrl+Shift+F`) |
+| 📤 | Upload files into the folder this pane is showing |
 | 🖥️ | Reveal the current location in the system file manager (local panes only) |
 
 **Top bar:** theme · max surface · broadcast typing · fullscreen · App Settings · chevron to hide the bar. Plus a `Workspace…` menu and a `Sessions…` menu.

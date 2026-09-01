@@ -181,7 +181,8 @@
     }
 
     /* While editing, the non-editor file chrome is disabled so a stray click
-       cannot swap views or download the old disk copy. Zoom, line wrapping and
+       cannot swap views, download the old disk copy, or start an upload whose
+       refresh lands under an unsaved buffer. Zoom, line wrapping and
        the appearance menu stay live — like the wrap toggle they only restyle
        the surface (CSS custom properties on panels that are not rebuilt), and
        the Source font they set is the one being typed into.
@@ -213,7 +214,8 @@
         };
         setDisabled([
             '[data-explorer-file-view]',
-            `[data-explorer-download="${index}"]`
+            `[data-explorer-download="${index}"]`,
+            `[data-explorer-upload="${index}"]`
         ], Boolean(disabled));
         setDisabled([
             `[data-explorer-search-input="${index}"]`,

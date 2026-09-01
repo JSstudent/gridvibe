@@ -27,6 +27,51 @@
         return pane;
     }
 
+    /* Rebuilding the tree body empties `[data-explorer-tree-body]`, and the
+       browser answers an emptied scroller by clamping it to 0 and reporting
+       that clamp as a `scroll` event a task later. The tree panel carries a
+       capture-phase listener (wireExplorerSidebarPresentation), which answers
+       that event by storing the clamp as the reader's position — and every
+       rebuild below has at least one `await` per directory between the
+       emptying render and the render that puts the branches back, so the
+       event lands in that gap and the offset the rebuild was about to restore
+       is already gone by the time it is applied.
+
+       Source has exactly this hazard and answers it exactly this way: the
+       stored point stands while a build is in flight
+       (`_explorerSourceRenderJob` in captureExplorerFileScroll). A depth
+       rather than a flag, because loadExplorerTree() nests the reveal walk
+       inside its own rebuild. */
+    function beginExplorerTreeRebuild(pane) {
+        if (!pane) {
+            return;
+        }
+        pane._explorerTreeRebuildDepth = (pane._explorerTreeRebuildDepth || 0) + 1;
+    }
+
+    function endExplorerTreeRebuild(pane) {
+        if (!pane) {
+            return;
+        }
+        pane._explorerTreeRebuildDepth = Math.max(
+            0, (pane._explorerTreeRebuildDepth || 0) - 1
+        );
+    }
+
+    function explorerTreeRebuildInFlight(pane) {
+        return Boolean(pane && pane._explorerTreeRebuildDepth > 0);
+    }
+
+    /* The tree panel's own offset, put back after a rebuild that emptied it.
+       Routed through the shared sidebar restore rather than a second
+       applyScrollMetrics() call, so the point it reads is the one the pane
+       stores and the one a workspace restore hands back. */
+    function restoreExplorerTreeScroll(index) {
+        if (typeof restoreExplorerSidebarPresentation === 'function') {
+            restoreExplorerSidebarPresentation(index);
+        }
+    }
+
     /* `refresh` re-reads a directory the tree has already cached. The cached
        rows stay on screen for the whole round trip — a re-read the reader did
        not ask for must not blank the folder they are looking at — so the
@@ -649,7 +694,7 @@
     /* Expand every ancestor of the pane's current directory or open file — or
        of an explicit path, which the tab strip's locate-in-tree gesture uses
        to point at a tab's file without depending on what the viewer shows. */
-    async function revealExplorerTreePath(index, targetPath = '') {
+    async function revealExplorerTreePath(index, targetPath = '', { scroll = true } = {}) {
         const pane = terminals[index];
         if (!pane?._explorerTreeSidebarOpen) {
             return;
@@ -675,8 +720,16 @@
         renderExplorerTreePanel(index);
         /* Expanding the ancestors is only half the reveal: in a long tree the
            target's row can still sit outside the panel's scrolled viewport,
-           which leaves its `.active` highlight off screen. */
-        scrollExplorerTreeRowIntoView(index, target);
+           which leaves its `.active` highlight off screen.
+
+           `scroll: false` is for the caller that owns where the panel opens.
+           A restore is not a navigation — the same rule renderExplorerFile()
+           re-applies the find under — so opening the tree over a pane that
+           already carries a stored offset expands the ancestors and leaves
+           the scrolling to the restore that follows. */
+        if (scroll) {
+            scrollExplorerTreeRowIntoView(index, target);
+        }
     }
 
     /* The tree row for a path (file or directory), or the row marked `.active`
@@ -842,15 +895,39 @@
         return true;
     }
 
+    /* Opening the panel over a pane that already carries a tree offset is a
+       restore, not a navigation: the reader's own position is the answer and
+       the reveal's scroll-to-row is not. A workspace restore hands back the
+       expansion set *and* the offset it was captured with, and the reveal
+       walk ran last — so every restored pane opened its tree scrolled to
+       whatever file the Preview tab happened to be showing, which is the
+       "jumps to the preview file position" half of the report.
+
+       A pane with no stored point is a first show and still reveals: there is
+       nothing else to point the reader at. */
     async function loadExplorerTree(index) {
         const pane = terminals[index];
         if (!pane) {
             return;
         }
         ensureExplorerTreeState(pane);
-        renderExplorerTreePanel(index);
-        await hydrateExplorerTreeExpansion(index);
-        await revealExplorerTreePath(index);
+        const restoring = Boolean(pane._explorerSidebarScroll?.tree);
+        beginExplorerTreeRebuild(pane);
+        try {
+            renderExplorerTreePanel(index);
+            await hydrateExplorerTreeExpansion(index);
+            await revealExplorerTreePath(index, '', { scroll: !restoring });
+            /* Slot-addressed work after an await: a group switch rehouses
+               `terminals[index]` while the listings are out, and writing this
+               pane's offset into whatever now sits in the slot moves a pane
+               that never asked. The rebuild depth above is pane state and is
+               released either way. */
+            if (restoring && terminals[index] === pane) {
+                restoreExplorerTreeScroll(index);
+            }
+        } finally {
+            endExplorerTreeRebuild(pane);
+        }
     }
 
     /* Drop cached children but keep expansion state, then refetch what is visible. */
@@ -861,24 +938,46 @@
         }
 
         ensureExplorerTreeState(pane);
-        pane._explorerTreeChildren.clear();
-        pane._explorerTreeErrors.clear();
-        renderExplorerTreePanel(index);
+        /* An upload, a delete, a rename or a Git action reloads the tree under
+           a reader who never asked to be moved. The expansion already survives
+           it — nothing here touches `_explorerTreeExpanded` — and the offset
+           now does too: the clear-and-render below empties the panel, which
+           clamps its scroller to 0 and handed the reader back the top of a
+           tree they had navigated by hand. Its two quieter siblings
+           (refreshExplorerTreeFileEntry, refreshExplorerTreeQuiet) already
+           bracket their rebuilds this way. */
+        const viewport = captureScrollMetrics(
+            document.getElementById(`explorer-tree-panel-${index}`)
+        );
+        beginExplorerTreeRebuild(pane);
+        try {
+            pane._explorerTreeChildren.clear();
+            pane._explorerTreeErrors.clear();
+            renderExplorerTreePanel(index);
 
-        const expanded = [...pane._explorerTreeExpanded]
-            .sort((left, right) => left.split('/').length - right.split('/').length);
-        await loadExplorerTreeChildren(index, '');
-        for (const path of expanded) {
-            await loadExplorerTreeChildren(index, path);
-        }
-        resetExplorerFsWatchBaseline(pane);
-        renderExplorerTreePanel(index);
-        /* A reload means the tree on disk moved under us (a create, a delete, a
-           rename). With a filter typed, its result set is what the panel is
-           showing, so it has to be re-read too — once, on the same explicit
-           trigger, never on a timer. */
-        if (typeof explorerTreeSearchActive === 'function' && explorerTreeSearchActive(pane)) {
-            await runExplorerTreeSearch(index);
+            const expanded = [...pane._explorerTreeExpanded]
+                .sort((left, right) => left.split('/').length - right.split('/').length);
+            await loadExplorerTreeChildren(index, '');
+            for (const path of expanded) {
+                await loadExplorerTreeChildren(index, path);
+            }
+            resetExplorerFsWatchBaseline(pane);
+            renderExplorerTreePanel(index);
+            /* A reload means the tree on disk moved under us (a create, a delete, a
+               rename). With a filter typed, its result set is what the panel is
+               showing, so it has to be re-read too — once, on the same explicit
+               trigger, never on a timer. */
+            if (typeof explorerTreeSearchActive === 'function' && explorerTreeSearchActive(pane)) {
+                await runExplorerTreeSearch(index);
+            }
+            if (terminals[index] === pane) {
+                applyScrollMetrics(
+                    document.getElementById(`explorer-tree-panel-${index}`),
+                    viewport
+                );
+            }
+        } finally {
+            endExplorerTreeRebuild(pane);
         }
     }
 

@@ -6,6 +6,7 @@ No path is passed to a shell. Parent directories are resolved before literal
 leaves are joined, so mutation targets are never followed through a link leaf.
 """
 
+import contextlib
 import errno
 import logging
 import os
@@ -31,6 +32,11 @@ EXPLORER_COPY_MAX_BYTES = 512 * 1024 * 1024
 EXPLORER_COPY_CHUNK_BYTES = 1024 * 1024
 EXPLORER_COPY_NAME_ATTEMPTS = 100
 EXPLORER_CREATE_NAME_MAX_CHARS = 255
+# Upload is download's mirror, so it carries download's ceiling rather than
+# the copy limit: both move one file across the HTTP boundary, and a cap the
+# two halves share is one number a user can hold in their head.
+EXPLORER_UPLOAD_MAX_BYTES = 100 * 1024 * 1024
+EXPLORER_UPLOAD_CHUNK_BYTES = 1024 * 1024
 
 _WINDOWS_ABSOLUTE_RE = re.compile(r"^[A-Za-z]:")
 _FILESYSTEM_ERRORS = (OSError, RuntimeError, ValueError)
@@ -94,6 +100,11 @@ class ExplorerFsCrossDeviceError(ExplorerFsError):
 class ExplorerFsCopyLimitError(ExplorerFsError):
     status_code = 413
     code = "copy_limit_exceeded"
+
+
+class ExplorerFsUploadLimitError(ExplorerFsError):
+    status_code = 413
+    code = "upload_too_large"
 
 
 class ExplorerFsIoError(ExplorerFsError):
@@ -517,6 +528,106 @@ def _reserve_copy_destination(
     )
 
 
+def _upload_name_for_attempt(name: str, attempt: int) -> str:
+    """Return the picked name, then extension-aware ``name (1)`` variants.
+
+    The copy suffix (``-Copy``) says "this is a duplicate of something here";
+    an upload's says "this is a newer one of these", which is the numbered form
+    every file manager uses and the one a reader will recognise without being
+    told. Extension-aware for the same reason `_copy_name_for_attempt` is: the
+    number belongs to the name, not after the type.
+
+    A stem long enough that the suffix would overflow the component limit is
+    trimmed rather than allowed to fail as ``ENAMETOOLONG`` — the alternative
+    is refusing an upload for a reason the user cannot see and cannot act on.
+    """
+    if attempt <= 0:
+        return name
+    stem, extension = os.path.splitext(name)
+    suffix = f" ({attempt})"
+    budget = EXPLORER_CREATE_NAME_MAX_CHARS - len(suffix) - len(extension)
+    if budget < 1:
+        # Nothing left to keep: the extension alone fills the component.
+        stem = ""
+    elif len(stem) > budget:
+        stem = stem[:budget]
+    return f"{stem}{suffix}{extension}"
+
+
+def _reserve_upload_destination(
+    backend: Any,
+    destination_absolute: str,
+    literal_name: str,
+) -> Tuple[str, str, Any, Any]:
+    """Reserve the first free ``name``/``name (n)`` and keep holding its claim.
+
+    A collision is not a failure here: the user is uploading a newer copy of
+    something and wants the old one kept, so a taken name steps to the next
+    candidate exactly as `paste` does. What must not change is *how* the name
+    is taken -- every attempt is an exclusive create, so two uploads racing for
+    one name cannot both win it and neither can land on top of an existing
+    file. Checking `lstat` first only saves a doomed create; the ``EEXIST``
+    branch is what actually decides.
+
+    The claim is per **candidate leaf**, not on the destination folder: claims
+    are ancestor-aware, and holding the folder for the length of a 100 MB
+    transfer would block every editor save under it. A candidate another
+    operation already owns is skipped rather than waited for, which is also the
+    right answer for two concurrent uploads of one name.
+
+    Returns the reserved path, its leaf, the open handle, and the claim to hold
+    for the duration of the write.
+    """
+    claim_conflict = False
+    for attempt in range(EXPLORER_COPY_NAME_ATTEMPTS):
+        candidate = _upload_name_for_attempt(literal_name, attempt)
+        target_path = backend.fs_join(destination_absolute, candidate)
+        with contextlib.ExitStack() as attempt_resources:
+            try:
+                attempt_resources.enter_context(
+                    _explorer_path_claims(
+                        (backend.fs_claim_key(target_path),),
+                        error_type=ExplorerFsOperationInProgressError,
+                    )
+                )
+            except ExplorerFsOperationInProgressError:
+                claim_conflict = True
+                continue
+            try:
+                existing = backend.fs_lstat(target_path)
+            except _FILESYSTEM_ERRORS as exc:
+                _raise_io_error(
+                    "Could not inspect the upload destination", exc, mutated=False
+                )
+            if existing is not None:
+                continue
+            try:
+                handle = backend.fs_create_exclusive(target_path)
+            except _FILESYSTEM_ERRORS as exc:
+                if _is_destination_collision_error(exc):
+                    continue
+                _raise_io_error(
+                    "Could not create the uploaded file", exc, mutated=False
+                )
+            return target_path, candidate, handle, attempt_resources.pop_all()
+    if claim_conflict:
+        raise ExplorerFsOperationInProgressError(
+            f"Another operation is using {literal_name}; try again in a moment",
+            path=literal_name,
+        )
+    raise ExplorerFsDestinationExistsError(
+        f"Could not allocate a free name for {literal_name}",
+        path=literal_name,
+    )
+
+
+def _close_quietly(handle: Any) -> None:
+    try:
+        handle.close()
+    except Exception:
+        logger.debug("Explorer upload handle did not close cleanly")
+
+
 def _relative_path_contains_git(path: str) -> bool:
     return any(part.lower() == ".git" for part in path.replace("\\", "/").split("/"))
 
@@ -603,6 +714,150 @@ def create_explorer_entry_payload(
         "destination_path": destination_path,
         "type": entry_kind,
         "entry_kind": entry_kind,
+    }
+
+
+def _discard_partial_upload(backend: Any, target_path: str) -> bool:
+    """Remove the reserved destination after a failed upload.
+
+    An upload reserves its destination with an exclusive create *before* a
+    single byte arrives, so a stream that dies halfway leaves a real file at a
+    name the user never got. Removing it is what lets the failure be reported
+    as ``mutated: False`` and retried; a removal that itself fails is the one
+    case the caller has to report as possibly-applied.
+    """
+    try:
+        backend.fs_remove_file(target_path)
+        return True
+    except _FILESYSTEM_ERRORS:
+        logger.debug("Explorer upload could not remove its partial destination")
+        return False
+
+
+def upload_explorer_file_payload(
+    backend: Any,
+    *,
+    root_revision: Any,
+    destination_directory: Any,
+    name: Any,
+    stream: Any,
+    declared_size: Any = None,
+    session_id: str,
+) -> Dict[str, Any]:
+    """Write one uploaded file into the explorer root without overwrite.
+
+    Download's mirror, and deliberately built out of ``create``'s parts rather
+    than beside them: the same literal-leaf validation, the same
+    resolve-parent-then-join, the same ``.git`` refusal, the same exclusive
+    create, and the same per-path claim that coordinates with editor saves. The
+    only thing upload adds is a body, and the body is streamed under a ceiling
+    the reader enforces itself -- a declared length is a client's claim, and the
+    file that arrives is what has to be bounded.
+
+    There is no overwrite here and there must not be one: an upload that
+    replaces is a delete the user did not ask for. A collision is therefore not
+    an error but a *new name* -- ``report (1).pdf`` beside ``report.pdf`` --
+    because the reason to upload a file that is already there is almost always
+    that this one is newer, and the old one is worth keeping until the user
+    says otherwise. Deleting and renaming afterwards is one gesture each; a
+    lost previous version is not recoverable at all.
+
+    The response says which name it actually used, so the caller never has to
+    assume it got the one it asked for.
+    """
+    literal_name = _normalize_entry_name(name)
+    ceiling = EXPLORER_UPLOAD_MAX_BYTES
+    if isinstance(declared_size, int) and declared_size > ceiling:
+        raise ExplorerFsUploadLimitError(
+            f"{literal_name} exceeds the {ceiling // (1024 * 1024)} MB upload limit",
+            path=literal_name,
+            max_bytes=ceiling,
+        )
+    current_root, _revision = _current_root(backend, root_revision)
+    destination_root, destination_absolute, destination_relative = (
+        _resolve_destination(backend, destination_directory)
+    )
+    if destination_root != current_root:
+        raise ExplorerFsRootChangedError(
+            "The explorer root changed; refresh before trying again"
+        )
+
+    resolved_destination_relative = backend.rel_explorer_path(
+        current_root, destination_absolute
+    )
+    if _relative_path_contains_git(
+        resolved_destination_relative or destination_relative
+    ):
+        raise ExplorerFsProtectedPathError(
+            "GridVibe will not upload entries into .git"
+        )
+
+    written_bytes = 0
+    target_path, stored_name, handle, claim = _reserve_upload_destination(
+        backend, destination_absolute, literal_name
+    )
+    with claim:
+        over_limit = False
+        try:
+            while True:
+                chunk = stream.read(EXPLORER_UPLOAD_CHUNK_BYTES)
+                if not chunk:
+                    break
+                written_bytes += len(chunk)
+                if written_bytes > ceiling:
+                    over_limit = True
+                    break
+                handle.write(chunk)
+            if not over_limit:
+                flush = getattr(handle, "flush", None)
+                if callable(flush):
+                    flush()
+        except _FILESYSTEM_ERRORS as exc:
+            _close_quietly(handle)
+            removed = _discard_partial_upload(backend, target_path)
+            _raise_io_error(
+                f"{stored_name} could not be written"
+                if removed
+                else f"{stored_name} may have been partly written; refresh before retrying",
+                exc,
+                mutated=not removed,
+                path=stored_name,
+            )
+        else:
+            try:
+                handle.close()
+            except Exception as exc:
+                removed = _discard_partial_upload(backend, target_path)
+                _raise_io_error(
+                    f"{stored_name} could not be written"
+                    if removed
+                    else f"{stored_name} may have been partly written; refresh before retrying",
+                    exc,
+                    mutated=not removed,
+                    path=stored_name,
+                )
+        if over_limit:
+            removed = _discard_partial_upload(backend, target_path)
+            raise ExplorerFsUploadLimitError(
+                f"{stored_name} exceeds the {ceiling // (1024 * 1024)} MB upload limit",
+                mutated=not removed,
+                path=stored_name,
+                max_bytes=ceiling,
+            )
+
+    destination_path = backend.rel_explorer_path(current_root, target_path)
+    return {
+        "ok": True,
+        "destination_path": destination_path,
+        "type": "file",
+        "entry_kind": "file",
+        "size": written_bytes,
+        # What was asked for and what was stored are two facts, and the caller
+        # needs both: it has to be able to say "kept as report (1).pdf" rather
+        # than quietly reporting a success under a name that is not on disk.
+        "requested_name": literal_name,
+        "stored_name": stored_name,
+        "renamed": stored_name != literal_name,
     }
 
 
@@ -1103,6 +1358,8 @@ __all__ = [
     "EXPLORER_CREATE_NAME_MAX_CHARS",
     "EXPLORER_FS_MAX_DEPTH",
     "EXPLORER_FS_MAX_ENTRIES",
+    "EXPLORER_UPLOAD_CHUNK_BYTES",
+    "EXPLORER_UPLOAD_MAX_BYTES",
     "ExplorerFsCopyLimitError",
     "ExplorerFsCrossDeviceError",
     "ExplorerFsError",
@@ -1111,11 +1368,13 @@ __all__ = [
     "ExplorerFsOperationInProgressError",
     "ExplorerFsProtectedPathError",
     "ExplorerFsUnsupportedEntryError",
+    "ExplorerFsUploadLimitError",
     "_copy_name_for_attempt",
     "_explorer_claim_keys_conflict",
     "_fs_revision",
     "_fs_root_revision",
     "_normalize_entry_name",
+    "_upload_name_for_attempt",
     "_normalize_rel",
     "_scan_tree",
     "create_explorer_entry_payload",
@@ -1123,5 +1382,6 @@ __all__ = [
     "move_explorer_entry_payload",
     "paste_explorer_entry_payload",
     "rename_explorer_entry_payload",
+    "upload_explorer_file_payload",
     "resolve_mutation_target",
 ]

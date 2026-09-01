@@ -20,6 +20,11 @@ _JS = Path(__file__).resolve().parent.parent / "web" / "static" / "js"
 TIERS_JS = _JS / "explorer-tiers.js"
 REPAINT_JS = _JS / "explorer-repaint.js"
 TABS_JS = _JS / "explorer-tabs.js"
+CORE_JS = _JS / "explorer-worker-core.js"
+CLIENT_JS = _JS / "explorer-worker-client.js"
+HIGHLIGHT_JS = (
+    Path(__file__).resolve().parent.parent / "web" / "static" / "vendor" / "highlight.min.js"
+)
 NODE = shutil.which("node")
 
 # Enough document for explorer-viewer.js to evaluate, plus a panel whose
@@ -258,6 +263,98 @@ setTimeout(() => {
 """
 
 
+# The whole-document pass on a CRLF buffer, run against the real pinned
+# Highlight.js build. The viewer reads its collaborators off `window`, so the
+# harness publishes them there exactly as the page's script tags do; nothing
+# here touches the DOM, which is the property the fix restored.
+CRLF_OFFSET_HARNESS = """
+const fs = require('fs');
+const vm = require('vm');
+
+const sandbox = {
+    console,
+    document: {
+        getElementById: () => null,
+        querySelector: () => null,
+        querySelectorAll: () => [],
+        addEventListener() {},
+        body: { dataset: {}, addEventListener() {} }
+    },
+    window: {
+        addEventListener() {},
+        setTimeout,
+        clearTimeout,
+        matchMedia: () => ({ matches: false }),
+        localStorage: { getItem: () => null, setItem() {}, removeItem() {} },
+        requestAnimationFrame: () => 0
+    },
+    navigator: {},
+    setTimeout,
+    clearTimeout,
+    requestAnimationFrame: () => 0,
+    terminals: [],
+    sessionIds: [],
+    applyExplorerChangeMarks: () => {},
+    escHtml: value => String(value == null ? '' : value)
+};
+sandbox.globalThis = sandbox;
+sandbox.self = sandbox;
+vm.createContext(sandbox);
+// argv: [2] viewer, [3] worker core, [4] worker client, [5] pinned Highlight.js
+[3, 4, 5].forEach(at => {
+    vm.runInContext(fs.readFileSync(process.argv[at], 'utf8'), sandbox);
+});
+sandbox.window.hljs = sandbox.hljs;
+sandbox.window.GridVibeExplorerWorkerCore = sandbox.GridVibeExplorerWorkerCore;
+sandbox.window.GridVibeExplorerWorkerClient = sandbox.GridVibeExplorerWorkerClient;
+vm.runInContext(fs.readFileSync(process.argv[2], 'utf8'), sandbox);
+
+const CRLF = String.fromCharCode(13) + String.fromCharCode(10);
+const LF = String.fromCharCode(10);
+const body = [];
+for (let at = 0; at < 40; at += 1) {
+    body.push('    "key_' + at + '": { "n": ' + at + ', "s": "value ' + at + '" },');
+}
+const rows = ['{'].concat(body).concat(['    "last": true', '}']);
+const crlf = rows.join(CRLF);
+const lf = rows.join(LF);
+
+const measure = (source, lines) => {
+    const records = sandbox.explorerSourceLineRecords(source);
+    let misplaced = 0;
+    let runs = 0;
+    const texts = [];
+    records.forEach(record => {
+        const forLine = lines.get(record.number) || [];
+        runs += forLine.length;
+        forLine.forEach(run => {
+            if (source.slice(run.start, run.start + run.text.length) !== run.text) {
+                misplaced += 1;
+            }
+        });
+        texts.push(forLine.map(run => run.text).join(''));
+    });
+    return { records, misplaced, runs, texts };
+};
+
+const crlfLines = sandbox.explorerHighlightDocumentLines(crlf, 'json');
+const lfLines = sandbox.explorerHighlightDocumentLines(lf, 'json');
+const crlfSeen = measure(crlf, crlfLines);
+const lfSeen = measure(lf, lfLines);
+
+process.stdout.write(JSON.stringify({
+    lines: rows.length,
+    crlfCount: (crlf.match(new RegExp(CRLF, 'g')) || []).length,
+    runs: crlfSeen.runs,
+    misplaced: crlfSeen.misplaced,
+    lineTexts: crlfSeen.texts,
+    recordTexts: crlfSeen.records.map(record => record.text),
+    lfMisplaced: lfSeen.misplaced,
+    lfLineTexts: lfSeen.texts
+}));
+"""
+
+
 # The line-record cache, driven through its one public entry point. Records are
 # identity-comparable per call, so "was this a hit?" is observable without
 # reaching inside the cache: a hit returns the very same array.
@@ -476,6 +573,29 @@ class ExplorerSourceFrameTestCase(unittest.TestCase):
                 capture_output=True,
                 text=True,
                 check=False,
+            )
+        if completed.returncode != 0:
+            self.fail("node harness failed:" + chr(10) + completed.stderr)
+        return json.loads(completed.stdout)
+
+    def _run_highlight_node(self, harness: str):
+        """Run a harness that also needs the worker core, its client and hljs.
+
+        The page loads all three beside explorer-viewer.js, so a harness that
+        exercises the whole-document pass has to as well.
+        """
+        with TemporaryDirectory() as script_dir:
+            script_path = Path(script_dir) / "harness.js"
+            script_path.write_text(harness, encoding="utf-8")
+            completed = subprocess.run(
+                [
+                    NODE, str(script_path), str(VIEWER_JS),
+                    str(CORE_JS), str(CLIENT_JS), str(HIGHLIGHT_JS),
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=120,
             )
         if completed.returncode != 0:
             self.fail("node harness failed:" + chr(10) + completed.stderr)
@@ -791,6 +911,44 @@ class ExplorerSourceFrameTestCase(unittest.TestCase):
         self.assertEqual(
             rendered["omitted"]["tokenizeArgs"], ["def spam" + chr(10), "python"]
         )
+
+    @unittest.skipUnless(NODE, "Node.js is required for CRLF offset tests")
+    def test_document_tokens_carry_exact_offsets_into_a_crlf_buffer(self):
+        """A run's ``start`` is an offset into the file's own bytes, CR included.
+
+        The row records count the CR of every CRLF line and the find resolves
+        its ranges against the same string, so the whole-document pass has to
+        agree with both. It used to parse Highlight.js markup with
+        ``template.innerHTML``, and the HTML parser's input preprocessing
+        turns every CRLF into a lone LF — so each line's runs came back one
+        character earlier than the line before it had already drifted. On a
+        900-line CRLF JSON file line 100 was 99 characters out and the end of
+        the file 900, which is why the find's counter stayed correct while its
+        marks landed on the wrong text or vanished entirely.
+
+        Executed against the real pinned Highlight.js build: every run must
+        name the exact substring it claims, on a buffer whose every line ends
+        CRLF.
+        """
+        result = self._run_highlight_node(CRLF_OFFSET_HARNESS)
+
+        # The fixture is genuinely the shape that broke: every line ends CRLF.
+        self.assertEqual(result["crlfCount"], result["lines"] - 1)
+        self.assertGreater(result["lines"], 20)
+        self.assertGreater(result["runs"], result["lines"])
+        # Every run names the substring it points at. Under the DOM parse this
+        # was every run from line two onward.
+        self.assertEqual(
+            result["misplaced"], 0,
+            "a run's start must index the CRLF source it was tokenized from",
+        )
+        # And the per-line texts are the records' texts: the CR is counted
+        # toward the offset and dropped from what is painted.
+        self.assertEqual(result["lineTexts"], result["recordTexts"])
+        # The same buffer with LF endings tokenizes to the same painted text,
+        # so nothing here is a CRLF-only special case.
+        self.assertEqual(result["lfLineTexts"], result["recordTexts"])
+        self.assertEqual(result["lfMisplaced"], 0)
 
 
 if __name__ == "__main__":

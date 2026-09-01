@@ -5405,6 +5405,7 @@
                                      <button type="button" class="explorer-git-toggle" id="explorer-git-toggle-${i}" data-explorer-git-toggle="${i}" title="Show Git changes and history" aria-label="Show Git changes and history" aria-pressed="false">${EXPLORER_GIT_TOGGLE_ICON}</button>
                                      <button type="button" class="explorer-search-toggle" id="explorer-search-toggle-${i}" data-explorer-search-toggle="${i}" title="Search in folder (Ctrl+Shift+F)" aria-label="Search in folder" aria-pressed="false">${EXPLORER_SEARCH_TOGGLE_ICON}</button>
                                      ${session.mode === 'ssh' ? '' : `<button type="button" class="explorer-os-open" id="explorer-os-open-${i}" data-explorer-os-open="${i}" title="Open current location in system file manager" aria-label="Open current location in system file manager">${EXPLORER_OS_OPEN_ICON}</button>`}
+                                     <button type="button" class="explorer-bar-upload" id="explorer-bar-upload-${i}" data-explorer-bar-upload="${i}" title="Upload files into the folder this pane is showing" aria-label="Upload files into the folder this pane is showing">${EXPLORER_UPLOAD_ICON}</button>
                                      <div class="explorer-git-summary" id="explorer-git-${i}" aria-live="polite"></div>
                                      <div class="explorer-path" id="explorer-path-${i}">${escHtml(session.directory || '')}</div>
                                      <div class="explorer-directory-search" id="explorer-directory-search-${i}"></div>
@@ -5475,6 +5476,11 @@
         wireCardButton(card, `[data-explorer-tree-toggle="${i}"]`, () => toggleExplorerTreeSidebar(i));
         wireCardButton(card, `[data-explorer-search-toggle="${i}"]`, () => toggleExplorerSearchSidebar(i));
         wireCardButton(card, `[data-explorer-os-open="${i}"]`, () => revealExplorerInOs(i));
+        wireCardButton(
+            card,
+            `[data-explorer-bar-upload="${i}"]`,
+            () => reportRefusedExplorerUpload(startExplorerPaneUpload(i))
+        );
     }
 
     /* Forward keystrokes and pointer focus for a terminal pane once its DOM
@@ -6111,6 +6117,21 @@
             });
         }
 
+        const explorerBarUpload = card.querySelector(`[data-explorer-bar-upload="${index}"]`);
+        if (explorerBarUpload && !explorerBarUpload.dataset.bound) {
+            explorerBarUpload.dataset.bound = 'true';
+            explorerBarUpload.draggable = false;
+            explorerBarUpload.addEventListener('mousedown', event => {
+                event.preventDefault();
+                event.stopPropagation();
+            });
+            explorerBarUpload.addEventListener('click', event => {
+                event.preventDefault();
+                event.stopPropagation();
+                reportRefusedExplorerUpload(startExplorerPaneUpload(index));
+            });
+        }
+
         const explorerSearchToggle = card.querySelector(`[data-explorer-search-toggle="${index}"]`);
         if (explorerSearchToggle && !explorerSearchToggle.dataset.bound) {
             explorerSearchToggle.dataset.bound = 'true';
@@ -6289,6 +6310,7 @@
                         <button type="button" class="explorer-git-toggle" id="explorer-git-toggle-${index}" data-explorer-git-toggle="${index}" title="Show Git changes and history" aria-label="Show Git changes and history" aria-pressed="false">${EXPLORER_GIT_TOGGLE_ICON}</button>
                         <button type="button" class="explorer-search-toggle" id="explorer-search-toggle-${index}" data-explorer-search-toggle="${index}" title="Search in folder (Ctrl+Shift+F)" aria-label="Search in folder" aria-pressed="false">${EXPLORER_SEARCH_TOGGLE_ICON}</button>
                         ${session.mode === 'ssh' ? '' : `<button type="button" class="explorer-os-open" id="explorer-os-open-${index}" data-explorer-os-open="${index}" title="Open current location in system file manager" aria-label="Open current location in system file manager">${EXPLORER_OS_OPEN_ICON}</button>`}
+                        <button type="button" class="explorer-bar-upload" id="explorer-bar-upload-${index}" data-explorer-bar-upload="${index}" title="Upload files into the folder this pane is showing" aria-label="Upload files into the folder this pane is showing">${EXPLORER_UPLOAD_ICON}</button>
                         <div class="explorer-git-summary" id="explorer-git-${index}" aria-live="polite"></div>
                         <div class="explorer-path" id="explorer-path-${index}">${escHtml(session.directory || '')}</div>
                         <div class="explorer-directory-search" id="explorer-directory-search-${index}"></div>

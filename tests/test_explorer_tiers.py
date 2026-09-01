@@ -239,15 +239,20 @@ class SourceTierTestCase(ExplorerTierHarness):
     def test_capability_predicate_agrees_with_the_notice(self):
         """One predicate, so the notice and the switch cannot promise different things."""
         allowed = self._run_node(
-            "const caps = ['find', 'download', 'edit', 'changeMarks', 'folding'];"
+            "const caps = ['find', 'download', 'upload', 'edit', 'changeMarks', 'folding'];"
             "emit({"
             "  full: caps.filter(cap => tiers.sourceTierAllows('full', cap)),"
             "  large: caps.filter(cap => tiers.sourceTierAllows('large', cap))"
             "});"
         )
 
-        self.assertEqual(allowed["full"], ["find", "download", "edit", "changeMarks", "folding"])
-        self.assertEqual(allowed["large"], ["download", "edit"])
+        self.assertEqual(
+            allowed["full"],
+            ["find", "download", "upload", "edit", "changeMarks", "folding"],
+        )
+        # Upload is chrome beside the file, not a property of how the Source
+        # view rendered it, so the tier costs it nothing — and says so.
+        self.assertEqual(allowed["large"], ["download", "upload", "edit"])
 
 
 class DiffTierTestCase(ExplorerTierHarness):

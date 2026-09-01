@@ -567,6 +567,17 @@
     });
 
     const EXPLORER_C_LIKE_LANGUAGES = new Set(['c', 'cpp', 'csharp', 'css', 'go', 'java', 'javascript', 'kotlin', 'php', 'rust', 'swift', 'typescript']);
+    /* The documents this lexer meets that are prose rather than code. One
+       consequence each, and they are not the same consequence. Here, an
+       apostrophe is an apostrophe: "version's interval" is not an unclosed
+       string literal, and reading it as one coloured the rest of the line —
+       every line of prose carrying a contraction. Double quotes, backticks and
+       numbers still mean what they look like and keep their colours. And in
+       the Markdown preview, a fenced block declared text/markdown is left
+       alone entirely, since a code fence is where the reader has said the
+       content is *not* prose. Markdown headings are coloured either way —
+       those come from the fence-aware heading map, not from this lexer. */
+    const EXPLORER_PROSE_LANGUAGES = new Set(['text', 'markdown']);
     const EXPLORER_HASH_COMMENT_LANGUAGES = new Set(['config', 'dockerfile', 'dotenv', 'gitignore', 'ini', 'makefile', 'python', 'ruby', 'shell', 'powershell', 'yaml', 'toml']);
     const EXPLORER_LOG_LEVELS = new Set(['TRACE', 'DEBUG', 'INFO', 'WARN', 'WARNING', 'ERROR', 'CRITICAL', 'FATAL']);
     const EXPLORER_EDITOR_FONT_MIN = 10;
@@ -833,6 +844,15 @@
         return `<span class="${className}">${explorerMarkedEscHtml(text, absoluteStart, searchRanges)}</span>`;
     }
 
+    /* A quote that never closes ends at its own line. Only the triple-quoted
+       form below is a deliberate multi-line construct; every other string
+       this lexer meets is single-line in every language it serves, and
+       running an unclosed one to the end of the buffer is what let one
+       apostrophe colour a whole fenced block in the Markdown preview -- the
+       one call site that hands this lexer more than a single line. The
+       Source view feeds it one line at a time, so there the cap only makes
+       the two agree. An escape at the end of a line escapes the newline, not
+       the first character of the next one. */
     function explorerReadStringToken(content, start) {
         const quote = content[start];
         let index = start + 1;
@@ -846,8 +866,8 @@
             }
             return content.slice(start, Math.min(index + 3, content.length));
         }
-        while (index < content.length) {
-            if (content[index] === '\\') {
+        while (index < content.length && content[index] !== '\n') {
+            if (content[index] === '\\' && content[index + 1] !== '\n') {
                 index += 2;
                 continue;
             }
@@ -856,7 +876,7 @@
                 break;
             }
         }
-        return content.slice(start, index);
+        return content.slice(start, Math.min(index, content.length));
     }
 
     function explorerLogLevelClass(level) {
@@ -940,6 +960,7 @@
         const keywords = new Set(EXPLORER_CODE_KEYWORDS[normalizedLanguage] || []);
         const builtins = new Set(EXPLORER_CODE_BUILTINS[normalizedLanguage] || []);
         const caseInsensitiveKeywords = normalizedLanguage === 'sql';
+        const proseDocument = EXPLORER_PROSE_LANGUAGES.has(normalizedLanguage);
         let output = '';
         let index = 0;
 
@@ -979,7 +1000,9 @@
                 continue;
             }
 
-            if (current === '"' || current === "'" || (current === '`' && !['json', 'jsonl', 'yaml', 'toml'].includes(normalizedLanguage))) {
+            if (current === '"'
+                || (current === "'" && !proseDocument)
+                || (current === '`' && !['json', 'jsonl', 'yaml', 'toml'].includes(normalizedLanguage))) {
                 const token = explorerReadStringToken(content, index);
                 output += explorerCodeSpan('explorer-code-string', token, absoluteStart + index, searchRanges);
                 index += token.length;
@@ -1023,13 +1046,30 @@
        once with Highlight.js so multiline constructs (block comments, triple-
        quoted / template strings, embedded languages) keep their state across
        newlines — the per-line highlightExplorerCode lexer above cannot. Returns
-       a Map keyed by 1-based line number, each value an array of styled runs
-       ({ className, text, start }) whose `start` is the absolute character
-       offset into `content` (so the existing offset-based search-mark machinery
-       keeps working). Returns null — and the caller falls back to the
+       a per-line map keyed by 1-based line number, each value an array of
+       styled runs ({ className, text, start }) whose `start` is the absolute
+       character offset into `content` (so the existing offset-based search-mark
+       machinery keeps working). Returns null — and the caller falls back to the
        handwritten lexer — when Highlight.js is unavailable, the language is not
        in the pinned build, the file is above the plain-preview threshold, or
-       Highlight.js throws. */
+       Highlight.js throws.
+
+       Highlight.js hands back HTML, and the markup is parsed by the *worker
+       core's* narrow parser rather than by the DOM. That is the whole point of
+       this call rather than an optimization: `template.innerHTML` runs the HTML
+       parser, whose input preprocessing normalizes every CRLF to a lone LF, so
+       a text node's length no longer equals the length of the source it came
+       from. Offsets built from it drifted one character per line — line 100 of
+       a CRLF file was 99 characters out, the end of a 900-line file 900 — while
+       the row records (explorerBuildSourceLineRecords) counted the CR the
+       parser had eaten. The counter stayed right and the marks walked off their
+       matches. compactHighlightMarkup() reads the markup as text, keeps the CR,
+       and asserts the reconstructed length against the source, so a parser that
+       silently ate a character fails here instead of painting a wrong file.
+
+       It is also the same encoder the worker runs, so a buffer under
+       HIGHLIGHT_WORKER_MIN_CHARS and one over it are coloured by one
+       implementation rather than by two that can disagree. */
     function explorerHighlightDocumentLines(content, normalizedLanguage) {
         const grammar = EXPLORER_HLJS_LANGUAGE[normalizedLanguage];
         if (!grammar) {
@@ -1044,66 +1084,20 @@
             || typeof engine.getLanguage !== 'function' || !engine.getLanguage(grammar)) {
             return null;
         }
+        const core = typeof window !== 'undefined' ? window.GridVibeExplorerWorkerCore : null;
+        const decode = typeof window !== 'undefined'
+            ? window.GridVibeExplorerWorkerClient?.decodeHighlightResult
+            : null;
+        if (typeof core?.highlightToCompact !== 'function' || typeof decode !== 'function') {
+            return null;
+        }
 
-        let markup;
         try {
-            markup = engine.highlight(source, { language: grammar, ignoreIllegal: true }).value;
+            return decode(source, core.highlightToCompact(source, grammar, engine));
         } catch (error) {
             console.error('[GridVibe Sessions] Explorer syntax highlight failed:', error);
             return null;
         }
-
-        const template = document.createElement('template');
-        template.innerHTML = markup;
-
-        const lines = new Map();
-        let lineNumber = 1;
-        let offset = 0;
-        let current = [];
-        lines.set(lineNumber, current);
-
-        const pushText = (className, text) => {
-            let segmentStart = 0;
-            for (let i = 0; i < text.length; i += 1) {
-                if (text[i] !== '\n') {
-                    continue;
-                }
-                let segment = text.slice(segmentStart, i);
-                const rawLength = segment.length;
-                if (segment.endsWith('\r')) {
-                    // Records strip the trailing CR of CRLF lines; match that for
-                    // display while still counting it toward the raw offset.
-                    segment = segment.slice(0, -1);
-                }
-                if (segment) {
-                    current.push({ className, text: segment, start: offset });
-                }
-                offset += rawLength + 1;
-                lineNumber += 1;
-                current = [];
-                lines.set(lineNumber, current);
-                segmentStart = i + 1;
-            }
-            const tail = text.slice(segmentStart);
-            if (tail) {
-                current.push({ className, text: tail, start: offset });
-                offset += tail.length;
-            }
-        };
-
-        const walk = (node, className) => {
-            node.childNodes.forEach(child => {
-                if (child.nodeType === Node.TEXT_NODE) {
-                    pushText(className, child.nodeValue || '');
-                } else if (child.nodeType === Node.ELEMENT_NODE) {
-                    // Innermost Highlight.js class wins the colour; the decoded
-                    // text length equals the raw source so offsets stay aligned.
-                    walk(child, child.getAttribute('class') || className);
-                }
-            });
-        };
-        walk(template.content, '');
-        return lines;
     }
 
     /* Whole-document tokenization is the expensive part of a Source re-render,
@@ -1962,6 +1956,48 @@
             });
         }
 
+        /* Upload sits directly under Download because it is the same read
+           inverted, and it is offered from every surface Download is: the
+           Files tree, the Preview listing, the tab strip and the Git
+           sidebar's rows — plus the blank space of both browsing surfaces and
+           every folder row, which is where "upload into *this* folder" is the
+           only sentence a reader would think to say.
+
+           It is never a selection action: an upload has one destination, and
+           several selected rows name several. The right-clicked row is what
+           picks the folder — a folder names itself, anything else names the
+           folder it sits in — so the entry always states which folder it
+           found. Nothing here names a file, so nothing here can overwrite
+           one. */
+        const uploadPolicy = window.GridVibeExplorerUpload;
+        if (uploadPolicy && offersPathEntries && typeof startExplorerUpload === 'function') {
+            const uploadSurface = blankContext
+                ? blankContext.surface
+                : (rowSurface
+                    || (row?.dataset.explorerGitScopeSurface === 'tab' ? 'tab' : 'git'));
+            const uploadContext = {
+                surface: uploadSurface,
+                kind: blankContext
+                    ? 'directory'
+                    : (row?.dataset.explorerContextKind || 'file'),
+                path: blankContext
+                    ? blankContext.path
+                    : (row?.dataset.explorerContextPath || relativePath)
+            };
+            const uploadDestination = uploadPolicy.uploadDestination(
+                Object.assign({}, uploadContext, {
+                    listingPath: pane?._explorerPath || ''
+                })
+            );
+            if (uploadDestination !== null) {
+                pathItems.push({
+                    label: 'Upload files…',
+                    title: `Upload files from this computer into ${uploadPolicy.destinationLabel(uploadDestination)}`,
+                    action: () => startExplorerUpload(index, uploadContext)
+                });
+            }
+        }
+
         /* Git pinning is one exact path, never a selection action. Files-tree
            rows and open file tabs share the same policy, while commit rows
            returned through their path-free branch above and can never reach
@@ -2329,6 +2365,21 @@
         ensureExplorerTreeState(pane);
         const scroll = { ...(pane._explorerSidebarScroll || {}) };
         ['tree', 'git'].forEach(panel => {
+            /* A rebuild empties its panel, the browser clamps the scroller to
+               0, and it reports that clamp as a `scroll` event a task later —
+               which the capture-phase listener wireExplorerSidebarPresentation()
+               installed answers with this very function. Storing the clamp
+               would hand the rebuild's own side effect to the restore queued
+               behind it, which is how a tree reload came back at the top even
+               once it had the reader's offset in hand. Source guards its
+               capture on `_explorerSourceRenderJob` for exactly this; an
+               in-flight tree rebuild is the same fact, so the stored point
+               stands until the rebuild has put its branches back. */
+            if (panel === 'tree'
+                && typeof explorerTreeRebuildInFlight === 'function'
+                && explorerTreeRebuildInFlight(pane)) {
+                return;
+            }
             const metrics = captureScrollMetrics(
                 document.getElementById(`explorer-${panel}-panel-${index}`)
             );
@@ -4372,8 +4423,9 @@
             const pre = code.parentElement;
             pre.classList.add('explorer-preview-code');
             pre.dataset.lang = language.toUpperCase();
-            // Plain text/markdown blocks stay unstyled; string/number rules would mislead there.
-            if (language === 'text' || language === 'markdown') {
+            // Plain text/markdown blocks stay unstyled; string/number rules
+            // would mislead there.
+            if (EXPLORER_PROSE_LANGUAGES.has(language)) {
                 return;
             }
             code.innerHTML = highlightExplorerCode(code.textContent, language);
@@ -6259,6 +6311,21 @@
         reportExplorerDownloadBatch(results);
     }
 
+    /* Both file-view headers wire their upload button the same way, and the
+       destination is the open file's own folder — the answer the reader
+       expects from a button sitting on a file. The DOM-free rule derives it;
+       nothing here re-derives a path. */
+    function wireExplorerUploadButton(list, index, path) {
+        const button = list.querySelector(`[data-explorer-upload="${index}"]`);
+        if (!button || typeof startExplorerUpload !== 'function') {
+            button?.remove();
+            return;
+        }
+        button.addEventListener('click', () => reportRefusedExplorerUpload(
+            startExplorerUpload(index, { surface: 'file-view', kind: 'file', path })
+        ));
+    }
+
     function getDownloadBaseName(fullPath) {
         return String(fullPath || '').split(/[\\/]/).pop() || '';
     }
@@ -6644,6 +6711,7 @@
                         <div class="explorer-editor-meta" data-explorer-image-meta="${index}">${escHtml(baseMeta)}</div>
                     </div>
                     <button type="button" class="explorer-download-btn" data-explorer-download="${index}" title="Download file" aria-label="Download file">${EXPLORER_DOWNLOAD_ICON}</button>
+                    <button type="button" class="explorer-upload-btn" data-explorer-upload="${index}" title="Upload files into this file's folder" aria-label="Upload files into this file's folder">${EXPLORER_UPLOAD_ICON}</button>
                 </div>
                 <div class="explorer-editor-body">
                     <div class="explorer-image-view" id="explorer-image-${index}">
@@ -6657,6 +6725,7 @@
         if (downloadButton) {
             downloadButton.addEventListener('click', () => downloadExplorerFile(index));
         }
+        wireExplorerUploadButton(list, index, path);
         const image = viewer.querySelector('.explorer-image');
         if (image) {
             /* Ctrl+scroll zooms the image (notes 3); double-click resets it. */
@@ -6889,6 +6958,7 @@
                     <button type="button" class="explorer-md-appearance-btn" data-explorer-md-appearance="${index}" title="Appearance" aria-label="Viewer appearance" aria-haspopup="menu" aria-expanded="false">${EXPLORER_MD_APPEARANCE_ICON}</button>
                     ${explorerEditorControlsHtml(index)}
                     <button type="button" class="explorer-download-btn" data-explorer-download="${index}" title="Download file" aria-label="Download file">${EXPLORER_DOWNLOAD_ICON}</button>
+                    <button type="button" class="explorer-upload-btn" data-explorer-upload="${index}" title="Upload files into this file's folder" aria-label="Upload files into this file's folder">${EXPLORER_UPLOAD_ICON}</button>
                     ${findAvailable ? `<div class="explorer-editor-search" data-explorer-search="${index}">
                         <input
                             type="search"
@@ -6951,6 +7021,7 @@
                 downloadExplorerFile(index);
             });
         }
+        wireExplorerUploadButton(list, index, path);
         list.querySelectorAll('[data-explorer-file-view]').forEach(button => {
             button.addEventListener('click', () => {
                 if (button.dataset.explorerFileView === 'diff') {

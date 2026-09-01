@@ -17,11 +17,12 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 import webbrowser
 from pathlib import Path, PureWindowsPath
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 
 from main import setup_logging
 from web.api import (
@@ -664,6 +665,65 @@ def _set_native_window_zoom(window, zoom_factor):
     return factor if result["applied"] else None
 
 
+# Upload is download's mirror in the native window too: WebView2 will no more
+# open a picker the page asked for than it will answer ``window.prompt``, so the
+# dialog is the launcher's and the bytes go out over this server's own endpoint
+# — its root confinement, its literal-leaf rules and its size cap all still
+# apply, exactly as they do to ``save_download``'s fetch.
+EXPLORER_UPLOAD_MAX_BYTES = 100 * 1024 * 1024
+
+
+class _MultipartUploadBody:
+    """A read-only stream over one multipart body, never materialized whole.
+
+    A 100 MB file assembled into a ``bytes`` is 100 MB held in the launcher
+    process for as long as the POST lasts, which is the defect the download
+    side already refuses to have. This yields the prologue, then the file, then
+    the epilogue, so ``http.client`` sends it in blocks against a
+    ``Content-Length`` computed from the size on disk.
+    """
+
+    def __init__(self, prologue: bytes, handle, file_size: int, epilogue: bytes):
+        self._prologue = prologue
+        self._handle = handle
+        self._epilogue = epilogue
+        self._remaining_file = file_size
+        self._offset = 0
+        self._epilogue_offset = 0
+        self.length = len(prologue) + file_size + len(epilogue)
+
+    def read(self, size=-1):
+        if size is None or size < 0:
+            size = self.length
+        if self._offset < len(self._prologue):
+            chunk = self._prologue[self._offset:self._offset + size]
+            self._offset += len(chunk)
+            return chunk
+        if self._remaining_file > 0:
+            chunk = self._handle.read(min(size, self._remaining_file))
+            if not chunk:
+                # The file shrank between the size read and the send. Padding
+                # would upload silently wrong bytes and stopping short would
+                # hang the connection against the declared Content-Length, so
+                # the only honest answer is to fail the request here.
+                raise OSError("The file changed while it was being uploaded")
+            self._remaining_file -= len(chunk)
+            return chunk
+        if self._epilogue_offset < len(self._epilogue):
+            chunk = self._epilogue[self._epilogue_offset:self._epilogue_offset + size]
+            self._epilogue_offset += len(chunk)
+            return chunk
+        return b""
+
+
+def _multipart_field(boundary: str, name: str, value: str) -> bytes:
+    return (
+        f"--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="{name}"\r\n\r\n'
+        f"{value}\r\n"
+    ).encode("utf-8")
+
+
 class GridVibeApi:
     """Expose native window actions to the pywebview frontend."""
 
@@ -1044,6 +1104,145 @@ class GridVibeApi:
             return {"ok": False, "error": str(exc)}
 
         return {"ok": True, "path": destination}
+
+
+    def select_upload_files(self, workspace_id=DEFAULT_WORKSPACE_ID):
+        """Open a native multi-select file picker for an explorer upload.
+
+        Returns paths only. The page never sees bytes and never builds a
+        request from them; it hands each path back to :meth:`upload_file`,
+        which is the one place a local file is read.
+        """
+        try:
+            resolved_workspace_id = normalize_workspace_id(workspace_id)
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}
+        window = self._workspace_windows.get(resolved_workspace_id) or self._window
+        if window is None or webview is None:
+            return {"ok": False, "error": "Window is not ready"}
+
+        try:
+            selected = window.create_file_dialog(
+                webview.OPEN_DIALOG,
+                allow_multiple=True,
+            )
+        except Exception as exc:
+            logger.warning("Native upload picker failed: %s", exc)
+            return {"ok": False, "error": str(exc)}
+
+        if not selected:
+            return {"ok": False, "cancelled": True}
+        if isinstance(selected, str):
+            selected = [selected]
+
+        files = []
+        for entry in selected:
+            path = str(entry or "").strip()
+            if not path:
+                continue
+            try:
+                size = os.path.getsize(path)
+            except OSError as exc:
+                logger.debug("Skipping unreadable upload candidate: %s", exc)
+                continue
+            files.append({"path": path, "name": os.path.basename(path), "size": size})
+        if not files:
+            return {"ok": False, "cancelled": True}
+        return {"ok": True, "files": files}
+
+    def upload_file(
+        self,
+        upload_url,
+        source_path,
+        fields=None,
+        workspace_id=DEFAULT_WORKSPACE_ID,
+    ):
+        """POST one local file to the app's own explorer upload endpoint.
+
+        The page cannot read a local path, so this is the native counterpart of
+        the browser's ``FormData`` POST — and deliberately nothing more. The
+        URL is checked to be this app's upload route before anything is opened,
+        the body is streamed rather than assembled, and the answer is handed
+        back verbatim so the page's batch reporter cannot tell the two
+        transports apart.
+        """
+        try:
+            normalize_workspace_id(workspace_id)
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc), "mutated": False}
+
+        relative_url = str(upload_url or "").strip()
+        # Only ever post to the app's own explorer upload endpoint — never an
+        # arbitrary URL handed in from the page.
+        if not relative_url.startswith("/api/explorer/") or not relative_url.endswith("/upload"):
+            return {"ok": False, "error": "Unsupported upload request", "mutated": False}
+
+        path = str(source_path or "").strip()
+        if not path or not os.path.isfile(path):
+            return {"ok": False, "error": "The selected file is no longer available", "mutated": False}
+        try:
+            file_size = os.path.getsize(path)
+        except OSError as exc:
+            return {"ok": False, "error": str(exc), "mutated": False}
+        if file_size > EXPLORER_UPLOAD_MAX_BYTES:
+            return {
+                "ok": False,
+                "code": "upload_too_large",
+                "mutated": False,
+                "error": (
+                    f"{os.path.basename(path)} is larger than the "
+                    f"{EXPLORER_UPLOAD_MAX_BYTES // (1024 * 1024)} MB upload limit"
+                ),
+            }
+
+        form = fields if isinstance(fields, dict) else {}
+        name = os.path.basename(str(form.get("name") or "") or path)
+        boundary = f"----GridVibeUpload{uuid.uuid4().hex}"
+        prologue = b"".join(
+            _multipart_field(boundary, key, str(form.get(key, "")))
+            for key in ("root_revision", "destination_directory")
+        ) + _multipart_field(boundary, "name", name) + (
+            f"--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="file"; filename="{name}"\r\n'
+            f"Content-Type: application/octet-stream\r\n\r\n"
+        ).encode("utf-8")
+        epilogue = f"\r\n--{boundary}--\r\n".encode("utf-8")
+
+        request_url = f"{self._base_url}{relative_url}"
+        try:
+            with open(path, "rb") as handle:
+                body = _MultipartUploadBody(prologue, handle, file_size, epilogue)
+                request = Request(
+                    request_url,
+                    data=body,
+                    method="POST",
+                    headers={
+                        "Content-Type": f"multipart/form-data; boundary={boundary}",
+                        "Content-Length": str(body.length),
+                    },
+                )
+                with urlopen(request, timeout=600) as response:
+                    payload = json.loads(response.read().decode("utf-8", errors="ignore") or "{}")
+                    return {"ok": True, "status": response.status, "data": payload}
+        except HTTPError as exc:
+            raw = exc.read().decode("utf-8", errors="ignore") if exc.fp else ""
+            try:
+                payload = json.loads(raw)
+            except Exception:
+                payload = {}
+            logger.warning("Upload request failed (%s)", exc.code)
+            return {
+                "ok": False,
+                "status": exc.code,
+                "error": payload.get("error") or f"Upload failed ({exc.code})",
+                "code": payload.get("code") or "io_error",
+                # An answer the server sent is authoritative about whether it
+                # mutated; a request that never got one is not.
+                "mutated": payload.get("mutated") is True,
+            }
+        except (URLError, OSError) as exc:
+            logger.warning("Could not upload %s", os.path.basename(path))
+            return {"ok": False, "error": str(exc), "code": "io_error", "mutated": True}
 
     def _bring_to_front(self, window, window_name: str = "window"):
         """Bring a pywebview window forward using the safest available call."""

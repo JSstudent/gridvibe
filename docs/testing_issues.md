@@ -1,11 +1,67 @@
 # GridVibe Testing Issues
-Last updated: 2026-08-31
+Last updated: 2026-09-01
 
 ## Open Issues
 
 None.
 
 ## Closed Issues
+
+### Issue ID: ISSUE-2026-051
+- Title: Every explorer upload fails with "parameter 2 is not of type 'Blob'"
+- Priority: High
+- Status: Closed
+- Area: `web/static/js/explorer-fs.js`, `web/static/js/explorer-upload.js`
+- Assignee: Unassigned
+- Tags: `explorer`, `upload`
+- Reported: 2026-09-01
+- Closed: 2026-09-01
+
+Description:
+Reported during the first smoke test of the new upload feature: "error on local
+and remote ssh modes, and also in all menu types", with the explorer's error bar
+reading `Failed to execute 'append' on 'FormData': parameter 2 is not of type
+'Blob'.`
+
+The picker opened and files were chosen — the failure is after that, in the one
+line that builds the request body. `uploadPlan()` returns an accepted entry that
+*wraps* the picked object (`{name, size, source}`) rather than being it, and the
+request builder read `entry.blob` straight off the accepted entry. That is always
+`undefined`, so `FormData.append('file', undefined, name)` threw before any
+request went out. Because that line is shared by every surface and both session
+kinds, it failed identically everywhere, which is what made the report read as a
+whole-feature failure rather than a one-line one.
+
+Steps to reproduce:
+1. Explorer pane (local or SSH), any upload affordance — the toolbar button, the
+   explorer bar button, or **Upload files…** from any context menu.
+2. Choose one file.
+
+Expected behavior:
+The file is uploaded into the resolved destination folder and the listing gains
+it.
+
+Actual behavior / logs:
+Nothing is sent. The explorer's error bar shows the `FormData` TypeError with a
+**Refresh** action, which is also wrong: the request never left the page, so
+nothing could have been mutated and the offer should have been **Retry**.
+
+Resolution:
+Which handle an entry carries is now `uploadEntrySource()` in
+`explorer-upload.js` rather than a property read at the call site. Two transports
+carry two different handles — a `File` from the browser picker, a path from the
+native bridge — an accepted entry is not the picked object, and none of that is
+visible until a real file is chosen, so the resolution belongs with the rest of
+the upload's rules where it is executed by tests. It also accepts a raw picked
+shape, so a retry can hand back either. An entry it cannot resolve returns
+`null`, and the descriptor answers with an `invalid_request` / `mutated: false`
+result instead of building a body, so that class of failure now offers Retry.
+
+Cover: `tests/test_explorer_upload.py` — the plan → `uploadEntrySource` round trip
+asserts blob *identity* survives, plus the native path, the raw picked shape and
+the two handle-less cases; and a second case builds the real `FormData` with
+Node's own `File`/`Blob` — the exact expression the page runs — and reads the
+part back out. Both fail against the original code.
 
 ### Issue ID: ISSUE-2026-050
 - Title: Repository-search hits open large files at the top instead of at the hit

@@ -148,11 +148,13 @@ from web.explorer import (  # noqa: F401 - some names re-exported for backwards 
     save_explorer_file_payload,
 )
 from web.explorer_fs import (
+    EXPLORER_UPLOAD_MAX_BYTES,
     create_explorer_entry_payload,
     delete_explorer_entry_payload,
     move_explorer_entry_payload,
     paste_explorer_entry_payload,
     rename_explorer_entry_payload,
+    upload_explorer_file_payload,
 )
 from web.explorer_search import (  # noqa: F401 - re-exported for backwards compatibility
     run_explorer_find,
@@ -1126,6 +1128,95 @@ def create_explorer_entry(session_id: str):
             destination_directory=data["destination_directory"],
             name=data["name"],
             entry_kind=data["entry_kind"],
+            session_id=session_id,
+        )
+
+    return _explorer_route_response(session, handler)
+
+
+# The multipart envelope a browser adds around a 100 MB part is small, but it
+# is not nothing, so the request ceiling sits a little above the file ceiling;
+# the bytes that actually land are bounded by the payload's own reader.
+EXPLORER_UPLOAD_MAX_REQUEST_BYTES = EXPLORER_UPLOAD_MAX_BYTES + (1024 * 1024)
+
+
+@app.route('/api/explorer/<session_id>/upload', methods=['POST'])
+def upload_explorer_file(session_id: str):
+    """Write one uploaded file into this pane's explorer root without overwrite.
+
+    Download's mirror on the write side, and one file per request for the same
+    reason every other explorer mutation is: a batch is N atomic calls, so a
+    partial failure names the file that failed and retries only that one. There
+    is deliberately no archive form and no overwrite.
+
+    ``Content-Length`` is checked *before* ``request.files`` is touched, because
+    reading the form is what spools the whole body to disk -- a refusal has to
+    cost a header read, not a 500 MB temp file.
+    """
+    session = session_manager.get_session(session_id)
+    if session is None:
+        return jsonify({"error": "Session not found"}), 404
+    if not _is_explorer_session(session):
+        return jsonify({"error": "Session is not a file explorer pane"}), 400
+    declared_request_bytes = request.content_length
+    if (
+        declared_request_bytes is not None
+        and declared_request_bytes > EXPLORER_UPLOAD_MAX_REQUEST_BYTES
+    ):
+        return (
+            jsonify(
+                {
+                    "error": (
+                        "The upload exceeds the "
+                        f"{EXPLORER_UPLOAD_MAX_BYTES // (1024 * 1024)} MB limit"
+                    ),
+                    "code": "upload_too_large",
+                    "mutated": False,
+                    "max_bytes": EXPLORER_UPLOAD_MAX_BYTES,
+                }
+            ),
+            413,
+        )
+    upload = request.files.get("file")
+    if upload is None:
+        return (
+            jsonify(
+                {
+                    "error": "Upload requires one file part named file",
+                    "code": "invalid_request",
+                    "mutated": False,
+                }
+            ),
+            400,
+        )
+    root_revision = request.form.get("root_revision", "")
+    destination_directory = request.form.get("destination_directory", "")
+    # The client states the leaf so the server never has to guess one out of a
+    # browser-supplied filename; when it does not, the part's own name is used
+    # and validated by exactly the same literal-leaf rules as Create.
+    name = request.form.get("name") or (upload.filename or "")
+    if not root_revision:
+        return (
+            jsonify(
+                {
+                    "error": "Upload requires a root revision and a destination directory",
+                    "code": "invalid_request",
+                    "mutated": False,
+                }
+            ),
+            400,
+        )
+
+    def handler(backend: Any) -> Dict[str, Any]:
+        return upload_explorer_file_payload(
+            backend,
+            root_revision=root_revision,
+            destination_directory=destination_directory,
+            name=name,
+            stream=upload.stream,
+            declared_size=(
+                upload.content_length if upload.content_length else None
+            ),
             session_id=session_id,
         )
 
