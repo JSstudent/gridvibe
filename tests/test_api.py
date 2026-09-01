@@ -1854,7 +1854,14 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("const EXPLORER_HLJS_LANGUAGE = Object.freeze({", html)
         self.assertIn("function explorerHighlightDocumentLines(content, normalizedLanguage)", html)
         self.assertIn("function explorerRenderHighlightedRuns(runs, searchRanges = [])", html)
-        self.assertIn("engine.highlight(source, { language: grammar, ignoreIllegal: true })", html)
+        # Grammar is always passed explicitly; auto-detection is never used.
+        self.assertNotIn("hljs.highlightAuto(", html)
+        # The whole-document pass hands Highlight.js markup to the worker
+        # core's own parser, never to template.innerHTML: the HTML parser
+        # normalizes CRLF to LF, which put every run offset one character per
+        # line away from the source the search marks are measured against.
+        # tests/test_explorer_source_frame.py executes that on a CRLF buffer.
+        self.assertIn("core.highlightToCompact(", html)
         # Source rendering prefers the whole-document pass, falling back per line.
         self.assertIn(": explorerHighlightDocumentLines(content, normalizedLanguage);", html)
         # Which of those two a row gets — the cached token map or the per-line

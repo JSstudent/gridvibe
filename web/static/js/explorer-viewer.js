@@ -1046,13 +1046,30 @@
        once with Highlight.js so multiline constructs (block comments, triple-
        quoted / template strings, embedded languages) keep their state across
        newlines — the per-line highlightExplorerCode lexer above cannot. Returns
-       a Map keyed by 1-based line number, each value an array of styled runs
-       ({ className, text, start }) whose `start` is the absolute character
-       offset into `content` (so the existing offset-based search-mark machinery
-       keeps working). Returns null — and the caller falls back to the
+       a per-line map keyed by 1-based line number, each value an array of
+       styled runs ({ className, text, start }) whose `start` is the absolute
+       character offset into `content` (so the existing offset-based search-mark
+       machinery keeps working). Returns null — and the caller falls back to the
        handwritten lexer — when Highlight.js is unavailable, the language is not
        in the pinned build, the file is above the plain-preview threshold, or
-       Highlight.js throws. */
+       Highlight.js throws.
+
+       Highlight.js hands back HTML, and the markup is parsed by the *worker
+       core's* narrow parser rather than by the DOM. That is the whole point of
+       this call rather than an optimization: `template.innerHTML` runs the HTML
+       parser, whose input preprocessing normalizes every CRLF to a lone LF, so
+       a text node's length no longer equals the length of the source it came
+       from. Offsets built from it drifted one character per line — line 100 of
+       a CRLF file was 99 characters out, the end of a 900-line file 900 — while
+       the row records (explorerBuildSourceLineRecords) counted the CR the
+       parser had eaten. The counter stayed right and the marks walked off their
+       matches. compactHighlightMarkup() reads the markup as text, keeps the CR,
+       and asserts the reconstructed length against the source, so a parser that
+       silently ate a character fails here instead of painting a wrong file.
+
+       It is also the same encoder the worker runs, so a buffer under
+       HIGHLIGHT_WORKER_MIN_CHARS and one over it are coloured by one
+       implementation rather than by two that can disagree. */
     function explorerHighlightDocumentLines(content, normalizedLanguage) {
         const grammar = EXPLORER_HLJS_LANGUAGE[normalizedLanguage];
         if (!grammar) {
@@ -1067,66 +1084,20 @@
             || typeof engine.getLanguage !== 'function' || !engine.getLanguage(grammar)) {
             return null;
         }
+        const core = typeof window !== 'undefined' ? window.GridVibeExplorerWorkerCore : null;
+        const decode = typeof window !== 'undefined'
+            ? window.GridVibeExplorerWorkerClient?.decodeHighlightResult
+            : null;
+        if (typeof core?.highlightToCompact !== 'function' || typeof decode !== 'function') {
+            return null;
+        }
 
-        let markup;
         try {
-            markup = engine.highlight(source, { language: grammar, ignoreIllegal: true }).value;
+            return decode(source, core.highlightToCompact(source, grammar, engine));
         } catch (error) {
             console.error('[GridVibe Sessions] Explorer syntax highlight failed:', error);
             return null;
         }
-
-        const template = document.createElement('template');
-        template.innerHTML = markup;
-
-        const lines = new Map();
-        let lineNumber = 1;
-        let offset = 0;
-        let current = [];
-        lines.set(lineNumber, current);
-
-        const pushText = (className, text) => {
-            let segmentStart = 0;
-            for (let i = 0; i < text.length; i += 1) {
-                if (text[i] !== '\n') {
-                    continue;
-                }
-                let segment = text.slice(segmentStart, i);
-                const rawLength = segment.length;
-                if (segment.endsWith('\r')) {
-                    // Records strip the trailing CR of CRLF lines; match that for
-                    // display while still counting it toward the raw offset.
-                    segment = segment.slice(0, -1);
-                }
-                if (segment) {
-                    current.push({ className, text: segment, start: offset });
-                }
-                offset += rawLength + 1;
-                lineNumber += 1;
-                current = [];
-                lines.set(lineNumber, current);
-                segmentStart = i + 1;
-            }
-            const tail = text.slice(segmentStart);
-            if (tail) {
-                current.push({ className, text: tail, start: offset });
-                offset += tail.length;
-            }
-        };
-
-        const walk = (node, className) => {
-            node.childNodes.forEach(child => {
-                if (child.nodeType === Node.TEXT_NODE) {
-                    pushText(className, child.nodeValue || '');
-                } else if (child.nodeType === Node.ELEMENT_NODE) {
-                    // Innermost Highlight.js class wins the colour; the decoded
-                    // text length equals the raw source so offsets stay aligned.
-                    walk(child, child.getAttribute('class') || className);
-                }
-            });
-        };
-        walk(template.content, '');
-        return lines;
     }
 
     /* Whole-document tokenization is the expensive part of a Source re-render,
