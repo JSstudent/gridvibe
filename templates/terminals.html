@@ -384,8 +384,11 @@
     const CURRENT_WORKSPACE_LABEL = {{ workspace_label | tojson }};
     const MULTI_WORKSPACE_ENABLED = {{ multi_workspace_enabled | tojson }};
     /* cmd / PowerShell / WSL panes only exist on Windows hosts, so the header
-       shell picker is offered there only. */
+       shell picker offers shell families there only. */
     const LOCAL_SHELL_MODES_AVAILABLE = {{ local_windows_shells_available|tojson }};
+    /* The same registry-backed agent list the launcher renders: the pane
+       header's relaunch menu offers them on every pane that runs a shell. */
+    const AGENT_OPTIONS = {{ agent_options|tojson }};
 </script>
 <script src="{{ url_for('static', filename='js/session-persistence.js') }}?v={{ version }}"></script>
 <script src="{{ url_for('static', filename='js/explorer-persistence.js') }}?v={{ version }}"></script>

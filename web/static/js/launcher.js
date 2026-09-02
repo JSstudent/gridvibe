@@ -143,6 +143,7 @@
     let installKind = 'git';
     const agentPreflightRequestState = new WeakMap();
     const agentPreflightTimerState = new WeakMap();
+    const agentInstallCopyTimerState = new WeakMap();
     const ACTIVE_SAVED_SESSION_STORAGE_KEY = 'gridvibe.activeSavedSession';
     const DEFAULT_SESSION_ID = 'default-session';
     let savedSessionUpdateChannel = null;
@@ -1113,6 +1114,12 @@
         wsl: '<svg class="workspace-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>'
     };
 
+    /* The agent preflight's install-command copy button. The terminals page
+       paints the same two offset sheets from terminal-icons.js; that file is
+       not loaded here, and this page already carries its own icon literals
+       (the fold chevron, the connection targets above) for the same reason. */
+    const AGENT_INSTALL_COPY_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="9" y="9" width="12" height="12" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>';
+
     const BLANK_CONNECTION_TARGETS = {
         ssh: { host: '', username: 'ubuntu', password: '', port: '22', default_dir: '' },
         wsl: { distribution: '', username: '', default_dir: '' }
@@ -1626,22 +1633,46 @@
         const selectedOption = select.options[select.selectedIndex] || null;
         const wasOpen = disclosure.open;
 
+        /* One element per line rather than one run of text split by <br>: the
+           box is a grid, and a run of inline content collapses into a single
+           anonymous grid item whose min-width is its min-content — which an
+           install URL with no break opportunity in it (Hermes' 52-character
+           host) pushes wider than the pane, clipping the tail. Real items can
+           be given `min-width: 0` and wrap. */
         const lines = [];
         if (message) {
-            lines.push(`<strong>${escHtml(message)}</strong>`);
+            lines.push(`<p class="agent-preflight-line agent-preflight-headline">${escHtml(message)}</p>`);
         }
         if (targetLabel) {
-            lines.push(`Target: <code>${escHtml(targetLabel)}</code>`);
+            lines.push(`<p class="agent-preflight-line">Target: <code>${escHtml(targetLabel)}</code></p>`);
         }
         if (prerequisite) {
-            lines.push(`Prerequisite: ${escHtml(prerequisite)}`);
+            lines.push(`<p class="agent-preflight-line">Prerequisite: ${escHtml(prerequisite)}</p>`);
         }
         if (installCommand) {
-            const installPrefix = installLabel ? `${escHtml(installLabel)}: ` : 'Install: ';
-            lines.push(`${installPrefix}<code>${escHtml(installCommand)}</code>`);
+            /* The label and the command are deliberately two rows: the copy
+               button sits on the label's row so it lands on the box's own
+               right content edge whatever the command's length, and the
+               command gets the full width to wrap into. The command travels
+               on the button as a data attribute, so the click copies exactly
+               what is rendered and never re-reads the DOM text. */
+            lines.push(`<div class="agent-preflight-install">
+                    <div class="agent-preflight-install-head">
+                        <span class="agent-preflight-install-label">${escHtml(installLabel || 'Install')}:</span>
+                        <button
+                            type="button"
+                            class="agent-preflight-copy-btn"
+                            data-install-command="${escHtml(installCommand)}"
+                            title="Copy the install command"
+                            aria-label="Copy the install command"
+                            onclick="copyAgentInstallCommand(this)"
+                        >${AGENT_INSTALL_COPY_ICON}</button>
+                    </div>
+                    <code class="agent-preflight-command">${escHtml(installCommand)}</code>
+                </div>`);
         }
         if (warning) {
-            lines.push(escHtml(warning));
+            lines.push(`<p class="agent-preflight-line">${escHtml(warning)}</p>`);
         }
 
         _clearAgentStatusClasses(select);
@@ -1658,9 +1689,44 @@
 
         summary.className = `agent-preflight-summary ${escHtml(status)}`.trim();
         summaryLabel.textContent = label;
-        copy.innerHTML = lines.join('<br>');
+        copy.innerHTML = lines.join('');
         disclosure.classList.add('visible');
         disclosure.open = wasOpen;
+    }
+
+    /* A copy can fail — an insecure origin with no `execCommand`, a webview
+       that refuses the write — and a control that always looks successful is
+       the defect guardrail 8 names. Success is a transient class on the button
+       itself (never a markup rewrite, and never the global banner: the banner
+       reports events and a copy is not one anybody needs told twice); failure
+       is the launcher's one notification surface, because it is the only
+       outcome the user has to act on. */
+    async function copyAgentInstallCommand(button) {
+        const command = String(button?.dataset?.installCommand || '');
+        if (!command) {
+            return;
+        }
+
+        const copied = await copyTextToClipboard(command);
+        if (!copied) {
+            showGridVibeNotice('Could not copy the install command. Select it and copy manually.', 'error');
+            return;
+        }
+
+        /* The preflight re-renders this box on every check, so the button the
+           timer fires against may already have been replaced. */
+        if (!button.isConnected) {
+            return;
+        }
+        const pending = agentInstallCopyTimerState.get(button);
+        if (pending) {
+            clearTimeout(pending);
+        }
+        button.classList.add('is-copied');
+        agentInstallCopyTimerState.set(button, setTimeout(() => {
+            agentInstallCopyTimerState.delete(button);
+            button.classList.remove('is-copied');
+        }, 1400));
     }
 
     function buildAgentPreflightPayload(row) {

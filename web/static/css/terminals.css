@@ -1254,7 +1254,10 @@
             top: calc(100% + 6px);
             right: 0;
             z-index: 60;
-            min-width: 186px;
+            min-width: 204px;
+            max-height: min(60vh, 360px);
+            overflow-y: auto;
+            scrollbar-gutter: stable;
             display: flex;
             flex-direction: column;
             gap: 2px;
@@ -1293,6 +1296,56 @@
         }
 
         .pane-shell-menu-item.is-active { color: var(--t-accent); }
+
+        /* A shell family and its agent list are two decisions, so the row
+           carries two controls: the row itself relaunches that family plainly,
+           and the chevron beside it opens the family's agents. A button inside
+           a button is not a control, hence the wrapper. */
+        .pane-shell-menu-row {
+            display: flex;
+            align-items: stretch;
+            gap: 2px;
+        }
+
+        .pane-shell-menu-row .pane-shell-menu-item { flex: 1 1 auto; min-width: 0; }
+
+        .pane-shell-menu-expand {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            flex: 0 0 22px;
+            padding: 0;
+            border: 1px solid transparent;
+            border-radius: 6px;
+            background: transparent;
+            color: var(--t-text-muted);
+            cursor: pointer;
+        }
+
+        .pane-shell-menu-expand svg {
+            width: 13px;
+            height: 13px;
+            transition: transform .12s ease;
+        }
+
+        .pane-shell-menu-expand:hover {
+            background: var(--t-btn-hover-bg);
+            border-color: var(--session-color, var(--t-accent));
+            color: var(--t-text);
+        }
+
+        .pane-shell-menu-expand.is-expanded { color: var(--t-text); }
+
+        .pane-shell-menu-expand.is-expanded svg { transform: rotate(90deg); }
+
+        .pane-shell-menu-sub {
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+            margin: 2px 0 4px 10px;
+            padding-left: 6px;
+            border-left: 1px solid var(--t-border);
+        }
 
         .pane-shell-menu-mark {
             display: inline-flex;

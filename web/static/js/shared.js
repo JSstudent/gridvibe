@@ -409,6 +409,46 @@
         const normalizedChild = child.replace(/[\\/]+/g, separator);
         return `${base}${separator}${normalizedChild}`;
     }
+    /* The one clipboard write both pages use. It lives here rather than in
+       terminals.js because the launcher's install-command copy button needs
+       the same `navigator.clipboard` fallback dance, and a second copy of it
+       is how the two pages come to behave differently for one gesture. */
+    function _copyTextFallbackWrite(text) {
+        const element = document.createElement('textarea');
+        element.value = text;
+        element.style.cssText = 'position:fixed;opacity:0;pointer-events:none';
+        document.body.appendChild(element);
+        element.select();
+        let copied = false;
+        try {
+            copied = document.execCommand('copy');
+        } catch (_) {
+            copied = false;
+        }
+        element.remove();
+        return copied;
+    }
+
+    /* Resolves to whether the text actually reached the clipboard, so a caller
+       that must report a failure can (guardrail 8). `navigator.clipboard` is
+       absent on insecure origins and rejects when the document is not focused,
+       which is exactly when the execCommand path still works. */
+    async function copyTextToClipboard(value) {
+        const text = String(value ?? '');
+        if (!text) {
+            return false;
+        }
+        if (navigator.clipboard?.writeText) {
+            try {
+                await navigator.clipboard.writeText(text);
+                return true;
+            } catch (_) {
+                return _copyTextFallbackWrite(text);
+            }
+        }
+        return _copyTextFallbackWrite(text);
+    }
+
     function escHtml(value) {
         return String(value ?? '')
             .replace(/&/g, '&amp;')
