@@ -13294,6 +13294,12 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(api._agent_from_terminal_command("claude.exe"), ("claude", "claude.exe"))
         self.assertIsNone(api._agent_from_terminal_command("echo codex"))
         self.assertIsNone(api._agent_from_terminal_command("codex-helper"))
+        # todos 2: a runtime-started grok/hermes pane promotes the same way.
+        self.assertEqual(api._agent_from_terminal_command("grok"), ("grok", "grok"))
+        self.assertEqual(
+            api._agent_from_terminal_command("hermes --yolo"),
+            ("hermes", "hermes --yolo"),
+        )
 
     def test_build_local_command_uses_wsl_startup_directory_when_available(self):
         session = SimpleNamespace(use_wsl=True, username="devuser")
@@ -20781,13 +20787,15 @@ class SettingsLauncherConfigTestCase(unittest.TestCase):
         self.assertEqual(options["copilot"]["auto_mode_flag"], "--allow-all-tools")
         self.assertEqual(options["kimi"]["auto_mode_flag"], "--auto-approve")
         self.assertEqual(options["kilo"]["auto_mode_flag"], "--yolo")
+        self.assertEqual(options["grok"]["auto_mode_flag"], "--always-approve")
+        self.assertEqual(options["hermes"]["auto_mode_flag"], "--yolo")
         self.assertEqual(options["opencode"]["auto_mode_flag"], "")
         self.assertEqual(options["other"]["auto_mode_flag"], "")
 
     def test_agent_options_expose_registry_auto_mode_descriptions(self):
         """Wave 4 / 7.b: every flag-carrying agent surfaces its helper text."""
         options = {item["value"]: item for item in web_agents._agent_options()}
-        for key in ("claude", "codex", "copilot", "kimi", "kilo"):
+        for key in ("claude", "codex", "copilot", "kimi", "kilo", "grok", "hermes"):
             with self.subTest(agent=key):
                 self.assertTrue(options[key]["auto_mode_description"])
         self.assertEqual(options["opencode"]["auto_mode_description"], "")
@@ -20821,6 +20829,74 @@ class SettingsLauncherConfigTestCase(unittest.TestCase):
         ]
         self.assertIn("curl -LsSf https://code.kimi.com/install.sh | bash", linux_commands)
         self.assertIn("uv tool install --python 3.13 kimi-cli", linux_commands)
+
+    def test_agent_registry_includes_grok_build_entry(self):
+        """todos 2: Grok Build joins the registry keyed by the command it runs."""
+        entry = web_agents.AGENT_REGISTRY.get("grok")
+        self.assertIsInstance(entry, dict)
+        self.assertEqual(entry["binary"], "grok")
+        self.assertEqual(entry["display_name"], "Grok Build (xAI)")
+        self.assertEqual(entry["auto_mode"]["flag"], "--always-approve")
+        self.assertTrue(entry["auto_mode"]["description"])
+        self.assertIn("grok --version", entry["verify"])
+        environments = entry["environments"]
+        for key in ("windows_native", "wsl_linux", "ssh"):
+            with self.subTest(environment=key):
+                self.assertTrue(environments[key]["supported"])
+        # Install commands confirmed against the official xAI CLI docs.
+        windows_commands = [
+            option["command"]
+            for option in environments["windows_native"]["install_options"]
+        ]
+        self.assertIn("irm https://x.ai/cli/install.ps1 | iex", windows_commands)
+        linux_commands = [
+            option["command"]
+            for option in environments["wsl_linux"]["install_options"]
+        ]
+        self.assertIn("curl -fsSL https://x.ai/cli/install.sh | bash", linux_commands)
+        self.assertTrue(environments["ssh"]["detect_only"])
+
+    def test_agent_registry_includes_hermes_entry(self):
+        """todos 2: Hermes Agent joins the registry keyed by the command it runs."""
+        entry = web_agents.AGENT_REGISTRY.get("hermes")
+        self.assertIsInstance(entry, dict)
+        self.assertEqual(entry["binary"], "hermes")
+        self.assertEqual(entry["display_name"], "Hermes Agent")
+        self.assertEqual(entry["auto_mode"]["flag"], "--yolo")
+        self.assertTrue(entry["auto_mode"]["description"])
+        self.assertIn("hermes --version", entry["verify"])
+        environments = entry["environments"]
+        for key in ("windows_native", "wsl_linux", "ssh"):
+            with self.subTest(environment=key):
+                self.assertTrue(environments[key]["supported"])
+        # Install commands confirmed against the official Nous Research docs.
+        windows_commands = [
+            option["command"]
+            for option in environments["windows_native"]["install_options"]
+        ]
+        self.assertIn(
+            "iex (irm https://hermes-agent.nousresearch.com/install.ps1)",
+            windows_commands,
+        )
+        linux_commands = [
+            option["command"]
+            for option in environments["wsl_linux"]["install_options"]
+        ]
+        self.assertIn(
+            "curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash",
+            linux_commands,
+        )
+        self.assertTrue(environments["ssh"]["detect_only"])
+
+    def test_every_registered_agent_key_is_its_own_launch_command(self):
+        """An agent pane launches its registry key verbatim, so the key must be
+        the command: `initial_command` is set to `agent_selection` on every path
+        (launcher payload, saved-preset merge, runtime promotion), and only the
+        `binary` field is consulted for detection. A key that is a product name
+        rather than a command would launch a shell error."""
+        for key, spec in web_agents.AGENT_REGISTRY.items():
+            with self.subTest(agent=key):
+                self.assertEqual(str(spec.get("binary") or key).strip().lower(), key)
 
     def test_auto_mode_flag_rejects_malformed_registry_values(self):
         with patch.dict(

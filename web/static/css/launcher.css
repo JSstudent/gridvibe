@@ -1312,9 +1312,9 @@
 
         .agent-preflight-copy {
             display: grid;
-            gap: 4px;
+            gap: 6px;
             padding: 10px 12px;
-            border-radius: 10px;
+            border-radius: var(--gv-radius-m);
             border: 1px solid var(--border-muted);
             background: var(--bg-input);
             color: var(--muted);
@@ -1322,7 +1322,20 @@
             line-height: 1.45;
         }
 
-        .agent-preflight-copy strong {
+        /* An install command is one long unbreakable token (a URL), and a grid
+           item's default `min-width: auto` is its min-content width — so the
+           row grew past the pane and the tail was clipped off the card. Every
+           row is allowed to shrink and to break inside that token instead. */
+        .agent-preflight-copy > * {
+            min-width: 0;
+        }
+
+        .agent-preflight-line {
+            margin: 0;
+            overflow-wrap: anywhere;
+        }
+
+        .agent-preflight-headline {
             color: var(--text);
             font-size: 0.8rem;
             font-weight: 600;
@@ -1331,6 +1344,67 @@
         .agent-preflight-copy code {
             color: var(--text);
             font-family: Consolas, Monaco, "Courier New", monospace;
+            overflow-wrap: anywhere;
+        }
+
+        .agent-preflight-install {
+            display: grid;
+            gap: 4px;
+        }
+
+        /* The button rides on the label's row so its right edge lands on the
+           box's own right content edge, whatever the command below wraps to. */
+        .agent-preflight-install-head {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+        }
+
+        .agent-preflight-install-label {
+            min-width: 0;
+            overflow-wrap: anywhere;
+        }
+
+        .agent-preflight-command {
+            display: block;
+        }
+
+        .agent-preflight-copy-btn {
+            display: inline-flex;
+            flex: 0 0 auto;
+            align-items: center;
+            justify-content: center;
+            width: 24px;
+            height: 24px;
+            padding: 0;
+            border: 1px solid var(--border-muted);
+            border-radius: var(--gv-radius-s);
+            background: transparent;
+            color: var(--muted);
+            cursor: pointer;
+            transition: border-color 0.2s ease, background 0.2s ease, color 0.2s ease;
+        }
+
+        .agent-preflight-copy-btn svg {
+            width: 14px;
+            height: 14px;
+        }
+
+        .agent-preflight-copy-btn:hover {
+            border-color: var(--accent);
+            color: var(--accent);
+        }
+
+        .agent-preflight-copy-btn:focus-visible {
+            outline: 2px solid var(--accent);
+            outline-offset: 1px;
+        }
+
+        .agent-preflight-copy-btn.is-copied {
+            border-color: var(--success);
+            background: var(--gv-success-soft);
+            color: var(--success);
         }
 
         .tip-link-btn {

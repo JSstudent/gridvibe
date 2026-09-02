@@ -93,6 +93,8 @@ Pick an agent per pane in the launcher. GridVibe checks whether the binary is on
 | OpenCode CLI | `opencode` | — |
 | Kilo CLI | `kilo` | Yes |
 | Kimi Code CLI | `kimi` | Yes |
+| Grok Build (xAI) | `grok` | Yes |
+| Hermes Agent | `hermes` | Yes |
 
 GridVibe does not bundle the CLIs. If everything shows `Missing`, install it and put its folder on `PATH` — for npm-installed agents on Windows that is usually `%APPDATA%\npm` (check with `npm prefix -g`). Restart GridVibe after PATH changes.
 

@@ -6914,23 +6914,11 @@
     /* ─────────────────────────────────────────────
        Clipboard helpers (copy / paste)
     ───────────────────────────────────────────── */
+    /* Fire-and-forget wrapper over the shared writer: every caller here is a
+       menu entry or a Ctrl+C on a selection, none of which reports a result. */
     function _copyText(text) {
         if (!text) return;
-        if (navigator.clipboard) {
-            navigator.clipboard.writeText(text).catch(() => _copyTextFallback(text));
-        } else {
-            _copyTextFallback(text);
-        }
-    }
-
-    function _copyTextFallback(text) {
-        const el = document.createElement('textarea');
-        el.value = text;
-        el.style.cssText = 'position:fixed;opacity:0;pointer-events:none';
-        document.body.appendChild(el);
-        el.select();
-        try { document.execCommand('copy'); } catch (_) {}
-        el.remove();
+        copyTextToClipboard(text);
     }
 
     function _wireClipboard(index) {
