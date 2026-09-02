@@ -244,6 +244,11 @@ from web.session_presentation import (
     apply_group_presentation,
     apply_workspace_presentation,
 )
+from web.session_shell import (  # noqa: F401 - re-exported for backwards compatibility
+    ShellTransitionEffects,
+    ShellTransitionError,
+    apply_pane_shell_change,
+)
 from web.terminal_io import (  # noqa: F401 - re-exported for backwards compatibility
     _MAX_TRACKED_SOCKET_CLIENTS,
     _MAX_TRACKED_TERMINAL_COMMAND_LENGTH,
@@ -732,6 +737,7 @@ def terminals_page():
         return "Workspace not found", 400
     settings = runtime_config.snapshot()
     return render_template('terminals.html', max_sessions=settings.max_sessions,
+                           agent_options=_agent_options(),
                            app_surface_mode=settings.app_surface_mode,
                            workspace_id=workspace_id,
                            workspace_label=workspace_label(workspace_id),
@@ -2952,83 +2958,29 @@ def reconnect_session(session_id: str):
 
 @app.route('/api/sessions/<session_id>/shell', methods=['POST'])
 def change_session_shell(session_id: str):
-    """Restart one Local Repo terminal pane under a different local shell.
+    """Relaunch one terminal pane under another shell family and/or agent.
 
-    Only the shell family (cmd / PowerShell / WSL distro) changes: the pane
-    keeps its slot, title, startup command and startup mode, so the pane's
-    startup sequence simply replays under the newly chosen shell. The live
-    working directory is carried over when the old shell still answers a cwd
-    probe (that probe already returns Windows-form paths for WSL panes).
+    HTTP adaptation only: the transaction lives in `web/session_shell.py`. The
+    three side effects are resolved here rather than imported there because
+    they belong to this module's Socket.IO server and connection registry --
+    and looking them up in this body is what keeps them the same patch points
+    they have always been.
     """
-    session = session_manager.get_session(session_id)
-    if not session:
-        return jsonify({"error": "Session not found"}), 404
-
-    if session.mode != "wsl":
-        return jsonify({"error": "Shell switching is only available for Local Repo sessions"}), 400
-
-    if os.name != "nt":
-        return jsonify(
-            {"error": "cmd, PowerShell and WSL shells are only available on Windows hosts"}
-        ), 400
-
-    if _is_explorer_session(session) or _is_browser_session(session):
-        return jsonify(
-            {"error": "Switch this pane back to terminal mode before changing its shell"}
-        ), 400
-
-    data = request.get_json(silent=True) or {}
-    shell_kind = _normalize_local_shell_kind(data.get("shell"))
-    if shell_kind not in LOCAL_SHELL_KINDS:
-        return jsonify({"error": "shell must be 'cmd', 'powershell', or 'wsl'"}), 400
-
-    use_wsl = shell_kind == "wsl"
-    use_powershell = shell_kind == "powershell"
-    distribution = str(data.get("distribution") or "").strip() if use_wsl else ""
-
-    # Re-selecting the shell a pane already runs is a no-op rather than a
-    # restart, so clicking the active menu entry never kills a live shell.
-    if shell_kind == _local_shell_kind(session) and (
-        not use_wsl or distribution == str(session.distribution or "").strip()
-    ):
-        return jsonify(session.to_dict())
-
-    next_directory = session.directory
-    # The replacement shell starts where the pane is, not where it launched --
-    # and asks the observed sources first, so switching shells mid-build lands
-    # in the right directory instead of the one the probe could not confirm.
-    observed_directory, _ = effective_directory(session_id, session, allow_probe=True)
-    if observed_directory and os.path.isdir(observed_directory):
-        next_directory = observed_directory
-
-    session_manager.update_session_metadata(
-        session_id,
-        directory=next_directory,
-        # The replacement shell has observed nothing yet, and the old shell's
-        # last report is not an observation of this one.
-        current_directory=None,
-        distribution=distribution,
-        use_wsl=use_wsl,
-        use_powershell=use_powershell,
-        host=_local_shell_display_name(
-            use_wsl=use_wsl,
-            use_powershell=use_powershell,
-            distribution=distribution,
-        ),
-    )
-    logger.info(
-        "Shell switch session_id=%s shell=%s distribution=%s directory=%s",
-        session_id,
-        shell_kind,
-        distribution or "-",
-        next_directory,
-    )
-    _close_ssh_connection(session_id, clear_buffer=True)
-    session_manager.update_session_status(session_id, SessionStatus.PENDING)
-    _broadcast_session_status(session_id)
-    socketio.start_background_task(_connect_session, session_id)
-
-    return jsonify(session_manager.get_session(session_id).to_dict())
+    try:
+        payload = apply_pane_shell_change(
+            session_id,
+            request.get_json(silent=True) or {},
+            ShellTransitionEffects(
+                close_connection=_close_ssh_connection,
+                broadcast_status=_broadcast_session_status,
+                start_connector=lambda pane_session_id: socketio.start_background_task(
+                    _connect_session, pane_session_id
+                ),
+            ),
+        )
+    except ShellTransitionError as exc:
+        return jsonify({"error": exc.message}), exc.status_code
+    return jsonify(payload)
 
 
 @app.route('/api/sessions/<session_id>/mode', methods=['POST'])

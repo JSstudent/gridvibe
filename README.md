@@ -147,9 +147,13 @@ When the pane cannot say where it is — the shell never answered, or the pane i
 
 Cross-root transfers and Git checkout, pull, or merge are intentionally left to the terminal.
 
-## Switching a Local Repo Pane's Shell
+## Relaunching a Pane's Shell or Agent
 
-Launched a pane in cmd and wanted PowerShell — or WSL? Click the pane's 🔄 button: on a Local Repo terminal it's a dropdown with **Reset view** on top and a **Shell** section listing **Command Prompt**, **PowerShell**, **WSL** (default distro) and every detected distro. Picking one restarts that pane's shell in place — same slot, same title, same startup command — starting in the directory the old shell was sitting in. Windows hosts only; SSH, explorer, and browser panes keep the plain one-click reset.
+Launched a pane in cmd and wanted PowerShell — or WSL? Click the pane's 🔄 button: on a Local Repo terminal it's a dropdown with **Reset view** on top and a **Shell** section listing **Command Prompt**, **PowerShell**, **WSL** (default distro) and every detected distro. Picking one restarts that pane's shell in place — same slot, same title — starting in the directory the old shell was sitting in. Windows hosts only.
+
+Each of those rows also carries a chevron on its right, and it opens that shell's **agent** list: **Plain shell** plus Claude, Codex, Copilot, OpenCode, Kilo, Kimi, Grok and Hermes. Picking one relaunches the pane under that shell *and* starts that agent, so “this pane, but Codex in WSL” is one click. Pressing the shell row itself is the plain relaunch, exactly as before. An **SSH pane** has no shell family to choose between, so it gets the same agent list flat, under an **Agent** heading — as does a Local Repo pane on a non-Windows host. Choosing **Plain shell** on a pane that is running an agent drops the agent and comes back to an ordinary prompt; choosing what the pane already runs does nothing at all, so a live shell is never killed by a stray click. Explorer and browser panes have no shell to relaunch and keep the plain one-click reset.
+
+The agent's **Auto mode** follows the agent rather than the pane: relaunch the same agent under another shell and it stays on, switch to a different agent and it starts from that agent's plain launch. Set it per pane in the launcher's Terminal Setup as before.
 
 ## Browser Preview
 

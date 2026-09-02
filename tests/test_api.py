@@ -1236,25 +1236,32 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertNotIn("teardownCurrentGrid();", html[switch_start:switch_end])
 
     def test_terminals_page_exposes_pane_shell_picker(self):
-        """The header reset control doubles as the Local Repo shell picker."""
+        """The header reset control doubles as the pane relaunch picker.
+
+        Markup and `data-*` hooks only: what the menu *decides* is exercised by
+        `tests/test_session_shell.py` against the route it posts to.
+        """
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
         html = self._page_html(response)
-        # The reset button and its menu are rendered by terminal-shell.js and
-        # only the local terminal panes get the dropdown behaviour.
+        # The reset button and its menu are rendered by terminal-shell.js.
         self.assertIn("${paneResetButtonHtml(i, session)}", html)
         self.assertIn("${paneShellMenuHtml(i)}", html)
         self.assertIn("handlePaneResetButton(i)", html)
+        # Shell families stay a Windows-only, Local-Repo-only dimension.
         self.assertIn("function paneSupportsShellSwitch(session)", html)
         self.assertIn("&& session.mode === 'wsl'", html)
         self.assertIn("!isExplorerSession(session)", html)
         self.assertIn("!isBrowserSession(session)", html)
-        self.assertIn("async function switchSessionShell(index, shellKind, distribution = '')", html)
         self.assertIn("`/api/sessions/${encodeURIComponent(sessionId)}/shell`", html)
-        self.assertIn("body: JSON.stringify({ shell: shellKind, distribution })", html)
-        self.assertIn("data-pane-shell-kind=\"wsl\" data-pane-shell-distro=\"\"", html)
         self.assertIn("fetch('/api/wsl-distros')", html)
+        # Every actionable row carries both dimensions, so nothing on this side
+        # can name a shell family without saying what to start under it.
+        self.assertIn('data-pane-shell-launch="1"', html)
+        self.assertIn('data-pane-shell-kind="${escHtml(shellKind)}"', html)
+        self.assertIn('data-pane-shell-distro="${escHtml(distribution)}"', html)
+        self.assertIn('data-pane-shell-agent="${escHtml(agentKey)}"', html)
         # Non-switchable panes keep the plain one-click reset.
         reset_start = html.index("function handlePaneResetButton(index)")
         reset_body = html[reset_start:html.index("function syncPaneShellControls(index, session)")]
@@ -1263,6 +1270,41 @@ class ApiRoutesTestCase(unittest.TestCase):
         # WebView2-safe dismissal + retry affordance for failed distro lookups.
         self.assertIn("closeAllPaneShellMenus();", html)
         self.assertIn("data-pane-shell-distro-retry=\"1\"", html)
+
+    def test_terminals_page_offers_an_agent_list_on_every_shell_pane(self):
+        """The chevron beside each shell row, and the flat list without one.
+
+        The agent dimension belongs to any pane that runs a shell, so the page
+        carries the same registry-backed list the launcher does, and the pane
+        with no shell family to hang chevrons on gets it as its own section.
+        """
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = self._page_html(response)
+        self.assertIn("const AGENT_OPTIONS = [", html)
+        self.assertIn("function paneSupportsAgentSwitch(session)", html)
+        # The chevron is a control beside the row, never a second meaning for
+        # it: a button inside a button is not a control.
+        self.assertIn('data-pane-shell-expand="${escHtml(rowKey)}"', html)
+        self.assertIn('class="pane-shell-menu-row"', html)
+        self.assertIn('class="pane-shell-menu-sub"', html)
+        self.assertIn(".pane-shell-menu-expand.is-expanded svg { transform: rotate(90deg); }", html)
+        # "Plain shell" is a stated choice of no agent, not a silence.
+        self.assertIn("label: 'Plain shell',", html)
+
+    def test_terminals_page_agent_options_carry_registry_display_names(self):
+        """The menu names an agent in prose; the launcher keeps naming binaries."""
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = response.get_data(as_text=True)
+        options = json.loads(
+            re.search(r"const AGENT_OPTIONS = (\[.*?\]);", html, re.S).group(1)
+        )
+        by_value = {option["value"]: option for option in options}
+        self.assertEqual(by_value["claude"]["label"], "claude")
+        self.assertEqual(by_value["claude"]["display_name"], "Claude Code")
 
     def test_terminals_page_exposes_browser_pane_rendering_hooks(self):
         response = self.client.get("/terminals")

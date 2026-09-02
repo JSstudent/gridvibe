@@ -103,13 +103,25 @@ def _agent_options() -> List[Dict[str, str]]:
         {
             "value": key,
             "label": str(spec.get("label") or key),
+            # The pane header's relaunch menu names an agent in prose rather
+            # than by its binary, so the registry's display name travels with
+            # the option instead of being looked up a second time client-side.
+            "display_name": str(spec.get("display_name") or spec.get("label") or key),
             "auto_mode_flag": _agent_auto_mode_flag(key),
             "auto_mode_description": _agent_auto_mode_description(key),
         }
         for key, spec in AGENT_REGISTRY.items()
     ]
     options.sort(key=lambda item: item["label"])
-    options.append({"value": "other", "label": "other", "auto_mode_flag": "", "auto_mode_description": ""})
+    options.append(
+        {
+            "value": "other",
+            "label": "other",
+            "display_name": "other",
+            "auto_mode_flag": "",
+            "auto_mode_description": "",
+        }
+    )
     return options
 
 
