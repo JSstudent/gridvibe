@@ -3184,7 +3184,7 @@ async function fetch(path, options) {
         # so the plain editable-target guard would swallow the shortcut exactly
         # when a terminal is highlighted and leave the user stuck in the pane.
         # One guard now serves every window-level Alt shortcut (Alt+W and the
-        # Alt+` launcher key), so the exemption cannot drift between them.
+        # Alt+Q launcher key), so the exemption cannot drift between them.
         self.assertIn("function isPaneShortcutBlockingTarget(target)", terminals_js)
         self.assertIn("target.closest('.xterm-helper-textarea')", terminals_js)
         self.assertIn(
@@ -3192,7 +3192,7 @@ async function fetch(path, options) {
             terminals_js,
         )
         self.assertIn(
-            "event.code !== 'Backquote' || isPaneShortcutBlockingTarget(event.target)",
+            "event.code !== 'KeyQ' || isPaneShortcutBlockingTarget(event.target)",
             terminals_js,
         )
 

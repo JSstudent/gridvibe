@@ -4422,13 +4422,13 @@
                 && event.code === 'KeyW') {
                 return false;
             }
-            /* And for Alt+` (open launcher), which xterm would otherwise send
-               on to the shell as ESC `. */
+            /* And for Alt+Q (open launcher), which xterm would otherwise send
+               on to the shell as ESC q. */
             if (event.altKey
                 && !event.ctrlKey
                 && !event.metaKey
                 && !event.shiftKey
-                && event.code === 'Backquote') {
+                && event.code === 'KeyQ') {
                 return false;
             }
 
@@ -7027,6 +7027,54 @@
         refreshTerminalDisplay(index);
     });
 
+    /* Ctrl+Shift+E is the keyboard route into the in-place editor, and while
+       editing it is Cancel — the same toggle the header shows, where the Edit
+       button is itself replaced by Save/Cancel. Leaving was already bound
+       (Ctrl+S saves, Esc cancels) and entering was mouse-only, so the pair was
+       asymmetric.
+
+       A file that cannot be edited says why on the toast rather than doing
+       nothing: the disabled Edit button carries that same sentence in its
+       tooltip, and a chord that silently no-ops reads as broken. The reason
+       comes from explorerEditDisabledTooltip() so the two cannot drift.
+
+       On Firefox in browser mode this chord is the Network Monitor and may not
+       reach the page; Chrome, Edge and the native window are unaffected. */
+    document.addEventListener('keydown', event => {
+        if (!(event.ctrlKey || event.metaKey) || !event.shiftKey || event.altKey || event.repeat) {
+            return;
+        }
+        if (event.code !== 'KeyE') {
+            return;
+        }
+        const index = findExplorerShortcutTargetIndex();
+        const pane = index === -1 ? null : terminals[index];
+        if (!pane) {
+            return;
+        }
+        if (explorerEditState(pane)) {
+            event.preventDefault();
+            event.stopPropagation();
+            cancelExplorerEdit(index);
+            return;
+        }
+        /* Not showing a file at all — a directory listing has no Edit button
+           either, so there is nothing to report and nothing to claim. */
+        if (pane._explorerMode !== 'file') {
+            return;
+        }
+        event.preventDefault();
+        event.stopPropagation();
+        if (!pane._explorerFileEditable) {
+            showTerminalToast(
+                explorerEditDisabledTooltip(pane._explorerFileEditBlockReason || ''),
+                'error'
+            );
+            return;
+        }
+        enterExplorerEditMode(index);
+    });
+
     document.addEventListener('auxclick', event => {
         if (event.button !== 3) {
             return;
@@ -7264,15 +7312,29 @@
         cycleWorkspaceWindow(event.shiftKey ? -1 : 1);
     });
 
-    /* Alt+` (the key left of 1) opens the launcher — the same action as the
-       button at the head of the session tab line. Matching on event.code keeps
-       the shortcut on that physical key on layouts where it produces a dead
-       key rather than a backtick. */
+    /* Alt+Q opens the launcher — the same action as the button at the head of
+       the session tab line, and one hand away from the Alt navigation family
+       it belongs to (Alt+1..9, Alt+W).
+
+       It replaced Alt+` because that key is a dead accent on several layouts
+       (cedilla on Slovenian/Croatian). The launcher still opened — the binding
+       matched the physical key — but Windows' own ToUnicode ignores plain Alt
+       when it translates the message, so the layout armed its composer as if
+       the key had been pressed bare, and the next character typed anywhere in
+       the thread (the launcher's own new-workspace field, most often) came out
+       accented. That arming happens before any handler runs, so
+       preventDefault() could not undo it: the cure is a key that is dead on no
+       layout, and Q is one. `!event.ctrlKey` is what keeps AltGr out — AltGr
+       reaches the page as Ctrl+Alt, and AltGr+Q types a backslash here — so
+       that clause is load-bearing, not boilerplate. Still matched on
+       event.code, so the chord stays on the same physical key whatever the
+       layout prints on it; README and the button's own tooltip are where it is
+       named. */
     document.addEventListener('keydown', event => {
         if (!event.altKey || event.ctrlKey || event.metaKey || event.shiftKey || event.repeat) {
             return;
         }
-        if (event.code !== 'Backquote' || isPaneShortcutBlockingTarget(event.target)) {
+        if (event.code !== 'KeyQ' || isPaneShortcutBlockingTarget(event.target)) {
             return;
         }
 

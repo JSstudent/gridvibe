@@ -203,12 +203,13 @@ GridVibe does not proxy pages or bypass `X-Frame-Options`/CSP, so sites that blo
 
 | Shortcut | Action |
 | --- | --- |
-| ``Alt+` `` | Open the launcher (the key left of `1`) |
+| `Alt+Q` | Open the launcher |
 | `Alt+1`–`Alt+9` | Switch session group |
 | `Alt+W` / `Alt+Shift+W` | Next / previous workspace window (multiple workspaces only) — the window you land in pulses once. In the launcher, `Alt+W` returns to the workspace that opened it, or to whichever workspace is still open if that one has closed |
 | `Ctrl+Shift+F` | Terminal scrollback search — or, on an explorer pane, toggle repository search |
 | `Ctrl+F` | Find in the open file |
 | `Ctrl+Shift+V` | Toggle Markdown rendered preview |
+| `Ctrl+Shift+E` | Edit the open file in place — and, while editing, cancel |
 | `Ctrl+S` / `Esc` | Save / cancel in the explorer editor |
 | `F5` | Refresh the focused explorer |
 

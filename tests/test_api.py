@@ -902,7 +902,7 @@ class ApiRoutesTestCase(unittest.TestCase):
     def test_terminals_page_launcher_button_heads_the_session_tab_line(self):
         """The launcher button sits at the head of the session tab line — ahead
         of the first tab and out of the top bar, so hiding the top bar no longer
-        hides it. Alt+` reaches the same action."""
+        hides it. Alt+Q reaches the same action."""
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
@@ -916,14 +916,22 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertLess(session_bar_start, launcher_start)
         self.assertLess(launcher_start, session_tabs_start)
         self.assertLess(topbar_actions_start, session_bar_start)
-        self.assertIn('aria-keyshortcuts="Alt+`"', html)
+        self.assertIn('aria-keyshortcuts="Alt+Q"', html)
+        self.assertIn("Open launcher (Alt+Q)", html)
 
         terminals_js = self._static("js/terminals.js")
-        # The physical key left of "1" — matched by code so a layout that types
-        # a dead key there still reaches the launcher, and a focused terminal
-        # hands the key up instead of sending ESC ` to the shell.
-        self.assertIn("event.code !== 'Backquote'", terminals_js)
-        self.assertIn("event.code === 'Backquote'", terminals_js)
+        # Matched by physical key, so the chord survives a layout that prints
+        # something else there, and a focused terminal hands the key up instead
+        # of sending ESC q to the shell.
+        self.assertIn("event.code !== 'KeyQ'", terminals_js)
+        self.assertIn("event.code === 'KeyQ'", terminals_js)
+        # The old chord is gone rather than kept in parallel: it opened the
+        # launcher and left the layout's dead-accent composer armed, so keeping
+        # it reachable keeps the bug reachable by the same reflex. Nothing
+        # matches that physical key any more, and the button no longer names
+        # it. (The handler's comment still explains why it moved.)
+        self.assertNotIn("Backquote", terminals_js)
+        self.assertNotIn('aria-keyshortcuts="Alt+`"', html)
 
     def test_terminals_page_opens_app_settings_without_the_launcher(self):
         """The session window carries its own App Settings dialog (todo 1) —

@@ -123,7 +123,7 @@
 
     /* ── The launcher's way back ──
        The launcher is a window, not a workspace, so it has no place in the
-       Alt+W walk — but it is almost always reached *from* a workspace (Alt+`,
+       Alt+W walk — but it is almost always reached *from* a workspace (Alt+Q,
        or the launcher button at the head of the session line), and the way back
        was a mouse trip through the Workspaces card. Every path that opens the
        launcher records the workspace it left, so the same keystroke that walks
