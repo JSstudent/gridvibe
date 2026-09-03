@@ -268,6 +268,158 @@
         return SHORTCUT_HELP_GROUPS.map(shortcutsHelpGroupHtml).join('');
     }
 
+    /* ── Fitting the panel to the room it actually has ──
+       The stylesheet caps the panel at `min(62vh, 540px)`, which is a cap
+       against the *window* and knows nothing about the box the panel is drawn
+       in. On the launcher that box is `.column`, a scroll container — so a
+       panel anchored above a button in the bottom action bar grew straight up
+       through the top of the setup card and had its first group clipped away.
+       A reference whose first entry cannot be reached is not one.
+
+       So the height is measured against whatever actually clips the panel:
+       every scrolling ancestor up to the viewport, intersected, because an
+       inner clipper sits inside its outer ones and the tightest of them is the
+       edge the panel meets first. The measurement only ever *tightens* the
+       stylesheet's cap — the cap is a reading decision and this is a fitting
+       one, and a panel allowed to grow past it because the window is tall
+       would be a different surface.
+
+       The arithmetic is separated from the measuring so it can be run without
+       a page: `shortcutsHelpFittedHeight()` is the whole policy and takes
+       numbers. */
+
+    /* Matches the 6px the stylesheet's anchor offsets the panel by. */
+    const SHORTCUTS_HELP_GAP = 6;
+    /* Never flush against the edge it was about to be clipped by: a panel
+       touching the boundary reads as one that is still cut off. */
+    const SHORTCUTS_HELP_EDGE = 8;
+    /* A floor, because a sliver is worse than a scrollbar. Below this the
+       panel overflows its box again — deliberately, since at that point the
+       window is too short for any answer to be a good one. */
+    const SHORTCUTS_HELP_MIN_HEIGHT = 140;
+    /* Leaving with the pointer closes the panel, but not on the first frame
+       the cursor clips a corner on its way to the scrollbar. */
+    const SHORTCUTS_HELP_LEAVE_GRACE_MS = 260;
+
+    function shortcutsHelpFittedHeight(measurements) {
+        const {
+            opensUp,
+            buttonTop,
+            buttonBottom,
+            boundsTop,
+            boundsBottom,
+            styleCap
+        } = measurements;
+        const room = opensUp
+            ? buttonTop - boundsTop
+            : boundsBottom - buttonBottom;
+        const usable = room - SHORTCUTS_HELP_GAP - SHORTCUTS_HELP_EDGE;
+        const capped = Number.isFinite(styleCap) && styleCap > 0
+            ? Math.min(styleCap, usable)
+            : usable;
+        return Math.max(Math.round(capped), SHORTCUTS_HELP_MIN_HEIGHT);
+    }
+
+    /* The clip the panel is drawn inside: every ancestor that scrolls, down to
+       the viewport. Intersected rather than stopping at the first one, so a
+       scroller that is itself scrolled out of a shorter one cannot report more
+       room than there is. */
+    function shortcutsHelpClipBounds(root) {
+        let top = 0;
+        let bottom = window.innerHeight;
+        let node = root.parentElement;
+        while (node && node !== document.body && node !== document.documentElement) {
+            if (window.getComputedStyle(node).overflowY !== 'visible') {
+                const rect = node.getBoundingClientRect();
+                top = Math.max(top, rect.top);
+                bottom = Math.min(bottom, rect.bottom);
+            }
+            node = node.parentElement;
+        }
+        return { top, bottom };
+    }
+
+    function fitShortcutsHelpPanel(root, button, panel) {
+        if (
+            typeof window === 'undefined'
+            || typeof window.getComputedStyle !== 'function'
+            || typeof panel.getBoundingClientRect !== 'function'
+        ) {
+            return;
+        }
+        /* Cleared first, so the cap read back is the stylesheet's own and not
+           what the previous open left behind. */
+        panel.style.maxHeight = '';
+        const buttonRect = button.getBoundingClientRect();
+        const panelRect = panel.getBoundingClientRect();
+        /* Which way it opened is the page's decision (--sh-anchor-*), so it is
+           read off the result rather than asked for again here. */
+        const opensUp = panelRect.bottom <= buttonRect.top + 1;
+        const bounds = shortcutsHelpClipBounds(root);
+        panel.style.maxHeight = `${shortcutsHelpFittedHeight({
+            opensUp,
+            buttonTop: buttonRect.top,
+            buttonBottom: buttonRect.bottom,
+            boundsTop: bounds.top,
+            boundsBottom: bounds.bottom,
+            styleCap: parseFloat(window.getComputedStyle(panel).maxHeight)
+        })}px`;
+    }
+
+    /* ── Leaving closes it ──
+       The panel is a reference you glance at, not a surface you operate, so the
+       two ways of stopping looking at it close it: moving the pointer off it,
+       and taking the window's focus somewhere else. Both are armed on open and
+       taken off on close, because a listener that outlives its surface is the
+       thing that closes the *next* panel unbidden.
+
+       `mouseleave` on the root is the whole hover test: the panel is a child of
+       the root, so the pointer moving from the button onto the panel never
+       leaves it, and no separate "is it heading for the panel" rule is needed.
+       Opening from the keyboard arms it too and costs nothing — a pointer that
+       was never over the root cannot leave it. */
+
+    let releaseShortcutsHelpDismissers = null;
+
+    function armShortcutsHelpDismissers(root) {
+        releaseShortcutsHelpDismissers?.();
+        if (typeof root.addEventListener !== 'function') {
+            return;
+        }
+        let graceHandle = null;
+        const cancelGrace = () => {
+            if (graceHandle !== null) {
+                clearTimeout(graceHandle);
+                graceHandle = null;
+            }
+        };
+        const onLeave = () => {
+            cancelGrace();
+            graceHandle = setTimeout(() => {
+                graceHandle = null;
+                closeShortcutsHelp();
+            }, SHORTCUTS_HELP_LEAVE_GRACE_MS);
+        };
+        const onBlur = () => closeShortcutsHelp();
+        const onVisibility = () => {
+            if (document.hidden) {
+                closeShortcutsHelp();
+            }
+        };
+        root.addEventListener('mouseleave', onLeave);
+        root.addEventListener('mouseenter', cancelGrace);
+        window?.addEventListener?.('blur', onBlur);
+        document.addEventListener?.('visibilitychange', onVisibility);
+        releaseShortcutsHelpDismissers = () => {
+            cancelGrace();
+            root.removeEventListener('mouseleave', onLeave);
+            root.removeEventListener('mouseenter', cancelGrace);
+            window?.removeEventListener?.('blur', onBlur);
+            document.removeEventListener?.('visibilitychange', onVisibility);
+            releaseShortcutsHelpDismissers = null;
+        };
+    }
+
     /* ── Open / close ──
        Not a modal: it changes nothing, so a backdrop and a focus trap would be
        worse than the thing they guard. Focus moves into the panel on open so
@@ -288,6 +440,7 @@
             && document.activeElement
             && (panel === document.activeElement || panel.contains?.(document.activeElement))
         );
+        releaseShortcutsHelpDismissers?.();
         root.classList.remove('open');
         button?.setAttribute('aria-expanded', 'false');
         /* The rows go with the panel. They are static, so rebuilding them on
@@ -296,6 +449,12 @@
            either. */
         if (panel) {
             panel.innerHTML = '';
+            /* The fitted height belongs to the window the panel was opened in,
+               so it goes with the rows rather than standing until the next
+               open measures over it. */
+            if (panel.style) {
+                panel.style.maxHeight = '';
+            }
         }
         if (hadFocus) {
             button?.focus?.();
@@ -318,5 +477,10 @@
         panel.innerHTML = shortcutsHelpPanelHtml();
         root.classList.add('open');
         button.setAttribute('aria-expanded', 'true');
+        /* After the class, because a panel still `display: none` measures
+           nothing, and before focus, so the list is already the size it will
+           be read at when the caret lands in it. */
+        fitShortcutsHelpPanel(root, button, panel);
+        armShortcutsHelpDismissers(root);
         panel.focus?.();
     }

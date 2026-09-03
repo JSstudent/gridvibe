@@ -1065,18 +1065,24 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("closeShortcutsHelp();", launcher_js)
 
     def test_shortcut_panel_shape_is_shared_and_only_its_palette_is_per_page(self):
-        """The two pages have unrelated palettes, so the panel names its
-        colours through --sh-* and each page declares them from the tokens it
-        already has — which is what keeps dark/light working on both surfaces
-        with no second palette and no prefers-color-scheme block."""
+        """The two pages have unrelated palettes and open the panel in opposite
+        directions, so both are named through --sh-* knobs. The contract is
+        that the shared file *reads* every one of them and *declares* none:
+        both templates load it after their page stylesheet, so anything it
+        declares at .shortcuts-help-panel outranks the page's own amendment at
+        the same specificity. That is not hypothetical — it cost the workspace
+        window its palette (a translucent dialog fill over an opaque file tree)
+        and cost the launcher its height (`top: auto` overruled while its own
+        `bottom` survived, pinning a box to both edges of a 30px button)."""
         shared_css = self._static("css/shortcuts-help.css")
-        # The shape lives here once: the anchor, the scrolling body and the one
-        # <kbd> rule this app had never needed before.
+        # The shape lives here once: the horizontal anchor, the scrolling body
+        # and the one <kbd> rule this app had never needed before.
         self.assertIn("right: 0;", shared_css)
         self.assertIn("overflow-y: auto;", shared_css)
         self.assertIn("scrollbar-gutter: stable;", shared_css)
         self.assertIn(".shortcuts-help-key", shared_css)
-        for name in (
+
+        knobs = (
             "--sh-bg",
             "--sh-border",
             "--sh-text",
@@ -1084,12 +1090,21 @@ class ApiRoutesTestCase(unittest.TestCase):
             "--sh-key-bg",
             "--sh-key-text",
             "--sh-key-border",
-        ):
-            self.assertIn(f"var({name})", shared_css)
+            "--sh-anchor-top",
+            "--sh-anchor-bottom",
+            "--sh-backdrop",
+        )
+        for name in knobs:
+            with self.subTest(knob=name):
+                # Read, with the default a page that says nothing inherits...
+                self.assertRegex(shared_css, rf"var\({name}, [^)]")
+                # ...and never declared, or load order decides it instead.
+                self.assertNotRegex(shared_css, rf"{name}\s*:")
         # No palette literal anywhere in it — every value is a token.
         self.assertIsNone(re.search(r"#[0-9a-fA-F]{3,8}", shared_css))
 
-        # The workspace window remaps them onto the set its own menus use.
+        # The workspace window remaps the palette onto the set its own menus
+        # use, and turns off the blur that goes with the translucent default.
         terminals_css = self._static("css/terminals.css")
         mapping = re.search(
             r"\.shortcuts-help-panel \{(.*?)\}", terminals_css, re.DOTALL
@@ -1097,17 +1112,20 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIsNotNone(mapping)
         self.assertIn("--sh-bg: var(--t-ctx-bg);", mapping.group(1))
         self.assertIn("--sh-key-bg: var(--t-btn-neutral);", mapping.group(1))
+        self.assertIn("--sh-backdrop: none;", mapping.group(1))
         self.assertIsNone(re.search(r"#[0-9a-fA-F]{3,8}", mapping.group(1)))
 
         # The launcher's button is in a *bottom* action bar, so the one thing
-        # it states is the direction the panel opens.
+        # it states is the direction the panel opens — and it states both
+        # edges, because taking the bottom one without giving up the top one is
+        # what collapses the box.
         launcher_css = self._static("css/launcher.css")
         launcher_rule = re.search(
             r"\.shortcuts-help-panel \{(.*?)\}", launcher_css, re.DOTALL
         )
         self.assertIsNotNone(launcher_rule)
-        self.assertIn("bottom: calc(100% + 6px);", launcher_rule.group(1))
-        self.assertIn("top: auto;", launcher_rule.group(1))
+        self.assertIn("--sh-anchor-bottom: calc(100% + 6px);", launcher_rule.group(1))
+        self.assertIn("--sh-anchor-top: auto;", launcher_rule.group(1))
 
     def test_docs_images_route_serves_gridvibe_icon(self):
         response = self.client.get("/docs/images/GridVibe_icon.ico")

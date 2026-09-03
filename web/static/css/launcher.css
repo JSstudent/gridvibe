@@ -889,10 +889,18 @@
            lives in the bottom action bar, so a panel hanging below it would open
            off the foot of the window. It opens upward instead, and its height
            cap keeps it inside .column's own scroll box, which would otherwise
-           clip it rather than let it reach the window edge. */
+           clip it rather than let it reach the window edge.
+
+           Both edges are stated, because "open upward" is two facts: the panel
+           takes the bottom edge *and* gives up the top one. Saying only the
+           first left the box pinned to both edges of a ~30px button, where its
+           height resolves to zero. They are custom properties rather than
+           `top`/`bottom` for the reason the shared file's header sets out: that
+           file loads after this one, so a plain `top: auto` here was simply
+           overruled, while a knob it only reads can never be. */
         .shortcuts-help-panel {
-            top: auto;
-            bottom: calc(100% + 6px);
+            --sh-anchor-top: auto;
+            --sh-anchor-bottom: calc(100% + 6px);
         }
 
         .app-footer {

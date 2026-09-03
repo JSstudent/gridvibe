@@ -4,13 +4,31 @@
    Both pages render the same partial and the same rows, so the *shape* of the
    panel lives here exactly once: its box, its anchor, its grid and the one
    `<kbd>` rule this app had never needed before. What differs is the palette —
-   the launcher and the workspace window have unrelated ones — so the colours are
-   named through seven local custom properties. They default to the shared
-   `--gv-dialog-*` tokens, which *are* the launcher's palette, and terminals.css
-   redeclares them from its own `--t-*` set so the panel matches the menus it
-   sits beside. Every one of those tokens is already redefined per theme where it
-   is declared, which is the whole of what makes this dark/light specific: no
-   `prefers-color-scheme` block, and no second palette to keep in step by hand. */
+   the launcher and the workspace window have unrelated ones — and, on the
+   launcher, the direction the panel opens.
+
+   Both are named through custom properties, and **this file declares none of
+   them**: it reads each one with `var(--sh-x, <default>)` and the pages
+   declare only what they change. That is not a style, it is the fix for the
+   defect this file shipped with. Both templates load it *after* their page
+   stylesheet, so every declaration here outranked the page's own at the same
+   specificity, and the pages' amendments were silently thrown away:
+
+     - the workspace window's seven palette remappings lost to the defaults
+       below, so its panel wore the launcher's translucent dialog fill over an
+       opaque file tree and could not be read;
+     - the launcher's `top: auto` lost to the `top` here while its `bottom`
+       survived, leaving an absolutely positioned box pinned to *both* edges of
+       a ~30px-tall button. Its height resolved to zero and the whole reference
+       went behind a scrollbar, one line high.
+
+   A knob nothing here declares cannot be won back by load order, so the pages
+   below are authoritative whatever order the <link>s end up in. The defaults
+   are the shared `--gv-dialog-*` tokens, which *are* the launcher's palette,
+   and terminals.css sets its own `--t-*` set so the panel matches the menus it
+   sits beside. Every one of those tokens is already redefined per theme where
+   it is declared, which is the whole of what makes this dark/light specific:
+   no `prefers-color-scheme` block, and no second palette to keep in step. */
 .shortcuts-help {
     position: relative;
     display: inline-flex;
@@ -18,20 +36,15 @@
 }
 
 .shortcuts-help-panel {
-    --sh-bg: var(--gv-dialog-bg);
-    --sh-border: var(--gv-dialog-border);
-    --sh-text: var(--gv-dialog-text);
-    --sh-muted: var(--gv-dialog-muted);
-    --sh-key-bg: var(--gv-dialog-panel-soft);
-    --sh-key-text: var(--gv-dialog-text);
-    --sh-key-border: var(--gv-dialog-border);
-
     position: absolute;
     /* Anchored right, because the button sits at the right end of its control
        group on both pages and a left-anchored panel this wide would run past
-       the window edge. The vertical anchor is the page's own: it hangs below
-       the workspace top bar and above the launcher's bottom action bar. */
-    top: calc(100% + 6px);
+       the window edge. The vertical anchor is the page's own — it hangs below
+       the workspace top bar and above the launcher's bottom action bar — so
+       both edges are read, never declared: a page that has to say "not below"
+       must be able to say it, and setting one edge here left the other pinned. */
+    top: var(--sh-anchor-top, calc(100% + 6px));
+    bottom: var(--sh-anchor-bottom, auto);
     right: 0;
     z-index: 200;
     display: none;
@@ -48,9 +61,16 @@
        every row from reflowing when it appears. */
     scrollbar-gutter: stable;
     padding: 10px 12px;
-    border: 1px solid var(--sh-border);
+    border: 1px solid var(--sh-border, var(--gv-dialog-border));
     border-radius: var(--gv-radius-s);
-    background: var(--sh-bg);
+    background: var(--sh-bg, var(--gv-dialog-bg));
+    /* The default fill is the shared dialog surface, which is translucent
+       because every other surface using it sits over a scrim or a blur —
+       .workspace-context-menu, the launcher's own floating menu, blurs at
+       exactly this radius. This panel has no scrim, so it blurs too. A page
+       whose menus are opaque turns it off rather than inheriting a wash it
+       does not need. */
+    backdrop-filter: var(--sh-backdrop, blur(12px));
     box-shadow: var(--gv-dialog-shadow);
     cursor: default;
 }
@@ -72,7 +92,7 @@
 
 .shortcuts-help-group-title {
     margin: 0 0 4px;
-    color: var(--sh-muted);
+    color: var(--sh-muted, var(--gv-dialog-muted));
     font-size: .66rem;
     font-weight: 700;
     letter-spacing: .09em;
@@ -95,7 +115,7 @@
 }
 
 .shortcuts-help-action {
-    color: var(--sh-text);
+    color: var(--sh-text, var(--gv-dialog-text));
     font-size: .78rem;
     line-height: 1.35;
 }
@@ -104,7 +124,7 @@
 .shortcuts-help-plus,
 .shortcuts-help-chord-join,
 .shortcuts-help-chord-label {
-    color: var(--sh-muted);
+    color: var(--sh-muted, var(--gv-dialog-muted));
 }
 
 .shortcuts-help-plus,
@@ -122,10 +142,10 @@
     display: inline-block;
     min-width: 1.4em;
     padding: 1px 5px;
-    border: 1px solid var(--sh-key-border);
+    border: 1px solid var(--sh-key-border, var(--gv-dialog-border));
     border-radius: 4px;
-    background: var(--sh-key-bg);
-    color: var(--sh-key-text);
+    background: var(--sh-key-bg, var(--gv-dialog-panel-soft));
+    color: var(--sh-key-text, var(--gv-dialog-text));
     font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
     font-size: .72rem;
     line-height: 1.5;

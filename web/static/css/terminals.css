@@ -616,7 +616,18 @@
            bar's own menus, so it reads from the same --t-* set they do. Those
            are declared once per theme at the top of this file, which is the
            whole of what makes the panel dark/light specific: no second palette,
-           and nothing to keep in step by hand. */
+           and nothing to keep in step by hand.
+
+           This is a remapping and not a suggestion: the shared file declares
+           none of these, so nothing here can be lost to the fact that it loads
+           afterwards. It was, once — the panel came up wearing the launcher's
+           translucent dialog fill over an opaque file tree, which is exactly
+           as legible as it sounds.
+
+           The blur goes with it. --t-ctx-bg is opaque, as every menu on this
+           page is, so there is nothing for a backdrop filter to do but cost a
+           compositing layer; the launcher's fill is translucent by design and
+           keeps it. */
         .shortcuts-help-panel {
             --sh-bg: var(--t-ctx-bg);
             --sh-border: var(--t-border-tab);
@@ -625,6 +636,7 @@
             --sh-key-bg: var(--t-btn-neutral);
             --sh-key-text: var(--t-btn-neutral-text);
             --sh-key-border: var(--t-border-tab);
+            --sh-backdrop: none;
         }
 
         .topbar-title { font-size: 1rem; color: var(--t-accent); font-weight: 700; }

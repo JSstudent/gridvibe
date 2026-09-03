@@ -67,17 +67,41 @@ function fakeClassList() {
     };
 }
 
+/* Listener bookkeeping, not a dispatcher: the assertions care that a handler
+   was added *and* taken off again, so the stub keeps the set rather than a
+   count and `fire()` simply refuses to run one that was removed. */
+function fakeListeners() {
+    const handlers = new Map();
+    return {
+        addEventListener(type, handler) {
+            if (!handlers.has(type)) { handlers.set(type, new Set()); }
+            handlers.get(type).add(handler);
+        },
+        removeEventListener(type, handler) {
+            handlers.get(type)?.delete(handler);
+        },
+        listenerCount(type) { return handlers.get(type)?.size || 0; },
+        fire(type) { [...(handlers.get(type) || [])].forEach(handler => handler()); }
+    };
+}
+
 function fakeElement(id) {
     return {
         id,
         innerHTML: '',
         attributes: {},
+        style: {},
         classList: fakeClassList(),
         setAttribute(name, value) { this.attributes[name] = value; },
         focus() { document.activeElement = this; },
         /* The panel holds no focusable rows, so the only node it ever contains
            for this purpose is itself -- which the module checks separately. */
-        contains: node => false
+        contains: node => false,
+        /* No parent, so shortcutsHelpClipBounds() has nothing to walk -- and no
+           getBoundingClientRect either, which is what makes fitting stand down
+           on a page that cannot be measured. */
+        parentElement: null,
+        ...fakeListeners()
     };
 }
 
@@ -86,8 +110,14 @@ const byId = new Map();
 
 const document = {
     activeElement: null,
-    getElementById: id => byId.get(id) || null
+    hidden: false,
+    getElementById: id => byId.get(id) || null,
+    ...fakeListeners()
 };
+
+/* The module guards every window access, so the stub is only what the
+   dismissers reach for. */
+const window = fakeListeners();
 
 function root() { return byId.get('shortcutsHelpRoot'); }
 function button() { return byId.get('shortcutsHelpBtn'); }
@@ -387,6 +417,214 @@ class ShortcutsHelpChordNamesTestCase(ShortcutsHelpTestCase):
         self.assertNotIn("Ctrl+click", names)
         self.assertNotIn("Shift+click", names)
         self.assertNotIn("", names)
+
+
+class ShortcutsHelpFitTestCase(ShortcutsHelpTestCase):
+    """The panel is sized against the box it is drawn in, not against the window.
+
+    On the launcher that box is `.column`, a scroll container, so a panel
+    anchored above a button in the bottom action bar grew through the top of
+    the setup card and had its first group clipped away. The policy is pure
+    arithmetic and is exercised as such."""
+
+    def _fit(self, **measurements):
+        return self._run_node(
+            "report(shortcutsHelpFittedHeight(%s));" % json.dumps(measurements)
+        )
+
+    def test_a_panel_opening_upward_is_cut_to_the_room_above_its_button(self):
+        # The launcher's case: 540px of cap, 300px of room above the button.
+        fitted = self._fit(
+            opensUp=True,
+            buttonTop=300,
+            buttonBottom=340,
+            boundsTop=0,
+            boundsBottom=900,
+            styleCap=540,
+        )
+        self.assertLess(fitted, 540)
+        self.assertLessEqual(fitted, 300)
+
+    def test_the_clip_is_the_scroll_box_and_not_the_window_top(self):
+        """Same button, same window - only the box it is drawn in moves."""
+        window_only = self._fit(
+            opensUp=True,
+            buttonTop=600,
+            buttonBottom=640,
+            boundsTop=0,
+            boundsBottom=900,
+            styleCap=540,
+        )
+        inside_a_scroller = self._fit(
+            opensUp=True,
+            buttonTop=600,
+            buttonBottom=640,
+            boundsTop=380,
+            boundsBottom=900,
+            styleCap=540,
+        )
+        self.assertEqual(window_only, 540)
+        self.assertLess(inside_a_scroller, window_only)
+
+    def test_room_to_spare_never_grows_the_panel_past_its_own_cap(self):
+        """The cap is a reading decision; this measurement is a fitting one."""
+        fitted = self._fit(
+            opensUp=False,
+            buttonTop=40,
+            buttonBottom=80,
+            boundsTop=0,
+            boundsBottom=4000,
+            styleCap=540,
+        )
+        self.assertEqual(fitted, 540)
+
+    def test_a_panel_opening_downward_measures_the_room_below(self):
+        fitted = self._fit(
+            opensUp=False,
+            buttonTop=40,
+            buttonBottom=80,
+            boundsTop=0,
+            boundsBottom=300,
+            styleCap=540,
+        )
+        self.assertLessEqual(fitted, 220)
+
+    def test_a_box_too_short_for_any_answer_gets_the_floor_not_a_sliver(self):
+        fitted = self._fit(
+            opensUp=True,
+            buttonTop=30,
+            buttonBottom=70,
+            boundsTop=0,
+            boundsBottom=200,
+            styleCap=540,
+        )
+        self.assertGreaterEqual(fitted, 140)
+
+    def test_a_page_that_cannot_be_measured_is_left_alone(self):
+        """The stub page has no rects, so fitting stands down rather than
+        writing a height it guessed."""
+        result = self._run_node(
+            """
+            press();
+            report({ maxHeight: panel().style.maxHeight ?? null, open: isOpen() });
+            """
+        )
+        self.assertTrue(result["open"])
+        self.assertIsNone(result["maxHeight"])
+
+
+class ShortcutsHelpDismissalTestCase(ShortcutsHelpTestCase):
+    """Two ways of stopping looking at it close it, and both are taken off again.
+
+    A reference is glanced at rather than operated, so the pointer leaving it
+    and the window losing focus each dismiss it - and a listener that outlived
+    its surface would be the thing that closed the *next* panel unbidden."""
+
+    def test_leaving_with_the_pointer_closes_it(self):
+        result = self._run_node(
+            """
+            press();
+            const openBeforeLeaving = isOpen();
+            root().fire('mouseleave');
+            const openDuringGrace = isOpen();
+            await new Promise(resolve => setTimeout(resolve, 400));
+            report({ openBeforeLeaving, openDuringGrace, open: isOpen(), html: panel().innerHTML });
+            """
+        )
+        self.assertTrue(result["openBeforeLeaving"])
+        # Not on the frame the pointer clips a corner: the grace is the point.
+        self.assertTrue(result["openDuringGrace"])
+        self.assertFalse(result["open"])
+        self.assertEqual(result["html"], "")
+
+    def test_coming_back_within_the_grace_keeps_it_open(self):
+        result = self._run_node(
+            """
+            press();
+            root().fire('mouseleave');
+            root().fire('mouseenter');
+            await new Promise(resolve => setTimeout(resolve, 400));
+            report({ open: isOpen() });
+            """
+        )
+        self.assertTrue(result["open"])
+
+    def test_the_window_losing_focus_closes_it(self):
+        result = self._run_node(
+            """
+            press();
+            window.fire('blur');
+            report({ open: isOpen(), html: panel().innerHTML });
+            """
+        )
+        self.assertFalse(result["open"])
+        self.assertEqual(result["html"], "")
+
+    def test_the_tab_going_to_the_background_closes_it(self):
+        result = self._run_node(
+            """
+            press();
+            document.hidden = true;
+            document.fire('visibilitychange');
+            const hiddenClosed = !isOpen();
+            document.hidden = false;
+            press();
+            document.fire('visibilitychange');
+            report({ hiddenClosed, stillOpenWhenVisible: isOpen() });
+            """
+        )
+        self.assertTrue(result["hiddenClosed"])
+        # Coming back to the foreground is not a reason to close.
+        self.assertTrue(result["stillOpenWhenVisible"])
+
+    def test_closing_takes_every_listener_off_again(self):
+        result = self._run_node(
+            """
+            const counts = () => ({
+                leave: root().listenerCount('mouseleave'),
+                blur: window.listenerCount('blur'),
+                visibility: document.listenerCount('visibilitychange')
+            });
+            const before = counts();
+            press();
+            const armed = counts();
+            press();
+            report({ before, armed, released: counts() });
+            """
+        )
+        self.assertEqual(result["before"], {"leave": 0, "blur": 0, "visibility": 0})
+        self.assertEqual(result["armed"], {"leave": 1, "blur": 1, "visibility": 1})
+        self.assertEqual(result["released"], {"leave": 0, "blur": 0, "visibility": 0})
+
+    def test_reopening_does_not_stack_a_second_set_of_listeners(self):
+        result = self._run_node(
+            """
+            press(); press(); press(); press(); press();
+            report({
+                open: isOpen(),
+                leave: root().listenerCount('mouseleave'),
+                blur: window.listenerCount('blur')
+            });
+            """
+        )
+        self.assertTrue(result["open"])
+        self.assertEqual(result["leave"], 1)
+        self.assertEqual(result["blur"], 1)
+
+    def test_a_grace_left_running_cannot_close_the_next_panel(self):
+        """The pointer leaves, the panel is closed another way, and it is
+        opened again inside the grace window - the stale timer must be gone."""
+        result = self._run_node(
+            """
+            press();
+            root().fire('mouseleave');
+            press();
+            press();
+            await new Promise(resolve => setTimeout(resolve, 400));
+            report({ open: isOpen() });
+            """
+        )
+        self.assertTrue(result["open"])
 
 
 class ShortcutsHelpReadmeTestCase(ShortcutsHelpTestCase):
