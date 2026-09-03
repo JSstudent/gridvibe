@@ -79,6 +79,8 @@ python webview_launcher.py         # auto: native window, browser fallback
 python webview_launcher.py --mode browser|native
 ```
 
+In **native desktop mode** the launcher and each workspace are real OS windows, so they can be managed as a set: **Minimize all** (`Alt+X`, or the button in either top bar) sends every GridVibe window to the taskbar at once, and App Settings can make minimizing any one of them do the same. Clicking a taskbar entry always brings back just that window.
+
 Browser mode is one browser window per run: the launcher opens in a **new window** of your default browser, and each workspace opens as a tab beside it. Browsers allow a page to open only one tab per click, so restoring several workspaces at once opens the first and reports the rest — allow pop-ups for GridVibe's address to have them all open automatically, or use **Open** in the launcher's Workspaces card.
 
 ## Agent CLIs
@@ -195,28 +197,42 @@ GridVibe does not proxy pages or bypass `X-Frame-Options`/CSP, so sites that blo
 | 📤 | Upload files into the folder this pane is showing |
 | 🖥️ | Reveal the current location in the system file manager (local panes only) |
 
-**Top bar:** theme · max surface · broadcast typing · fullscreen · App Settings · chevron to hide the bar. Plus a `Workspace…` menu and a `Sessions…` menu.
+**Top bar:** theme · max surface · broadcast typing · fullscreen · minimize all windows (native desktop mode only) · keyboard shortcuts · App Settings · chevron to hide the bar. It also carries the save/status line — and when the bar is hidden that message goes to the workspace's toast instead, so it is never reported into a bar you cannot see.
 
-**A hidden top bar comes back on hover.** Rest the pointer on the small handle at the top edge, centred — only that handle triggers it, so the rest of the edge is free — and the bar slides down over the workspace for as long as you are using it, so `Save Session` and `Save Workspace` stay reachable with the bar hidden. It stays while a menu is open and hides again shortly after you move away (or on `Esc`); clicking the handle reveals the bar and puts focus in it, which is the keyboard route in. Fullscreen hides the bar for its duration and reveals it the same way; leaving fullscreen gives back whatever the chevron last said. Nothing about the reveal is saved.
+**A hidden top bar comes back on hover.** Rest the pointer on the small handle at the top edge, centred — only that handle triggers it, so the rest of the edge is free — and the bar slides down over the workspace, so theme, max surface, broadcast, fullscreen, the shortcut list and App Settings stay reachable with the bar hidden. It stays for as long as the pointer is on it or focus is in it, and hides again shortly after you move away (or on `Esc`); clicking the handle reveals the bar and puts focus in it, which is the keyboard route in. Fullscreen hides the bar for its duration and reveals it the same way; leaving fullscreen gives back whatever the chevron last said. Nothing about the reveal is saved.
 
-**Session tab line:** the back-to-launcher button sits at the head of the tab line, ahead of the first tab, so it stays reachable with the top bar hidden.
+**Session tab line:** the menu button and the back-to-launcher button sit at the head of the tab line, ahead of the first tab, so they stay reachable with the top bar hidden.
+
+**One menu holds sessions and workspaces.** The GridVibe button at the head of the tab line opens a two-row menu — **Sessions** and **Workspace** — and pointing at either one opens its items beside it: `Import Session…`, `Save Session`, `Save Session as…` and `Save All Sessions` under the first; `Save Workspace`, and with multiple workspaces enabled `Rename Workspace…`, `New Workspace…`, `Open Workspace`, `Move Session to Workspace` and the two close verbs, under the second. Hovering is enough — there is no chevron to aim at, the whole row opens — and only one section is open at a time, so the two rows never move. Moving the pointer off the menu closes it.
+
+**Every shortcut is listed in the app.** The keyboard button — in the workspace top bar left of App Settings, and in the launcher's bottom action bar left of the minimize-all control — opens a read-only panel with the whole list, grouped the way you'd look for it. Rows that only apply in one mode say so rather than disappearing. Nothing in it is editable; the one configurable chord in GridVibe is voice push-to-talk, set in App Settings.
 
 | Shortcut | Action |
 | --- | --- |
-| ``Alt+` `` | Open the launcher (the key left of `1`) |
-| `Alt+1`–`Alt+9` | Switch session group |
-| `Alt+W` / `Alt+Shift+W` | Next / previous workspace window (multiple workspaces only) — the window you land in pulses once. In the launcher, `Alt+W` returns to the workspace that opened it, or to whichever workspace is still open if that one has closed |
+| `Alt+1` – `Alt+9` | Switch session group |
+| `Alt+W` / `Alt+Shift+W` | Next / previous workspace window (multiple workspaces only) — the window you land in pulses once |
+| `Alt+W` | On the launcher, return to the workspace that opened it, or to whichever workspace is still open if that one has closed |
+| `Alt+Q` | Open the launcher (in a workspace window) |
 | `Ctrl+Shift+F` | Terminal scrollback search — or, on an explorer pane, toggle repository search |
+| `Ctrl+Shift+C` | Copy the terminal selection |
+| `Ctrl+V` | Paste into the terminal |
 | `Ctrl+F` | Find in the open file |
-| `Ctrl+Shift+V` | Toggle Markdown rendered preview |
-| `Ctrl+S` / `Esc` | Save / cancel in the explorer editor |
+| `Ctrl+Shift+V` | Toggle the Markdown rendered preview |
 | `F5` | Refresh the focused explorer |
+| `Enter` / `Shift+Enter`, `↑` / `↓` | Step through find matches, in any find bar |
+| `Ctrl+Shift+E` | Edit the open file in place — and, while editing, cancel |
+| `Ctrl+S` | Save in the explorer editor |
+| `Tab` | Indent in the explorer editor |
+| `Esc` | Cancel an edit, drop an explorer selection, or close the open menu |
+| `Alt+X` | Minimize every GridVibe window (native desktop mode only) — click any taskbar entry to bring one back |
+
+Mouse: `Alt`+click folds a whole sibling level in the Files tree, or collapses every commit in the Git graph; `Ctrl`+click and `Shift`+click extend the explorer selection.
 
 Drag the dividers between panes to resize them.
 
 ## Configuration
 
-Everything lives in **App Settings** — same dialog from the gear on the launcher *or* the session window, so settings never need a trip back to the launcher. It covers theme, surface mode, terminal font and size, max sessions, shell integration, workspace autosave interval, SSH host-key policy, and all voice options. The one exception is **Multiple workspaces**: it changes what every launch does, so its switch sits in the launcher's Workspaces card instead of the dialog.
+Everything lives in **App Settings** — same dialog from the gear on the launcher *or* the session window, so settings never need a trip back to the launcher. It covers theme, surface mode, terminal font and size, max sessions, shell integration, workspace autosave interval, SSH host-key policy, and all voice options — plus, in the native window, whether minimizing one GridVibe window minimizes them all (off by default; the checkbox is not shown in browser mode, where a page has no windows of its own to manage). The one exception is **Multiple workspaces**: it changes what every launch does, so its switch sits in the launcher's Workspaces card instead of the dialog.
 
 On disk, settings load from `config.json` (git-ignored) falling back to `default_config.json`:
 
@@ -225,7 +241,7 @@ On disk, settings load from `config.json` (git-ignored) falling back to `default
   "server": { "host": "127.0.0.1", "port": 5050 },
   "appearance": { "theme": "dark" },
   "terminal": { "max_sessions": 16, "font_size": 14, "shell_integration": true },
-  "workspace": { "surface_mode": "normal", "autosave_interval_minutes": 5, "multi_workspace_enabled": false },
+  "workspace": { "surface_mode": "normal", "autosave_interval_minutes": 5, "multi_workspace_enabled": false, "minimize_cascade": false },
   "ssh": { "host_key_policy": "auto-add" },
   "explorer_search": { "max_files": 2000, "max_matches": 5000, "timeout_seconds": 20 }
 }

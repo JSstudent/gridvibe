@@ -37,6 +37,17 @@
             {# Multiple workspaces is not here: it changes what every launch
                does, so it is the switch in the launcher's Workspaces card
                (templates/index.html step 04), not a checkbox in a dialog. #}
+            {# Native desktop mode only — app-settings.js hides the whole field
+               in browser mode, where windows are the browser's to manage, and
+               a save from a window that cannot see it omits the key rather
+               than writing its unchecked default back. #}
+            <label class="check-field multiline-check hidden" id="appWorkspaceMinimizeCascadeField">
+                <input id="appWorkspaceMinimizeCascade" type="checkbox">
+                <span class="check-copy">
+                    <strong>Minimize all GridVibe windows together</strong>
+                    <span>Minimizing any one window minimizes the rest — the same batch the Minimize-all button (Alt+X) runs. Restoring is never cascaded: clicking a taskbar entry brings back only that window.</span>
+                </span>
+            </label>
             <div class="field">
                 <label>SSH Host Keys</label>
                 <select id="appSshHostKeyPolicy" aria-label="SSH host key verification policy">

@@ -276,6 +276,7 @@ class RuntimeConfigState:
     app_theme: str
     app_surface_mode: str
     multi_workspace_enabled: bool
+    workspace_minimize_cascade: bool
     workspace_autosave_interval_minutes: int
     explorer_search_max_files: int
     explorer_search_max_matches: int
@@ -345,6 +346,12 @@ def _build_runtime_state(app_config: Dict[str, Any]) -> RuntimeConfigState:
     multi_workspace_enabled = workspace_config.get("multi_workspace_enabled", False)
     if not isinstance(multi_workspace_enabled, bool):
         multi_workspace_enabled = False
+    # Native desktop mode only: minimizing one GridVibe window minimizes the
+    # rest. Off by default — minimizing one window to see what is behind it is
+    # an ordinary thing to do, and four other windows vanishing is a surprise.
+    workspace_minimize_cascade = workspace_config.get("minimize_cascade", False)
+    if not isinstance(workspace_minimize_cascade, bool):
+        workspace_minimize_cascade = False
     try:
         workspace_autosave_interval_minutes = max(
             AUTOSAVE_INTERVAL_MINUTES_MIN,
@@ -388,6 +395,7 @@ def _build_runtime_state(app_config: Dict[str, Any]) -> RuntimeConfigState:
         app_theme=app_theme,
         app_surface_mode=_normalize_surface_mode(workspace_config.get("surface_mode")),
         multi_workspace_enabled=multi_workspace_enabled,
+        workspace_minimize_cascade=workspace_minimize_cascade,
         workspace_autosave_interval_minutes=workspace_autosave_interval_minutes,
         explorer_search_max_files=_clamped_int(
             search_config.get("max_files", EXPLORER_SEARCH_MAX_FILES_DEFAULT),

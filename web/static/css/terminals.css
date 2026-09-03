@@ -553,27 +553,16 @@
             flex: 0 0 auto;
         }
 
-        .app-menu-toggle {
-            display: inline-flex;
-            align-items: center;
-            gap: 8px;
-            height: 32px;
-        }
-
-        .app-menu-toggle::after {
-            content: "";
-            width: 0;
-            height: 0;
-            border-left: 4px solid transparent;
-            border-right: 4px solid transparent;
-            border-top: 5px solid currentColor;
-        }
-
         .app-menu-panel {
             position: absolute;
             top: calc(100% + 6px);
             left: 0;
-            z-index: 50;
+            /* Anchored in the session bar now, so the panel overlays the grid
+               and must beat every pane-level surface — .pane-shell-menu and
+               #terminalResizeOverlay at 60, the pane actions menu at 40 — while
+               staying well under the modals (3000), the peek zone (3900) and
+               the revealed bar (4000). */
+            z-index: 200;
             display: none;
             min-width: 190px;
             padding: 6px;
@@ -619,6 +608,37 @@
             opacity: 0.65;
         }
 
+        /* ── The shortcut reference panel ──
+           Its shape, anchor and <kbd> rule live in the shared
+           shortcuts-help.css, which both pages load; what belongs here is the
+           palette. The shared file defaults to the --gv-dialog-* tokens, which
+           are the launcher's colours — up here the panel sits beside the top
+           bar's own menus, so it reads from the same --t-* set they do. Those
+           are declared once per theme at the top of this file, which is the
+           whole of what makes the panel dark/light specific: no second palette,
+           and nothing to keep in step by hand.
+
+           This is a remapping and not a suggestion: the shared file declares
+           none of these, so nothing here can be lost to the fact that it loads
+           afterwards. It was, once — the panel came up wearing the launcher's
+           translucent dialog fill over an opaque file tree, which is exactly
+           as legible as it sounds.
+
+           The blur goes with it. --t-ctx-bg is opaque, as every menu on this
+           page is, so there is nothing for a backdrop filter to do but cost a
+           compositing layer; the launcher's fill is translucent by design and
+           keeps it. */
+        .shortcuts-help-panel {
+            --sh-bg: var(--t-ctx-bg);
+            --sh-border: var(--t-border-tab);
+            --sh-text: var(--t-text-secondary);
+            --sh-muted: var(--t-text-muted);
+            --sh-key-bg: var(--t-btn-neutral);
+            --sh-key-text: var(--t-btn-neutral-text);
+            --sh-key-border: var(--t-border-tab);
+            --sh-backdrop: none;
+        }
+
         .topbar-title { font-size: 1rem; color: var(--t-accent); font-weight: 700; }
         .topbar-sub   { font-size: .78rem; color: var(--t-text-muted); margin-left: 10px; }
 
@@ -631,8 +651,7 @@
         }
 
         .topbar button,
-        .topbar a,
-        .app-menu {
+        .topbar a {
             -webkit-app-region: no-drag;
         }
 
@@ -665,6 +684,14 @@
             justify-content: center;
             font-size: 1rem;
             line-height: 1;
+        }
+
+        /* `display: inline-flex` above is an author rule, so it beats the user
+           agent's `[hidden] { display: none }` outright — and the minimize-all
+           control is rendered hidden and revealed only when the native bridge
+           arrives. */
+        .btn-icon[hidden] {
+            display: none;
         }
 
         .modal-shell {
@@ -921,6 +948,152 @@
             border-color: var(--t-accent);
             background: var(--t-btn-hover-bg);
         }
+        /* The session/workspace menu heads the line, so it takes the leading
+           gutter the launcher button used to own; the launcher keeps only the
+           inter-button gap, which is what stops the tab strip's start moving. */
+        .session-bar-menu {
+            align-self: center;
+            margin: 8px 0 8px 12px;
+        }
+
+        /* Icon then caret, on one line: the icon says which app the menu
+           belongs to and the caret says it is a menu. Stacking the two was what
+           shrank the icon — the button's height is the tab line's, so a second
+           row could only come out of the icon, and the icon is the half that
+           carries the meaning. The caret is decoration inside the one button
+           and has no behaviour of its own. */
+        .session-bar-menu-btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 1px;
+            /* The launcher button's height, plus the room the caret needs. */
+            width: 46px;
+            min-width: 46px;
+            height: 34px;
+            padding: 0 3px;
+            border: 1px solid var(--t-border-tab);
+            border-radius: 6px;
+            background: var(--t-btn-bg);
+            color: var(--t-btn-text);
+        }
+
+        .session-bar-menu-btn:hover,
+        .app-menu.open .session-bar-menu-btn {
+            border-color: var(--t-accent);
+            color: var(--t-accent);
+            background: var(--t-btn-hover-bg);
+        }
+
+        /* Every entry in icon_transparent.ico draws its artwork inside the
+           middle ~5/8 of its own canvas (the 48px entry inks 9..39), so a box
+           sized to the button drew a glyph two thirds that size and the icon
+           read as small however large the box got. The box is therefore sized
+           to the *artwork* — 26px, near the button's 32px interior — and the
+           baked-in padding is taken back out of the layout with a negative
+           margin rather than by shipping a second, cropped copy of the asset.
+           A negative margin and not `transform: scale()`, so the browser still
+           picks its source entry from the size it actually paints and the glyph
+           stays crisp: 42 × 5/8 ≈ 26 drawn, 42 − 2×8 = 26 occupied. */
+        .session-bar-menu-icon {
+            width: 42px;
+            height: 42px;
+            margin: -8px;
+            display: block;
+            flex: 0 0 auto;
+        }
+
+        .session-bar-menu-caret {
+            width: 10px;
+            height: 10px;
+            display: block;
+            flex: 0 0 auto;
+        }
+
+        /* The panel holds the two section rows and nothing else — a section's
+           items open beside it, not inside it — so it is sized to those two
+           words. */
+        .session-bar-menu-panel {
+            min-width: 152px;
+        }
+
+        /* The anchor its section's flyout is positioned against. */
+        .session-menu-section {
+            position: relative;
+        }
+
+        .session-menu-section + .session-menu-section {
+            margin-top: 2px;
+        }
+
+        /* The section row is a plain menu row that opens its own submenu, so it
+           reuses .app-menu-item outright and adds only the caret beside its
+           label. The caret sits *next to* the label rather than at the far edge:
+           these two labels are short and the panel is as wide as the rows it
+           reveals, so an edge-aligned caret is separated from the word it
+           qualifies by a hand's width of nothing. */
+        .session-menu-section-head {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            color: var(--t-text);
+            font-weight: 600;
+        }
+
+        .session-menu-section-head[aria-expanded="true"] {
+            background: var(--t-ctx-hover);
+        }
+
+        .session-menu-section-caret {
+            display: inline-flex;
+            align-items: center;
+            color: var(--t-text-muted);
+            transition: transform .18s;
+        }
+
+        .session-menu-section-caret svg {
+            width: 14px;
+            height: 14px;
+            display: block;
+        }
+
+        .session-menu-section-head[aria-expanded="true"] .session-menu-section-caret {
+            transform: rotate(90deg);
+            color: currentColor;
+        }
+
+        /* A flyout to the right, not an accordion below. Opening a section in
+           place pushed the *other* section's row down the panel, so swapping
+           between the two moved the row you were aiming at out from under the
+           pointer — the two heads have to hold still, and they only can if
+           nothing opens between them.
+
+           `top` cancels the flyout's own top border and padding so its first
+           row lines up with the head that opened it, and the left margin clears
+           the panel's border and padding, so the two boxes sit against each
+           other with no gap for the pointer to fall through. */
+        .session-menu-section-body {
+            position: absolute;
+            top: -7px;
+            left: 100%;
+            margin-left: 7px;
+            z-index: 1;
+            display: flex;
+            flex-direction: column;
+            min-width: 216px;
+            max-width: min(320px, 70vw);
+            /* The Workspace flyout opens from the lower of the two rows and is
+               the taller of the two, so on a short window it would otherwise
+               run off the bottom with its last rows unreachable. */
+            max-height: calc(100vh - 110px);
+            overflow-y: auto;
+            padding: 6px;
+            border: 1px solid var(--t-border-tab);
+            border-radius: 6px;
+            background: var(--t-ctx-bg);
+            box-shadow: 0 12px 24px rgba(0, 0, 0, 0.32);
+        }
+
         /* Launcher button seated at the head of the session tab line: it keeps
            its own size, so it only needs centring and the leading gutter the
            tab strip would otherwise own. */
@@ -928,7 +1101,7 @@
             flex: 0 0 auto;
             align-self: center;
             justify-content: center;
-            margin: 8px 0 8px 12px;
+            margin: 8px 0 8px 8px;
         }
         .session-bar-launcher-btn + .session-tabs {
             padding-left: 10px;
@@ -988,6 +1161,7 @@
            while the button has room to squeeze it, which max surface mode (a
            fixed 32x28 button with no padding) takes away. */
         .broadcast-icon,
+        .shortcuts-help-icon,
         .app-settings-icon {
             width: 18px;
             height: 18px;
@@ -1802,10 +1976,6 @@
             height: 24px;
         }
 
-        body.surface-max .app-menu-toggle {
-            height: 28px;
-        }
-
         body.surface-max .topbar-sub {
             display: inline-block;
             max-width: 42vw;
@@ -1838,8 +2008,32 @@
             padding: 5px 8px 4px;
         }
 
-        body.surface-max .session-bar-launcher-btn {
+        body.surface-max .session-bar-menu {
             margin: 4px 0 4px 8px;
+        }
+
+        body.surface-max .session-bar-menu-btn {
+            width: 38px;
+            min-width: 38px;
+            height: 28px;
+            padding: 0 2px;
+        }
+
+        /* The same 5/8 correction against a 26px interior: 35 × 5/8 ≈ 22
+           drawn, 35 − 2×7 = 21 occupied. */
+        body.surface-max .session-bar-menu-icon {
+            width: 35px;
+            height: 35px;
+            margin: -7px;
+        }
+
+        body.surface-max .session-bar-menu-caret {
+            width: 9px;
+            height: 9px;
+        }
+
+        body.surface-max .session-bar-launcher-btn {
+            margin: 4px 0 4px 6px;
         }
 
         body.surface-max .session-bar-launcher-btn + .session-tabs {

@@ -32,6 +32,7 @@ from web.api import (
     run_server,
     session_manager,
 )
+from web.config import runtime_config
 from web.lifecycle import lifecycle_coordinator
 from web.runtime_state import normalize_native_zoom_factor
 from web.workspaces import DEFAULT_WORKSPACE_ID, normalize_workspace_id
@@ -738,6 +739,13 @@ class GridVibeApi:
         self._window_minimized = False
         self._workspace_window_minimized = {}
         self._restarting = False
+        # One re-entrancy guard for both triggers of the minimize batch (the
+        # control and the cascade): minimizing the others fires *their*
+        # `minimized` handlers, and each would otherwise minimize everyone
+        # again. The lock only guards the claim — the native calls happen
+        # outside it, because UI work inside a shared lock is the worse defect.
+        self._minimizing_all = False
+        self._minimize_all_lock = threading.Lock()
         self._close_approved = False
         self._close_prompt_pending = False
         self._native_theme = "dark"
@@ -1283,6 +1291,81 @@ class GridVibeApi:
             logger.exception("Failed to bring %s window to front: %s", window_name, exc)
             return False
 
+    def _open_native_windows(self):
+        """Return every live GridVibe window as ``(window_name, window)``.
+
+        Workspaces first, launcher last, matching the teardown sweep — and the
+        names are the ones `_set_window_minimized`/`_is_window_minimized`
+        already speak, so a batch never has to invent a second naming scheme.
+        """
+        windows = [
+            (f"workspace:{workspace_id}", window)
+            for workspace_id, window in list(self._workspace_windows.items())
+            if window is not None
+        ]
+        if self._window is not None:
+            windows.append(("launcher", self._window))
+        return windows
+
+    def _minimize_window(self, window, window_name: str) -> bool:
+        """Minimize one native window on the UI thread that owns it."""
+        minimize = getattr(window, "minimize", None)
+        if not callable(minimize):
+            logger.debug("%s window does not expose minimize()", window_name)
+            return False
+        try:
+            _run_on_native_ui_thread(window, minimize)
+            return True
+        except Exception:
+            logger.debug("Could not minimize %s window", window_name, exc_info=True)
+            return False
+
+    def minimize_all_windows(self):
+        """Minimize every open GridVibe window to the taskbar.
+
+        The one batch behind both triggers: the per-window control and, when
+        `workspace.minimize_cascade` is on, minimizing any single window.
+        Nothing hides, so nothing needs a way back — clicking any taskbar entry
+        restores it through `_restore_minimized_window()`.
+
+        A window already tracked as minimized is skipped and the tracked flag
+        is set as each window is minimized, so the `minimized` events this
+        batch provokes arrive at a handler that can already tell they are its
+        own echo even after the re-entrancy flag has been released.
+        """
+        with self._minimize_all_lock:
+            if self._minimizing_all:
+                logger.debug("Minimize-all already in progress; ignoring re-entry")
+                return {"ok": True, "minimized": 0, "suppressed": True}
+            self._minimizing_all = True
+        try:
+            windows = self._open_native_windows()
+            minimized = 0
+            for window_name, window in windows:
+                if self._is_window_minimized(window_name):
+                    continue
+                if self._minimize_window(window, window_name):
+                    self._set_window_minimized(window_name, True)
+                    minimized += 1
+            logger.debug(
+                "Minimized %s of %s GridVibe windows", minimized, len(windows)
+            )
+            return {"ok": True, "minimized": minimized, "windows": len(windows)}
+        except Exception as exc:
+            logger.exception("Failed to minimize all GridVibe windows")
+            return {"ok": False, "error": str(exc)}
+        finally:
+            with self._minimize_all_lock:
+                self._minimizing_all = False
+
+    def _minimize_cascade_enabled(self) -> bool:
+        """Whether minimizing one window should minimize the rest."""
+        try:
+            return bool(runtime_config.snapshot().workspace_minimize_cascade)
+        except Exception:
+            logger.debug("Could not read the minimize-cascade setting", exc_info=True)
+            return False
+
     def focus_session_window(self):
         """Focus the default workspace window."""
         return self.focus_workspace_window(DEFAULT_WORKSPACE_ID)
@@ -1774,7 +1857,22 @@ def main():
 
         def _handle_minimized(*_args):
             logger.debug("GridVibe %s window minimized", kind)
+            was_tracked_minimized = api_bridge._is_window_minimized(kind)
             api_bridge._set_window_minimized(kind, True)
+            # The cascade (workspace.minimize_cascade, off by default) is the
+            # 4-A control's second trigger and runs the same batch. Two guards,
+            # because the events this batch provokes can land either inside it
+            # or after it: `_minimizing_all` catches the ones delivered while
+            # the batch runs, and a window the batch already marked minimized
+            # is its own echo whenever the event arrives. Restore is
+            # deliberately not cascaded — bringing four windows back because
+            # one taskbar entry was clicked is the bigger surprise.
+            if was_tracked_minimized or api_bridge._minimizing_all:
+                return
+            if not api_bridge._minimize_cascade_enabled():
+                return
+            logger.debug("Cascading minimize from the %s window", kind)
+            api_bridge.minimize_all_windows()
 
         def _handle_restored(*_args):
             logger.debug("GridVibe %s window restored", kind)

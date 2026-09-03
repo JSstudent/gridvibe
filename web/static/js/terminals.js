@@ -183,9 +183,11 @@
         _refreshVoiceRuntimeState();
     }
 
-    /* The Workspace menu's multi-workspace items are server-rendered, so this
-       window re-renders itself when the mode changes elsewhere. A window whose
-       workspace was closed by that change closes instead (workspaces.js). */
+    /* The whole window is reloaded when the mode changes elsewhere: the flag
+       reaches the page as server-rendered markup (MULTI_WORKSPACE_ENABLED),
+       which the session menu reads when it builds its Workspace section. A
+       window whose workspace was closed by that change closes instead
+       (workspaces.js). */
     function applyAppConfigMultiWorkspace(message) {
         const enabled = message?.workspace?.multi_workspace_enabled;
         if (typeof enabled !== 'boolean' || enabled === isMultiWorkspaceEnabled()) {
@@ -365,10 +367,12 @@
         noteWorkspacePresentationChanged();
     }
 
-    /* Hiding the bar took the Sessions… and Workspace… menus with it — the
-       only place Save Session and Save Workspace live — so a hidden bar is
-       revealed on demand by GridVibeTopbarPeek. It owns *when*; the page owns
-       what that looks like. Two body classes, two meanings:
+    /* A hidden bar is revealed on demand by GridVibeTopbarPeek — theme, max
+       surface, broadcast, fullscreen and App Settings are all still up here,
+       and so is the save status line. (Sessions and Workspace are not: they
+       are one button down in the session tab line, which is why the peek no
+       longer has a menu to hold itself open for.) It owns *when*; the page
+       owns what that looks like. Two body classes, two meanings:
 
        - topbar-collapsed is the chevron's persisted choice, and stays the one
          thing every topbar_visible read-back looks at;
@@ -383,6 +387,14 @@
         onChange: ({ hidden, peeking, hiddenChanged }) => {
             document.body.classList.toggle('topbar-hidden', hidden);
             document.body.classList.toggle('topbar-peek', peeking);
+            /* The shortcut panel hangs off a button on this bar, so a bar that
+               is out of the flow and not being peeked at leaves the panel
+               floating over the grid with nothing above it. The chevron,
+               fullscreen and a retracting peek all arrive here, which is why
+               this is the one place that has to say it. */
+            if (hidden && !peeking) {
+                closeShortcutsHelp();
+            }
             /* Only a flow change resizes anything: the peek is an overlay, so
                a pointer trip to the top edge costs no terminal refit. */
             if (hiddenChanged && gridBuilt) {
@@ -390,17 +402,6 @@
             }
         }
     });
-
-    /* Kept in step with the two app menus, which must hold the peek open while
-       one of them is showing. */
-    function reportAppMenuState() {
-        topbarPeek.setMenuOpen(
-            Boolean(
-                document.getElementById('sessionsMenuRoot')?.classList.contains('open')
-                || document.getElementById('workspaceMenuRoot')?.classList.contains('open')
-            )
-        );
-    }
 
     function applyTopbarVisibility(visible, { persist = false, report = false } = {}) {
         const shouldShow = Boolean(visible);
@@ -1312,59 +1313,6 @@
         } catch (_error) {}
     }
 
-    function closeSessionsMenu() {
-        const root = document.getElementById('sessionsMenuRoot');
-        const button = document.getElementById('sessionsMenuBtn');
-        root?.classList.remove('open');
-        button?.setAttribute('aria-expanded', 'false');
-        reportAppMenuState();
-    }
-
-    function toggleSessionsMenu(event) {
-        event?.preventDefault();
-        event?.stopPropagation();
-        const root = document.getElementById('sessionsMenuRoot');
-        const button = document.getElementById('sessionsMenuBtn');
-        if (!root || !button) {
-            return;
-        }
-
-        const shouldOpen = !root.classList.contains('open');
-        root.classList.toggle('open', shouldOpen);
-        button.setAttribute('aria-expanded', shouldOpen ? 'true' : 'false');
-        if (shouldOpen) {
-            closeWorkspaceMenu();
-        }
-        reportAppMenuState();
-    }
-
-    function closeWorkspaceMenu() {
-        const root = document.getElementById('workspaceMenuRoot');
-        const button = document.getElementById('workspaceMenuBtn');
-        root?.classList.remove('open');
-        button?.setAttribute('aria-expanded', 'false');
-        reportAppMenuState();
-    }
-
-    function toggleWorkspaceMenu(event) {
-        event?.preventDefault();
-        event?.stopPropagation();
-        const root = document.getElementById('workspaceMenuRoot');
-        const button = document.getElementById('workspaceMenuBtn');
-        if (!root || !button) {
-            return;
-        }
-
-        const shouldOpen = !root.classList.contains('open');
-        root.classList.toggle('open', shouldOpen);
-        button.setAttribute('aria-expanded', shouldOpen ? 'true' : 'false');
-        if (shouldOpen) {
-            closeSessionsMenu();
-            refreshWorkspaceMenuLists();
-        }
-        reportAppMenuState();
-    }
-
     /* ─────────────────────────────────────────────
        Multi-workspace: menus, move, window lifecycle
 
@@ -1435,7 +1383,7 @@
                 disabled: workspace.workspace_id === currentWorkspaceId,
                 icon: workspace.workspace_id === currentWorkspaceId ? '' : WORKSPACE_ICONS.window,
                 onSelect: () => {
-                    closeWorkspaceMenu();
+                    closeSessionMenu();
                     switchToWorkspaceWindow(workspace.workspace_id, {
                         groupId: workspace.active_group_id
                     });
@@ -1450,7 +1398,7 @@
                 icon: WORKSPACE_ICONS.move,
                 disabled: !targetGroupId,
                 onSelect: () => {
-                    closeWorkspaceMenu();
+                    closeSessionMenu();
                     moveSessionGroupToWorkspace(targetGroupId, { workspaceId: workspace.workspace_id });
                 }
             }));
@@ -1459,7 +1407,7 @@
             icon: WORKSPACE_ICONS.add,
             disabled: !targetGroupId,
             onSelect: () => {
-                closeWorkspaceMenu();
+                closeSessionMenu();
                 moveSessionGroupToNewWorkspace(targetGroupId);
             }
         });
@@ -2045,11 +1993,17 @@
     }
 
     document.addEventListener('click', event => {
-        if (!(event.target instanceof Element) || !event.target.closest('#sessionsMenuRoot')) {
-            closeSessionsMenu();
+        if (!(event.target instanceof Element) || !event.target.closest('#sessionMenuRoot')) {
+            closeSessionMenu();
         }
-        if (!(event.target instanceof Element) || !event.target.closest('#workspaceMenuRoot')) {
-            closeWorkspaceMenu();
+    });
+
+    /* A press anywhere else closes the shortcut panel — including a press on
+       any other top-bar control, which is outside the panel's own root and so
+       needs no rule of its own. */
+    document.addEventListener('click', event => {
+        if (!(event.target instanceof Element) || !event.target.closest('#shortcutsHelpRoot')) {
+            closeShortcutsHelp();
         }
     });
 
@@ -2100,10 +2054,8 @@
 
     document.addEventListener('keydown', event => {
         if (event.key === 'Escape') {
-            closeSessionsMenu();
-            closeWorkspaceMenu();
-            /* After the menus, so a peek held open by one of them is released
-               by the same keypress that closed it. */
+            closeSessionMenu();
+            closeShortcutsHelp();
             topbarPeek.dismiss();
             if (document.getElementById('savedSessionsModal').classList.contains('visible')) {
                 closeSavedSessionModal();
@@ -2125,9 +2077,28 @@
     const WORKSPACE_SAVE_MESSAGE_MS = 6000;
     let workspaceSaveMessageTimer = null;
 
+    /* One message, one surface, chosen when the message is raised.
+
+       The status string lives in the top bar, which leaves the layout for the
+       chevron or for fullscreen — so a message written there while the bar is
+       out of the flow is a message nobody sees. It goes to the toast instead,
+       which is visible either way.
+
+       Routed on `topbar-hidden` (the flow) and deliberately not on
+       `topbar-peek`: a message written into a bar that is only peeking leaves
+       320 ms after the pointer does. And a live message never migrates — hiding
+       the bar while a status string is up does not move it, and each surface
+       dismisses on its own timer. */
     function setWorkspaceSaveMessage(message, type = '') {
+        if (!message) {
+            return;
+        }
+        if (document.body.classList.contains('topbar-hidden')) {
+            showTerminalToast(message, type === 'error' || type === 'success' ? type : '');
+            return;
+        }
         const label = document.getElementById('sessionLabel');
-        if (!label || !message) {
+        if (!label) {
             return;
         }
         label.textContent = message;
@@ -2776,13 +2747,6 @@
         }
     }
 
-    function updateWorkspaceSaveItemState() {
-        const item = document.getElementById('saveWorkspaceItem');
-        if (item) {
-            item.disabled = !sessionGroups.length;
-        }
-    }
-
     async function getCurrentWorkspaceNativeZoomFactor() {
         const api = window.pywebview?.api;
         if (api?.get_workspace_native_zoom) {
@@ -2860,7 +2824,7 @@
     }
 
     function renderSessionTabs() {
-        updateWorkspaceSaveItemState();
+        syncSessionMenuState();
         const container = document.getElementById('sessionTabs');
         if (!container) return;
 
@@ -4422,13 +4386,13 @@
                 && event.code === 'KeyW') {
                 return false;
             }
-            /* And for Alt+` (open launcher), which xterm would otherwise send
-               on to the shell as ESC `. */
+            /* And for Alt+Q (open launcher), which xterm would otherwise send
+               on to the shell as ESC q. */
             if (event.altKey
                 && !event.ctrlKey
                 && !event.metaKey
                 && !event.shiftKey
-                && event.code === 'Backquote') {
+                && event.code === 'KeyQ') {
                 return false;
             }
 
@@ -6562,10 +6526,7 @@
             }
         } catch (error) {
             console.error('[GridVibe Sessions] switchSessionPaneMode failed:', error);
-            const label = document.getElementById('sessionLabel');
-            if (label) {
-                label.textContent = `Mode switch failed: ${error.message}`;
-            }
+            setWorkspaceSaveMessage(`Mode switch failed: ${error.message}`, 'error');
             updateModeToggleButton(button, switchingToTerminal);
         } finally {
             pendingModeSwitchSessionIds.delete(sessionId);
@@ -6605,10 +6566,7 @@
             }
         } catch (error) {
             console.error('[GridVibe Sessions] switchSessionBrowserMode failed:', error);
-            const label = document.getElementById('sessionLabel');
-            if (label) {
-                label.textContent = `Browser mode switch failed: ${error.message}`;
-            }
+            setWorkspaceSaveMessage(`Browser mode switch failed: ${error.message}`, 'error');
             updateBrowserModeToggleButton(button, switchingToTerminal);
         } finally {
             pendingModeSwitchSessionIds.delete(sessionId);
@@ -6735,10 +6693,10 @@
             ? null
             : buildTerminalCloseRectsBySessionId(plan);
         if (!plan.closeLastPane && !restoreRectsBySessionId) {
-            const label = document.getElementById('sessionLabel');
-            if (label) {
-                label.textContent = 'Close terminal failed: no neighboring pane can safely fill this layout';
-            }
+            setWorkspaceSaveMessage(
+                'Close terminal failed: no neighboring pane can safely fill this layout',
+                'error'
+            );
             return;
         }
         // Past the confirm and the layout check: this pane is really closing.
@@ -6787,10 +6745,7 @@
             await initialLoad();
         } catch (error) {
             console.error('[GridVibe Sessions] closeTerminalPane failed:', error);
-            const label = document.getElementById('sessionLabel');
-            if (label) {
-                label.textContent = `Close terminal failed: ${error.message}`;
-            }
+            setWorkspaceSaveMessage(`Close terminal failed: ${error.message}`, 'error');
         } finally {
             if (button) {
                 button.textContent = '×';
@@ -6902,10 +6857,7 @@
             emitTerminalResize(newIndex, true);
         } catch (error) {
             console.error('[GridVibe Sessions] splitTerminalPane failed:', error);
-            const label = document.getElementById('sessionLabel');
-            if (label) {
-                label.textContent = `Split failed: ${error.message}`;
-            }
+            setWorkspaceSaveMessage(`Split failed: ${error.message}`, 'error');
         } finally {
             updateAllSplitButtonStates();
         }
@@ -7025,6 +6977,54 @@
         event.preventDefault();
         event.stopPropagation();
         refreshTerminalDisplay(index);
+    });
+
+    /* Ctrl+Shift+E is the keyboard route into the in-place editor, and while
+       editing it is Cancel — the same toggle the header shows, where the Edit
+       button is itself replaced by Save/Cancel. Leaving was already bound
+       (Ctrl+S saves, Esc cancels) and entering was mouse-only, so the pair was
+       asymmetric.
+
+       A file that cannot be edited says why on the toast rather than doing
+       nothing: the disabled Edit button carries that same sentence in its
+       tooltip, and a chord that silently no-ops reads as broken. The reason
+       comes from explorerEditDisabledTooltip() so the two cannot drift.
+
+       On Firefox in browser mode this chord is the Network Monitor and may not
+       reach the page; Chrome, Edge and the native window are unaffected. */
+    document.addEventListener('keydown', event => {
+        if (!(event.ctrlKey || event.metaKey) || !event.shiftKey || event.altKey || event.repeat) {
+            return;
+        }
+        if (event.code !== 'KeyE') {
+            return;
+        }
+        const index = findExplorerShortcutTargetIndex();
+        const pane = index === -1 ? null : terminals[index];
+        if (!pane) {
+            return;
+        }
+        if (explorerEditState(pane)) {
+            event.preventDefault();
+            event.stopPropagation();
+            cancelExplorerEdit(index);
+            return;
+        }
+        /* Not showing a file at all — a directory listing has no Edit button
+           either, so there is nothing to report and nothing to claim. */
+        if (pane._explorerMode !== 'file') {
+            return;
+        }
+        event.preventDefault();
+        event.stopPropagation();
+        if (!pane._explorerFileEditable) {
+            showTerminalToast(
+                explorerEditDisabledTooltip(pane._explorerFileEditBlockReason || ''),
+                'error'
+            );
+            return;
+        }
+        enterExplorerEditMode(index);
     });
 
     document.addEventListener('auxclick', event => {
@@ -7249,6 +7249,13 @@
         return isEditableShortcutTarget(target);
     }
 
+    /* minimize-all.js owns Alt+X and its button; this is the page's answer to
+       "may the chord fire from here", so the native control obeys the same
+       focused-pane rule the Alt+Q and Alt+W handlers below do. */
+    function minimizeAllShortcutBlocked(target) {
+        return isPaneShortcutBlockingTarget(target);
+    }
+
     document.addEventListener('keydown', event => {
         if (!event.altKey || event.ctrlKey || event.metaKey || event.repeat) {
             return;
@@ -7264,15 +7271,29 @@
         cycleWorkspaceWindow(event.shiftKey ? -1 : 1);
     });
 
-    /* Alt+` (the key left of 1) opens the launcher — the same action as the
-       button at the head of the session tab line. Matching on event.code keeps
-       the shortcut on that physical key on layouts where it produces a dead
-       key rather than a backtick. */
+    /* Alt+Q opens the launcher — the same action as the button at the head of
+       the session tab line, and one hand away from the Alt navigation family
+       it belongs to (Alt+1..9, Alt+W).
+
+       It replaced Alt+` because that key is a dead accent on several layouts
+       (cedilla on Slovenian/Croatian). The launcher still opened — the binding
+       matched the physical key — but Windows' own ToUnicode ignores plain Alt
+       when it translates the message, so the layout armed its composer as if
+       the key had been pressed bare, and the next character typed anywhere in
+       the thread (the launcher's own new-workspace field, most often) came out
+       accented. That arming happens before any handler runs, so
+       preventDefault() could not undo it: the cure is a key that is dead on no
+       layout, and Q is one. `!event.ctrlKey` is what keeps AltGr out — AltGr
+       reaches the page as Ctrl+Alt, and AltGr+Q types a backslash here — so
+       that clause is load-bearing, not boilerplate. Still matched on
+       event.code, so the chord stays on the same physical key whatever the
+       layout prints on it; README and the button's own tooltip are where it is
+       named. */
     document.addEventListener('keydown', event => {
         if (!event.altKey || event.ctrlKey || event.metaKey || event.shiftKey || event.repeat) {
             return;
         }
-        if (event.code !== 'Backquote' || isPaneShortcutBlockingTarget(event.target)) {
+        if (event.code !== 'KeyQ' || isPaneShortcutBlockingTarget(event.target)) {
             return;
         }
 
@@ -8476,6 +8497,7 @@
        Boot
     ───────────────────────────────────────────── */
     initSurfaceMode();
+    wireSessionMenu();
     topbarPeek.attach();
     applyTopbarVisibility(getStoredTopbarVisible());
     setupAppConfigUpdateListeners();

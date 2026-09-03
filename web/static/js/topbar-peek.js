@@ -8,20 +8,23 @@
      that setting — leaving fullscreen has to give back whatever the chevron
      last said.
 
-   Either way the Sessions… and Workspace… menus went with it, and those menus
-   are the only place **Save Session** and **Save Workspace** live: hiding the
-   bar to get room took away the controls you hide it in order to keep using.
-   This module gives the hidden bar back on demand — the pointer resting on the
-   window's top edge, or the peek handle being clicked or focused — as an
-   *overlay*, never a return to the flow, so a trip to the top edge costs no
-   terminal refit and no persisted state changes at all.
+   The bar was justified here by the Sessions… and Workspace… menus, which it
+   held and which are now one button down in the session tab line — always in
+   the flow, so hiding the bar no longer takes them away. What is still up here
+   is worth reaching without un-hiding: theme, max surface, broadcast,
+   fullscreen, App Settings, the session line, and the transient save status,
+   which is the one thing on the bar that appears while you are looking
+   elsewhere. This module gives the hidden bar back on demand — the pointer
+   resting on the window's top edge, or the peek handle being clicked or
+   focused — as an *overlay*, never a return to the flow, so a trip to the top
+   edge costs no terminal refit and no persisted state changes at all.
 
    Two halves, deliberately separated (the notice-banner split):
 
    - `policy` is pure — no DOM, no timers, no globals. `isHidden` and
      `isRetained` are the whole decision: the bar is out of the flow when the
      chevron or fullscreen says so, and a revealed bar must stay for as long as
-     the pointer is on it, focus is in it, or one of its menus is open.
+     the pointer is on it or focus is in it.
    - `create(runtime)` is the adapter. Every element, timer, and class write
      goes through the injected runtime, which is what lets Node execute the
      behaviour instead of tests asserting source text.
@@ -40,8 +43,9 @@
     const HANDLE_ID = 'topbarPeekHandle';
     const BAR_ID = 'terminalTopbar';
     /* Focus target for the handle: the first control in the bar, so activating
-       the handle by keyboard lands somewhere you can Tab onward from. */
-    const BAR_FOCUS_ID = 'sessionsMenuBtn';
+       the handle by keyboard lands somewhere you can Tab onward from. It is the
+       theme toggle since the two menus left the bar. */
+    const BAR_FOCUS_ID = 'themeToggleBtn';
     /* Long enough to cross the gap between the bar and a pointer that overshot
        it, short enough that the bar is gone by the time you have looked back
        at the pane you were aiming for. */
@@ -56,12 +60,11 @@
         return Boolean(state && (state.collapsed || state.fullscreen));
     }
 
-    /* While any of these hold the peek must not close. The menu case is the
-       whole point of the feature: an open Sessions… menu that vanished because
-       the pointer had wandered a few pixels off the bar would be the same bug
-       in a new place. */
+    /* While either of these holds the peek must not close: a bar that vanished
+       because the pointer wandered a few pixels off it, mid-click, would be the
+       same reachability bug the reveal exists to answer. */
     function isRetained(state) {
-        return Boolean(state && (state.pointerInside || state.focusInside || state.menuOpen));
+        return Boolean(state && (state.pointerInside || state.focusInside));
     }
 
     const policy = {
@@ -84,8 +87,7 @@
             fullscreen: false,
             peeking: false,
             pointerInside: false,
-            focusInside: false,
-            menuOpen: false
+            focusInside: false
         };
         let timer = null;
 
@@ -187,15 +189,6 @@
             setHiddenInput('fullscreen', fullscreen);
         }
 
-        function setMenuOpen(open) {
-            state.menuOpen = Boolean(open);
-            if (state.menuOpen) {
-                stopTimer();
-            } else {
-                scheduleClose();
-            }
-        }
-
         function pointerEnterBar() {
             if (!isHidden(state)) {
                 return;
@@ -281,8 +274,8 @@
                 bar.addEventListener('focusin', () => focusEnterBar());
                 bar.addEventListener('focusout', event => {
                     const next = event && event.relatedTarget;
-                    /* An open menu panel is a descendant of the bar, so moving
-                       focus into one is not leaving. */
+                    /* Focus moving between the bar's own controls is not
+                       leaving it. */
                     if (next && typeof bar.contains === 'function' && bar.contains(next)) {
                         return;
                     }
@@ -295,7 +288,6 @@
             attach,
             setCollapsed,
             setFullscreen,
-            setMenuOpen,
             reveal,
             revealAndFocus,
             pointerEnterBar,
@@ -311,7 +303,6 @@
                 peeking: state.peeking,
                 pointerInside: state.pointerInside,
                 focusInside: state.focusInside,
-                menuOpen: state.menuOpen,
                 hidden: isHidden(state),
                 retained: isRetained(state)
             })

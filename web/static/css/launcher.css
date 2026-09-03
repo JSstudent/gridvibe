@@ -864,6 +864,13 @@
             border-radius: 999px;
         }
 
+        /* `display: inline-flex` above is an author rule and beats the user
+           agent's `[hidden] { display: none }` — the minimize-all control is
+           rendered hidden and revealed only in native desktop mode. */
+        .icon-btn[hidden] {
+            display: none;
+        }
+
         .icon-btn svg {
             width: 18px;
             height: 18px;
@@ -872,6 +879,28 @@
 
         .icon-btn.loading svg {
             animation: tf-spin 0.9s linear infinite;
+        }
+
+        /* ── The shortcut reference panel ──
+           Its shape and its whole palette come from the shared
+           shortcuts-help.css, which defaults to the --gv-dialog-* tokens —
+           those *are* this page's colours, so nothing is remapped here. The one
+           thing that is this page's own is the direction it opens: the button
+           lives in the bottom action bar, so a panel hanging below it would open
+           off the foot of the window. It opens upward instead, and its height
+           cap keeps it inside .column's own scroll box, which would otherwise
+           clip it rather than let it reach the window edge.
+
+           Both edges are stated, because "open upward" is two facts: the panel
+           takes the bottom edge *and* gives up the top one. Saying only the
+           first left the box pinned to both edges of a ~30px button, where its
+           height resolves to zero. They are custom properties rather than
+           `top`/`bottom` for the reason the shared file's header sets out: that
+           file loads after this one, so a plain `top: auto` here was simply
+           overruled, while a knob it only reads can never be. */
+        .shortcuts-help-panel {
+            --sh-anchor-top: auto;
+            --sh-anchor-bottom: calc(100% + 6px);
         }
 
         .app-footer {

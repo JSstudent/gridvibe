@@ -316,6 +316,8 @@ class ApiRoutesTestCase(unittest.TestCase):
             "js/explorer-overview.js",
             "js/browser-pane.js",
             "js/terminal-shell.js",
+            "js/session-menu.js",
+            "js/shortcuts-help.js",
             "js/terminals.js",
         ):
             marker = f"/static/{asset}"
@@ -725,13 +727,19 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         html = self._page_html(response)
         self.assertIn('src="/docs/images/GridVibe_icon.ico"', html)
-        self.assertIn(">Sessions...</button>", html)
-        self.assertIn(">Import Session ...</button>", html)
-        self.assertIn(">Save Session</button>", html)
-        self.assertIn(">Save Session as ...</button>", html)
-        self.assertIn("onclick=\"closeSessionsMenu(); return openNewSessionSelector(event);\"", html)
-        self.assertIn("onclick=\"closeSessionsMenu(); saveActiveWorkspaceSession(this);\"", html)
-        self.assertIn("onclick=\"closeSessionsMenu(); saveActiveWorkspaceSessionAs(this);\"", html)
+        # The two top-bar dropdowns are one button in the session tab line now;
+        # its panel's rows are built by session-menu.js, which names the same
+        # four session actions and sends each through its own data attribute.
+        self.assertNotIn(">Sessions...</button>", html)
+        self.assertIn('id="sessionMenuBtn"', html)
+        self.assertIn("label: 'Import Session ...'", html)
+        self.assertIn("label: 'Save Session'", html)
+        self.assertIn("label: 'Save Session as ...'", html)
+        self.assertIn("label: 'Save All Sessions'", html)
+        self.assertIn("data-session-menu-action=\"${escHtml(row.action)}\"", html)
+        self.assertIn("importSession: (_button, event) => openNewSessionSelector(event)", html)
+        self.assertIn("saveSession: button => saveActiveWorkspaceSession(button)", html)
+        self.assertIn("saveSessionAs: button => saveActiveWorkspaceSessionAs(button)", html)
         self.assertIn('<div id="savedSessionsModal" class="modal-shell" aria-hidden="true">', html)
         self.assertIn('<div id="saveSessionAsModal" class="modal-shell" aria-hidden="true">', html)
         self.assertIn('<input id="saveSessionAsOpenNow" type="checkbox">', html)
@@ -744,8 +752,8 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("async function saveActiveWorkspaceSession(button = null, options = {})", html)
         self.assertIn("function saveActiveWorkspaceSessionAs(button = null)", html)
         self.assertIn("async function saveAllWorkspaceSessions(button = null)", html)
-        self.assertIn("closeSessionsMenu(); saveAllWorkspaceSessions(this);", html)
-        self.assertIn('id="saveAllSessionsMenuItem"', html)
+        self.assertIn("saveAllSessions: button => saveAllWorkspaceSessions(button)", html)
+        self.assertIn("id: 'saveAllSessionsMenuItem'", html)
         self.assertIn("let workspaceSaveTargets = new Map();", html)
         self.assertIn("function notifySavedSessionUpdated(savedSession, options = {})", html)
         self.assertIn("const SAVED_SESSION_UPDATE_STORAGE_KEY = 'gridvibe.savedSessionUpdated';", html)
@@ -878,11 +886,15 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         html = self._page_html(response)
 
-        menu_start = html.index('>Import Session ...</button>')
         go_to_settings_start = html.index("async function goToSettings(event)")
         open_selector_start = html.index("async function openNewSessionSelector(event)")
 
-        self.assertIn("openNewSessionSelector(event)", html[:menu_start])
+        # Import Session opens the in-page selector; only the launcher button
+        # beside it reaches for a window.
+        self.assertIn(
+            "importSession: (_button, event) => openNewSessionSelector(event)",
+            html,
+        )
         self.assertNotIn(
             "window.pywebview?.api?.open_launcher_window",
             html[open_selector_start:go_to_settings_start],
@@ -902,7 +914,7 @@ class ApiRoutesTestCase(unittest.TestCase):
     def test_terminals_page_launcher_button_heads_the_session_tab_line(self):
         """The launcher button sits at the head of the session tab line — ahead
         of the first tab and out of the top bar, so hiding the top bar no longer
-        hides it. Alt+` reaches the same action."""
+        hides it. Alt+Q reaches the same action."""
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
@@ -916,14 +928,22 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertLess(session_bar_start, launcher_start)
         self.assertLess(launcher_start, session_tabs_start)
         self.assertLess(topbar_actions_start, session_bar_start)
-        self.assertIn('aria-keyshortcuts="Alt+`"', html)
+        self.assertIn('aria-keyshortcuts="Alt+Q"', html)
+        self.assertIn("Open launcher (Alt+Q)", html)
 
         terminals_js = self._static("js/terminals.js")
-        # The physical key left of "1" — matched by code so a layout that types
-        # a dead key there still reaches the launcher, and a focused terminal
-        # hands the key up instead of sending ESC ` to the shell.
-        self.assertIn("event.code !== 'Backquote'", terminals_js)
-        self.assertIn("event.code === 'Backquote'", terminals_js)
+        # Matched by physical key, so the chord survives a layout that prints
+        # something else there, and a focused terminal hands the key up instead
+        # of sending ESC q to the shell.
+        self.assertIn("event.code !== 'KeyQ'", terminals_js)
+        self.assertIn("event.code === 'KeyQ'", terminals_js)
+        # The old chord is gone rather than kept in parallel: it opened the
+        # launcher and left the layout's dead-accent composer armed, so keeping
+        # it reachable keeps the bug reachable by the same reflex. Nothing
+        # matches that physical key any more, and the button no longer names
+        # it. (The handler's comment still explains why it moved.)
+        self.assertNotIn("Backquote", terminals_js)
+        self.assertNotIn('aria-keyshortcuts="Alt+`"', html)
 
     def test_terminals_page_opens_app_settings_without_the_launcher(self):
         """The session window carries its own App Settings dialog (todo 1) —
@@ -953,6 +973,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         terminals_css = self._static("css/terminals.css")
         for icon in (
             "broadcast-icon",
+            "shortcuts-help-icon",
             "app-settings-icon",
             "surface-mode-icon",
             "fullscreen-icon",
@@ -966,6 +987,145 @@ class ApiRoutesTestCase(unittest.TestCase):
                 self.assertIsNotNone(rule)
                 self.assertIn("width:", rule.group(0))
                 self.assertIn("height:", rule.group(0))
+
+    def test_terminals_page_offers_the_shortcut_reference(self):
+        """Item 6: one icon button in .topbar-actions, immediately left of App
+        Settings, opening a read-only panel. Nothing is editable, nothing is
+        persisted, and no keybind handler learned anything — the panel is the
+        whole feature."""
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = self._page_html(response)
+
+        actions_start = html.index('<div class="topbar-actions">')
+        button_start = html.index('id="shortcutsHelpBtn"')
+        settings_start = html.index('id="appSettingsBtn"')
+        # In the window-level utility group, and left of the cog: a shortcut
+        # reference is one of those controls rather than something belonging
+        # beside the session line.
+        self.assertLess(actions_start, button_start)
+        self.assertLess(button_start, settings_start)
+
+        self.assertIn('onclick="toggleShortcutsHelp(event)"', html)
+        self.assertIn('aria-label="Keyboard shortcuts"', html)
+        self.assertIn('title="Keyboard shortcuts"', html)
+        # A popover, not a menu and not a modal.
+        self.assertIn('aria-haspopup="dialog"', html)
+        self.assertIn('id="shortcutsHelpRoot"', html)
+        self.assertIn('id="shortcutsHelp"', html)
+        self.assertIn('aria-labelledby="shortcutsHelpBtn"', html)
+        # Focus is moved into the panel on open, so it has to be focusable —
+        # and it holds no controls of its own to receive that focus.
+        self.assertIn('tabindex="-1"', html)
+        self.assertIn("js/shortcuts-help.js", html)
+
+    def test_shortcut_panel_is_dismissed_by_a_press_escape_and_a_departing_bar(self):
+        """It hangs off a button on the top bar, so the bar leaving the flow
+        has to take it with it — otherwise it floats over the grid with nothing
+        above it. And Escape is claimed, which the explorer must know about or
+        the same key would drop a pane's selection instead."""
+        terminals_js = self._static("js/terminals.js")
+
+        self.assertIn("closest('#shortcutsHelpRoot')", terminals_js)
+        self.assertIn("closeShortcutsHelp();", terminals_js)
+        # The chevron, fullscreen and a retracting peek all arrive through the
+        # one topbar-peek report, which is why this is the only rule needed.
+        self.assertIn("if (hidden && !peeking) {", terminals_js)
+
+        explorer_viewer_js = self._static("js/explorer-viewer.js")
+        self.assertIn("'#shortcutsHelpRoot.open'", explorer_viewer_js)
+
+    def test_launcher_offers_the_same_shortcut_reference(self):
+        """One list, both pages: the launcher renders the same partial and
+        loads the same module, and its button sits left of the minimize-all
+        control in the bottom action bar."""
+        response = self.client.get("/")
+
+        self.assertEqual(response.status_code, 200)
+        html = response.get_data(as_text=True)
+
+        button_start = html.index('id="shortcutsHelpBtn"')
+        minimize_start = html.index('id="minimizeAllWindowsBtn"')
+        settings_start = html.index('id="appSettingsBtn"')
+        self.assertLess(button_start, minimize_start)
+        self.assertLess(minimize_start, settings_start)
+
+        # The launcher dresses its controls differently, and that is the only
+        # thing the partial takes from the page.
+        self.assertIn('class="ghost-btn icon-btn"', html)
+        self.assertIn('onclick="toggleShortcutsHelp(event)"', html)
+        self.assertIn('id="shortcutsHelpRoot"', html)
+        self.assertIn('aria-haspopup="dialog"', html)
+        self.assertIn("js/shortcuts-help.js", html)
+        self.assertIn("css/shortcuts-help.css", html)
+
+        launcher_js = self._static("js/launcher.js")
+        self.assertIn("closest('#shortcutsHelpRoot')", launcher_js)
+        self.assertIn("closeShortcutsHelp();", launcher_js)
+
+    def test_shortcut_panel_shape_is_shared_and_only_its_palette_is_per_page(self):
+        """The two pages have unrelated palettes and open the panel in opposite
+        directions, so both are named through --sh-* knobs. The contract is
+        that the shared file *reads* every one of them and *declares* none:
+        both templates load it after their page stylesheet, so anything it
+        declares at .shortcuts-help-panel outranks the page's own amendment at
+        the same specificity. That is not hypothetical — it cost the workspace
+        window its palette (a translucent dialog fill over an opaque file tree)
+        and cost the launcher its height (`top: auto` overruled while its own
+        `bottom` survived, pinning a box to both edges of a 30px button)."""
+        shared_css = self._static("css/shortcuts-help.css")
+        # The shape lives here once: the horizontal anchor, the scrolling body
+        # and the one <kbd> rule this app had never needed before.
+        self.assertIn("right: 0;", shared_css)
+        self.assertIn("overflow-y: auto;", shared_css)
+        self.assertIn("scrollbar-gutter: stable;", shared_css)
+        self.assertIn(".shortcuts-help-key", shared_css)
+
+        knobs = (
+            "--sh-bg",
+            "--sh-border",
+            "--sh-text",
+            "--sh-muted",
+            "--sh-key-bg",
+            "--sh-key-text",
+            "--sh-key-border",
+            "--sh-anchor-top",
+            "--sh-anchor-bottom",
+            "--sh-backdrop",
+        )
+        for name in knobs:
+            with self.subTest(knob=name):
+                # Read, with the default a page that says nothing inherits...
+                self.assertRegex(shared_css, rf"var\({name}, [^)]")
+                # ...and never declared, or load order decides it instead.
+                self.assertNotRegex(shared_css, rf"{name}\s*:")
+        # No palette literal anywhere in it — every value is a token.
+        self.assertIsNone(re.search(r"#[0-9a-fA-F]{3,8}", shared_css))
+
+        # The workspace window remaps the palette onto the set its own menus
+        # use, and turns off the blur that goes with the translucent default.
+        terminals_css = self._static("css/terminals.css")
+        mapping = re.search(
+            r"\.shortcuts-help-panel \{(.*?)\}", terminals_css, re.DOTALL
+        )
+        self.assertIsNotNone(mapping)
+        self.assertIn("--sh-bg: var(--t-ctx-bg);", mapping.group(1))
+        self.assertIn("--sh-key-bg: var(--t-btn-neutral);", mapping.group(1))
+        self.assertIn("--sh-backdrop: none;", mapping.group(1))
+        self.assertIsNone(re.search(r"#[0-9a-fA-F]{3,8}", mapping.group(1)))
+
+        # The launcher's button is in a *bottom* action bar, so the one thing
+        # it states is the direction the panel opens — and it states both
+        # edges, because taking the bottom one without giving up the top one is
+        # what collapses the box.
+        launcher_css = self._static("css/launcher.css")
+        launcher_rule = re.search(
+            r"\.shortcuts-help-panel \{(.*?)\}", launcher_css, re.DOTALL
+        )
+        self.assertIsNotNone(launcher_rule)
+        self.assertIn("--sh-anchor-bottom: calc(100% + 6px);", launcher_rule.group(1))
+        self.assertIn("--sh-anchor-top: auto;", launcher_rule.group(1))
 
     def test_docs_images_route_serves_gridvibe_icon(self):
         response = self.client.get("/docs/images/GridVibe_icon.ico")
@@ -3754,7 +3914,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("closeSessionGroup(group.group_id);", html)
         self.assertIn(".app-menu-panel {", html)
         self.assertIn(".app-menu-item {", html)
-        self.assertIn(">Import Session ...</button>", html)
+        self.assertIn("label: 'Import Session ...'", html)
 
     def test_session_tabs_close_on_middle_click(self):
         """Todo 3 — middle-click closes a session tab like an explorer tab,
@@ -20444,17 +20604,20 @@ class RuntimeStateRestoreTestCase(unittest.TestCase):
         """The Workspace... dropdown's Save Workspace item posts to
         /api/runtime-state/save and is disabled when no groups are live."""
         html = self.client.get("/terminals").get_data(as_text=True)
-        self.assertIn('id="workspaceMenuRoot"', html)
-        self.assertIn('id="workspaceMenuBtn"', html)
-        self.assertIn(">Workspace...</button>", html)
-        self.assertIn('id="saveWorkspaceItem"', html)
-        self.assertIn(">Save Workspace</button>", html)
+        self.assertIn('id="sessionMenuRoot"', html)
+        self.assertIn('id="sessionMenuBtn"', html)
+        session_menu_js = self._static("js/session-menu.js")
+        self.assertIn("label: 'Workspace'", session_menu_js)
+        self.assertIn("id: 'saveWorkspaceItem'", session_menu_js)
+        self.assertIn("label: 'Save Workspace'", session_menu_js)
+        self.assertIn("function toggleSessionMenu(event)", session_menu_js)
+        # Save Workspace is unavailable with nothing live to save: a render
+        # input when the section is built, a paint while it is showing.
+        self.assertIn("item.disabled = !sessionMenuHasLiveGroups();", session_menu_js)
         terminals_js = self._static("js/terminals.js")
-        self.assertIn("function toggleWorkspaceMenu(event)", terminals_js)
         self.assertIn("async function saveWorkspace(", terminals_js)
         self.assertIn("/api/runtime-state/save", terminals_js)
         self.assertIn("native_zoom_factor: nativeZoomFactor", terminals_js)
-        self.assertIn("item.disabled = !sessionGroups.length;", terminals_js)
         shared_js = self._static("js/shared.js")
         self.assertIn("function normalizeNativeZoomFactor(value)", shared_js)
         self.assertIn("async function getNativeSessionZoomFactor()", shared_js)
@@ -20552,6 +20715,80 @@ class SettingsLauncherConfigTestCase(unittest.TestCase):
             "const MULTI_WORKSPACE_ENABLED = true;",
             self.client.get("/terminals").get_data(as_text=True),
         )
+
+    # ── Item 4-D — the native minimize cascade ──
+
+    def test_minimize_cascade_defaults_off_and_round_trips_through_config(self):
+        payload = self.client.get("/api/app-config").get_json()
+        # Off by default: minimizing one window to see what is behind it is an
+        # ordinary thing to do, and four others vanishing is a surprise.
+        self.assertFalse(payload["workspace"]["minimize_cascade"])
+
+        response = self.client.post(
+            "/api/app-config",
+            json={"workspace": {"minimize_cascade": True}},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.get_json()["workspace"]["minimize_cascade"])
+        self.assertTrue(api.runtime_config.workspace_minimize_cascade)
+        self.assertTrue(api.load_config()["workspace"]["minimize_cascade"])
+
+    def test_a_save_that_omits_the_cascade_leaves_it_where_it_was(self):
+        # The dialog omits the key whenever the field is not shown (a browser
+        # window), so a save from there must never write a native setting off.
+        self.client.post(
+            "/api/app-config",
+            json={"workspace": {"minimize_cascade": True}},
+        )
+
+        response = self.client.post(
+            "/api/app-config",
+            json={"workspace": {"surface_mode": "max"}},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.get_json()["workspace"]["minimize_cascade"])
+
+    def test_a_non_boolean_cascade_is_refused_rather_than_coerced(self):
+        response = self.client.post(
+            "/api/app-config",
+            json={"workspace": {"minimize_cascade": "yes"}},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.get_json()["workspace"]["minimize_cascade"])
+        self.assertFalse(api.runtime_config.workspace_minimize_cascade)
+
+    def test_both_pages_carry_the_native_only_minimize_all_control(self):
+        for path in ("/", "/terminals"):
+            page = self.client.get(path).get_data(as_text=True)
+            self.assertIn('id="minimizeAllWindowsBtn"', page, path)
+            # Rendered hidden, revealed only when the pywebview bridge arrives:
+            # a browser tab cannot minimize its own window, and a dead button
+            # with a tooltip is noise on a surface where everything else works.
+            button = re.search(
+                r'<button id="minimizeAllWindowsBtn".*?>|'
+                r'<button\s+class="[^"]*"\s+id="minimizeAllWindowsBtn".*?>',
+                page,
+                re.DOTALL,
+            )
+            self.assertIsNotNone(button, path)
+            self.assertIn("hidden", button.group(0), path)
+            self.assertIn("js/minimize-all.js", page, path)
+            # The name printed to the user is the module's own spelling of the
+            # chord it matches. `event.code` is QWERTY-named and reports the
+            # physical key, so a page that printed a different letter would be
+            # describing a key this layout does not have there.
+            chord_label = re.search(
+                r"const CHORD_LABEL = '([^']+)';",
+                (
+                    Path(api.__file__).resolve().parent
+                    / "static" / "js" / "minimize-all.js"
+                ).read_text(encoding="utf-8"),
+            )
+            self.assertIsNotNone(chord_label)
+            self.assertIn(chord_label.group(1), page, path)
 
     def test_app_config_persists_terminal_settings(self):
         response = self.client.post(

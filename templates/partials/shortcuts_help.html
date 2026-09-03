@@ -1,0 +1,42 @@
+{# The shortcut reference — the same button and the same panel on both pages.
+
+   Read-only, so it is a non-modal dialog anchored under (or, on the launcher,
+   over) its own button rather than a modal: it changes nothing, and trapping
+   the keyboard inside a list would be worse than the thing it documents.
+
+   Only the button's own chrome differs between the two pages — the workspace
+   top bar dresses its controls as `.btn.btn-neutral.btn-icon`, the launcher as
+   `.ghost-btn.icon-btn` — so the caller states that and nothing else:
+
+       {% set shortcuts_help_button_class = 'ghost-btn icon-btn' %}
+       {% include 'partials/shortcuts_help.html' %}
+
+   The panel itself is built by shortcuts-help.js when the button is pressed. #}
+<div class="shortcuts-help" id="shortcutsHelpRoot">
+    <button
+        class="{{ shortcuts_help_button_class | default('ghost-btn icon-btn', true) }}"
+        id="shortcutsHelpBtn"
+        type="button"
+        onclick="toggleShortcutsHelp(event)"
+        title="Keyboard shortcuts"
+        aria-label="Keyboard shortcuts"
+        aria-haspopup="dialog"
+        aria-expanded="false"
+    >
+        <svg class="shortcuts-help-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+            <rect x="2" y="5" width="20" height="14" rx="2.5"></rect>
+            <path d="M6 9h.01M10 9h.01M14 9h.01M18 9h.01"></path>
+            <path d="M6 12.5h.01M10 12.5h.01M14 12.5h.01M18 12.5h.01"></path>
+            <path d="M8 16h8"></path>
+        </svg>
+    </button>
+    {# Focus is moved in here on open, and the panel holds no controls of its
+       own to receive it — hence the tabindex. #}
+    <div
+        class="shortcuts-help-panel"
+        id="shortcutsHelp"
+        role="dialog"
+        aria-labelledby="shortcutsHelpBtn"
+        tabindex="-1"
+    ></div>
+</div>

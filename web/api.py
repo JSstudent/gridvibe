@@ -427,6 +427,7 @@ def _public_app_config() -> Dict[str, Any]:
             "surface_mode": settings.app_surface_mode,
             "autosave_interval_minutes": settings.workspace_autosave_interval_minutes,
             "multi_workspace_enabled": settings.multi_workspace_enabled,
+            "minimize_cascade": settings.workspace_minimize_cascade,
         },
         "ssh": {
             "host_key_policy": settings.ssh_host_key_policy,
@@ -503,6 +504,12 @@ def _normalize_app_config_update(data: Any) -> Dict[str, Any]:
     )
     if not isinstance(multi_workspace_enabled, bool):
         multi_workspace_enabled = settings.multi_workspace_enabled
+    minimize_cascade = workspace.get(
+        "minimize_cascade",
+        settings.workspace_minimize_cascade,
+    )
+    if not isinstance(minimize_cascade, bool):
+        minimize_cascade = settings.workspace_minimize_cascade
     try:
         autosave_interval_minutes = int(
             workspace.get(
@@ -578,6 +585,7 @@ def _normalize_app_config_update(data: Any) -> Dict[str, Any]:
             "surface_mode": surface_mode,
             "autosave_interval_minutes": autosave_interval_minutes,
             "multi_workspace_enabled": multi_workspace_enabled,
+            "minimize_cascade": minimize_cascade,
         },
         "ssh": {
             "host_key_policy": host_key_policy,
