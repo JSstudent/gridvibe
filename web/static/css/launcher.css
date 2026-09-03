@@ -864,6 +864,13 @@
             border-radius: 999px;
         }
 
+        /* `display: inline-flex` above is an author rule and beats the user
+           agent's `[hidden] { display: none }` — the minimize-all control is
+           rendered hidden and revealed only in native desktop mode. */
+        .icon-btn[hidden] {
+            display: none;
+        }
+
         .icon-btn svg {
             width: 18px;
             height: 18px;

@@ -667,6 +667,14 @@
             line-height: 1;
         }
 
+        /* `display: inline-flex` above is an author rule, so it beats the user
+           agent's `[hidden] { display: none }` outright — and the minimize-all
+           control is rendered hidden and revealed only when the native bridge
+           arrives. */
+        .btn-icon[hidden] {
+            display: none;
+        }
+
         .modal-shell {
             position: fixed;
             inset: 0;

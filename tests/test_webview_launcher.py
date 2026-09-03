@@ -1058,6 +1058,232 @@ class WebviewLauncherTestCase(unittest.TestCase):
         self.assertIn("DETACHED_PROCESS", helper_command[2])
 
 
+class _MinimizableWindow:
+    """A window that records minimize calls and exposes no `native` attribute.
+
+    No `native` means `_run_on_native_ui_thread` runs the callback inline,
+    which is exactly the non-Windows path and keeps the batch's own ordering
+    observable.
+    """
+
+    def __init__(self, on_minimize=None):
+        self.minimize_calls = 0
+        self._on_minimize = on_minimize
+
+    def minimize(self):
+        self.minimize_calls += 1
+        if self._on_minimize is not None:
+            self._on_minimize()
+
+
+class MinimizeAllWindowsTestCase(unittest.TestCase):
+    """Item 4-A: one batch, two triggers.
+
+    The control and the cascade are the same `minimize_all_windows()` call, so
+    everything that could make it misbehave — re-entrancy, an echo of its own
+    `minimized` events, a window already down — is asserted once, here.
+    """
+
+    def _bridge_with(self, workspaces=1, launcher=True):
+        bridge = webview_launcher.GridVibeApi("http://127.0.0.1:5050")
+        windows = {}
+        for index in range(workspaces):
+            workspace_id = "default" if index == 0 else f"aaaaaaaaaa{index:02d}"
+            window = _MinimizableWindow()
+            bridge._attach_workspace_window(workspace_id, window)
+            windows[f"workspace:{workspace_id}"] = window
+        if launcher:
+            window = _MinimizableWindow()
+            bridge._attach_window(window)
+            windows["launcher"] = window
+        return bridge, windows
+
+    def test_the_batch_minimizes_every_window_and_records_each_as_minimized(self):
+        bridge, windows = self._bridge_with(workspaces=2)
+
+        result = bridge.minimize_all_windows()
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["minimized"], 3)
+        for name, window in windows.items():
+            self.assertEqual(window.minimize_calls, 1, name)
+            # Tracked immediately, so the `minimized` events this batch
+            # provokes reach a handler that can tell they are its own echo.
+            self.assertTrue(bridge._is_window_minimized(name), name)
+
+    def test_a_window_already_down_is_left_alone(self):
+        bridge, windows = self._bridge_with(workspaces=2)
+        bridge._set_window_minimized("workspace:aaaaaaaaaa01", True)
+
+        result = bridge.minimize_all_windows()
+
+        self.assertEqual(result["minimized"], 2)
+        self.assertEqual(windows["workspace:aaaaaaaaaa01"].minimize_calls, 0)
+        self.assertEqual(windows["launcher"].minimize_calls, 1)
+
+    def test_a_batch_provoked_from_inside_itself_runs_once(self):
+        bridge = webview_launcher.GridVibeApi("http://127.0.0.1:5050")
+        reentries = []
+
+        def _reenter():
+            reentries.append(bridge.minimize_all_windows())
+
+        first = _MinimizableWindow(on_minimize=_reenter)
+        second = _MinimizableWindow()
+        bridge._attach_workspace_window("default", first)
+        bridge._attach_window(second)
+
+        result = bridge.minimize_all_windows()
+
+        self.assertEqual(result["minimized"], 2)
+        self.assertEqual(first.minimize_calls, 1)
+        self.assertEqual(second.minimize_calls, 1)
+        self.assertEqual([answer["suppressed"] for answer in reentries], [True])
+        # The guard is released again, or the control would work exactly once.
+        self.assertFalse(bridge._minimizing_all)
+
+    def test_a_window_that_cannot_minimize_does_not_stop_the_rest(self):
+        bridge = webview_launcher.GridVibeApi("http://127.0.0.1:5050")
+        stubborn = _MinimizableWindow()
+        stubborn.minimize = Mock(side_effect=RuntimeError("no"))
+        healthy = _MinimizableWindow()
+        bridge._attach_workspace_window("default", stubborn)
+        bridge._attach_window(healthy)
+
+        result = bridge.minimize_all_windows()
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["minimized"], 1)
+        self.assertEqual(healthy.minimize_calls, 1)
+        self.assertFalse(bridge._is_window_minimized("workspace:default"))
+
+    def test_the_cascade_setting_is_read_from_runtime_config(self):
+        bridge = webview_launcher.GridVibeApi("http://127.0.0.1:5050")
+        with patch.object(
+            webview_launcher.runtime_config, "workspace_minimize_cascade", True
+        ):
+            self.assertTrue(bridge._minimize_cascade_enabled())
+        with patch.object(
+            webview_launcher.runtime_config, "workspace_minimize_cascade", False
+        ):
+            self.assertFalse(bridge._minimize_cascade_enabled())
+
+
+class MinimizeCascadeEventTestCase(unittest.TestCase):
+    """4-D: the cascade is the `minimized` event's second trigger.
+
+    Off by default, minimize-only, and never re-entered by the events its own
+    batch produces.
+    """
+
+    def _register(self, api_bridge, window):
+        """Run the real `register_window` from main() against one fake window."""
+        fake_thread = _FakeThread()
+        fake_webview = Mock()
+        fake_webview.create_window.return_value = window
+
+        with patch.object(
+            webview_launcher.sys,
+            "argv",
+            ["webview_launcher.py", "--mode", "native"],
+        ), patch.object(
+            webview_launcher.os.path,
+            "exists",
+            return_value=False,
+        ), patch.object(
+            webview_launcher,
+            "setup_logging",
+        ), patch.object(
+            webview_launcher,
+            "_wait_for_server",
+            return_value=True,
+        ), patch.object(
+            webview_launcher.threading,
+            "Thread",
+            return_value=fake_thread,
+        ), patch.object(
+            webview_launcher,
+            "webview",
+            fake_webview,
+        ), patch.object(
+            webview_launcher,
+            "_preferred_pywebview_gui",
+            return_value=None,
+        ), patch.object(
+            webview_launcher,
+            "_set_linux_qtwebengine_env",
+        ), patch.object(
+            webview_launcher,
+            "GridVibeApi",
+            return_value=api_bridge,
+        ):
+            webview_launcher.main()
+        return window
+
+    def _api_with_registered_launcher(self):
+        api_bridge = webview_launcher.GridVibeApi("http://127.0.0.1:5050")
+        window = self._register(api_bridge, _FakeWindow())
+        return api_bridge, window, window.events.minimized.handlers[0]
+
+    def test_minimizing_one_window_leaves_the_others_alone_by_default(self):
+        api_bridge, _window, on_minimized = self._api_with_registered_launcher()
+        workspace = _MinimizableWindow()
+        api_bridge._attach_workspace_window("default", workspace)
+
+        with patch.object(
+            webview_launcher.runtime_config, "workspace_minimize_cascade", False
+        ):
+            on_minimized()
+
+        self.assertEqual(workspace.minimize_calls, 0)
+        self.assertTrue(api_bridge._is_window_minimized("launcher"))
+
+    def test_with_the_setting_on_one_minimize_takes_the_rest_down(self):
+        api_bridge, _window, on_minimized = self._api_with_registered_launcher()
+        first = _MinimizableWindow()
+        second = _MinimizableWindow()
+        api_bridge._attach_workspace_window("default", first)
+        api_bridge._attach_workspace_window("aaaaaaaaaa02", second)
+
+        with patch.object(
+            webview_launcher.runtime_config, "workspace_minimize_cascade", True
+        ):
+            on_minimized()
+
+        self.assertEqual(first.minimize_calls, 1)
+        self.assertEqual(second.minimize_calls, 1)
+
+    def test_the_batchs_own_echo_never_cascades_again(self):
+        api_bridge, _window, on_minimized = self._api_with_registered_launcher()
+        workspace = _MinimizableWindow()
+        api_bridge._attach_workspace_window("default", workspace)
+
+        with patch.object(
+            webview_launcher.runtime_config, "workspace_minimize_cascade", True
+        ):
+            on_minimized()
+            # The event the batch itself provoked, delivered after the batch
+            # released its re-entrancy flag: the window is already tracked
+            # minimized, so it is an echo and not a new gesture.
+            on_minimized()
+
+        self.assertEqual(workspace.minimize_calls, 1)
+
+    def test_restore_is_not_cascaded(self):
+        api_bridge, window, _on_minimized = self._api_with_registered_launcher()
+        workspace = _MinimizableWindow()
+        api_bridge._attach_workspace_window("default", workspace)
+        api_bridge._set_window_minimized("workspace:default", True)
+        api_bridge._set_window_minimized("launcher", True)
+
+        window.events.restored.handlers[0]()
+
+        # Bringing four windows back because one taskbar entry was clicked is
+        # the bigger surprise, so the other windows stay down.
+        self.assertFalse(api_bridge._is_window_minimized("launcher"))
+        self.assertTrue(api_bridge._is_window_minimized("workspace:default"))
+
+
 class TeardownNoSnapshotTestCase(unittest.TestCase):
     """10.5 hardening — teardown must never write the workspace snapshot.
 

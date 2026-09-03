@@ -20,7 +20,8 @@
         workspace: Object.freeze({
             surface_mode: 'normal',
             autosave_interval_minutes: 5,
-            multi_workspace_enabled: false
+            multi_workspace_enabled: false,
+            minimize_cascade: false
         }),
         ssh: Object.freeze({
             host_key_policy: 'auto-add'
@@ -133,6 +134,12 @@
         whisperSection?.classList.toggle('hidden', !voiceEnabled || selectedEngine !== 'whisper');
         micSection?.classList.toggle('hidden', !voiceEnabled);
         whisperGpuHint?.classList.toggle('hidden', !voiceEnabled || selectedEngine !== 'whisper' || selectedDevice !== 'cuda');
+        /* Native desktop mode only: the minimize cascade is a window-manager
+           setting, and a browser tab has no windows of its own to cascade.
+           The predicate is minimize-all.js's own, so the field and the control
+           it describes can never disagree about whether native mode is on. */
+        const cascadeField = document.getElementById('appWorkspaceMinimizeCascadeField');
+        cascadeField?.classList.toggle('hidden', !isNativeWindowModeAvailable());
         /* OD-13: the free-text font input only shows for the "Custom…" preset. */
         const fontPresetInput = document.getElementById('appTerminalFontPreset');
         const fontCustomField = document.getElementById('appTerminalFontCustomField');
@@ -172,6 +179,10 @@
                     : DEFAULT_APP_SETTINGS.workspace.autosave_interval_minutes
             );
             syncAutosaveIntervalLabel();
+        }
+        const minimizeCascadeInput = document.getElementById('appWorkspaceMinimizeCascade');
+        if (minimizeCascadeInput) {
+            minimizeCascadeInput.checked = workspace.minimize_cascade === true;
         }
         if (sshHostKeyPolicyInput) {
             sshHostKeyPolicyInput.value = ['auto-add', 'known-hosts', 'strict'].includes(ssh.host_key_policy)
@@ -528,6 +539,36 @@
             || DEFAULT_APP_SETTINGS.terminal.font_family;
     }
 
+    /* "Is the native window control available here?" has one owner —
+       minimize-all.js — so the settings field that describes it and the button
+       that runs it cannot disagree. The fallback is for a page that somehow
+       loaded this file without that one; it asks the same question of the same
+       bridge method. */
+    function isNativeWindowModeAvailable() {
+        if (typeof gridVibeMinimizeAllAvailable === 'function') {
+            return Boolean(gridVibeMinimizeAllAvailable());
+        }
+        return typeof window.pywebview?.api?.minimize_all_windows === 'function';
+    }
+
+    /* The cascade key is omitted whenever the field is not shown, so a save
+       from a browser window keeps whatever the native side already has —
+       the same reason multi_workspace_enabled is absent below. */
+    function collectWorkspaceSettingsForm() {
+        const workspace = {
+            surface_mode: document.getElementById('appSurfaceMode')?.value === 'max' ? 'max' : 'normal',
+            autosave_interval_minutes: Math.min(15, Math.max(1,
+                Number(document.getElementById('appWorkspaceAutosaveInterval')?.value)
+                    || DEFAULT_APP_SETTINGS.workspace.autosave_interval_minutes
+            ))
+        };
+        const minimizeCascadeInput = document.getElementById('appWorkspaceMinimizeCascade');
+        if (minimizeCascadeInput && isNativeWindowModeAvailable()) {
+            workspace.minimize_cascade = Boolean(minimizeCascadeInput.checked);
+        }
+        return workspace;
+    }
+
     function syncAutosaveIntervalLabel() {
         const input = document.getElementById('appWorkspaceAutosaveInterval');
         const value = document.getElementById('appWorkspaceAutosaveIntervalValue');
@@ -541,18 +582,13 @@
             appearance: {
                 theme: document.getElementById('appTheme')?.value || DEFAULT_APP_SETTINGS.appearance.theme
             },
-            workspace: {
-                surface_mode: document.getElementById('appSurfaceMode')?.value === 'max' ? 'max' : 'normal',
-                autosave_interval_minutes: Math.min(15, Math.max(1,
-                    Number(document.getElementById('appWorkspaceAutosaveInterval')?.value)
-                        || DEFAULT_APP_SETTINGS.workspace.autosave_interval_minutes
-                ))
-                /* multi_workspace_enabled is deliberately absent: the launcher's
-                   Workspaces switch owns it, and an omitted key keeps whatever
-                   the server already has (web/api.py _normalize_app_config_update),
-                   so saving this dialog can never move the mode behind the
-                   user's back. */
-            },
+            /* multi_workspace_enabled is deliberately absent: the launcher's
+               Workspaces switch owns it, and an omitted key keeps whatever the
+               server already has (web/api.py _normalize_app_config_update), so
+               saving this dialog can never move the mode behind the user's
+               back. minimize_cascade is omitted on the same rule whenever the
+               window this dialog is open in is not a native one. */
+            workspace: collectWorkspaceSettingsForm(),
             ssh: {
                 host_key_policy: document.getElementById('appSshHostKeyPolicy')?.value || DEFAULT_APP_SETTINGS.ssh.host_key_policy
             },

@@ -20561,6 +20561,80 @@ class SettingsLauncherConfigTestCase(unittest.TestCase):
             self.client.get("/terminals").get_data(as_text=True),
         )
 
+    # ── Item 4-D — the native minimize cascade ──
+
+    def test_minimize_cascade_defaults_off_and_round_trips_through_config(self):
+        payload = self.client.get("/api/app-config").get_json()
+        # Off by default: minimizing one window to see what is behind it is an
+        # ordinary thing to do, and four others vanishing is a surprise.
+        self.assertFalse(payload["workspace"]["minimize_cascade"])
+
+        response = self.client.post(
+            "/api/app-config",
+            json={"workspace": {"minimize_cascade": True}},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.get_json()["workspace"]["minimize_cascade"])
+        self.assertTrue(api.runtime_config.workspace_minimize_cascade)
+        self.assertTrue(api.load_config()["workspace"]["minimize_cascade"])
+
+    def test_a_save_that_omits_the_cascade_leaves_it_where_it_was(self):
+        # The dialog omits the key whenever the field is not shown (a browser
+        # window), so a save from there must never write a native setting off.
+        self.client.post(
+            "/api/app-config",
+            json={"workspace": {"minimize_cascade": True}},
+        )
+
+        response = self.client.post(
+            "/api/app-config",
+            json={"workspace": {"surface_mode": "max"}},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.get_json()["workspace"]["minimize_cascade"])
+
+    def test_a_non_boolean_cascade_is_refused_rather_than_coerced(self):
+        response = self.client.post(
+            "/api/app-config",
+            json={"workspace": {"minimize_cascade": "yes"}},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.get_json()["workspace"]["minimize_cascade"])
+        self.assertFalse(api.runtime_config.workspace_minimize_cascade)
+
+    def test_both_pages_carry_the_native_only_minimize_all_control(self):
+        for path in ("/", "/terminals"):
+            page = self.client.get(path).get_data(as_text=True)
+            self.assertIn('id="minimizeAllWindowsBtn"', page, path)
+            # Rendered hidden, revealed only when the pywebview bridge arrives:
+            # a browser tab cannot minimize its own window, and a dead button
+            # with a tooltip is noise on a surface where everything else works.
+            button = re.search(
+                r'<button id="minimizeAllWindowsBtn".*?>|'
+                r'<button\s+class="[^"]*"\s+id="minimizeAllWindowsBtn".*?>',
+                page,
+                re.DOTALL,
+            )
+            self.assertIsNotNone(button, path)
+            self.assertIn("hidden", button.group(0), path)
+            self.assertIn("js/minimize-all.js", page, path)
+            # The name printed to the user is the module's own spelling of the
+            # chord it matches. `event.code` is QWERTY-named and reports the
+            # physical key, so a page that printed a different letter would be
+            # describing a key this layout does not have there.
+            chord_label = re.search(
+                r"const CHORD_LABEL = '([^']+)';",
+                (
+                    Path(api.__file__).resolve().parent
+                    / "static" / "js" / "minimize-all.js"
+                ).read_text(encoding="utf-8"),
+            )
+            self.assertIsNotNone(chord_label)
+            self.assertIn(chord_label.group(1), page, path)
+
     def test_app_config_persists_terminal_settings(self):
         response = self.client.post(
             "/api/app-config",

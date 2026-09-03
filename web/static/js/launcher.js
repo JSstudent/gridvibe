@@ -2748,6 +2748,12 @@
         return Boolean(target.closest('.voice-ptt-keybind')) || target.isContentEditable;
     }
 
+    /* minimize-all.js owns Alt+X and its button; this is the launcher's answer
+       to "may the chord fire from here", matching the Alt+W handler's guard. */
+    function minimizeAllShortcutBlocked(target) {
+        return isLauncherShortcutBlockingTarget(target);
+    }
+
     async function openTerminalsIfActive(
         preferredGroupId = '',
         nativeZoomFactor = null,

@@ -79,6 +79,8 @@ python webview_launcher.py         # auto: native window, browser fallback
 python webview_launcher.py --mode browser|native
 ```
 
+In **native desktop mode** the launcher and each workspace are real OS windows, so they can be managed as a set: **Minimize all** (`Alt+X`, or the button in either top bar) sends every GridVibe window to the taskbar at once, and App Settings can make minimizing any one of them do the same. Clicking a taskbar entry always brings back just that window.
+
 Browser mode is one browser window per run: the launcher opens in a **new window** of your default browser, and each workspace opens as a tab beside it. Browsers allow a page to open only one tab per click, so restoring several workspaces at once opens the first and reports the rest — allow pop-ups for GridVibe's address to have them all open automatically, or use **Open** in the launcher's Workspaces card.
 
 ## Agent CLIs
@@ -195,7 +197,7 @@ GridVibe does not proxy pages or bypass `X-Frame-Options`/CSP, so sites that blo
 | 📤 | Upload files into the folder this pane is showing |
 | 🖥️ | Reveal the current location in the system file manager (local panes only) |
 
-**Top bar:** theme · max surface · broadcast typing · fullscreen · App Settings · chevron to hide the bar. Plus a `Workspace…` menu and a `Sessions…` menu.
+**Top bar:** theme · max surface · broadcast typing · fullscreen · minimize all windows (native desktop mode only) · App Settings · chevron to hide the bar. Plus a `Workspace…` menu and a `Sessions…` menu.
 
 **A hidden top bar comes back on hover.** Rest the pointer on the small handle at the top edge, centred — only that handle triggers it, so the rest of the edge is free — and the bar slides down over the workspace for as long as you are using it, so `Save Session` and `Save Workspace` stay reachable with the bar hidden. It stays while a menu is open and hides again shortly after you move away (or on `Esc`); clicking the handle reveals the bar and puts focus in it, which is the keyboard route in. Fullscreen hides the bar for its duration and reveals it the same way; leaving fullscreen gives back whatever the chevron last said. Nothing about the reveal is saved.
 
@@ -206,6 +208,7 @@ GridVibe does not proxy pages or bypass `X-Frame-Options`/CSP, so sites that blo
 | `Alt+Q` | Open the launcher |
 | `Alt+1`–`Alt+9` | Switch session group |
 | `Alt+W` / `Alt+Shift+W` | Next / previous workspace window (multiple workspaces only) — the window you land in pulses once. In the launcher, `Alt+W` returns to the workspace that opened it, or to whichever workspace is still open if that one has closed |
+| `Alt+X` | Minimize every GridVibe window (native desktop mode only) — click any taskbar entry to bring one back |
 | `Ctrl+Shift+F` | Terminal scrollback search — or, on an explorer pane, toggle repository search |
 | `Ctrl+F` | Find in the open file |
 | `Ctrl+Shift+V` | Toggle Markdown rendered preview |
@@ -217,7 +220,7 @@ Drag the dividers between panes to resize them.
 
 ## Configuration
 
-Everything lives in **App Settings** — same dialog from the gear on the launcher *or* the session window, so settings never need a trip back to the launcher. It covers theme, surface mode, terminal font and size, max sessions, shell integration, workspace autosave interval, SSH host-key policy, and all voice options. The one exception is **Multiple workspaces**: it changes what every launch does, so its switch sits in the launcher's Workspaces card instead of the dialog.
+Everything lives in **App Settings** — same dialog from the gear on the launcher *or* the session window, so settings never need a trip back to the launcher. It covers theme, surface mode, terminal font and size, max sessions, shell integration, workspace autosave interval, SSH host-key policy, and all voice options — plus, in the native window, whether minimizing one GridVibe window minimizes them all (off by default; the checkbox is not shown in browser mode, where a page has no windows of its own to manage). The one exception is **Multiple workspaces**: it changes what every launch does, so its switch sits in the launcher's Workspaces card instead of the dialog.
 
 On disk, settings load from `config.json` (git-ignored) falling back to `default_config.json`:
 
@@ -226,7 +229,7 @@ On disk, settings load from `config.json` (git-ignored) falling back to `default
   "server": { "host": "127.0.0.1", "port": 5050 },
   "appearance": { "theme": "dark" },
   "terminal": { "max_sessions": 16, "font_size": 14, "shell_integration": true },
-  "workspace": { "surface_mode": "normal", "autosave_interval_minutes": 5, "multi_workspace_enabled": false },
+  "workspace": { "surface_mode": "normal", "autosave_interval_minutes": 5, "multi_workspace_enabled": false, "minimize_cascade": false },
   "ssh": { "host_key_policy": "auto-add" },
   "explorer_search": { "max_files": 2000, "max_matches": 5000, "timeout_seconds": 20 }
 }

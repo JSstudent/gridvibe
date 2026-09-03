@@ -7297,6 +7297,13 @@
         return isEditableShortcutTarget(target);
     }
 
+    /* minimize-all.js owns Alt+X and its button; this is the page's answer to
+       "may the chord fire from here", so the native control obeys the same
+       focused-pane rule the Alt+Q and Alt+W handlers below do. */
+    function minimizeAllShortcutBlocked(target) {
+        return isPaneShortcutBlockingTarget(target);
+    }
+
     document.addEventListener('keydown', event => {
         if (!event.altKey || event.ctrlKey || event.metaKey || event.repeat) {
             return;
