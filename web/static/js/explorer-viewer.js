@@ -1557,6 +1557,7 @@
         '.terminal-container.actions-open',
         '.pane-shell-menu:not([hidden])',
         '#sessionMenuRoot.open',
+        '#shortcutsHelpRoot.open',
         '#workspaceContextMenu:not([hidden])'
     ].join(', ');
 

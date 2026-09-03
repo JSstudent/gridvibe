@@ -881,6 +881,20 @@
             animation: tf-spin 0.9s linear infinite;
         }
 
+        /* ── The shortcut reference panel ──
+           Its shape and its whole palette come from the shared
+           shortcuts-help.css, which defaults to the --gv-dialog-* tokens —
+           those *are* this page's colours, so nothing is remapped here. The one
+           thing that is this page's own is the direction it opens: the button
+           lives in the bottom action bar, so a panel hanging below it would open
+           off the foot of the window. It opens upward instead, and its height
+           cap keeps it inside .column's own scroll box, which would otherwise
+           clip it rather than let it reach the window edge. */
+        .shortcuts-help-panel {
+            top: auto;
+            bottom: calc(100% + 6px);
+        }
+
         .app-footer {
             display: flex;
             align-items: center;

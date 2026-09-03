@@ -317,6 +317,7 @@ class ApiRoutesTestCase(unittest.TestCase):
             "js/browser-pane.js",
             "js/terminal-shell.js",
             "js/session-menu.js",
+            "js/shortcuts-help.js",
             "js/terminals.js",
         ):
             marker = f"/static/{asset}"
@@ -972,6 +973,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         terminals_css = self._static("css/terminals.css")
         for icon in (
             "broadcast-icon",
+            "shortcuts-help-icon",
             "app-settings-icon",
             "surface-mode-icon",
             "fullscreen-icon",
@@ -985,6 +987,127 @@ class ApiRoutesTestCase(unittest.TestCase):
                 self.assertIsNotNone(rule)
                 self.assertIn("width:", rule.group(0))
                 self.assertIn("height:", rule.group(0))
+
+    def test_terminals_page_offers_the_shortcut_reference(self):
+        """Item 6: one icon button in .topbar-actions, immediately left of App
+        Settings, opening a read-only panel. Nothing is editable, nothing is
+        persisted, and no keybind handler learned anything — the panel is the
+        whole feature."""
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = self._page_html(response)
+
+        actions_start = html.index('<div class="topbar-actions">')
+        button_start = html.index('id="shortcutsHelpBtn"')
+        settings_start = html.index('id="appSettingsBtn"')
+        # In the window-level utility group, and left of the cog: a shortcut
+        # reference is one of those controls rather than something belonging
+        # beside the session line.
+        self.assertLess(actions_start, button_start)
+        self.assertLess(button_start, settings_start)
+
+        self.assertIn('onclick="toggleShortcutsHelp(event)"', html)
+        self.assertIn('aria-label="Keyboard shortcuts"', html)
+        self.assertIn('title="Keyboard shortcuts"', html)
+        # A popover, not a menu and not a modal.
+        self.assertIn('aria-haspopup="dialog"', html)
+        self.assertIn('id="shortcutsHelpRoot"', html)
+        self.assertIn('id="shortcutsHelp"', html)
+        self.assertIn('aria-labelledby="shortcutsHelpBtn"', html)
+        # Focus is moved into the panel on open, so it has to be focusable —
+        # and it holds no controls of its own to receive that focus.
+        self.assertIn('tabindex="-1"', html)
+        self.assertIn("js/shortcuts-help.js", html)
+
+    def test_shortcut_panel_is_dismissed_by_a_press_escape_and_a_departing_bar(self):
+        """It hangs off a button on the top bar, so the bar leaving the flow
+        has to take it with it — otherwise it floats over the grid with nothing
+        above it. And Escape is claimed, which the explorer must know about or
+        the same key would drop a pane's selection instead."""
+        terminals_js = self._static("js/terminals.js")
+
+        self.assertIn("closest('#shortcutsHelpRoot')", terminals_js)
+        self.assertIn("closeShortcutsHelp();", terminals_js)
+        # The chevron, fullscreen and a retracting peek all arrive through the
+        # one topbar-peek report, which is why this is the only rule needed.
+        self.assertIn("if (hidden && !peeking) {", terminals_js)
+
+        explorer_viewer_js = self._static("js/explorer-viewer.js")
+        self.assertIn("'#shortcutsHelpRoot.open'", explorer_viewer_js)
+
+    def test_launcher_offers_the_same_shortcut_reference(self):
+        """One list, both pages: the launcher renders the same partial and
+        loads the same module, and its button sits left of the minimize-all
+        control in the bottom action bar."""
+        response = self.client.get("/")
+
+        self.assertEqual(response.status_code, 200)
+        html = response.get_data(as_text=True)
+
+        button_start = html.index('id="shortcutsHelpBtn"')
+        minimize_start = html.index('id="minimizeAllWindowsBtn"')
+        settings_start = html.index('id="appSettingsBtn"')
+        self.assertLess(button_start, minimize_start)
+        self.assertLess(minimize_start, settings_start)
+
+        # The launcher dresses its controls differently, and that is the only
+        # thing the partial takes from the page.
+        self.assertIn('class="ghost-btn icon-btn"', html)
+        self.assertIn('onclick="toggleShortcutsHelp(event)"', html)
+        self.assertIn('id="shortcutsHelpRoot"', html)
+        self.assertIn('aria-haspopup="dialog"', html)
+        self.assertIn("js/shortcuts-help.js", html)
+        self.assertIn("css/shortcuts-help.css", html)
+
+        launcher_js = self._static("js/launcher.js")
+        self.assertIn("closest('#shortcutsHelpRoot')", launcher_js)
+        self.assertIn("closeShortcutsHelp();", launcher_js)
+
+    def test_shortcut_panel_shape_is_shared_and_only_its_palette_is_per_page(self):
+        """The two pages have unrelated palettes, so the panel names its
+        colours through --sh-* and each page declares them from the tokens it
+        already has — which is what keeps dark/light working on both surfaces
+        with no second palette and no prefers-color-scheme block."""
+        shared_css = self._static("css/shortcuts-help.css")
+        # The shape lives here once: the anchor, the scrolling body and the one
+        # <kbd> rule this app had never needed before.
+        self.assertIn("right: 0;", shared_css)
+        self.assertIn("overflow-y: auto;", shared_css)
+        self.assertIn("scrollbar-gutter: stable;", shared_css)
+        self.assertIn(".shortcuts-help-key", shared_css)
+        for name in (
+            "--sh-bg",
+            "--sh-border",
+            "--sh-text",
+            "--sh-muted",
+            "--sh-key-bg",
+            "--sh-key-text",
+            "--sh-key-border",
+        ):
+            self.assertIn(f"var({name})", shared_css)
+        # No palette literal anywhere in it — every value is a token.
+        self.assertIsNone(re.search(r"#[0-9a-fA-F]{3,8}", shared_css))
+
+        # The workspace window remaps them onto the set its own menus use.
+        terminals_css = self._static("css/terminals.css")
+        mapping = re.search(
+            r"\.shortcuts-help-panel \{(.*?)\}", terminals_css, re.DOTALL
+        )
+        self.assertIsNotNone(mapping)
+        self.assertIn("--sh-bg: var(--t-ctx-bg);", mapping.group(1))
+        self.assertIn("--sh-key-bg: var(--t-btn-neutral);", mapping.group(1))
+        self.assertIsNone(re.search(r"#[0-9a-fA-F]{3,8}", mapping.group(1)))
+
+        # The launcher's button is in a *bottom* action bar, so the one thing
+        # it states is the direction the panel opens.
+        launcher_css = self._static("css/launcher.css")
+        launcher_rule = re.search(
+            r"\.shortcuts-help-panel \{(.*?)\}", launcher_css, re.DOTALL
+        )
+        self.assertIsNotNone(launcher_rule)
+        self.assertIn("bottom: calc(100% + 6px);", launcher_rule.group(1))
+        self.assertIn("top: auto;", launcher_rule.group(1))
 
     def test_docs_images_route_serves_gridvibe_icon(self):
         response = self.client.get("/docs/images/GridVibe_icon.ico")

@@ -1,0 +1,134 @@
+/* The shortcut reference panel — shared by the launcher and the workspace
+   window.
+
+   Both pages render the same partial and the same rows, so the *shape* of the
+   panel lives here exactly once: its box, its anchor, its grid and the one
+   `<kbd>` rule this app had never needed before. What differs is the palette —
+   the launcher and the workspace window have unrelated ones — so the colours are
+   named through seven local custom properties. They default to the shared
+   `--gv-dialog-*` tokens, which *are* the launcher's palette, and terminals.css
+   redeclares them from its own `--t-*` set so the panel matches the menus it
+   sits beside. Every one of those tokens is already redefined per theme where it
+   is declared, which is the whole of what makes this dark/light specific: no
+   `prefers-color-scheme` block, and no second palette to keep in step by hand. */
+.shortcuts-help {
+    position: relative;
+    display: inline-flex;
+    flex: 0 0 auto;
+}
+
+.shortcuts-help-panel {
+    --sh-bg: var(--gv-dialog-bg);
+    --sh-border: var(--gv-dialog-border);
+    --sh-text: var(--gv-dialog-text);
+    --sh-muted: var(--gv-dialog-muted);
+    --sh-key-bg: var(--gv-dialog-panel-soft);
+    --sh-key-text: var(--gv-dialog-text);
+    --sh-key-border: var(--gv-dialog-border);
+
+    position: absolute;
+    /* Anchored right, because the button sits at the right end of its control
+       group on both pages and a left-anchored panel this wide would run past
+       the window edge. The vertical anchor is the page's own: it hangs below
+       the workspace top bar and above the launcher's bottom action bar. */
+    top: calc(100% + 6px);
+    right: 0;
+    z-index: 200;
+    display: none;
+    min-width: 190px;
+    width: max-content;
+    max-width: min(440px, calc(100vw - 48px));
+    /* Read, not skimmed — so it scrolls rather than outgrowing its container.
+       The cap is deliberately under a full viewport height: on the launcher the
+       panel lives inside a scrolling column, and a taller box would be clipped
+       by it rather than simply reaching the window edge. */
+    max-height: min(62vh, 540px);
+    overflow-y: auto;
+    /* The bar comes and goes with the list's height; reserving its gutter keeps
+       every row from reflowing when it appears. */
+    scrollbar-gutter: stable;
+    padding: 10px 12px;
+    border: 1px solid var(--sh-border);
+    border-radius: var(--gv-radius-s);
+    background: var(--sh-bg);
+    box-shadow: var(--gv-dialog-shadow);
+    cursor: default;
+}
+
+.shortcuts-help.open .shortcuts-help-panel {
+    display: flex;
+    flex-direction: column;
+}
+
+/* Focus is moved here on open so the list can be scrolled from the keyboard.
+   It holds no controls, so the ring would be decoration on a whole panel. */
+.shortcuts-help-panel:focus {
+    outline: none;
+}
+
+.shortcuts-help-group + .shortcuts-help-group {
+    margin-top: 12px;
+}
+
+.shortcuts-help-group-title {
+    margin: 0 0 4px;
+    color: var(--sh-muted);
+    font-size: .66rem;
+    font-weight: 700;
+    letter-spacing: .09em;
+    text-transform: uppercase;
+}
+
+.shortcuts-help-row {
+    display: grid;
+    grid-template-columns: minmax(0, max-content) minmax(0, 1fr);
+    align-items: baseline;
+    column-gap: 12px;
+    padding: 3px 0;
+}
+
+.shortcuts-help-chord {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 3px;
+}
+
+.shortcuts-help-action {
+    color: var(--sh-text);
+    font-size: .78rem;
+    line-height: 1.35;
+}
+
+.shortcuts-help-note,
+.shortcuts-help-plus,
+.shortcuts-help-chord-join,
+.shortcuts-help-chord-label {
+    color: var(--sh-muted);
+}
+
+.shortcuts-help-plus,
+.shortcuts-help-chord-join {
+    font-size: .7rem;
+}
+
+.shortcuts-help-chord-label {
+    font-size: .74rem;
+    font-style: italic;
+}
+
+/* The one genuinely new element: this app had never styled a <kbd>. */
+.shortcuts-help-key {
+    display: inline-block;
+    min-width: 1.4em;
+    padding: 1px 5px;
+    border: 1px solid var(--sh-key-border);
+    border-radius: 4px;
+    background: var(--sh-key-bg);
+    color: var(--sh-key-text);
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: .72rem;
+    line-height: 1.5;
+    text-align: center;
+    white-space: nowrap;
+}

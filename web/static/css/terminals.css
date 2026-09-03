@@ -608,6 +608,25 @@
             opacity: 0.65;
         }
 
+        /* ── The shortcut reference panel ──
+           Its shape, anchor and <kbd> rule live in the shared
+           shortcuts-help.css, which both pages load; what belongs here is the
+           palette. The shared file defaults to the --gv-dialog-* tokens, which
+           are the launcher's colours — up here the panel sits beside the top
+           bar's own menus, so it reads from the same --t-* set they do. Those
+           are declared once per theme at the top of this file, which is the
+           whole of what makes the panel dark/light specific: no second palette,
+           and nothing to keep in step by hand. */
+        .shortcuts-help-panel {
+            --sh-bg: var(--t-ctx-bg);
+            --sh-border: var(--t-border-tab);
+            --sh-text: var(--t-text-secondary);
+            --sh-muted: var(--t-text-muted);
+            --sh-key-bg: var(--t-btn-neutral);
+            --sh-key-text: var(--t-btn-neutral-text);
+            --sh-key-border: var(--t-border-tab);
+        }
+
         .topbar-title { font-size: 1rem; color: var(--t-accent); font-weight: 700; }
         .topbar-sub   { font-size: .78rem; color: var(--t-text-muted); margin-left: 10px; }
 
@@ -1130,6 +1149,7 @@
            while the button has room to squeeze it, which max surface mode (a
            fixed 32x28 button with no padding) takes away. */
         .broadcast-icon,
+        .shortcuts-help-icon,
         .app-settings-icon {
             width: 18px;
             height: 18px;

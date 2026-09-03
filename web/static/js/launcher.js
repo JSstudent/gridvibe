@@ -3883,6 +3883,16 @@
         closeSaveSessionNameModal({ name: document.getElementById('saveSessionNameInput').value });
     });
 
+    /* A press anywhere else closes the shortcut panel — including a press on
+       any other control in the action bar, which is outside the panel's own
+       root and so needs no rule of its own. The workspace window has the same
+       pair of listeners; the panel and its list are shared. */
+    document.addEventListener('click', event => {
+        if (!(event.target instanceof Element) || !event.target.closest('#shortcutsHelpRoot')) {
+            closeShortcutsHelp();
+        }
+    });
+
     document.getElementById('workspaceRestoreModal')?.addEventListener('click', event => {
         /* Clicking the backdrop is "not now", never a restore or a forget. */
         if (event.target.id === 'workspaceRestoreModal' && !workspaceRestoreInFlight) {
@@ -3891,6 +3901,9 @@
     });
 
     document.addEventListener('keydown', event => {
+        if (event.key === 'Escape') {
+            closeShortcutsHelp();
+        }
         if (event.key === 'Escape' && document.getElementById('savedSessionsModal').classList.contains('visible')) {
             closeSavedSessionModal();
         }

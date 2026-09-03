@@ -11,6 +11,7 @@
     <link rel="stylesheet" href="{{ url_for('static', filename='css/app-settings.css') }}?v={{ version }}">
     <link rel="stylesheet" href="{{ url_for('static', filename='css/workspaces.css') }}?v={{ version }}">
     <link rel="stylesheet" href="{{ url_for('static', filename='css/lifecycle.css') }}?v={{ version }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/shortcuts-help.css') }}?v={{ version }}">
 </head>
 <body
     data-voice-enabled="{{ 'true' if voice_enabled else 'false' }}"
@@ -103,6 +104,8 @@
                 <path d="M4 18.5h16"></path>
             </svg>
         </button>
+        {% set shortcuts_help_button_class = 'btn btn-neutral btn-icon' %}
+        {% include 'partials/shortcuts_help.html' %}
         <button
             class="btn btn-neutral btn-icon"
             id="appSettingsBtn"
@@ -366,6 +369,7 @@
 <script src="{{ url_for('static', filename='js/browser-pane.js') }}?v={{ version }}"></script>
 <script src="{{ url_for('static', filename='js/terminal-shell.js') }}?v={{ version }}"></script>
 <script src="{{ url_for('static', filename='js/session-menu.js') }}?v={{ version }}"></script>
+<script src="{{ url_for('static', filename='js/shortcuts-help.js') }}?v={{ version }}"></script>
 <script src="{{ url_for('static', filename='js/topbar-peek.js') }}?v={{ version }}"></script>
 <script src="{{ url_for('static', filename='js/terminal-modes.js') }}?v={{ version }}"></script>
 <script src="{{ url_for('static', filename='js/terminals.js') }}?v={{ version }}"></script>

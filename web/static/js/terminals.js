@@ -387,6 +387,14 @@
         onChange: ({ hidden, peeking, hiddenChanged }) => {
             document.body.classList.toggle('topbar-hidden', hidden);
             document.body.classList.toggle('topbar-peek', peeking);
+            /* The shortcut panel hangs off a button on this bar, so a bar that
+               is out of the flow and not being peeked at leaves the panel
+               floating over the grid with nothing above it. The chevron,
+               fullscreen and a retracting peek all arrive here, which is why
+               this is the one place that has to say it. */
+            if (hidden && !peeking) {
+                closeShortcutsHelp();
+            }
             /* Only a flow change resizes anything: the peek is an overlay, so
                a pointer trip to the top edge costs no terminal refit. */
             if (hiddenChanged && gridBuilt) {
@@ -1990,6 +1998,15 @@
         }
     });
 
+    /* A press anywhere else closes the shortcut panel — including a press on
+       any other top-bar control, which is outside the panel's own root and so
+       needs no rule of its own. */
+    document.addEventListener('click', event => {
+        if (!(event.target instanceof Element) || !event.target.closest('#shortcutsHelpRoot')) {
+            closeShortcutsHelp();
+        }
+    });
+
     document.getElementById('savedSessionsModal').addEventListener('click', event => {
         if (event.target.id === 'savedSessionsModal') {
             closeSavedSessionModal();
@@ -2038,6 +2055,7 @@
     document.addEventListener('keydown', event => {
         if (event.key === 'Escape') {
             closeSessionMenu();
+            closeShortcutsHelp();
             topbarPeek.dismiss();
             if (document.getElementById('savedSessionsModal').classList.contains('visible')) {
                 closeSavedSessionModal();

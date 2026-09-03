@@ -197,26 +197,36 @@ GridVibe does not proxy pages or bypass `X-Frame-Options`/CSP, so sites that blo
 | 📤 | Upload files into the folder this pane is showing |
 | 🖥️ | Reveal the current location in the system file manager (local panes only) |
 
-**Top bar:** theme · max surface · broadcast typing · fullscreen · minimize all windows (native desktop mode only) · App Settings · chevron to hide the bar. It also carries the save/status line — and when the bar is hidden that message goes to the workspace's toast instead, so it is never reported into a bar you cannot see.
+**Top bar:** theme · max surface · broadcast typing · fullscreen · minimize all windows (native desktop mode only) · keyboard shortcuts · App Settings · chevron to hide the bar. It also carries the save/status line — and when the bar is hidden that message goes to the workspace's toast instead, so it is never reported into a bar you cannot see.
 
-**A hidden top bar comes back on hover.** Rest the pointer on the small handle at the top edge, centred — only that handle triggers it, so the rest of the edge is free — and the bar slides down over the workspace, so theme, max surface, broadcast, fullscreen and App Settings stay reachable with the bar hidden. It stays for as long as the pointer is on it or focus is in it, and hides again shortly after you move away (or on `Esc`); clicking the handle reveals the bar and puts focus in it, which is the keyboard route in. Fullscreen hides the bar for its duration and reveals it the same way; leaving fullscreen gives back whatever the chevron last said. Nothing about the reveal is saved.
+**A hidden top bar comes back on hover.** Rest the pointer on the small handle at the top edge, centred — only that handle triggers it, so the rest of the edge is free — and the bar slides down over the workspace, so theme, max surface, broadcast, fullscreen, the shortcut list and App Settings stay reachable with the bar hidden. It stays for as long as the pointer is on it or focus is in it, and hides again shortly after you move away (or on `Esc`); clicking the handle reveals the bar and puts focus in it, which is the keyboard route in. Fullscreen hides the bar for its duration and reveals it the same way; leaving fullscreen gives back whatever the chevron last said. Nothing about the reveal is saved.
 
 **Session tab line:** the menu button and the back-to-launcher button sit at the head of the tab line, ahead of the first tab, so they stay reachable with the top bar hidden.
 
 **One menu holds sessions and workspaces.** The GridVibe button at the head of the tab line opens a two-row menu — **Sessions** and **Workspace** — and pointing at either one opens its items beside it: `Import Session…`, `Save Session`, `Save Session as…` and `Save All Sessions` under the first; `Save Workspace`, and with multiple workspaces enabled `Rename Workspace…`, `New Workspace…`, `Open Workspace`, `Move Session to Workspace` and the two close verbs, under the second. Hovering is enough — there is no chevron to aim at, the whole row opens — and only one section is open at a time, so the two rows never move. Moving the pointer off the menu closes it.
 
+**Every shortcut is listed in the app.** The keyboard button — in the workspace top bar left of App Settings, and in the launcher's bottom action bar left of the minimize-all control — opens a read-only panel with the whole list, grouped the way you'd look for it. Rows that only apply in one mode say so rather than disappearing. Nothing in it is editable; the one configurable chord in GridVibe is voice push-to-talk, set in App Settings.
+
 | Shortcut | Action |
 | --- | --- |
-| `Alt+Q` | Open the launcher |
-| `Alt+1`–`Alt+9` | Switch session group |
-| `Alt+W` / `Alt+Shift+W` | Next / previous workspace window (multiple workspaces only) — the window you land in pulses once. In the launcher, `Alt+W` returns to the workspace that opened it, or to whichever workspace is still open if that one has closed |
-| `Alt+X` | Minimize every GridVibe window (native desktop mode only) — click any taskbar entry to bring one back |
+| `Alt+1` – `Alt+9` | Switch session group |
+| `Alt+W` / `Alt+Shift+W` | Next / previous workspace window (multiple workspaces only) — the window you land in pulses once |
+| `Alt+W` | On the launcher, return to the workspace that opened it, or to whichever workspace is still open if that one has closed |
+| `Alt+Q` | Open the launcher (in a workspace window) |
 | `Ctrl+Shift+F` | Terminal scrollback search — or, on an explorer pane, toggle repository search |
+| `Ctrl+Shift+C` | Copy the terminal selection |
+| `Ctrl+V` | Paste into the terminal |
 | `Ctrl+F` | Find in the open file |
-| `Ctrl+Shift+V` | Toggle Markdown rendered preview |
-| `Ctrl+Shift+E` | Edit the open file in place — and, while editing, cancel |
-| `Ctrl+S` / `Esc` | Save / cancel in the explorer editor |
+| `Ctrl+Shift+V` | Toggle the Markdown rendered preview |
 | `F5` | Refresh the focused explorer |
+| `Enter` / `Shift+Enter`, `↑` / `↓` | Step through find matches, in any find bar |
+| `Ctrl+Shift+E` | Edit the open file in place — and, while editing, cancel |
+| `Ctrl+S` | Save in the explorer editor |
+| `Tab` | Indent in the explorer editor |
+| `Esc` | Cancel an edit, drop an explorer selection, or close the open menu |
+| `Alt+X` | Minimize every GridVibe window (native desktop mode only) — click any taskbar entry to bring one back |
+
+Mouse: `Alt`+click folds a whole sibling level in the Files tree, or collapses every commit in the Git graph; `Ctrl`+click and `Shift`+click extend the explorer selection.
 
 Drag the dividers between panes to resize them.
 
