@@ -183,9 +183,11 @@
         _refreshVoiceRuntimeState();
     }
 
-    /* The Workspace menu's multi-workspace items are server-rendered, so this
-       window re-renders itself when the mode changes elsewhere. A window whose
-       workspace was closed by that change closes instead (workspaces.js). */
+    /* The whole window is reloaded when the mode changes elsewhere: the flag
+       reaches the page as server-rendered markup (MULTI_WORKSPACE_ENABLED),
+       which the session menu reads when it builds its Workspace section. A
+       window whose workspace was closed by that change closes instead
+       (workspaces.js). */
     function applyAppConfigMultiWorkspace(message) {
         const enabled = message?.workspace?.multi_workspace_enabled;
         if (typeof enabled !== 'boolean' || enabled === isMultiWorkspaceEnabled()) {
@@ -365,10 +367,12 @@
         noteWorkspacePresentationChanged();
     }
 
-    /* Hiding the bar took the Sessions… and Workspace… menus with it — the
-       only place Save Session and Save Workspace live — so a hidden bar is
-       revealed on demand by GridVibeTopbarPeek. It owns *when*; the page owns
-       what that looks like. Two body classes, two meanings:
+    /* A hidden bar is revealed on demand by GridVibeTopbarPeek — theme, max
+       surface, broadcast, fullscreen and App Settings are all still up here,
+       and so is the save status line. (Sessions and Workspace are not: they
+       are one button down in the session tab line, which is why the peek no
+       longer has a menu to hold itself open for.) It owns *when*; the page
+       owns what that looks like. Two body classes, two meanings:
 
        - topbar-collapsed is the chevron's persisted choice, and stays the one
          thing every topbar_visible read-back looks at;
@@ -390,17 +394,6 @@
             }
         }
     });
-
-    /* Kept in step with the two app menus, which must hold the peek open while
-       one of them is showing. */
-    function reportAppMenuState() {
-        topbarPeek.setMenuOpen(
-            Boolean(
-                document.getElementById('sessionsMenuRoot')?.classList.contains('open')
-                || document.getElementById('workspaceMenuRoot')?.classList.contains('open')
-            )
-        );
-    }
 
     function applyTopbarVisibility(visible, { persist = false, report = false } = {}) {
         const shouldShow = Boolean(visible);
@@ -1312,59 +1305,6 @@
         } catch (_error) {}
     }
 
-    function closeSessionsMenu() {
-        const root = document.getElementById('sessionsMenuRoot');
-        const button = document.getElementById('sessionsMenuBtn');
-        root?.classList.remove('open');
-        button?.setAttribute('aria-expanded', 'false');
-        reportAppMenuState();
-    }
-
-    function toggleSessionsMenu(event) {
-        event?.preventDefault();
-        event?.stopPropagation();
-        const root = document.getElementById('sessionsMenuRoot');
-        const button = document.getElementById('sessionsMenuBtn');
-        if (!root || !button) {
-            return;
-        }
-
-        const shouldOpen = !root.classList.contains('open');
-        root.classList.toggle('open', shouldOpen);
-        button.setAttribute('aria-expanded', shouldOpen ? 'true' : 'false');
-        if (shouldOpen) {
-            closeWorkspaceMenu();
-        }
-        reportAppMenuState();
-    }
-
-    function closeWorkspaceMenu() {
-        const root = document.getElementById('workspaceMenuRoot');
-        const button = document.getElementById('workspaceMenuBtn');
-        root?.classList.remove('open');
-        button?.setAttribute('aria-expanded', 'false');
-        reportAppMenuState();
-    }
-
-    function toggleWorkspaceMenu(event) {
-        event?.preventDefault();
-        event?.stopPropagation();
-        const root = document.getElementById('workspaceMenuRoot');
-        const button = document.getElementById('workspaceMenuBtn');
-        if (!root || !button) {
-            return;
-        }
-
-        const shouldOpen = !root.classList.contains('open');
-        root.classList.toggle('open', shouldOpen);
-        button.setAttribute('aria-expanded', shouldOpen ? 'true' : 'false');
-        if (shouldOpen) {
-            closeSessionsMenu();
-            refreshWorkspaceMenuLists();
-        }
-        reportAppMenuState();
-    }
-
     /* ─────────────────────────────────────────────
        Multi-workspace: menus, move, window lifecycle
 
@@ -1435,7 +1375,7 @@
                 disabled: workspace.workspace_id === currentWorkspaceId,
                 icon: workspace.workspace_id === currentWorkspaceId ? '' : WORKSPACE_ICONS.window,
                 onSelect: () => {
-                    closeWorkspaceMenu();
+                    closeSessionMenu();
                     switchToWorkspaceWindow(workspace.workspace_id, {
                         groupId: workspace.active_group_id
                     });
@@ -1450,7 +1390,7 @@
                 icon: WORKSPACE_ICONS.move,
                 disabled: !targetGroupId,
                 onSelect: () => {
-                    closeWorkspaceMenu();
+                    closeSessionMenu();
                     moveSessionGroupToWorkspace(targetGroupId, { workspaceId: workspace.workspace_id });
                 }
             }));
@@ -1459,7 +1399,7 @@
             icon: WORKSPACE_ICONS.add,
             disabled: !targetGroupId,
             onSelect: () => {
-                closeWorkspaceMenu();
+                closeSessionMenu();
                 moveSessionGroupToNewWorkspace(targetGroupId);
             }
         });
@@ -2045,11 +1985,8 @@
     }
 
     document.addEventListener('click', event => {
-        if (!(event.target instanceof Element) || !event.target.closest('#sessionsMenuRoot')) {
-            closeSessionsMenu();
-        }
-        if (!(event.target instanceof Element) || !event.target.closest('#workspaceMenuRoot')) {
-            closeWorkspaceMenu();
+        if (!(event.target instanceof Element) || !event.target.closest('#sessionMenuRoot')) {
+            closeSessionMenu();
         }
     });
 
@@ -2100,10 +2037,7 @@
 
     document.addEventListener('keydown', event => {
         if (event.key === 'Escape') {
-            closeSessionsMenu();
-            closeWorkspaceMenu();
-            /* After the menus, so a peek held open by one of them is released
-               by the same keypress that closed it. */
+            closeSessionMenu();
             topbarPeek.dismiss();
             if (document.getElementById('savedSessionsModal').classList.contains('visible')) {
                 closeSavedSessionModal();
@@ -2125,9 +2059,28 @@
     const WORKSPACE_SAVE_MESSAGE_MS = 6000;
     let workspaceSaveMessageTimer = null;
 
+    /* One message, one surface, chosen when the message is raised.
+
+       The status string lives in the top bar, which leaves the layout for the
+       chevron or for fullscreen — so a message written there while the bar is
+       out of the flow is a message nobody sees. It goes to the toast instead,
+       which is visible either way.
+
+       Routed on `topbar-hidden` (the flow) and deliberately not on
+       `topbar-peek`: a message written into a bar that is only peeking leaves
+       320 ms after the pointer does. And a live message never migrates — hiding
+       the bar while a status string is up does not move it, and each surface
+       dismisses on its own timer. */
     function setWorkspaceSaveMessage(message, type = '') {
+        if (!message) {
+            return;
+        }
+        if (document.body.classList.contains('topbar-hidden')) {
+            showTerminalToast(message, type === 'error' || type === 'success' ? type : '');
+            return;
+        }
         const label = document.getElementById('sessionLabel');
-        if (!label || !message) {
+        if (!label) {
             return;
         }
         label.textContent = message;
@@ -2776,13 +2729,6 @@
         }
     }
 
-    function updateWorkspaceSaveItemState() {
-        const item = document.getElementById('saveWorkspaceItem');
-        if (item) {
-            item.disabled = !sessionGroups.length;
-        }
-    }
-
     async function getCurrentWorkspaceNativeZoomFactor() {
         const api = window.pywebview?.api;
         if (api?.get_workspace_native_zoom) {
@@ -2860,7 +2806,7 @@
     }
 
     function renderSessionTabs() {
-        updateWorkspaceSaveItemState();
+        syncSessionMenuState();
         const container = document.getElementById('sessionTabs');
         if (!container) return;
 
@@ -6562,10 +6508,7 @@
             }
         } catch (error) {
             console.error('[GridVibe Sessions] switchSessionPaneMode failed:', error);
-            const label = document.getElementById('sessionLabel');
-            if (label) {
-                label.textContent = `Mode switch failed: ${error.message}`;
-            }
+            setWorkspaceSaveMessage(`Mode switch failed: ${error.message}`, 'error');
             updateModeToggleButton(button, switchingToTerminal);
         } finally {
             pendingModeSwitchSessionIds.delete(sessionId);
@@ -6605,10 +6548,7 @@
             }
         } catch (error) {
             console.error('[GridVibe Sessions] switchSessionBrowserMode failed:', error);
-            const label = document.getElementById('sessionLabel');
-            if (label) {
-                label.textContent = `Browser mode switch failed: ${error.message}`;
-            }
+            setWorkspaceSaveMessage(`Browser mode switch failed: ${error.message}`, 'error');
             updateBrowserModeToggleButton(button, switchingToTerminal);
         } finally {
             pendingModeSwitchSessionIds.delete(sessionId);
@@ -6735,10 +6675,10 @@
             ? null
             : buildTerminalCloseRectsBySessionId(plan);
         if (!plan.closeLastPane && !restoreRectsBySessionId) {
-            const label = document.getElementById('sessionLabel');
-            if (label) {
-                label.textContent = 'Close terminal failed: no neighboring pane can safely fill this layout';
-            }
+            setWorkspaceSaveMessage(
+                'Close terminal failed: no neighboring pane can safely fill this layout',
+                'error'
+            );
             return;
         }
         // Past the confirm and the layout check: this pane is really closing.
@@ -6787,10 +6727,7 @@
             await initialLoad();
         } catch (error) {
             console.error('[GridVibe Sessions] closeTerminalPane failed:', error);
-            const label = document.getElementById('sessionLabel');
-            if (label) {
-                label.textContent = `Close terminal failed: ${error.message}`;
-            }
+            setWorkspaceSaveMessage(`Close terminal failed: ${error.message}`, 'error');
         } finally {
             if (button) {
                 button.textContent = '×';
@@ -6902,10 +6839,7 @@
             emitTerminalResize(newIndex, true);
         } catch (error) {
             console.error('[GridVibe Sessions] splitTerminalPane failed:', error);
-            const label = document.getElementById('sessionLabel');
-            if (label) {
-                label.textContent = `Split failed: ${error.message}`;
-            }
+            setWorkspaceSaveMessage(`Split failed: ${error.message}`, 'error');
         } finally {
             updateAllSplitButtonStates();
         }
@@ -8545,6 +8479,7 @@
        Boot
     ───────────────────────────────────────────── */
     initSurfaceMode();
+    wireSessionMenu();
     topbarPeek.attach();
     applyTopbarVisibility(getStoredTopbarVisible());
     setupAppConfigUpdateListeners();

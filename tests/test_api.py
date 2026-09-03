@@ -316,6 +316,7 @@ class ApiRoutesTestCase(unittest.TestCase):
             "js/explorer-overview.js",
             "js/browser-pane.js",
             "js/terminal-shell.js",
+            "js/session-menu.js",
             "js/terminals.js",
         ):
             marker = f"/static/{asset}"
@@ -725,13 +726,19 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         html = self._page_html(response)
         self.assertIn('src="/docs/images/GridVibe_icon.ico"', html)
-        self.assertIn(">Sessions...</button>", html)
-        self.assertIn(">Import Session ...</button>", html)
-        self.assertIn(">Save Session</button>", html)
-        self.assertIn(">Save Session as ...</button>", html)
-        self.assertIn("onclick=\"closeSessionsMenu(); return openNewSessionSelector(event);\"", html)
-        self.assertIn("onclick=\"closeSessionsMenu(); saveActiveWorkspaceSession(this);\"", html)
-        self.assertIn("onclick=\"closeSessionsMenu(); saveActiveWorkspaceSessionAs(this);\"", html)
+        # The two top-bar dropdowns are one button in the session tab line now;
+        # its panel's rows are built by session-menu.js, which names the same
+        # four session actions and sends each through its own data attribute.
+        self.assertNotIn(">Sessions...</button>", html)
+        self.assertIn('id="sessionMenuBtn"', html)
+        self.assertIn("label: 'Import Session ...'", html)
+        self.assertIn("label: 'Save Session'", html)
+        self.assertIn("label: 'Save Session as ...'", html)
+        self.assertIn("label: 'Save All Sessions'", html)
+        self.assertIn("data-session-menu-action=\"${escHtml(row.action)}\"", html)
+        self.assertIn("importSession: (_button, event) => openNewSessionSelector(event)", html)
+        self.assertIn("saveSession: button => saveActiveWorkspaceSession(button)", html)
+        self.assertIn("saveSessionAs: button => saveActiveWorkspaceSessionAs(button)", html)
         self.assertIn('<div id="savedSessionsModal" class="modal-shell" aria-hidden="true">', html)
         self.assertIn('<div id="saveSessionAsModal" class="modal-shell" aria-hidden="true">', html)
         self.assertIn('<input id="saveSessionAsOpenNow" type="checkbox">', html)
@@ -744,8 +751,8 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("async function saveActiveWorkspaceSession(button = null, options = {})", html)
         self.assertIn("function saveActiveWorkspaceSessionAs(button = null)", html)
         self.assertIn("async function saveAllWorkspaceSessions(button = null)", html)
-        self.assertIn("closeSessionsMenu(); saveAllWorkspaceSessions(this);", html)
-        self.assertIn('id="saveAllSessionsMenuItem"', html)
+        self.assertIn("saveAllSessions: button => saveAllWorkspaceSessions(button)", html)
+        self.assertIn("id: 'saveAllSessionsMenuItem'", html)
         self.assertIn("let workspaceSaveTargets = new Map();", html)
         self.assertIn("function notifySavedSessionUpdated(savedSession, options = {})", html)
         self.assertIn("const SAVED_SESSION_UPDATE_STORAGE_KEY = 'gridvibe.savedSessionUpdated';", html)
@@ -878,11 +885,15 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         html = self._page_html(response)
 
-        menu_start = html.index('>Import Session ...</button>')
         go_to_settings_start = html.index("async function goToSettings(event)")
         open_selector_start = html.index("async function openNewSessionSelector(event)")
 
-        self.assertIn("openNewSessionSelector(event)", html[:menu_start])
+        # Import Session opens the in-page selector; only the launcher button
+        # beside it reaches for a window.
+        self.assertIn(
+            "importSession: (_button, event) => openNewSessionSelector(event)",
+            html,
+        )
         self.assertNotIn(
             "window.pywebview?.api?.open_launcher_window",
             html[open_selector_start:go_to_settings_start],
@@ -3762,7 +3773,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("closeSessionGroup(group.group_id);", html)
         self.assertIn(".app-menu-panel {", html)
         self.assertIn(".app-menu-item {", html)
-        self.assertIn(">Import Session ...</button>", html)
+        self.assertIn("label: 'Import Session ...'", html)
 
     def test_session_tabs_close_on_middle_click(self):
         """Todo 3 — middle-click closes a session tab like an explorer tab,
@@ -20452,17 +20463,20 @@ class RuntimeStateRestoreTestCase(unittest.TestCase):
         """The Workspace... dropdown's Save Workspace item posts to
         /api/runtime-state/save and is disabled when no groups are live."""
         html = self.client.get("/terminals").get_data(as_text=True)
-        self.assertIn('id="workspaceMenuRoot"', html)
-        self.assertIn('id="workspaceMenuBtn"', html)
-        self.assertIn(">Workspace...</button>", html)
-        self.assertIn('id="saveWorkspaceItem"', html)
-        self.assertIn(">Save Workspace</button>", html)
+        self.assertIn('id="sessionMenuRoot"', html)
+        self.assertIn('id="sessionMenuBtn"', html)
+        session_menu_js = self._static("js/session-menu.js")
+        self.assertIn("label: 'Workspace'", session_menu_js)
+        self.assertIn("id: 'saveWorkspaceItem'", session_menu_js)
+        self.assertIn("label: 'Save Workspace'", session_menu_js)
+        self.assertIn("function toggleSessionMenu(event)", session_menu_js)
+        # Save Workspace is unavailable with nothing live to save: a render
+        # input when the section is built, a paint while it is showing.
+        self.assertIn("item.disabled = !sessionMenuHasLiveGroups();", session_menu_js)
         terminals_js = self._static("js/terminals.js")
-        self.assertIn("function toggleWorkspaceMenu(event)", terminals_js)
         self.assertIn("async function saveWorkspace(", terminals_js)
         self.assertIn("/api/runtime-state/save", terminals_js)
         self.assertIn("native_zoom_factor: nativeZoomFactor", terminals_js)
-        self.assertIn("item.disabled = !sessionGroups.length;", terminals_js)
         shared_js = self._static("js/shared.js")
         self.assertIn("function normalizeNativeZoomFactor(value)", shared_js)
         self.assertIn("async function getNativeSessionZoomFactor()", shared_js)

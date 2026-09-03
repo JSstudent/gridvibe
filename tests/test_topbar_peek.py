@@ -2,15 +2,20 @@
 
 `topbar-peek.js` takes its elements and timers from an injected runtime, so
 both halves run in Node against the real module: the tests drive the same
-pointer, focus, and menu events the page dispatches and read back the state and
-the `{hidden, peeking}` reports terminals.js maps onto its two body classes,
-rather than asserting source text.
+pointer and focus events the page dispatches and read back the state and the
+`{hidden, peeking}` reports terminals.js maps onto its two body classes, rather
+than asserting source text.
 
 The contracts pinned here are the ones the feature exists for: a hidden bar
-comes back on demand, an open Sessions…/Workspace… menu can never be closed out
-from under the pointer, fullscreen hides the bar without touching the stored
-`topbar_visible`, and a reveal is an overlay — it never reports the flow
-change that costs every terminal a refit.
+comes back on demand, a revealed bar can never be closed out from under a
+pointer resting on it or a control focused in it, fullscreen hides the bar
+without touching the stored `topbar_visible`, and a reveal is an overlay — it
+never reports the flow change that costs every terminal a refit.
+
+The Sessions…/Workspace… menus that used to be the third retention input are in
+the session tab line now, so nothing in the bar opens a menu and `setMenuOpen`
+went with them (guardrail 5). The keyboard route in moves with it: the handle
+focuses whatever is genuinely first in the bar, which is the theme toggle.
 """
 
 import json
@@ -155,7 +160,14 @@ class TopbarPeekPolicyTestCase(TopbarPeekNodeTestCase):
             {"shown": False, "chevron": True, "fullscreen": True, "both": True},
         )
 
-    def test_pointer_focus_and_an_open_menu_each_hold_the_reveal(self):
+    def test_a_pointer_on_the_bar_or_focus_in_it_each_hold_the_reveal(self):
+        """The two inputs left, and nothing else retains.
+
+        A menu opened from the bar used to be the third; with the menus one bar
+        down in the session tab line there is no producer for it, so a state
+        that still carried the field would be a retention nothing could ever
+        release.
+        """
         result = self._run_node(
             """
             const { isRetained } = peek.policy;
@@ -163,13 +175,24 @@ class TopbarPeekPolicyTestCase(TopbarPeekNodeTestCase):
                 idle: isRetained({}),
                 pointer: isRetained({ pointerInside: true }),
                 focus: isRetained({ focusInside: true }),
-                menu: isRetained({ menuOpen: true })
+                stateFields: Object.keys(harness(peek).controller.state()).sort()
             }));
             """
         )
+        self.assertEqual(result["idle"], False)
+        self.assertEqual(result["pointer"], True)
+        self.assertEqual(result["focus"], True)
         self.assertEqual(
-            result,
-            {"idle": False, "pointer": True, "focus": True, "menu": True},
+            result["stateFields"],
+            [
+                "collapsed",
+                "focusInside",
+                "fullscreen",
+                "hidden",
+                "peeking",
+                "pointerInside",
+                "retained",
+            ],
         )
 
 
@@ -266,29 +289,31 @@ class TopbarPeekRevealTestCase(TopbarPeekNodeTestCase):
 
 
 class TopbarPeekRetentionTestCase(TopbarPeekNodeTestCase):
-    def test_an_open_menu_holds_the_bar_open_after_the_pointer_leaves(self):
-        """The whole point of the feature: Save Session lives in that menu, and
-        a menu that vanished because the pointer wandered a few pixels off the
-        bar would be the same bug in a new place."""
+    def test_a_pointer_resting_on_the_bar_holds_it_open(self):
+        """A bar that vanished while the pointer was on one of its controls
+        would be the reachability bug the reveal exists to answer, one surface
+        along. The peek zone's own leave fires as the pointer crosses into the
+        bar, so the enter has to win that race."""
         result = self._run_node(
             """
             const page = harness(peek);
             page.controller.setCollapsed(true);
             page.hoverEdge();
-            page.controller.setMenuOpen(true);
+            const held = page.bodyClasses();
+            page.clock.fire();
+            const afterGrace = page.bodyClasses();
             page.leaveBar();
             page.clock.fire();
-            const withMenuOpen = page.bodyClasses();
-            page.controller.setMenuOpen(false);
-            page.clock.fire();
             process.stdout.write(JSON.stringify({
-                withMenuOpen,
-                afterMenuClosed: page.bodyClasses()
+                held,
+                afterGrace,
+                afterPointerLeft: page.bodyClasses()
             }));
             """
         )
-        self.assertEqual(result["withMenuOpen"], ["topbar-hidden", "topbar-peek"])
-        self.assertEqual(result["afterMenuClosed"], ["topbar-hidden"])
+        self.assertEqual(result["held"], ["topbar-hidden", "topbar-peek"])
+        self.assertEqual(result["afterGrace"], ["topbar-hidden", "topbar-peek"])
+        self.assertEqual(result["afterPointerLeft"], ["topbar-hidden"])
 
     def test_keyboard_focus_inside_the_bar_holds_it_open(self):
         result = self._run_node(

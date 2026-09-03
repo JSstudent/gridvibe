@@ -407,10 +407,10 @@
         }
 
         if (pane._browserTabs.length >= BROWSER_MAX_TABS) {
-            const label = document.getElementById('sessionLabel');
-            if (label) {
-                label.textContent = `Browser panes hold at most ${BROWSER_MAX_TABS} tabs.`;
-            }
+            /* Through the one helper, so it gets a status type, a timer and
+                the toast when the top bar is out of the flow — a raw write to
+                #sessionLabel is invisible in exactly that case. */
+            setWorkspaceSaveMessage(`Browser panes hold at most ${BROWSER_MAX_TABS} tabs.`, 'error');
             return;
         }
 
@@ -418,10 +418,7 @@
         try {
             normalized = normalizeBrowserUrlInput(url);
         } catch (error) {
-            const label = document.getElementById('sessionLabel');
-            if (label) {
-                label.textContent = `Browser tab rejected: ${error.message}`;
-            }
+            setWorkspaceSaveMessage(`Browser tab rejected: ${error.message}`, 'error');
             return;
         }
 
@@ -534,10 +531,7 @@
             if (input) {
                 input.value = tab.url;
             }
-            const label = document.getElementById('sessionLabel');
-            if (label) {
-                label.textContent = `Browser URL rejected: ${error.message}`;
-            }
+            setWorkspaceSaveMessage(`Browser URL rejected: ${error.message}`, 'error');
             return;
         }
 

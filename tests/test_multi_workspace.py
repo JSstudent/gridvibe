@@ -2885,8 +2885,17 @@ async function fetch(path, options) {
     # ── Page and menu wiring ──
 
     def test_terminals_page_ships_the_multi_workspace_menu_items(self):
+        """The Workspace section's rows live in session-menu.js's registry now.
+
+        The two top-bar dropdowns became one button in the session tab line, so
+        the page ships the button and the dialogs; what the Workspace section
+        holds is read off the registry, and whether the multi-workspace half of
+        it is offered is exercised in ``tests/test_session_menu.py`` by opening
+        the menu with the flag on and off.
+        """
         with patch.object(api.runtime_config, "multi_workspace_enabled", True):
             html = self.client.get("/terminals").get_data(as_text=True)
+        session_menu_js = self._static("js/session-menu.js")
 
         for element_id in (
             "renameWorkspaceItem",
@@ -2898,23 +2907,39 @@ async function fetch(path, options) {
             # separate persistence effects, so the menu offers both.
             "closeWorkspaceItem",
         ):
-            self.assertIn(f'id="{element_id}"', html)
+            self.assertIn(f"'{element_id}'", session_menu_js)
+        self.assertIn('id="sessionMenuRoot"', html)
         self.assertIn('id="workspaceNameModal"', html)
         self.assertIn('id="workspaceContextMenu"', html)
-        self.assertIn('id="saveWorkspaceItem"', html)
+        self.assertIn("id: 'saveWorkspaceItem'", session_menu_js)
 
     def test_workspace_menu_degrades_when_the_flag_is_off(self):
-        with patch.object(api.runtime_config, "multi_workspace_enabled", False):
-            html = self.client.get("/terminals").get_data(as_text=True)
+        """Save Workspace survives the flag; everything below it is gated.
 
-        self.assertIn('id="saveWorkspaceItem"', html)
+        The gate is one early return in the registry, so the row that precedes
+        it is the whole single-workspace menu.
+        """
+        session_menu_js = self._static("js/session-menu.js")
+        gated = session_menu_js[
+            session_menu_js.index("function sessionMenuWorkspaceRows()"):
+        ]
+        before_gate, after_gate = gated.split("if (!isSessionMenuMultiWorkspace()) {", 1)
+
+        self.assertIn("id: 'saveWorkspaceItem'", before_gate)
+        # The gate returns what it has rather than filtering afterwards, so the
+        # single-workspace menu cannot pick up a row by accident.
+        self.assertIn(
+            "if (!isSessionMenuMultiWorkspace()) {\n            return rows;\n        }",
+            session_menu_js,
+        )
         for element_id in (
             "renameWorkspaceItem",
             "newWorkspaceItem",
             "closeWorkspaceWindowItem",
             "closeWorkspaceItem",
         ):
-            self.assertNotIn(f'id="{element_id}"', html)
+            self.assertNotIn(f"'{element_id}'", before_gate)
+            self.assertIn(f"'{element_id}'", after_gate)
 
     def test_launcher_ships_the_destination_control_behind_the_flag(self):
         with patch.object(api.runtime_config, "multi_workspace_enabled", True):
@@ -2954,25 +2979,24 @@ async function fetch(path, options) {
             self.assertNotIn(banned, workspaces_js)
 
     def test_move_submenu_names_the_session_it_acts_on(self):
-        with patch.object(api.runtime_config, "multi_workspace_enabled", True):
-            html = self.client.get("/terminals").get_data(as_text=True)
         terminals_js = self._static("js/terminals.js")
 
         # "Move Session to Workspace" alone does not say which session, so the
         # heading carries the active tab's name and the list its aria-label.
-        self.assertIn('id="moveWorkspaceScope"', html)
+        self.assertIn("scopeId: 'moveWorkspaceScope'", self._static("js/session-menu.js"))
         self.assertIn("function setMoveWorkspaceScopeLabel(groupId)", terminals_js)
         self.assertIn("setMoveWorkspaceScopeLabel(targetGroupId);", terminals_js)
         self.assertIn("`Move session ${name} to workspace`", terminals_js)
 
     def test_alt_w_walks_the_workspaces_without_the_menu(self):
-        with patch.object(api.runtime_config, "multi_workspace_enabled", True):
-            html = self.client.get("/terminals").get_data(as_text=True)
         terminals_js = self._static("js/terminals.js")
         workspaces_js = self._static("js/workspaces.js")
 
-        # The shortcut is discoverable from the menu it replaces.
-        self.assertIn('<span class="workspace-submenu-hint">Alt+W</span>', html)
+        # The shortcut is discoverable from the menu it replaces, which now
+        # builds that heading in session-menu.js.
+        session_menu_js = self._static("js/session-menu.js")
+        self.assertIn('<span class="workspace-submenu-hint">${escHtml(row.hint)}</span>', session_menu_js)
+        self.assertIn("hint: 'Alt+W'", session_menu_js)
         # One ordering for the menu and the shortcut, so they cannot disagree.
         self.assertIn(
             "function nextWorkspaceInCycle(workspaces, currentWorkspaceId, step = 1)",

@@ -197,11 +197,13 @@ GridVibe does not proxy pages or bypass `X-Frame-Options`/CSP, so sites that blo
 | 📤 | Upload files into the folder this pane is showing |
 | 🖥️ | Reveal the current location in the system file manager (local panes only) |
 
-**Top bar:** theme · max surface · broadcast typing · fullscreen · minimize all windows (native desktop mode only) · App Settings · chevron to hide the bar. Plus a `Workspace…` menu and a `Sessions…` menu.
+**Top bar:** theme · max surface · broadcast typing · fullscreen · minimize all windows (native desktop mode only) · App Settings · chevron to hide the bar. It also carries the save/status line — and when the bar is hidden that message goes to the workspace's toast instead, so it is never reported into a bar you cannot see.
 
-**A hidden top bar comes back on hover.** Rest the pointer on the small handle at the top edge, centred — only that handle triggers it, so the rest of the edge is free — and the bar slides down over the workspace for as long as you are using it, so `Save Session` and `Save Workspace` stay reachable with the bar hidden. It stays while a menu is open and hides again shortly after you move away (or on `Esc`); clicking the handle reveals the bar and puts focus in it, which is the keyboard route in. Fullscreen hides the bar for its duration and reveals it the same way; leaving fullscreen gives back whatever the chevron last said. Nothing about the reveal is saved.
+**A hidden top bar comes back on hover.** Rest the pointer on the small handle at the top edge, centred — only that handle triggers it, so the rest of the edge is free — and the bar slides down over the workspace, so theme, max surface, broadcast, fullscreen and App Settings stay reachable with the bar hidden. It stays for as long as the pointer is on it or focus is in it, and hides again shortly after you move away (or on `Esc`); clicking the handle reveals the bar and puts focus in it, which is the keyboard route in. Fullscreen hides the bar for its duration and reveals it the same way; leaving fullscreen gives back whatever the chevron last said. Nothing about the reveal is saved.
 
-**Session tab line:** the back-to-launcher button sits at the head of the tab line, ahead of the first tab, so it stays reachable with the top bar hidden.
+**Session tab line:** the menu button and the back-to-launcher button sit at the head of the tab line, ahead of the first tab, so they stay reachable with the top bar hidden.
+
+**One menu holds sessions and workspaces.** The GridVibe button at the head of the tab line opens a two-row menu — **Sessions** and **Workspace** — and pointing at either one opens its items beside it: `Import Session…`, `Save Session`, `Save Session as…` and `Save All Sessions` under the first; `Save Workspace`, and with multiple workspaces enabled `Rename Workspace…`, `New Workspace…`, `Open Workspace`, `Move Session to Workspace` and the two close verbs, under the second. Hovering is enough — there is no chevron to aim at, the whole row opens — and only one section is open at a time, so the two rows never move. Moving the pointer off the menu closes it.
 
 | Shortcut | Action |
 | --- | --- |
