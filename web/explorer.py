@@ -1121,6 +1121,9 @@ def _empty_explorer_git_context(error: Optional[str] = None) -> Dict[str, Any]:
         "available": False,
         "repo_root": None,
         "branch": None,
+        "detached": False,
+        "detached_ref": None,
+        "detached_at": None,
         "head": None,
         "ahead": None,
         "behind": None,
@@ -1149,6 +1152,13 @@ EXPLORER_GIT_MAX_OUTPUT_BYTES = 10 * 1024 * 1024
 # ceiling: whatever a runaway command has to say, the first megabyte says it.
 EXPLORER_GIT_MAX_STDERR_BYTES = 1 * 1024 * 1024
 _GIT_STREAM_CHUNK_BYTES = 64 * 1024
+# How far back the HEAD reflog is read for the switch that detached HEAD, and
+# in what shape. Git scans the whole reflog; that switch is by construction
+# near its tip, and an unbounded read of repository-sized history is what the
+# output-ceiling rule exists to prevent.
+GIT_HEAD_SWITCH_REFLOG_ENTRIES = 40
+GIT_HEAD_SWITCH_REFLOG_FORMAT = "%H %gs"
+_GIT_OBJECT_ID_PATTERN = re.compile(r"[0-9a-f]{7,64}")
 
 
 def _git_output_limit(max_output_bytes: Optional[int]) -> int:
@@ -1458,7 +1468,9 @@ def _parse_git_status_porcelain_v2(raw_output: bytes) -> Tuple[Dict[str, Any], D
     """Parse NUL-delimited `git status --porcelain=v2 -z --branch` output."""
     branch: Dict[str, Any] = {
         "branch": None,
+        "detached": False,
         "head": None,
+        "head_oid": None,
         "ahead": None,
         "behind": None,
     }
@@ -1473,10 +1485,23 @@ def _parse_git_status_porcelain_v2(raw_output: bytes) -> Tuple[Dict[str, Any], D
         if record.startswith("# "):
             header = record[2:]
             key, _, value = header.partition(" ")
-            if key == "branch.head" and value != "(detached)":
-                branch["branch"] = value or None
+            if key == "branch.head":
+                # `(detached)` is Git's own word for the state, and it is
+                # recorded rather than left as an absent branch: the sidebar
+                # otherwise prints the abbreviated HEAD in the branch's place,
+                # which reads as a branch literally named `3c2574d`. A status
+                # that carried no branch header at all stays a third, distinct
+                # fact -- neither a branch nor a detachment.
+                if value == "(detached)":
+                    branch["detached"] = True
+                else:
+                    branch["branch"] = value or None
             elif key == "branch.oid":
                 branch["head"] = None if value == "(initial)" else value[:12]
+                # The full id never reaches the payload -- `head` is what the
+                # sidebar shows -- but the detached-HEAD description compares
+                # object ids, and a 12-character prefix is not one.
+                branch["head_oid"] = None if value == "(initial)" else value
             elif key == "branch.ab":
                 branch["ahead"], branch["behind"] = _parse_git_ahead_behind(value)
             continue
@@ -2428,6 +2453,116 @@ def _resolve_git_worktree_root(backend: Any, current_path: str) -> Tuple[Optiona
     return backend.canonical_repo_root(rev_lines[0]), None
 
 
+def _is_git_revision_argument(name: str) -> bool:
+    """True for a reflog-derived name that may be handed back to Git as a rev.
+
+    The name is repository content, and although the local runner passes argv
+    and the remote one `shlex.quote`s it, a leading `-` is still an option
+    wherever it lands. Git's own ref-name rules already exclude whitespace and
+    control characters, so anything carrying them was never a ref.
+    """
+    if not name or len(name) > 255 or name.startswith("-"):
+        return False
+    return not any(character.isspace() or ord(character) < 0x20 for character in name)
+
+
+def _parse_git_head_switch_reflog(raw_output: bytes) -> Optional[Tuple[str, str]]:
+    """Return `(object id, requested name)` for the newest HEAD switch entry.
+
+    `git reflog show` is newest-first, and the entry that detached HEAD is the
+    most recent `checkout: moving from X to Y` in it -- the same record
+    `git branch` reads, and the only one that says what was *asked for*:
+    several refs can point at one commit and none of them has to. An entry
+    whose message carries no ` to ` is skipped rather than ending the scan,
+    exactly as Git's own reader does.
+    """
+    prefix = "checkout: moving from "
+    for line in _decode_git_output(raw_output).splitlines():
+        object_id, _, subject = line.partition(" ")
+        if not subject.startswith(prefix):
+            continue
+        moved = subject[len(prefix):]
+        separator = moved.find(" to ")
+        if separator < 0:
+            continue
+        name = moved[separator + len(" to "):].strip()
+        if not _is_git_revision_argument(name):
+            return None
+        return object_id.strip(), name
+    return None
+
+
+def _describe_git_detached_head(
+    backend: Any,
+    repo_root: str,
+    head_oid: Optional[str],
+) -> Tuple[Optional[str], Optional[bool]]:
+    """Return what `git branch` says about a detached HEAD: a name, and at/from.
+
+    `(None, None)` means there is nothing to name and the caller falls back to
+    the abbreviated object id -- which is what Git itself prints for a checkout
+    of a raw id, so the fallback is not a degradation.
+
+    Two bounded reads, and only ever while HEAD is detached: the reflog for the
+    name, then one `rev-parse` to establish that the name still points where
+    the reflog said it did. That second read is the difference between naming a
+    scope and guessing at one -- a fetch that moved `origin/x` forward leaves
+    the reflog entry standing, and "detached at origin/x" would then name a
+    commit HEAD is not on. Comparing against the reflog entry's own id rather
+    than HEAD's is also what answers *at* versus *from*.
+
+    The name reported is the one the reflog recorded, so a remote-tracking
+    checkout reads `origin/bfla_db_name` exactly as `git branch` prints it. Git
+    resolves the name to a full refname first and strips only `refs/tags/` and
+    `refs/remotes/`, which is why `git checkout --detach master` prints
+    `refs/heads/master` there and the branch's own name here.
+    """
+    try:
+        reflog = backend.run_git(
+            [
+                "reflog",
+                "show",
+                "--format=" + GIT_HEAD_SWITCH_REFLOG_FORMAT,
+                "-n",
+                str(GIT_HEAD_SWITCH_REFLOG_ENTRIES),
+                "HEAD",
+            ],
+            cwd=repo_root,
+            timeout=GIT_READ_TIMEOUT,
+        )
+        _require_complete_git_result(reflog, "Git reflog read")
+    except Exception:
+        return None, None
+    if reflog.returncode != 0:
+        return None, None
+
+    entry = _parse_git_head_switch_reflog(reflog.stdout)
+    if entry is None:
+        return None, None
+    moved_oid, name = entry
+    if not moved_oid:
+        return None, None
+    # A checkout of a raw object id names no ref, and Git abbreviates it there
+    # in exactly the way this function's caller already does.
+    if _GIT_OBJECT_ID_PATTERN.fullmatch(name):
+        return None, None
+
+    try:
+        resolved = backend.run_git(
+            ["rev-parse", "--verify", "--quiet", name + "^{commit}"],
+            cwd=repo_root,
+            timeout=GIT_READ_TIMEOUT,
+        )
+        _require_complete_git_result(resolved, "Git revision check")
+    except Exception:
+        return None, None
+    if resolved.returncode != 0:
+        return None, None
+    if _decode_git_output(resolved.stdout) != moved_oid:
+        return None, None
+    return name, moved_oid == (head_oid or "")
+
+
 def _explorer_cwd_repo_root(backend: Any, current_path: str) -> Optional[str]:
     """Return the worktree root of an explorer's working directory, or None.
 
@@ -2496,10 +2631,21 @@ def _get_git_context(
         return context, {}
 
     branch, statuses = _parse_git_status_porcelain_v2(status_result.stdout)
+    detached = bool(branch.get("detached"))
+    # Described only while HEAD is detached: the two extra reads are the price
+    # of that state, and are not charged to every repository not in it.
+    detached_ref, detached_at = (
+        _describe_git_detached_head(backend, repo_root, branch.get("head_oid"))
+        if detached
+        else (None, None)
+    )
     context = {
         "available": True,
         "repo_root": repo_root,
         "branch": branch.get("branch"),
+        "detached": detached,
+        "detached_ref": detached_ref,
+        "detached_at": detached_at,
         "head": branch.get("head"),
         "ahead": branch.get("ahead"),
         "behind": branch.get("behind"),
@@ -2870,10 +3016,16 @@ def _explorer_git_changed_files(
 def _git_repo_revision(git_context: Dict[str, Any], changes: List[Dict[str, Any]]) -> str:
     """Return a stable token for the Git state an explorer sidebar can show.
 
-    Covers exactly what the sidebar renders: branch/HEAD/ahead/behind plus each
-    visible changed path with its index and worktree columns. Deliberately
-    excludes error text and absolute paths so local and SSH explorers on the
-    same semantic state produce the same token.
+    Covers exactly what the sidebar renders: branch/HEAD/ahead/behind, the
+    detached-HEAD description, and each visible changed path with its index and
+    worktree columns. Deliberately excludes error text and absolute paths so
+    local and SSH explorers on the same semantic state produce the same token.
+
+    The detachment is in here because it moves on its own: checking out the id
+    a ref already points at changes the name with HEAD standing still, and a
+    fetch that advances that ref turns "detached at" into "detached from"
+    without moving HEAD at all. A token blind to both would leave the branch
+    line saying something that stopped being true.
     """
     rows = sorted(
         [
@@ -2889,6 +3041,8 @@ def _git_repo_revision(git_context: Dict[str, Any], changes: List[Dict[str, Any]
         {
             "repo_path": git_context.get("repo_path") or "",
             "branch": git_context.get("branch"),
+            "detached_ref": git_context.get("detached_ref"),
+            "detached_at": git_context.get("detached_at"),
             "head": git_context.get("head"),
             "ahead": git_context.get("ahead"),
             "behind": git_context.get("behind"),

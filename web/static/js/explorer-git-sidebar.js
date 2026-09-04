@@ -241,6 +241,51 @@ ${explorerGitRequestedScopeKind(pane)}`;
         return ['modified', 'added', 'deleted', 'renamed', 'conflicted'].includes(git.status || '');
     }
 
+    /* What stands where a branch name would, when there is no branch: the
+       same sentence `git branch` prints for the state, in the same order of
+       preference.
+
+       A detached HEAD used to print its bare seven-character abbreviation
+       here, which is indistinguishable from a branch actually named
+       `3c2574d` -- so a checkout that landed on a commit rather than a branch
+       (a tag, a remote-tracking ref, a submodule's recorded revision) read as
+       the sidebar having lost the branch name. It now names what was checked
+       out -- `Detached at origin/bfla_db_name` -- and falls back to the
+       abbreviation only when nothing can be named, which is what Git does for
+       a checkout of a raw id too.
+
+       Both facts are the server's: `detached` is its reading of
+       `branch.head (detached)` and `detached_ref` its reading of the HEAD
+       reflog. Neither is re-derived here -- a status carrying no branch header
+       at all is a third fact, and an older payload without the fields keeps
+       exactly the label it always had. */
+    function explorerGitHeadLabel(git) {
+        const head = git.head ? String(git.head).slice(0, 7) : '';
+        if (!git.detached) {
+            return head || 'Git';
+        }
+        const ref = typeof git.detached_ref === 'string' ? git.detached_ref.trim() : '';
+        if (ref) {
+            /* `at` and `from` are the same two words `git branch` prints, and
+               they are not decoration: `from` says HEAD has moved on since the
+               checkout, which is the state where commits made here belong to
+               no branch. Only an explicit `false` is `from`, so a payload that
+               named a ref without answering the question still reads as `at`. */
+            return `${git.detached_at === false ? 'Detached from' : 'Detached at'} ${ref}`;
+        }
+        return head ? `Detached at ${head}` : 'Detached HEAD';
+    }
+
+    /* The branch line's tooltip. It carries the abbreviated commit whenever the
+       label spent its room on a ref name instead -- the id is what a detached
+       HEAD is actually *at*, and losing it to the better label would be a
+       trade, not an improvement. */
+    function explorerGitBranchTitle(git) {
+        const text = explorerGitBranchLabel(git);
+        const head = git && git.detached && git.head ? String(git.head).slice(0, 7) : '';
+        return head && !text.includes(head) ? `${text} (${head})` : text;
+    }
+
     function explorerGitSummaryText(git) {
         if (!git || typeof git !== 'object') {
             return '';
@@ -248,7 +293,7 @@ ${explorerGitRequestedScopeKind(pane)}`;
         if (!git.available) {
             return git.error ? 'Git unavailable' : 'No Git repo';
         }
-        const parts = [git.branch || (git.head ? git.head.slice(0, 7) : 'Git')];
+        const parts = [git.branch || explorerGitHeadLabel(git)];
         if (Number(git.ahead || 0) > 0) {
             parts.push(`↑${git.ahead}`);
         }
@@ -1363,6 +1408,7 @@ ${explorerGitRequestedScopeKind(pane)}`;
         const publishLabel = hasUpstream ? 'Push' : 'Publish branch';
         const repoName = String(git.repo_name || '').trim();
         const repoBranchText = explorerGitBranchLabel(git);
+        const repoBranchTitle = explorerGitBranchTitle(git);
         const following = Boolean(pane._explorerGitFollowBrowsing);
         const followTitle = explorerGitFollowButtonTitle(pane, following);
         const pinState = explorerGitPinState(pane);
@@ -1455,7 +1501,7 @@ ${explorerGitRequestedScopeKind(pane)}`;
                         <span class="explorer-git-repo-icon">${EXPLORER_FOLDER_ICON}</span>
                         <span class="explorer-git-repo-text">${escHtml(repoName)}</span>
                     </div>` : ''}
-                    <div class="explorer-git-repo-line explorer-git-repo-branch" title="${escHtml(repoBranchText)}">
+                    <div class="explorer-git-repo-line explorer-git-repo-branch" title="${escHtml(repoBranchTitle)}">
                         <span class="explorer-git-repo-icon">${EXPLORER_GIT_TOGGLE_ICON}</span>
                         <span class="explorer-git-repo-text">${escHtml(repoBranchText)}</span>
                     </div>
