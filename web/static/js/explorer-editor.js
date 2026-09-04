@@ -114,7 +114,7 @@
     function exitAllExplorerEditModes() {
         terminals.forEach((pane, index) => {
             if (explorerEditState(pane)) {
-                exitExplorerEditMode(index, { focusEditButton: false });
+                exitExplorerEditMode(index, { focus: 'none' });
             }
         });
     }
@@ -419,14 +419,25 @@
         }
         if (event.key === 'Escape') {
             event.preventDefault();
-            cancelExplorerEdit(index);
+            cancelExplorerEdit(index, { focus: 'source' });
         }
     }
 
     /* Leave edit mode for the same file (Cancel or after a discarded conflict).
        Rebuilds the read-only highlighted Source view from the unchanged buffer
-       and restores the file chrome + Edit button. */
-    function exitExplorerEditMode(index, { focusEditButton = true } = {}) {
+       and restores the file chrome + Edit button.
+
+       `focus` names where the caller's gesture leaves the keyboard, because
+       the answer is not the same for all three. Pressing **Cancel** hands
+       focus to the Edit button that replaces it in the same slot. Leaving by
+       **keyboard** (Esc, Ctrl+Shift+E) hands it to the Source view instead:
+       Chromium paints :focus-visible on a programmatically focused control and
+       shows its `title` as a tooltip, so the button came back looking hovered
+       and explaining itself for a gesture that happened in the buffer — and
+       the view is where the reader actually is, holding the offset and the
+       carried selection this restores. Tearing the grid down moves no focus at
+       all. */
+    function exitExplorerEditMode(index, { focus = 'edit-button' } = {}) {
         const pane = terminals[index];
         if (!pane) {
             return;
@@ -472,12 +483,16 @@
                 }
             });
         });
-        if (focusEditButton) {
+        if (focus === 'edit-button') {
             document.querySelector(`[data-explorer-edit="${index}"]`)?.focus();
+        } else if (focus === 'source') {
+            // preventScroll for the same reason entering does: the view is the
+            // scroller whose offset was just put back.
+            document.getElementById(`explorer-code-${index}`)?.focus({ preventScroll: true });
         }
     }
 
-    async function cancelExplorerEdit(index) {
+    async function cancelExplorerEdit(index, { focus = 'edit-button' } = {}) {
         const pane = terminals[index];
         if (!explorerEditState(pane)) {
             return;
@@ -496,7 +511,7 @@
                 return;
             }
         }
-        exitExplorerEditMode(index);
+        exitExplorerEditMode(index, { focus });
     }
 
     // ── Save ────────────────────────────────────────────────────────────────

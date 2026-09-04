@@ -382,5 +382,104 @@ class DiscardAllExplorerEditsTestCase(NodeHarnessMixin, unittest.TestCase):
         self.assertEqual(result["calls"]["renderSource"], [])
 
 
+@unittest.skipUnless(NODE, "Node.js is required for explorer editor tests")
+class ExitExplorerEditModeFocusTestCase(NodeHarnessMixin, unittest.TestCase):
+    """Where the keyboard lands on the way out depends on the gesture.
+
+    Pressing **Cancel** takes focus to the Edit button that replaces it in the
+    same slot. Leaving by keyboard (``Esc``, ``Ctrl+Shift+E``) must not: a
+    control focused from the keyboard is painted by ``:focus-visible`` and
+    Chromium shows its ``title`` as a tooltip, so the Edit button came back
+    looking hovered and explaining itself for a gesture made in the buffer.
+    Focus goes to the Source view the reader is left looking at instead.
+    """
+
+    def _exit(self, focus: str):
+        return self._run_node(
+            """
+            const fs = require('fs');
+            const vm = require('vm');
+            const focus = process.argv[3];
+
+            const nodes = {
+                '[data-explorer-editor-actions="0"]': makeElement('actions-0'),
+                'explorer-list-0': makeElement('explorer-list-0')
+            };
+            const sandbox = makeSandbox(nodes);
+
+            const calls = { renderSource: [], focused: [] };
+            const code = makeElement('explorer-code-0');
+            code.focus = options => calls.focused.push(['source', Boolean(options
+                && options.preventScroll)]);
+            nodes['explorer-code-0'] = code;
+            sandbox.VOICE_MIC_ICON = '<svg data-mic></svg>';
+            sandbox.EXPLORER_SAVE_ICON = '<svg data-save></svg>';
+            sandbox.EXPLORER_CANCEL_ICON = '<svg data-cancel></svg>';
+            sandbox.EXPLORER_EDIT_ICON = '<svg data-edit></svg>';
+            sandbox._voiceServiceStatus = { enabled: true };
+            sandbox._voiceState = {};
+            sandbox._voiceActiveIndex = -1;
+            sandbox._voicePrefs = { pttEnabled: false, pttKeybind: '' };
+            sandbox._updateVoiceBtn = () => {};
+            sandbox._setVoiceBtnsDisabled = () => {};
+            sandbox._wireVoiceHoldToTalkElements = () => {};
+            sandbox._toggleVoice = () => {};
+            sandbox._stopVoice = () => Promise.resolve();
+            sandbox.showTerminalToast = () => {};
+            sandbox.captureScrollMetrics = () => null;
+            sandbox.applyScrollMetrics = () => {};
+            sandbox.applyExplorerSearch = () => {};
+            sandbox.renderExplorerSource = index => calls.renderSource.push(index);
+            sandbox.whenExplorerSourceRendered = (index, run) => run();
+            sandbox.openGenericConfirmModal = () => Promise.resolve(true);
+            sandbox.document.querySelector = selector => {
+                if (selector.startsWith('[data-explorer-edit=')) {
+                    return { focus: () => calls.focused.push(['edit-button', false]) };
+                }
+                return nodes[selector] || null;
+            };
+
+            vm.createContext(sandbox);
+            vm.runInContext(fs.readFileSync(process.argv[2], 'utf8'), sandbox);
+
+            sandbox.terminals[0] = {
+                _explorerFileEditable: true,
+                _explorerFileName: 'notes.txt',
+                _explorerEdit: { dirty: false, saving: false, voice: null }
+            };
+
+            const options = focus === 'default' ? undefined : { focus };
+            Promise.resolve(sandbox.cancelExplorerEdit(0, options)).then(() => {
+                process.stdout.write(JSON.stringify({
+                    stillEditing: Boolean(sandbox.terminals[0]._explorerEdit),
+                    calls
+                }));
+            });
+            """,
+            str(EDITOR_JS),
+            focus,
+        )
+
+    def test_the_keyboard_lands_on_the_file_and_not_on_the_edit_button(self):
+        result = self._exit("source")
+        self.assertFalse(result["stillEditing"])
+        self.assertEqual(result["calls"]["renderSource"], [0])
+        # preventScroll, for the same reason entering passes it: the view is
+        # the scroller whose offset this exit has just put back.
+        self.assertEqual(result["calls"]["focused"], [["source", True]])
+
+    def test_pressing_cancel_still_hands_focus_to_the_edit_button(self):
+        # The pointer gesture happened on a control that is being replaced in
+        # place, so focus belongs on its replacement.
+        result = self._exit("default")
+        self.assertFalse(result["stillEditing"])
+        self.assertEqual(result["calls"]["focused"], [["edit-button", False]])
+
+    def test_a_teardown_moves_no_focus_at_all(self):
+        result = self._exit("none")
+        self.assertFalse(result["stillEditing"])
+        self.assertEqual(result["calls"]["focused"], [])
+
+
 if __name__ == "__main__":
     unittest.main()

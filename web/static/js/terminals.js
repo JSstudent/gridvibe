@@ -7007,7 +7007,11 @@
         if (explorerEditState(pane)) {
             event.preventDefault();
             event.stopPropagation();
-            cancelExplorerEdit(index);
+            /* Focus goes back to the file, not to the Edit button: a control
+               focused from the keyboard is painted and shows its tooltip, so
+               the button came back looking hovered for a chord pressed in the
+               buffer. */
+            cancelExplorerEdit(index, { focus: 'source' });
             return;
         }
         /* Not showing a file at all — a directory listing has no Edit button

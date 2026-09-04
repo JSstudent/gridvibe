@@ -2365,7 +2365,7 @@ class ApiRoutesTestCase(unittest.TestCase):
             "data-explorer-edit-cancel=",
             "function enterExplorerEditMode(index)",
             "function saveExplorerEdit(index)",
-            "function cancelExplorerEdit(index)",
+            "function cancelExplorerEdit(",
         ):
             self.assertIn(hook, editor)
         # Textarea attributes: spellcheck off, the tab's own Source wrap flag
@@ -2409,7 +2409,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("view.querySelector('.explorer-source-editor')", viewer)
         exit_mode = editor[
             editor.index("function exitExplorerEditMode("):
-            editor.index("async function cancelExplorerEdit(index)")
+            editor.index("async function cancelExplorerEdit(")
         ]
         self.assertIn(
             "const editViewport = captureScrollMetrics(explorerEditScrollElement(index));",
