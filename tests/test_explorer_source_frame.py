@@ -649,9 +649,16 @@ class ExplorerSourceFrameTestCase(unittest.TestCase):
         # editor) still resolves the inner scrollable view, which no longer
         # carries the panel hook or class.
         self.assertIn(
-            '<div class="explorer-source-view" id="explorer-code-${index}"></div>',
+            '<div class="explorer-source-view" id="explorer-code-${index}"',
             viewer,
         )
+        # It is focusable, and only programmatically: leaving the in-place
+        # editor by keyboard hands focus here rather than to the Edit button,
+        # which a keyboard focus paints and gives a tooltip. Tab still never
+        # reaches it, and it draws no ring of its own.
+        self.assertIn('id="explorer-code-${index}" tabindex="-1"', viewer)
+        css = self._static("css/terminals.css")
+        self.assertIn(".explorer-source-view:focus", css)
 
     @unittest.skipUnless(NODE, "Node.js is required for scroll-target tests")
     def test_panel_scroll_target_sees_through_the_source_frame(self):

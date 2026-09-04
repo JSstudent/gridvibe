@@ -2365,7 +2365,7 @@ class ApiRoutesTestCase(unittest.TestCase):
             "data-explorer-edit-cancel=",
             "function enterExplorerEditMode(index)",
             "function saveExplorerEdit(index)",
-            "function cancelExplorerEdit(index)",
+            "function cancelExplorerEdit(",
         ):
             self.assertIn(hook, editor)
         # Textarea attributes: spellcheck off, the tab's own Source wrap flag
@@ -2409,7 +2409,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("view.querySelector('.explorer-source-editor')", viewer)
         exit_mode = editor[
             editor.index("function exitExplorerEditMode("):
-            editor.index("async function cancelExplorerEdit(index)")
+            editor.index("async function cancelExplorerEdit(")
         ]
         self.assertIn(
             "const editViewport = captureScrollMetrics(explorerEditScrollElement(index));",
@@ -7679,6 +7679,34 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(statuses["conflict.txt"]["status"], "conflicted")
         self.assertEqual(statuses["notes.txt"]["status"], "untracked")
         self.assertEqual(statuses["ignored.log"]["status"], "ignored")
+        self.assertFalse(branch["detached"])
+
+    def test_parse_git_porcelain_v2_status_records_detached_head(self):
+        # A detached HEAD carries no branch name, and the sidebar prints the
+        # abbreviated object id in its place -- so the detachment itself is
+        # recorded, or that abbreviation reads as a branch named `abcdef123456`.
+        raw_status = (
+            b"# branch.oid abcdef1234567890\0"
+            b"# branch.head (detached)\0"
+            b"1 M. N... 100644 100644 100644 old new src/app.py\0"
+        )
+
+        branch, statuses = web_explorer._parse_git_status_porcelain_v2(raw_status)
+
+        self.assertTrue(branch["detached"])
+        self.assertIsNone(branch["branch"])
+        self.assertEqual(branch["head"], "abcdef123456")
+        self.assertEqual(statuses["src/app.py"]["status"], "modified")
+
+    def test_parse_git_porcelain_v2_status_without_branch_header(self):
+        # Neither a branch nor a detachment: a status that never reported one
+        # must not be laundered into either.
+        branch, _statuses = web_explorer._parse_git_status_porcelain_v2(
+            b"# branch.oid abcdef1234567890\0"
+        )
+
+        self.assertFalse(branch["detached"])
+        self.assertIsNone(branch["branch"])
 
     def test_explorer_entries_returns_git_metadata_for_local_repo(self):
         repo_dir = Path(self.temp_dir.name) / "repo"
@@ -7934,6 +7962,128 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("initial", payload["commits"][0]["line"])
         self.assertEqual(payload["commits"][0]["files"][0]["path"], "README.md")
         self.assertEqual(payload["commits"][0]["files"][0]["git"]["status"], "added")
+
+    def test_parse_git_head_switch_reflog_reads_the_newest_checkout(self):
+        # Newest-first, and the newest *switch* -- a commit made after the
+        # checkout is a later entry that says nothing about what was asked for.
+        raw_reflog = (
+            b"1111111111111111111111111111111111111111 commit: later work\n"
+            b"2222222222222222222222222222222222222222 checkout: moving from main to origin/topic\n"
+            b"3333333333333333333333333333333333333333 checkout: moving from topic to main\n"
+        )
+
+        entry = web_explorer._parse_git_head_switch_reflog(raw_reflog)
+
+        self.assertEqual(
+            entry,
+            ("2222222222222222222222222222222222222222", "origin/topic"),
+        )
+
+    def test_parse_git_head_switch_reflog_refuses_an_option_like_name(self):
+        # The name is repository content and is handed straight back to Git as
+        # a revision; a leading dash is an option wherever it lands.
+        raw_reflog = (
+            b"2222222222222222222222222222222222222222 checkout: moving from main to --upload-pack=x\n"
+        )
+
+        self.assertIsNone(web_explorer._parse_git_head_switch_reflog(raw_reflog))
+
+    def test_parse_git_head_switch_reflog_without_a_switch_entry(self):
+        raw_reflog = b"1111111111111111111111111111111111111111 commit: only work\n"
+
+        self.assertIsNone(web_explorer._parse_git_head_switch_reflog(raw_reflog))
+
+    def test_explorer_git_repo_names_the_ref_a_detached_head_sits_at(self):
+        # What `git branch` prints -- "(HEAD detached at v1)" -- and the reason
+        # the sidebar can say it: the reflog records what was asked for, and
+        # several refs may point at one commit.
+        repo_dir = self._init_committed_repo()
+        self._run_git(repo_dir, "tag", "v1")
+        (repo_dir / "later.txt").write_text("later\n", encoding="utf-8")
+        self._run_git(repo_dir, "add", "later.txt")
+        self._run_git(repo_dir, "commit", "-m", "later")
+        self._run_git(repo_dir, "checkout", "v1")
+        session_id = self._create_explorer_session(repo_dir)
+
+        response = self.client.get(f"/api/explorer/{session_id}/git/repo")
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        git = response.get_json()["git"]
+        self.assertTrue(git["detached"])
+        self.assertEqual(git["detached_ref"], "v1")
+        self.assertTrue(git["detached_at"])
+
+    def test_explorer_git_repo_reports_a_head_that_moved_past_its_ref(self):
+        # Committing on a detached HEAD is exactly the state `git branch`
+        # reports as "detached *from*", and the distinction is the warning
+        # that those commits belong to no branch.
+        repo_dir = self._init_committed_repo()
+        self._run_git(repo_dir, "tag", "v1")
+        self._run_git(repo_dir, "checkout", "v1")
+        (repo_dir / "loose.txt").write_text("loose\n", encoding="utf-8")
+        self._run_git(repo_dir, "add", "loose.txt")
+        self._run_git(repo_dir, "commit", "-m", "loose commit")
+        session_id = self._create_explorer_session(repo_dir)
+
+        response = self.client.get(f"/api/explorer/{session_id}/git/repo")
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        git = response.get_json()["git"]
+        self.assertEqual(git["detached_ref"], "v1")
+        self.assertFalse(git["detached_at"])
+
+    def test_explorer_git_repo_falls_back_to_the_id_for_a_raw_checkout(self):
+        # A checkout of a commit id names no ref, and Git abbreviates it there
+        # too -- so the fallback is the same answer, not a lost one.
+        repo_dir = self._init_committed_repo()
+        head = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=repo_dir,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        self._run_git(repo_dir, "checkout", head)
+        session_id = self._create_explorer_session(repo_dir)
+
+        response = self.client.get(f"/api/explorer/{session_id}/git/repo")
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        git = response.get_json()["git"]
+        self.assertTrue(git["detached"])
+        self.assertIsNone(git["detached_ref"])
+        self.assertTrue(head.startswith(git["head"]))
+
+    def test_explorer_git_repo_reports_a_detached_head_as_detached(self):
+        # Checking out a commit rather than a branch (a tag, a remote-tracking
+        # ref, a submodule's recorded revision) leaves no branch name, and the
+        # sidebar shows the abbreviated object id in its place -- so the
+        # payload has to say the branch is *absent*, not merely unknown.
+        repo_dir = self._init_committed_repo()
+        self._run_git(repo_dir, "checkout", "--detach", "HEAD")
+        session_id = self._create_explorer_session(repo_dir)
+
+        response = self.client.get(f"/api/explorer/{session_id}/git/repo")
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        git = response.get_json()["git"]
+        self.assertTrue(git["available"])
+        self.assertIsNone(git["branch"])
+        self.assertTrue(git["detached"])
+        self.assertTrue(git["head"])
+
+    def test_explorer_git_repo_on_a_branch_is_not_detached(self):
+        repo_dir = self._init_committed_repo()
+        session_id = self._create_explorer_session(repo_dir)
+
+        response = self.client.get(f"/api/explorer/{session_id}/git/repo")
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        git = response.get_json()["git"]
+        self.assertTrue(git["branch"])
+        self.assertFalse(git["detached"])
+        self.assertIsNone(git["detached_ref"])
+        self.assertIsNone(git["detached_at"])
 
     def test_explorer_git_file_scope_narrows_status_and_graph_to_that_file(self):
         repo_dir = self._init_committed_repo()

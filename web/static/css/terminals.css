@@ -3899,6 +3899,17 @@
             outline-offset: -2px;
         }
 
+        /* The view is `tabindex="-1"`: it is never reached by Tab, only handed
+           focus when the keyboard leaves the in-place editor, so it draws no
+           ring of its own — the restored offset and the carried selection are
+           the visible answer, and a ring around the whole file would be the
+           louder version of the highlighted Edit button this replaced. The
+           accent outline above is a different state: it marks the scroller
+           while the textarea *inside* it holds focus. */
+        .explorer-source-view:focus {
+            outline: none;
+        }
+
         /* Line wrapping and the appearance menu stay live while editing (like
            zoom, they only restyle the surface), so their buttons are not dimmed
            with the disabled chrome. */

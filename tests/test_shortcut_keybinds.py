@@ -22,7 +22,9 @@ avoid rather than a restatement of the code:
 - **Ctrl+Shift+E is a toggle that never silently does nothing.** It enters the
   in-place editor, cancels it while editing, and on a file that cannot be
   edited says why -- in the same sentence the disabled Edit button's tooltip
-  carries, taken from the same function.
+  carries, taken from the same function. Cancelling names the Source view as
+  where the keyboard lands: focusing the Edit button instead left it painted
+  and showing that tooltip, as though the pointer were resting on it.
 """
 
 import json
@@ -155,7 +157,9 @@ const sandbox = {
     terminals: [],
     goToSettings() { calls.launcher += 1; },
     enterExplorerEditMode(index) { calls.enter.push(index); },
-    cancelExplorerEdit(index) { calls.cancel.push(index); },
+    cancelExplorerEdit(index, options) {
+        calls.cancel.push([index, (options && options.focus) || null]);
+    },
     showTerminalToast(message) { calls.toasts.push(message); },
     findExplorerShortcutTargetIndex: () =>
         (spec.explorerIndex === undefined ? -1 : spec.explorerIndex),
@@ -301,7 +305,11 @@ class EditChordTestCase(ShortcutHandlerTestCase):
         pane = dict(self.EDITABLE, _explorerEdit={"dirty": False})
         calls = self._press(event=self._chord(), explorerIndex=0, pane=pane)
 
-        self.assertEqual(calls["cancel"], [0])
+        # And it says where the keyboard lands: on the file, never on the Edit
+        # button, which a keyboard focus paints and gives a tooltip -- the
+        # chord was pressed in the buffer, so nothing in the header was
+        # touched.
+        self.assertEqual(calls["cancel"], [[0, "source"]])
         self.assertEqual(calls["enter"], [])
 
     def test_a_file_that_cannot_be_edited_says_why(self):

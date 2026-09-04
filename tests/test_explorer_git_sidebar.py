@@ -94,6 +94,38 @@ sandbox.wireExplorerCopyPathMenu = () => {};
         'session id', 'state', 'repo one/src', { known: 'abc 123' }
     );
     const label = sandbox.explorerGitBranchLabel(payload.git);
+    /* The three things that can stand where a branch name goes: a branch, a
+       detachment named as one, and a payload that reported neither (an older
+       server) keeping the bare abbreviation it always showed. */
+    const detachedLabel = sandbox.explorerGitBranchLabel({
+        available: true,
+        branch: null,
+        detached: true,
+        head: '3c2574dabc12',
+        dirty: true
+    });
+    const headOnlyLabel = sandbox.explorerGitBranchLabel({
+        available: true,
+        branch: null,
+        head: '3c2574dabc12'
+    });
+    const detachedAtRef = {
+        available: true,
+        branch: null,
+        detached: true,
+        detached_ref: 'origin/bfla_db_name',
+        detached_at: true,
+        head: '3c2574dabc12'
+    };
+    const detachedAtRefLabel = sandbox.explorerGitBranchLabel(detachedAtRef);
+    /* Committing on a detached HEAD is `from`, not `at`, and the tooltip is
+       where the object id goes once the label is spent on a name. */
+    const detachedFromRefLabel = sandbox.explorerGitBranchLabel({
+        ...detachedAtRef,
+        detached_at: false
+    });
+    const detachedAtRefTitle = sandbox.explorerGitBranchTitle(detachedAtRef);
+    const branchTitle = sandbox.explorerGitBranchTitle(payload.git);
     await sandbox.loadExplorerGitRepo(0);
     pane._explorerPath = 'repo one/docs';
     // Root scope is cached across navigation.
@@ -126,6 +158,12 @@ sandbox.wireExplorerCopyPathMenu = () => {};
         builtRoot,
         builtFollow,
         label,
+        detachedLabel,
+        headOnlyLabel,
+        detachedAtRefLabel,
+        detachedFromRefLabel,
+        detachedAtRefTitle,
+        branchTitle,
         calls,
         anchorPath: pane._explorerGitAnchorPath,
         following: Boolean(pane._explorerGitFollowBrowsing),
@@ -165,6 +203,22 @@ class ExplorerGitSidebarRequestTestCase(unittest.TestCase):
             "/api/explorer/session%20id/git/state?scope=path&path=repo+one%2Fsrc&known=abc+123",
         )
         self.assertEqual(payload["label"], "main ↑2 *")
+        # A detached HEAD says so; the bare abbreviation it used to print is
+        # indistinguishable from a branch named `3c2574d`.
+        self.assertEqual(payload["detachedLabel"], "Detached at 3c2574d *")
+        self.assertEqual(payload["headOnlyLabel"], "3c2574d")
+        # What `git branch` prints for the same repository, in the same words.
+        self.assertEqual(
+            payload["detachedAtRefLabel"], "Detached at origin/bfla_db_name"
+        )
+        self.assertEqual(
+            payload["detachedFromRefLabel"], "Detached from origin/bfla_db_name"
+        )
+        self.assertEqual(
+            payload["detachedAtRefTitle"],
+            "Detached at origin/bfla_db_name (3c2574d)",
+        )
+        self.assertEqual(payload["branchTitle"], "main ↑2 *")
         self.assertEqual(
             [call["url"] for call in payload["calls"]],
             [

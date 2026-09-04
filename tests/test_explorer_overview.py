@@ -333,11 +333,8 @@ class ExplorerOverviewColumnTestCase(unittest.TestCase):
         # The column is a sibling of the scroller inside the fixed frame, so
         # it takes real layout width instead of overlaying the code, and it
         # hides with the panel.
-        self.assertIn(
-            '<div class="explorer-source-view" id="explorer-code-${index}"></div>'
-            "${explorerOverviewHtml(index)}",
-            viewer,
-        )
+        self.assertIn('<div class="explorer-source-view" id="explorer-code-${index}"', viewer)
+        self.assertIn("</div>${explorerOverviewHtml(index)}", viewer)
         self.assertIn("function explorerOverviewHtml(", self._overview())
 
     def test_overview_markup_carries_its_hooks_and_scrollbar_semantics(self):
