@@ -443,25 +443,125 @@ The current architecture makes these additions comparatively natural:
 
 ## 11. Proposed remediation milestones
 
-### Milestone A — security boundary
+These milestones assign every finding from GV-001 through GV-031 to exactly one
+primary implementation stage. Cross-stage dependencies are stated separately so
+the list can later be expanded into detailed work packets without moving or
+silently losing a finding. Within each milestone, implementation may be split
+into several pull requests, but the milestone is complete only when its whole
+exit gate is satisfied.
 
-Fix GV-001 through GV-003 and GV-007. Add centralized response headers from GV-027. Refuse unauthenticated non-loopback startup until authenticated mode exists. This milestone should be independently releasable.
+### Milestone A — security boundary and data exposure
+
+**Findings:** GV-001, GV-002, GV-003, GV-007, GV-025, GV-027.
+
+Establish one trustworthy HTTP and Socket.IO boundary: validate Host and full
+origins, define trusted-proxy behavior, refuse unauthenticated non-loopback
+startup, validate and authorize socket events, and remove reusable passwords
+from ordinary browser payloads. Add a centralized response-header policy and
+replace command/path logging with shape-only, redacted operational records.
+
+**Exit gate:** hostile Host/origin and direct unauthenticated network cases are
+rejected; all ordinary API/Socket.IO responses are secret-free; malformed and
+cross-client socket events are bounded and refused; logs contain no raw startup
+commands or credentials; and the security-boundary tests pass for HTTP,
+Socket.IO, IPv4/IPv6, proxy-disabled, and explicitly configured proxy modes.
+
+This milestone is independently releasable and is a prerequisite for any
+supported LAN/remote mode.
 
 ### Milestone B — ownership and concurrency
 
-Implement per-pane connection generations (GV-004/GV-005), atomic capacity claims (GV-006), voice generations (GV-008), repository mutation claims (GV-013), atomic lifecycle selection (GV-014), and native opening claims (GV-015).
+**Findings:** GV-004, GV-005, GV-006, GV-008, GV-013, GV-014, GV-015.
 
-### Milestone C — bounded external work
+Introduce explicit ownership for operations that currently span several locked
+calls: per-pane connection/transition generations, atomic split-capacity claims,
+voice owner generations, repository-scoped Git mutation claims and revisions,
+atomic lifecycle window selection, and per-workspace native opening claims.
+Stale workers and callbacks must become no-ops rather than mutating the current
+generation.
 
-Replace Windows process handling (GV-009), unify subprocess supervision (GV-024), and put one deadline/cancellation model around SSH detection, remote Git status, and SFTP (GV-010 through GV-012).
+**Exit gate:** deterministic barrier-based tests prove that only one winner is
+committed for every contested operation; an old terminal or voice generation
+cannot affect its replacement; scoped Git commits cannot absorb a concurrent
+out-of-scope change; and no duplicate/untracked native window can be created.
 
-### Milestone D — durability and configuration
+### Milestone C — bounded external work and SSH trust
 
-Unify config ownership/schema (GV-017/GV-019), preserve restart arguments (GV-020), atomically maintain backups and directory sync (GV-021), then address external filesystem/search limits (GV-022/GV-023/GV-028/GV-029).
+**Findings:** GV-009, GV-010, GV-011, GV-012, GV-018, GV-024.
+
+First replace Windows child-tree handling with verifiable process ownership,
+then route Git, agent probes, and dependency installation through one bounded
+subprocess supervisor. Apply the same monotonic-deadline/cancellation model to
+SSH command detection, remote Git exit status, and every SFTP operation. Make
+known-host updates a locked, atomic merge and define fail-closed behavior for
+strict mode.
+
+**Exit gate:** every external operation returns within its advertised deadline;
+no child/helper, pipe, repository handle, SSH channel, or pooled transport
+survives cancellation; concurrent first-contact host keys are all retained; and
+the real stalled-remote tests pass on Windows plus at least one POSIX platform.
+
+GV-009 is the first internal work item in this milestone because GV-024 and the
+self-update work in Milestone D must build on the corrected supervisor.
+
+### Milestone D — update, configuration, and durability
+
+**Findings:** GV-016, GV-017, GV-019, GV-020, GV-021, GV-022, GV-023, GV-028,
+GV-029.
+
+Create one canonical configuration owner and strict schema, preserve the full
+launch command during restart, and use both together with Milestone C's process
+supervisor to make self-update staged, serialized, version-checked, and followed
+by a coordinated restart. Complete crash durability for primary and backup
+state files, then harden search/file operations against catastrophic regex,
+special/growing files, external check/use races, encoded filename limits, and
+interrupted requirement rewrites.
+
+**Exit gate:** custom configuration behaves identically across startup, runtime
+reads, writes, and restart; malformed valid JSON cannot crash startup or coerce
+wrong booleans; self-update cannot serve mixed builds and has a tested failure
+and rollback path; persistence fault injection preserves either the old or new
+valid state and a valid recovery copy; and bounded search/file-name/CAS edge
+tests pass on supported filesystems.
+
+GV-016 depends on GV-009 and GV-024 from Milestone C and on GV-020 within this
+milestone. Implement GV-017/GV-019/GV-020 before the updater transaction so its
+restart uses the correct executable, arguments, and configuration.
 
 ### Milestone E — maintainability and performance
 
-Split global modules, resolve settings partial commits, add the repository snapshot cache, and introduce structured diagnostics (GV-026/GV-030/GV-031). Re-run the complete Python and Node suite on Windows and at least one POSIX platform before release.
+**Findings:** GV-026, GV-030, GV-031.
+
+Give App Settings one truthful transaction or explicit partial-result recovery,
+split the largest backend and classic-script modules behind stable behavioral
+contracts, and add a measured repository snapshot cache with bounded concurrency
+for independent repositories. Structured diagnostics may be added here, but
+must reuse Milestone A's redaction policy and Milestone C's operation/job model.
+
+**Exit gate:** partial settings failures reconcile to authoritative server state;
+module extraction introduces no new globals or source-text-only contracts; Git
+command counts and remote round trips show a measured improvement without stale
+views; and the complete Python and Node suite passes on Windows and POSIX.
+
+This milestone follows the correctness work: repository results must not be
+cached until the mutation, cancellation, and revision rules are stable.
+
+### Milestone coverage check
+
+| Milestone | Primary finding IDs | Count |
+|---|---|---:|
+| A — security boundary and data exposure | GV-001–GV-003, GV-007, GV-025, GV-027 | 6 |
+| B — ownership and concurrency | GV-004–GV-006, GV-008, GV-013–GV-015 | 7 |
+| C — bounded external work and SSH trust | GV-009–GV-012, GV-018, GV-024 | 6 |
+| D — update, configuration, and durability | GV-016–GV-017, GV-019–GV-023, GV-028–GV-029 | 9 |
+| E — maintainability and performance | GV-026, GV-030–GV-031 | 3 |
+| **Total** | **GV-001–GV-031, each assigned once** | **31** |
+
+For the later detailed implementation plan, expand each milestone using the
+same headings: prerequisites, invariants to preserve, production changes by
+finding ID, migrations/compatibility, test matrix, observability, rollback,
+and exit evidence. That keeps the audit ID as the traceable link from finding
+to implementation and verification.
 
 ## 12. Release gate from this review
 
@@ -473,4 +573,3 @@ At minimum, do not call the revision clean until:
 - concurrent reconnects cannot create two live connectors or let an old stream close a new one;
 - remote Git/SFTP/agent detection always returns within its stated deadline; and
 - custom config selection is consistent across startup, runtime reads, and writes.
-
