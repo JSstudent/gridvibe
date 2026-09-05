@@ -22,7 +22,7 @@ from typing import Any, Dict, List, Optional
 
 from flask_socketio import emit
 
-from web.config import _config_lock, load_config, runtime_config, save_config
+from web.config import load_config, runtime_config, update_config
 from web.paths import BASE_DIR
 
 try:
@@ -611,10 +611,7 @@ def _load_voice_prefs() -> Dict[str, Any]:
 
 
 def _save_voice_prefs(prefs: Dict[str, Any]):
-    with _config_lock:
-        cfg = load_config()
-        cfg['voice_prefs'] = prefs
-        save_config(cfg)
+    update_config(lambda _current: {'voice_prefs': prefs})
 
 
 # ==================== Active recording registry ====================
@@ -842,9 +839,15 @@ def _handle_vosk_audio_chunk(session_id: str, audio: Any):
     if not session_lock.acquire(timeout=2):
         return
     try:
+        with _vosk_lock:
+            if _vosk_ws_connections.get(session_id) is not ws:
+                return
         raw = audio if isinstance(audio, bytes) else bytes(audio)
         ws.send(raw, opcode=0x2)  # OPCODE_BINARY
         result_str = ws.recv()
+        with _vosk_lock:
+            if _vosk_ws_connections.get(session_id) is not ws:
+                return
         if result_str:
             parsed = json.loads(result_str)
             text = parsed.get('text', '')
@@ -864,12 +867,16 @@ def _handle_vosk_audio_chunk(session_id: str, audio: Any):
     except Exception as exc:
         logger.error("Voice audio proxy error for %s: %s", session_id, exc)
         with _vosk_lock:
-            _vosk_ws_connections.pop(session_id, None)
-            _vosk_session_locks.pop(session_id, None)
+            current = _vosk_ws_connections.get(session_id) is ws
+            if current:
+                _vosk_ws_connections.pop(session_id, None)
+                _vosk_session_locks.pop(session_id, None)
         try:
             ws.close()
         except Exception:
             pass
+        if not current:
+            return
         emit('voice_status', {
             'session_id': session_id,
             'status': 'error',
@@ -923,30 +930,44 @@ def _handle_whisper_audio_chunk(session_id: str, audio: Any):
 
 
 def _stop_vosk_voice_session(session_id: str):
-    """Stop a Vosk-backed voice session and flush final text."""
+    """Serialize the final flush, or explicitly cancel after a bounded wait."""
     with _vosk_lock:
-        ws = _vosk_ws_connections.pop(session_id, None)
-        session_lock = _vosk_session_locks.pop(session_id, None)
-
+        ws = _vosk_ws_connections.get(session_id)
+        session_lock = _vosk_session_locks.get(session_id)
     if not ws:
         return
-
     acquired = session_lock.acquire(timeout=5) if session_lock else True
     try:
+        if not acquired:
+            emit('voice_status', {
+                'session_id': session_id, 'status': 'error',
+                'message': 'Voice stop timed out; final audio was discarded. Start recording again to retry.',
+            })
+            return False
+        with _vosk_lock:
+            if _vosk_ws_connections.get(session_id) is not ws:
+                return False
         ws.send('{"eof": 1}')
         result_str = ws.recv()
+        with _vosk_lock:
+            if _vosk_ws_connections.get(session_id) is not ws:
+                return False
         if result_str:
-            parsed = json.loads(result_str)
-            text = parsed.get('text', '')
+            text = json.loads(result_str).get('text', '')
             if text:
-                emit('voice_result', {
-                    'session_id': session_id,
-                    'text': text,
-                    'final': True,
-                })
+                emit('voice_result', {'session_id': session_id, 'text': text, 'final': True})
     except Exception as exc:
-        logger.debug("Error during voice_stop flush: %s", exc)
+        logger.debug('Error during voice_stop flush: %s', exc)
+        emit('voice_status', {
+            'session_id': session_id, 'status': 'error',
+            'message': 'Voice service could not finish recording. Start recording again to retry.',
+        })
+        return False
     finally:
+        with _vosk_lock:
+            if _vosk_ws_connections.get(session_id) is ws:
+                _vosk_ws_connections.pop(session_id, None)
+                _vosk_session_locks.pop(session_id, None)
         try:
             ws.close()
         except Exception:

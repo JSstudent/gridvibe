@@ -68,7 +68,7 @@ from web.app import (  # noqa: F401 - re-exported for backwards compatibility
     session_manager,
     socketio,
 )
-from web.config import (
+from web.config import (  # noqa: F401 - compatibility re-exports
     AUTOSAVE_INTERVAL_MINUTES_MAX,
     AUTOSAVE_INTERVAL_MINUTES_MIN,
     HOST_KEY_POLICY_OPTIONS,
@@ -80,6 +80,7 @@ from web.config import (
     WHISPER_MODEL_OPTIONS,
     ConfigPersistenceError,
     RuntimeConfigState,
+    _build_runtime_state,
     _config_lock,
     _merge_dicts,
     _normalize_surface_mode,
@@ -87,6 +88,7 @@ from web.config import (
     resolve_server_settings,  # noqa: F401 - re-exported for the entry points
     runtime_config,
     save_config,
+    update_config,
 )
 from web.explorer import (  # noqa: F401 - some names re-exported for backwards compatibility
     EXPLORER_FILE_PREVIEW_MAX_BYTES,
@@ -478,14 +480,14 @@ def _broadcast_app_config_update(apply_scope: str = "session"):
     )
 
 
-def _normalize_app_config_update(data: Any) -> Dict[str, Any]:
+def _normalize_app_config_update(data: Any, settings=None) -> Dict[str, Any]:
     """Validate and normalize launcher-editable app settings.
 
     Every omitted field falls back to the *same* captured generation
     (ISSUE-2026-041), so a partial update cannot write back a mixture of two
     configs for the settings the request did not mention.
     """
-    settings = runtime_config.snapshot()
+    settings = settings if settings is not None else runtime_config.snapshot()
     payload = data if isinstance(data, dict) else {}
     appearance = payload.get("appearance")
     if not isinstance(appearance, dict):
@@ -941,22 +943,10 @@ def set_app_config():
         terminal_payload = {}
     apply_scope = str(terminal_payload.get("apply_scope", "")).strip().lower()
 
-    # _normalize_app_config_update fills every section the payload omits from
-    # runtime_config, so the refresh has to happen under the same lock hold:
-    # otherwise a partial POST (the workspace theme toggle sends only
-    # `appearance`) landing between the save and the refresh would write the
-    # pre-save values of every other section straight back over the new ones.
-    # The broadcast stays outside the lock — never emit while holding one.
-    with _config_lock:
-        current = load_config()
-        current = _merge_dicts(current, _normalize_app_config_update(data))
-        try:
-            save_config(current)
-        except ConfigPersistenceError as exc:
-            # Not stored: answer retryably instead of echoing the settings back
-            # as saved, and leave runtime_config on the values still on disk.
-            return jsonify({"error": str(exc), "code": "config_write_failed"}), 500
-        _refresh_runtime_config()
+    try:
+        update_config(lambda current: _normalize_app_config_update(data, _build_runtime_state(current)))
+    except ConfigPersistenceError as exc:
+        return jsonify({"error": str(exc), "code": "config_write_failed"}), 500
     _broadcast_app_config_update(apply_scope)
     return jsonify(_public_app_config())
 
@@ -3558,7 +3548,8 @@ def handle_voice_stop(data):
     if engine == 'whisper':
         _stop_whisper_voice_session(session_id)
     else:
-        _stop_vosk_voice_session(session_id)
+        if _stop_vosk_voice_session(session_id) is False:
+            return
 
     emit('voice_status', {'session_id': session_id, 'status': 'stopped'})
     logger.info("Voice stopped for session %s", session_id)

@@ -903,6 +903,7 @@
                    group being attached in its place. It resumes on the way
                    back with its position and its queued readers intact. */
                 explorerSuspendSourceRenderJob(terminal);
+                releaseExplorerRepoSearch(terminal);
                 /* The commit card is not suspended, it is closed: it floats on
                    document.body pinned to a row that is about to be detached,
                    so leaving it would hang one group's card over the group
@@ -1159,6 +1160,7 @@
             if (isExplorerPaneInstance(terminal)) {
                 explorerReleasePaneWork(terminal);
             }
+            if (isBrowserPaneInstance(terminal)) browserDisposePane(terminal);
             if (terminal?.term) {
                 try { terminal.term.dispose(); } catch (_) {}
             }
@@ -5006,6 +5008,7 @@
             if (isExplorerPaneInstance(t)) {
                 explorerReleasePaneWork(t);
             }
+            if (isBrowserPaneInstance(t)) browserDisposePane(t);
             if (t && t.term) {
                 try { t.term.dispose(); } catch (_) {}
             }
@@ -6204,6 +6207,7 @@
         }
 
         const previousTerminal = terminals[index];
+        if (isBrowserPaneInstance(previousTerminal)) browserDisposePane(previousTerminal);
         if (previousTerminal?.term) {
             try { previousTerminal.term.dispose(); } catch (_) {}
         }
@@ -6315,6 +6319,7 @@
         }
 
         const previousTerminal = terminals[index];
+        if (isBrowserPaneInstance(previousTerminal)) browserDisposePane(previousTerminal);
         if (previousTerminal?.term) {
             try { previousTerminal.term.dispose(); } catch (_) {}
         }

@@ -4183,6 +4183,9 @@
         if (!pane) {
             return;
         }
+        if (typeof releaseExplorerRepoSearch === 'function') {
+            releaseExplorerRepoSearch(pane, { dispose: true });
+        }
         explorerCancelSourceRenderJob(pane);
         pane._explorerSourceRenderCallbacks = [];
         cancelExplorerRequestSlots(pane);

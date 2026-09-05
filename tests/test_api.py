@@ -13709,7 +13709,9 @@ class ApiRoutesTestCase(unittest.TestCase):
                     with patch.object(web_terminal_io, "_stream_local_output"):
                         with patch.object(web_terminal_io, "_run_startup_sequence"):
                             with patch.object(web_terminal_io, "_drain_until_prompt"):
-                                with patch.object(api.session_manager, "update_session_status"):
+                                with patch.object(api.session_manager, "update_session_status"), patch.object(
+                                    api.session_manager, "get_session", return_value=session
+                                ):
                                     winpty.spawn.return_value = fake_process
                                     api._connect_local_session("abc123", session)
 
@@ -13745,7 +13747,9 @@ class ApiRoutesTestCase(unittest.TestCase):
                 with patch.object(web_terminal_io, "_broadcast_session_status"):
                     with patch.object(web_terminal_io, "_stream_local_output"):
                         with patch.object(web_terminal_io, "_run_startup_sequence"):
-                            with patch.object(api.session_manager, "update_session_status"):
+                            with patch.object(api.session_manager, "update_session_status"), patch.object(
+                                    api.session_manager, "get_session", return_value=session
+                                ):
                                 winpty.spawn.return_value = fake_process
                                 api._connect_local_session("abc123", session)
 
@@ -17825,11 +17829,12 @@ class KnownHostsPersistenceTestCase(unittest.TestCase):
         self.assertTrue(Path(self.known_hosts_path).exists())
         client.load_host_keys.assert_called_once_with(self.known_hosts_path)
 
-    def test_load_failure_is_non_fatal(self):
+    def test_load_failure_refuses_unverifiable_connection(self):
         client = MagicMock()
         client.load_host_keys.side_effect = OSError("file locked")
 
-        api._load_persistent_host_keys(client)  # must not raise
+        with self.assertRaisesRegex(OSError, 'Cannot verify SSH host keys'):
+            api._load_persistent_host_keys(client)
 
     @patch("web.explorer.paramiko")
     def test_open_ssh_sftp_loads_known_hosts(self, mock_paramiko):
@@ -17998,7 +18003,9 @@ class EmitOutsideConnectionLockTestCase(unittest.TestCase):
             lock_owned_during_emit.append(api.connection_lock._is_owned())
 
         with patch.object(api.socketio, "emit", side_effect=fake_emit):
-            api._drain_until_prompt(session_id, {"pty_process": FakePty()}, timeout=1.0)
+            connection = {"pty_process": FakePty()}
+            api.ssh_connections[session_id] = connection
+            api._drain_until_prompt(session_id, connection, timeout=1.0)
 
         self.assertEqual(lock_owned_during_emit, [False])
         self.assertEqual(api._get_buffered_terminal_output(session_id), "booted")
@@ -21707,7 +21714,7 @@ class ConfigDurabilityTestCase(unittest.TestCase):
         client = api.app.test_client()
 
         with patch.object(
-            api, "save_config", side_effect=web_config.ConfigPersistenceError("disk full")
+            api, "update_config", side_effect=web_config.ConfigPersistenceError("disk full")
         ), patch.object(api, "_refresh_runtime_config") as refresh, patch.object(
             api, "_broadcast_app_config_update"
         ) as broadcast:

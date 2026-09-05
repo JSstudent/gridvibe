@@ -124,11 +124,26 @@ WHISPER_MODEL_OPTIONS = {
 }
 
 
+_CONFIG_SECTIONS = frozenset({
+    'server', 'ssh', 'terminal', 'security', 'appearance', 'workspace',
+    'explorer_search', 'voice_input',
+})
+
+
+def _validate_config_shape(data):
+    if not isinstance(data, dict):
+        raise ValueError('Configuration must be a JSON object')
+    for name in _CONFIG_SECTIONS:
+        if name in data and not isinstance(data[name], dict):
+            raise ValueError(f'Configuration section {name} must be an object')
+
+
 def _load_json_file(path: str) -> Dict[str, Any]:
     """Load one JSON object from disk."""
     with open(path, "r", encoding="utf-8") as f:
         data = json.load(f)
-    return data if isinstance(data, dict) else {}
+    _validate_config_shape(data)
+    return data
 
 
 def _merge_dicts(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
@@ -145,13 +160,17 @@ def _merge_dicts(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, An
 def load_config(config_path: Optional[str] = None) -> Dict[str, Any]:
     """Load configuration from file, falling back to default_config.json."""
     target_path = config_path or CONFIG_PATH
+    with _config_lock, _CrossProcessConfigLock(target_path):
+        return _load_config_unlocked(target_path)
 
+
+def _load_config_unlocked(target_path):
     with _config_lock:
         default_config: Dict[str, Any] = {}
         if target_path != DEFAULT_CONFIG_PATH and os.path.exists(DEFAULT_CONFIG_PATH):
             try:
                 default_config = _load_json_file(DEFAULT_CONFIG_PATH)
-            except (OSError, json.JSONDecodeError) as exc:
+            except (OSError, ValueError) as exc:
                 logger.warning(
                     "Failed to load default configuration from %s: %s",
                     DEFAULT_CONFIG_PATH,
@@ -162,7 +181,7 @@ def load_config(config_path: Optional[str] = None) -> Dict[str, Any]:
         if os.path.exists(target_path):
             try:
                 loaded = _load_json_file(target_path)
-            except (OSError, json.JSONDecodeError) as exc:
+            except (OSError, ValueError) as exc:
                 logger.warning(
                     "Failed to load configuration from %s: %s; using default configuration",
                     target_path,
@@ -191,8 +210,12 @@ def _recover_config(target_path: str, exc: Exception) -> Optional[Dict[str, Any]
     if isinstance(exc, ValueError):  # json.JSONDecodeError
         quarantine_state_file(target_path, f"unreadable: {exc}", label=_QUARANTINE_LABEL)
     payload = read_backup_json(target_path, label=_QUARANTINE_LABEL)
-    if not isinstance(payload, dict):
+    try:
+        _validate_config_shape(payload)
+    except ValueError:
         return None
+    if isinstance(exc, ValueError) and not os.path.exists(target_path):
+        _write_config(payload, target_path)
     logger.warning("Recovered the configuration from the last-good backup")
     return payload
 
@@ -208,12 +231,48 @@ def save_config(config: Dict[str, Any], config_path: Optional[str] = None):
     """
     target_path = config_path or CONFIG_PATH
     with _config_lock, _CrossProcessConfigLock(target_path):
-        write_json_atomically(
-            config,
-            target_path,
-            error_type=ConfigPersistenceError,
-            failure_message="Could not persist the configuration",
-        )
+        _validate_config_shape(config)
+        _prepare_config_write(target_path)
+        _write_config(config, target_path)
+
+
+def _prepare_config_write(target_path):
+    # Never copy an invalid or unreadable primary over a useful backup.
+    if not os.path.exists(target_path):
+        return
+    try:
+        _load_json_file(target_path)
+    except ValueError as exc:
+        _recover_config(target_path, exc)
+        if os.path.exists(target_path):
+            try:
+                _load_json_file(target_path)
+            except (ValueError, OSError) as error:
+                raise ConfigPersistenceError('Repair the unreadable configuration before saving') from error
+    except OSError as exc:
+        raise ConfigPersistenceError('Cannot read the configuration; nothing was saved') from exc
+
+
+def _write_config(config, target_path):
+    write_json_atomically(
+        config, target_path, error_type=ConfigPersistenceError,
+        failure_message='Could not persist the configuration',
+    )
+
+
+def update_config(updater, config_path=None):
+    """Read, normalize/merge and commit under one cross-process lock."""
+    target_path = config_path or CONFIG_PATH
+    with _config_lock, _CrossProcessConfigLock(target_path):
+        current = _load_config_unlocked(target_path)
+        updated = _merge_dicts(current, updater(current))
+        _validate_config_shape(updated)
+        state = _build_runtime_state(updated)
+        _prepare_config_write(target_path)
+        _write_config(updated, target_path)
+        if config_path is None:
+            runtime_config._state = state
+        return updated
 
 
 def resolve_server_settings(
@@ -306,6 +365,7 @@ def _build_runtime_state(app_config: Dict[str, Any]) -> RuntimeConfigState:
     touching the published one. That is what lets `RuntimeConfig.refresh()`
     do all of its work off to the side and then publish in a single step.
     """
+    _validate_config_shape(app_config)
     ssh_config = app_config.get("ssh", {})
     host_key_policy = str(ssh_config.get("host_key_policy", "auto-add")).strip().lower()
     if host_key_policy not in HOST_KEY_POLICY_OPTIONS:

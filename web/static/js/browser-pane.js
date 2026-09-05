@@ -159,9 +159,9 @@
 
        Nothing is written back from the response here; the local session object
        is updated first and stays the newest thing this window knows. */
-    function browserPersistTabs(index, { continuous = false } = {}) {
-        const pane = browserPaneAt(index);
-        const sessionId = sessionIds[index];
+    function browserPersistTabs(index, { continuous = false, owner = null } = {}) {
+        const pane = owner || browserPaneAt(index);
+        const sessionId = pane?._session?.session_id || (index >= 0 ? sessionIds[index] : '');
         if (!pane || !sessionId || isSessionModeSwitchPending(sessionId)) {
             return false;
         }
@@ -175,7 +175,10 @@
         /* Opening, closing, reordering and switching a tab are structural and
            go out at once; a frame navigating itself repeatedly is continuous
            and coalesces on the queue's one-second floor. */
-        return notePanePresentationChanged(index, { continuous });
+        return index >= 0 && terminals[index] === pane
+            ? notePanePresentationChanged(index, { continuous })
+            : (pane._session?.group_id
+                ? noteGroupPresentationChanged(pane._session.group_id, { continuous }) : false);
     }
 
     /* ── Markup ─────────────────────────────────── */
@@ -450,7 +453,9 @@
         }
 
         const [removed] = pane._browserTabs.splice(tabIndex, 1);
-        browserFrameForTab(index, removed.id)?.remove();
+        const removedFrame = browserFrameForTab(index, removed.id);
+        browserDisposeFrame(removedFrame);
+        removedFrame?.remove();
         if (pane._browserActiveTab >= pane._browserTabs.length) {
             pane._browserActiveTab = pane._browserTabs.length - 1;
         } else if (tabIndex < pane._browserActiveTab) {
@@ -572,23 +577,51 @@
         }
     }
 
+    function browserFrameOwnerIndex(frame) {
+        const owner = frame?._browserOwner;
+        if (!owner || owner.disposed || !owner.pane._browserTabs?.includes(owner.tab)) return -1;
+        const index = terminals.indexOf(owner.pane);
+        return index >= 0 && sessionIds[index] === owner.sessionId ? index : -1;
+    }
+
+    function browserDisposeFrame(frame) {
+        const owner = frame?._browserOwner;
+        if (!owner) return;
+        owner.disposed = true;
+        frame.removeEventListener?.('load', owner.load);
+        owner.unhook?.();
+        owner.pane._browserFrames?.delete(frame);
+        delete frame._browserOwner;
+        delete frame.dataset.bound;
+    }
+
+    function browserDisposePane(pane) {
+        Array.from(pane?._browserFrames || []).forEach(browserDisposeFrame);
+    }
+
     function browserHookFrameWindow(index, frame) {
+        const owner = frame?._browserOwner;
+        if (!owner || owner.disposed || !owner.pane._browserTabs?.includes(owner.tab)) return;
         const win = browserFrameWindow(frame);
         if (!win) {
             return;
         }
         try {
-            if (win.__gridvibeBrowserPaneHooked) {
+            if (win.__gridvibeBrowserPaneHooked === owner) {
                 return;
             }
-            win.__gridvibeBrowserPaneHooked = true;
+            owner.unhook?.();
+            win.__gridvibeBrowserPaneHooked = owner;
 
             /* window.open → a new pane tab. Returning null is safe for the
                callers we capture (GridVibe's own launcher ignores the handle);
                anything we cannot turn into an http(s) URL falls through to the
                native implementation. */
+            const originalOpen = win.open;
             const nativeOpen = typeof win.open === 'function' ? win.open.bind(win) : null;
             win.open = function hookedOpen(url, target, features) {
+                const ownerIndex = browserFrameOwnerIndex(frame);
+                if (ownerIndex < 0) return null;
                 const resolved = browserResolveFrameUrl(win, url);
                 const name = String(target || '').trim();
                 /* `_self`/`_top`/`_parent` navigate an existing window rather
@@ -597,12 +630,16 @@
                     return nativeOpen ? nativeOpen(url, target, features) : null;
                 }
                 const reusableName = ['_blank', '_new', ''].includes(name) ? '' : name;
-                browserOpenTab(index, resolved, { windowName: reusableName });
+                browserOpenTab(ownerIndex, resolved, { windowName: reusableName });
                 return null;
             };
 
             /* target="_blank" anchors, captured before the default action. */
-            win.document.addEventListener('click', event => {
+            const hookedOpen = win.open;
+            const frameDocument = win.document;
+            const onClick = event => {
+                const ownerIndex = browserFrameOwnerIndex(frame);
+                if (ownerIndex < 0) return;
                 const anchor = event.target?.closest?.('a[target="_blank"], a[target="_new"]');
                 if (!anchor) {
                     return;
@@ -612,8 +649,16 @@
                     return;
                 }
                 event.preventDefault();
-                browserOpenTab(index, resolved);
-            }, true);
+                browserOpenTab(ownerIndex, resolved);
+            };
+            frameDocument.addEventListener('click', onClick, true);
+            owner.unhook = () => {
+                try {
+                    frameDocument.removeEventListener?.('click', onClick, true);
+                    if (win.open === hookedOpen) win.open = originalOpen;
+                    if (win.__gridvibeBrowserPaneHooked === owner) delete win.__gridvibeBrowserPaneHooked;
+                } catch (_) { /* The document may have navigated across origins. */ }
+            };
         } catch (_) {
             /* Cross-origin document raced into place — leave the frame alone. */
         }
@@ -623,10 +668,10 @@
        pages so in-frame navigation (links, redirects, history) is reflected in
        the tab strip and persisted. */
     function browserSyncTabFromFrame(index, frame) {
-        const pane = browserPaneAt(index);
-        const tabId = frame?.dataset?.browserTabId;
-        const tab = pane?._browserTabs.find(entry => entry.id === tabId);
-        if (!pane || !tab) {
+        const owner = frame?._browserOwner;
+        const pane = owner?.pane;
+        const tab = owner?.tab;
+        if (!pane || owner.disposed || !pane._browserTabs?.includes(tab)) {
             return;
         }
         const win = browserFrameWindow(frame);
@@ -650,8 +695,9 @@
             return;
         }
         if (changed) {
-            browserRenderTabStrip(index);
-            browserPersistTabs(index, { continuous: true });
+            const ownerIndex = browserFrameOwnerIndex(frame);
+            if (ownerIndex >= 0) browserRenderTabStrip(ownerIndex);
+            browserPersistTabs(ownerIndex, { continuous: true, owner: pane });
         }
     }
 
@@ -660,6 +706,13 @@
         if (!frame || frame.dataset.bound) {
             return;
         }
+        const pane = browserPaneAt(index);
+        const tab = pane?._browserTabs.find(entry => entry.id === frame.dataset.browserTabId);
+        if (!pane || !tab) return;
+        const owner = { pane, tab, sessionId: sessionIds[index], disposed: false };
+        frame._browserOwner = owner;
+        if (!pane._browserFrames) pane._browserFrames = new Set();
+        pane._browserFrames.add(frame);
         frame.dataset.bound = 'true';
         if (frame.tagName !== 'IFRAME') {
             /* Blocked nested preview: no document will ever load, so clear the
@@ -667,11 +720,14 @@
             document.getElementById(`ph-${index}`)?.remove();
             return;
         }
-        frame.addEventListener('load', () => {
-            document.getElementById(`ph-${index}`)?.remove();
-            browserHookFrameWindow(index, frame);
-            browserSyncTabFromFrame(index, frame);
-        });
+        owner.load = () => {
+            if (owner.disposed || !pane._browserTabs.includes(tab)) return;
+            const ownerIndex = browserFrameOwnerIndex(frame);
+            if (ownerIndex >= 0) document.getElementById(`ph-${ownerIndex}`)?.remove();
+            browserHookFrameWindow(ownerIndex, frame);
+            browserSyncTabFromFrame(ownerIndex, frame);
+        };
+        frame.addEventListener('load', owner.load);
     }
 
     function browserWireTabStrip(index) {

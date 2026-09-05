@@ -39,7 +39,7 @@
        window, the first time a shell menu opens, and cached here. */
     let _wslDistroState = 'idle';
     let _wslDistroNames = [];
-    const _pendingShellSwitchIndexes = new Set();
+    const _pendingShellSwitchPanes = new Set();
     /* index → the shell row whose agent list is open, at most one per menu.
        Dropped when the menu closes: an expansion is a pointer gesture inside
        one opening of the menu, not pane state. */
@@ -287,7 +287,7 @@
         const activeKind = paneShellKind(session);
         const activeDistribution = String(session?.distribution || '').trim();
         const activeAgent = paneAgentKey(session);
-        const busy = _pendingShellSwitchIndexes.has(index);
+        const busy = _pendingShellSwitchPanes.has(terminals[index]);
 
         let sections = '';
         if (paneSupportsShellSwitch(session)) {
@@ -399,7 +399,7 @@
         menu.addEventListener('click', event => {
             event.preventDefault();
             event.stopPropagation();
-            if (_pendingShellSwitchIndexes.has(index)) {
+            if (_pendingShellSwitchPanes.has(terminals[index])) {
                 return;
             }
             /* The chevron expands its row's agent list and does nothing else:
@@ -487,7 +487,9 @@
        SSH pane has none to state — while `agent` is always stated. */
     async function relaunchSessionShell(index, { shell = '', distribution = '', agent = '' } = {}) {
         const sessionId = sessionIds[index];
-        const session = terminals[index]?._session;
+        const pane = terminals[index];
+        const session = pane?._session;
+        if (_pendingShellSwitchPanes.has(pane)) return;
         if (!sessionId || !paneIsRelaunchable(session)) {
             return;
         }
@@ -505,7 +507,7 @@
             body.distribution = distribution;
         }
 
-        _pendingShellSwitchIndexes.add(index);
+        _pendingShellSwitchPanes.add(pane);
         renderPaneShellMenu(index);
         try {
             const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/shell`, {
@@ -518,11 +520,11 @@
                 throw new Error(data.error || `Relaunch failed with status ${response.status}`);
             }
 
+            pane._session = data;
+            const ownerIndex = terminals.indexOf(pane);
+            if (ownerIndex < 0 || sessionIds[ownerIndex] !== sessionId) return;
+            index = ownerIndex;
             closeAllPaneShellMenus();
-            const pane = terminals[index];
-            if (pane) {
-                pane._session = data;
-            }
             const hostLabel = document.getElementById(`thost-${index}`);
             if (hostLabel) {
                 hostLabel.textContent = data.host || '';
@@ -535,8 +537,11 @@
             console.error('[GridVibe Sessions] relaunchSessionShell failed:', error);
             showTerminalToast(error.message || 'Relaunch failed', 'error');
         } finally {
-            _pendingShellSwitchIndexes.delete(index);
-            if (!paneShellMenuElement(index)?.hidden) {
+            _pendingShellSwitchPanes.delete(pane);
+            const ownerIndex = terminals.indexOf(pane);
+            if (ownerIndex >= 0 && sessionIds[ownerIndex] === sessionId
+                && !paneShellMenuElement(ownerIndex)?.hidden) {
+                index = ownerIndex;
                 renderPaneShellMenu(index);
             }
         }
