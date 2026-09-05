@@ -517,9 +517,20 @@ function resolvePreview(html, stateRevision) {
     pane._explorerRenderedTabId = tabA.id;
     pane._explorerFilePath = tabA.path;
     pane._explorerFileContent = '# a';
-    pane._explorerSearch = { query: 'needle' };
+    pane._explorerFileRevision = 'rev-a';
+    // The reader walked this find to its third match before leaving the tab.
+    pane._explorerSearch = { query: 'needle', activeIndex: 2, matchCount: 8 };
     realTabRuntime.capture(0);
     const capturedOnA = tabA.find && { ...tabA.find };
+    /* What the tab hands back when its file renders again: the position it was
+       left on for the same file at the same revision, the first match for a
+       file that moved underneath, and nothing at all for another path. */
+    const restored = {
+        sameRevision: sandbox.explorerRestoredTabFind(tabA, 'a.md', 'rev-a'),
+        movedFile: sandbox.explorerRestoredTabFind(tabA, 'a.md', 'rev-a2'),
+        otherPath: sandbox.explorerRestoredTabFind(tabA, 'b.md', 'rev-a'),
+        untouchedTab: sandbox.explorerRestoredTabFind(tabB, 'b.md', 'rev-b')
+    };
     // The permanent Preview tab shows a different file on every plain click, so
     // its stored query answers for that path only.
     pane._explorerActiveTabId = previewTab.id;
@@ -527,6 +538,7 @@ function resolvePreview(html, stateRevision) {
     previewTab.path = 'first.md';
     pane._explorerFilePath = 'first.md';
     pane._explorerFileContent = '# first';
+    pane._explorerFileRevision = 'rev-first';
     pane._explorerSearch = { query: 'first-query' };
     realTabRuntime.capture(0);
     const previewCarry = previewTab.find && { ...previewTab.find };
@@ -538,7 +550,8 @@ function resolvePreview(html, stateRevision) {
         capturedOnA,
         untouchedTab: tabB.find == null,
         previewCarry,
-        clearedCarry: previewTab.find
+        clearedCarry: previewTab.find,
+        restored
     };
 
     // The content identity behind every revision comparison is computed once
@@ -1065,14 +1078,40 @@ class ExplorerScrollAdapterTestCase(unittest.TestCase):
         under it changes while a pinned tab keeps it.
         """
         carry = self.results["tabFindCarry"]
-        self.assertEqual(carry["capturedOnA"], {"path": "a.md", "query": "needle"})
+        self.assertEqual(
+            carry["capturedOnA"],
+            {"path": "a.md", "query": "needle", "activeIndex": 2, "revision": "rev-a"},
+        )
         # A tab nobody searched carries nothing to re-apply.
         self.assertTrue(carry["untouchedTab"])
         self.assertEqual(
-            carry["previewCarry"], {"path": "first.md", "query": "first-query"}
+            carry["previewCarry"],
+            {
+                "path": "first.md",
+                "query": "first-query",
+                "activeIndex": 0,
+                "revision": "rev-first",
+            },
         )
         # Clearing the find clears the tab's carry with it.
         self.assertIsNone(carry["clearedCarry"])
+
+    def test_a_tab_switch_returns_the_find_to_the_match_it_was_left_on(self):
+        """A find the reader walked is a place, not just a query.
+
+        Returning to a searched tab used to re-run its query from the top: the
+        marks came back but the position did not, so a reader who had stepped
+        to match 3 of 8 landed on 1 of 8. The position now travels with the
+        query, paired with the revision of the file it was counted against —
+        a file that changed underneath is re-found from its first match,
+        because the stored index no longer names the line it was standing on.
+        """
+        restored = self.results["tabFindCarry"]["restored"]
+        self.assertEqual(restored["sameRevision"], {"query": "needle", "activeIndex": 2})
+        self.assertEqual(restored["movedFile"], {"query": "needle", "activeIndex": 0})
+        # Another file's render is handed no query at all, position included.
+        self.assertEqual(restored["otherPath"], {"query": "", "activeIndex": 0})
+        self.assertEqual(restored["untouchedTab"], {"query": "", "activeIndex": 0})
 
     def test_the_content_identity_is_computed_once_per_document(self):
         """A capture is not a reason to re-hash the file.

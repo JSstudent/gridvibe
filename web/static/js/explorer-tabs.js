@@ -335,12 +335,26 @@
            shows a different file on every plain click — drop the query while a
            pinned tab, or a reopen of the same file, keeps it.
 
+           The position travels with the query. A tab switch used to hand back
+           the query alone, so returning to the tab re-ran it from the top and
+           left the reader on match 1 of 8 with the counter to match — the find
+           survived, the place they had walked it to did not. The revision is
+           stamped alongside it so a file that moved underneath is re-found
+           from its first match rather than reopened at an index that now names
+           a different line.
+
            In-memory only. Nothing here reaches the persisted tab record; the
            snapshot contract stores no Search query or result. */
         if (isFile) {
-            const query = String(pane._explorerSearch?.query || '');
+            const search = pane._explorerSearch;
+            const query = String(search?.query || '');
             tab.find = query
-                ? { path: explorerNormalizeTabPath(pane._explorerFilePath), query }
+                ? {
+                    path: explorerNormalizeTabPath(pane._explorerFilePath),
+                    query,
+                    activeIndex: Math.max(0, Math.floor(Number(search?.activeIndex) || 0)),
+                    revision: String(pane._explorerFileRevision || '')
+                }
                 : null;
         }
         const scroll = captureExplorerFileScroll(index);
@@ -357,6 +371,38 @@
                 ? String(pane._explorerDiffMode || '')
                 : '',
             scroll
+        };
+    }
+
+    /* What a tab hands its find back when its file renders again, and the one
+       owner of that decision (renderExplorerFile reads it and does nothing
+       else with the record).
+
+       Two pairings, each answering a different way to be wrong. The query is
+       paired with the path, so a tab showing another file — the permanent
+       Preview tab, most of all — hands back nothing rather than painting the
+       outgoing file's marks over the incoming one. The position is paired with
+       the revision, so a reader who left on match 3 of 8 comes back to match 3
+       of 8, while a file that changed underneath comes back at the first match
+       the way a freshly typed query does: the index no longer names the line
+       it was standing on. The count itself is not restored — it is recomputed
+       against the file that actually rendered, and the index is clamped to it
+       there. */
+    function explorerRestoredTabFind(tab, path, revision) {
+        const find = tab && tab.find;
+        const key = explorerNormalizeTabPath(path);
+        const query = key && find && explorerNormalizeTabPath(find.path) === key
+            ? String(find.query || '')
+            : '';
+        if (!query) {
+            return { query: '', activeIndex: 0 };
+        }
+        const stored = Math.floor(Number(find.activeIndex) || 0);
+        const sameRevision = Boolean(find.revision)
+            && find.revision === String(revision || '');
+        return {
+            query,
+            activeIndex: sameRevision && stored > 0 ? stored : 0
         };
     }
 

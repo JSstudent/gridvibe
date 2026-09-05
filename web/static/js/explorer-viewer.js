@@ -6770,6 +6770,10 @@
         }
         const assignedTab = explorerAssignOpenTab(pane, data.path || '', { pinned, tab });
         assignedTab.git = data.git || null;
+        // Read before the assignment below overwrites it: the find restore
+        // needs to know whether this render is a different tab or the same one
+        // being rebuilt in place.
+        const previousRenderedTabId = pane._explorerRenderedTabId || '';
         pane._explorerRenderedTabId = assignedTab.id;
 
         const path = data.path || '';
@@ -6848,15 +6852,23 @@
            whatever the pane was last searching. A pane-wide query is what made
            a tab switch paint the previous file's find over the new one and
            then scroll it to the first hit. */
-        const tabFind = assignedTab?.find;
-        const restoredQuery = tabFind
-            && explorerNormalizeTabPath(tabFind.path) === explorerNormalizeTabPath(path)
-            ? String(tabFind.query || '')
-            : '';
-        if (restoredQuery !== searchState.query || (previousPath && previousPath !== path)) {
+        const restoredFind = explorerRestoredTabFind(assignedTab, path, data.revision);
+        const restoredQuery = restoredFind.query;
+        /* Which of the two renders this is decides what the find keeps. A
+           different tab (or file) hands the pane the incoming tab's own
+           position, so returning to a tab reopens on the match it was left on
+           instead of on the first one. The same tab rebuilt in place — a save,
+           a watch refresh — is a repaint: the pane's live position is the
+           reader's, and the tab's record is only as fresh as the last switch
+           away from it, so it is left alone. Two tabs on one path (a pinned
+           tab and Preview) are still two positions, which is why the tab id is
+           read and not just the path. */
+        const sameSurface = previousRenderedTabId === assignedTab.id
+            && (!previousPath || previousPath === path);
+        if (!sameSurface || restoredQuery !== searchState.query) {
             cancelExplorerSearch(index);
             searchState.query = restoredQuery;
-            searchState.activeIndex = 0;
+            searchState.activeIndex = sameSurface ? 0 : restoredFind.activeIndex;
             searchState.matchCount = 0;
             searchState.matchCapped = false;
             searchState.ranges = [];
