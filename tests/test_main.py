@@ -68,7 +68,7 @@ class MainTestCase(unittest.TestCase):
     def test_setup_logging_mutes_paramiko_chatter_outside_debug(self):
         """paramiko's per-SFTP-channel INFO lines must not crowd out first-party
         log retention, but genuine WARNING/ERROR failures still get through and
-        --debug still gives the full stream (CLAUDE.md guardrail 9)."""
+        --debug still gives the full stream (docs/engineering_contracts.md#logging)."""
         root_logger = logging.getLogger()
         paramiko_logger = logging.getLogger("paramiko")
         original_handlers = list(root_logger.handlers)

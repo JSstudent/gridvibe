@@ -46,8 +46,8 @@ awkward to grep and to read in the explorer's log viewer. `_StripAnsiFilter` is 
 to the **file handler only**, and the console handler is registered first and emits first —
 so `logs/gridvibe.log` is plain text while terminal output keeps its colours.
 
-Keeping ANSI out of the log file is a regression guardrail (`CLAUDE.md` §9); don't attach
-a new file handler without this filter.
+Keeping ANSI out of the log file is a [logging guardrail](engineering_contracts.md#logging);
+don't attach a new file handler without this filter.
 
 ---
 
@@ -108,7 +108,7 @@ restores the full paramiko stream for diagnosing one.
 
 Before muting a new library, prefer a filter if only some of its records are noise — this
 is for the case where an entire level is per-operation bookkeeping. Keeping
-`logs/gridvibe.log` readable is a regression guardrail (`CLAUDE.md` §9).
+`logs/gridvibe.log` readable is a [logging guardrail](engineering_contracts.md#logging).
 
 ---
 
@@ -160,7 +160,7 @@ logger.error("SSH connect failed: %s", exc)
 ### Choosing a level
 
 The log's value comes from `WARNING` and `ERROR` being rare enough to read every one, so
-be deliberate (`CLAUDE.md` §9):
+be deliberate (see the [logging contract](engineering_contracts.md#logging)):
 
 - **`DEBUG`** — routine teardown, window-management state, reconnect bookkeeping, and
   anything that can fire more than a few times per user action.
@@ -185,4 +185,3 @@ MAX_LOG_BACKUPS = 10                 # number of rotated copies kept
 ```
 
 No other files need to change — `setup_logging()` reads these constants directly.
-
