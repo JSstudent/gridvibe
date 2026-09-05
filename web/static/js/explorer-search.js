@@ -318,6 +318,12 @@
             results.innerHTML = files.length
                 ? files.map(file => explorerSearchGroupHtml(index, file, state.collapsed.has(file.path), activeKey)).join('')
                 : '<div class="explorer-diff-sidebar-empty">No matches found.</div>';
+            if (payload.error) {
+                results.innerHTML = `<div class="explorer-diff-sidebar-error">
+                    <div>${escHtml(payload.error)}</div>
+                    <button type="button" class="explorer-search-btn explorer-search-retry" data-explorer-search-retry>Retry</button>
+                </div>` + (files.length ? results.innerHTML : '');
+            }
             const footerParts = [];
             const engineLabel = EXPLORER_SEARCH_ENGINE_LABELS[payload.engine] || payload.engine || '';
             if (engineLabel) {

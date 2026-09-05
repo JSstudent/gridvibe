@@ -620,6 +620,7 @@
             const originalOpen = win.open;
             const nativeOpen = typeof win.open === 'function' ? win.open.bind(win) : null;
             win.open = function hookedOpen(url, target, features) {
+                if (owner.disposed || frame._browserOwner !== owner) return null;
                 const ownerIndex = browserFrameOwnerIndex(frame);
                 if (ownerIndex < 0) return null;
                 const resolved = browserResolveFrameUrl(win, url);
@@ -638,6 +639,7 @@
             const hookedOpen = win.open;
             const frameDocument = win.document;
             const onClick = event => {
+                if (owner.disposed || frame._browserOwner !== owner) return;
                 const ownerIndex = browserFrameOwnerIndex(frame);
                 if (ownerIndex < 0) return;
                 const anchor = event.target?.closest?.('a[target="_blank"], a[target="_new"]');

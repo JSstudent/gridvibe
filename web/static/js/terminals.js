@@ -6374,6 +6374,7 @@
             return false;
         }
 
+        if (typeof browserDisposePane === 'function') browserDisposePane(terminals[index]);
         const terminal = makeTerminal();
         terminal._session = session;
         terminals[index] = terminal;

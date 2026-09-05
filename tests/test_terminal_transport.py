@@ -12,7 +12,7 @@ from web import terminal_io as terminal
 class TerminalTransportTestCase(unittest.TestCase):
     def setUp(self):
         self.registry = {}
-        self.session = SimpleNamespace(startup_mode='terminal', status=SessionStatus.CONNECTED)
+        self.session = SimpleNamespace(mode='wsl', startup_mode='terminal', status=SessionStatus.CONNECTED)
         for name, value in [('ssh_connections', self.registry), ('session_output_buffers', {})]:
             context = patch.object(terminal, name, value)
             context.start()
@@ -140,6 +140,59 @@ class TerminalTransportTestCase(unittest.TestCase):
         terminal._close_ssh_connection('pane')
         self.assertFalse(terminal._connection_is_current('pane', second))
         self.session_manager.update_session_status.assert_not_called()
+
+    def test_replacement_waits_for_own_publication_without_blocking_other_panes(self):
+        entered, proceed, replaced = threading.Event(), threading.Event(), threading.Event()
+        old = terminal._begin_connection('pane')
+        failures = []
+
+        def emit(*args, **kwargs):
+            entered.set()
+            if not proceed.wait(2):
+                failures.append('Timed out waiting for publication release')
+            if self.registry.get('pane') is not old:
+                failures.append('Published after replacement')
+
+        def replace():
+            terminal._begin_connection('pane')
+            replaced.set()
+
+        with patch.object(terminal.socketio, 'emit', side_effect=emit):
+            publisher = threading.Thread(target=terminal._publish_ssh_terminal_output, args=('pane', 'old', old))
+            replacer = threading.Thread(target=replace)
+            publisher.start()
+            try:
+                self.assertTrue(entered.wait(2))
+                replacer.start()
+                self.assertFalse(replaced.wait(0.05))
+                # A different pane must still be able to acquire the shared lock.
+                unrelated = threading.Thread(target=terminal._begin_connection, args=('other',))
+                unrelated.start()
+                unrelated.join(1)
+                self.assertFalse(unrelated.is_alive())
+            finally:
+                proceed.set()
+                publisher.join(2)
+                if replacer.ident is not None:
+                    replacer.join(2)
+            self.assertTrue(replaced.is_set())
+            self.assertEqual(failures, [])
+        terminal._publish_ssh_terminal_output('pane', 'late', old)
+        self.assertEqual(self.emitted, [])
+
+    def test_nonterminal_modes_refuse_a_pending_connection(self):
+        for mode in ['explorer', 'browser']:
+            with self.subTest(mode=mode):
+                self.session.startup_mode = mode
+                self.assertIsNone(terminal._begin_connection('pane'))
+                self.assertEqual(self.registry, {})
+
+    def test_delivered_input_cannot_promote_a_replacement(self):
+        old = terminal._begin_connection('pane')
+        replacement = terminal._begin_connection('pane')
+        terminal._track_terminal_agent_input('pane', old, 'codex\n')
+        self.session_manager.update_session_metadata.assert_not_called()
+        self.assertIs(self.registry['pane'], replacement)
 
     def test_posix_spawn_failure_closes_both_descriptors(self):
         session = SimpleNamespace(distribution='', username='', directory='', initial_command='', use_wsl=False)

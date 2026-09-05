@@ -143,6 +143,9 @@ class FakeSshStream:
         self._offset += len(chunk)
         return chunk
 
+    def close(self):
+        self.channel.close()
+
 
 class FakeSshExecClient:
     def __init__(self, responses):
@@ -155,11 +158,20 @@ class FakeSshExecClient:
         if not self.responses:
             raise OSError("Unexpected SSH command")
         returncode, stdout, stderr = self.responses.pop(0)
-        return (
-            None,
-            FakeSshStream(stdout, returncode),
-            FakeSshStream(stderr, returncode),
+        output, errors = FakeSshStream(stdout, returncode), FakeSshStream(stderr, returncode)
+        channel = SimpleNamespace(
+            settimeout=lambda timeout: None,
+            recv_ready=lambda: output._offset < len(output._data),
+            recv_stderr_ready=lambda: errors._offset < len(errors._data),
+            recv=output.read,
+            recv_stderr=errors.read,
+            exit_status_ready=lambda: True,
+            recv_exit_status=lambda: returncode,
+            closed=False,
+            close=lambda: None,
         )
+        output.channel = errors.channel = channel
+        return None, output, errors
 
     def close(self):
         self.closed = True
@@ -469,7 +481,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         voice input ships disabled, and a decline was never remembered."""
         launcher = (Path(api.BASE_DIR) / "GridVibe.bat").read_text(encoding="utf-8")
 
-        gate_index = launcher.index("get('voice_input', {}).get('enabled')")
+        gate_index = launcher.index("runtime_config.voice_enabled")
         prompt_index = launcher.index("choice /C YN")
         marker_index = launcher.index('> ".voice-deps-declined"')
 
@@ -496,14 +508,14 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertLess(reset_index, start_index)
         self.assertLess(start_index, failure_check_index)
 
-    def test_windows_launcher_selects_desktop_browser_or_quit_after_core_setup(self):
+    def test_windows_launcher_selects_desktop_browser_or_quit_before_core_setup(self):
         launcher = (Path(api.BASE_DIR) / "GridVibe.bat").read_text(encoding="utf-8")
 
         prompt_index = launcher.index("choice /C DBQ")
         core_check_index = launcher.index("Core dependency import check passed.")
         desktop_install_index = launcher.index("Installing optional desktop dependencies")
 
-        self.assertGreater(prompt_index, core_check_index)
+        self.assertLess(prompt_index, core_check_index)
         self.assertLess(prompt_index, desktop_install_index)
         self.assertIn('set "LAUNCH_MODE=auto"', launcher)
         self.assertIn('set "LAUNCH_MODE=browser"', launcher)
@@ -7425,6 +7437,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         session_id = self._create_local_terminal_session(desktop).session_id
         connection = {"kind": "local", "shell_kind": "posix"}
 
+        api.ssh_connections[session_id] = connection
         with patch.object(web_terminal_io, "_broadcast_session_status"):
             web_terminal_io._track_terminal_agent_input(
                 session_id, connection, "codex\r"
@@ -13546,6 +13559,7 @@ class ApiRoutesTestCase(unittest.TestCase):
             startup_mode="terminal",
         )
         connection = {}
+        api.ssh_connections[session.session_id] = connection
 
         with patch.object(web_terminal_io, "_broadcast_session_status") as broadcast:
             api._track_terminal_agent_input(session.session_id, connection, "co")
@@ -13577,8 +13591,10 @@ class ApiRoutesTestCase(unittest.TestCase):
             initial_command_mode="agent",
         )
 
+        connection = {}
+        api.ssh_connections[session.session_id] = connection
         with patch.object(web_terminal_io, "_broadcast_session_status") as broadcast:
-            api._track_terminal_agent_input(session.session_id, {}, "claudx\be\r")
+            api._track_terminal_agent_input(session.session_id, connection, "claudx\be\r")
 
         updated = api.session_manager.get_session(session.session_id)
         self.assertEqual(updated.startup_mode, "agent")
@@ -13604,8 +13620,10 @@ class ApiRoutesTestCase(unittest.TestCase):
             initial_command="codex",
         )
 
+        connection = {}
+        api.ssh_connections[session.session_id] = connection
         with patch.object(web_terminal_io, "_broadcast_session_status") as broadcast:
-            api._track_terminal_agent_input(session.session_id, {}, "\x03")
+            api._track_terminal_agent_input(session.session_id, connection, "\x03")
 
         updated = api.session_manager.get_session(session.session_id)
         self.assertEqual(updated.startup_mode, "terminal")
@@ -13632,8 +13650,10 @@ class ApiRoutesTestCase(unittest.TestCase):
             initial_command="claude",
         )
 
+        connection = {}
+        api.ssh_connections[session.session_id] = connection
         with patch.object(web_terminal_io, "_broadcast_session_status") as broadcast:
-            api._track_terminal_agent_input(session.session_id, {}, "/exit\r")
+            api._track_terminal_agent_input(session.session_id, connection, "/exit\r")
 
         updated = api.session_manager.get_session(session.session_id)
         self.assertEqual(updated.startup_mode, "terminal")
@@ -18105,6 +18125,9 @@ class AgentInputTrackingLockTestCase(unittest.TestCase):
     def setUp(self):
         api.session_manager.reset_sessions()
         self.addCleanup(api.session_manager.reset_sessions)
+        registry = patch.object(web_terminal_io, "ssh_connections", {})
+        registry.start()
+        self.addCleanup(registry.stop)
 
     def test_double_interrupt_marks_agent_exited(self):
         session = api.session_manager.create_session(
@@ -18112,6 +18135,7 @@ class AgentInputTrackingLockTestCase(unittest.TestCase):
             startup_mode="agent", agent_selection="claude",
         )
         connection = {}
+        web_terminal_io.ssh_connections[session.session_id] = connection
 
         with patch.object(web_terminal_io, "_mark_runtime_agent_exited", return_value=True) as mark:
             api._track_terminal_agent_input(session.session_id, connection, "\x03")
@@ -18124,6 +18148,7 @@ class AgentInputTrackingLockTestCase(unittest.TestCase):
             group_id="grp-line", host="local", directory="/tmp",
         )
         connection = {}
+        web_terminal_io.ssh_connections[session.session_id] = connection
 
         api._track_terminal_agent_input(session.session_id, connection, "cla")
         api._track_terminal_agent_input(session.session_id, connection, "ude")

@@ -209,18 +209,30 @@ def _clear_terminal_output_buffer(session_id: str):
         session_output_buffers[session_id] = _OutputBuffer()
 
 
-def _close_ssh_connection(session_id: str, clear_buffer: bool = True, *, expected=None):
-    """Close and remove a single SSH connection."""
+def _connection_gate(connection):
     with connection_lock:
-        if expected is not None and ssh_connections.get(session_id) is not expected:
-            return
-        connection = ssh_connections.pop(session_id, None)
-        if connection is not None:
-            connection['retired'] = True
-        if clear_buffer:
-            session_output_buffers.pop(session_id, None)
+        return connection.setdefault('ownership_lock', threading.RLock())
 
-    _shutdown_connection(connection)
+
+def _close_ssh_connection(session_id: str, clear_buffer: bool = True, *, expected=None):
+    """Retire the captured transport after its last publication completes."""
+    with connection_lock:
+        connection = ssh_connections.get(session_id)
+        if expected is not None and connection is not expected:
+            return
+        if connection is None:
+            if clear_buffer:
+                session_output_buffers.pop(session_id, None)
+    if connection is not None:
+        with _connection_gate(connection):
+            with connection_lock:
+                if ssh_connections.get(session_id) is not connection:
+                    return
+                ssh_connections.pop(session_id, None)
+                connection['retired'] = True
+                if clear_buffer:
+                    session_output_buffers.pop(session_id, None)
+        _shutdown_connection(connection)
     _evict_pooled_ssh_client(session_id)
 
 
@@ -897,58 +909,72 @@ def _connection_is_current(session_id, connection):
 
 
 def _connection_status(session_id, connection, status, error_message=None):
-    with connection_lock:
-        if not _connection_is_current(session_id, connection):
-            return
-        session = session_manager.get_session(session_id)
-        if session is None or _is_explorer_session(session) or _is_browser_session(session):
-            return
-        session_manager.update_session_status(session_id, status, error_message=error_message)
-    _broadcast_session_status(session_id)
+    with _connection_gate(connection):
+        with connection_lock:
+            if not _connection_is_current(session_id, connection):
+                return
+            session = session_manager.get_session(session_id)
+            if session is None or _is_explorer_session(session) or _is_browser_session(session):
+                return
+            if status == SessionStatus.ERROR and session.status == SessionStatus.DISCONNECTED:
+                return
+            session_manager.update_session_status(session_id, status, error_message=error_message)
+        _broadcast_session_status(session_id)
 
 
 def _begin_connection(session_id):
-    connection = {'write_lock': threading.Lock()}
-    with connection_lock:
-        if session_manager.get_session(session_id) is None:
-            return None
-        old = ssh_connections.get(session_id)
-        if old is not None:
-            old['retired'] = True
-        ssh_connections[session_id] = connection
+    connection = {'write_lock': threading.Lock(), 'ownership_lock': threading.RLock()}
+    while True:
+        with connection_lock:
+            session = session_manager.get_session(session_id)
+            if session is None or _is_explorer_session(session) or _is_browser_session(session):
+                return None
+            old = ssh_connections.get(session_id)
+            if old is None:
+                ssh_connections[session_id] = connection
+                return connection
+        with _connection_gate(old):
+            with connection_lock:
+                if ssh_connections.get(session_id) is not old:
+                    continue
+                old['retired'] = True
+                ssh_connections[session_id] = connection
+                break
     _shutdown_connection(old)
     return connection
 
 
 def _finalize_stream(session_id: str, connection=None):
     """Only the reader owning the current transport may retire the pane."""
-    with connection_lock:
-        if not _connection_is_current(session_id, connection):
-            return
-        session = session_manager.get_session(session_id)
-        if (session and not _is_explorer_session(session) and not _is_browser_session(session)
-                and session.status not in {SessionStatus.ERROR, SessionStatus.DISCONNECTED}):
-            session_manager.update_session_status(session_id, SessionStatus.DISCONNECTED)
-        ssh_connections.pop(session_id, None)
-        session_output_buffers.pop(session_id, None)
-        connection['retired'] = True
-    _broadcast_session_status(session_id)
-    _shutdown_connection(connection)
-    _evict_pooled_ssh_client(session_id)
+    if connection is None:
+        return
+    with _connection_gate(connection):
+        with connection_lock:
+            if not _connection_is_current(session_id, connection):
+                return
+            session = session_manager.get_session(session_id)
+            changed = (session and not _is_explorer_session(session) and not _is_browser_session(session)
+                       and session.status not in {SessionStatus.ERROR, SessionStatus.DISCONNECTED})
+            if changed:
+                session_manager.update_session_status(session_id, SessionStatus.DISCONNECTED)
+        if changed:
+            _broadcast_session_status(session_id)
+        _close_ssh_connection(session_id, expected=connection)
 
 
 SSH_STREAM_RECV_TIMEOUT = 0.5
 
 
 def _publish_ssh_terminal_output(session_id: str, output: str, connection=None) -> None:
-    """Publish only output belonging to the current connection."""
-    if not output:
+    """Publish before retirement, without holding either shared registry lock."""
+    if not output or connection is None:
         return
-    with connection_lock:
-        if not _connection_is_current(session_id, connection):
-            return
-        _cache_terminal_output(session_id, output)
-    socketio.emit('terminal_output', {'session_id': session_id, 'data': output}, room=session_id)
+    with _connection_gate(connection):
+        with connection_lock:
+            if not _connection_is_current(session_id, connection):
+                return
+            _cache_terminal_output(session_id, output)
+        socketio.emit('terminal_output', {'session_id': session_id, 'data': output}, room=session_id)
 
 
 def _decoded_terminal_output(session_id, connection, data=b'', *, final=False):
@@ -1214,6 +1240,18 @@ def _agent_from_terminal_command(command: str) -> Optional[Tuple[str, str]]:
 
 
 def _track_terminal_agent_input(
+    session_id: str,
+    connection: Dict[str, Any],
+    input_data: str,
+) -> None:
+    """Apply successfully delivered input only to its owning connection."""
+    with _connection_gate(connection):
+        if not _connection_is_current(session_id, connection):
+            return
+        _track_current_terminal_agent_input(session_id, connection, input_data)
+
+
+def _track_current_terminal_agent_input(
     session_id: str,
     connection: Dict[str, Any],
     input_data: str,

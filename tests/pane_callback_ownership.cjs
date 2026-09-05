@@ -60,6 +60,7 @@ function browserCallbacks() {
     assert.deepEqual(writes, ['A']);
     ctx.browserOpenTab = (index, url) => popups.push([ctx.sessionIds[index], url]);
     const queuedOpen = frame.contentWindow.open;
+    const queuedClick = listeners.click;
     queuedOpen('http://localhost/new', '_blank');
     assert.deepEqual(popups, []);
     ctx.terminals.push(a); ctx.sessionIds.push('A');
@@ -78,6 +79,13 @@ function browserCallbacks() {
     assert.equal(popups.length, 1);
     assert.equal(frame.contentWindow.open, nativeOpen);
     assert.equal(Object.keys(listeners).length, 0);
+    ctx.browserWireFrame(0, frame);
+    listeners.load();
+    queuedLoad(); queuedOpen('http://localhost/stale', '_blank');
+    queuedClick({ target: { closest: () => ({ getAttribute: () => 'http://localhost/stale' }) },
+        preventDefault() { throw Error('Disposed handler still active'); } });
+    assert.equal(popups.length, 1);
+    assert.equal(b._session.initial_command, 'http://localhost/reordered');
 }
 
 async function searchCallbacks() {

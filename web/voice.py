@@ -938,6 +938,9 @@ def _stop_vosk_voice_session(session_id: str):
         return
     acquired = session_lock.acquire(timeout=5) if session_lock else True
     try:
+        with _vosk_lock:
+            if _vosk_ws_connections.get(session_id) is not ws:
+                return False
         if not acquired:
             emit('voice_status', {
                 'session_id': session_id, 'status': 'error',
@@ -958,6 +961,9 @@ def _stop_vosk_voice_session(session_id: str):
                 emit('voice_result', {'session_id': session_id, 'text': text, 'final': True})
     except Exception as exc:
         logger.debug('Error during voice_stop flush: %s', exc)
+        with _vosk_lock:
+            if _vosk_ws_connections.get(session_id) is not ws:
+                return False
         emit('voice_status', {
             'session_id': session_id, 'status': 'error',
             'message': 'Voice service could not finish recording. Start recording again to retry.',

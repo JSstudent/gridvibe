@@ -296,10 +296,14 @@
                 : '';
         }
         const nodes = buildExplorerTreeSearchNodes(state.payload.entries);
+        const failure = state.payload.error ? `<div class="explorer-diff-sidebar-error">
+            <div>${escHtml(state.payload.error)}</div>
+            <button type="button" class="explorer-search-btn" data-explorer-tree-search-retry>Retry</button>
+        </div>` : '';
         if (!nodes.length) {
-            return '<div class="explorer-tree-empty">No matching files or folders.</div>';
+            return failure || `<div class="explorer-tree-empty">No matching files or folders.</div>${explorerTreeSearchFooterHtml(state.payload)}`;
         }
-        return `${explorerTreeSearchRowsHtml(pane, nodes, 0)}${explorerTreeSearchFooterHtml(state.payload)}`;
+        return `${failure}${explorerTreeSearchRowsHtml(pane, nodes, 0)}${explorerTreeSearchFooterHtml(state.payload)}`;
     }
 
     function syncExplorerTreeSearchControls(index) {

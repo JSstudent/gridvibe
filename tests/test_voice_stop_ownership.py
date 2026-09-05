@@ -61,6 +61,31 @@ class VoiceStopOwnershipTestCase(unittest.TestCase):
         self.emit.assert_not_called()
         self.assertFalse(self.lock.locked())
 
+    def test_old_stop_errors_do_not_interrupt_restarted_recording(self):
+        for timeout in [True, False]:
+            with self.subTest(timeout=timeout):
+                old, replacement = MagicMock(), MagicMock()
+                lock = MagicMock()
+                self.connections['pane'], self.locks['pane'] = old, lock
+
+                def restart(*args, **kwargs):
+                    self.connections['pane'] = replacement
+                    self.locks['pane'] = threading.Lock()
+                    if timeout:
+                        return False
+                    raise OSError('Old service ended')
+
+                if timeout:
+                    lock.acquire.side_effect = restart
+                else:
+                    lock.acquire.return_value = True
+                    old.recv.side_effect = restart
+                self.assertFalse(voice._stop_vosk_voice_session('pane'))
+                self.emit.assert_not_called()
+                self.assertIs(self.connections['pane'], replacement)
+                replacement.close.assert_not_called()
+                self.assertEqual(lock.release.call_count, 0 if timeout else 1)
+
     def test_final_text_is_emitted_once_and_all_holds_are_released(self):
         self.ws.recv.return_value = '{"text":"final text"}'
         voice._stop_vosk_voice_session('pane')

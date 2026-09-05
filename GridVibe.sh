@@ -49,7 +49,8 @@ prompt_mode() {
                 return 0
                 ;;
             3|q|Q|quit|Quit)
-                exit 0
+                printf '%s\n' "quit"
+                return 0
                 ;;
             *)
                 printf '%s\n' "Please choose 1, 2, or 3." >&2
@@ -57,6 +58,18 @@ prompt_mode() {
         esac
     done
 }
+
+SETUP_REPAIR=false
+case "${1:-}" in
+    --repair) SETUP_REPAIR=true ;;
+    --help) info "Usage: ./GridVibe.sh [--repair]"; exit 0 ;;
+    '') ;;
+    *) fail "Unknown option: $1. Use --repair to reinstall dependencies." ;;
+esac
+
+LAUNCH_MODE=$(prompt_mode) || exit 0
+[ "$LAUNCH_MODE" != "quit" ] || exit 0
+info "To repair dependencies, run ./GridVibe.sh --repair."
 
 BOOTSTRAP_PYTHON=$(find_python) || fail "Python 3 was not found on PATH."
 
@@ -73,7 +86,7 @@ info "Project path: $PROJECT_DIR"
 info "Using bootstrap interpreter: $BOOTSTRAP_PYTHON"
 info ""
 
-if [ ! -x "$PROJECT_DIR/.venv/bin/python" ]; then
+if [ ! -x "$PROJECT_DIR/.venv/bin/python" ] || ! "$PROJECT_DIR/.venv/bin/python" --version >/dev/null 2>&1; then
     if [ -d "$PROJECT_DIR/.venv" ]; then
         backup="$PROJECT_DIR/.venv-nonlinux-$(date +%Y%m%d%H%M%S)"
         info "Existing .venv is not usable from Linux. Moving it to:"
@@ -89,21 +102,24 @@ fi
 
 VENV_PYTHON="$PROJECT_DIR/.venv/bin/python"
 
-info "Updating Python installer tooling..."
-"$VENV_PYTHON" -m pip install --upgrade pip setuptools wheel \
-    || fail "Failed to update Python installer tooling."
+if [ "$SETUP_REPAIR" = true ] || ! "$VENV_PYTHON" "$PROJECT_DIR/utils/launcher_setup.py" check core; then
+    info "Updating Python installer tooling..."
+    "$VENV_PYTHON" -m pip install --upgrade pip setuptools wheel \
+        || fail "Failed to update Python installer tooling."
 
-info "Installing core dependencies..."
-"$VENV_PYTHON" -m pip install --upgrade --upgrade-strategy eager -r "$PROJECT_DIR/requirements.txt" \
-    || fail "Failed to install core dependencies."
+    info "Installing core dependencies..."
+    "$VENV_PYTHON" -m pip install --upgrade --upgrade-strategy eager -r "$PROJECT_DIR/requirements.txt" \
+        || fail "Failed to install core dependencies."
 
-info "Verifying core dependencies..."
-"$VENV_PYTHON" -c 'import _cffi_backend, cryptography.fernet, engineio, flask, flask_socketio, paramiko, socketio; print("Core dependency import check passed.")' \
-    || fail "Core dependency import check failed."
+    info "Verifying core dependencies..."
+    "$VENV_PYTHON" -c 'import _cffi_backend, cryptography.fernet, engineio, flask, flask_socketio, paramiko, socketio; print("Core dependency import check passed.")' \
+        || fail "Core dependency import check failed."
 
-LAUNCH_MODE=$(prompt_mode)
+    "$VENV_PYTHON" "$PROJECT_DIR/utils/launcher_setup.py" record core \
+        || fail "Core setup verification failed. Run ./GridVibe.sh --repair."
+fi
 
-if [ "$LAUNCH_MODE" = "native" ]; then
+if [ "$LAUNCH_MODE" = "native" ] && { [ "$SETUP_REPAIR" = true ] || ! "$VENV_PYTHON" "$PROJECT_DIR/utils/launcher_setup.py" check desktop; }; then
     info ""
     info "Installing optional desktop dependencies..."
     "$VENV_PYTHON" -m pip install --upgrade --upgrade-strategy eager -r "$PROJECT_DIR/requirements-desktop.txt" \
@@ -112,6 +128,8 @@ if [ "$LAUNCH_MODE" = "native" ]; then
     info "Verifying optional desktop dependencies..."
     "$VENV_PYTHON" -c 'import webview; print("Desktop dependency import check passed.")' \
         || fail "Desktop dependency import check failed. Rerun and choose Browser, or repair requirements-desktop.txt installation."
+    "$VENV_PYTHON" "$PROJECT_DIR/utils/launcher_setup.py" record desktop \
+        || fail "Desktop setup verification failed. Run ./GridVibe.sh --repair."
 fi
 
 info ""
