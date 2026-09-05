@@ -18,4 +18,9 @@ This file is only a visible shortcut for GitHub releases. The real launcher rema
 .\GridVibe.bat
 ```
 
+An unchanged, verified environment starts without running pip again. To force
+dependency installation and verification, run `.\GridVibe.bat --repair` from
+the project root. Use the root launcher for this option; the shortcut here
+does not forward arguments. Choosing **Quit** exits before environment setup.
+
 GitHub controls repository file icons by file type, so a batch file cannot have a custom icon in the file list. Keeping this `START_HERE` folder near the top of the repository makes the Windows launcher easier to find without duplicating launcher logic.

@@ -382,7 +382,7 @@ The backend:
 - sends `{"config": {"sample_rate": 16000}}` before audio
 - forwards binary PCM chunks
 - relays partial or final Vosk messages as `voice_result`
-- sends `{"eof": 1}` on stop to flush the final result
+- sends `{"eof": 1}` on stop to flush the final result only after acquiring that recording's I/O lock
 - can restart the service if the first connection attempt fails
 
 ### Vosk service behavior
@@ -403,6 +403,13 @@ There are a few important implementation details here — all in `web/voice.py` 
 
 - `_vosk_lock` guards the session WebSocket registry.
 - `_vosk_session_locks` serialize `send` and `recv` per Vosk voice session.
+- Stop captures the WebSocket and its lock, then waits at most five seconds
+  to acquire that lock. If it cannot acquire it, it closes the captured
+  connection and reports cancellation without sending EOF or receiving beside
+  an active audio request. The stop handler must not then claim success.
+- Audio and stop completions compare the captured WebSocket with the registry
+  entry before publishing text/errors or removing the entry. A stop/restart
+  cannot let an old response, timeout, or service error reach the new recording.
 - `_vosk_process_lock` isolates subprocess lifecycle operations.
 - old or leaked Vosk WebSocket handles are explicitly closed before replacement.
 - the frontend disables mic buttons on other terminals while one terminal is recording.
@@ -530,6 +537,8 @@ Notable verified areas:
 - Vosk session startup stores connections safely under lock
 - Vosk startup retry closes failed or leaked connections correctly
 - Vosk audio proxy handles closed WebSocket races without crashing
+- `tests/test_voice_stop_ownership.py` exercises refused stop locks, late audio
+  and stop results/errors after restart, one final transcript, and cleanup.
 
 ## Known Constraints
 

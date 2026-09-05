@@ -60,6 +60,23 @@ python main.py                   # → http://localhost:5050
 
 Both launchers ask for **Desktop** (native window) or **Browser** mode. Core requirements already include `pywinpty` on Windows, so local cmd/PowerShell/WSL panes work in browser mode too. For a native window, also install `requirements-desktop.txt`.
 
+Choose **Quit** to exit before environment setup; closing the input stream also
+exits the POSIX launcher. After a successful setup, an unchanged environment
+passes an import check and starts without running pip, including offline.
+Changed requirements, interpreter identity, installed package versions, or a
+failed import check trigger setup again. Optional desktop packages are checked
+when that mode is selected; Windows retains its optional voice-package choice.
+
+To force dependency installation and verification, run the root launcher:
+
+```powershell
+.\GridVibe.bat --repair          # Windows, from the project root
+```
+
+```bash
+./GridVibe.sh --repair           # Linux / macOS
+```
+
 ### Getting & updating it
 
 | | Get it | Update it |
@@ -145,6 +162,15 @@ When the pane cannot say where it is — the shell never answered, or the pane i
 | **Select several** | `Ctrl`-click rows to add or remove them, `Shift`-click for a range. Copy, Cut, Delete, Download, and Copy path act on the whole selection, with one confirmation and one result; right-click outside it drops back to that single row. Rename and Upload stay single-entry. |
 | **Very large files & diffs** | Past ~20,000 lines or 4 MiB a file opens in a plain **large file view** — no syntax colour, folding, change marks, overview ruler, or find — with a notice naming each one; Download and Edit still work. Below that tier, source paints as readable plain rows first and gains colour when a background worker finishes. Large diffs drop intraline emphasis and then syntax colour, but always keep side-by-side layout, line numbers, and line and block undo. |
 | **Restore fidelity** | Saved sessions and workspaces bring back the explorer root, ordered file tabs, Preview/Source/Diff intent, scroll, wrapping, folds, sidebar width, Files-tree and commit expansion, theme, and Markdown appearance. Scroll and folds restore only while the file, directory, or diff still matches; queries and fetched results are always refetched, never stored. |
+
+Repository content search and name find use Python regular-expression syntax
+with the same case and whole-word rules across Git, local walks, and SSH
+fallbacks. Search stops at its configured limits and marks partial results;
+remote command failures show an error with a retry action. Emoji before a match
+do not shift its highlight.
+
+On Linux/macOS, move or rename is refused if the
+filesystem cannot guarantee that a concurrent destination will be preserved.
 
 ### Git sidebar
 
@@ -258,6 +284,12 @@ On disk, settings load from `config.json` (git-ignored) falling back to `default
 
 GridVibe generates a Flask session signing key at startup unless `GRIDVIBE_SECRET_KEY`, `SECRET_KEY`, or `security.secret_key` is set.
 
+Settings updates merge with the latest file under a cross-process lock, so
+unrelated changes from two GridVibe processes survive. Invalid JSON, invalid
+UTF-8, and malformed configuration sections are quarantined and recovered from
+a valid `config.json.bak` when available. A failed save is reported and leaves
+the running settings unchanged.
+
 ### Shell integration
 
 `terminal.shell_integration` (on by default) is what lets GridVibe follow the directory a terminal is *in*, rather than the one it was launched in — which is the directory the file explorer opens on when you switch a pane over.
@@ -273,7 +305,7 @@ What it costs: that one echoed line on SSH panes, and **cmd's `PROMPT` is replac
 GridVibe is a local tool, not a public web service: it binds to `127.0.0.1` by default, has no built-in authentication, and should not be exposed to the internet.
 
 - Socket.IO CORS defaults to same-origin, following the address the server actually resolved (so `--host`/`--port` are covered) plus the host each request was addressed to; state-changing cross-origin requests are rejected on the same rule. Set `security.cors_origins` only if you serve GridVibe from another origin — an explicit list is used verbatim and replaces both defaults.
-- SSH host keys persist to `.known_hosts`; `ssh.host_key_policy` can be `auto-add` (default), `known-hosts`, or `strict`.
+- SSH host keys persist to `.known_hosts`; `ssh.host_key_policy` can be `auto-add` (default), `known-hosts`, or `strict`. The first two accept and save new keys (`known-hosts` also warns); all modes reject changed keys. An unreadable or malformed trust file refuses the connection. Repair access or restore a valid trust file, then reconnect; GridVibe preserves the failed file.
 - Saved SSH passwords are Fernet-encrypted; the key lives in `.encryption_key`.
 
 See [`SECURITY.md`](SECURITY.md) for reporting and scope.

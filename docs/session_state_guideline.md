@@ -56,6 +56,22 @@ saving a preset never rewrites a snapshot.
 
 ---
 
+## Configuration Transactions
+
+`web/config.py::update_config()` owns the complete settings transaction: read
+the latest file under the in-process and cross-process locks, merge and
+normalize against that read, validate and build the next runtime generation,
+save, then publish. App Settings and voice preferences both use it. Reading
+outside the transaction and later saving a merged dictionary can discard an
+unrelated change from another process, even if the replace itself is atomic.
+
+The root and every present known configuration section must be JSON objects.
+Malformed shapes and invalid UTF-8 enter the same quarantine/backup recovery as
+invalid JSON; the backup is validated before use. Recovery preserves a valid
+backup across the next save. An unreadable file is preserved and a refused
+refresh or failed save leaves the previous immutable `RuntimeConfigState`
+published. Multi-field readers still take one `runtime_config.snapshot()`.
+
 ## Two Layers of State
 
 **Launchable shape** — what it takes to relaunch a pane: host, port, username,
@@ -339,5 +355,8 @@ that then *types* its `initial_command` at the prompt.
   pin are the same test rather than two, and an out-of-allowlist
   `explorer_git_pin_kind` is asserted to be refused rather than coerced.
 - `tests/test_saved_session_store.py` — preset and encryption-key durability.
+- `tests/test_config_transactions.py` — malformed config recovery, backup
+  preservation, refused writes/refreshes, and two real processes merging
+  unrelated settings under the same file lock.
 - `tests/test_backend_concurrency_contract.py` — the RuntimeConfig publication,
   workspace-label claim, and pooled-SSH reservation guardrails.
