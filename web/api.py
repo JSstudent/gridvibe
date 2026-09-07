@@ -90,6 +90,7 @@ from web.config import (  # noqa: F401 - compatibility re-exports
     save_config,
     update_config,
 )
+from web.dashboard import build_dashboard_snapshot
 from web.explorer import (  # noqa: F401 - some names re-exported for backwards compatibility
     EXPLORER_FILE_PREVIEW_MAX_BYTES,
     ExplorerRouteError,
@@ -294,6 +295,7 @@ from web.terminal_io import (  # noqa: F401 - re-exported for backwards compatib
     _stream_ssh_output,
     _terminal_cwd_probe_command,
     _track_terminal_agent_input,
+    agent_activity_snapshot,
     client_joined_sessions,
     connection_lock,
     effective_directory,
@@ -2032,6 +2034,24 @@ def get_workspaces():
     """
     workspaces = list_live_workspaces()
     return jsonify({"workspaces": workspaces, "count": len(workspaces)})
+
+
+@app.route('/api/dashboard', methods=['GET'])
+def get_dashboard():
+    """Return every live workspace, session group and pane in one reading.
+
+    The one request behind the dashboard panel both pages open. It exists
+    because the alternative is N+1 requests raced against each other: a window
+    asking for workspaces, then a group list per workspace, then a pane list per
+    group, would render a tree assembled out of several different moments.
+
+    The two shared locks are taken in the allowed order and never nested --
+    ``connection_lock`` for the activity snapshot first, released, and only then
+    the manager -- so a busy pane's pump thread is never waiting on a dashboard
+    poll.
+    """
+    activity = agent_activity_snapshot()
+    return jsonify(build_dashboard_snapshot(session_manager, activity))
 
 
 @app.route('/api/workspaces', methods=['POST'])

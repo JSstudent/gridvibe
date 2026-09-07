@@ -12,6 +12,7 @@
     <link rel="stylesheet" href="{{ url_for('static', filename='css/workspaces.css') }}?v={{ version }}">
     <link rel="stylesheet" href="{{ url_for('static', filename='css/lifecycle.css') }}?v={{ version }}">
     <link rel="stylesheet" href="{{ url_for('static', filename='css/shortcuts-help.css') }}?v={{ version }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/dashboard.css') }}?v={{ version }}">
 </head>
 <body
     data-voice-enabled="{{ 'true' if voice_enabled else 'false' }}"
@@ -143,6 +144,10 @@
         </button>
         <div class="app-menu-panel session-bar-menu-panel" id="sessionMenu" role="menu" aria-labelledby="sessionMenuBtn"></div>
     </div>
+    <!-- Everything that is running, anywhere: the same panel the launcher
+         shows, seated beside the menu whose scope stops at this window. -->
+    {% set dashboard_button_class = 'btn btn-neutral btn-icon session-bar-dashboard-btn' %}
+    {% include 'partials/dashboard.html' %}
     <!-- The launcher button heads the session tab line so it sits with the tabs
          it opens and stays reachable while the top bar is hidden. -->
     <a
@@ -368,7 +373,9 @@
 <script src="{{ url_for('static', filename='js/explorer-overview.js') }}?v={{ version }}"></script>
 <script src="{{ url_for('static', filename='js/browser-pane.js') }}?v={{ version }}"></script>
 <script src="{{ url_for('static', filename='js/terminal-shell.js') }}?v={{ version }}"></script>
+<script src="{{ url_for('static', filename='js/agent-identity.js') }}?v={{ version }}"></script>
 <script src="{{ url_for('static', filename='js/session-menu.js') }}?v={{ version }}"></script>
+<script src="{{ url_for('static', filename='js/dashboard.js') }}?v={{ version }}"></script>
 <script src="{{ url_for('static', filename='js/shortcuts-help.js') }}?v={{ version }}"></script>
 <script src="{{ url_for('static', filename='js/topbar-peek.js') }}?v={{ version }}"></script>
 <script src="{{ url_for('static', filename='js/terminal-modes.js') }}?v={{ version }}"></script>

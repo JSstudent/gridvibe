@@ -19,6 +19,7 @@ Regression history and audit narratives do not belong in this reference.
 - [Explorer rendering and scroll](#explorer-rendering-and-scroll)
 - [Presentation persistence](#presentation-persistence)
 - [Workspace lifecycle and windows](#workspace-lifecycle-and-windows)
+- [Activity dashboard](#activity-dashboard)
 - [Architecture and extraction boundaries](#architecture-and-extraction-boundaries)
 - [UI and styling](#ui-and-styling)
 - [Logging](#logging)
@@ -136,6 +137,13 @@ changing any field that survives restart; it owns the complete save/restore flow
   prompt. Only SSH receives a typed integration command. Disabling
   `terminal.shell_integration` stops installation, not parsing sequences emitted
   by the user's shell.
+- `web/agent_activity.py` reads OSC 0/2 titles and OSC 9;4 progress from the
+  same stream, with its own bounded residue and no filtering. Both observers
+  share the residue scanner in `web/osc_stream.py`; each owns its sequence heads
+  and its ceiling. The reading lives on the pane's connection entry and is
+  replaced, never edited, so a lock-free pump write and a locked snapshot read
+  cannot meet a half-updated record. A retired entry's reading is unreachable
+  and needs no ownership check.
 - `web/terminal_cwd.py` parses OSC 7 / OSC 9;9 outside locks with bounded
   per-connection residue and never filters output. `_publish_observed_cwd()`
   checks exact registry-entry identity and writes metadata in the same
@@ -483,6 +491,38 @@ unless the task explicitly changes this contract.
   `gridVibeMinimizeAllAvailable()` controls button and settings visibility; browser
   saves omit invisible native settings. Page-specific shortcut guards exclude
   AltGr (`!event.ctrlKey`) and match `event.code`.
+
+## Activity dashboard
+
+- `GET /api/dashboard` is the only cross-workspace read: one pass composing
+  every live workspace, its groups and their panes. Consumers must not fan out
+  per-workspace requests to rebuild it.
+- `web/dashboard.py` composes; the route stays thin. `compose_dashboard()` is
+  pure (dictionaries in, dictionary out, no manager, no clock). The gatherer
+  snapshots activity under `connection_lock` and releases it *before* taking the
+  manager lock — the two are never nested.
+- Pane payloads are built from `PANE_FIELDS`, never filtered from
+  `TerminalSession.to_dict()`, so a field added later cannot leak. No
+  credentials, no explorer view state, no presentation fields.
+- The payload states what a pane *is*, never what to call it. Naming is
+  `web/static/js/agent-identity.js`, shared by the pane header and the dashboard
+  row; a second implementation server-side is what would let the two disagree.
+- A pane with no transport carries `activity: null`. "Nothing to observe" and
+  "observed nothing yet" (`state: "unknown"`) are different answers.
+- Liveness falls back to output cadence, because most agents publish no progress
+  at all; a published progress state stops driving the reading once stale. The
+  state names the input that decided it.
+- A generic `Terminal N` title is treated as unset so an agent pane can name
+  itself; a title the user typed always wins, and the display name is never
+  persisted back as the pane's title.
+- The panel polls only while it is open; a slow answer that lands after a newer
+  one is dropped. A closed panel holds no rows.
+- Which side the panel hangs from is each page's `--dash-anchor-*` statement,
+  because it is a fact about where that page's button is: the workspace window's
+  heads the session bar (left), the launcher's sits in `.action-bar-right`
+  (right, the shared default). `dashboardPanelFit()` then measures and nudges
+  whatever still overflows and caps the height from the panel's own anchored
+  edge, so a wrong anchor degrades to a shifted panel rather than one off screen.
 
 ## Architecture and extraction boundaries
 

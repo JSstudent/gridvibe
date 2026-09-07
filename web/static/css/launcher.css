@@ -903,6 +903,18 @@
             --sh-anchor-bottom: calc(100% + 6px);
         }
 
+        /* Same story for the dashboard, which sits in the same control row: it
+           opens upward, and both edges are stated because "open upward" is two
+           facts -- take the bottom edge, give up the top one. The horizontal
+           side is *not* restated: this cluster is `.action-bar-right`, at the
+           right end of the bar, which is exactly what the shared default's
+           right anchor is for. (The workspace window is the page that has to
+           override it -- its button heads the session bar on the left.) */
+        .dashboard-panel {
+            --dash-anchor-top: auto;
+            --dash-anchor-bottom: calc(100% + 6px);
+        }
+
         .app-footer {
             display: flex;
             align-items: center;

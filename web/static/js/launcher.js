@@ -3831,6 +3831,10 @@
     loadVoicePrefs().catch(() => {});
     checkRestorableWorkspace().catch(() => {});
     refreshWorkspaceDestinations().catch(() => {});
+    /* The dashboard reads across every window, so the launcher -- which is
+       in none of them -- is the one page that can only learn what is running
+       by asking. */
+    wireDashboard();
     updateHeaderBadges();
 
     function updateHeaderBadges() {

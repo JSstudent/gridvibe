@@ -650,6 +650,22 @@
        browserSurfaceHtml, wireBrowserOnlyControls, navigateBrowserPane,
        reloadBrowserPane, openBrowserPaneExternally, browserSerializeTabs. */
 
+    /* What a pane's header prints. The rule -- a title the user typed wins, an
+       agent pane is otherwise named after its agent, and only then "Terminal N"
+       -- is agent-identity.js's, shared with the dashboard row that lists the
+       same pane, so the two can never disagree about what it is called.
+
+       Display only. The persisted title stays whatever the launcher wrote, so
+       naming a pane after its agent never turns that name into the pane's own.
+    */
+    function paneDisplayTitle(session, index) {
+        return window.GridVibeAgentIdentity.paneDisplayTitle(
+            session,
+            index,
+            typeof AGENT_OPTIONS === 'undefined' ? [] : AGENT_OPTIONS
+        );
+    }
+
     function getSessionApiPath(groupId = activeGroupId) {
         const params = new URLSearchParams({ workspace_id: currentWorkspaceId });
         if (groupId) {
@@ -5275,7 +5291,7 @@
                 <div class="terminal-header">
                     <div class="terminal-info">
                         <span class="terminal-name" id="tname-${i}">
-                            ${escHtml(session.title || `Terminal ${i + 1}`)}
+                            ${escHtml(paneDisplayTitle(session, i))}
                         </span>
                         <span class="terminal-host" id="thost-${i}">
                             ${escHtml(session.host || '')}
@@ -5869,7 +5885,7 @@
 
         const name = card.querySelector(`#tname-${targetIndex}`);
         if (name) {
-            name.textContent = session.title || `Terminal ${targetIndex + 1}`;
+            name.textContent = paneDisplayTitle(session, targetIndex);
         }
         const host = card.querySelector(`#thost-${targetIndex}`);
         if (host) {
@@ -6261,7 +6277,7 @@
         const nameLabel = document.getElementById(`tname-${index}`);
         const hostLabel = document.getElementById(`thost-${index}`);
         if (nameLabel) {
-            nameLabel.textContent = session.title || `Terminal ${index + 1}`;
+            nameLabel.textContent = paneDisplayTitle(session, index);
         }
         if (hostLabel) {
             hostLabel.textContent = session.host || '';
@@ -6354,7 +6370,7 @@
         const nameLabel = document.getElementById(`tname-${index}`);
         const hostLabel = document.getElementById(`thost-${index}`);
         if (nameLabel) {
-            nameLabel.textContent = session.title || `Terminal ${index + 1}`;
+            nameLabel.textContent = paneDisplayTitle(session, index);
         }
         if (hostLabel) {
             hostLabel.textContent = session.host || '';
@@ -6400,7 +6416,7 @@
         const nameLabel = document.getElementById(`tname-${index}`);
         const hostLabel = document.getElementById(`thost-${index}`);
         if (nameLabel) {
-            nameLabel.textContent = session.title || `Terminal ${index + 1}`;
+            nameLabel.textContent = paneDisplayTitle(session, index);
         }
         if (hostLabel) {
             hostLabel.textContent = session.host || '';
@@ -8508,6 +8524,7 @@
     ───────────────────────────────────────────── */
     initSurfaceMode();
     wireSessionMenu();
+    wireDashboard();
     topbarPeek.attach();
     applyTopbarVisibility(getStoredTopbarVisible());
     setupAppConfigUpdateListeners();

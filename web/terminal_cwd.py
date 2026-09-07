@@ -20,15 +20,18 @@ Two properties are the reason it is shaped this way:
   different roots on two different days depending on what the shell happened to
   be doing.
 
-Everything here is text-in/values-out with no imports from ``web``, so
-``tests/test_terminal_cwd.py`` executes it directly. The stream side --
-choosing when to parse, where the residue lives, and what to do with the
-result -- stays in ``web/terminal_io.py``.
+Everything here is text-in/values-out, so ``tests/test_terminal_cwd.py``
+executes it directly; its one import is the sequence scanner it shares with the
+agent-activity observer (``web/osc_stream.py``), which is text-in/text-out too.
+The stream side -- choosing when to parse, where the residue lives, and what to
+do with the result -- stays in ``web/terminal_io.py``.
 """
 
 import re
 from typing import Dict, List, Optional, Tuple
 from urllib.parse import unquote, urlsplit
+
+from web.osc_stream import pending_osc_residue
 
 #: Event kinds ``parse_cwd_events`` reports.
 CWD_EVENT_DIRECTORY = "cwd"
@@ -65,41 +68,15 @@ _WSL_MOUNT_PATTERN = re.compile(r"^/mnt/([A-Za-z])(?:/(.*))?$")
 _URL_DRIVE_PATTERN = re.compile(r"^/([A-Za-z]):(?:[\\/](.*))?$")
 
 
-def _is_pending_sequence(tail: str) -> bool:
-    """True when ``tail`` could still become one of the sequences we read."""
-    for head in _SEQUENCE_HEADS:
-        if head.startswith(tail):
-            # The header itself is still arriving ("\x1b", "\x1b]", "\x1b]9;").
-            return True
-        if tail.startswith(head):
-            payload = tail[len(head):]
-            if "\x07" in payload:
-                return False
-            escapes = payload.count("\x1b")
-            if escapes == 0:
-                return True
-            # One trailing ESC is the first half of the ST terminator.
-            return escapes == 1 and payload.endswith("\x1b")
-    return False
-
-
 def _pending_residue(text: str) -> str:
-    """Return the trailing fragment of a sequence still being written.
+    """Return the trailing fragment of a cwd sequence still being written.
 
-    Only the last ``CWD_RESIDUE_MAX_CHARS`` characters are considered, which is
-    what bounds the residue: a sequence that has already outgrown the ceiling
-    is dropped rather than carried, so a stream that opens one and never closes
-    it costs nothing per read.
+    The scan itself is ``web/osc_stream.py``'s -- shared with the agent-activity
+    observer, which reads the same stream for different sequences -- and what
+    stays here is the pair this module owns: which heads count, and how much of
+    an unterminated one may be carried.
     """
-    window_start = max(0, len(text) - CWD_RESIDUE_MAX_CHARS)
-    index = text.find("\x1b]", window_start)
-    while index >= 0:
-        tail = text[index:]
-        if _is_pending_sequence(tail):
-            return tail
-        index = text.find("\x1b]", index + 2)
-    # The ESC arrived without its "]" yet.
-    return "\x1b" if text.endswith("\x1b") else ""
+    return pending_osc_residue(text, _SEQUENCE_HEADS, CWD_RESIDUE_MAX_CHARS)
 
 
 def parse_cwd_events(chunk: str, residue: str = "") -> Tuple[List[Tuple[str, str]], str]:

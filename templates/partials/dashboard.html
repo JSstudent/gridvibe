@@ -1,0 +1,50 @@
+{# The activity dashboard — the same button and the same panel on both pages.
+
+   Read-only, so it is a non-modal dialog anchored under (or, on the launcher,
+   over) its own button rather than a modal: it changes nothing by being open,
+   and every row it holds is a way *out* of it.
+
+   Only the button's own chrome differs between the two pages — the workspace
+   session bar dresses its controls as `.btn.btn-neutral.btn-icon`, the launcher
+   as `.ghost-btn.icon-btn` — so the caller states that and nothing else:
+
+       {% set dashboard_button_class = 'ghost-btn icon-btn' %}
+       {% include 'partials/dashboard.html' %}
+
+   The panel itself is built by dashboard.js from one `/api/dashboard` read,
+   and only while it is open. #}
+<div class="dashboard" id="dashboardRoot">
+    <button
+        class="{{ dashboard_button_class | default('ghost-btn icon-btn', true) }}"
+        id="dashboardBtn"
+        type="button"
+        onclick="toggleDashboard(event)"
+        title="Active workspaces, sessions and agents"
+        aria-label="Active workspaces, sessions and agents"
+        aria-haspopup="dialog"
+        aria-expanded="false"
+    >
+        {# PLACEHOLDER ICON — swap the <svg> below for the real artwork when it
+           lands. Nothing else in the partial, the module or the stylesheet
+           refers to its shape: the class is what everything is hung off. #}
+        <svg class="dashboard-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+            <rect x="3" y="3" width="7.5" height="7.5" rx="1.6"></rect>
+            <rect x="13.5" y="3" width="7.5" height="7.5" rx="1.6"></rect>
+            <rect x="3" y="13.5" width="7.5" height="7.5" rx="1.6"></rect>
+            <path d="M14 17.2h6.5"></path>
+            <path d="M14 20.2h4"></path>
+        </svg>
+        {# Filled by dashboard.js with the live agent count, hidden while there
+           is none: a badge that is always showing is not a signal. #}
+        <span class="dashboard-badge" id="dashboardBadge" aria-hidden="true" hidden></span>
+    </button>
+    {# Focus moves in here on open, and the panel may legitimately hold no
+       focusable row (an empty dashboard) — hence the tabindex. #}
+    <div
+        class="dashboard-panel"
+        id="dashboardPanel"
+        role="dialog"
+        aria-labelledby="dashboardBtn"
+        tabindex="-1"
+    ></div>
+</div>

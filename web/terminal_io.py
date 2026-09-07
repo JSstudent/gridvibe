@@ -23,6 +23,12 @@ from collections import deque
 from typing import Any, Deque, Dict, Iterable, List, Optional, Tuple
 
 from sessions.manager import SessionStatus
+from web.agent_activity import (
+    apply_agent_events,
+    blank_agent_activity,
+    note_agent_output,
+    parse_agent_events,
+)
 from web.agents import (
     AGENT_REGISTRY,
     _compose_agent_startup_command,
@@ -484,6 +490,56 @@ def _observe_terminal_output_cwd(
 
     if _publish_observed_cwd(session_id, connection, directory):
         _broadcast_session_status(session_id)
+
+
+def _observe_agent_activity(connection: Dict[str, Any], output: str) -> None:
+    """Record what one pane just announced about itself, from its own output.
+
+    The sibling of :func:`_observe_terminal_output_cwd`, and deliberately the
+    cheaper of the two. Two properties keep it off the hot path:
+
+    * **Nothing shared is touched.** The whole reading lives in the pane's own
+      connection entry, written by the pane's own pump thread -- no lock, no
+      session write, no broadcast per chunk. A pane painting a spinner at 20
+      frames a second costs one timestamp per frame and wakes nobody.
+    * **The record is replaced, never edited.** ``agent_activity_snapshot``
+      reads these entries under ``connection_lock`` while this writes without
+      it, so a reader must never meet a half-updated dict. Each update rebinds
+      the key to a finished dict, which makes every read either the old record
+      or the new one and never a mixture.
+
+    Ownership needs no check here for the same reason: a retired connection's
+    entry is no longer the registry's, so what it goes on recording is simply
+    never read.
+    """
+    if not output:
+        return
+    now = time.time()
+    record = note_agent_output(connection.get("agent_activity"), now)
+    residue = str(connection.get("agent_residue") or "")
+    if "\x1b" in output or residue:
+        events, residue = parse_agent_events(output, residue)
+        connection["agent_residue"] = residue
+        if events:
+            record = apply_agent_events(record, events, now)
+    connection["agent_activity"] = record
+
+
+def agent_activity_snapshot() -> Dict[str, Dict[str, Any]]:
+    """Return every live pane's latest observation record, by session id.
+
+    One short lock hold that copies the mapping and nothing else: the records
+    themselves are replaced rather than mutated, so handing them out by
+    reference is safe and a deep copy would only cost the caller time. Panes
+    with no transport -- explorer and browser panes -- are absent rather than
+    blank, which is what lets the dashboard tell "nothing to observe" from
+    "observed nothing".
+    """
+    with connection_lock:
+        return {
+            session_id: connection.get("agent_activity") or blank_agent_activity()
+            for session_id, connection in ssh_connections.items()
+        }
 
 
 def _publish_observed_cwd(
@@ -981,6 +1037,7 @@ def _decoded_terminal_output(session_id, connection, data=b'', *, final=False):
     decoder = connection.setdefault('decoder', codecs.getincrementaldecoder('utf-8')(errors='replace'))
     output = data if isinstance(data, str) else decoder.decode(data, final=final)
     _observe_terminal_output_cwd(session_id, connection, output)
+    _observe_agent_activity(connection, output)
     if connection.get('kind') == 'ssh':
         output = _scrub_ssh_startup_output(connection, output, force=final)
     _publish_ssh_terminal_output(session_id, output, connection)
