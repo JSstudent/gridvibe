@@ -670,6 +670,19 @@
         );
     }
 
+    function paneAgentIconHtml(session) {
+        const identity = window.GridVibeAgentIdentity;
+        if (identity.paneKindForSession(session) !== 'agent') return '';
+        return window.GridVibeAgentGlyphs.agentGlyphMarkup(identity.agentKeyForSession(session));
+    }
+
+    function syncPaneAgentIcon(icon, session) {
+        if (!icon) return;
+        const html = paneAgentIconHtml(session);
+        if (icon.innerHTML !== html) icon.innerHTML = html;
+        icon.hidden = !html;
+    }
+
     function getSessionApiPath(groupId = activeGroupId) {
         const params = new URLSearchParams({ workspace_id: currentWorkspaceId });
         if (groupId) {
@@ -833,6 +846,7 @@
        than by what is running in it, and syncing the shell controls here would
        close a menu the user has open. */
     function syncPaneIdentityChrome(index, session) {
+        syncPaneAgentIcon(document.getElementById(`ticon-${index}`), session);
         const nameLabel = document.getElementById(`tname-${index}`);
         const title = paneDisplayTitle(session, index);
         if (nameLabel && nameLabel.textContent.trim() !== title) {
@@ -5400,6 +5414,7 @@
         card.innerHTML = `
                 <div class="terminal-header">
                     <div class="terminal-info">
+                        <span class="terminal-agent-icon" id="ticon-${i}" aria-hidden="true" ${session.startup_mode === 'agent' ? '' : 'hidden'}>${paneAgentIconHtml(session)}</span>
                         <span class="terminal-name" id="tname-${i}">
                             ${escHtml(paneDisplayTitle(session, i))}
                         </span>
@@ -5994,6 +6009,7 @@
         card.style.setProperty('--session-color-dim', hexToRgba(sessionColour, 0.45));
 
         const name = card.querySelector(`#tname-${targetIndex}`);
+        syncPaneAgentIcon(card.querySelector(`#ticon-${targetIndex}`), session);
         if (name) {
             name.textContent = paneDisplayTitle(session, targetIndex);
         }
@@ -6384,15 +6400,8 @@
         }
         ensureExplorerThemeButton(card, index);
         applyExplorerThemeToCard(card, initialExplorerTheme);
-        const nameLabel = document.getElementById(`tname-${index}`);
-        const hostLabel = document.getElementById(`thost-${index}`);
-        if (nameLabel) {
-            nameLabel.textContent = paneDisplayTitle(session, index);
-        }
-        if (hostLabel) {
-            hostLabel.textContent = session.host || '';
-        }
         updateModeToggleButton(card.querySelector(`[data-session-mode-toggle="${index}"]`), true);
+        syncPaneIdentityChrome(index, session);
         syncPaneShellControls(index, session);
         wrapper.innerHTML = `
             <div class="terminal-surface">
@@ -6477,14 +6486,7 @@
         ensureSplitControls(card, index, session);
         const browserButton = ensureBrowserModeButton(card, index, session, true);
         updateBrowserModeToggleButton(browserButton, true);
-        const nameLabel = document.getElementById(`tname-${index}`);
-        const hostLabel = document.getElementById(`thost-${index}`);
-        if (nameLabel) {
-            nameLabel.textContent = paneDisplayTitle(session, index);
-        }
-        if (hostLabel) {
-            hostLabel.textContent = session.host || '';
-        }
+        syncPaneIdentityChrome(index, session);
         syncPaneShellControls(index, session);
         wrapper.innerHTML = renderBrowserSurface(index, session);
         wireBrowserOnlyControls(card, index);
@@ -6523,15 +6525,8 @@
         }
         const browserButton = ensureBrowserModeButton(card, index, session, false);
         updateBrowserModeToggleButton(browserButton, false);
-        const nameLabel = document.getElementById(`tname-${index}`);
-        const hostLabel = document.getElementById(`thost-${index}`);
-        if (nameLabel) {
-            nameLabel.textContent = paneDisplayTitle(session, index);
-        }
-        if (hostLabel) {
-            hostLabel.textContent = session.host || '';
-        }
         updateModeToggleButton(card.querySelector(`[data-session-mode-toggle="${index}"]`), false);
+        syncPaneIdentityChrome(index, session);
         syncPaneShellControls(index, session);
         wrapper.innerHTML = `
             <div class="terminal-surface">

@@ -31,6 +31,8 @@ body {
     height: 100%;
 }
 
+*, *::before, *::after { box-sizing: border-box; }
+
 body {
     margin: 0;
     background: var(--gv-bg-app);
@@ -54,6 +56,7 @@ body {
     align-items: center;
     justify-content: space-between;
     gap: 16px;
+    flex-wrap: wrap;
     flex: 0 0 auto;
     padding: 12px 20px;
     border-bottom: 1px solid var(--gv-dialog-border);
@@ -236,12 +239,14 @@ body {
    legible at. */
 .dash-sessions {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(380px, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 380px), 1fr));
     gap: 12px;
     align-items: start;
 }
 
 .dash-session {
+    min-width: 0;
+    container-type: inline-size;
     border: 1px solid var(--gv-dialog-border);
     border-radius: var(--gv-radius-m);
     background: var(--gv-dialog-panel-soft);
@@ -369,6 +374,8 @@ body {
     cursor: pointer;
 }
 
+.dash-agent-reading { display: inline-flex; flex: 0 0 auto; }
+
 .dash-agent:hover,
 .dash-agent:focus-visible {
     background: var(--gv-accent-soft);
@@ -382,7 +389,10 @@ body {
     font-weight: 500;
     overflow: hidden;
     text-overflow: ellipsis;
-    white-space: nowrap;
+    overflow-wrap: anywhere;
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
 }
 
 /* The marks, tinted by which agent they are. Nothing here is a brand colour
@@ -526,4 +536,21 @@ body {
 @media (prefers-reduced-motion: reduce) {
     .dash-state-working .dash-state-dot { animation: none; }
     .dash-progress-fill.is-indeterminate { animation: none; }
+}
+
+@container (max-width: 340px) {
+    .dash-agent { flex-wrap: wrap; padding-left: 8px; gap: 5px 8px; }
+    .dash-agent-line { flex-basis: 100%; }
+    .dash-agent-reading { margin-left: auto; }
+    .dash-session-head { flex-wrap: wrap; }
+    .dash-session-meta { flex-basis: 100%; margin-left: 0; }
+    .dash-agent-head { flex-wrap: wrap; }
+    .dash-tag-transport { max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+}
+
+@media (max-width: 500px) {
+    .dash-titlebar { padding: 10px 12px; gap: 8px; }
+    .dash-titlebar-right { width: 100%; justify-content: space-between; }
+    .dash-body { padding: 12px; }
+    .dash-workspace-head { flex-wrap: wrap; gap: 4px 8px; }
 }

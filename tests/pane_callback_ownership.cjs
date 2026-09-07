@@ -17,6 +17,7 @@ async function shellCallbacks() {
         b.term = { reset() { throw Error('Reset wrong pane'); } };
         const ctx = vm.createContext({ console: { error() {} }, terminals: [a], sessionIds: ['A'],
             isExplorerSession: () => false, isBrowserSession: () => false, document,
+            syncPaneIdentityChrome() {},
             showPlaceholderConnecting() { placeholders++; }, showTerminalToast() {},
             fetch: () => new Promise(resolve => { complete = resolve; }) });
         vm.runInContext(source('terminal-shell.js'), ctx);

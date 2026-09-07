@@ -40,6 +40,7 @@ from web.agent_activity import (  # noqa: E402
     ACTIVITY_UNKNOWN,
     ACTIVITY_WORKING,
     AGENT_EVENT_PROGRESS,
+    AGENT_EVENT_TAB_TITLE,
     AGENT_EVENT_TITLE,
     AGENT_RESIDUE_MAX_CHARS,
     AGENT_TITLE_MAX_CHARS,
@@ -50,6 +51,7 @@ from web.agent_activity import (  # noqa: E402
     apply_agent_events,
     blank_agent_activity,
     describe_agent_activity,
+    has_agent_screen_output,
     normalize_agent_title,
     note_agent_output,
     parse_agent_events,
@@ -71,11 +73,36 @@ def progress_sequence(payload: str, terminator: str = BEL) -> str:
 
 
 class AgentTitleParserTestCase(unittest.TestCase):
+    def test_tab_title_survives_window_title_updates_and_osc0_replaces_both(self):
+        stream = title_sequence("Chat A", "1", ST) + title_sequence("Chat A · model · cwd", "2")
+        for split in range(len(stream) + 1):
+            with self.subTest(split=split):
+                first, residue = parse_agent_events(stream[:split])
+                second, residue = parse_agent_events(stream[split:], residue)
+                record = apply_agent_events(None, first + second, 10)
+                self.assertEqual(describe_agent_activity(record, 11)["title"], "Chat A")
+                reset, _ = parse_agent_events(title_sequence("Chat B", "0"))
+                record = apply_agent_events(record, reset, 12)
+                self.assertEqual(describe_agent_activity(record, 13)["title"], "Chat B")
+                clear, _ = parse_agent_events(title_sequence("", "0"))
+                record = apply_agent_events(record, clear, 14)
+                self.assertEqual(describe_agent_activity(record, 15)["title"], "")
+
+    def test_title_reassertions_and_control_frames_do_not_count_as_work(self):
+        stream = title_sequence("My chat")
+        for split in range(len(stream) + 1):
+            _, residue = parse_agent_events(stream[:split])
+            self.assertFalse(has_agent_screen_output(stream[:split]))
+            self.assertFalse(has_agent_screen_output(stream[split:], residue))
+        self.assertFalse(has_agent_screen_output("\x1b[?25h\x1b[22;2t"))
+        self.assertTrue(has_agent_screen_output(stream + "thinking"))
+
     def test_osc0_and_osc2_both_report_a_title(self):
         for code in ("0", "2"):
             with self.subTest(code=code):
                 events, _ = parse_agent_events(title_sequence("Claude Code", code))
-                self.assertEqual(events, [(AGENT_EVENT_TITLE, "Claude Code")])
+                reading = describe_agent_activity(apply_agent_events(None, events, 10), 11)
+                self.assertEqual(reading["title"], "Claude Code")
 
     def test_both_terminators_are_accepted(self):
         for terminator in (BEL, ST):
@@ -83,19 +110,14 @@ class AgentTitleParserTestCase(unittest.TestCase):
                 events, _ = parse_agent_events(title_sequence("codex", "2", terminator))
                 self.assertEqual(events, [(AGENT_EVENT_TITLE, "codex")])
 
-    def test_the_icon_name_sequence_is_not_a_title(self):
-        # OSC 1 sets the icon name, which is not what a pane calls itself.
+    def test_the_tab_label_sequence_is_read(self):
         events, residue = parse_agent_events(f"{ESC}]1;iconified{BEL}")
-        self.assertEqual(events, [])
+        self.assertEqual(events, [(AGENT_EVENT_TAB_TITLE, "iconified")])
         self.assertEqual(residue, "")
 
     def test_the_last_title_in_a_chunk_wins(self):
         events, _ = parse_agent_events(
             title_sequence("first") + "output" + title_sequence("second")
-        )
-        self.assertEqual(
-            events,
-            [(AGENT_EVENT_TITLE, "first"), (AGENT_EVENT_TITLE, "second")],
         )
         record = apply_agent_events(None, events, 10.0)
         self.assertEqual(record["title"], "second")
@@ -105,7 +127,10 @@ class AgentTitleParserTestCase(unittest.TestCase):
         self.assertEqual(events, [])
         self.assertTrue(residue)
         events, residue = parse_agent_events(f" the tests{BEL}rest of the frame", residue)
-        self.assertEqual(events, [(AGENT_EVENT_TITLE, "Claude: fixing the tests")])
+        self.assertEqual(
+            describe_agent_activity(apply_agent_events(None, events, 10), 11)["title"],
+            "Claude: fixing the tests",
+        )
         self.assertEqual(residue, "")
 
     def test_an_unterminated_sequence_cannot_grow_the_residue(self):
@@ -198,7 +223,7 @@ class AgentAndCwdObserversTestCase(unittest.TestCase):
         cwd_events, cwd_residue = parse_cwd_events(chunk)
         self.assertEqual(
             agent_events,
-            [(AGENT_EVENT_TITLE, "Claude Code"), (AGENT_EVENT_PROGRESS, "3")],
+            [(AGENT_EVENT_TITLE, "Claude Code"), (AGENT_EVENT_TAB_TITLE, ""), (AGENT_EVENT_PROGRESS, "3")],
         )
         self.assertEqual(cwd_events, [(CWD_EVENT_DIRECTORY, "/srv/app")])
         self.assertEqual(agent_residue, "")
@@ -245,6 +270,14 @@ class AgentActivityStateTestCase(unittest.TestCase):
         self.assertEqual(reading["state_source"], ACTIVITY_SOURCE_OUTPUT)
         # Still reported: it is what the pane last said.
         self.assertEqual(reading["progress_state"], PROGRESS_STATE_INDETERMINATE)
+        self.assertFalse(reading["progress_fresh"])
+
+    def test_published_error_is_not_reported_as_working(self):
+        record = apply_agent_events(note_agent_output(None, 10), [(AGENT_EVENT_PROGRESS, "2;30")], 10)
+        reading = describe_agent_activity(record, 11)
+        self.assertEqual(reading["state"], "error")
+        self.assertEqual(reading["state_source"], ACTIVITY_SOURCE_PROGRESS)
+        self.assertTrue(reading["progress_fresh"])
 
     def test_a_percentage_is_only_published_while_the_state_carries_one(self):
         record = apply_agent_events(None, [(AGENT_EVENT_PROGRESS, "1;55")], 10.0)

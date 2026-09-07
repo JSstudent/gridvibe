@@ -137,9 +137,11 @@ changing any field that survives restart; it owns the complete save/restore flow
   prompt. Only SSH receives a typed integration command. Disabling
   `terminal.shell_integration` stops installation, not parsing sequences emitted
   by the user's shell.
-- `web/agent_activity.py` reads OSC 0/2 titles and OSC 9;4 progress from the
-  same stream, with its own bounded residue and no filtering. Both observers
-  share the residue scanner in `web/osc_stream.py`; each owns its sequence heads
+- `web/agent_activity.py` reads OSC 0/1/2 titles and OSC 9;4 progress from the
+  same stream, with its own bounded residue and no stream filtering. OSC 1 is
+  the preferred tab/chat title; OSC 0 replaces both title scopes. Title-only,
+  CSI-only, and control-only output does not refresh the liveness timestamp.
+  Both observers share the residue scanner in `web/osc_stream.py`; each owns its sequence heads
   and its ceiling. The reading lives on the pane's connection entry and is
   replaced, never edited, so a lock-free pump write and a locked snapshot read
   cannot meet a half-updated record. A retired entry's reading is unreachable
@@ -517,17 +519,26 @@ unless the task explicitly changes this contract.
   row; a second implementation server-side is what would let the two disagree.
   The transport tag reads `mode` plus the `use_wsl`/`use_powershell` precedence
   `paneShellKind()` already uses, so the tag and the relaunch menu agree.
+- The dashboard conversation line prefers the agent's usable OSC tab/window
+  title, then a non-generic pane title, then the directory/remote host fallback.
+  `agentChatTitle()` removes known provider-only labels and transient status
+  marks but cannot synthesize a conversation name an agent never publishes.
+  Built-in Codex launches request `tui.terminal_title=['thread-title']` as a
+  launch-only override; saved and custom command text stays unchanged.
 - A pane with no transport carries `activity: null`. "Nothing to observe" and
   "observed nothing yet" (`state: "unknown"`) are different answers.
 - Liveness falls back to output cadence, because most agents publish no progress
   at all; a published progress state stops driving the reading once stale. The
-  state names the input that decided it. A pane whose `status` is not
-  `connected` reports the transport's word instead of an activity reading.
+  state names the input that decided it. Fresh OSC 9;4 error state is reported
+  as an error, and stale progress does not paint a progress bar. A pane whose
+  `status` is not `connected` reports the transport's word instead of an
+  activity reading.
 - A generic `Terminal N` title is treated as unset so an agent pane can name
   itself; a title the user typed always wins, and the display name is never
   persisted back as the pane's title. Every path that changes which agent a
   pane runs — the mode transitions and the shell/agent relaunch — repaints the
-  pane header's name from the session it got back.
+  pane header's name and agent glyph from the session it got back. Plain,
+  explorer, and browser panes carry no agent glyph.
 - The dashboard is a window (`/dashboard`, `dashboard-window.js`), not a panel:
   it reads across every workspace and is in none, so it is opened and focused
   the way a workspace window is — the native bridge's `open_dashboard_window()`
@@ -537,12 +548,20 @@ unless the task explicitly changes this contract.
   running.
 - The host pages hold only the button: `dashboard.js` opens the window, binds
   `Alt+A` (matched on `event.code`, Ctrl excluded so AltGr cannot fire it, and
-  gated by the page's own `minimizeAllShortcutBlocked`), and polls slowly for
-  the badge, standing down while the document is hidden.
-- The window polls only while it is visible; a slow answer that lands after a
-  newer one is dropped, an unchanged reading is not repainted at all, and a
-  failed read leaves the last good tree on screen behind a stated notice rather
-  than blanking the window.
+  gated by the page's own `minimizeAllShortcutBlocked`), and polls for the
+  badge without overlapping requests. Badge and window reads have bounded
+  deadlines, cancel on hide/pagehide, refresh on focus, reject malformed
+  payloads, and discard answers superseded by a newer request.
+- `dashboard-focus.js` owns a same-origin, short-lived focus lease. While the
+  dashboard is focused and visible, unfocused launcher/workspace documents add
+  the content-only blur class; focusing a host clears its own blur immediately.
+  BroadcastChannel is the fast path, localStorage is the fallback, and lease
+  expiry prevents a crashed dashboard from leaving pages blurred.
+- Dashboard layout must remain usable without horizontal overflow at narrow
+  widths. A polling update that changes only a row's title, status, progress, or
+  idle age updates that row in place; structural changes rebuild the tree while
+  restoring scroll and focus. A failed read leaves the last good tree on screen
+  behind a stated retry notice, and an action failure survives successful polls.
 
 ## Architecture and extraction boundaries
 

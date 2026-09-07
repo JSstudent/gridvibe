@@ -166,23 +166,41 @@ three different things:
 
 Click any row — an agent, its session or its workspace — to open (or focus) the
 window that owns it, at that session tab. The dashboard stays where it is.
+While the dashboard has focus, the launcher and workspace pages behind it are
+softly blurred so the active window is obvious. Focusing another GridVibe
+window removes the blur immediately; closing, hiding, or crashing the dashboard
+also releases it automatically.
 
 Each agent row carries two readings, both taken from the pane's own output — no
 probe is ever sent, and nothing is typed into a running agent:
 
-- **What it is doing.** Agents set the terminal window title as they work
-  (Claude Code does this continuously), and the row shows that title.
+- **Which chat is active.** GridVibe reads both terminal tab-title (`OSC 1`) and
+  window-title (`OSC 0` / `OSC 2`) announcements and shows the most specific
+  useful title. Codex sessions launched by GridVibe request Codex's
+  `thread-title`, so renaming or switching the current Codex conversation is
+  reflected here. Provider status marks and generic labels such as `Codex` or
+  `kimi-code` are removed. If an agent publishes no meaningful chat title, the
+  row falls back to a custom pane title and then its directory; GridVibe cannot
+  recover a chat name that the agent never emits.
 - **Whether it is doing anything.** A pane that has written something in the
   last few seconds reads as *working*; one that has gone quiet reads as *idle*,
-  with how long it has been waiting. Agents that publish the terminal progress
-  sequence (`OSC 9;4` — Claude Code 2.0 and up) also get a real percentage. A
-  pane that is not connected says so instead.
+  with how long it has been waiting. Title-only and terminal-control updates do
+  not count as work. Agents that publish the terminal progress sequence (`OSC
+  9;4`) also get a current percentage or error state; stale progress is not
+  presented as current. A pane that is not connected says so instead.
 
 A pane running an agent also **names itself after that agent** in its own
 header: `Terminal 1` becomes `Claude Code`, `OpenAI Codex CLI`, and so on —
 including when you point an open pane at a different agent from its reset menu,
-which renames the header on the spot. A title you typed yourself always wins,
-and the agent's name is never saved as the pane's title.
+which renames the header on the spot. The agent's own icon sits beside that
+name and changes with it. A title you typed yourself always wins, and the
+agent's name is never saved as the pane's title.
+
+The dashboard adapts from a full-width desktop view down to a narrow window,
+wrapping metadata and activity without horizontal scrolling. Polls are bounded,
+cancelled while hidden, and update existing rows in place so a refreshed title
+or idle time does not disturb focus, selection, or scroll position. A failed
+refresh leaves the last good reading visible and offers a retry.
 
 ## File Explorer
 

@@ -26,6 +26,8 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+from tests.test_dashboard_targeting import PANE_IDENTITY_SOURCE
+
 STATIC_JS = Path(__file__).resolve().parent.parent / "web" / "static" / "js"
 TERMINAL_SHELL_JS = STATIC_JS / "terminal-shell.js"
 # The real naming rule, loaded rather than imitated: a relaunch repaints the
@@ -249,6 +251,8 @@ class TerminalShellMenuTestCase(unittest.TestCase):
         script = (
             HARNESS_STUBS
             + AGENT_IDENTITY_JS.read_text(encoding="utf-8")
+            + (STATIC_JS / "agent-glyphs.js").read_text(encoding="utf-8")
+            + PANE_IDENTITY_SOURCE
             + TERMINAL_SHELL_JS.read_text(encoding="utf-8")
             + "\n(async () => {\n"
             + body

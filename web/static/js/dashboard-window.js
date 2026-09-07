@@ -64,7 +64,8 @@
     const AGENT_DASHBOARD_NOTICE_ID = 'agentDashboardNotice';
 
     /* A dashboard that lags the thing it describes is just a screenshot. */
-    const AGENT_DASHBOARD_REFRESH_MS = 4000;
+    const AGENT_DASHBOARD_REFRESH_MS = 2000;
+    const AGENT_DASHBOARD_TIMEOUT_MS = 10000;
 
 
     let _agentDashboardTimer = null;
@@ -74,6 +75,12 @@
     let _agentDashboardRequestId = 0;
     /* What is on screen right now, so an unchanged answer costs no repaint. */
     let _agentDashboardPainted = '';
+    let _agentDashboardController = null;
+    let _agentDashboardStructure = '';
+    let _agentDashboardRows = new Map();
+    let _agentDashboardActionNotice = '';
+    let _agentDashboardReadNotice = '';
+    let _agentDashboardWired = false;
 
     function dashboardAgentOptions() {
         return typeof AGENT_OPTIONS === 'undefined' || !Array.isArray(AGENT_OPTIONS) ? [] : AGENT_OPTIONS;
@@ -116,6 +123,7 @@
     /* "4m" rather than "247 seconds": the number is only ever read as "has it
        been long", and a rounded one says that faster. */
     function dashboardIdleLabel(seconds) {
+        if (seconds === null || seconds === undefined) return '';
         const value = Number(seconds);
         if (!Number.isFinite(value) || value < 0) {
             return '';
@@ -157,29 +165,18 @@
         return glyphs ? glyphs.agentGlyphMarkup(dashboardAgentKey(pane)) : '';
     }
 
-    /* The one line a pane gets, and the reason this window exists: *which*
-       conversation this is. Three sources, in the order of how much each was
-       chosen by somebody.
-
-       A title the user typed always wins — the rule agent-identity.js applies
-       to the pane header, and this is the only place that name still appears
-       now that the heading above says which agent the pane runs. Otherwise the
-       agent is announcing what it is working on, and that is the answer.
-       Otherwise the line falls back to where the pane points.
-
-       The host is only worth naming for a remote pane. A local pane's `host`
-       field holds the shell it started — "PowerShell", "cmd" — which is
-       exactly what the heading's tag already says, and a line that also printed
-       it would spend half of itself saying it twice. */
+    /* The current published conversation title leads. A pane label or its
+       directory identifies panes whose agent has not announced a title.
+       Only remote panes need the host here; local shells are already tagged. */
     function dashboardPaneLine(pane) {
         const identity = dashboardIdentity();
+        const announced = identity
+            ? identity.agentChatTitle(pane, dashboardAgentOptions())
+            : String(pane?.activity?.title || '').trim();
+        if (announced) return announced;
         const typed = String(pane?.title || '').trim();
         if (typed && identity && !identity.isGenericPaneTitle(typed)) {
             return typed;
-        }
-        const announced = String(pane?.activity?.title || '').trim();
-        if (announced) {
-            return announced;
         }
         const directory = String(pane?.directory || '').trim();
         const isRemote = String(pane?.mode || '').toLowerCase() === 'ssh';
@@ -195,6 +192,7 @@
         if (state === 'working') {
             return 'Working';
         }
+        if (state === 'error') return 'Error';
         if (state === 'idle') {
             const idle = dashboardIdleLabel(activity?.idle_seconds);
             return idle ? `Idle ${idle}` : 'Idle';
@@ -240,15 +238,18 @@
         const activity = pane?.activity;
         const stateKey = dashboardPaneStateKey(pane);
         const word = dashboardPaneStateWord(pane);
-        const progressState = String(activity?.progress_state || '');
-        const value = Number(activity?.progress_value) || 0;
-        const determinate = stateKey !== 'error' && progressState === 'normal' && value > 0;
+        const progressState = pane?.status === 'connected' && activity?.progress_fresh !== false
+            ? String(activity?.progress_state || '') : '';
+        const value = Math.max(0, Math.min(100, Number(activity?.progress_value) || 0));
+        const determinate = stateKey === 'working' && progressState === 'normal';
         const indeterminate = !determinate
             && stateKey === 'working'
             && ['indeterminate', 'warning', 'normal'].includes(progressState);
         const bar = determinate || indeterminate
             ? `
-                <span class="dash-progress dash-progress-${escHtml(progressState || 'normal')}">
+                <span class="dash-progress dash-progress-${escHtml(progressState || 'normal')}"
+                    role="progressbar" aria-label="Agent progress" aria-valuemin="0" aria-valuemax="100"
+                    ${determinate ? `aria-valuenow="${value}"` : ''}>
                     <span
                         class="dash-progress-fill${indeterminate ? ' is-indeterminate' : ''}"
                         ${determinate ? `style="width:${Math.max(0, Math.min(100, value))}%"` : ''}
@@ -292,10 +293,11 @@
                 data-workspace-id="${escHtml(pane?.workspace_id || '')}"
                 data-group-id="${escHtml(pane?.group_id || '')}"
                 data-session-id="${escHtml(pane?.session_id || '')}"
+                title="${escHtml(dashboardPaneLine(pane))}"
             >
                 <span class="dash-agent-line">${escHtml(dashboardPaneLine(pane))}</span>
                 ${pane?.agent_auto_mode ? dashboardTagHtml('auto', 'auto') : ''}
-                ${dashboardActivityHtml(pane)}
+                <span class="dash-agent-reading">${dashboardActivityHtml(pane)}</span>
             </button>
         `;
     }
@@ -436,13 +438,55 @@
 
     /* ── The page ── */
 
-    function setAgentDashboardNotice(message) {
+    function setAgentDashboardNotice(message, source = 'action') {
+        if (source === 'read') _agentDashboardReadNotice = message;
+        else _agentDashboardActionNotice = message;
         const notice = document.getElementById(AGENT_DASHBOARD_NOTICE_ID);
         if (!notice) {
             return;
         }
-        notice.textContent = message;
-        notice.hidden = !message;
+        notice.textContent = _agentDashboardActionNotice || _agentDashboardReadNotice;
+        notice.hidden = !notice.textContent;
+    }
+
+    function paintAgentDashboardSnapshot(snapshot) {
+        const body = document.getElementById(AGENT_DASHBOARD_BODY_ID);
+        if (!body) return;
+        const rows = new Map();
+        const structure = JSON.stringify(snapshot.workspaces.map(workspace => ({
+            ...workspace,
+            groups: workspace.groups.map(group => ({
+                ...group,
+                panes: group.panes.map(pane => {
+                    rows.set(pane.session_id, pane);
+                    const { activity, title, directory, status, ...identity } = pane;
+                    return identity;
+                })
+            }))
+        })));
+        // Ordinary polls update existing rows. Idle ages and title changes must
+        // not replace buttons, interrupt a press, or destroy text selections.
+        if (structure === _agentDashboardStructure && body.querySelectorAll) {
+            body.querySelectorAll('[data-session-id]').forEach(row => {
+                const pane = rows.get(row.dataset.sessionId);
+                const previous = _agentDashboardRows.get(row.dataset.sessionId);
+                if (!pane) return;
+                const line = dashboardPaneLine(pane);
+                if (!previous || line !== dashboardPaneLine(previous)) {
+                    row.querySelector('.dash-agent-line').textContent = line;
+                    row.title = line;
+                }
+                const reading = dashboardActivityHtml(pane);
+                if (!previous || reading !== dashboardActivityHtml(previous)) {
+                    row.querySelector('.dash-agent-reading').innerHTML = reading;
+                }
+            });
+            _agentDashboardPainted = '';
+        } else {
+            renderAgentDashboard(dashboardBodyHtml(snapshot));
+        }
+        _agentDashboardStructure = structure;
+        _agentDashboardRows = rows;
     }
 
     /* A render replaces the row the pointer or the caret was on, so the row is
@@ -462,29 +506,47 @@
         _agentDashboardPainted = html;
         body.scrollTop = scrollTop;
         if (focusedKey) {
-            body.querySelector?.(`[data-dashboard-key="${focusedKey}"]`)?.focus?.();
+            body.querySelector?.(`[data-dashboard-key="${focusedKey}"]`)?.focus?.({ preventScroll: true });
         }
         return true;
     }
 
     async function refreshAgentDashboard() {
+        if (document.hidden) return;
         const requestId = ++_agentDashboardRequestId;
+        _agentDashboardController?.abort();
+        const controller = new AbortController();
+        _agentDashboardController = controller;
+        const timeout = setTimeout(() => controller.abort(), AGENT_DASHBOARD_TIMEOUT_MS);
         let snapshot = null;
         let failure = '';
         try {
-            const response = await fetch('/api/dashboard');
+            const response = await fetch('/api/dashboard', { signal: controller.signal, cache: 'no-store' });
             if (!response.ok) {
                 throw new Error(`HTTP ${response.status}`);
             }
             snapshot = await response.json();
+            if (!snapshot || !Array.isArray(snapshot.workspaces)
+                || !snapshot.workspaces.every(workspace => Array.isArray(workspace?.groups)
+                    && workspace.groups.every(group => Array.isArray(group?.panes)))) {
+                throw new Error('Invalid dashboard response');
+            }
         } catch (error) {
-            console.error('[GridVibe Dashboard] load failed:', error);
-            failure = 'Could not read what is running.';
+            snapshot = null;
+            if (requestId === _agentDashboardRequestId) {
+                console.error('[GridVibe Dashboard] load failed:', error);
+                failure = _agentDashboardStructure
+                    ? 'Could not refresh. Showing the last reading. Use Refresh to retry.'
+                    : 'Could not read what is running. Use Refresh to retry.';
+            }
+        } finally {
+            clearTimeout(timeout);
+            if (_agentDashboardController === controller) _agentDashboardController = null;
         }
         if (requestId !== _agentDashboardRequestId) {
             return;
         }
-        setAgentDashboardNotice(failure);
+        setAgentDashboardNotice(failure, 'read');
         if (!snapshot) {
             /* The last good tree stays on screen behind the notice: a reading
                from four seconds ago beats an empty page, as long as the page
@@ -495,7 +557,7 @@
         if (totals) {
             totals.textContent = dashboardTotalsText(snapshot);
         }
-        renderAgentDashboard(dashboardBodyHtml(snapshot));
+        paintAgentDashboardSnapshot(snapshot);
     }
 
     /* Stands down entirely while the window is hidden — a dashboard nobody can
@@ -506,9 +568,14 @@
             _agentDashboardTimer = null;
         }
         if (document.hidden) {
+            ++_agentDashboardRequestId;
+            _agentDashboardController?.abort();
+            _agentDashboardController = null;
             return;
         }
-        _agentDashboardTimer = setInterval(refreshAgentDashboard, AGENT_DASHBOARD_REFRESH_MS);
+        _agentDashboardTimer = setInterval(() => {
+            if (!_agentDashboardController) refreshAgentDashboard();
+        }, AGENT_DASHBOARD_REFRESH_MS);
     }
 
     /* ── What a row does ──
@@ -529,6 +596,7 @@
         }
         try {
             if (await openWorkspaceWindow(resolvedWorkspaceId, { groupId })) {
+                setAgentDashboardNotice('');
                 return true;
             }
         } catch (error) {
@@ -606,9 +674,13 @@
         if (typeof openLauncherWindow !== 'function') {
             return;
         }
-        if (await openLauncherWindow()) {
-            setAgentDashboardNotice('');
-            return;
+        try {
+            if (await openLauncherWindow()) {
+                setAgentDashboardNotice('');
+                return;
+            }
+        } catch (error) {
+            console.error('[GridVibe Dashboard] launcher open failed:', error);
         }
         setAgentDashboardNotice(dashboardBlockedTabHint());
     }
@@ -639,9 +711,10 @@
 
     function wireAgentDashboard() {
         const body = document.getElementById(AGENT_DASHBOARD_BODY_ID);
-        if (!body) {
+        if (_agentDashboardWired || !body) {
             return;
         }
+        _agentDashboardWired = true;
         /* Delegated: every row is rebuilt whenever the reading changes, so a
            listener on a row would not outlive the reading that drew it. */
         body.addEventListener('click', event => {
@@ -666,6 +739,17 @@
             }
         });
         wireAgentDashboardChords();
+        window.addEventListener?.('focus', () => refreshAgentDashboard());
+        window.addEventListener?.('pagehide', () => {
+            clearInterval(_agentDashboardTimer);
+            _agentDashboardTimer = null;
+            ++_agentDashboardRequestId;
+            _agentDashboardController?.abort();
+            _agentDashboardController = null;
+        });
+        window.addEventListener?.('pageshow', event => {
+            if (event.persisted) { scheduleAgentDashboardRefresh(); refreshAgentDashboard(); }
+        });
         scheduleAgentDashboardRefresh();
         refreshAgentDashboard();
     }

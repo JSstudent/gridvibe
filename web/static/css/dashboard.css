@@ -64,3 +64,13 @@
     text-align: center;
     pointer-events: none;
 }
+body.dashboard-background-blurred::after {
+    content: '';
+    position: fixed;
+    inset: 0;
+    z-index: 2147483647;
+    pointer-events: none;
+    backdrop-filter: blur(3px);
+    -webkit-backdrop-filter: blur(3px);
+    background: color-mix(in srgb, var(--gv-bg-app) 18%, transparent);
+}

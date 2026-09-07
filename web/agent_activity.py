@@ -45,6 +45,7 @@ from web.osc_stream import pending_osc_residue
 
 #: Event kinds ``parse_agent_events`` reports.
 AGENT_EVENT_TITLE = "title"
+AGENT_EVENT_TAB_TITLE = "tab_title"
 AGENT_EVENT_PROGRESS = "progress"
 
 #: Upper bound on the split-sequence residue one connection may carry between
@@ -57,7 +58,7 @@ AGENT_RESIDUE_MAX_CHARS = 2048
 #: terminated one, and neither may reach the dashboard at full length.
 AGENT_TITLE_MAX_CHARS = 160
 
-_OSC_TITLE_HEADS = ("\x1b]0;", "\x1b]2;")
+_OSC_TITLE_HEADS = ("\x1b]0;", "\x1b]1;", "\x1b]2;")
 _OSC_PROGRESS_HEAD = "\x1b]9;4;"
 _SEQUENCE_HEADS = _OSC_TITLE_HEADS + (_OSC_PROGRESS_HEAD,)
 
@@ -68,13 +69,15 @@ _SEQUENCE_HEADS = _OSC_TITLE_HEADS + (_OSC_PROGRESS_HEAD,)
 # patterns name their second field, so neither can ever read the other's.
 _OSC_EVENT_PATTERN = re.compile(
     r"\x1b\]"
-    r"(?:[02];(?P<title>[^\x07\x1b]*)"
+    r"(?:(?P<title_code>[012]);(?P<title>[^\x07\x1b]*)"
     r"|9;4;(?P<progress>[^\x07\x1b]*))"
     r"(?:\x07|\x1b\\)"
 )
 
 # A title is one line of text, so every control character in it is noise.
 _TITLE_CONTROL_PATTERN = re.compile(r"[\x00-\x1f\x7f]")
+_TERMINAL_OSC_PATTERN = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\|$)")
+_TERMINAL_CSI_PATTERN = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
 #: OSC 9;4 states, by the numeric code the sequence carries.
 PROGRESS_STATE_NONE = ""
@@ -113,6 +116,7 @@ AGENT_PROGRESS_STALE_SECONDS = 120.0
 ACTIVITY_WORKING = "working"
 ACTIVITY_IDLE = "idle"
 ACTIVITY_UNKNOWN = "unknown"
+ACTIVITY_ERROR = "error"
 
 #: Which input decided the state, reported alongside it so a reader can tell an
 #: observation from an inference (the same rule the cwd observer follows).
@@ -128,6 +132,18 @@ def normalize_agent_title(value: Any) -> str:
     if len(candidate) > AGENT_TITLE_MAX_CHARS:
         candidate = candidate[:AGENT_TITLE_MAX_CHARS].rstrip() + "…"
     return candidate
+
+
+def has_agent_screen_output(chunk: str, residue: str = "") -> bool:
+    """Title reassertions and control-only frames do not mean agent work.
+
+    This only classifies output; the transport still forwards every byte.
+    Include the previous residue so the tail of a split title isn't mistaken
+    for visible text when it arrives on its own.
+    """
+    visible = _TERMINAL_OSC_PATTERN.sub("", (residue or "") + (chunk or ""))
+    visible = _TERMINAL_CSI_PATTERN.sub("", visible)
+    return bool(_TITLE_CONTROL_PATTERN.sub("", visible).strip())
 
 
 def parse_progress_payload(payload: Any) -> Optional[Tuple[str, int]]:
@@ -168,7 +184,15 @@ def parse_agent_events(chunk: str, residue: str = "") -> Tuple[List[Tuple[str, s
         if progress is not None:
             events.append((AGENT_EVENT_PROGRESS, progress.strip()))
             continue
-        events.append((AGENT_EVENT_TITLE, match.group("title") or ""))
+        title = match.group("title") or ""
+        code = match.group("title_code")
+        if code == "1":
+            events.append((AGENT_EVENT_TAB_TITLE, title))
+        else:
+            events.append((AGENT_EVENT_TITLE, title))
+            # OSC 0 sets both labels; it also retires an older OSC 1 label.
+            if code == "0":
+                events.append((AGENT_EVENT_TAB_TITLE, ""))
 
     return events, pending_osc_residue(text, _SEQUENCE_HEADS, AGENT_RESIDUE_MAX_CHARS)
 
@@ -177,6 +201,7 @@ def blank_agent_activity() -> Dict[str, Any]:
     """Return the record a pane starts with: nothing observed yet."""
     return {
         "title": "",
+        "tab_title": "",
         "title_at": 0.0,
         "progress_state": PROGRESS_STATE_NONE,
         "progress_value": 0,
@@ -188,10 +213,8 @@ def blank_agent_activity() -> Dict[str, Any]:
 def note_agent_output(record: Optional[Dict[str, Any]], now: float) -> Dict[str, Any]:
     """Record that the pane wrote something at ``now``.
 
-    Every chunk lands here and nowhere else -- one float, in the pane's own
-    connection entry, written by the pane's own pump thread. That is what lets
-    liveness be observed without a lock, a broadcast or a session write per
-    chunk.
+    Visible output lands here; title and control-only updates are excluded by
+    the observer. The pane's pump owns this connection-local timestamp.
     """
     updated = dict(record or blank_agent_activity())
     updated["last_output_at"] = float(now)
@@ -212,6 +235,9 @@ def apply_agent_events(
     """
     updated = dict(record or blank_agent_activity())
     for kind, value in events:
+        if kind == AGENT_EVENT_TAB_TITLE:
+            updated["tab_title"] = normalize_agent_title(value)
+            continue
         if kind == AGENT_EVENT_TITLE:
             updated["title"] = normalize_agent_title(value)
             updated["title_at"] = float(now)
@@ -252,13 +278,13 @@ def describe_agent_activity(
     progress_at = float(source.get("progress_at") or 0.0)
     progress_state = str(source.get("progress_state") or PROGRESS_STATE_NONE)
     progress_fresh = bool(
-        progress_state in _LIVE_PROGRESS_STATES
+        progress_state
         and progress_at > 0.0
         and (now - progress_at) <= float(progress_stale_after)
     )
 
-    if progress_fresh:
-        state = ACTIVITY_WORKING
+    if progress_fresh and progress_state in _LIVE_PROGRESS_STATES | {PROGRESS_STATE_ERROR}:
+        state = ACTIVITY_ERROR if progress_state == PROGRESS_STATE_ERROR else ACTIVITY_WORKING
         state_source = ACTIVITY_SOURCE_PROGRESS
     elif last_output_at <= 0.0:
         state = ACTIVITY_UNKNOWN
@@ -273,8 +299,9 @@ def describe_agent_activity(
     return {
         "state": state,
         "state_source": state_source,
-        "title": str(source.get("title") or ""),
+        "title": str(source.get("tab_title") or source.get("title") or ""),
         "progress_state": progress_state,
+        "progress_fresh": progress_fresh,
         # The percentage only means anything while the sequence says it does;
         # an error or indeterminate state carries no number worth painting.
         "progress_value": (

@@ -533,14 +533,7 @@
             if (ownerIndex < 0 || sessionIds[ownerIndex] !== sessionId) return;
             index = ownerIndex;
             closeAllPaneShellMenus();
-            const nameLabel = document.getElementById(`tname-${index}`);
-            if (nameLabel) {
-                nameLabel.textContent = paneDisplayTitle(data, index);
-            }
-            const hostLabel = document.getElementById(`thost-${index}`);
-            if (hostLabel) {
-                hostLabel.textContent = data.host || '';
-            }
+            syncPaneIdentityChrome(index, data);
             /* The backend cleared the old shell's replay buffer; drop its output
                here too so the fresh shell starts on a clean screen. */
             pane?.term?.reset?.();

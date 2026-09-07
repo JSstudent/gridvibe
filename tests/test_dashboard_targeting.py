@@ -464,7 +464,7 @@ function report(value) { process.stdout.write(JSON.stringify(value)); }
 
 PANE_IDENTITY_SOURCE = "\n".join(
     _js_function_source(TERMINALS_JS, name)
-    for name in ("paneDisplayTitle", "syncPaneIdentityChrome")
+    for name in ("paneDisplayTitle", "paneAgentIconHtml", "syncPaneAgentIcon", "syncPaneIdentityChrome")
 )
 
 
@@ -474,6 +474,7 @@ class PaneIdentityChromeTestCase(NodeHarnessTestCase):
         return self._run_node(
             PANE_IDENTITY_STUBS
             + (STATIC_JS / "agent-identity.js").read_text(encoding="utf-8")
+            + (STATIC_JS / "agent-glyphs.js").read_text(encoding="utf-8")
             + PANE_IDENTITY_SOURCE
             + "\n"
             + body
@@ -495,6 +496,29 @@ class PaneIdentityChromeTestCase(NodeHarnessTestCase):
             """
         )
         self.assertEqual(result, "Terminal 1")
+
+    def test_icons_follow_agent_switches_and_disappear_for_plain_panes(self):
+        result = self._run(
+            """
+            const icon = { innerHTML: '', hidden: true };
+            fields.set('ticon-0', icon);
+            const captures = [];
+            for (const [startup_mode, agent_selection] of [
+                ['agent', 'claude'], ['agent', 'codex'], ['agent', 'other'],
+                ['terminal', ''], ['explorer', ''], ['browser', '']
+            ]) {
+                syncPaneIdentityChrome(0, { startup_mode, agent_selection });
+                captures.push({ html: icon.innerHTML, hidden: icon.hidden });
+            }
+            report(captures);
+            """
+        )
+        for row in result[:3]:
+            self.assertIn("<svg", row["html"])
+            self.assertFalse(row["hidden"])
+        self.assertNotEqual(result[0]["html"], result[1]["html"])
+        for row in result[3:]:
+            self.assertEqual(row, {"html": "", "hidden": True})
 
     def test_a_pane_takes_the_name_of_the_agent_started_in_it(self):
         result = self._run(

@@ -1352,6 +1352,17 @@
             white-space: nowrap;
         }
         .terminal-name { font-weight: 600; color: var(--t-accent); font-size: .88rem; }
+        .terminal-agent-icon {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            flex: 0 0 18px;
+            width: 18px;
+            height: 18px;
+            color: var(--t-accent);
+        }
+        .terminal-agent-icon[hidden] { display: none; }
+        .terminal-agent-icon svg { width: 16px; height: 16px; }
         .terminal-host { color: var(--t-text-muted); font-size: .78rem; }
 
         .terminal-meta {

@@ -13602,7 +13602,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(updated.initial_command, "claude")
         broadcast.assert_called_once_with(session.session_id)
 
-    def test_terminal_input_returns_codex_to_terminal_mode_on_interrupt(self):
+    def test_one_codex_interrupt_keeps_the_agent_in_the_dashboard(self):
         group = api.session_manager.create_group(
             name="Codex",
             connection_mode="ssh",
@@ -13622,6 +13622,13 @@ class ApiRoutesTestCase(unittest.TestCase):
 
         connection = {}
         api.ssh_connections[session.session_id] = connection
+        with patch.object(web_terminal_io, "_broadcast_session_status") as broadcast:
+            api._track_terminal_agent_input(session.session_id, connection, "\x03")
+
+        updated = api.session_manager.get_session(session.session_id)
+        self.assertEqual(updated.startup_mode, "agent")
+        self.assertEqual(updated.agent_selection, "codex")
+        broadcast.assert_not_called()
         with patch.object(web_terminal_io, "_broadcast_session_status") as broadcast:
             api._track_terminal_agent_input(session.session_id, connection, "\x03")
 
@@ -18163,6 +18170,19 @@ class AgentInputTrackingLockTestCase(unittest.TestCase):
         self.assertEqual(updated.agent_selection, "claude")
         self.assertEqual(connection["_gridvibe_input_line"], "")
 
+    def test_naming_another_cli_in_chat_does_not_change_the_running_agent(self):
+        session = api.session_manager.create_session(
+            group_id="grp-agent", host="local", directory="/tmp",
+            startup_mode="agent", agent_selection="codex", initial_command="codex",
+        )
+        connection = {}
+        web_terminal_io.ssh_connections[session.session_id] = connection
+        with patch.object(web_terminal_io, "_broadcast_session_status") as broadcast:
+            api._track_terminal_agent_input(session.session_id, connection, "claude\r")
+        self.assertEqual(session.agent_selection, "codex")
+        self.assertEqual(session.initial_command, "codex")
+        broadcast.assert_not_called()
+
 
 class ExplorerPaneDisposalTestCase(unittest.TestCase):
     """Every path that discards an explorer pane gives its work back.
@@ -21422,6 +21442,19 @@ class SettingsLauncherConfigTestCase(unittest.TestCase):
             compose(session(initial_command_mode="command")), "claude"
         )
         self.assertEqual(compose(session(initial_command="")), "")
+
+    def test_codex_launch_enables_chat_titles_without_persisting_the_override(self):
+        for auto in (False, True):
+            session = SimpleNamespace(
+                initial_command="codex", initial_command_mode="agent",
+                agent_selection="codex", agent_auto_mode=auto,
+            )
+            command = web_agents._compose_agent_startup_command(session)
+            self.assertIn(' -c "tui.terminal_title=[\'thread-title\']"', command)
+            self.assertEqual(session.initial_command, "codex")
+            self.assertEqual("--sandbox workspace-write" in command, auto)
+        session.initial_command = "codex resume --last"
+        self.assertEqual(web_agents._compose_agent_startup_command(session), session.initial_command)
 
     def test_startup_sequence_sends_composed_auto_mode_command(self):
         connection = {"kind": "ssh", "shell_kind": "posix"}

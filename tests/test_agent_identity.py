@@ -115,6 +115,29 @@ class AgentIdentityTestCase(unittest.TestCase):
         )
         self.assertEqual(title, "Build box")
 
+    def test_chat_titles_drop_provider_placeholders_and_status_markers(self):
+        result = self._run_node(
+            """
+            report([
+                ['claude', '✳ Fix dashboard navigation'],
+                ['hermes', '⠋ Rename current conversation'],
+                ['copilot', '🤖 GitHub Copilot'],
+                ['kimi', 'kimi-code'],
+                ['codex', 'Codex'],
+                ['codex', '⚠ Keep literal conversation punctuation'],
+                ['other', '✳ Custom agent title'],
+                ['kimi', 'Multiword active chat title']
+            ].map(([key, title]) => identity.agentChatTitle(pane({
+                startup_mode: 'agent', agent_selection: key, activity: { title }
+            }), AGENT_OPTIONS)));
+            """
+        )
+        self.assertEqual(result, [
+            "Fix dashboard navigation", "Rename current conversation", "", "", "",
+            "⚠ Keep literal conversation punctuation", "✳ Custom agent title",
+            "Multiword active chat title",
+        ])
+
     def test_a_plain_pane_keeps_the_terminal_n_fallback(self):
         # A placeholder on a pane with no agent is still printed as the server
         # holds it, exactly as the header always has -- treating it as unset is

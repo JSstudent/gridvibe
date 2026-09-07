@@ -46,13 +46,17 @@
     const DASHBOARD_CHORD_LABEL = 'Alt+A';
 
     /* The button is the only consumer, so a slow tick is plenty. */
-    const DASHBOARD_BADGE_REFRESH_MS = 30000;
+    const DASHBOARD_BADGE_REFRESH_MS = 5000;
+    const DASHBOARD_BADGE_TIMEOUT_MS = 10000;
 
     let _dashboardBadgeTimer = null;
     /* Bumped on every request. A slow answer that lands after a newer one was
        asked for is dropped rather than painted, so the badge cannot flick back
        to an older count. */
     let _dashboardRequestId = 0;
+    let _dashboardBadgeController = null;
+    let _dashboardOpening = false;
+    let _dashboardWired = false;
 
     function dashboardChordMatches(event) {
         if (!event || !event.altKey || event.ctrlKey || event.metaKey) return false;
@@ -100,6 +104,26 @@
     async function openAgentDashboardWindow(event) {
         event?.preventDefault?.();
         event?.stopPropagation?.();
+        if (_dashboardOpening) return false;
+        _dashboardOpening = true;
+        try {
+            return await performOpenAgentDashboardWindow();
+        } catch (error) {
+            console.error('[GridVibe Dashboard] open failed:', error);
+            dashboardOpenFailure();
+            return false;
+        } finally {
+            _dashboardOpening = false;
+        }
+    }
+
+    function dashboardOpenFailure() {
+        const message = 'Could not open the agent dashboard. Allow pop-ups for this site and try again.';
+        if (typeof showGridVibeNotice === 'function') showGridVibeNotice(message, 'error');
+        else if (typeof showTerminalToast === 'function') showTerminalToast(message, 'error');
+    }
+
+    async function performOpenAgentDashboardWindow() {
         rememberDashboardOriginWorkspace();
         const api = dashboardNativeApi();
         if (api?.open_dashboard_window) {
@@ -116,6 +140,7 @@
         const opened = window.open(AGENT_DASHBOARD_URL, AGENT_DASHBOARD_WINDOW_NAME);
         if (!opened) {
             console.error('[GridVibe Dashboard] the browser blocked the dashboard tab');
+            dashboardOpenFailure();
             return false;
         }
         opened.focus?.();
@@ -133,17 +158,32 @@
     }
 
     async function refreshDashboardBadge() {
+        if (document.hidden) return;
         const requestId = ++_dashboardRequestId;
+        _dashboardBadgeController?.abort();
+        const controller = new AbortController();
+        _dashboardBadgeController = controller;
+        const timeout = setTimeout(() => controller.abort(), DASHBOARD_BADGE_TIMEOUT_MS);
         let snapshot = null;
         try {
-            const response = await fetch('/api/dashboard');
+            const response = await fetch('/api/dashboard', { signal: controller.signal, cache: 'no-store' });
             if (!response.ok) {
                 throw new Error(`HTTP ${response.status}`);
             }
             snapshot = await response.json();
+            if (!Number.isInteger(snapshot?.totals?.agents) || snapshot.totals.agents < 0) {
+                throw new Error('Invalid dashboard count');
+            }
         } catch (error) {
-            console.error('[GridVibe Dashboard] badge read failed:', error);
+            if (requestId === _dashboardRequestId) {
+                console.error('[GridVibe Dashboard] badge read failed:', error);
+                const badge = document.getElementById(DASHBOARD_BADGE_ID);
+                if (badge) { badge.textContent = '?'; badge.hidden = false; }
+            }
             return;
+        } finally {
+            clearTimeout(timeout);
+            if (_dashboardBadgeController === controller) _dashboardBadgeController = null;
         }
         if (requestId !== _dashboardRequestId) {
             return;
@@ -160,15 +200,33 @@
             _dashboardBadgeTimer = null;
         }
         if (document.hidden) {
+            ++_dashboardRequestId;
+            _dashboardBadgeController?.abort();
+            _dashboardBadgeController = null;
             return;
         }
-        _dashboardBadgeTimer = setInterval(refreshDashboardBadge, DASHBOARD_BADGE_REFRESH_MS);
+        _dashboardBadgeTimer = setInterval(() => {
+            if (!_dashboardBadgeController) refreshDashboardBadge();
+        }, DASHBOARD_BADGE_REFRESH_MS);
     }
 
     function wireDashboard() {
-        if (!document.getElementById(DASHBOARD_BUTTON_ID)) {
+        if (_dashboardWired || !document.getElementById(DASHBOARD_BUTTON_ID)) {
             return;
         }
+        _dashboardWired = true;
+        window.GridVibeDashboardFocus?.start();
+        window.addEventListener?.('focus', () => refreshDashboardBadge());
+        window.addEventListener?.('pagehide', () => {
+            clearInterval(_dashboardBadgeTimer);
+            _dashboardBadgeTimer = null;
+            ++_dashboardRequestId;
+            _dashboardBadgeController?.abort();
+            _dashboardBadgeController = null;
+        });
+        window.addEventListener?.('pageshow', event => {
+            if (event.persisted) { scheduleDashboardBadgeRefresh(); refreshDashboardBadge(); }
+        });
         document.addEventListener?.('keydown', event => {
             if (!dashboardChordMatches(event) || dashboardChordBlocked(event.target)) {
                 return;

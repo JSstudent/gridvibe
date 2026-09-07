@@ -26,6 +26,7 @@ from sessions.manager import SessionStatus
 from web.agent_activity import (
     apply_agent_events,
     blank_agent_activity,
+    has_agent_screen_output,
     note_agent_output,
     parse_agent_events,
 )
@@ -515,8 +516,10 @@ def _observe_agent_activity(connection: Dict[str, Any], output: str) -> None:
     if not output:
         return
     now = time.time()
-    record = note_agent_output(connection.get("agent_activity"), now)
     residue = str(connection.get("agent_residue") or "")
+    record = connection.get("agent_activity") or blank_agent_activity()
+    if has_agent_screen_output(output, residue):
+        record = note_agent_output(record, now)
     if "\x1b" in output or residue:
         events, residue = parse_agent_events(output, residue)
         connection["agent_residue"] = residue
@@ -1330,7 +1333,6 @@ def _track_current_terminal_agent_input(
                 connection["_gridvibe_input_line"] = ""
                 exit_reason = "end-of-input"
             elif "\x03" in text:
-                agent_key = str(session.agent_selection or "").strip().lower()
                 now = time.monotonic()
                 last_interrupt = float(connection.get("_gridvibe_agent_interrupt_at") or 0.0)
                 interrupt_count = (
@@ -1340,7 +1342,7 @@ def _track_current_terminal_agent_input(
                 )
                 connection["_gridvibe_agent_interrupt_at"] = now
                 connection["_gridvibe_agent_interrupt_count"] = interrupt_count
-                if agent_key == "codex" or interrupt_count >= 2:
+                if interrupt_count >= 2:
                     connection["_gridvibe_input_line"] = ""
                     exit_reason = "interrupt"
 
@@ -1367,6 +1369,11 @@ def _track_current_terminal_agent_input(
         if submitted_line.strip().lower() in {"/exit", "/quit"}:
             if _mark_runtime_agent_exited(session_id, "exit command"):
                 return
+        # A prompt containing another CLI's name is conversation input while
+        # an agent owns the pane. Only a shell (or an unassigned agent pane)
+        # can promote a submitted command to a different runtime agent.
+        if session and session.startup_mode == "agent" and session.agent_selection:
+            continue
         detected = _agent_from_terminal_command(submitted_line)
         if not detected:
             continue

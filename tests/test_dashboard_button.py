@@ -332,7 +332,7 @@ class DashboardButtonTestCase(unittest.TestCase):
         self.assertEqual(result["afterNewer"], "9")
         self.assertEqual(result["afterSlowLanded"], "9")
 
-    def test_a_failed_read_leaves_the_badge_as_it_was(self):
+    def test_a_failed_read_marks_the_badge_unknown(self):
         result = self._run_node(
             """
             fetchAnswer = snapshot(2);
@@ -342,7 +342,7 @@ class DashboardButtonTestCase(unittest.TestCase):
             report({ text: badge().textContent, hidden: badge().hidden });
             """
         )
-        self.assertEqual(result["text"], "2")
+        self.assertEqual(result["text"], "?")
         self.assertFalse(result["hidden"])
 
     def test_a_hidden_document_arms_no_poll_and_reads_again_on_the_way_back(self):

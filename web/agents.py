@@ -126,28 +126,32 @@ def _agent_options() -> List[Dict[str, str]]:
 
 
 def _compose_agent_startup_command(session: Any) -> str:
-    """Return the startup command for a session, applying its auto-mode flag.
+    """Apply launch-only title settings and optional auto-mode flags.
 
-    The persisted ``initial_command`` always stays the base agent key so
-    preflight detection and saved-session round-trips keep working; the flag
-    is appended only here, at launch time, and only when the selected
-    built-in agent has a registered auto-mode option.
+    Keep the persisted base command intact for detection and saved sessions.
+    Custom or explicitly configured commands remain verbatim.
     """
     base = str(getattr(session, "initial_command", "") or "").strip()
     if not base:
         return base
     if str(getattr(session, "initial_command_mode", "") or "") != "agent":
         return base
-    if not bool(getattr(session, "agent_auto_mode", False)):
-        return base
     agent_key = _normalize_agent_key(getattr(session, "agent_selection", "")) or _normalize_agent_key(base)
     if _normalize_agent_key(base) != agent_key:
         # Custom or already-modified commands launch verbatim.
         return base
-    flag = _agent_auto_mode_flag(agent_key)
-    if not flag:
-        return base
-    return f"{base} {flag}"
+    command = base
+    if agent_key == "codex":
+        # Launch-only override: the CLI's default title contains the project,
+        # while thread-title follows the active conversation and /rename.
+        # TOML literal strings preserve their quotes through cmd, PowerShell
+        # and POSIX shells without platform-specific backslash escaping.
+        command += ' -c "tui.terminal_title=[\'thread-title\']"'
+    if bool(getattr(session, "agent_auto_mode", False)):
+        flag = _agent_auto_mode_flag(agent_key)
+        if flag:
+            command += f" {flag}"
+    return command
 
 
 def _normalize_agent_key(value: Any) -> str:

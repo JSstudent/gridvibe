@@ -404,6 +404,124 @@ class DashboardWindowTestCase(unittest.TestCase):
 
 
 class DashboardWindowStructureTestCase(DashboardWindowTestCase):
+    def test_zero_progress_and_stale_or_disconnected_progress(self):
+        result = self._run_node(
+            """
+            const readings = [
+                pane({ activity: activity({ progress_state: 'normal', progress_value: 0 }) }),
+                pane({ activity: activity({ progress_state: 'normal', progress_value: 65, progress_fresh: false }) }),
+                pane({ status: 'disconnected', activity: activity({ progress_state: 'normal', progress_value: 65 }) }),
+                pane({ status: 'connecting', activity: activity({ progress_state: 'normal', progress_value: 65 }) })
+            ];
+            report(readings.map(p => dashboardActivityHtml(p)));
+            """
+        )
+        self.assertIn('width:0%', result[0])
+        self.assertIn('>0%</span>', result[0])
+        for html in result[1:]:
+            self.assertNotIn('dash-progress-fill', html)
+
+    def test_chat_changes_and_idle_ages_update_rows_without_rebuilding_buttons(self):
+        result = self._run_node(
+            """
+            const first = pane({ activity: activity({ title: 'First chat', state: 'idle', idle_seconds: 5 }) });
+            fetchAnswer = snapshot([group([first])]);
+            await refreshAgentDashboard();
+            const originalHtml = body().innerHTML;
+            const line = { textContent: 'First chat' };
+            const reading = { innerHTML: dashboardActivityHtml(first) };
+            const row = { dataset: { sessionId: 's1' }, title: 'First chat', querySelector: selector =>
+                selector === '.dash-agent-line' ? line : reading };
+            body().querySelectorAll = () => [row];
+            body().scrollTop = 123;
+            fetchAnswer = snapshot([group([pane({ activity: activity({
+                title: 'Renamed chat', state: 'idle', idle_seconds: 70
+            }) })])]);
+            await refreshAgentDashboard();
+            report({ sameButtons: body().innerHTML === originalHtml, line: line.textContent,
+                tooltip: row.title, reading: reading.innerHTML, scroll: body().scrollTop });
+            """
+        )
+        self.assertTrue(result["sameButtons"])
+        self.assertEqual(result["line"], "Renamed chat")
+        self.assertEqual(result["tooltip"], "Renamed chat")
+        self.assertIn("Idle 1m", result["reading"])
+        self.assertEqual(result["scroll"], 123)
+
+    def test_a_hidden_window_aborts_its_request_and_ignores_the_late_result(self):
+        result = self._run_node(
+            """
+            fetchAnswer = snapshot();
+            wireAgentDashboard();
+            await settle();
+            const initial = body().innerHTML;
+            let resolve, signal;
+            globalThis.fetch = (_url, options) => {
+                signal = options.signal;
+                return new Promise(done => { resolve = done; });
+            };
+            const pending = refreshAgentDashboard();
+            document.hidden = true;
+            document.fire('visibilitychange');
+            resolve({ ok: true, json: async () => snapshot([], { workspaces: [] }) });
+            await pending;
+            report({ aborted: signal.aborted, unchanged: initial === body().innerHTML });
+            """
+        )
+        self.assertEqual(result, {"aborted": True, "unchanged": True})
+
+    def test_stalled_reads_time_out_and_the_next_refresh_recovers(self):
+        result = self._run_node(
+            """
+            const realTimeout = globalThis.setTimeout;
+            let expire;
+            globalThis.setTimeout = (fn, delay) => { expire = fn; return 0; };
+            globalThis.fetch = (_url, { signal }) => new Promise((_resolve, reject) => {
+                signal.addEventListener('abort', () => reject(new Error('aborted')));
+            });
+            const pending = refreshAgentDashboard();
+            expire();
+            await pending;
+            const failed = !notice().hidden;
+            globalThis.setTimeout = realTimeout;
+            globalThis.fetch = async () => ({ ok: true, json: async () => snapshot() });
+            await refreshAgentDashboard();
+            report({ failed, recovered: notice().hidden, agents: sectionCounts().agents });
+            """
+        )
+        self.assertEqual(result, {"failed": True, "recovered": True, "agents": 1})
+
+    def test_a_successful_poll_does_not_erase_a_failed_navigation(self):
+        result = self._run_node(
+            """
+            workspaceOpens = false;
+            await openDashboardTarget({ workspaceId: 'default' });
+            const failure = notice().textContent;
+            fetchAnswer = snapshot();
+            await refreshAgentDashboard();
+            const afterPoll = notice().textContent;
+            workspaceOpens = true;
+            await openDashboardTarget({ workspaceId: 'default' });
+            report({ failure, afterPoll, cleared: notice().hidden });
+            """
+        )
+        self.assertTrue(result["failure"])
+        self.assertEqual(result["failure"], result["afterPoll"])
+        self.assertTrue(result["cleared"])
+
+    def test_malformed_response_preserves_the_last_tree(self):
+        result = self._run_node(
+            """
+            fetchAnswer = snapshot();
+            await refreshAgentDashboard();
+            const initial = body().innerHTML;
+            fetchAnswer = { workspaces: [{ groups: null }] };
+            await refreshAgentDashboard();
+            report({ unchanged: body().innerHTML === initial, error: !notice().hidden });
+            """
+        )
+        self.assertEqual(result, {"unchanged": True, "error": True})
+
     def test_the_three_levels_are_three_sections(self):
         result = self._run_node(
             """
@@ -537,10 +655,7 @@ class DashboardWindowStructureTestCase(DashboardWindowTestCase):
         )
         self.assertEqual(result, "10.0.0.5: /srv/app")
 
-    def test_a_name_the_user_typed_outranks_what_the_agent_announced(self):
-        """The heading now says which agent this is, so the line is the only
-        place a typed pane name still appears — and agent-identity.js's rule is
-        that a name somebody chose wins."""
+    def test_the_active_chat_title_outranks_a_pane_label(self):
         result = self._run_node(
             """
             fetchAnswer = snapshot([group([pane({
@@ -552,7 +667,7 @@ class DashboardWindowStructureTestCase(DashboardWindowTestCase):
             report({ line: rowFor('pane:s1').label, heading: parseAgentGroups()[0].title });
             """
         )
-        self.assertEqual(result["line"], "release cut")
+        self.assertEqual(result["line"], "Claude: fixing the parser")
         self.assertEqual(result["heading"], "Claude Code")
 
     def test_a_local_agent_is_tagged_with_the_shell_it_runs(self):
@@ -1008,7 +1123,7 @@ class DashboardWindowRepaintTestCase(DashboardWindowTestCase):
             """
         )
         self.assertFalse(result["failed"]["hidden"])
-        self.assertEqual(result["failed"]["text"], "Could not read what is running.")
+        self.assertIn("Use Refresh to retry", result["failed"]["text"])
         self.assertEqual(result["failed"]["rows"], 3)
         self.assertTrue(result["recovered"]["hidden"])
         self.assertEqual(result["recovered"]["rows"], 3)

@@ -133,6 +133,21 @@
         return title || `Terminal ${Number(index || 0) + 1}`;
     }
 
+    function agentChatTitle(session, options) {
+        const key = agentKeyForSession(session);
+        let title = text(session?.activity?.title);
+        // These agents decorate their published title with a changing status
+        // marker. It is separate from the conversation's name.
+        if (['claude', 'hermes', 'copilot'].includes(key)) {
+            title = title.replace(/^[\u2800-\u28ff✳✻✽✶✢⏺⏳✓⚠🤖]\uFE0F?\s*/u, '').trim();
+        }
+        const placeholders = [key, agentDisplayName(session, options)];
+        if (key === 'kimi') placeholders.push('kimi-code', 'kimi code');
+        if (key === 'copilot') placeholders.push('GitHub Copilot');
+        if (key === 'codex') placeholders.push('Codex');
+        return placeholders.some(value => text(value).toLowerCase() === title.toLowerCase()) ? '' : title;
+    }
+
     /* What a pane is running on, in one word.
 
        An SSH pane is remote and that is the whole answer — which host it is on
@@ -175,6 +190,7 @@
         agentOptionFor,
         agentDisplayName,
         paneDisplayTitle,
+        agentChatTitle,
         paneTransportLabel
     };
 }));
