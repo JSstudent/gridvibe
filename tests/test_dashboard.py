@@ -1,4 +1,4 @@
-"""The one reading of everything that is live.
+"""The one reading of every agent that is running.
 
 Three layers, each exercised where it actually decides something:
 
@@ -11,6 +11,13 @@ Three layers, each exercised where it actually decides something:
 
 What is pinned:
 
+- **Agents, and only agents.** A pane that is not running one is not a row, and
+  a group or workspace left holding none is not a heading. The filter is the
+  server's so the page and the payload cannot disagree about what "empty" is.
+- **The filter does not renumber the panes.** A pane's `index` is its position
+  in its *whole* group — it is what names the pane and what focuses it — so an
+  agent sitting third in a four-pane group still says 2 after the two panes in
+  front of it are dropped.
 - **The payload is built, never filtered.** A pane row is assembled from a fixed
   field list, so a credential added to `TerminalSession` later cannot arrive
   here by default. The password case asserts that directly.
@@ -18,9 +25,8 @@ What is pinned:
   `list_live_workspaces` returns them, groups in display order, panes in pane
   order — because a dashboard row that is not where the window would put it is
   a row you have to search for.
-- **`None` activity is not a blank reading.** An explorer pane has no transport
-  to observe; saying "observed nothing" about it would be a claim, not an
-  absence.
+- **`None` activity is not a blank reading.** Saying "observed nothing" about a
+  pane with no transport would be a claim, not an absence.
 - **The two locks are never nested.** The route reads the activity snapshot
   before it touches the manager, which is what keeps a busy pane's pump thread
   off a dashboard poll.
@@ -73,6 +79,7 @@ def group(group_id, workspace_id, name="Session"):
 
 
 def session(session_id, group_id, **overrides):
+    """One agent pane, which is the only kind this surface lists."""
     payload = {
         "session_id": session_id,
         "group_id": group_id,
@@ -81,10 +88,13 @@ def session(session_id, group_id, **overrides):
         "current_directory": None,
         "title": "Terminal 1",
         "mode": "ssh",
-        "startup_mode": "terminal",
-        "agent_selection": "",
+        "startup_mode": "agent",
+        "agent_selection": "claude",
         "custom_agent": "",
         "agent_auto_mode": False,
+        "use_wsl": False,
+        "use_powershell": False,
+        "distribution": "",
         "status": "connected",
         "password": "hunter2",
         "username": "root",
@@ -92,6 +102,13 @@ def session(session_id, group_id, **overrides):
     }
     payload.update(overrides)
     return payload
+
+
+def plain_session(session_id, group_id, **overrides):
+    """A pane that is not an agent, and so is not a row."""
+    payload = {"startup_mode": "terminal", "agent_selection": ""}
+    payload.update(overrides)
+    return session(session_id, group_id, **payload)
 
 
 class DashboardComposerTestCase(unittest.TestCase):
@@ -106,13 +123,13 @@ class DashboardComposerTestCase(unittest.TestCase):
         arguments.update(overrides)
         return compose_dashboard(**arguments)
 
-    def test_the_tree_nests_workspace_session_pane(self):
+    def test_the_tree_nests_workspace_session_agent(self):
         snapshot = self._compose()
         self.assertEqual(len(snapshot["workspaces"]), 1)
         workspace_row = snapshot["workspaces"][0]
         self.assertEqual(workspace_row["workspace_id"], "default")
         self.assertEqual(workspace_row["group_count"], 1)
-        self.assertEqual(workspace_row["pane_count"], 1)
+        self.assertEqual(workspace_row["agent_count"], 1)
         pane = workspace_row["groups"][0]["panes"][0]
         self.assertEqual(pane["session_id"], "s1")
         self.assertEqual(pane["workspace_id"], "default")
@@ -127,6 +144,26 @@ class DashboardComposerTestCase(unittest.TestCase):
             set(pane) - set(PANE_FIELDS),
             {"workspace_id", "index", "directory", "activity"},
         )
+
+    def test_a_pane_publishes_what_it_runs_on(self):
+        """The three transport facts the tag is named from, and nothing more."""
+        pane = self._compose(
+            sessions_by_group={
+                "g1": [
+                    session(
+                        "s1",
+                        "g1",
+                        mode="wsl",
+                        use_wsl=True,
+                        distribution="Ubuntu",
+                    )
+                ]
+            }
+        )["workspaces"][0]["groups"][0]["panes"][0]
+        self.assertEqual(pane["mode"], "wsl")
+        self.assertTrue(pane["use_wsl"])
+        self.assertFalse(pane["use_powershell"])
+        self.assertEqual(pane["distribution"], "Ubuntu")
 
     def test_the_observed_directory_wins_over_the_launch_one(self):
         panes = self._compose(
@@ -145,12 +182,77 @@ class DashboardComposerTestCase(unittest.TestCase):
         self.assertEqual([pane["session_id"] for pane in panes], ["s1", "s2", "s3"])
         self.assertEqual([pane["index"] for pane in panes], [0, 1, 2])
 
+    def test_a_pane_that_is_not_an_agent_is_not_a_row(self):
+        group_row = self._compose(
+            sessions_by_group={
+                "g1": [
+                    plain_session("s1", "g1"),
+                    session("s2", "g1"),
+                    plain_session("s3", "g1", startup_mode="explorer"),
+                    plain_session("s4", "g1", startup_mode="browser"),
+                ]
+            }
+        )["workspaces"][0]["groups"][0]
+        self.assertEqual([pane["session_id"] for pane in group_row["panes"]], ["s2"])
+        self.assertEqual(group_row["agent_count"], 1)
+        # The group still says how big it actually is, so "1 agent" cannot read
+        # as "a one-pane session".
+        self.assertEqual(group_row["pane_count"], 4)
+
+    def test_the_filter_does_not_renumber_the_panes_it_keeps(self):
+        """`index` names and focuses the pane, so it stays its real position."""
+        panes = self._compose(
+            sessions_by_group={
+                "g1": [
+                    plain_session("s1", "g1"),
+                    plain_session("s2", "g1"),
+                    session("s3", "g1"),
+                    plain_session("s4", "g1"),
+                    session("s5", "g1"),
+                ]
+            }
+        )["workspaces"][0]["groups"][0]["panes"]
+        self.assertEqual([pane["session_id"] for pane in panes], ["s3", "s5"])
+        self.assertEqual([pane["index"] for pane in panes], [2, 4])
+
+    def test_a_session_with_no_agent_is_dropped_with_its_workspace(self):
+        snapshot = self._compose(
+            workspaces=[workspace("default"), workspace("ws2", label="api")],
+            groups_by_workspace={
+                "default": [group("g1", "default"), group("g2", "default")],
+                "ws2": [group("g3", "ws2")],
+            },
+            sessions_by_group={
+                "g1": [plain_session("s1", "g1")],
+                "g2": [session("s2", "g2")],
+                "g3": [plain_session("s3", "g3"), plain_session("s4", "g3")],
+            },
+        )
+        self.assertEqual(
+            [row["workspace_id"] for row in snapshot["workspaces"]], ["default"]
+        )
+        self.assertEqual(
+            [row["group_id"] for row in snapshot["workspaces"][0]["groups"]], ["g2"]
+        )
+        self.assertEqual(
+            snapshot["totals"], {"workspaces": 1, "sessions": 1, "agents": 1}
+        )
+
+    def test_a_server_with_no_agent_anywhere_composes_an_empty_tree(self):
+        snapshot = self._compose(
+            sessions_by_group={"g1": [plain_session("s1", "g1")]}
+        )
+        self.assertEqual(snapshot["workspaces"], [])
+        self.assertEqual(
+            snapshot["totals"], {"workspaces": 0, "sessions": 0, "agents": 0}
+        )
+
     def test_the_active_group_hint_marks_exactly_one_row(self):
         snapshot = self._compose(
             groups_by_workspace={
                 "default": [group("g1", "default"), group("g2", "default")]
             },
-            sessions_by_group={"g1": [session("s1", "g1")], "g2": []},
+            sessions_by_group={"g1": [session("s1", "g1")], "g2": [session("s2", "g2")]},
         )
         groups = snapshot["workspaces"][0]["groups"]
         self.assertEqual([row["is_active"] for row in groups], [True, False])
@@ -158,10 +260,7 @@ class DashboardComposerTestCase(unittest.TestCase):
     def test_a_pane_with_no_transport_carries_no_reading_at_all(self):
         snapshot = self._compose(
             sessions_by_group={
-                "g1": [
-                    session("s1", "g1", startup_mode="explorer"),
-                    session("s2", "g1"),
-                ]
+                "g1": [session("s1", "g1"), session("s2", "g1")]
             },
             activity={"s2": note_agent_output(None, 499.0)},
         )
@@ -183,25 +282,16 @@ class DashboardComposerTestCase(unittest.TestCase):
             },
             sessions_by_group={
                 "g1": [
-                    session("s1", "g1", startup_mode="agent", agent_selection="claude"),
-                    session("s2", "g1"),
+                    session("s1", "g1", agent_selection="claude"),
+                    plain_session("s2", "g1"),
                 ],
-                "g2": [
-                    session("s3", "g2", startup_mode="agent", agent_selection="codex")
-                ],
+                "g2": [session("s3", "g2", agent_selection="codex")],
             },
         )
         self.assertEqual(
             snapshot["totals"],
-            {"workspaces": 2, "sessions": 2, "panes": 3, "agents": 2},
+            {"workspaces": 2, "sessions": 2, "agents": 2},
         )
-
-    def test_an_empty_workspace_still_appears_with_nothing_under_it(self):
-        snapshot = self._compose(
-            groups_by_workspace={"default": []}, sessions_by_group={}
-        )
-        self.assertEqual(snapshot["workspaces"][0]["groups"], [])
-        self.assertEqual(snapshot["workspaces"][0]["pane_count"], 0)
 
 
 class DashboardObservationOwnershipTestCase(unittest.TestCase):
@@ -287,21 +377,25 @@ class DashboardRouteTestCase(unittest.TestCase):
         )
         return created, agent, plain
 
-    def test_the_route_returns_the_live_tree(self):
+    def test_the_route_returns_the_live_tree_of_agents(self):
         created, agent, plain = self._launch_group()
         payload = self.client.get("/api/dashboard").get_json()
 
-        self.assertEqual(payload["totals"]["workspaces"], 1)
-        self.assertEqual(payload["totals"]["sessions"], 1)
-        self.assertEqual(payload["totals"]["panes"], 2)
-        self.assertEqual(payload["totals"]["agents"], 1)
+        self.assertEqual(
+            payload["totals"], {"workspaces": 1, "sessions": 1, "agents": 1}
+        )
 
         group_row = payload["workspaces"][0]["groups"][0]
         self.assertEqual(group_row["group_id"], created.group_id)
         self.assertEqual(group_row["name"], "API work")
+        # The plain terminal beside it is a pane of the group and not a row.
+        self.assertEqual(group_row["pane_count"], 2)
         self.assertEqual(
             [pane["session_id"] for pane in group_row["panes"]],
-            [agent.session_id, plain.session_id],
+            [agent.session_id],
+        )
+        self.assertNotIn(
+            plain.session_id, [pane["session_id"] for pane in group_row["panes"]]
         )
         self.assertEqual(group_row["panes"][0]["agent_selection"], "claude")
         self.assertEqual(group_row["panes"][0]["startup_mode"], "agent")
@@ -326,13 +420,19 @@ class DashboardRouteTestCase(unittest.TestCase):
         self.assertEqual(reading["title"], "Claude: fixing the parser")
         self.assertEqual(reading["state"], ACTIVITY_WORKING)
         self.assertEqual(reading["progress_value"], 65)
-        # The pane beside it has no transport at all, so it has no reading.
-        self.assertIsNone(panes[1]["activity"])
 
     def test_an_empty_server_answers_rather_than_failing(self):
         payload = self.client.get("/api/dashboard").get_json()
         self.assertEqual(payload["workspaces"], [])
-        self.assertEqual(payload["totals"]["panes"], 0)
+        self.assertEqual(payload["totals"]["agents"], 0)
+
+    def test_the_dashboard_page_is_served(self):
+        """Its own page, in no workspace, so it takes no workspace argument."""
+        response = self.client.get("/dashboard")
+        self.assertEqual(response.status_code, 200)
+        body = response.get_data(as_text=True)
+        self.assertIn("agentDashboardBody", body)
+        self.assertIn("dashboard-window.js", body)
 
 
 if __name__ == "__main__":

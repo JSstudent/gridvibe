@@ -22,6 +22,15 @@
      · `startup_mode === 'agent'` is the only marker of an agent pane, matching
        terminal-shell.js: a startup *command* is not an agent.
 
+   It also holds the *second* thing both surfaces say about a pane: what it is
+   running on. `paneTransportLabel` turns the three transport facts the backend
+   publishes (`mode`, and the `use_wsl`/`use_powershell` precedence
+   terminal-shell.js's `paneShellKind` already reads) into the one short word
+   the dashboard tags a row with. It is here rather than in the dashboard for
+   the reason the naming rule is: it is a *naming* decision over facts the
+   server states, and the server states them precisely so it does not have to
+   make it.
+
    DOM-free and require()-able from Node so the rule is executed by tests
    rather than asserted as source text. */
 (function (root, factory) {
@@ -40,6 +49,15 @@
     const PANE_KIND_TERMINAL = 'terminal';
     const PANE_KIND_EXPLORER = 'explorer';
     const PANE_KIND_BROWSER = 'browser';
+
+    /* The one pane mode that is not local. Everything else runs on this
+       machine, and which shell it runs there is the `use_*` precedence. */
+    const PANE_MODE_SSH = 'ssh';
+
+    const TRANSPORT_LABEL_SSH = 'SSH';
+    const TRANSPORT_LABEL_WSL = 'WSL';
+    const TRANSPORT_LABEL_POWERSHELL = 'PowerShell';
+    const TRANSPORT_LABEL_CMD = 'cmd';
 
     function text(value) {
         return String(value === null || value === undefined ? '' : value).trim();
@@ -115,17 +133,48 @@
         return title || `Terminal ${Number(index || 0) + 1}`;
     }
 
+    /* What a pane is running on, in one word.
+
+       An SSH pane is remote and that is the whole answer — which host it is on
+       is already the row's own note, and repeating it in a tag would push the
+       agent's name off the line. A local pane is named by the shell family it
+       actually started, in terminal-shell.js's own precedence (WSL beats
+       PowerShell beats cmd), because that is the dimension its relaunch menu
+       offers and the two have to agree about what the pane is running now.
+
+       A named WSL distro is worth carrying: two agents on two distros are two
+       different machines as far as their work is concerned. */
+    function paneTransportLabel(session) {
+        if (!session) {
+            return '';
+        }
+        if (text(session.mode).toLowerCase() === PANE_MODE_SSH) {
+            return TRANSPORT_LABEL_SSH;
+        }
+        if (session.use_wsl) {
+            const distribution = text(session.distribution);
+            return distribution ? `${TRANSPORT_LABEL_WSL} · ${distribution}` : TRANSPORT_LABEL_WSL;
+        }
+        return session.use_powershell ? TRANSPORT_LABEL_POWERSHELL : TRANSPORT_LABEL_CMD;
+    }
+
     return {
         GENERIC_PANE_TITLE_PATTERN,
         PANE_KIND_AGENT,
         PANE_KIND_TERMINAL,
         PANE_KIND_EXPLORER,
         PANE_KIND_BROWSER,
+        PANE_MODE_SSH,
+        TRANSPORT_LABEL_SSH,
+        TRANSPORT_LABEL_WSL,
+        TRANSPORT_LABEL_POWERSHELL,
+        TRANSPORT_LABEL_CMD,
         isGenericPaneTitle,
         agentKeyForSession,
         paneKindForSession,
         agentOptionFor,
         agentDisplayName,
-        paneDisplayTitle
+        paneDisplayTitle,
+        paneTransportLabel
     };
 }));

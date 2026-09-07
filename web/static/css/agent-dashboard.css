@@ -1,0 +1,495 @@
+/* The agent dashboard window.
+
+   Its own page, so — unlike dashboard.css, which is shared by two pages that
+   each own their palette — this file states its colours. It states them from
+   the shared `--gv-dialog-*` and status tokens rather than literals, which is
+   what makes the window follow the app's light/dark preference without a
+   second palette to keep in step.
+
+   The whole point of the layout is that the three levels look like three
+   different things, because the panel this replaced made them three indent
+   depths and that was unreadable:
+
+     · a **workspace** is a band across the page, with a ruled heading;
+     · a **session** is a bordered card inside that band, and the cards flow
+       into however many columns the window is wide enough for;
+     · an **agent** is a row inside a card.
+
+   Nothing here is decoration: every heading and every row is a button, because
+   each one is a way out of this window and into the thing it describes. */
+
+:root {
+    color-scheme: dark;
+}
+
+[data-theme="light"] {
+    color-scheme: light;
+}
+
+html,
+body {
+    height: 100%;
+}
+
+body {
+    margin: 0;
+    background: var(--gv-bg-app);
+    color: var(--gv-dialog-text);
+    font-family: 'Segoe UI', Roboto, -apple-system, BlinkMacSystemFont, sans-serif;
+    font-size: 14px;
+    -webkit-font-smoothing: antialiased;
+}
+
+.dash-frame {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-height: 100%;
+}
+
+/* ── The title bar ── */
+
+.dash-titlebar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    flex: 0 0 auto;
+    padding: 12px 20px;
+    border-bottom: 1px solid var(--gv-dialog-border);
+    background: var(--gv-dialog-panel-soft);
+}
+
+.dash-titlebar-left {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    min-width: 0;
+}
+
+.dash-logo {
+    width: 30px;
+    height: 30px;
+    border-radius: 7px;
+    flex: 0 0 auto;
+}
+
+.dash-titlebar-text h1 {
+    margin: 0;
+    font-size: 1rem;
+    font-weight: 700;
+    letter-spacing: .01em;
+    color: var(--gv-dialog-text);
+}
+
+.dash-titlebar-sub {
+    margin: 1px 0 0;
+    font-size: .72rem;
+    color: var(--gv-dialog-muted);
+}
+
+.dash-titlebar-right {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex: 0 0 auto;
+}
+
+.dash-totals {
+    font-size: .74rem;
+    color: var(--gv-dialog-muted);
+    font-variant-numeric: tabular-nums;
+}
+
+.dash-refresh-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 30px;
+    height: 30px;
+    padding: 0;
+    border: 1px solid var(--gv-dialog-border);
+    border-radius: var(--gv-radius-s);
+    background: transparent;
+    color: var(--gv-dialog-muted);
+    cursor: pointer;
+}
+
+.dash-refresh-btn svg {
+    width: 15px;
+    height: 15px;
+}
+
+.dash-refresh-btn:hover,
+.dash-refresh-btn:focus-visible {
+    border-color: var(--gv-accent);
+    color: var(--gv-accent);
+    outline: none;
+}
+
+/* Present only while a read has failed, so it is never a strip of chrome that
+   is always there saying nothing. */
+.dash-notice {
+    flex: 0 0 auto;
+    margin: 0;
+    padding: 8px 20px;
+    border-bottom: 1px solid var(--gv-dialog-border);
+    background: var(--gv-danger-soft);
+    color: var(--gv-danger);
+    font-size: .74rem;
+}
+
+/* ── The scroller ── */
+
+.dash-body {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    scrollbar-gutter: stable;
+    padding: 18px 20px 26px;
+}
+
+.dash-empty {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    min-height: 55vh;
+    text-align: center;
+    color: var(--gv-dialog-muted);
+}
+
+.dash-empty-title {
+    margin: 0;
+    font-size: .96rem;
+    font-weight: 600;
+    color: var(--gv-dialog-text);
+}
+
+.dash-empty-note {
+    margin: 0;
+    max-width: 42ch;
+    font-size: .76rem;
+    line-height: 1.5;
+}
+
+/* ── A workspace: a band ── */
+
+.dash-workspace + .dash-workspace {
+    margin-top: 26px;
+}
+
+.dash-workspace-head {
+    display: flex;
+    align-items: baseline;
+    gap: 12px;
+    padding-bottom: 7px;
+    margin-bottom: 12px;
+    border-bottom: 1px solid var(--gv-dialog-border);
+}
+
+/* The heading's name is the pressable part, not the whole rule: a band's
+   heading stretches the width of the window, and a button that wide is a
+   target you hit by accident. */
+.dash-workspace-open {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 2px 6px;
+    margin-left: -6px;
+    border: 0;
+    border-radius: var(--gv-radius-s);
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    cursor: pointer;
+    min-width: 0;
+}
+
+.dash-workspace-open:hover,
+.dash-workspace-open:focus-visible {
+    background: var(--gv-accent-soft);
+    outline: none;
+}
+
+.dash-workspace-name {
+    font-size: .92rem;
+    font-weight: 700;
+    letter-spacing: .06em;
+    text-transform: uppercase;
+    color: var(--gv-accent);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.dash-workspace-meta {
+    font-size: .7rem;
+    color: var(--gv-dialog-muted);
+    white-space: nowrap;
+}
+
+/* ── A session: a card ──
+   Several across a wide window, one across a narrow one, with no breakpoint to
+   maintain: the track minimum is the narrowest a row of this shape stays
+   legible at. */
+.dash-sessions {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(380px, 1fr));
+    gap: 12px;
+    align-items: start;
+}
+
+.dash-session {
+    border: 1px solid var(--gv-dialog-border);
+    border-radius: var(--gv-radius-m);
+    background: var(--gv-dialog-panel-soft);
+    overflow: hidden;
+}
+
+.dash-session-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    padding: 9px 12px;
+    border: 0;
+    border-bottom: 1px solid var(--gv-dialog-border);
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+}
+
+.dash-session-head:hover,
+.dash-session-head:focus-visible {
+    background: var(--gv-accent-soft);
+    outline: none;
+}
+
+.dash-session-name {
+    font-size: .82rem;
+    font-weight: 600;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+}
+
+.dash-session-meta {
+    margin-left: auto;
+    flex: 0 0 auto;
+    font-size: .68rem;
+    color: var(--gv-dialog-muted);
+    white-space: nowrap;
+}
+
+.dash-agents {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 6px;
+}
+
+/* ── An agent: a row ── */
+
+.dash-agent {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    padding: 7px 8px;
+    border: 0;
+    border-radius: var(--gv-radius-s);
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+}
+
+.dash-agent:hover,
+.dash-agent:focus-visible {
+    background: var(--gv-accent-soft);
+    outline: none;
+}
+
+.dash-agent-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: 0 0 auto;
+    width: 26px;
+    height: 26px;
+    border-radius: 7px;
+    background: var(--gv-accent-soft);
+    color: var(--gv-accent);
+}
+
+.dash-agent-glyph {
+    width: 15px;
+    height: 15px;
+}
+
+.dash-agent-main {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+.dash-agent-name {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+}
+
+.dash-agent-label {
+    font-size: .8rem;
+    font-weight: 600;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.dash-agent-note {
+    font-size: .69rem;
+    color: var(--gv-dialog-muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* ── Tags ── */
+
+.dash-tag {
+    flex: 0 0 auto;
+    padding: 1px 6px;
+    border: 1px solid var(--gv-dialog-border);
+    border-radius: 999px;
+    font-size: .58rem;
+    font-weight: 600;
+    letter-spacing: .05em;
+    text-transform: uppercase;
+    color: var(--gv-dialog-muted);
+    white-space: nowrap;
+}
+
+/* The auto-approval marker earns a hue: it is the one property of a running
+   agent that changes what it may do without asking. */
+.dash-tag-auto {
+    border-color: transparent;
+    background: var(--gv-warning-soft);
+    color: var(--gv-warning);
+}
+
+.dash-tag-active {
+    border-color: transparent;
+    background: var(--gv-accent);
+    color: var(--gv-bg-app);
+}
+
+/* ── The activity reading ──
+   A word and a dot for the state and, before them, either a determinate bar or
+   nothing. The two are separate on purpose: every agent has a state, and only
+   the few that speak the progress sequence have a percentage. */
+
+.dash-activity {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    flex: 0 0 auto;
+}
+
+.dash-state-word {
+    font-size: .66rem;
+    color: var(--gv-dialog-muted);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+
+.dash-state-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--gv-dialog-muted);
+}
+
+.dash-state-working .dash-state-dot {
+    background: var(--gv-success);
+    animation: dash-pulse 1.4s ease-in-out infinite;
+}
+
+.dash-state-working .dash-state-word {
+    color: var(--gv-success);
+}
+
+.dash-state-idle .dash-state-dot {
+    background: var(--gv-warning);
+}
+
+.dash-state-error .dash-state-dot {
+    background: var(--gv-danger);
+}
+
+.dash-state-error .dash-state-word {
+    color: var(--gv-danger);
+}
+
+@keyframes dash-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: .28; }
+}
+
+.dash-progress {
+    position: relative;
+    width: 52px;
+    height: 4px;
+    overflow: hidden;
+    border-radius: 999px;
+    background: var(--gv-dialog-border);
+}
+
+.dash-progress-fill {
+    display: block;
+    height: 100%;
+    border-radius: inherit;
+    background: var(--gv-success);
+}
+
+.dash-progress-error .dash-progress-fill {
+    background: var(--gv-danger);
+}
+
+.dash-progress-warning .dash-progress-fill {
+    background: var(--gv-warning);
+}
+
+/* An agent that says it is busy without saying how far along it is: the bar
+   still moves, because "working, no number" is a real reading and a bar frozen
+   at zero would read as stalled. */
+.dash-progress-fill.is-indeterminate {
+    width: 40%;
+    animation: dash-slide 1.5s ease-in-out infinite;
+}
+
+@keyframes dash-slide {
+    0% { transform: translateX(-100%); }
+    100% { transform: translateX(250%); }
+}
+
+.dash-progress-value {
+    min-width: 26px;
+    font-size: .64rem;
+    font-variant-numeric: tabular-nums;
+    color: var(--gv-dialog-muted);
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .dash-state-working .dash-state-dot { animation: none; }
+    .dash-progress-fill.is-indeterminate { animation: none; }
+}

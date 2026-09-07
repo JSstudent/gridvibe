@@ -3831,9 +3831,8 @@
     loadVoicePrefs().catch(() => {});
     checkRestorableWorkspace().catch(() => {});
     refreshWorkspaceDestinations().catch(() => {});
-    /* The dashboard reads across every window, so the launcher -- which is
-       in none of them -- is the one page that can only learn what is running
-       by asking. */
+    /* The dashboard button: its badge, and Alt+A. The dashboard itself is a
+       window of its own, so this page holds no part of it. */
     wireDashboard();
     updateHeaderBadges();
 

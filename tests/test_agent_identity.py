@@ -194,13 +194,59 @@ class AgentIdentityTestCase(unittest.TestCase):
             report({
                 kind: identity.paneKindForSession(null),
                 key: identity.agentKeyForSession(null),
-                title: identity.paneDisplayTitle(null, 2, AGENT_OPTIONS)
+                title: identity.paneDisplayTitle(null, 2, AGENT_OPTIONS),
+                transport: identity.paneTransportLabel(null)
             });
             """
         )
         self.assertEqual(answers["kind"], "terminal")
         self.assertEqual(answers["key"], "")
         self.assertEqual(answers["title"], "Terminal 3")
+        self.assertEqual(answers["transport"], "")
+
+    # ── What a pane runs on ──
+    # The one word the dashboard tags a row with. It reads the same three facts
+    # the relaunch menu's `paneShellKind` does, and in the same precedence,
+    # because a row that said `cmd` about a pane whose reset menu has WSL
+    # ticked would be the two surfaces disagreeing about the same pane.
+
+    def _labels(self, cases: str):
+        return self._run_node(
+            "report(%s.map(overrides => identity.paneTransportLabel(pane(overrides))));"
+            % cases
+        )
+
+    def test_a_remote_pane_is_named_by_its_transport_and_not_its_host(self):
+        # The host is already the row's own note; repeating it in the tag would
+        # push the agent's name off the line.
+        self.assertEqual(
+            self._labels("[{ mode: 'ssh', host: '10.0.0.5' }]"), ["SSH"]
+        )
+
+    def test_a_local_pane_is_named_by_the_shell_it_actually_started(self):
+        labels = self._labels(
+            """[
+                { mode: 'wsl', use_wsl: true, use_powershell: true },
+                { mode: 'wsl', use_powershell: true },
+                { mode: 'wsl' }
+            ]"""
+        )
+        # WSL beats PowerShell beats cmd — terminal-shell.js's own order.
+        self.assertEqual(labels, ["WSL", "PowerShell", "cmd"])
+
+    def test_a_named_distro_is_carried_because_it_is_a_different_machine(self):
+        labels = self._labels(
+            """[
+                { mode: 'wsl', use_wsl: true, distribution: 'Ubuntu' },
+                { mode: 'wsl', use_wsl: true, distribution: '   ' }
+            ]"""
+        )
+        self.assertEqual(labels, ["WSL · Ubuntu", "WSL"])
+
+    def test_a_remote_pane_is_remote_whatever_shell_flags_it_carries(self):
+        self.assertEqual(
+            self._labels("[{ mode: 'SSH', use_powershell: true }]"), ["SSH"]
+        )
 
 
 if __name__ == "__main__":

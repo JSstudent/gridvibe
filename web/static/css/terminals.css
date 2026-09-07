@@ -639,33 +639,9 @@
             --sh-backdrop: none;
         }
 
-        /* The dashboard panel takes the same treatment, for the same reason and
-           from the same set: it opens over the grid and the file tree, both of
-           which are opaque, so the shared translucent dialog fill would be read
-           through rather than read. The activity colours are deliberately left
-           at their defaults -- working/idle/error are the shared status tokens,
-           and they mean the same thing on both pages. */
-        .dashboard-panel {
-            /* This page's button heads the session tab line, hard against the
-               left edge of the window, so the panel hangs from its *left*.
-               Right-anchored -- the shared default, which is right for a button
-               in a right-hand control group -- put a 320px-wide panel entirely
-               off the left of the screen. Both edges are stated, because
-               choosing a side is two facts: take one edge and give up the
-               other. dashboard.js still measures and nudges what is left over,
-               but the side it hangs from is a layout fact and belongs here. */
-            --dash-anchor-left: 0;
-            --dash-anchor-right: auto;
-            --dash-bg: var(--t-ctx-bg);
-            --dash-border: var(--t-border-tab);
-            --dash-text: var(--t-text-secondary);
-            --dash-muted: var(--t-text-muted);
-            --dash-row-hover: var(--t-btn-neutral);
-            --dash-badge-bg: var(--t-accent);
-            --dash-badge-text: var(--t-tabs-bg);
-            --dash-backdrop: none;
-        }
-
+        /* The dashboard button opens a window rather than a panel, so this page
+           has no surface of its own to dress -- only the badge riding on the
+           button, which has to sit on the session bar's own accent. */
         .dashboard-badge {
             --dash-badge-bg: var(--t-accent);
             --dash-badge-text: var(--t-tabs-bg);

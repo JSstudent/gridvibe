@@ -1,19 +1,16 @@
-/* The activity dashboard panel — shared by the launcher and the workspace
+/* The agent dashboard *button* — shared by the launcher and the workspace
    window.
 
-   Written the way shortcuts-help.css is, and for the same reason: both pages
-   render the same partial and the same rows, so the *shape* lives here exactly
-   once while the palette is each page's own. **This file declares no palette
-   token of its own** — every colour is read as `var(--dash-x, <default>)` and
-   the pages declare only what they change. Both templates load this after
-   their page stylesheet, so anything declared here would outrank the page's
-   amendment at equal specificity; a knob this file only reads cannot be. The
-   defaults are the shared `--gv-dialog-*` tokens, which are the launcher's
-   palette, and terminals.css remaps them to its own `--t-*` set.
-
-   The state colours are the one exception worth naming: `working`, `idle` and
-   `unknown` are the same three readings on both pages, so they default to the
-   shared status tokens rather than to a page's accent. */
+   The dashboard itself is a window with a stylesheet of its own
+   (`agent-dashboard.css`); all that is shared between the two host pages is
+   the button that opens it and the badge riding on it. Written the way
+   shortcuts-help.css is, and for the same reason: both pages render the same
+   partial, so the *shape* lives here exactly once while the palette is each
+   page's own. **This file declares no palette token of its own** — the badge's
+   two colours are read as `var(--dash-x, <default>)` and the pages declare only
+   what they change. Both templates load this after their page stylesheet, so
+   anything declared here would outrank the page's amendment at equal
+   specificity; a knob this file only reads cannot be. */
 
 .dashboard {
     position: relative;
@@ -21,9 +18,14 @@
     flex: 0 0 auto;
 }
 
+/* The supplied artwork, sized to sit level with the stroke-SVG icons in the
+   same control row. It is raster and carries its own palette, so it takes a
+   radius of its own rather than inheriting a glyph's currentColor. */
 .dashboard-icon {
-    width: 18px;
-    height: 18px;
+    width: 19px;
+    height: 19px;
+    border-radius: 4px;
+    display: block;
 }
 
 /* The badge is positioned against the button itself, and the anchor is stated
@@ -37,8 +39,8 @@
     overflow: visible;
 }
 
-/* The count rides the button rather than the panel: it is the reason to open
-   one, so it has to be legible without opening it. */
+/* The count rides the button rather than the window it opens: it is the reason
+   to open one, so it has to be legible without opening it. */
 .dashboard-badge {
     position: absolute;
     top: -3px;
@@ -54,235 +56,4 @@
     line-height: 15px;
     text-align: center;
     pointer-events: none;
-}
-
-.dashboard-panel {
-    position: absolute;
-    /* Both edges are read, never declared, so a page that opens the panel
-       upward can say so without leaving the other edge pinned — the defect
-       shortcuts-help.css records in full. */
-    top: var(--dash-anchor-top, calc(100% + 6px));
-    bottom: var(--dash-anchor-bottom, auto);
-    left: var(--dash-anchor-left, auto);
-    right: var(--dash-anchor-right, 0);
-    z-index: 220;
-    display: none;
-    width: max-content;
-    min-width: 320px;
-    max-width: min(560px, calc(100vw - 48px));
-    max-height: min(70vh, 620px);
-    overflow-y: auto;
-    scrollbar-gutter: stable;
-    padding: 10px 12px 12px;
-    border: 1px solid var(--dash-border, var(--gv-dialog-border));
-    border-radius: var(--gv-radius-s);
-    background: var(--dash-bg, var(--gv-dialog-bg));
-    backdrop-filter: var(--dash-backdrop, blur(14px));
-    box-shadow: 0 18px 42px rgba(0, 0, 0, .38);
-    color: var(--dash-text, var(--gv-dialog-text));
-    font-size: .78rem;
-    text-align: left;
-}
-
-.dashboard.open .dashboard-panel {
-    display: block;
-}
-
-.dashboard-head {
-    display: flex;
-    align-items: baseline;
-    justify-content: space-between;
-    gap: 10px;
-    margin-bottom: 8px;
-}
-
-.dashboard-title {
-    font-size: .82rem;
-    font-weight: 700;
-    color: var(--dash-text, var(--gv-dialog-text));
-}
-
-.dashboard-totals {
-    font-size: .68rem;
-    color: var(--dash-muted, var(--gv-dialog-muted));
-}
-
-.dashboard-empty,
-.dashboard-error {
-    padding: 14px 4px;
-    text-align: center;
-    color: var(--dash-muted, var(--gv-dialog-muted));
-}
-
-.dashboard-workspace {
-    border-top: 1px solid var(--dash-border, var(--gv-dialog-border));
-    padding-top: 8px;
-    margin-top: 8px;
-}
-
-.dashboard-workspace:first-of-type {
-    border-top: 0;
-    padding-top: 0;
-    margin-top: 0;
-}
-
-/* Every row is a button: nothing in this panel is decoration, and a row that
-   looks like a list item but is not pressable is the shape people hunt for a
-   control inside. */
-.dashboard-row {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    width: 100%;
-    padding: 5px 6px;
-    border: 0;
-    border-radius: var(--gv-radius-s);
-    background: transparent;
-    color: inherit;
-    font: inherit;
-    text-align: left;
-    cursor: pointer;
-}
-
-.dashboard-row:hover,
-.dashboard-row:focus-visible {
-    background: var(--dash-row-hover, rgba(127, 127, 127, .16));
-    outline: none;
-}
-
-.dashboard-row-workspace {
-    font-weight: 700;
-}
-
-.dashboard-row-session {
-    padding-left: 16px;
-}
-
-.dashboard-row-pane {
-    padding-left: 30px;
-}
-
-.dashboard-row-main {
-    display: flex;
-    flex-direction: column;
-    gap: 1px;
-    min-width: 0;
-    flex: 1 1 auto;
-}
-
-.dashboard-row-name {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    min-width: 0;
-}
-
-.dashboard-row-label,
-.dashboard-row-note {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-}
-
-.dashboard-row-note {
-    font-size: .68rem;
-    color: var(--dash-muted, var(--gv-dialog-muted));
-}
-
-.dashboard-tag {
-    flex: 0 0 auto;
-    padding: 0 5px;
-    border: 1px solid var(--dash-border, var(--gv-dialog-border));
-    border-radius: 999px;
-    font-size: .6rem;
-    text-transform: uppercase;
-    letter-spacing: .04em;
-    color: var(--dash-muted, var(--gv-dialog-muted));
-}
-
-.dashboard-tag-active {
-    border-color: transparent;
-    background: var(--dash-badge-bg, var(--gv-accent));
-    color: var(--dash-badge-text, var(--gv-bg-app));
-}
-
-/* ── The activity reading ──
-   A dot for the state and, beside it, either a determinate bar or nothing.
-   The two are separate on purpose: every pane has a state, and only the few
-   agents that speak the progress sequence have a percentage. */
-.dashboard-activity {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    flex: 0 0 auto;
-}
-
-.dashboard-state-dot {
-    width: 7px;
-    height: 7px;
-    border-radius: 50%;
-    background: var(--dash-state-unknown, var(--gv-dialog-muted));
-}
-
-.dashboard-state-working .dashboard-state-dot {
-    background: var(--dash-state-working, var(--gv-success));
-    animation: dashboard-pulse 1.4s ease-in-out infinite;
-}
-
-.dashboard-state-idle .dashboard-state-dot {
-    background: var(--dash-state-idle, var(--gv-warning));
-}
-
-@keyframes dashboard-pulse {
-    0%, 100% { opacity: 1; }
-    50% { opacity: .28; }
-}
-
-@media (prefers-reduced-motion: reduce) {
-    .dashboard-state-working .dashboard-state-dot { animation: none; }
-    .dashboard-progress-fill.is-indeterminate { animation: none; }
-}
-
-.dashboard-progress {
-    position: relative;
-    width: 54px;
-    height: 4px;
-    overflow: hidden;
-    border-radius: 999px;
-    background: var(--dash-row-hover, rgba(127, 127, 127, .22));
-}
-
-.dashboard-progress-fill {
-    display: block;
-    height: 100%;
-    border-radius: inherit;
-    background: var(--dash-state-working, var(--gv-success));
-}
-
-.dashboard-progress-error .dashboard-progress-fill {
-    background: var(--dash-state-error, var(--gv-danger));
-}
-
-.dashboard-progress-warning .dashboard-progress-fill {
-    background: var(--dash-state-idle, var(--gv-warning));
-}
-
-/* An agent that says it is busy without saying how far along it is: the bar
-   still moves, because "working, no number" is a real reading and a bar frozen
-   at zero would read as stalled. */
-.dashboard-progress-fill.is-indeterminate {
-    width: 40%;
-    animation: dashboard-slide 1.5s ease-in-out infinite;
-}
-
-@keyframes dashboard-slide {
-    0% { transform: translateX(-100%); }
-    100% { transform: translateX(250%); }
-}
-
-.dashboard-progress-value {
-    min-width: 26px;
-    font-size: .64rem;
-    font-variant-numeric: tabular-nums;
-    color: var(--dash-muted, var(--gv-dialog-muted));
 }

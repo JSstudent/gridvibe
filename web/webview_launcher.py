@@ -553,9 +553,21 @@ def _exit_after_startup_failure(code: int = 1):
     os._exit(code)
 
 
+#: The registration kind — and the minimize/theme name — of the agent dashboard
+#: window. One constant, because the bridge, the batch and the close handler all
+#: have to agree about what this window is called.
+DASHBOARD_WINDOW_NAME = "dashboard"
+
+#: Windows that exist only to describe the others. They are real windows and
+#: they minimize and theme with the rest, but none of them is a reason for the
+#: app to stay running: a dashboard alone on the desktop has nothing left to
+#: report on.
+AUXILIARY_WINDOW_KINDS = frozenset({DASHBOARD_WINDOW_NAME})
+
+
 def _should_exit_after_window_close(kind: str, open_windows: set[str]) -> bool:
     """Treat the launcher/settings window as the owner of the desktop app lifecycle."""
-    return kind == "launcher" or not open_windows
+    return kind == "launcher" or not (set(open_windows) - AUXILIARY_WINDOW_KINDS)
 
 
 def _request_native_close_prompt(window, api_bridge):
@@ -750,6 +762,12 @@ class GridVibeApi:
         self._close_prompt_pending = False
         self._native_theme = "dark"
         self._pending_workspace_native_zoom_factors = {}
+        # The agent dashboard is a window of its own and belongs to no
+        # workspace, so it is tracked beside the workspace map rather than in
+        # it: a single slot, because there is one dashboard however many times
+        # it is asked for.
+        self._dashboard_window = None
+        self._dashboard_window_minimized = False
 
     # Stage-2 compatibility aliases. The singular bridge methods target the
     # permanent default workspace, while all real state is workspace-keyed.
@@ -829,6 +847,8 @@ class GridVibeApi:
         """Track whether the named window is currently minimized."""
         if window_name == "launcher":
             self._window_minimized = minimized
+        elif window_name == DASHBOARD_WINDOW_NAME:
+            self._dashboard_window_minimized = minimized
         elif window_name == "session":
             self._workspace_window_minimized[DEFAULT_WORKSPACE_ID] = minimized
         elif window_name.startswith("workspace:"):
@@ -839,6 +859,8 @@ class GridVibeApi:
         """Return the tracked minimized state for the named window."""
         if window_name == "launcher":
             return self._window_minimized
+        if window_name == DASHBOARD_WINDOW_NAME:
+            return self._dashboard_window_minimized
         if window_name == "session":
             return self._workspace_window_minimized.get(DEFAULT_WORKSPACE_ID, False)
         if window_name.startswith("workspace:"):
@@ -869,7 +891,7 @@ class GridVibeApi:
     def _should_skip_top_most_pulse(self, window_name: str) -> bool:
         """Avoid the focus workaround only where it is known to cause renderer issues."""
         return sys.platform == "win32" and (
-            window_name in {"session", "launcher"}
+            window_name in {"session", "launcher", DASHBOARD_WINDOW_NAME}
             or window_name.startswith("workspace:")
         )
 
@@ -1006,6 +1028,11 @@ class GridVibeApi:
             applied = self._apply_native_frame_theme(
                 window,
                 f"workspace:{workspace_id}",
+            ) or applied
+        if self._dashboard_window is not None:
+            applied = self._apply_native_frame_theme(
+                self._dashboard_window,
+                DASHBOARD_WINDOW_NAME,
             ) or applied
         return applied
 
@@ -1297,12 +1324,18 @@ class GridVibeApi:
         Workspaces first, launcher last, matching the teardown sweep — and the
         names are the ones `_set_window_minimized`/`_is_window_minimized`
         already speak, so a batch never has to invent a second naming scheme.
+
+        The dashboard is in the list because "minimize every GridVibe window"
+        means every one: a dashboard left floating over the desktop after
+        Alt+X would be the one window the control missed.
         """
         windows = [
             (f"workspace:{workspace_id}", window)
             for workspace_id, window in list(self._workspace_windows.items())
             if window is not None
         ]
+        if self._dashboard_window is not None:
+            windows.append((DASHBOARD_WINDOW_NAME, self._dashboard_window))
         if self._window is not None:
             windows.append(("launcher", self._window))
         return windows
@@ -1536,6 +1569,62 @@ class GridVibeApi:
                 resolved_workspace_id,
                 resolved_group_id or "all",
             )
+            return {"ok": False, "error": str(exc)}
+
+    def open_dashboard_window(self):
+        """Open, or focus, the one agent dashboard window.
+
+        It reads across every workspace and belongs to none, so it is its own
+        window rather than a panel inside one — and there is exactly one of it:
+        a second press focuses what is already open rather than stacking
+        another copy, which is the same rule a workspace window follows.
+
+        Smaller than a workspace window because it holds no terminal: the
+        minimum is the width one session card plus its gutters needs, below
+        which the cards stop being cards.
+        """
+        try:
+            if self._dashboard_window is not None:
+                logger.debug("Reusing the existing agent dashboard window")
+                if not self._bring_to_front(
+                    self._dashboard_window,
+                    DASHBOARD_WINDOW_NAME,
+                ):
+                    return {"ok": False, "error": "Failed to focus the dashboard window"}
+                return {"ok": True, "reused": True}
+
+            if webview is None:
+                logger.warning("Dashboard window requested without pywebview support")
+                return {"ok": False, "error": "pywebview is unavailable"}
+
+            url = f"{self._base_url}/dashboard"
+            logger.info("Creating agent dashboard window url=%s", url)
+            _patch_winforms_dark_title_bar()
+            window = webview.create_window(
+                "GridVibe Agents",
+                url,
+                width=980,
+                height=760,
+                min_size=(460, 380),
+                resizable=True,
+                frameless=False,
+                easy_drag=False,
+                background_color="#0d0d0d",
+                text_select=True,
+                zoomable=True,
+                js_api=self,
+            )
+            if window is None:
+                logger.error("pywebview.create_window returned None for the dashboard window")
+                return {"ok": False, "error": "Failed to create the dashboard window"}
+
+            self._dashboard_window = window
+            if self._register_window is not None:
+                self._register_window(window, DASHBOARD_WINDOW_NAME)
+            logger.info("Agent dashboard window created and registered")
+            return {"ok": True, "reused": False}
+        except Exception as exc:
+            logger.exception("Failed to open the agent dashboard window")
             return {"ok": False, "error": str(exc)}
 
     def open_launcher_window(self):
@@ -1908,6 +1997,10 @@ def main():
                     workspace_id,
                     None,
                 )
+            elif kind == DASHBOARD_WINDOW_NAME:
+                # Released rather than kept, so the next press opens a fresh
+                # window instead of trying to focus a destroyed one.
+                api_bridge._dashboard_window = None
             else:
                 api_bridge._window = None
                 api_bridge._is_fullscreen = False

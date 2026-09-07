@@ -1,8 +1,9 @@
-{# The activity dashboard — the same button and the same panel on both pages.
+{# The agent dashboard button — the same button on both pages.
 
-   Read-only, so it is a non-modal dialog anchored under (or, on the launcher,
-   over) its own button rather than a modal: it changes nothing by being open,
-   and every row it holds is a way *out* of it.
+   It opens a window, not a panel: the dashboard reads across every workspace
+   and belongs to none of them, so it is its own window (native) or its own
+   named tab (browser), the way the launcher is. Nothing here holds rows, and
+   the only state this button carries is the badge.
 
    Only the button's own chrome differs between the two pages — the workspace
    session bar dresses its controls as `.btn.btn-neutral.btn-icon`, the launcher
@@ -10,41 +11,24 @@
 
        {% set dashboard_button_class = 'ghost-btn icon-btn' %}
        {% include 'partials/dashboard.html' %}
-
-   The panel itself is built by dashboard.js from one `/api/dashboard` read,
-   and only while it is open. #}
-<div class="dashboard" id="dashboardRoot">
+#}
+<div class="dashboard">
     <button
         class="{{ dashboard_button_class | default('ghost-btn icon-btn', true) }}"
         id="dashboardBtn"
         type="button"
-        onclick="toggleDashboard(event)"
-        title="Active workspaces, sessions and agents"
-        aria-label="Active workspaces, sessions and agents"
-        aria-haspopup="dialog"
-        aria-expanded="false"
+        onclick="openAgentDashboardWindow(event)"
+        title="Agent dashboard — every agent running in every workspace (Alt+A)"
+        aria-label="Open the agent dashboard"
     >
-        {# PLACEHOLDER ICON — swap the <svg> below for the real artwork when it
-           lands. Nothing else in the partial, the module or the stylesheet
-           refers to its shape: the class is what everything is hung off. #}
-        <svg class="dashboard-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
-            <rect x="3" y="3" width="7.5" height="7.5" rx="1.6"></rect>
-            <rect x="13.5" y="3" width="7.5" height="7.5" rx="1.6"></rect>
-            <rect x="3" y="13.5" width="7.5" height="7.5" rx="1.6"></rect>
-            <path d="M14 17.2h6.5"></path>
-            <path d="M14 20.2h4"></path>
-        </svg>
+        {# The one raster icon in a page of stroke SVGs, and deliberately so:
+           it is a supplied piece of artwork with its own palette, the same way
+           the launcher's own app logo is, rather than a control glyph that has
+           to take the surrounding colour. Sized in the stylesheet with the
+           other button icons. #}
+        <img class="dashboard-icon" src="/docs/images/active_ws.ico" alt="" aria-hidden="true">
         {# Filled by dashboard.js with the live agent count, hidden while there
            is none: a badge that is always showing is not a signal. #}
         <span class="dashboard-badge" id="dashboardBadge" aria-hidden="true" hidden></span>
     </button>
-    {# Focus moves in here on open, and the panel may legitimately hold no
-       focusable row (an empty dashboard) — hence the tabindex. #}
-    <div
-        class="dashboard-panel"
-        id="dashboardPanel"
-        role="dialog"
-        aria-labelledby="dashboardBtn"
-        tabindex="-1"
-    ></div>
 </div>

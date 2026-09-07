@@ -482,9 +482,17 @@
     }
 
     /* Relaunch one pane under the shell family and/or agent a menu row named.
-       The pane keeps its slot, title and group, so only the process behind it
-       is replaced. An empty `shell` states nothing about the shell family — an
-       SSH pane has none to state — while `agent` is always stated. */
+       The pane keeps its slot, its stored title and its group, so only the
+       process behind it is replaced. An empty `shell` states nothing about the
+       shell family — an SSH pane has none to state — while `agent` is always
+       stated.
+
+       What the header *prints* is not the stored title, though: an agent pane
+       whose title is still the launcher's `Terminal N` placeholder is named
+       after its agent, so relaunching a pane onto a different agent (or back
+       to a plain shell) changes what that header should say. The stored title
+       is untouched either way — a name the user typed keeps winning, and the
+       agent's name is still never persisted back. */
     async function relaunchSessionShell(index, { shell = '', distribution = '', agent = '' } = {}) {
         const sessionId = sessionIds[index];
         const pane = terminals[index];
@@ -525,6 +533,10 @@
             if (ownerIndex < 0 || sessionIds[ownerIndex] !== sessionId) return;
             index = ownerIndex;
             closeAllPaneShellMenus();
+            const nameLabel = document.getElementById(`tname-${index}`);
+            if (nameLabel) {
+                nameLabel.textContent = paneDisplayTitle(data, index);
+            }
             const hostLabel = document.getElementById(`thost-${index}`);
             if (hostLabel) {
                 hostLabel.textContent = data.host || '';

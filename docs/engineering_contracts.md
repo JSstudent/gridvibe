@@ -19,7 +19,7 @@ Regression history and audit narratives do not belong in this reference.
 - [Explorer rendering and scroll](#explorer-rendering-and-scroll)
 - [Presentation persistence](#presentation-persistence)
 - [Workspace lifecycle and windows](#workspace-lifecycle-and-windows)
-- [Activity dashboard](#activity-dashboard)
+- [Agent dashboard](#agent-dashboard)
 - [Architecture and extraction boundaries](#architecture-and-extraction-boundaries)
 - [UI and styling](#ui-and-styling)
 - [Logging](#logging)
@@ -492,11 +492,18 @@ unless the task explicitly changes this contract.
   saves omit invisible native settings. Page-specific shortcut guards exclude
   AltGr (`!event.ctrlKey`) and match `event.code`.
 
-## Activity dashboard
+## Agent dashboard
 
 - `GET /api/dashboard` is the only cross-workspace read: one pass composing
-  every live workspace, its groups and their panes. Consumers must not fan out
-  per-workspace requests to rebuild it.
+  every live workspace, its groups and their agent panes. Consumers must not fan
+  out per-workspace requests to rebuild it.
+- The payload is agent-scoped, and the filter is the server's. Only
+  `startup_mode == "agent"` panes are composed; a group with no agent and a
+  workspace with no such group are dropped, so "empty" means one thing on both
+  sides. `pane["index"]` stays the pane's position in its *whole* group — it is
+  what names and focuses the pane — so the filter is applied after `enumerate`,
+  never before. Every count (`totals`, `agent_count`) is agent-scoped;
+  `pane_count` on a group is the only total-pane number.
 - `web/dashboard.py` composes; the route stays thin. `compose_dashboard()` is
   pure (dictionaries in, dictionary out, no manager, no clock). The gatherer
   snapshots activity under `connection_lock` and releases it *before* taking the
@@ -504,25 +511,38 @@ unless the task explicitly changes this contract.
 - Pane payloads are built from `PANE_FIELDS`, never filtered from
   `TerminalSession.to_dict()`, so a field added later cannot leak. No
   credentials, no explorer view state, no presentation fields.
-- The payload states what a pane *is*, never what to call it. Naming is
+- The payload states what a pane *is*, never what to call it. Both namings —
+  the agent's display name and the transport tag — are
   `web/static/js/agent-identity.js`, shared by the pane header and the dashboard
   row; a second implementation server-side is what would let the two disagree.
+  The transport tag reads `mode` plus the `use_wsl`/`use_powershell` precedence
+  `paneShellKind()` already uses, so the tag and the relaunch menu agree.
 - A pane with no transport carries `activity: null`. "Nothing to observe" and
   "observed nothing yet" (`state: "unknown"`) are different answers.
 - Liveness falls back to output cadence, because most agents publish no progress
   at all; a published progress state stops driving the reading once stale. The
-  state names the input that decided it.
+  state names the input that decided it. A pane whose `status` is not
+  `connected` reports the transport's word instead of an activity reading.
 - A generic `Terminal N` title is treated as unset so an agent pane can name
   itself; a title the user typed always wins, and the display name is never
-  persisted back as the pane's title.
-- The panel polls only while it is open; a slow answer that lands after a newer
-  one is dropped. A closed panel holds no rows.
-- Which side the panel hangs from is each page's `--dash-anchor-*` statement,
-  because it is a fact about where that page's button is: the workspace window's
-  heads the session bar (left), the launcher's sits in `.action-bar-right`
-  (right, the shared default). `dashboardPanelFit()` then measures and nudges
-  whatever still overflows and caps the height from the panel's own anchored
-  edge, so a wrong anchor degrades to a shifted panel rather than one off screen.
+  persisted back as the pane's title. Every path that changes which agent a
+  pane runs — the mode transitions and the shell/agent relaunch — repaints the
+  pane header's name from the session it got back.
+- The dashboard is a window (`/dashboard`, `dashboard-window.js`), not a panel:
+  it reads across every workspace and is in none, so it is opened and focused
+  the way a workspace window is — the native bridge's `open_dashboard_window()`
+  first, a named `window.open` second. There is one of it; a second request
+  focuses what is open. It is registered as an auxiliary native window: it
+  minimizes and themes with the rest and is never a reason for the app to stay
+  running.
+- The host pages hold only the button: `dashboard.js` opens the window, binds
+  `Alt+A` (matched on `event.code`, Ctrl excluded so AltGr cannot fire it, and
+  gated by the page's own `minimizeAllShortcutBlocked`), and polls slowly for
+  the badge, standing down while the document is hidden.
+- The window polls only while it is visible; a slow answer that lands after a
+  newer one is dropped, an unchanged reading is not repainted at all, and a
+  failed read leaves the last good tree on screen behind a stated notice rather
+  than blanking the window.
 
 ## Architecture and extraction boundaries
 
@@ -568,6 +588,9 @@ unless the task explicitly changes this contract.
   explicit box/inline-flex centering; remove glyph font sizing and convert paired
   controls together. Find bars keep the shared ↑/↓/× exception; any conversion
   converts all find bars. Reuse selectors/tokens instead of copying declarations.
+  Supplied artwork with a palette of its own — the app logo, the dashboard
+  button's `active_ws.ico` — stays an `<img>` from `/docs/images/`; it is an
+  identity, not a control glyph, and must not be converted to a stroke SVG.
 - Floating explorer surfaces use `--explorer-float-border` in all five explorer
   palette blocks. Body-mounted surfaces carry the pane's `data-explorer-theme`
   and corresponding selectors so opposite-theme panes stay consistent.

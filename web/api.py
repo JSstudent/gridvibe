@@ -764,6 +764,25 @@ def terminals_page():
                            version=__version__)
 
 
+@app.route('/dashboard')
+def dashboard_page():
+    """The agent dashboard: its own window, in no workspace.
+
+    It reads across every workspace and belongs to none of them, which is why
+    it is a page rather than a panel inside one -- and why it takes no
+    ``workspace`` argument. Everything it draws comes from ``/api/dashboard``;
+    the template is handed only what naming an agent needs.
+    """
+    logger.info("GET /dashboard")
+    settings = runtime_config.snapshot()
+    return render_template(
+        'dashboard.html',
+        agent_options=_agent_options(),
+        multi_workspace_enabled=settings.multi_workspace_enabled,
+        version=__version__,
+    )
+
+
 @app.route('/docs/images/<path:filename>')
 def docs_images(filename: str):
     """Serve bundled documentation images used by the local UI."""
@@ -2038,12 +2057,14 @@ def get_workspaces():
 
 @app.route('/api/dashboard', methods=['GET'])
 def get_dashboard():
-    """Return every live workspace, session group and pane in one reading.
+    """Return every agent running anywhere, under the workspace and session
+    that holds it.
 
-    The one request behind the dashboard panel both pages open. It exists
-    because the alternative is N+1 requests raced against each other: a window
-    asking for workspaces, then a group list per workspace, then a pane list per
-    group, would render a tree assembled out of several different moments.
+    The one request behind the agent dashboard window, and behind the badge on
+    the button that opens it. It exists because the alternative is N+1 requests
+    raced against each other: a window asking for workspaces, then a group list
+    per workspace, then a pane list per group, would render a tree assembled
+    out of several different moments.
 
     The two shared locks are taken in the allowed order and never nested --
     ``connection_lock`` for the activity snapshot first, released, and only then

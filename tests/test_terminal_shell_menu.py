@@ -28,6 +28,10 @@ from tempfile import TemporaryDirectory
 
 STATIC_JS = Path(__file__).resolve().parent.parent / "web" / "static" / "js"
 TERMINAL_SHELL_JS = STATIC_JS / "terminal-shell.js"
+# The real naming rule, loaded rather than imitated: a relaunch repaints the
+# pane header from the session it got back, and a harness with a second rule of
+# its own would be checking the harness.
+AGENT_IDENTITY_JS = STATIC_JS / "agent-identity.js"
 
 NODE = shutil.which("node")
 
@@ -62,6 +66,15 @@ function escHtml(value) {
 
 function isExplorerSession(session) { return session?.startup_mode === 'explorer'; }
 function isBrowserSession(session) { return session?.startup_mode === 'browser'; }
+
+/* terminals.js's own one-line wrapper over agent-identity.js, which is loaded
+   below this stub block. The rule itself is exercised in
+   test_agent_identity.py; what it is doing here is letting the relaunch
+   actually repaint a header. */
+const window = globalThis;
+function paneDisplayTitle(session, index) {
+    return window.GridVibeAgentIdentity.paneDisplayTitle(session, index, AGENT_OPTIONS);
+}
 
 const calls = { reset: [], connecting: [], toasts: [], requests: [] };
 function refreshTerminalDisplay(index) { calls.reset.push(index); }
@@ -235,6 +248,7 @@ class TerminalShellMenuTestCase(unittest.TestCase):
     def _run_node(self, body: str):
         script = (
             HARNESS_STUBS
+            + AGENT_IDENTITY_JS.read_text(encoding="utf-8")
             + TERMINAL_SHELL_JS.read_text(encoding="utf-8")
             + "\n(async () => {\n"
             + body
@@ -476,6 +490,60 @@ class PaneWithoutShellFamiliesTestCase(TerminalShellMenuTestCase):
             """
         )
         self.assertEqual(result["requests"][0]["body"], {"agent": ""})
+
+
+class RelaunchedPaneHeaderTestCase(TerminalShellMenuTestCase):
+    """A relaunched pane's header says what it is running now.
+
+    The pane keeps its slot, its group and its stored title, so the relaunch
+    used to repaint only the host line — and a pane pointed at a different
+    agent went on calling itself by the old one until something else rebuilt
+    the window. The stored title is still never written to: what changes is
+    only what the header prints, from the session the route handed back.
+    """
+
+    def _relaunch(self, session: str, response: str, row: str):
+        return self._run_node(
+            """
+            RELAUNCH_RESPONSE = %s;
+            const rows = await openMenu(0, %s);
+            await press(0, rows.find(row => row.label === '%s'));
+            report({
+                name: element('tname-0').textContent,
+                host: element('thost-0').textContent,
+                toasts: calls.toasts,
+                connecting: calls.connecting
+            });
+            """
+            % (response, session, row)
+        )
+
+    def test_relaunching_onto_an_agent_renames_the_header(self):
+        result = self._relaunch(
+            "sshPane({ startup_mode: 'terminal', title: 'Terminal 1' })",
+            "{ startup_mode: 'agent', agent_selection: 'codex', title: 'Terminal 1' }",
+            "OpenAI Codex CLI",
+        )
+        self.assertEqual(result["name"], "OpenAI Codex CLI")
+        self.assertEqual(result["host"], "relaunched")
+        self.assertEqual(result["toasts"], [])
+        self.assertEqual(result["connecting"], [0])
+
+    def test_relaunching_back_to_a_plain_shell_takes_the_agents_name_off(self):
+        result = self._relaunch(
+            "sshPane({ startup_mode: 'agent', agent_selection: 'claude', title: 'Terminal 1' })",
+            "{ startup_mode: 'terminal', agent_selection: '', title: 'Terminal 1' }",
+            "Plain shell",
+        )
+        self.assertEqual(result["name"], "Terminal 1")
+
+    def test_a_title_the_user_typed_survives_the_relaunch(self):
+        result = self._relaunch(
+            "sshPane({ startup_mode: 'terminal', title: 'build box' })",
+            "{ startup_mode: 'agent', agent_selection: 'codex', title: 'build box' }",
+            "OpenAI Codex CLI",
+        )
+        self.assertEqual(result["name"], "build box")
 
 
 class PaneWithoutARelaunchTestCase(TerminalShellMenuTestCase):

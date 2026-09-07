@@ -1,4 +1,4 @@
-"""One reading of everything that is live: workspaces, sessions, panes.
+"""One reading of every agent that is running, wherever it is running.
 
 GridVibe already answers "what is in *this* window" several times over --
 ``/api/workspaces`` lists workspaces, ``/api/session-groups`` lists one
@@ -8,14 +8,26 @@ requests and stitch the answers together while they moved underneath it. This
 module is that answer composed once, on the server, from one pass over the
 manager.
 
-Two rules shape what it carries:
+Three rules shape what it carries:
 
+* **Agents, and only agents.** This is the agent management surface, so a pane
+  that is not running one is not a row: a terminal, an explorer and a browser
+  pane are all things you already see in the window that holds them. The filter
+  is ``startup_mode == "agent"``, the same marker
+  ``web/static/js/agent-identity.js`` reads, and it is applied here rather than
+  in the page so a workspace whose every pane is a plain terminal costs no
+  bytes and no row. A group with no agent in it, and a workspace with no such
+  group, are dropped for the same reason -- an empty heading is something to
+  scroll past, not information. Panes keep the *index they have in their own
+  group* across the filter, because that index is what names a pane and what
+  focuses it.
 * **Facts, not names.** The payload states what a pane *is* -- its startup
-  mode, its agent selection, its status, what it has been announcing -- and
-  never what to call it. Turning that into "Claude" or "Terminal 3" is one rule
-  with two consumers (the pane header and the dashboard row), and it lives with
-  them, in ``web/static/js/agent-identity.js``. A second implementation here is
-  exactly how the two surfaces would come to disagree about the same pane.
+  mode, its agent selection, the transport and shell it runs on, what it has
+  been announcing -- and never what to call it. Turning that into "Claude" or
+  "WSL - Ubuntu" is one rule with two consumers (the pane header and the
+  dashboard row), and it lives with them, in
+  ``web/static/js/agent-identity.js``. A second implementation here is exactly
+  how the two surfaces would come to disagree about the same pane.
 * **A credential-free subset, built rather than filtered.** Pane payloads are
   assembled field by field from a fixed list, so a field added to
   ``TerminalSession`` later cannot arrive here by default -- passwords least of
@@ -33,10 +45,15 @@ from typing import Any, Dict, List, Optional
 
 from web.agent_activity import describe_agent_activity
 
+#: The one marker of an agent pane, mirroring ``agentKeyForSession`` on the
+#: client: a startup *command* is not an agent, and neither is a terminal that
+#: happens to have been handed one.
+AGENT_STARTUP_MODE = "agent"
+
 #: The pane fields the dashboard publishes. Everything else a session holds --
 #: credentials, explorer view state, browser tabs, the presentation fields --
-#: stays where it is; a dashboard row needs to know what a pane is and where it
-#: points, and nothing more.
+#: stays where it is; a dashboard row needs to know which agent this is, where
+#: it points and what it runs on, and nothing more.
 PANE_FIELDS = (
     "session_id",
     "group_id",
@@ -47,8 +64,20 @@ PANE_FIELDS = (
     "agent_selection",
     "custom_agent",
     "agent_auto_mode",
+    # What the agent is running *on*. Three fields rather than one word,
+    # because the word is a naming decision and naming is the client's:
+    # ``mode`` separates a remote pane from a local one, and the other two are
+    # the same precedence ``paneShellKind`` already reads for the relaunch menu.
+    "use_wsl",
+    "use_powershell",
+    "distribution",
     "status",
 )
+
+
+def is_agent_pane(session: Dict[str, Any]) -> bool:
+    """Whether this pane is one the agent dashboard is about."""
+    return str(session.get("startup_mode") or "") == AGENT_STARTUP_MODE
 
 
 def _pane_directory(session: Dict[str, Any]) -> str:
@@ -69,12 +98,13 @@ def compose_pane(
     activity: Optional[Dict[str, Any]],
     now: float,
 ) -> Dict[str, Any]:
-    """Build one pane row.
+    """Build one agent row.
 
-    ``activity`` is ``None`` for a pane with no transport to observe -- an
-    explorer or a browser pane -- and the row says so by carrying ``None``
-    rather than a blank reading, because "nothing to observe here" and
-    "observed nothing yet" are different answers.
+    ``activity`` is ``None`` for a pane with no transport to observe, and the
+    row says so by carrying ``None`` rather than a blank reading, because
+    "nothing to observe here" and "observed nothing yet" are different answers.
+    An agent pane has a transport once it is connected, so ``None`` here reads
+    as "not connected yet" rather than "nothing to observe".
     """
     pane = {field: session.get(field) for field in PANE_FIELDS}
     pane["workspace_id"] = workspace_id
@@ -94,7 +124,13 @@ def compose_group(
     activity: Dict[str, Any],
     now: float,
 ) -> Dict[str, Any]:
-    """Build one session row and the pane rows under it."""
+    """Build one session row and the agent rows under it.
+
+    ``enumerate`` runs over *every* pane and the filter is applied after it, so
+    a pane's ``index`` stays its position in its own group. That index is not
+    decoration: it is what the "Terminal N" fallback counts from and what the
+    row focuses when the pane is in the window the reader is already in.
+    """
     panes = [
         compose_pane(
             session,
@@ -104,6 +140,7 @@ def compose_group(
             now,
         )
         for index, session in enumerate(sessions)
+        if is_agent_pane(session)
     ]
     return {
         "group_id": group.get("group_id"),
@@ -118,7 +155,11 @@ def compose_group(
         # that only marked a group when a window happened to be reporting would
         # blink the marker on and off as windows come and go.
         "is_active": bool(active_group_id) and group.get("group_id") == active_group_id,
-        "pane_count": len(panes),
+        # How many panes the group holds in all, beside how many of them are
+        # agents: the second is what this surface lists, and the first is the
+        # context that keeps "1 agent" from reading as "a one-pane session".
+        "pane_count": len(sessions),
+        "agent_count": len(panes),
         "panes": panes,
     }
 
@@ -153,13 +194,20 @@ def compose_dashboard(
             )
             for group in groups_by_workspace.get(workspace_id, [])
         ]
+        # A session with no agent in it says nothing this surface is for, and a
+        # workspace with no such session says nothing either. Both are dropped
+        # here rather than hidden in the page, so the two can never disagree
+        # about what "empty" means.
+        groups = [group for group in groups if group["agent_count"]]
+        if not groups:
+            continue
         composed_workspaces.append({
             "workspace_id": workspace_id,
             "label": str(workspace.get("label") or ""),
             "created_at": workspace.get("created_at"),
             "active_group_id": active_group_id,
             "group_count": len(groups),
-            "pane_count": sum(group["pane_count"] for group in groups),
+            "agent_count": sum(group["agent_count"] for group in groups),
             "groups": groups,
         })
 
@@ -174,12 +222,13 @@ def compose_dashboard(
         "workspaces": composed_workspaces,
         # Counted here rather than in the page so every surface that shows a
         # badge counts the same way, and a page that has not expanded a
-        # workspace still knows what is inside it.
+        # workspace still knows what is inside it. Every count is agent-scoped:
+        # these are the workspaces and sessions that *hold* an agent, not every
+        # one that is live.
         "totals": {
             "workspaces": len(composed_workspaces),
             "sessions": sum(workspace["group_count"] for workspace in composed_workspaces),
-            "panes": len(panes),
-            "agents": sum(1 for pane in panes if pane.get("startup_mode") == "agent"),
+            "agents": len(panes),
         },
     }
 

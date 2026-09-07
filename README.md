@@ -144,16 +144,30 @@ Browser mode is the most reliable for microphone permissions. Settings apply liv
 
 Closing a workspace ends its terminals but keeps it available to restore. **Close and forget** removes both the live workspace and its snapshot, while closing only the window leaves its terminals running. Closing the last tab removes an empty workspace.
 
-## Activity Dashboard
+## Agent Dashboard
 
-The grid button — beside the session menu in a workspace window, and in the
-launcher's control row — opens one panel listing **everything that is running**:
-every live workspace, the session tabs inside it, and the panes inside those.
-Click any row to go there; a row in another workspace opens (or focuses) that
-window. The button carries a badge with the number of agent panes currently
-running anywhere.
+The dashboard button — beside the session menu in a workspace window, and in the
+launcher's control row — opens a **window of its own** (`Alt+A`) listing **every
+agent you have running, in every workspace**. It is one window however many
+times you ask for it, and it stays open beside your work: press again, or
+`Alt+A` from anywhere, and it comes to the front rather than opening a second
+copy. The button carries a badge with the number of agents running right now.
 
-Agent panes get two extra readings, both taken from the pane's own output — no
+It lists agents and nothing else. Plain terminals, file explorers and browser
+panes are already in front of you in the window that holds them; a workspace or
+a session tab with no agent in it is not listed at all. Three levels, drawn as
+three different things:
+
+- a **workspace** is a titled band across the window;
+- a **session tab** is a card inside that band, several across a wide window;
+- an **agent** is a row inside the card, tagged with what it is running on —
+  `SSH`, `WSL` (with the distro when there is one), `PowerShell` or `cmd` — and
+  marked `auto` when it was launched with its agent's own auto-approval flag.
+
+Click any row — an agent, its session or its workspace — to open (or focus) the
+window that owns it, at that session tab. The dashboard stays where it is.
+
+Each agent row carries two readings, both taken from the pane's own output — no
 probe is ever sent, and nothing is typed into a running agent:
 
 - **What it is doing.** Agents set the terminal window title as they work
@@ -161,12 +175,14 @@ probe is ever sent, and nothing is typed into a running agent:
 - **Whether it is doing anything.** A pane that has written something in the
   last few seconds reads as *working*; one that has gone quiet reads as *idle*,
   with how long it has been waiting. Agents that publish the terminal progress
-  sequence (`OSC 9;4` — Claude Code 2.0 and up) also get a real percentage.
+  sequence (`OSC 9;4` — Claude Code 2.0 and up) also get a real percentage. A
+  pane that is not connected says so instead.
 
 A pane running an agent also **names itself after that agent** in its own
-header: `Terminal 1` becomes `Claude Code`, `OpenAI Codex CLI`, and so on. A
-title you typed yourself always wins, and the agent's name is never saved as the
-pane's title.
+header: `Terminal 1` becomes `Claude Code`, `OpenAI Codex CLI`, and so on —
+including when you point an open pane at a different agent from its reset menu,
+which renames the header on the spot. A title you typed yourself always wins,
+and the agent's name is never saved as the pane's title.
 
 ## File Explorer
 
@@ -260,11 +276,11 @@ GridVibe does not proxy pages or bypass `X-Frame-Options`/CSP, so sites that blo
 
 **A hidden top bar comes back on hover.** Rest the pointer on the small handle at the top edge — only that handle triggers it — and the bar slides down over the workspace, so everything on it stays reachable while it is hidden. It stays as long as the pointer or focus is on it and hides shortly after you move away (or on `Esc`); clicking the handle reveals it and puts focus in it. Fullscreen hides the bar for its duration and reveals it the same way. Nothing about the reveal is saved.
 
-**Session tab line:** the menu button, the activity dashboard button and the back-to-launcher button sit at the head of the tab line, ahead of the first tab, so they stay reachable with the top bar hidden.
+**Session tab line:** the menu button, the agent dashboard button and the back-to-launcher button sit at the head of the tab line, ahead of the first tab, so they stay reachable with the top bar hidden.
 
 **One menu holds sessions and workspaces.** The GridVibe button at the head of the tab line opens a two-row menu — **Sessions** and **Workspace** — and pointing at either row opens its items beside it: `Import Session…`, `Save Session`, `Save Session as…` and `Save All Sessions` under the first; `Save Workspace` under the second, joined by `Rename Workspace…`, `New Workspace…`, `Open Workspace`, `Move Session to Workspace` and the two close verbs when multiple workspaces are enabled. Hovering the row is enough, only one section is open at a time, and moving the pointer off the menu closes it.
 
-**The dashboard button is on both pages.** The grid button opens the panel described under [Activity Dashboard](#activity-dashboard) — everything running in every workspace, with a badge counting the agents. It sits in the session tab line in a workspace window and in the launcher's control row.
+**The dashboard button is on both pages.** It opens the window described under [Agent Dashboard](#agent-dashboard) — every agent running in every workspace, with a badge counting them. It sits in the session tab line in a workspace window and in the launcher's control row, and `Alt+A` opens it from either.
 
 **Every shortcut is listed in the app.** The keyboard button — in the workspace top bar left of App Settings, and in the launcher's bottom action bar left of the minimize-all control — opens a read-only panel with the whole list, grouped the way you'd look for it. Rows that only apply in one mode say so rather than disappearing. Nothing in it is editable; the one configurable chord in GridVibe is voice push-to-talk, set in App Settings.
 
@@ -274,6 +290,7 @@ GridVibe does not proxy pages or bypass `X-Frame-Options`/CSP, so sites that blo
 | `Alt+W` / `Alt+Shift+W` | Next / previous workspace window (multiple workspaces only) — the window you land in pulses once |
 | `Alt+W` | On the launcher, return to the workspace that opened it, or to whichever workspace is still open if that one has closed |
 | `Alt+Q` | Open the launcher (in a workspace window) |
+| `Alt+A` | Open the agent dashboard window |
 | `Ctrl+Shift+F` | Terminal scrollback search — or, on an explorer pane, toggle repository search |
 | `Ctrl+Shift+C` | Copy the terminal selection |
 | `Ctrl+V` | Paste into the terminal |
