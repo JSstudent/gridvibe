@@ -11,7 +11,7 @@ paramiko>=5.0.0
 
 # Socket.IO transport
 python-socketio>=5.16.4
-python-engineio>=4.13.5
+python-engineio>=4.14.0
 
 # Encryption for saved session passwords
 cryptography>=50.0.1
@@ -21,4 +21,4 @@ cffi>=2.1.1
 pywinpty>=3.0.5; platform_system == "Windows"
 
 # Voice service client
-websocket-client>=1.9.0
+websocket-client>=1.9.2
