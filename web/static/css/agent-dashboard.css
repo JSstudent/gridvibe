@@ -293,14 +293,73 @@ body {
     padding: 6px;
 }
 
-/* ── An agent: a row ── */
+/* ── An agent: a heading, and one line per pane running it ──
+   The block, not the row, is the unit here. Four panes running Claude used to
+   be four copies of the same name and the same shell tag with one useful line
+   apiece; the agent is now stated once at the top of a block and the lines
+   under it carry only what differs. That is also why the type sizes run the
+   way they do — the heading is a label on a block the reader has already found
+   by its mark, and the line is what they came to read. */
 
+.dash-agent-group {
+    /* Every agent's own tint, in one custom property, so the mark and its chip
+       are coloured by one declaration each below rather than by a rule per
+       agent per element. The fallback is the app accent, which is what an agent
+       GridVibe has not drawn a mark for wears. */
+    --dash-agent-accent: var(--gv-accent);
+    border-radius: var(--gv-radius-s);
+    padding: 2px 0 4px;
+}
+
+.dash-agent-group + .dash-agent-group {
+    margin-top: 4px;
+    border-top: 1px solid var(--gv-dialog-border);
+    padding-top: 6px;
+}
+
+.dash-agent-head {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    padding: 2px 8px 4px;
+    min-width: 0;
+}
+
+.dash-agent-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: 0 0 auto;
+    width: 22px;
+    height: 22px;
+    border-radius: 6px;
+    background: color-mix(in srgb, var(--dash-agent-accent) 16%, transparent);
+    color: var(--dash-agent-accent);
+}
+
+.dash-agent-glyph {
+    width: 14px;
+    height: 14px;
+}
+
+.dash-agent-title {
+    font-size: .72rem;
+    font-weight: 600;
+    letter-spacing: .01em;
+    color: var(--gv-dialog-muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+}
+
+/* One pane. The line takes the width the name and the tag used to share. */
 .dash-agent {
     display: flex;
     align-items: center;
     gap: 10px;
     width: 100%;
-    padding: 7px 8px;
+    padding: 6px 8px 6px 37px;
     border: 0;
     border-radius: var(--gv-radius-s);
     background: transparent;
@@ -316,53 +375,28 @@ body {
     outline: none;
 }
 
-.dash-agent-icon {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    flex: 0 0 auto;
-    width: 26px;
-    height: 26px;
-    border-radius: 7px;
-    background: var(--gv-accent-soft);
-    color: var(--gv-accent);
-}
-
-.dash-agent-glyph {
-    width: 15px;
-    height: 15px;
-}
-
-.dash-agent-main {
-    display: flex;
-    flex-direction: column;
-    gap: 1px;
+.dash-agent-line {
     flex: 1 1 auto;
     min-width: 0;
-}
-
-.dash-agent-name {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    min-width: 0;
-}
-
-.dash-agent-label {
-    font-size: .8rem;
-    font-weight: 600;
+    font-size: .84rem;
+    font-weight: 500;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
 }
 
-.dash-agent-note {
-    font-size: .69rem;
-    color: var(--gv-dialog-muted);
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-}
+/* The marks, tinted by which agent they are. Nothing here is a brand colour
+   lifted from a vendor — they are GridVibe's own hues, chosen only to be
+   distinguishable from each other and legible on both grounds, which is the
+   whole job of a tint on a list. */
+.dash-agent-group[data-agent="claude"] { --dash-agent-accent: #d97757; }
+.dash-agent-group[data-agent="codex"] { --dash-agent-accent: #4fd1a5; }
+.dash-agent-group[data-agent="copilot"] { --dash-agent-accent: #a371f7; }
+.dash-agent-group[data-agent="grok"] { --dash-agent-accent: #9aa3af; }
+.dash-agent-group[data-agent="opencode"] { --dash-agent-accent: #f0a868; }
+.dash-agent-group[data-agent="kilo"] { --dash-agent-accent: #7aa2f7; }
+.dash-agent-group[data-agent="kimi"] { --dash-agent-accent: #6ee7b7; }
+.dash-agent-group[data-agent="hermes"] { --dash-agent-accent: #c084fc; }
 
 /* ── Tags ── */
 

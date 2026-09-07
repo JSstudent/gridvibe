@@ -2056,6 +2056,15 @@
             margin: 4px 0 4px 6px;
         }
 
+        /* The shared button stylesheet sizes the artwork for a full-height tab
+           line; max surface mode shrinks the button around it, so the mark comes
+           down with it. Stated here rather than there because the shrink is this
+           page's, and the launcher has no max surface mode to answer for. */
+        body.surface-max .dashboard-icon {
+            width: 22px;
+            height: 22px;
+        }
+
         body.surface-max .session-bar-launcher-btn + .session-tabs {
             padding-left: 6px;
         }

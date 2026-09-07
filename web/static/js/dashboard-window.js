@@ -27,6 +27,22 @@
            agent-identity.js — the same module the pane header uses, so the
            dashboard row and the pane it points at can never disagree about
            which agent that is or what it is running on.
+         · **One block per agent, not one per pane.** Four Claude panes in one
+           session used to be four identical name-and-tag headings with one
+           useful line each. The agent is named once, with its own mark and the
+           shell it runs on set small beside it, and what the reader came for —
+           what each of those panes is *actually doing* — gets the whole width
+           and the larger type underneath.
+         · **The mark says which agent, not that this is an agent.** Every row
+           carrying the same glyph told the reader nothing they could not
+           already see, so the mark comes from agent-glyphs.js, keyed by the
+           same registry key the name is. An agent GridVibe has not drawn falls
+           back to the terminal chip rather than to nothing.
+         · **A row lands on its own pane.** A row names a workspace, a session
+           tab and one pane; the native bridge raises an already-open workspace
+           window without retargeting it, so the last two used to be dropped and
+           every row arrived wherever that window was left. The target is stored
+           through workspaces.js and claimed by the window that arrives.
          · **A repaint that changes nothing is not performed.** The poll runs
            every few seconds and most ticks say the same thing; re-writing the
            tree anyway would drop the caret, kill a text selection and jump the
@@ -39,7 +55,8 @@
            so a missing percentage never reads as "stalled at 0%".
 
        Loaded after shared.js and workspaces.js, whose `openWorkspaceWindow` is
-       how a row reaches the window that owns it.
+       how a row reaches the window that owns it, and after agent-identity.js
+       and agent-glyphs.js, which are what a row is named and marked from.
     ───────────────────────────────────────────── */
 
     const AGENT_DASHBOARD_BODY_ID = 'agentDashboardBody';
@@ -49,11 +66,6 @@
     /* A dashboard that lags the thing it describes is just a screenshot. */
     const AGENT_DASHBOARD_REFRESH_MS = 4000;
 
-    /* Stroke-style currentColor icons only, like every other glyph in the app
-       (the button's artwork in the host pages is the one deliberate
-       exception). The agent mark is a terminal caret inside a rounded chip —
-       a machine that is being spoken to, not a robot face. */
-    const AGENT_ROW_ICON = '<svg class="dash-agent-glyph" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><rect x="2.5" y="4.5" width="19" height="15" rx="3.5"></rect><polyline points="7 10 9.5 12 7 14"></polyline><line x1="12.5" y1="14.5" x2="17" y2="14.5"></line></svg>';
 
     let _agentDashboardTimer = null;
     /* Bumped on every request. A slow answer that lands after a newer one was
@@ -69,6 +81,10 @@
 
     function dashboardIdentity() {
         return typeof window !== 'undefined' ? window.GridVibeAgentIdentity : undefined;
+    }
+
+    function dashboardGlyphs() {
+        return typeof window !== 'undefined' ? window.GridVibeAgentGlyphs : undefined;
     }
 
     /* ── The reading, as words ── */
@@ -113,15 +129,54 @@
         return `${Math.round(value / 3600)}h`;
     }
 
-    /* What the row says under its name. An agent that announced a title is
-       telling you what it is doing, and that beats repeating its directory;
-       otherwise the row falls back to where the pane points.
+    /* The agent this pane runs, in the registry's own prose — the heading its
+       panes are gathered under. Never empty: a custom agent with nothing to
+       name is still an agent, and a group with a blank heading would read as a
+       rendering fault rather than as a fact about the pane. */
+    function dashboardAgentName(pane) {
+        const identity = dashboardIdentity();
+        const name = identity ? identity.agentDisplayName(pane, dashboardAgentOptions()) : '';
+        return name || 'Agent';
+    }
+
+    /* Which mark the heading wears, and the mark itself. The glyph module owns
+       what an agent GridVibe has not drawn falls back to; this only hands it
+       the same registry key the name came from. */
+    function dashboardAgentKey(pane) {
+        const identity = dashboardIdentity();
+        return identity ? identity.agentKeyForSession(pane) : '';
+    }
+
+    function dashboardAgentGlyphKey(pane) {
+        const glyphs = dashboardGlyphs();
+        return glyphs ? glyphs.agentGlyphKey(dashboardAgentKey(pane)) : 'default';
+    }
+
+    function dashboardAgentGlyphHtml(pane) {
+        const glyphs = dashboardGlyphs();
+        return glyphs ? glyphs.agentGlyphMarkup(dashboardAgentKey(pane)) : '';
+    }
+
+    /* The one line a pane gets, and the reason this window exists: *which*
+       conversation this is. Three sources, in the order of how much each was
+       chosen by somebody.
+
+       A title the user typed always wins — the rule agent-identity.js applies
+       to the pane header, and this is the only place that name still appears
+       now that the heading above says which agent the pane runs. Otherwise the
+       agent is announcing what it is working on, and that is the answer.
+       Otherwise the line falls back to where the pane points.
 
        The host is only worth naming for a remote pane. A local pane's `host`
        field holds the shell it started — "PowerShell", "cmd" — which is
-       exactly what the row's tag already says, and a note reading
-       "PowerShell: C:\\…" spends half the line saying it twice. */
-    function dashboardPaneNote(pane) {
+       exactly what the heading's tag already says, and a line that also printed
+       it would spend half of itself saying it twice. */
+    function dashboardPaneLine(pane) {
+        const identity = dashboardIdentity();
+        const typed = String(pane?.title || '').trim();
+        if (typed && identity && !identity.isGenericPaneTitle(typed)) {
+            return typed;
+        }
         const announced = String(pane?.activity?.title || '').trim();
         if (announced) {
             return announced;
@@ -132,7 +187,7 @@
         if (directory && host) {
             return `${host}: ${directory}`;
         }
-        return directory || host;
+        return directory || host || dashboardPaneTitle(pane);
     }
 
     function dashboardStateWord(activity) {
@@ -217,10 +272,16 @@
             : '';
     }
 
-    /* One agent. The glyph says what kind of row this is, the tag says what it
-       is running on, and `auto` is worn only by a pane that was launched with
-       its agent's own auto-approval flag — which is the one property of a
-       running agent you would want to know from across the room. */
+    /* One running pane, as one line. Everything that is true of the *agent*
+       rather than of this pane has moved up into the heading above, so what is
+       left is what distinguishes this pane from its siblings: what it is doing,
+       whether it was launched with its agent's own auto-approval flag — the
+       one property of a running agent worth knowing from across the room, and
+       a per-pane one — and how it is getting on.
+
+       The session id rides the row because the window this row opens needs it:
+       naming the workspace lands in the right window, and naming the group and
+       the pane is what lands on the right tab and the right pane inside it. */
     function dashboardAgentRowHtml(pane) {
         return `
             <button
@@ -230,18 +291,56 @@
                 data-dashboard-key="pane:${escHtml(pane?.session_id || '')}"
                 data-workspace-id="${escHtml(pane?.workspace_id || '')}"
                 data-group-id="${escHtml(pane?.group_id || '')}"
+                data-session-id="${escHtml(pane?.session_id || '')}"
             >
-                <span class="dash-agent-icon" aria-hidden="true">${AGENT_ROW_ICON}</span>
-                <span class="dash-agent-main">
-                    <span class="dash-agent-name">
-                        <span class="dash-agent-label">${escHtml(dashboardPaneTitle(pane))}</span>
-                        ${dashboardTagHtml(dashboardTransportLabel(pane), 'transport')}
-                        ${pane?.agent_auto_mode ? dashboardTagHtml('auto', 'auto') : ''}
-                    </span>
-                    <span class="dash-agent-note">${escHtml(dashboardPaneNote(pane))}</span>
-                </span>
+                <span class="dash-agent-line">${escHtml(dashboardPaneLine(pane))}</span>
+                ${pane?.agent_auto_mode ? dashboardTagHtml('auto', 'auto') : ''}
                 ${dashboardActivityHtml(pane)}
             </button>
+        `;
+    }
+
+    /* Panes gathered under the agent they run, in the order they first appear.
+
+       The key is the agent *and* what it runs on, because a heading is a claim
+       about every line under it: two Claude panes on two different shells are
+       two different machines as far as their work is concerned, and folding
+       them under one "PowerShell" heading would state something false. Order is
+       first appearance rather than anything sorted, so a pane stays where the
+       window that owns it would put it. */
+    function dashboardAgentGroups(panes) {
+        const groups = [];
+        const byKey = new Map();
+        (Array.isArray(panes) ? panes : []).forEach(pane => {
+            const name = dashboardAgentName(pane);
+            const transport = dashboardTransportLabel(pane);
+            const glyphKey = dashboardAgentGlyphKey(pane);
+            const key = JSON.stringify([glyphKey, name, transport]);
+            let group = byKey.get(key);
+            if (!group) {
+                group = { key, name, transport, glyphKey, glyph: dashboardAgentGlyphHtml(pane), panes: [] };
+                byKey.set(key, group);
+                groups.push(group);
+            }
+            group.panes.push(pane);
+        });
+        return groups;
+    }
+
+    /* One agent, once, however many panes are running it. The heading is set
+       small deliberately: it is the label on a block the reader has already
+       found by its mark, and every pixel it gives up goes to the lines under
+       it, which are what they came to read. */
+    function dashboardAgentGroupHtml(group) {
+        return `
+            <div class="dash-agent-group" data-agent="${escHtml(group.glyphKey)}">
+                <div class="dash-agent-head">
+                    <span class="dash-agent-icon" aria-hidden="true">${group.glyph}</span>
+                    <span class="dash-agent-title">${escHtml(group.name)}</span>
+                    ${dashboardTagHtml(group.transport, 'transport')}
+                </div>
+                ${group.panes.map(dashboardAgentRowHtml).join('')}
+            </div>
         `;
     }
 
@@ -271,7 +370,7 @@
                     </span>
                 </button>
                 <div class="dash-agents">
-                    ${panes.map(dashboardAgentRowHtml).join('')}
+                    ${dashboardAgentGroups(panes).map(dashboardAgentGroupHtml).join('')}
                 </div>
             </section>
         `;
@@ -416,10 +515,17 @@
        This window is in no workspace, so every row is somewhere else: it opens
        (or focuses) the window that owns it, at the session it names. The
        dashboard stays open behind it — it is a place you come back to. */
-    async function openDashboardTarget({ workspaceId, groupId = '' }) {
+    async function openDashboardTarget({ workspaceId, groupId = '', sessionId = '' }) {
         const resolvedWorkspaceId = String(workspaceId || '');
         if (!resolvedWorkspaceId || typeof openWorkspaceWindow !== 'function') {
             return false;
+        }
+        /* Stored before the window is asked for, because that is the only order
+           that works for the case the URL cannot cover: a workspace window that
+           is already open is raised, not reloaded, so the tab and the pane have
+           to be waiting for it to claim when it comes to the front. */
+        if (typeof requestWorkspaceFocusTarget === 'function') {
+            requestWorkspaceFocusTarget(resolvedWorkspaceId, { groupId, sessionId });
         }
         try {
             if (await openWorkspaceWindow(resolvedWorkspaceId, { groupId })) {
@@ -440,6 +546,97 @@
         return false;
     }
 
+    /* ── Getting out of here ──
+       This window is about workspaces without being in one, which is exactly
+       the launcher's standing, so it answers the launcher's two chords the same
+       way: Alt+W goes back to the workspace you came from, Alt+Q opens the
+       launcher. Without them the dashboard was the one GridVibe window you
+       could only leave with the mouse.
+
+       Both are matched on `event.code` and exclude Ctrl, the rule every Alt
+       chord in the app follows: AltGr arrives as Ctrl+Alt on Windows, so a
+       chord that did not exclude Ctrl would fire while typing an accented
+       character, and matching the physical key keeps the chord on the same key
+       whatever the layout prints on it. Shift is read the way each host page
+       reads it: there is no cycle to run backwards from a window that is not a
+       workspace, so Alt+Shift+W still means "go back", while Alt+Q is a single
+       destination and takes no modifier.
+
+       Neither is gated on multi-workspace being enabled. The launcher gates its
+       Alt+W because it is the workspace *walk* seen from outside; this is "put
+       the window I came from back in front", which is worth the same whether
+       there is one workspace or six — and this window only exists when
+       something is running in one. */
+    const DASHBOARD_WORKSPACE_CHORD_CODE = 'KeyW';
+    const DASHBOARD_LAUNCHER_CHORD_CODE = 'KeyQ';
+
+    let _dashboardWorkspaceReturnInFlight = false;
+
+    function dashboardBlockedTabHint() {
+        return typeof WORKSPACE_TAB_BLOCKED_HINT === 'string'
+            ? WORKSPACE_TAB_BLOCKED_HINT
+            : 'Could not open that window.';
+    }
+
+    /* The in-flight guard keeps a held key from queueing a burst of opens —
+       the same guard, for the same reason, as the launcher's. */
+    async function returnToDashboardOriginWorkspace() {
+        if (_dashboardWorkspaceReturnInFlight || typeof returnToOriginWorkspace !== 'function') {
+            return;
+        }
+        _dashboardWorkspaceReturnInFlight = true;
+        try {
+            const { outcome } = await returnToOriginWorkspace();
+            if (outcome === WORKSPACE_RETURN_NONE) {
+                setAgentDashboardNotice('No workspace is open to switch back to.');
+            } else if (outcome === WORKSPACE_RETURN_BLOCKED) {
+                setAgentDashboardNotice(dashboardBlockedTabHint());
+            } else {
+                setAgentDashboardNotice('');
+            }
+        } catch (error) {
+            console.error('[GridVibe Dashboard] workspace return failed:', error);
+            setAgentDashboardNotice('Could not switch to a workspace window.');
+        } finally {
+            _dashboardWorkspaceReturnInFlight = false;
+        }
+    }
+
+    async function openDashboardLauncherWindow() {
+        if (typeof openLauncherWindow !== 'function') {
+            return;
+        }
+        if (await openLauncherWindow()) {
+            setAgentDashboardNotice('');
+            return;
+        }
+        setAgentDashboardNotice(dashboardBlockedTabHint());
+    }
+
+    function dashboardWindowChordMatches(event, code, { allowShift = false } = {}) {
+        if (!event || !event.altKey || event.ctrlKey || event.metaKey || event.repeat) {
+            return false;
+        }
+        if (event.shiftKey && !allowShift) {
+            return false;
+        }
+        return event.code === code;
+    }
+
+    function wireAgentDashboardChords() {
+        document.addEventListener?.('keydown', event => {
+            if (dashboardWindowChordMatches(event, DASHBOARD_WORKSPACE_CHORD_CODE, { allowShift: true })) {
+                event.preventDefault();
+                returnToDashboardOriginWorkspace();
+                return;
+            }
+            if (dashboardWindowChordMatches(event, DASHBOARD_LAUNCHER_CHORD_CODE)) {
+                event.preventDefault();
+                openDashboardLauncherWindow();
+            }
+        });
+    }
+
     function wireAgentDashboard() {
         const body = document.getElementById(AGENT_DASHBOARD_BODY_ID);
         if (!body) {
@@ -455,7 +652,8 @@
             event.preventDefault();
             openDashboardTarget({
                 workspaceId: row.dataset.workspaceId,
-                groupId: row.dataset.groupId || ''
+                groupId: row.dataset.groupId || '',
+                sessionId: row.dataset.sessionId || ''
             });
         });
         document.getElementById('agentDashboardRefreshBtn')?.addEventListener('click', () => {
@@ -467,6 +665,7 @@
                 refreshAgentDashboard();
             }
         });
+        wireAgentDashboardChords();
         scheduleAgentDashboardRefresh();
         refreshAgentDashboard();
     }

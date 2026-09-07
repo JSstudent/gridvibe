@@ -79,12 +79,28 @@
         return (typeof window !== 'undefined' ? window.pywebview?.api : null) || null;
     }
 
+    /* The dashboard has an Alt+W of its own now, and it means what the
+       launcher's means: back to the workspace you came from. That is a fact
+       only the departing window knows, so it is recorded on the way out — the
+       same record, through the same function, that the launcher button already
+       writes when a workspace window hands over to it. A launcher press writes
+       nothing: the launcher is not a workspace, and overwriting the record with
+       "nowhere" is how the way back gets lost. */
+    function rememberDashboardOriginWorkspace() {
+        if (typeof CURRENT_WORKSPACE_ID === 'undefined'
+            || typeof rememberLauncherOriginWorkspace !== 'function') {
+            return;
+        }
+        rememberLauncherOriginWorkspace(CURRENT_WORKSPACE_ID);
+    }
+
     /* Native first, browser second — the same order and the same fallback
        `openWorkspaceWindow` uses, because the two windows are the same kind of
        thing and a native bridge that refuses should still land somewhere. */
     async function openAgentDashboardWindow(event) {
         event?.preventDefault?.();
         event?.stopPropagation?.();
+        rememberDashboardOriginWorkspace();
         const api = dashboardNativeApi();
         if (api?.open_dashboard_window) {
             try {

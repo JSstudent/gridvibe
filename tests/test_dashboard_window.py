@@ -11,14 +11,28 @@ What is pinned is what the window is *for*:
   a card inside it, an agent is a row inside that — the complaint about the
   dropdown this replaced was that all three were the same list at different
   indents, so the nesting is asserted as structure and not as padding.
-- **An agent row says what is running without going to look**: the agent's own
-  name, what it is running on, what it announced, and whether it is working.
+- **One block per agent, not one per pane.** Several panes running the same
+  agent on the same shell are one heading and one line each, because the
+  heading was the part that was identical and the line is what the reader came
+  for. Two shells are two headings: a heading is a claim about every line under
+  it.
+- **The mark says which agent.** Every row wearing the same glyph said only
+  "this is a row"; the mark comes from the registry key the name does, and an
+  agent GridVibe has not drawn falls back rather than disappearing.
+- **A block says what is running without going to look**: the agent's own name,
+  what it is running on, what each pane announced, and whether it is working.
 - **The state and the percentage are separate readings.** Every agent has a
   state; only one that speaks the progress sequence has a number. A working
   agent with no number still gets a moving bar, so "no percentage" never reads
   as "stalled at 0%". A pane that is not connected reports that instead.
-- **Every row is a way out.** This window is in no workspace, so an agent, its
-  session and its workspace all open the window that owns it, at that session.
+- **Every row is a way out, to the pane it names.** This window is in no
+  workspace, so an agent, its session and its workspace all open the window that
+  owns it — and an agent row leaves the session tab and the pane waiting for
+  that window to claim, because a window that is already open is raised without
+  being reloaded and would otherwise land wherever it was left.
+- **The window can be left with the keyboard.** Alt+W goes back to the
+  workspace that opened it and Alt+Q opens the launcher, the two chords the
+  launcher already answers from the same standing.
 - **Values reach the markup escaped**, so an agent that announces markup in its
   window title cannot rewrite the rows.
 - **A repaint that changes nothing is not performed**, because this window
@@ -39,6 +53,7 @@ from tempfile import TemporaryDirectory
 REPO_ROOT = Path(__file__).resolve().parent.parent
 STATIC_JS = REPO_ROOT / "web" / "static" / "js"
 AGENT_IDENTITY_JS = STATIC_JS / "agent-identity.js"
+AGENT_GLYPHS_JS = STATIC_JS / "agent-glyphs.js"
 DASHBOARD_WINDOW_JS = STATIC_JS / "dashboard-window.js"
 
 NODE = shutil.which("node")
@@ -70,7 +85,43 @@ const AGENT_OPTIONS = [
 const WORKSPACE_TAB_BLOCKED_HINT =
     'Allow pop-ups for this site so GridVibe can open workspace tabs.';
 
-const calls = { fetches: 0, openWorkspaceWindow: [] };
+const calls = {
+    fetches: 0,
+    openWorkspaceWindow: [],
+    focusTargets: [],
+    workspaceReturns: 0,
+    launcherOpens: 0
+};
+
+/* workspaces.js's own names, stubbed with the shape the module reads. The
+   request is recorded rather than stored: what matters here is that a row asks
+   for its own pane, and *before* the window is opened. */
+function requestWorkspaceFocusTarget(workspaceId, options) {
+    calls.focusTargets.push({
+        workspaceId,
+        options,
+        openedSoFar: calls.openWorkspaceWindow.length
+    });
+    return true;
+}
+
+const WORKSPACE_RETURN_NONE = 'none';
+const WORKSPACE_RETURN_FOCUSED = 'focused';
+const WORKSPACE_RETURN_OPENED = 'opened';
+const WORKSPACE_RETURN_BLOCKED = 'blocked';
+
+/* Swapped per case: what the shared return resolver answered. */
+let workspaceReturnOutcome = WORKSPACE_RETURN_FOCUSED;
+async function returnToOriginWorkspace() {
+    calls.workspaceReturns += 1;
+    return { outcome: workspaceReturnOutcome, workspaceId: 'default' };
+}
+
+let launcherOpens = true;
+async function openLauncherWindow() {
+    calls.launcherOpens += 1;
+    return launcherOpens;
+}
 /* Swapped per case: `false` is a browser that blocked the pop-up. */
 let workspaceOpens = true;
 async function openWorkspaceWindow(workspaceId, options) {
@@ -176,6 +227,32 @@ function sectionCounts() {
     };
 }
 
+/* One agent block, read back as the reader meets it: the mark, the heading, the
+   shell it claims, and the lines gathered under it. */
+function parseAgentGroups() {
+    return body().innerHTML
+        .split('<div class="dash-agent-group"')
+        .slice(1)
+        .map(chunk => {
+            const scoped = chunk.split('</section>')[0];
+            const agent = /^ data-agent="([^"]*)"/.exec(scoped);
+            const title = /<span class="dash-agent-title">([\s\S]*?)<\/span>/.exec(scoped);
+            const transport = /<span class="dash-tag dash-tag-transport">([\s\S]*?)<\/span>/.exec(scoped);
+            const glyph = /<svg class="dash-agent-glyph"[\s\S]*?<\/svg>/.exec(scoped);
+            const lines = [];
+            const linePattern = /<span class="dash-agent-line">([\s\S]*?)<\/span>/g;
+            let line;
+            while ((line = linePattern.exec(scoped)) !== null) { lines.push(line[1].trim()); }
+            return {
+                agent: agent ? agent[1] : '',
+                title: title ? title[1].trim() : '',
+                transport: transport ? transport[1].trim() : '',
+                glyph: glyph ? glyph[0] : '',
+                lines
+            };
+        });
+}
+
 /* The rendered window, read back as the reader meets it. */
 function parseRows() {
     const rows = [];
@@ -193,8 +270,7 @@ function parseRows() {
             }
         }
         const inner = found[2];
-        const label = /<span class="dash-(?:agent-label|session-name|workspace-name)">([\s\S]*?)<\/span>/.exec(inner);
-        const note = /<span class="dash-agent-note">([\s\S]*?)<\/span>/.exec(inner);
+        const label = /<span class="dash-(?:agent-line|session-name|workspace-name)">([\s\S]*?)<\/span>/.exec(inner);
         const state = /class="dash-activity dash-state-([a-z]+)"/.exec(inner);
         const word = /<span class="dash-state-word">([\s\S]*?)<\/span>/.exec(inner);
         const percent = /<span class="dash-progress-value">(\d+)%<\/span>/.exec(inner);
@@ -207,9 +283,7 @@ function parseRows() {
             key: attributes['data-dashboard-key'] || '',
             dataset,
             label: label ? label[1].trim() : '',
-            note: note ? note[1].trim() : '',
             tags,
-            hasIcon: inner.includes('dash-agent-glyph'),
             state: state ? state[1] : '',
             word: word ? word[1].trim() : '',
             hasBar: inner.includes('dash-progress-fill'),
@@ -308,6 +382,7 @@ class DashboardWindowTestCase(unittest.TestCase):
         script = (
             HARNESS_STUBS
             + AGENT_IDENTITY_JS.read_text(encoding="utf-8")
+            + AGENT_GLYPHS_JS.read_text(encoding="utf-8")
             + DASHBOARD_WINDOW_JS.read_text(encoding="utf-8")
             + "\n(async () => {\n"
             + body
@@ -352,7 +427,7 @@ class DashboardWindowStructureTestCase(DashboardWindowTestCase):
             ["workspace", "session", "pane", "pane", "session", "pane"],
         )
 
-    def test_an_agent_row_says_what_is_running_without_going_to_look(self):
+    def test_a_block_says_what_is_running_without_going_to_look(self):
         result = self._run_node(
             """
             fetchAnswer = snapshot([group([pane({
@@ -360,30 +435,131 @@ class DashboardWindowStructureTestCase(DashboardWindowTestCase):
             })])]);
             wireAgentDashboard();
             await settle();
-            report(rowFor('pane:s1'));
+            report({ groups: parseAgentGroups(), row: rowFor('pane:s1') });
             """
         )
-        self.assertEqual(result["label"], "Claude Code")
-        self.assertEqual(result["note"], "Claude: fixing the parser")
-        self.assertEqual(result["tags"], ["SSH"])
-        self.assertTrue(result["hasIcon"])
+        block = result["groups"][0]
+        self.assertEqual(block["title"], "Claude Code")
+        self.assertEqual(block["transport"], "SSH")
+        self.assertEqual(block["agent"], "claude")
+        self.assertIn("<svg", block["glyph"])
+        # The line is the pane's own half of the answer, and the only half.
+        self.assertEqual(block["lines"], ["Claude: fixing the parser"])
+        self.assertEqual(result["row"]["label"], "Claude: fixing the parser")
+        self.assertEqual(result["row"]["tags"], [])
 
-    def test_a_row_with_nothing_announced_falls_back_to_where_it_points(self):
+    def test_several_panes_of_one_agent_are_one_heading_and_a_line_each(self):
+        """The complaint the block layout answers: four panes running Claude
+        used to be four copies of "Claude Code / POWERSHELL" with one useful
+        line apiece."""
+        result = self._run_node(
+            """
+            fetchAnswer = snapshot([group([
+                pane({ mode: 'wsl', use_powershell: true, host: 'PowerShell',
+                       activity: activity({ title: 'Agent dashboard todos' }) }),
+                pane({ session_id: 's2', index: 1, mode: 'wsl', use_powershell: true,
+                       host: 'PowerShell',
+                       activity: activity({ title: 'Button in both windows' }) })
+            ])]);
+            wireAgentDashboard();
+            await settle();
+            report(parseAgentGroups());
+            """
+        )
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["title"], "Claude Code")
+        self.assertEqual(result[0]["transport"], "PowerShell")
+        self.assertEqual(
+            result[0]["lines"], ["Agent dashboard todos", "Button in both windows"]
+        )
+
+    def test_one_agent_on_two_shells_is_two_headings(self):
+        """A heading is a claim about every line under it: two shells are two
+        machines as far as the work is concerned, and folding them under one
+        would state something false."""
+        result = self._run_node(
+            """
+            fetchAnswer = snapshot([group([
+                pane({ mode: 'wsl', use_powershell: true, host: 'PowerShell', directory: 'C:/repo' }),
+                pane({ session_id: 's2', index: 1, mode: 'wsl', use_wsl: true,
+                       distribution: 'Ubuntu', host: 'wsl', directory: '/srv' })
+            ])]);
+            wireAgentDashboard();
+            await settle();
+            report(parseAgentGroups().map(entry => [entry.title, entry.transport, entry.lines]));
+            """
+        )
+        self.assertEqual(
+            result,
+            [
+                ["Claude Code", "PowerShell", ["C:/repo"]],
+                ["Claude Code", "WSL · Ubuntu", ["/srv"]],
+            ],
+        )
+
+    def test_two_agents_wear_two_marks(self):
+        result = self._run_node(
+            """
+            fetchAnswer = snapshot([group([
+                pane(),
+                pane({ session_id: 's2', index: 1, agent_selection: 'codex' }),
+                pane({ session_id: 's3', index: 2, agent_selection: 'other',
+                       custom_agent: 'house-agent --resume' })
+            ])]);
+            wireAgentDashboard();
+            await settle();
+            report(parseAgentGroups().map(entry => ({
+                agent: entry.agent, title: entry.title, glyph: entry.glyph
+            })));
+            """
+        )
+        self.assertEqual(
+            [entry["agent"] for entry in result], ["claude", "codex", "default"]
+        )
+        self.assertEqual(
+            [entry["title"] for entry in result],
+            ["Claude Code", "OpenAI Codex CLI", "house-agent"],
+        )
+        # Three different marks, and the agent with no mark of its own still
+        # gets one rather than an empty chip.
+        self.assertEqual(len({entry["glyph"] for entry in result}), 3)
+        for entry in result:
+            self.assertIn("<svg", entry["glyph"])
+
+    def test_a_line_with_nothing_announced_falls_back_to_where_it_points(self):
         result = self._run_node(
             """
             fetchAnswer = snapshot([group([pane()])]);
             wireAgentDashboard();
             await settle();
-            report(rowFor('pane:s1').note);
+            report(rowFor('pane:s1').label);
             """
         )
         self.assertEqual(result, "10.0.0.5: /srv/app")
 
-    def test_a_local_agent_is_tagged_with_the_shell_it_runs(self):
-        """And the tag is the only place that is said.
+    def test_a_name_the_user_typed_outranks_what_the_agent_announced(self):
+        """The heading now says which agent this is, so the line is the only
+        place a typed pane name still appears — and agent-identity.js's rule is
+        that a name somebody chose wins."""
+        result = self._run_node(
+            """
+            fetchAnswer = snapshot([group([pane({
+                title: 'release cut',
+                activity: activity({ title: 'Claude: fixing the parser' })
+            })])]);
+            wireAgentDashboard();
+            await settle();
+            report({ line: rowFor('pane:s1').label, heading: parseAgentGroups()[0].title });
+            """
+        )
+        self.assertEqual(result["line"], "release cut")
+        self.assertEqual(result["heading"], "Claude Code")
 
-        A local pane's `host` field holds the shell it started, so a note that
-        also printed it spent half the line saying "PowerShell" twice. A remote
+    def test_a_local_agent_is_tagged_with_the_shell_it_runs(self):
+        """And the heading's tag is the only place that is said.
+
+        A local pane's `host` field holds the shell it started, so a line that
+        also printed it spent half of itself saying "PowerShell" twice. A remote
         pane's host is a machine, and stays.
         """
         result = self._run_node(
@@ -402,17 +578,17 @@ class DashboardWindowStructureTestCase(DashboardWindowTestCase):
             wireAgentDashboard();
             await settle();
             report({
-                wsl: rowFor('pane:s1'),
-                powershell: rowFor('pane:s2')
+                groups: parseAgentGroups().map(entry => entry.transport),
+                lines: [rowFor('pane:s1').label, rowFor('pane:s2').label]
             });
             """
         )
-        self.assertEqual(result["wsl"]["tags"], ["WSL · Ubuntu"])
-        self.assertEqual(result["wsl"]["note"], "C:/repo")
-        self.assertEqual(result["powershell"]["tags"], ["PowerShell"])
-        self.assertEqual(result["powershell"]["note"], "C:/repo")
+        self.assertEqual(result["groups"], ["WSL · Ubuntu", "PowerShell"])
+        self.assertEqual(result["lines"], ["C:/repo", "C:/repo"])
 
-    def test_auto_approval_is_marked_and_only_when_it_is_on(self):
+    def test_auto_approval_is_marked_on_the_pane_that_has_it(self):
+        """It is a per-pane property, so it rides the line rather than the
+        heading: two panes of one agent need not have been launched alike."""
         result = self._run_node(
             """
             fetchAnswer = snapshot([group([
@@ -421,11 +597,16 @@ class DashboardWindowStructureTestCase(DashboardWindowTestCase):
             ])]);
             wireAgentDashboard();
             await settle();
-            report({ auto: rowFor('pane:s1').tags, plain: rowFor('pane:s2').tags });
+            report({
+                auto: rowFor('pane:s1').tags,
+                plain: rowFor('pane:s2').tags,
+                headings: parseAgentGroups().length
+            });
             """
         )
-        self.assertEqual(result["auto"], ["SSH", "auto"])
-        self.assertEqual(result["plain"], ["SSH"])
+        self.assertEqual(result["auto"], ["auto"])
+        self.assertEqual(result["plain"], [])
+        self.assertEqual(result["headings"], 1)
 
     def test_the_session_card_says_how_many_of_its_panes_are_agents(self):
         result = self._run_node(
@@ -471,11 +652,11 @@ class DashboardWindowStructureTestCase(DashboardWindowTestCase):
             })])]);
             wireAgentDashboard();
             await settle();
-            report({ html: body().innerHTML, note: rowFor('pane:s1').note });
+            report({ html: body().innerHTML, line: rowFor('pane:s1').label });
             """
         )
         self.assertNotIn("<img", result["html"])
-        self.assertIn("&lt;img", result["note"])
+        self.assertIn("&lt;img", result["line"])
 
 
 class DashboardWindowActivityTestCase(DashboardWindowTestCase):
@@ -573,6 +754,52 @@ class DashboardWindowRowActionTestCase(DashboardWindowTestCase):
             ],
         )
 
+    def test_an_agent_row_leaves_its_own_pane_waiting_to_be_claimed(self):
+        """The bug the request answers: the native bridge raises an already-open
+        workspace window without retargeting it, so a row that named only the
+        workspace landed on whichever tab that window was last left on. The
+        request has to be standing *before* the window is asked for, because a
+        raised window claims it the moment it comes to the front."""
+        result = self._run_node(
+            """
+            fetchAnswer = snapshot([group([
+                pane(), pane({ session_id: 's2', index: 1 })
+            ])]);
+            wireAgentDashboard();
+            await settle();
+            clickRow('pane:s2');
+            await settle();
+            report(calls.focusTargets);
+            """
+        )
+        self.assertEqual(
+            result,
+            [{
+                "workspaceId": "default",
+                "options": {"groupId": "g1", "sessionId": "s2"},
+                # Nothing had been opened yet when the request was written.
+                "openedSoFar": 0,
+            }],
+        )
+
+    def test_a_session_head_names_its_tab_and_no_pane_in_it(self):
+        """It is the way to a tab that may hold panes this surface does not
+        list, so it must not land on one of the ones it does."""
+        result = self._run_node(
+            """
+            fetchAnswer = snapshot();
+            wireAgentDashboard();
+            await settle();
+            clickRow('session:g1');
+            clickRow('workspace:default');
+            await settle();
+            report(calls.focusTargets.map(entry => entry.options));
+            """
+        )
+        self.assertEqual(
+            result, [{"groupId": "g1", "sessionId": ""}, {"groupId": "", "sessionId": ""}]
+        )
+
     def test_the_dashboard_stays_open_behind_the_window_it_opened(self):
         result = self._run_node(
             """
@@ -603,6 +830,109 @@ class DashboardWindowRowActionTestCase(DashboardWindowTestCase):
         self.assertEqual(result["text"], WORKSPACE_TAB_BLOCKED_HINT)
 
 
+class DashboardWindowChordTestCase(DashboardWindowTestCase):
+    """The two ways out, driven through the page's own keydown listener.
+
+    Without them the dashboard was the one GridVibe window that could only be
+    left with the mouse. Both answer the launcher's chords, because this window
+    stands where the launcher does: about workspaces, in none of them.
+    """
+
+    def _press(self, event: str, extra: str = ""):
+        return self._run_node(
+            """
+            fetchAnswer = snapshot();
+            wireAgentDashboard();
+            await settle();
+            %s
+            let prevented = false;
+            document.fire('keydown', Object.assign(
+                { altKey: false, ctrlKey: false, metaKey: false, shiftKey: false,
+                  repeat: false, preventDefault() { prevented = true; } },
+                %s
+            ));
+            await settle();
+            report({
+                prevented,
+                workspaceReturns: calls.workspaceReturns,
+                launcherOpens: calls.launcherOpens,
+                notice: { hidden: notice().hidden, text: notice().textContent }
+            });
+            """
+            % (extra, event)
+        )
+
+    def test_alt_w_goes_back_to_the_workspace_this_window_came_from(self):
+        result = self._press("{ altKey: true, code: 'KeyW' }")
+        self.assertTrue(result["prevented"])
+        self.assertEqual(result["workspaceReturns"], 1)
+        self.assertEqual(result["launcherOpens"], 0)
+        self.assertTrue(result["notice"]["hidden"])
+
+    def test_alt_shift_w_means_the_same_thing(self):
+        # There is no cycle to run backwards from a window that is not a
+        # workspace, so both directions are "go back" - the launcher's rule.
+        result = self._press("{ altKey: true, shiftKey: true, code: 'KeyW' }")
+        self.assertEqual(result["workspaceReturns"], 1)
+
+    def test_alt_q_opens_the_launcher(self):
+        result = self._press("{ altKey: true, code: 'KeyQ' }")
+        self.assertTrue(result["prevented"])
+        self.assertEqual(result["launcherOpens"], 1)
+        self.assertEqual(result["workspaceReturns"], 0)
+
+    def test_altgr_types_a_character_rather_than_leaving_the_window(self):
+        # AltGr reaches the page as Ctrl+Alt on Windows, and AltGr+Q types a
+        # backslash on several layouts.
+        result = self._press("{ altKey: true, ctrlKey: true, code: 'KeyQ' }")
+        self.assertFalse(result["prevented"])
+        self.assertEqual(result["launcherOpens"], 0)
+        self.assertEqual(result["workspaceReturns"], 0)
+
+    def test_nowhere_to_go_back_to_is_said_rather_than_silently_ignored(self):
+        result = self._press(
+            "{ altKey: true, code: 'KeyW' }",
+            "workspaceReturnOutcome = WORKSPACE_RETURN_NONE;",
+        )
+        self.assertFalse(result["notice"]["hidden"])
+        self.assertEqual(
+            result["notice"]["text"], "No workspace is open to switch back to."
+        )
+
+    def test_a_blocked_tab_is_reported_in_the_wording_that_owns_it(self):
+        result = self._press(
+            "{ altKey: true, code: 'KeyW' }",
+            "workspaceReturnOutcome = WORKSPACE_RETURN_BLOCKED;",
+        )
+        self.assertEqual(result["notice"]["text"], WORKSPACE_TAB_BLOCKED_HINT)
+
+    def test_a_launcher_that_could_not_be_opened_says_so_too(self):
+        result = self._press(
+            "{ altKey: true, code: 'KeyQ' }", "launcherOpens = false;"
+        )
+        self.assertEqual(result["launcherOpens"], 1)
+        self.assertEqual(result["notice"]["text"], WORKSPACE_TAB_BLOCKED_HINT)
+
+    def test_a_held_key_queues_one_return_and_not_a_burst(self):
+        result = self._run_node(
+            """
+            fetchAnswer = snapshot();
+            wireAgentDashboard();
+            await settle();
+            const press = () => document.fire('keydown', {
+                altKey: true, ctrlKey: false, metaKey: false, shiftKey: false,
+                repeat: false, code: 'KeyW', preventDefault() {}
+            });
+            press();
+            press();
+            press();
+            await settle();
+            report(calls.workspaceReturns);
+            """
+        )
+        self.assertEqual(result, 1)
+
+
 class DashboardWindowRepaintTestCase(DashboardWindowTestCase):
     def test_an_unchanged_reading_is_not_repainted_at_all(self):
         """This window stays open while it is read, so an identical tick must
@@ -619,12 +949,12 @@ class DashboardWindowRepaintTestCase(DashboardWindowTestCase):
             const unchanged = body().innerHTML.includes('the reader was here');
             fetchAnswer = snapshot([group([pane({ activity: activity({ title: 'now doing something else' }) })])]);
             await refreshAgentDashboard();
-            report({ unchanged, afterChange: body().innerHTML.includes('the reader was here'), note: rowFor('pane:s1').note });
+            report({ unchanged, afterChange: body().innerHTML.includes('the reader was here'), line: rowFor('pane:s1').label });
             """
         )
         self.assertTrue(result["unchanged"])
         self.assertFalse(result["afterChange"])
-        self.assertEqual(result["note"], "now doing something else")
+        self.assertEqual(result["line"], "now doing something else")
 
     def test_a_reading_that_changed_keeps_the_caret_and_the_scroll(self):
         result = self._run_node(
@@ -654,10 +984,10 @@ class DashboardWindowRepaintTestCase(DashboardWindowTestCase):
             const slowResolve = pending;
             fetchAnswer = snapshot([group([pane({ activity: activity({ title: 'the newer reading' }) })])]);
             await refreshAgentDashboard();
-            const afterNewer = rowFor('pane:s1').note;
+            const afterNewer = rowFor('pane:s1').label;
             slowResolve(snapshot([group([pane({ activity: activity({ title: 'the older reading' }) })])]));
             await slow;
-            report({ afterNewer, afterSlowLanded: rowFor('pane:s1').note });
+            report({ afterNewer, afterSlowLanded: rowFor('pane:s1').label });
             """
         )
         self.assertEqual(result["afterNewer"], "the newer reading")

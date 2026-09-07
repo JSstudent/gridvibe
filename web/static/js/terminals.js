@@ -554,6 +554,10 @@
        arms the pulse at the departing end). Wired here, at the one place that
        knows which workspace this page is. */
     watchWorkspaceArrivals(currentWorkspaceId);
+    /* And the other half of the same arrival: a row in the agent dashboard
+       names a session tab and one pane, not just a window. Wired beside the
+       pulse, at the one place that knows which workspace this page is. */
+    watchWorkspaceFocusTargets(currentWorkspaceId, applyWorkspaceFocusTarget);
     let activeGroupId = initialRouteParams.get('group') || '';
     let sessionGroups = [];
     let activeLoadToken = 0;
@@ -733,6 +737,112 @@
             terminal,
             active: false
         };
+    }
+
+    /* ── Landing on the pane the agent dashboard named ──
+       A dashboard row names a workspace, a session tab and one pane. The
+       workspace is the window this page already is; the other two are this.
+
+       Two things make it more than one call to `switchGroup`. A window that was
+       already open is raised without being reloaded, so the tab has to be
+       changed here rather than through the URL the bridge never revisits; and a
+       window that was just *created* claims the request while its grid is still
+       being built, so the pane it names does not exist yet. The target is
+       therefore held and settled again at the end of the load that will produce
+       it — under a deadline, because a session closed between the click and the
+       arrival must not leave the window waiting for a pane that is never
+       coming. */
+    const WORKSPACE_FOCUS_TARGET_GRACE_MS = 15000;
+    let pendingWorkspaceFocusTarget = null;
+
+    function applyWorkspaceFocusTarget(target) {
+        const groupId = String(target?.groupId || '');
+        const sessionId = String(target?.sessionId || '');
+        if (!groupId && !sessionId) {
+            return;
+        }
+        pendingWorkspaceFocusTarget = {
+            groupId,
+            sessionId,
+            expiresAt: Date.now() + WORKSPACE_FOCUS_TARGET_GRACE_MS
+        };
+        settleWorkspaceFocusTarget();
+    }
+
+    async function settleWorkspaceFocusTarget() {
+        const target = pendingWorkspaceFocusTarget;
+        if (!target) {
+            return;
+        }
+        if (Date.now() > target.expiresAt) {
+            pendingWorkspaceFocusTarget = null;
+            return;
+        }
+        if (target.groupId && target.groupId !== activeGroupId) {
+            /* A tab this window has never heard of is not switched to: that is
+               how a stale row would blank the grid it landed on. It is left
+               standing instead, for the group list this window has not loaded
+               yet — or for the deadline. */
+            if (!sessionGroups.some(group => group.group_id === target.groupId)) {
+                return;
+            }
+            /* switchGroup runs the whole load and settles again from inside it.
+               It also declines — an unsaved editor, a copy in flight — and a
+               decline leaves the target standing rather than pretending the
+               trip finished. */
+            await switchGroup(target.groupId);
+            return;
+        }
+        if (!target.sessionId) {
+            pendingWorkspaceFocusTarget = null;
+            return;
+        }
+        const resolved = resolveSessionTarget(target.sessionId);
+        if (!resolved || !resolved.active) {
+            /* Not painted yet. The load that paints it settles again. */
+            return;
+        }
+        pendingWorkspaceFocusTarget = null;
+        focusPaneForArrival(resolved.index);
+    }
+
+    /* Real keyboard focus for a terminal, and the highlight a click would give
+       for a pane that cannot take it: an explorer or browser pane has no xterm
+       to focus, and landing on one still has to *show* which pane was meant. */
+    function focusPaneForArrival(index) {
+        const card = document.getElementById(`tc-${index}`);
+        card?.scrollIntoView?.({ block: 'nearest' });
+        const terminal = terminals[index];
+        if (terminal?.term && isPlainTerminalCard(card)) {
+            try { terminal.term.focus(); } catch (_error) {}
+            return;
+        }
+        card?.focus?.();
+    }
+
+    /* ── What a pane calls itself, repainted without a rebuild ──
+       A pane's agent can change while the pane stays exactly where it is: one
+       that exits hands the terminal back, and one started by hand at the prompt
+       takes it over. Both arrive as a status broadcast, and until this existed
+       the header went on naming the agent the pane was *launched* with — so a
+       Claude session could sit under a "OpenAI Codex CLI" title until something
+       else forced a rebuild.
+
+       The two header fields that read from the session record, and nothing
+       else: the reset control's affordance is decided by the transport rather
+       than by what is running in it, and syncing the shell controls here would
+       close a menu the user has open. */
+    function syncPaneIdentityChrome(index, session) {
+        const nameLabel = document.getElementById(`tname-${index}`);
+        const title = paneDisplayTitle(session, index);
+        if (nameLabel && nameLabel.textContent.trim() !== title) {
+            nameLabel.textContent = title;
+        }
+        const hostLabel = document.getElementById(`thost-${index}`);
+        const host = String(session.host || '');
+        if (hostLabel && hostLabel.textContent.trim() !== host) {
+            hostLabel.textContent = host;
+        }
     }
 
     function clearFitTimers(targetTerminals = terminals) {
@@ -7668,6 +7778,10 @@
                     isCurrent: stillCurrent
                 });
             }
+
+            /* The grid this load just produced is what a held dashboard target
+               has been waiting for. */
+            settleWorkspaceFocusTarget();
         } catch (e) {
             if (loadToken !== activeLoadToken) {
                 return;
@@ -7992,25 +8106,17 @@
            again from a different workspace retargets the way back. */
         rememberLauncherOriginWorkspace(currentWorkspaceId);
 
-        if (window.pywebview?.api?.open_launcher_window) {
-            try {
-                logSessionWindowAction('+ New Session clicked', {
-                    pywebview: true,
-                    preserve_fullscreen: true
-                });
-                const result = await window.pywebview.api.open_launcher_window();
-                logSessionWindowAction('open_launcher_window result', result || {});
-                if (result?.ok) {
-                    return false;
-                }
-            } catch (error) {
-                console.error('[GridVibe Sessions] open_launcher_window failed:', error);
-            }
-        }
-
-        await resetFullscreenState();
-        window.open('/', 'gridvibe-launcher');
-        logSessionWindowAction('Opened browser launcher window fallback');
+        /* workspaces.js owns "open or focus the launcher window" for both of
+           the windows that ask for it. Native mode keeps this window exactly as
+           it is, fullscreen included, so the fullscreen reset is handed over as
+           the browser-fallback step rather than run first: a bridge that
+           answered would otherwise have left this window un-maximised for
+           nothing. */
+        logSessionWindowAction('Launcher window requested', { preserve_fullscreen: true });
+        const opened = await openLauncherWindow({
+            beforeBrowserFallback: resetFullscreenState
+        });
+        logSessionWindowAction('Launcher window request finished', { opened });
         return false;
     }
 
@@ -8092,6 +8198,7 @@
                 }
                 terminals[i]._session = session;
                 setStatus(i, session.status);
+                syncPaneIdentityChrome(i, session);
                 sessionIds[i] = session.session_id;
                 setSessionRoute(session.session_id, activeGroupId, i);
                 if (session.status === 'connected' && isBrowserSession(session)) {
@@ -8356,6 +8463,7 @@
 
             const { index, terminal } = target;
             setStatus(index, session.status);
+            syncPaneIdentityChrome(index, session);
             if (
                 isExplorerPaneInstance(terminal) !== isExplorerSession(session)
                 || isBrowserPaneInstance(terminal) !== isBrowserSession(session)

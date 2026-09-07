@@ -20,11 +20,18 @@
 
 /* The supplied artwork, sized to sit level with the stroke-SVG icons in the
    same control row. It is raster and carries its own palette, so it takes a
-   radius of its own rather than inheriting a glyph's currentColor. */
+   radius of its own rather than inheriting a glyph's currentColor.
+
+   Sized *above* those glyphs rather than level with them, which is what it
+   started at and what made it read as a shrunken thumbnail between them: a
+   stroke icon draws to the edges of its 24px box, and a raster mark carries its
+   own margin inside the file, so matching the boxes leaves the marks visibly
+   unequal. The neighbouring launcher glyph is 24px and the session menu's own
+   artwork is larger still; this sits between them. */
 .dashboard-icon {
-    width: 19px;
-    height: 19px;
-    border-radius: 4px;
+    width: 26px;
+    height: 26px;
+    border-radius: 5px;
     display: block;
 }
 
