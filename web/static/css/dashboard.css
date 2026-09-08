@@ -18,21 +18,38 @@
     flex: 0 0 auto;
 }
 
-/* The supplied artwork, sized to sit level with the stroke-SVG icons in the
-   same control row. It is raster and carries its own palette, so it takes a
-   radius of its own rather than inheriting a glyph's currentColor.
+/* The supplied artwork, drawn at the size the host page asks for. It is raster
+   and carries its own palette, so it takes a radius of its own rather than
+   inheriting a glyph's currentColor.
 
-   Sized *above* those glyphs rather than level with them, which is what it
-   started at and what made it read as a shrunken thumbnail between them: a
-   stroke icon draws to the edges of its 24px box, and a raster mark carries its
-   own margin inside the file, so matching the boxes leaves the marks visibly
-   unequal. The neighbouring launcher glyph is 24px and the session menu's own
-   artwork is larger still; this sits between them. */
+   `--dash-icon-size` is the *mark*, not the box: active_ws.ico bakes padding
+   into its own canvas and inks about 0.61 of it across the entries a button
+   this size renders, so a box set to the mark draws under two thirds of it and
+   the icon reads as a shrunken thumbnail beside anything that fills its own
+   box. `--dash-icon-scale` is 1/that fraction: the box grows by it, the
+   baked-in padding comes back out of the layout as a negative margin of half
+   the difference, and what is left occupying the row is exactly the mark. A
+   negative margin rather than `transform: scale()`, so the browser still picks
+   its source entry from the size it actually paints.
+
+   The scale is this file's because it is a property of *this asset*, and the
+   size is the host page's because it is a property of the row: the launcher's
+   row draws 18px glyphs, which is the default, and the session bar states its
+   own. Guessing a larger box to compensate is what this replaces -- it made the
+   mark bigger without making it predictable, so one declaration drew one size
+   here and another beside identically-treated artwork over there.
+
+   The badge is out of flow and so is not in any of this arithmetic -- the count
+   changes what the button says, never how big its mark is. */
 .dashboard-icon {
-    width: 26px;
-    height: 26px;
+    --dash-icon-mark: var(--dash-icon-size, 18px);
+    --dash-icon-scale: 1.63;
+    width: calc(var(--dash-icon-mark) * var(--dash-icon-scale));
+    height: calc(var(--dash-icon-mark) * var(--dash-icon-scale));
+    margin: calc(var(--dash-icon-mark) * (1 - var(--dash-icon-scale)) / 2);
     border-radius: 5px;
     display: block;
+    flex: 0 0 auto;
 }
 
 /* The badge is positioned against the button itself, and the anchor is stated

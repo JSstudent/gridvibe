@@ -921,7 +921,12 @@ class ApiRoutesTestCase(unittest.TestCase):
         # Settings themselves now open in-page, so this button only opens the
         # launcher window and says so.
         self.assertIn('aria-label="Open launcher"', html)
-        self.assertIn('class="vibe-flow-icon"', html)
+        # It shows the launcher's own icon -- the same mark both top bars
+        # carry. A stroke glyph here was the one control in the session-bar
+        # group that was not supplied artwork.
+        self.assertIn('class="session-bar-launcher-icon"', html)
+        self.assertIn('src="/docs/images/GridVibe_icon.ico"', html)
+        self.assertNotIn("vibe-flow-icon", html)
 
     def test_terminals_page_launcher_button_heads_the_session_tab_line(self):
         """The launcher button sits at the head of the session tab line — ahead
@@ -957,6 +962,185 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertNotIn("Backquote", terminals_js)
         self.assertNotIn('aria-keyshortcuts="Alt+`"', html)
 
+    # ── The three controls at the head of the session tab line ──
+    #
+    # They are one group, and everything below is a consequence of that: one
+    # order, one box, one drawn mark. The mark is the part that had gone wrong
+    # in a way no rule could be read off the stylesheet -- three assets ink
+    # different fractions of their own canvases, so three rules that all said
+    # "26px" drew three different sizes.
+
+    def _css_rule(self, css: str, selector: str, contains: str = "") -> str:
+        """The first rule whose selector list matches (and whose body carries
+        `contains`, for a class that appears in a shared list as well as in a
+        rule of its own)."""
+        for rule in re.findall(rf"{selector}\s*\{{[^}}]*\}}", css, re.DOTALL):
+            if contains in rule:
+                return rule
+        self.fail(f"no rule for {selector}")
+
+    def test_session_bar_runs_launcher_then_dashboard_then_menu(self):
+        """Widest scope first: the launcher (every window), the dashboard
+        (every agent in every window), then the menu whose scope stops at this
+        one. The tab strip's leading padding follows the last of the three
+        rather than staying pinned to the launcher it no longer sits beside."""
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = response.get_data(as_text=True)
+
+        session_bar = html.index('<div class="session-bar">')
+        launcher = html.index('aria-label="Open launcher"')
+        dashboard = html.index('id="dashboardBtn"')
+        menu = html.index('id="sessionMenuRoot"')
+        tabs = html.index('id="sessionTabs"')
+
+        self.assertLess(session_bar, launcher)
+        self.assertLess(launcher, dashboard)
+        self.assertLess(dashboard, menu)
+        self.assertLess(menu, tabs)
+
+        terminals_css = self._static("css/terminals.css")
+        self.assertIn(".session-bar-menu + .session-tabs", terminals_css)
+        self.assertNotIn(".session-bar-launcher-btn + .session-tabs", terminals_css)
+
+    def test_session_bar_controls_are_three_marks_of_one_system(self):
+        """All three are the app's own supplied artwork, so the row reads as
+        one system rather than a stroke glyph beside two picture tiles."""
+        html = self.client.get("/terminals").get_data(as_text=True)
+
+        for mark, source in (
+            ("session-bar-launcher-icon", "GridVibe_icon.ico"),
+            ("dashboard-icon", "active_ws.ico"),
+            ("session-bar-menu-icon", "icon_transparent.ico"),
+        ):
+            with self.subTest(mark=mark):
+                self.assertIn(f'class="{mark}"', html)
+                self.assertIn(f'/docs/images/{source}', html)
+
+        # Nothing in that row paints from currentColor any more, so the button
+        # rule no longer carries a stroke colour for a glyph it has not got.
+        terminals_css = self._static("css/terminals.css")
+        box = self._css_rule(
+            terminals_css, r"\.settings-window-btn,\s*\.session-bar-dashboard-btn"
+        )
+        self.assertNotIn("color:", box)
+
+    def test_session_bar_controls_share_one_drawn_mark(self):
+        """One size is declared and every box is derived from it. The assets
+        do not agree on how much padding they bake into their own canvas --
+        GridVibe_icon inks about 0.53 of it, the other two about 0.61 -- so
+        each carries its own 1/fraction scale and the negative margin takes the
+        padding back out. Two rules that both said 26px are what drew a 26px
+        mark beside a 16px one."""
+        terminals_css = self._static("css/terminals.css")
+        dashboard_css = self._static("css/dashboard.css")
+
+        bar = self._css_rule(terminals_css, r"\.session-bar")
+        self.assertIn("--session-bar-mark:", bar)
+        # The shared dashboard stylesheet is handed the same size rather than
+        # keeping a second number of its own.
+        self.assertIn("--dash-icon-size: var(--session-bar-mark)", bar)
+
+        marks = self._css_rule(
+            terminals_css,
+            r"\.session-bar-launcher-icon,\s*\.session-bar-menu-icon",
+        )
+        self.assertIn("var(--session-bar-mark) * var(--mark-scale)", marks)
+        self.assertIn(
+            "calc(var(--session-bar-mark) * (1 - var(--mark-scale)) / 2)", marks
+        )
+        # ...and each asset states its own correction, because a scale shared
+        # between two assets is a box shared between two assets.
+        scales = set()
+        for mark in ("session-bar-launcher-icon", "session-bar-menu-icon"):
+            rule = self._css_rule(
+                terminals_css, rf"\.{mark}", contains="--mark-scale:"
+            )
+            self.assertIn("--mark-scale:", rule)
+            scales.add(rule.split("--mark-scale:")[1].split(";")[0].strip())
+        self.assertEqual(len(scales), 2, scales)
+
+        dashboard_mark = self._css_rule(dashboard_css, r"\.dashboard-icon")
+        self.assertIn("var(--dash-icon-mark) * var(--dash-icon-scale)", dashboard_mark)
+        self.assertIn(
+            "calc(var(--dash-icon-mark) * (1 - var(--dash-icon-scale)) / 2)",
+            dashboard_mark,
+        )
+
+        # Max surface mode shrinks the row by restating the one size, never by
+        # resizing a mark on its own -- which is how they drifted apart before.
+        max_bar = self._css_rule(
+            terminals_css, r"body\.surface-max \.session-bar"
+        )
+        self.assertIn("--session-bar-mark:", max_bar)
+        self.assertNotIn("body.surface-max .session-bar-menu-icon", terminals_css)
+        self.assertNotIn("body.surface-max .dashboard-icon", terminals_css)
+
+    def test_session_bar_marks_fill_their_buttons(self):
+        """The complaint the shared size was introduced against was not that
+        the marks disagreed but that they were small: three little pictures
+        floating in three large frames. The mark is sized against the button
+        interior, not against a comfortable margin."""
+        terminals_css = self._static("css/terminals.css")
+
+        def px(rule, prop):
+            value = rule.split(f"{prop}:")[1].split(";")[0].strip()
+            return float(value.removesuffix("px"))
+
+        for bar, button in (
+            (r"\.session-bar", r"\.settings-window-btn,\s*\.session-bar-dashboard-btn"),
+            (
+                r"body\.surface-max \.session-bar",
+                r"body\.surface-max \.settings-window-btn",
+            ),
+        ):
+            with self.subTest(bar=bar):
+                mark = px(self._css_rule(terminals_css, bar), "--session-bar-mark")
+                interior = px(self._css_rule(terminals_css, button), "height") - 2
+                self.assertGreaterEqual(mark / interior, 0.85)
+                self.assertLessEqual(mark, interior)
+
+    def test_session_bar_dashboard_button_wears_the_launcher_chrome(self):
+        """The one control in the group that is not a plain glyph was also the
+        one that did not look like a member of it: `.btn.btn-neutral` alone
+        gave it another fill, no border at all, and a height set by whatever
+        its artwork happened to be. It now shares the launcher's whole box."""
+        terminals_css = self._static("css/terminals.css")
+
+        box = self._css_rule(
+            terminals_css, r"\.settings-window-btn,\s*\.session-bar-dashboard-btn"
+        )
+        self.assertIn("width: 38px;", box)
+        self.assertIn("height: 34px;", box)
+        self.assertIn("border: 1px solid var(--t-border-tab);", box)
+        self.assertIn("background: var(--t-btn-bg);", box)
+
+        hover = self._css_rule(
+            terminals_css,
+            r"\.settings-window-btn:hover,\s*\.session-bar-dashboard-btn:hover",
+        )
+        self.assertIn("border-color: var(--t-accent);", hover)
+        self.assertIn("background: var(--t-btn-hover-bg);", hover)
+
+    def test_dashboard_icon_size_is_a_host_page_knob(self):
+        """dashboard.css declares no size of its own for the same reason it
+        declares no palette token: two pages render it, and the launcher's row
+        draws 18px stroke glyphs while the session bar's draws its own mark.
+        The badge is out of flow and enters none of that arithmetic -- the
+        count changes what the button says, never how big its mark is."""
+        dashboard_css = self._static("css/dashboard.css")
+        launcher_css = self._static("css/launcher.css")
+
+        mark = self._css_rule(dashboard_css, r"\.dashboard-icon")
+        self.assertIn("var(--dash-icon-size, 18px)", mark)
+        # The launcher takes the default rather than restating it.
+        self.assertNotIn("--dash-icon-size", launcher_css)
+
+        badge = self._css_rule(dashboard_css, r"\.dashboard-badge")
+        self.assertIn("position: absolute;", badge)
+        self.assertNotIn("--dash-icon", badge)
+
     def test_terminals_page_opens_app_settings_without_the_launcher(self):
         """The session window carries its own App Settings dialog (todo 1) —
         the shared partial plus the shared module, no launcher round-trip."""
@@ -989,7 +1173,6 @@ class ApiRoutesTestCase(unittest.TestCase):
             "app-settings-icon",
             "surface-mode-icon",
             "fullscreen-icon",
-            "vibe-flow-icon",
         ):
             with self.subTest(icon=icon):
                 self.assertIn(f'class="{icon}"', html)
@@ -18669,14 +18852,23 @@ class StyleThemingTestCase(unittest.TestCase):
 
     # ── 7.3: theme-ignoring hardcoded colors replaced with tokens ───────────
 
-    def test_settings_window_icon_uses_current_color(self):
+    def test_session_bar_buttons_hold_no_palette_literal(self):
         html = self.client.get("/terminals").get_data(as_text=True)
         for literal in ("#06263a", "#5eefff", "#63f6ff", "#6dfcff", "#4fd6ff"):
             self.assertNotIn(literal, html)
         terminals_css = self._static("css/terminals.css")
-        block = re.search(r"\.settings-window-btn \{.*?\}", terminals_css,
-                          re.DOTALL).group(0)
-        self.assertIn("color: var(--t-accent)", block)
+        # The launcher button used to paint a stroke glyph from
+        # `color: var(--t-accent)`; it now carries the app's own artwork, so
+        # the rule states no colour at all and every value it does state is a
+        # token.
+        block = re.search(
+            r"\.settings-window-btn,\s*\.session-bar-dashboard-btn \{.*?\}",
+            terminals_css,
+            re.DOTALL,
+        ).group(0)
+        self.assertNotIn("color:", block)
+        self.assertIn("border: 1px solid var(--t-border-tab);", block)
+        self.assertIn("background: var(--t-btn-bg);", block)
 
     def test_browser_close_button_uses_danger_token(self):
         launcher_css = self._static("css/launcher.css")

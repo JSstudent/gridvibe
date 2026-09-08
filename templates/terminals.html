@@ -124,10 +124,33 @@
 </div>
 
 <div class="session-bar">
-    <!-- The session/workspace menu heads the line, ahead of the launcher: the
-         session bar is always in the flow, so the two menus it absorbed stop
-         being reveal-then-traverse and become one click. The panel is built by
-         session-menu.js when the button is pressed. -->
+    <!-- Three controls, widest scope first: the launcher (every window), the
+         dashboard (every agent in every window), then the menu whose scope
+         stops at this one. They head the session tab line rather than the top
+         bar because the bar is always in the flow, so reaching them stops being
+         reveal-then-traverse and becomes one click. -->
+    <a
+        href="/"
+        class="btn btn-neutral btn-icon settings-window-btn session-bar-launcher-btn"
+        onclick="return goToSettings(event)"
+        title="Open launcher (Alt+Q)"
+        aria-label="Open launcher"
+        aria-keyshortcuts="Alt+Q"
+    >
+        <!-- The app's own mark, the same one both top bars carry: this button
+             opens the launcher, so the launcher's icon is what it should show.
+             A stroke glyph here was the one control in the group that was not
+             supplied artwork, which is what made the row read as three
+             different systems however carefully the three were sized. -->
+        <img class="session-bar-launcher-icon" src="/docs/images/GridVibe_icon.ico" alt="" aria-hidden="true">
+    </a>
+    <!-- Everything that is running, anywhere: the same panel the launcher
+         shows, seated between it and the menu whose scope stops at this
+         window. -->
+    {% set dashboard_button_class = 'btn btn-neutral btn-icon session-bar-dashboard-btn' %}
+    {% include 'partials/dashboard.html' %}
+    <!-- The session/workspace menu closes the group, against the tabs it acts
+         on. The panel is built by session-menu.js when the button is pressed. -->
     <div class="app-menu session-bar-menu" id="sessionMenuRoot">
         <button
             type="button"
@@ -144,27 +167,6 @@
         </button>
         <div class="app-menu-panel session-bar-menu-panel" id="sessionMenu" role="menu" aria-labelledby="sessionMenuBtn"></div>
     </div>
-    <!-- Everything that is running, anywhere: the same panel the launcher
-         shows, seated beside the menu whose scope stops at this window. -->
-    {% set dashboard_button_class = 'btn btn-neutral btn-icon session-bar-dashboard-btn' %}
-    {% include 'partials/dashboard.html' %}
-    <!-- The launcher button heads the session tab line so it sits with the tabs
-         it opens and stays reachable while the top bar is hidden. -->
-    <a
-        href="/"
-        class="btn btn-neutral btn-icon settings-window-btn session-bar-launcher-btn"
-        onclick="return goToSettings(event)"
-        title="Open launcher (Alt+Q)"
-        aria-label="Open launcher"
-        aria-keyshortcuts="Alt+Q"
-    >
-        <svg class="vibe-flow-icon" viewBox="0 0 32 32" aria-hidden="true" focusable="false">
-            <rect x="5" y="7" width="22" height="18" rx="5" fill="none" stroke="currentColor" stroke-width="1.4"/>
-            <path d="M9 11.5h14" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/>
-            <path d="M12 15l4 4-4 4" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
-            <path d="M18 22h5" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/>
-        </svg>
-    </a>
     <div class="session-tabs" id="sessionTabs"></div>
     <button
         type="button"
