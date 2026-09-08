@@ -187,6 +187,40 @@
     function isOwnBroadcast(message) {
         return message?.source === GRIDVIBE_WINDOW_ID;
     }
+
+    /* "A preset was written — reread your list." Sent by every page that can
+       write one (the workspace window's Save Session, the agent dashboard's
+       Save and close) and listened for by the launcher, which is the only
+       surface that renders the list and has no socket of its own. It lives
+       here rather than on any one page for exactly that reason: it is now sent
+       from three documents and the two channel names it writes are declared at
+       the top of this file. */
+    function notifySavedSessionUpdated(savedSession, options = {}) {
+        const sessionId = String(savedSession?.id || '').trim();
+        if (!sessionId) {
+            return;
+        }
+
+        const payload = {
+            id: sessionId,
+            name: String(savedSession?.name || '').trim(),
+            updated_at: String(savedSession?.updated_at || '').trim(),
+            activate: Boolean(options.activate),
+            timestamp: Date.now(),
+            nonce: Math.random().toString(36).slice(2)
+        };
+
+        try {
+            const channel = new BroadcastChannel(SAVED_SESSION_BROADCAST_CHANNEL);
+            channel.postMessage(payload);
+            channel.close();
+        } catch (_error) {}
+
+        try {
+            localStorage.setItem(SAVED_SESSION_UPDATE_STORAGE_KEY, JSON.stringify(payload));
+        } catch (_error) {}
+    }
+
     function normalizeThemePreference(theme) {
         return ['system', 'light', 'dark'].includes(theme) ? theme : 'system';
     }

@@ -673,6 +673,84 @@ def normalize_workspace_metadata(
     return normalized
 
 
+def _save_live_group_preset(
+    session_manager: Any,
+    group: Dict[str, Any],
+    entries: List[Dict[str, Any]],
+    taken_names: List[Any],
+) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, str]]]:
+    """Save one live group as a reusable preset and link the group to it.
+
+    The single implementation behind both callers: the exit save, which walks
+    every live group, and :func:`prepare_group_save`, which is one group asked
+    for by name from a surface that is not the window holding it.  ``entries``
+    and ``taken_names`` are the caller's running view of ``saved_sessions.json``
+    and are extended in place, so a caller saving several groups in one pass
+    cannot mint the same preset name twice.
+
+    Returns ``(saved_entry, error)``.  Both can be set at once: the preset was
+    written and the group closed before it could be linked.  That is a partial
+    result and is reported as one rather than rounded to either side.
+    """
+    group_id = str(group.get("group_id") or "").strip()
+    attached_id = str(group.get("saved_session_id") or "").strip()
+    existing = _find_saved_session_entry(entries, attached_id)
+    live_config = _live_group_config(group)
+    if existing is not None:
+        config = _merge_workspace_session_config(existing["config"], live_config)
+        # The merge keeps the base preset's `ssh` block verbatim, which
+        # is what stops a re-save from downgrading a stored password —
+        # but it also meant an *empty* one could never be repaired. A
+        # group whose preset was created without a credential (a
+        # workspace save from the terminal page) stayed unrestorable
+        # forever, even though the exit save holds the live password.
+        config = apply_live_ssh_credential(
+            config, _live_ssh_credential(live_config)
+        )
+        preset_name = existing["name"]
+        preset_id = existing["id"]
+    else:
+        config = _normalize_session_config(live_config)
+        base_name = str(group.get("name") or "Open session").strip() or "Open session"
+        preset_name = build_unique_session_name(base_name, taken_names)
+        preset_id = attached_id or None
+    try:
+        saved = upsert_saved_session(
+            config,
+            name=preset_name,
+            session_id=preset_id,
+            set_last_session=False,
+        )
+        updated = session_manager.update_group_saved_session(
+            group_id,
+            saved["id"],
+            saved["name"],
+            layout=saved["config"].get("layout"),
+            workspace_layout=saved["config"].get("workspace_layout"),
+            session_view_updates=build_live_session_view_updates(
+                live_config, saved["config"]
+            ),
+        )
+        entries.append(saved)
+        taken_names.append(saved["name"])
+        if updated is None:
+            return saved, {
+                "scope": "session",
+                "id": group_id,
+                "error": "The live group closed before its preset could be linked",
+            }
+        return saved, None
+    except Exception:
+        # Deliberately omit names, targets, paths, and exception text:
+        # preset errors can contain state-file paths and this response is
+        # a shape diagnostic, not a secret-bearing debug channel.
+        return None, {
+            "scope": "session",
+            "id": group_id,
+            "error": "The reusable session could not be saved",
+        }
+
+
 def _save_live_presets(
     session_manager: Any,
     snapshots: Dict[str, Dict[str, Any]],
@@ -685,67 +763,13 @@ def _save_live_presets(
 
     for workspace_id in sorted(snapshots):
         for group in snapshots[workspace_id].get("groups") or []:
-            group_id = str(group.get("group_id") or "").strip()
-            attached_id = str(group.get("saved_session_id") or "").strip()
-            existing = _find_saved_session_entry(entries, attached_id)
-            live_config = _live_group_config(group)
-            if existing is not None:
-                config = _merge_workspace_session_config(existing["config"], live_config)
-                # The merge keeps the base preset's `ssh` block verbatim, which
-                # is what stops a re-save from downgrading a stored password —
-                # but it also meant an *empty* one could never be repaired. A
-                # group whose preset was created without a credential (a
-                # workspace save from the terminal page) stayed unrestorable
-                # forever, even though the exit save holds the live password.
-                config = apply_live_ssh_credential(
-                    config, _live_ssh_credential(live_config)
-                )
-                preset_name = existing["name"]
-                preset_id = existing["id"]
-            else:
-                config = _normalize_session_config(live_config)
-                base_name = str(group.get("name") or "Open session").strip() or "Open session"
-                preset_name = build_unique_session_name(base_name, taken_names)
-                preset_id = attached_id or None
-            try:
-                saved = upsert_saved_session(
-                    config,
-                    name=preset_name,
-                    session_id=preset_id,
-                    set_last_session=False,
-                )
-                updated = session_manager.update_group_saved_session(
-                    group_id,
-                    saved["id"],
-                    saved["name"],
-                    layout=saved["config"].get("layout"),
-                    workspace_layout=saved["config"].get("workspace_layout"),
-                    session_view_updates=build_live_session_view_updates(
-                        live_config, saved["config"]
-                    ),
-                )
+            saved, error = _save_live_group_preset(
+                session_manager, group, entries, taken_names
+            )
+            if saved is not None:
                 saved_ids.append(saved["id"])
-                entries.append(saved)
-                taken_names.append(saved["name"])
-                if updated is None:
-                    errors.append(
-                        {
-                            "scope": "session",
-                            "id": group_id,
-                            "error": "The live group closed before its preset could be linked",
-                        }
-                    )
-            except Exception:
-                # Deliberately omit names, targets, paths, and exception text:
-                # preset errors can contain state-file paths and this response is
-                # a shape diagnostic, not a secret-bearing debug channel.
-                errors.append(
-                    {
-                        "scope": "session",
-                        "id": group_id,
-                        "error": "The reusable session could not be saved",
-                    }
-                )
+            if error is not None:
+                errors.append(error)
     return saved_ids, errors
 
 
@@ -946,3 +970,123 @@ def prepare_workspace_save(
         "native_zoom_factor": slot.get("native_zoom_factor"),
         "topbar_visible": slot["topbar_visible"],
     }, 200
+
+
+def prepare_group_save(
+    session_manager: Any,
+    group_id: Any,
+    emit_request: Callable[[str, str], None],
+) -> Tuple[Dict[str, Any], int]:
+    """Save one live session group as a reusable preset, from anywhere.
+
+    The middle button of the three-outcome close prompt -- *Save and close* --
+    asked for by a surface that is **not** the window holding the group.  The
+    workspace page composes that preset from its own live DOM, which the agent
+    dashboard has no access to; the server already knows how to build one
+    (:func:`_live_group_config`, the exit save's own path), so this is that
+    build asked for by name rather than a second implementation of it.
+
+    A window that *is* open is flushed first, for the reason the launcher's
+    per-workspace save flushes: presentation the window has queued but not yet
+    sent is the difference between saving what the reader sees and saving what
+    the server last heard.  A workspace with **no** window open is not refused
+    here, and that is the one deliberate difference from
+    :func:`prepare_workspace_save`: a workspace snapshot carries window chrome
+    that only a window knows, while a session preset carries none -- with
+    nothing open there is nothing newer to wait for, and the last synced
+    presentation is the whole truth.
+
+    It never captures a workspace slot, never issues a teardown decision, and
+    never closes anything: the caller decides whether the close follows, and a
+    save that failed must not cost the terminals it was meant to preserve.
+
+    Returns ``(payload, status)``; the caller only serializes it.
+    """
+    group = str(group_id or "").strip()
+    with session_manager.lock:
+        live_group = session_manager.groups.get(group)
+        workspace_id = str(live_group.workspace_id) if live_group is not None else ""
+    if live_group is None:
+        return {"error": "Session group not found", "group_missing": True}, 404
+
+    if lifecycle_coordinator.connected_window_count(workspace_id) > 0:
+        flush_result = lifecycle_coordinator.request_flush({workspace_id}, emit_request)
+        if not flush_result["ok"]:
+            logger.warning(
+                "Session save %s flush failed: categories=%s",
+                group,
+                sorted(
+                    {
+                        error.get("category", "client_flush")
+                        for error in flush_result["errors"]
+                    }
+                ),
+            )
+            return {
+                "saved": False,
+                "group_id": group,
+                "workspace_id": workspace_id,
+                "error": "The workspace window did not finish flushing — try again",
+                "retryable": True,
+                "errors": flush_result["errors"],
+            }, 503
+
+    # The one credential-bearing snapshot path, used here for exactly what it
+    # exists for: encrypting a reusable preset. Nothing from it is returned or
+    # logged.
+    snapshots = session_manager.snapshot_lifecycle_workspaces()
+    group_snapshot = next(
+        (
+            candidate
+            for candidate in (snapshots.get(workspace_id) or {}).get("groups") or []
+            if str(candidate.get("group_id") or "") == group
+        ),
+        None,
+    )
+    if group_snapshot is None:
+        # `snapshot_live_workspaces` skips a group with no panes, so this is an
+        # empty session rather than a missing one -- the same distinction the
+        # workspace save draws with its 409.
+        logger.debug("Session save %s skipped: category=empty_group", group)
+        return {
+            "saved": False,
+            "group_id": group,
+            "workspace_id": workspace_id,
+            "error": "This session has no terminals to save",
+        }, 409
+
+    stored = _load_saved_sessions_payload()
+    entries = list(stored.get("sessions") or [])
+    taken_names = [entry.get("name") for entry in entries]
+    saved, error = _save_live_group_preset(
+        session_manager, group_snapshot, entries, taken_names
+    )
+    if saved is None:
+        logger.warning("Session save %s could not commit its preset", group)
+        return {
+            "saved": False,
+            "group_id": group,
+            "workspace_id": workspace_id,
+            "error": "The reusable session could not be saved",
+            "retryable": True,
+            "errors": [error] if error else [],
+        }, 503
+
+    logger.info(
+        "Session group %s saved as preset %s from an out-of-window surface",
+        group,
+        saved["id"],
+    )
+    payload = {
+        "saved": True,
+        "group_id": group,
+        "workspace_id": workspace_id,
+        "id": saved["id"],
+        "name": saved["name"],
+        "updated_at": saved.get("updated_at", ""),
+    }
+    if error is not None:
+        # The preset is on disk; only the link back to a group that closed
+        # underneath it is missing. Saying so beats reporting a clean success.
+        payload["errors"] = [error]
+    return payload, 200

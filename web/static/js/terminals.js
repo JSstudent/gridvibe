@@ -578,7 +578,6 @@
     let pendingModeSwitchSessionIds = new Set();
     let savedSessionResolver = null;
     let saveSessionAsResolver = null;
-    let closeSessionConfirmResolver = null;
     const MAX_SPLIT_TERMINALS = Math.min(16, Number(MAX_SESSIONS || 16));
 
     function isSessionModeSwitchPending(sessionId) {
@@ -1429,31 +1428,9 @@
         }
     }
 
-    function notifySavedSessionUpdated(savedSession, options = {}) {
-        const sessionId = String(savedSession?.id || '').trim();
-        if (!sessionId) {
-            return;
-        }
-
-        const payload = {
-            id: sessionId,
-            name: String(savedSession?.name || '').trim(),
-            updated_at: String(savedSession?.updated_at || '').trim(),
-            activate: Boolean(options.activate),
-            timestamp: Date.now(),
-            nonce: Math.random().toString(36).slice(2)
-        };
-
-        try {
-            const channel = new BroadcastChannel(SAVED_SESSION_BROADCAST_CHANNEL);
-            channel.postMessage(payload);
-            channel.close();
-        } catch (_error) {}
-
-        try {
-            localStorage.setItem(SAVED_SESSION_UPDATE_STORAGE_KEY, JSON.stringify(payload));
-        } catch (_error) {}
-    }
+    /* notifySavedSessionUpdated() lives in shared.js, beside the two channel
+       names it writes to: a third page (the agent dashboard) now saves a
+       preset too, and the launcher listens for every one of them. */
 
     /* ─────────────────────────────────────────────
        Multi-workspace: menus, move, window lifecycle
@@ -1861,45 +1838,12 @@
         });
     }
 
-    /* The three outcomes of the close prompt. Anything that is not an explicit
-       button press (Escape, the backdrop) keeps the session. */
-    const CLOSE_SESSION_CANCEL = 'cancel';
-    const CLOSE_SESSION_CLOSE = 'close';
-    const CLOSE_SESSION_SAVE_AND_CLOSE = 'save-and-close';
+    /* The prompt itself — its markup, its three decisions and what it says —
+       is close-session-modal.js, shared with the agent dashboard, which opens
+       the same dialog over the same partial. What stays here is the one thing
+       that is this page's: which group is being asked about.
 
-    function closeCloseSessionConfirmModal(decision = CLOSE_SESSION_CANCEL) {
-        const modal = document.getElementById('closeSessionConfirmModal');
-        modal.classList.remove('visible');
-        modal.setAttribute('aria-hidden', 'true');
-
-        if (closeSessionConfirmResolver) {
-            const resolver = closeSessionConfirmResolver;
-            closeSessionConfirmResolver = null;
-            resolver(decision);
-        }
-    }
-
-    function openCloseSessionConfirmModal(group, connectedCount, totalCount) {
-        const modal = document.getElementById('closeSessionConfirmModal');
-        const copy = document.getElementById('closeSessionConfirmCopy');
-        const name = group?.name || group?.group_id || 'this session';
-        const terminalNoun = totalCount === 1 ? 'terminal' : 'terminals';
-        copy.textContent = totalCount > 0
-            ? `Close "${name}" and its ${totalCount} ${terminalNoun} (${connectedCount} connected)?`
-            : `Close "${name}"?`;
-        modal.classList.add('visible');
-        modal.setAttribute('aria-hidden', 'false');
-
-        window.setTimeout(() => {
-            document.getElementById('closeSessionConfirmCancel').focus();
-        }, 0);
-
-        return new Promise(resolve => {
-            closeSessionConfirmResolver = resolve;
-        });
-    }
-
-    /* One misclick on a tab's × must not silently kill live terminals
+       One misclick on a tab's × must not silently kill live terminals
        (sessions are memory-only), so closing a group with ≥1 connected
        terminal asks first, and offers to save the group as a preset on the
        way out. Dead groups close without the dialog. Resolves to one of the
@@ -1916,12 +1860,16 @@
             /* Status lookup failed — fall through and ask, the safe default. */
         }
 
-        const connectedCount = sessions.filter(session => session.status === 'connected').length;
-        if (sessions.length > 0 && connectedCount === 0) {
-            return CLOSE_SESSION_CLOSE;
+        const skipped = closeSessionPromptSkipDecision(sessions);
+        if (skipped) {
+            return skipped;
         }
 
-        return openCloseSessionConfirmModal(getGroupById(groupId), connectedCount, sessions.length);
+        return openCloseSessionConfirmModal({
+            group: getGroupById(groupId),
+            connectedCount: closeSessionConnectedCount(sessions),
+            totalCount: sessions.length
+        });
     }
 
     function buildSavedSessionLaunchPayload(savedSession) {
@@ -2176,23 +2124,8 @@
         });
     });
 
-    document.getElementById('closeSessionConfirmModal').addEventListener('click', event => {
-        if (event.target.id === 'closeSessionConfirmModal') {
-            closeCloseSessionConfirmModal(CLOSE_SESSION_CANCEL);
-        }
-    });
-
-    document.getElementById('closeSessionConfirmCancel').addEventListener('click', () => {
-        closeCloseSessionConfirmModal(CLOSE_SESSION_CANCEL);
-    });
-
-    document.getElementById('closeSessionConfirmSave').addEventListener('click', () => {
-        closeCloseSessionConfirmModal(CLOSE_SESSION_SAVE_AND_CLOSE);
-    });
-
-    document.getElementById('closeSessionConfirmAccept').addEventListener('click', () => {
-        closeCloseSessionConfirmModal(CLOSE_SESSION_CLOSE);
-    });
+    /* The close prompt's own backdrop, buttons and Escape are wired by
+       close-session-modal.js, over the same ids on both pages. */
 
     document.addEventListener('keydown', event => {
         if (event.key === 'Escape') {
@@ -2204,9 +2137,6 @@
             }
             if (document.getElementById('saveSessionAsModal').classList.contains('visible')) {
                 closeSaveSessionAsModal();
-            }
-            if (document.getElementById('closeSessionConfirmModal').classList.contains('visible')) {
-                closeCloseSessionConfirmModal(CLOSE_SESSION_CANCEL);
             }
         }
     });

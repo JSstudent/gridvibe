@@ -66,6 +66,9 @@
     /* A dashboard that lags the thing it describes is just a screenshot. */
     const AGENT_DASHBOARD_REFRESH_MS = 2000;
     const AGENT_DASHBOARD_TIMEOUT_MS = 10000;
+    /* How long a confirmation stays on the notice line. Only non-errors are
+       timed: a failure is a state the reader has to do something about. */
+    const AGENT_DASHBOARD_NOTICE_MS = 6000;
 
 
     let _agentDashboardTimer = null;
@@ -79,6 +82,8 @@
     let _agentDashboardStructure = '';
     let _agentDashboardRows = new Map();
     let _agentDashboardActionNotice = '';
+    let _agentDashboardActionTone = 'error';
+    let _agentDashboardNoticeTimer = null;
     let _agentDashboardReadNotice = '';
     let _agentDashboardWired = false;
 
@@ -346,36 +351,121 @@
         `;
     }
 
+    /* The one glyph on this page that is a control rather than a mark. Stroke
+       SVG and not a text ×, so it takes `currentColor` and lines up with the
+       title bar's own icon box instead of being centred by font metrics. */
+    const DASHBOARD_CLOSE_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor"'
+        + ' stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"'
+        + ' focusable="false"><line x1="18" y1="6" x2="6" y2="18"></line>'
+        + '<line x1="6" y1="6" x2="18" y2="18"></line></svg>';
+
+    function dashboardCloseActions() {
+        return typeof window !== 'undefined' ? window.GridVibeDashboardClose : undefined;
+    }
+
+    /* Whether the *window* verb is on this page at all. Asked at render time
+       rather than remembered, because the native bridge arrives after the
+       first paint — the `pywebviewready` listener below invalidates the
+       rendered structure so this question is put again once it has. */
+    function dashboardCanCloseWindows() {
+        const actions = dashboardCloseActions();
+        return Boolean(actions && actions.canCloseWindow());
+    }
+
     /* One session tab, as a card: its own heading, its own agents, its own
        edge. The heading is pressable for the same reason the agent rows are —
        it is the way to the tab itself, which may hold panes this surface
-       deliberately does not list. */
+       deliberately does not list.
+
+       The × is a control *beside* that heading and never inside it: a button
+       inside a button is not a control, and the heading already has an action
+       of its own. It ends live shells, so it goes through the same
+       three-outcome prompt the session tab's × does. */
     function dashboardSessionHtml(group) {
         const panes = Array.isArray(group?.panes) ? group.panes : [];
         const agents = Number(group?.agent_count) || panes.length;
         const total = Number(group?.pane_count) || panes.length;
         const others = Math.max(0, total - agents);
+        const name = String(group?.name || group?.group_id || '');
+        const actions = dashboardCloseActions();
+        /* No controller, no ×: a control that cannot do the thing it names is
+           worse than a heading with no control beside it. The same rule the
+           band's two verbs follow, and the same one this file already applies
+           to the identity and glyph modules. */
+        const closeTitle = actions ? actions.policy.sessionCloseTitle(`"${name}"`) : '';
+        const closeButton = actions
+            ? `
+                    <button
+                        type="button"
+                        class="dash-session-close"
+                        data-dashboard-action="close-session"
+                        data-dashboard-key="close-session:${escHtml(group?.group_id || '')}"
+                        data-workspace-id="${escHtml(group?.workspace_id || '')}"
+                        data-group-id="${escHtml(group?.group_id || '')}"
+                        data-session-name="${escHtml(name)}"
+                        title="${escHtml(closeTitle)}"
+                        aria-label="${escHtml(closeTitle)}"
+                    >${DASHBOARD_CLOSE_ICON}</button>`
+            : '';
         return `
             <section class="dash-session">
-                <button
-                    type="button"
-                    class="dash-session-head"
-                    data-dashboard-action="session"
-                    data-dashboard-key="session:${escHtml(group?.group_id || '')}"
-                    data-workspace-id="${escHtml(group?.workspace_id || '')}"
-                    data-group-id="${escHtml(group?.group_id || '')}"
-                >
-                    <span class="dash-session-name">${escHtml(String(group?.name || group?.group_id || ''))}</span>
-                    ${group?.is_active ? dashboardTagHtml('active', 'active') : ''}
-                    <span class="dash-session-meta">
-                        ${agents} agent${agents === 1 ? '' : 's'}${others ? ` · ${others} other pane${others === 1 ? '' : 's'}` : ''}
-                    </span>
-                </button>
+                <header class="dash-session-head">
+                    <button
+                        type="button"
+                        class="dash-session-open"
+                        data-dashboard-action="session"
+                        data-dashboard-key="session:${escHtml(group?.group_id || '')}"
+                        data-workspace-id="${escHtml(group?.workspace_id || '')}"
+                        data-group-id="${escHtml(group?.group_id || '')}"
+                    >
+                        <span class="dash-session-name">${escHtml(name)}</span>
+                        ${group?.is_active ? dashboardTagHtml('active', 'active') : ''}
+                        <span class="dash-session-meta">
+                            ${agents} agent${agents === 1 ? '' : 's'}${others ? ` · ${others} other pane${others === 1 ? '' : 's'}` : ''}
+                        </span>
+                    </button>${closeButton}
+                </header>
                 <div class="dash-agents">
                     ${dashboardAgentGroups(panes).map(dashboardAgentGroupHtml).join('')}
                 </div>
             </section>
         `;
+    }
+
+    /* The band's two close verbs. Words rather than glyphs, and deliberately:
+       they differ by whether the sessions survive, which no pair of icons this
+       size says and a label plus a title does. The window verb is simply not
+       rendered in browser mode (`dashboard-close.js` owns that predicate). */
+    function dashboardWorkspaceActionsHtml(workspace, index) {
+        const actions = dashboardCloseActions();
+        if (!actions) {
+            return '';
+        }
+        const label = dashboardWorkspaceLabel(workspace, index);
+        const workspaceId = escHtml(workspace?.workspace_id || '');
+        /* What closing the workspace would end, which is every live session in
+           it and not only the ones listed here. The agent-scoped count is the
+           fallback rather than zero: a band exists because something is
+           running in it, and a zero would make the confirmation skip itself. */
+        const closes = Number(workspace?.live_group_count)
+            || Number(workspace?.group_count)
+            || 0;
+        const controls = actions.policy
+            .workspaceControls(workspace, { native: dashboardCanCloseWindows() })
+            .map(control => `
+                <button
+                    type="button"
+                    class="dash-workspace-action${control.danger ? ' is-danger' : ''}"
+                    data-dashboard-action="${escHtml(control.action)}"
+                    data-dashboard-key="${escHtml(control.action)}:${workspaceId}"
+                    data-workspace-id="${workspaceId}"
+                    data-workspace-label="${escHtml(label)}"
+                    data-group-count="${escHtml(String(closes))}"
+                    title="${escHtml(control.title)}"
+                >${escHtml(control.label)}</button>
+            `)
+            .join('');
+        return `<div class="dash-workspace-actions">${controls}</div>`;
     }
 
     /* One workspace, as a titled band across the page. Its sessions are laid
@@ -399,6 +489,7 @@
                     <span class="dash-workspace-meta">
                         ${groups.length} session${groups.length === 1 ? '' : 's'} · ${agents} agent${agents === 1 ? '' : 's'}
                     </span>
+                    ${dashboardWorkspaceActionsHtml(workspace, index)}
                 </header>
                 <div class="dash-sessions">
                     ${groups.map(dashboardSessionHtml).join('')}
@@ -438,15 +529,44 @@
 
     /* ── The page ── */
 
-    function setAgentDashboardNotice(message, source = 'action') {
-        if (source === 'read') _agentDashboardReadNotice = message;
-        else _agentDashboardActionNotice = message;
+    /* One line, one message. A failed read and a failed action are two sources
+       and the action wins while it has something to say, because it is the one
+       the reader just provoked.
+
+       `tone` is the action slot's alone: a read failure is never anything but
+       an error, while an action can succeed *invisibly* — closing a workspace
+       window changes nothing on this page — and has to be able to say so. An
+       error stays until it is replaced or the action that raised it succeeds;
+       anything else is a confirmation rather than a state, so it hands the
+       line back on a timer, the same rule the launcher's banner follows. */
+    function setAgentDashboardNotice(message, source = 'action', tone = 'error') {
+        if (source === 'read') {
+            _agentDashboardReadNotice = message;
+        } else {
+            _agentDashboardActionNotice = message;
+            _agentDashboardActionTone = message ? tone : 'error';
+            if (_agentDashboardNoticeTimer !== null) {
+                clearTimeout(_agentDashboardNoticeTimer);
+                _agentDashboardNoticeTimer = null;
+            }
+            if (message && tone !== 'error') {
+                _agentDashboardNoticeTimer = setTimeout(
+                    () => setAgentDashboardNotice(''),
+                    AGENT_DASHBOARD_NOTICE_MS
+                );
+            }
+        }
         const notice = document.getElementById(AGENT_DASHBOARD_NOTICE_ID);
         if (!notice) {
             return;
         }
+        const showingAction = Boolean(_agentDashboardActionNotice);
         notice.textContent = _agentDashboardActionNotice || _agentDashboardReadNotice;
         notice.hidden = !notice.textContent;
+        notice.classList.toggle(
+            'is-info',
+            showingAction && _agentDashboardActionTone !== 'error'
+        );
     }
 
     function paintAgentDashboardSnapshot(snapshot) {
@@ -723,6 +843,21 @@
                 return;
             }
             event.preventDefault();
+            const action = row.dataset.dashboardAction || '';
+            const actions = dashboardCloseActions();
+            /* The close verbs and the open verbs share one listener because
+               they share one set of rows; what separates them is the action
+               the row states, never which element it is. */
+            if (actions?.handles(action)) {
+                actions.run(action, {
+                    workspaceId: row.dataset.workspaceId || '',
+                    groupId: row.dataset.groupId || '',
+                    name: row.dataset.sessionName || '',
+                    label: row.dataset.workspaceLabel || '',
+                    groupCount: Number(row.dataset.groupCount) || 0
+                }, row);
+                return;
+            }
             openDashboardTarget({
                 workspaceId: row.dataset.workspaceId,
                 groupId: row.dataset.groupId || '',
@@ -739,6 +874,16 @@
             }
         });
         wireAgentDashboardChords();
+        /* The native bridge is not there when the first tree is painted, and
+           the *window* close verb exists only when it is. The repaint skip
+           compares the reading, which has not changed — so the rendered
+           structure is dropped explicitly, or the row would keep its
+           browser-mode shape for the life of the window. */
+        window.addEventListener?.('pywebviewready', () => {
+            _agentDashboardStructure = '';
+            _agentDashboardPainted = '';
+            refreshAgentDashboard();
+        });
         window.addEventListener?.('focus', () => refreshAgentDashboard());
         window.addEventListener?.('pagehide', () => {
             clearInterval(_agentDashboardTimer);

@@ -183,6 +183,7 @@ def compose_dashboard(
     for workspace in workspaces:
         workspace_id = str(workspace.get("workspace_id") or "")
         active_group_id = str(workspace.get("active_group_id") or "")
+        live_groups = groups_by_workspace.get(workspace_id, [])
         groups = [
             compose_group(
                 group,
@@ -192,7 +193,7 @@ def compose_dashboard(
                 activity,
                 now,
             )
-            for group in groups_by_workspace.get(workspace_id, [])
+            for group in live_groups
         ]
         # A session with no agent in it says nothing this surface is for, and a
         # workspace with no such session says nothing either. Both are dropped
@@ -207,6 +208,13 @@ def compose_dashboard(
             "created_at": workspace.get("created_at"),
             "active_group_id": active_group_id,
             "group_count": len(groups),
+            # Every live session, agent-bearing or not. `group_count` is what
+            # this surface *lists*; this is what closing the workspace would
+            # *end*, and the two are different numbers whenever a workspace
+            # holds a plain terminal beside its agents. The close confirmation
+            # states consequences, so it reads this one -- naming the filtered
+            # count there would understate an irreversible act.
+            "live_group_count": len(live_groups),
             "agent_count": sum(group["agent_count"] for group in groups),
             "groups": groups,
         })

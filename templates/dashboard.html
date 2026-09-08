@@ -47,14 +47,27 @@
      its own, but the module wires its dismissers unconditionally. -->
 <div id="workspaceContextMenu" class="workspace-context-menu" role="menu" hidden></div>
 
+<!-- The two dialogs a close goes through, and both are the app's existing
+     ones: the session card's × asks the same three-outcome question the
+     session tab's × does, and the workspace band's Close workspace asks the
+     same question the launcher's Workspaces card does. A second prompt for one
+     irreversible act is how two surfaces come to warn about differently sized
+     consequences. -->
+{% set close_session_variant = 'dashboard' %}
+{% include 'partials/close_session_modal.html' %}
+{% set generic_confirm_variant = 'dashboard' %}
+{% include 'partials/generic_confirm_modal.html' %}
+
 <script>
     const MULTI_WORKSPACE_ENABLED = {{ multi_workspace_enabled | tojson }};
     const AGENT_OPTIONS = {{ agent_options|tojson }};
 </script>
 <script src="{{ url_for('static', filename='js/shared.js') }}?v={{ version }}"></script>
 <script src="{{ url_for('static', filename='js/workspaces.js') }}?v={{ version }}"></script>
+<script src="{{ url_for('static', filename='js/close-session-modal.js') }}?v={{ version }}"></script>
 <script src="{{ url_for('static', filename='js/agent-identity.js') }}?v={{ version }}"></script>
 <script src="{{ url_for('static', filename='js/agent-glyphs.js') }}?v={{ version }}"></script>
+<script src="{{ url_for('static', filename='js/dashboard-close.js') }}?v={{ version }}"></script>
 <script src="{{ url_for('static', filename='js/dashboard-window.js') }}?v={{ version }}"></script>
 <script src="{{ url_for('static', filename='js/dashboard-focus.js') }}?v={{ version }}"></script>
 <script>

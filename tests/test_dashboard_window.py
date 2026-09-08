@@ -155,6 +155,24 @@ let focusIsInside = false;
 let focusTarget = null;
 const focusQueries = [];
 
+/* Enough of a DOMTokenList for the module to write to: the notice line carries
+   its tone as a class, so a stub without one would fail every path that
+   reports anything. */
+function fakeClassList() {
+    const names = new Set();
+    return {
+        names,
+        add(name) { names.add(name); },
+        remove(name) { names.delete(name); },
+        contains(name) { return names.has(name); },
+        toggle(name, force) {
+            const on = force === undefined ? !names.has(name) : Boolean(force);
+            if (on) { names.add(name); } else { names.delete(name); }
+            return on;
+        }
+    };
+}
+
 function fakeElement(id) {
     return {
         id,
@@ -164,6 +182,7 @@ function fakeElement(id) {
         scrollTop: 0,
         dataset: {},
         style: {},
+        classList: fakeClassList(),
         contains: () => focusIsInside,
         querySelector(selector) { focusQueries.push(selector); return focusTarget; },
         ...fakeListeners()

@@ -246,24 +246,8 @@
     </div>
 </div>
 
-<div id="closeSessionConfirmModal" class="modal-shell" aria-hidden="true">
-    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="closeSessionConfirmTitle">
-        <div class="modal-head">
-            <div>
-                <div id="closeSessionConfirmTitle" class="modal-title">Close session?</div>
-                <div id="closeSessionConfirmCopy" class="modal-copy"></div>
-            </div>
-        </div>
-        <div class="modal-actions">
-            <div class="modal-copy">Live terminals are memory-only and cannot be recovered.</div>
-            <div class="modal-actions-buttons">
-                <button id="closeSessionConfirmCancel" class="btn btn-neutral" type="button">Cancel</button>
-                <button id="closeSessionConfirmSave" class="btn btn-primary" type="button">Save and close</button>
-                <button id="closeSessionConfirmAccept" class="btn btn-danger" type="button">Close session</button>
-            </div>
-        </div>
-    </div>
-</div>
+{% set close_session_variant = 'terminals' %}
+{% include 'partials/close_session_modal.html' %}
 
 {% set generic_confirm_variant = 'terminals' %}
 {% include 'partials/generic_confirm_modal.html' %}
@@ -355,6 +339,7 @@
 <script src="{{ url_for('static', filename='js/app-settings.js') }}?v={{ version }}"></script>
 <script src="{{ url_for('static', filename='js/minimize-all.js') }}?v={{ version }}"></script>
 <script src="{{ url_for('static', filename='js/lifecycle.js') }}?v={{ version }}"></script>
+<script src="{{ url_for('static', filename='js/close-session-modal.js') }}?v={{ version }}"></script>
 <script src="{{ url_for('static', filename='js/terminal-icons.js') }}?v={{ version }}"></script>
 <script src="{{ url_for('static', filename='js/voice-dictation.js') }}?v={{ version }}"></script>
 <script src="{{ url_for('static', filename='js/voice-input.js') }}?v={{ version }}"></script>

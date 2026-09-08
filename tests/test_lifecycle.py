@@ -890,6 +890,137 @@ class LifecycleRouteTestCase(unittest.TestCase):
         self.assertTrue(unknown.get_json()["workspace_missing"])
         self.assertEqual(malformed.status_code, 400)
 
+    # ── Per-group Save: the close prompt's middle button, from elsewhere ──
+
+    def test_group_save_writes_one_preset_and_links_the_live_group_to_it(self):
+        """The agent dashboard's *Save and close* has no live DOM to compose a
+        preset from, so the server builds one out of the same live-group shape
+        the exit save uses — and links the group to it, so a second save
+        updates that preset rather than minting another."""
+        launched = self._launch()
+        group_id = launched["group_id"]
+
+        response = self.client.post(f"/api/session-groups/{group_id}/save")
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        payload = response.get_json()
+        self.assertTrue(payload["saved"])
+        self.assertEqual(payload["group_id"], group_id)
+        self.assertEqual(payload["workspace_id"], "default")
+        entries = web_saved_sessions.load_saved_sessions()
+        self.assertEqual([entry["id"] for entry in entries], [payload["id"]])
+        self.assertEqual(entries[0]["name"], payload["name"])
+        # It saves and nothing else: no workspace slot, and nothing closed.
+        self.assertFalse(self.state_path.exists())
+        self.assertEqual(
+            len(api.session_manager.get_group_sessions(group_id)),
+            len(launched["sessions"]),
+        )
+
+        again = self.client.post(f"/api/session-groups/{group_id}/save")
+
+        self.assertEqual(again.status_code, 200, again.get_json())
+        self.assertEqual(again.get_json()["id"], payload["id"])
+        self.assertEqual(len(web_saved_sessions.load_saved_sessions()), 1)
+
+    def test_group_save_flushes_the_owning_window_before_it_composes(self):
+        """Presentation a window has queued but not sent is the difference
+        between saving what the reader sees and saving what the server last
+        heard."""
+        launched = self._launch()
+        api.lifecycle_coordinator.join_workspace("client-a", "default", "window-a")
+        rooms = []
+
+        def acknowledge(event, data, room=None, **_kwargs):
+            rooms.append((event, room))
+            api.lifecycle_coordinator.acknowledge_flush(
+                "client-a", {**data, "ok": True, "metadata": {}}
+            )
+
+        with patch.object(api.socketio, "emit", side_effect=acknowledge):
+            response = self.client.post(
+                f"/api/session-groups/{launched['group_id']}/save"
+            )
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertEqual(
+            rooms, [("lifecycle_flush_requested", workspace_room("default"))]
+        )
+
+    def test_group_save_refuses_when_the_window_it_asked_never_answered(self):
+        launched = self._launch()
+        api.lifecycle_coordinator.join_workspace("client-a", "default", "window-a")
+
+        with patch.object(api.socketio, "emit"):
+            response = self.client.post(
+                f"/api/session-groups/{launched['group_id']}/save"
+            )
+
+        self.assertEqual(response.status_code, 503)
+        payload = response.get_json()
+        self.assertFalse(payload["saved"])
+        self.assertTrue(payload["retryable"])
+        # A refused save writes nothing, so the caller can keep the session and
+        # the reader can try again.
+        self.assertFalse(self.saved_path.exists())
+
+    def test_group_save_with_no_window_open_composes_from_what_was_synced(self):
+        """The one deliberate difference from the per-workspace save. A
+        workspace snapshot carries window chrome only a window knows, so it
+        refuses; a session preset carries none, and with nothing open there is
+        nothing newer to wait for."""
+        launched = self._launch()
+
+        with patch.object(api.socketio, "emit") as emit:
+            response = self.client.post(
+                f"/api/session-groups/{launched['group_id']}/save"
+            )
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertTrue(response.get_json()["saved"])
+        # Nothing to flush means nothing was asked to flush.
+        emit.assert_not_called()
+
+    def test_group_save_reports_an_unknown_or_empty_group_without_writing(self):
+        unknown = self.client.post("/api/session-groups/not-a-group/save")
+
+        self.assertEqual(unknown.status_code, 404)
+        self.assertTrue(unknown.get_json()["group_missing"])
+        self.assertFalse(self.saved_path.exists())
+
+        launched = self._launch()
+        group_id = launched["group_id"]
+        # The race the 409 is for: the group's last pane goes while the flush
+        # is out, so the group is still registered but the snapshot -- which
+        # skips a group with no panes -- no longer carries it.
+        with patch.object(
+            api.session_manager, "snapshot_lifecycle_workspaces", return_value={}
+        ):
+            emptied = self.client.post(f"/api/session-groups/{group_id}/save")
+
+        # Empty, not missing — the same distinction the workspace save draws
+        # with its own 409 — and an empty group never overwrites a preset with
+        # nothing.
+        self.assertEqual(emptied.status_code, 409)
+        self.assertFalse(emptied.get_json()["saved"])
+        self.assertFalse(self.saved_path.exists())
+
+    def test_group_save_keeps_the_live_ssh_credential_out_of_its_answer(self):
+        """`snapshot_lifecycle_workspaces` is the one credential-bearing path;
+        this route uses it for exactly what it exists for and returns none of
+        it."""
+        launched = self._launch()
+        group_id = launched["group_id"]
+        session_id = launched["sessions"][0]["session_id"]
+        with api.session_manager.lock:
+            api.session_manager.sessions[session_id].password = "live-secret"
+
+        response = self.client.post(f"/api/session-groups/{group_id}/save")
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertNotIn("live-secret", response.get_data(as_text=True))
+        self.assertNotIn("live-secret", self.saved_path.read_text(encoding="utf-8"))
+
 
 class LifecycleDiagnosticsTestCase(unittest.TestCase):
     """Stage 7 item 3 — lifecycle logging carries shape diagnostics only:

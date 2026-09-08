@@ -19287,6 +19287,31 @@ class UxInteractionButtonsTestCase(unittest.TestCase):
         self.assertIn('id="closeSessionConfirmCancel"', html)
         # the third way out: keep the group as a preset, then close it
         self.assertIn('id="closeSessionConfirmSave"', html)
+        # The dialog is one shared partial driven by one shared controller, so
+        # the agent dashboard's session × asks the identical question. A page
+        # that shipped the markup without the module would render three buttons
+        # nothing listens to.
+        self.assertIn("/static/js/close-session-modal.js", html)
+
+    def test_the_dashboard_ships_the_same_close_dialog_the_workspace_does(self):
+        """One irreversible act, one prompt. The dashboard lists sessions from
+        every workspace, so a second dialog there would be the one place a
+        reader is warned about differently sized consequences than the window
+        that actually holds the terminals."""
+        terminals = self.client.get("/terminals").get_data(as_text=True)
+        dashboard = self.client.get("/dashboard").get_data(as_text=True)
+        for marker in (
+            'id="closeSessionConfirmModal"',
+            'id="closeSessionConfirmCancel"',
+            'id="closeSessionConfirmSave"',
+            'id="closeSessionConfirmAccept"',
+            "/static/js/close-session-modal.js",
+        ):
+            self.assertIn(marker, terminals)
+            self.assertIn(marker, dashboard)
+        # ... and the workspace verbs' own prompt, which is the launcher's.
+        self.assertIn('id="genericConfirmModal"', dashboard)
+        self.assertIn("/static/js/dashboard-close.js", dashboard)
 
     def test_close_session_group_gates_on_confirmation(self):
         terminals_js = self._static("js/terminals.js")
@@ -19299,15 +19324,12 @@ class UxInteractionButtonsTestCase(unittest.TestCase):
             terminals_js.index("async function confirmCloseSessionGroup"):
             terminals_js.index("function buildSavedSessionLaunchPayload")
         ]
-        # groups with no connected terminals close without the dialog
-        self.assertIn("session.status === 'connected'", confirm_fn)
-        self.assertIn("connectedCount === 0", confirm_fn)
-        # Escape / backdrop / Cancel all resolve to "keep the session"
-        self.assertIn("closeCloseSessionConfirmModal(CLOSE_SESSION_CANCEL)", terminals_js)
-        self.assertIn("closeCloseSessionConfirmModal(CLOSE_SESSION_CLOSE)", terminals_js)
-        self.assertIn(
-            "closeCloseSessionConfirmModal(CLOSE_SESSION_SAVE_AND_CLOSE)", terminals_js
-        )
+        # Which group is being asked about is this page's; what the prompt says
+        # and when it is skipped are the shared module's, executed by
+        # tests/test_close_session_modal.py rather than spelled again here.
+        self.assertIn("closeSessionPromptSkipDecision(sessions)", confirm_fn)
+        self.assertIn("openCloseSessionConfirmModal({", confirm_fn)
+        self.assertIn("group: getGroupById(groupId)", confirm_fn)
 
     def test_save_and_close_saves_before_teardown_and_aborts_on_failure(self):
         """A requested save that failed must not cost the terminals it was

@@ -253,25 +253,15 @@ body {
     overflow: hidden;
 }
 
+/* The heading is a row of two controls -- the way in, and the way to end it --
+   so it is a container now and the pressable chrome belongs to
+   `.dash-session-open` below. The rule under it stays here, because it divides
+   the heading from the agents rather than either control from the other. */
 .dash-session-head {
     display: flex;
-    align-items: center;
-    gap: 8px;
+    align-items: stretch;
     width: 100%;
-    padding: 9px 12px;
-    border: 0;
     border-bottom: 1px solid var(--gv-dialog-border);
-    background: transparent;
-    color: inherit;
-    font: inherit;
-    text-align: left;
-    cursor: pointer;
-}
-
-.dash-session-head:hover,
-.dash-session-head:focus-visible {
-    background: var(--gv-accent-soft);
-    outline: none;
 }
 
 .dash-session-name {
@@ -538,11 +528,223 @@ body {
     .dash-progress-fill.is-indeterminate { animation: none; }
 }
 
+/* ── Ending things from here ──
+
+   Three close verbs, and the shape of each control says which of them it is.
+   The two workspace verbs are words: they differ by whether the sessions
+   survive, which no pair of icons this size communicates. The session verb is
+   the × every tab strip has. */
+
+.dash-workspace-actions {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-left: auto;
+    flex: 0 0 auto;
+}
+
+.dash-workspace-action {
+    padding: 3px 9px;
+    border: 1px solid var(--gv-dialog-border);
+    border-radius: var(--gv-radius-s);
+    background: transparent;
+    color: var(--gv-dialog-muted);
+    font: inherit;
+    font-size: .68rem;
+    line-height: 1.6;
+    white-space: nowrap;
+    cursor: pointer;
+}
+
+.dash-workspace-action:hover,
+.dash-workspace-action:focus-visible {
+    border-color: var(--gv-accent);
+    color: var(--gv-accent);
+    outline: none;
+}
+
+/* The destructive one is tinted only on approach: a band that is always
+   carrying a red control reads as a warning about the workspace. */
+.dash-workspace-action.is-danger:hover,
+.dash-workspace-action.is-danger:focus-visible {
+    border-color: var(--gv-danger);
+    color: var(--gv-danger);
+    background: var(--gv-danger-soft);
+}
+
+/* The card's heading is now a row of two controls rather than one button, so
+   the rule that separated it from the agents moves out here with it. */
+.dash-session-open {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex: 1 1 auto;
+    min-width: 0;
+    padding: 9px 12px;
+    border: 0;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+}
+
+.dash-session-open:hover,
+.dash-session-open:focus-visible {
+    background: var(--gv-accent-soft);
+    outline: none;
+}
+
+.dash-session-close {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: 0 0 auto;
+    align-self: stretch;
+    width: 30px;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: var(--gv-dialog-muted);
+    cursor: pointer;
+}
+
+.dash-session-close svg {
+    width: 13px;
+    height: 13px;
+}
+
+.dash-session-close:hover,
+.dash-session-close:focus-visible {
+    background: var(--gv-danger-soft);
+    color: var(--gv-danger);
+    outline: none;
+}
+
+/* Busy is a class and never rewritten markup: the reading behind these rows is
+   repainted every couple of seconds, and a control that swapped its own text
+   would flicker between the two on every poll. */
+.dash-workspace-action.is-busy,
+.dash-session-close.is-busy,
+.modal-card.is-busy {
+    pointer-events: none;
+    opacity: .55;
+}
+
+/* A confirmation rather than a failure. Same line, different hue, because two
+   lines would be a second notification surface on a window that has one. */
+.dash-notice.is-info {
+    background: var(--gv-accent-soft);
+    color: var(--gv-accent);
+}
+
+/* ── The dialogs ──
+
+   Both are shared partials (`close_session_modal.html`,
+   `generic_confirm_modal.html`) whose chrome each page states from its own
+   palette; the launcher and the workspace window declare theirs in their own
+   legacy stylesheets. This page has neither, so the shell is declared here —
+   from the same `--gv-dialog-*` tokens the rest of this file uses, which is
+   what keeps one dialog from being dark inside a light window. */
+
+.modal-shell {
+    position: fixed;
+    inset: 0;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+    background: var(--gv-dialog-scrim);
+    z-index: 12000;
+}
+
+.modal-shell.visible {
+    display: flex;
+}
+
+.modal-card {
+    width: min(560px, 100%);
+    display: grid;
+    gap: 16px;
+    padding: 20px;
+    border: 1px solid var(--gv-dialog-border);
+    border-radius: var(--gv-radius-l);
+    background: var(--gv-bg-app);
+    box-shadow: var(--gv-dialog-shadow);
+}
+
+.modal-head,
+.modal-actions {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    flex-wrap: wrap;
+}
+
+.modal-title {
+    color: var(--gv-dialog-text);
+    font-size: 1rem;
+    font-weight: 700;
+}
+
+.modal-copy {
+    color: var(--gv-dialog-muted);
+    font-size: .82rem;
+    line-height: 1.45;
+}
+
+.modal-actions-buttons {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-left: auto;
+}
+
+.btn {
+    padding: 6px 14px;
+    border: 1px solid transparent;
+    border-radius: var(--gv-radius-s);
+    font: inherit;
+    font-size: .82rem;
+    font-weight: 500;
+    cursor: pointer;
+}
+
+.btn-neutral {
+    border-color: var(--gv-dialog-border);
+    background: transparent;
+    color: var(--gv-dialog-text);
+}
+
+.btn-neutral:hover {
+    border-color: var(--gv-accent);
+    color: var(--gv-accent);
+}
+
+.btn-primary {
+    background: var(--gv-accent);
+    color: var(--gv-bg-app);
+}
+
+.btn-primary:hover {
+    background: var(--gv-accent-hover);
+}
+
+.btn-danger {
+    background: var(--gv-danger);
+    color: #fff;
+}
+
+.btn-danger:hover {
+    filter: brightness(1.1);
+}
+
 @container (max-width: 340px) {
     .dash-agent { flex-wrap: wrap; padding-left: 8px; gap: 5px 8px; }
     .dash-agent-line { flex-basis: 100%; }
     .dash-agent-reading { margin-left: auto; }
-    .dash-session-head { flex-wrap: wrap; }
+    .dash-session-open { flex-wrap: wrap; }
     .dash-session-meta { flex-basis: 100%; margin-left: 0; }
     .dash-agent-head { flex-wrap: wrap; }
     .dash-tag-transport { max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
@@ -553,4 +755,5 @@ body {
     .dash-titlebar-right { width: 100%; justify-content: space-between; }
     .dash-body { padding: 12px; }
     .dash-workspace-head { flex-wrap: wrap; gap: 4px 8px; }
+    .dash-workspace-actions { margin-left: 0; }
 }

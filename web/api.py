@@ -174,6 +174,7 @@ from web.lifecycle import (
     LifecycleValidationError,
     lifecycle_coordinator,
     normalize_workspace_metadata,
+    prepare_group_save,
     prepare_lifecycle_action,
     prepare_workspace_save,
 )
@@ -2201,6 +2202,33 @@ def save_workspace(workspace_id: str):
     payload, status = prepare_workspace_save(
         session_manager,
         resolved_workspace_id,
+        lambda target_id, request_id: socketio.emit(
+            "lifecycle_flush_requested",
+            {"request_id": request_id, "workspace_id": target_id},
+            room=workspace_room(target_id),
+        ),
+    )
+    return jsonify(payload), status
+
+
+@app.route('/api/session-groups/<group_id>/save', methods=['POST'])
+def save_session_group(group_id: str):
+    """Save one live session group as a reusable preset, from any surface.
+
+    The *Save and close* half of the three-outcome close prompt, for a surface
+    that is not the window holding the group — the agent dashboard, which lists
+    sessions across every workspace and has none of their live DOM to compose a
+    preset from. The owning window is flushed first when one is open, so the
+    preset carries what the reader sees rather than what the server last heard.
+
+    It saves and nothing else: no workspace slot is captured, no teardown
+    decision is issued, and nothing is closed. The caller decides whether the
+    close follows, which is what keeps a failed save from costing the terminals
+    it was meant to preserve.
+    """
+    payload, status = prepare_group_save(
+        session_manager,
+        group_id,
         lambda target_id, request_id: socketio.emit(
             "lifecycle_flush_requested",
             {"request_id": request_id, "workspace_id": target_id},

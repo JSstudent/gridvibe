@@ -1,0 +1,38 @@
+{# The three-outcome close prompt for one session group.
+
+   Live terminals are memory-only, so one misclick must not end them silently:
+   Cancel keeps the session, "Save and close" writes a reusable preset first
+   and closes only if that succeeded, and "Close session" is the plain close.
+   Anything that is not one of those three presses (Escape, the backdrop) keeps
+   the session.
+
+   Shared by the workspace window, where the session tab's × opens it, and by
+   the agent dashboard, where a session card's × does. The controller is
+   `openCloseSessionConfirmModal()` in static/js/close-session-modal.js; only
+   the buttons' chrome varies between the two pages, and the caller states it:
+
+       {% set close_session_variant = 'dashboard' %}
+       {% include 'partials/close_session_modal.html' %}
+#}
+{% set close_session_is_launcher = close_session_variant == 'launcher' %}
+{% set close_session_cancel_class = 'ghost-btn' if close_session_is_launcher else 'btn btn-neutral' %}
+{% set close_session_save_class = 'ghost-btn' if close_session_is_launcher else 'btn btn-primary' %}
+{% set close_session_danger_class = 'ghost-btn danger-btn' if close_session_is_launcher else 'btn btn-danger' %}
+<div id="closeSessionConfirmModal" class="modal-shell" aria-hidden="true">
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="closeSessionConfirmTitle">
+        <div class="modal-head">
+            <div>
+                <div id="closeSessionConfirmTitle" class="modal-title">Close session?</div>
+                <div id="closeSessionConfirmCopy" class="modal-copy"></div>
+            </div>
+        </div>
+        <div class="modal-actions">
+            <div class="modal-copy">Live terminals are memory-only and cannot be recovered.</div>
+            <div class="modal-actions-buttons">
+                <button id="closeSessionConfirmCancel" class="{{ close_session_cancel_class }}" type="button">Cancel</button>
+                <button id="closeSessionConfirmSave" class="{{ close_session_save_class }}" type="button">Save and close</button>
+                <button id="closeSessionConfirmAccept" class="{{ close_session_danger_class }}" type="button">Close session</button>
+            </div>
+        </div>
+    </div>
+</div>

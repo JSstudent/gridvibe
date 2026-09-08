@@ -238,6 +238,34 @@ class DashboardComposerTestCase(unittest.TestCase):
             snapshot["totals"], {"workspaces": 1, "sessions": 1, "agents": 1}
         )
 
+    def test_a_workspace_reports_what_it_lists_and_what_closing_it_would_end(self):
+        """Two counts, and they are different numbers whenever a workspace holds
+        a plain terminal beside its agents. `group_count` is what this surface
+        lists; `live_group_count` is what the close confirmation states, because
+        a prompt about an irreversible act must not understate it."""
+        snapshot = self._compose(
+            workspaces=[workspace("default")],
+            groups_by_workspace={
+                "default": [
+                    group("g1", "default"),
+                    group("g2", "default"),
+                    group("g3", "default"),
+                ]
+            },
+            sessions_by_group={
+                "g1": [session("s1", "g1")],
+                "g2": [plain_session("s2", "g2")],
+                "g3": [plain_session("s3", "g3")],
+            },
+        )
+        workspace_row = snapshot["workspaces"][0]
+        self.assertEqual(workspace_row["group_count"], 1)
+        self.assertEqual(workspace_row["live_group_count"], 3)
+        # The listed count is still what the totals are built from: this
+        # surface is about agents, and only the confirmation asks the other
+        # question.
+        self.assertEqual(snapshot["totals"]["sessions"], 1)
+
     def test_a_server_with_no_agent_anywhere_composes_an_empty_tree(self):
         snapshot = self._compose(
             sessions_by_group={"g1": [plain_session("s1", "g1")]}
