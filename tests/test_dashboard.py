@@ -454,13 +454,21 @@ class DashboardRouteTestCase(unittest.TestCase):
         self.assertEqual(payload["workspaces"], [])
         self.assertEqual(payload["totals"]["agents"], 0)
 
-    def test_the_dashboard_page_is_served(self):
-        """Its own page, in no workspace, so it takes no workspace argument."""
-        response = self.client.get("/dashboard")
-        self.assertEqual(response.status_code, 200)
-        body = response.get_data(as_text=True)
-        self.assertIn("agentDashboardBody", body)
-        self.assertIn("dashboard-window.js", body)
+    def test_both_pages_carry_the_dialog_and_no_page_serves_it(self):
+        """It is a dialog on the page that opened it, so it is one partial on
+        both pages and no route of its own -- and a `/dashboard` that still
+        answered would be a second, divergent copy of this surface reachable by
+        typing a URL."""
+        for path in ("/", "/terminals"):
+            with self.subTest(path=path):
+                body = self.client.get(path).get_data(as_text=True)
+                self.assertIn('id="agentDashboardShell"', body)
+                self.assertIn("agentDashboardBody", body)
+                self.assertIn("dashboard-dialog.js", body)
+                # The button that raises it, and the badge that is the reason
+                # to.
+                self.assertIn('id="dashboardBtn"', body)
+        self.assertEqual(self.client.get("/dashboard").status_code, 404)
 
 
 if __name__ == "__main__":

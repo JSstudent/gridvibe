@@ -21,9 +21,11 @@ What is pinned, and why each would be silent if it broke:
 - **A close reports only what it could not do**, with one exception: closing a
   window changes nothing on this page, so that one says it worked.
 
-The second class renders the real `dashboard-window.js` over the real
+The second class renders the real `dashboard-dialog.js` over the real
 `dashboard-close.js` and reads the controls back out of the markup, because
 where the × sits is itself a rule: a button inside a button is not a control.
+It opens the dialog first, because the reading is only fetched while it is
+up.
 """
 
 import json
@@ -38,7 +40,7 @@ STATIC_JS = REPO_ROOT / "web" / "static" / "js"
 DASHBOARD_CLOSE_JS = STATIC_JS / "dashboard-close.js"
 AGENT_IDENTITY_JS = STATIC_JS / "agent-identity.js"
 AGENT_GLYPHS_JS = STATIC_JS / "agent-glyphs.js"
-DASHBOARD_WINDOW_JS = STATIC_JS / "dashboard-window.js"
+DASHBOARD_DIALOG_JS = STATIC_JS / "dashboard-dialog.js"
 
 NODE = shutil.which("node")
 
@@ -195,6 +197,9 @@ function fakeElement(id) {
         dataset: {},
         style: {},
         classList: fakeClassList(),
+        attributes: {},
+        setAttribute(name, value) { this.attributes[name] = value; },
+        focus() {},
         contains: () => false,
         querySelector: () => null,
         ...fakeListeners()
@@ -202,15 +207,35 @@ function fakeElement(id) {
 }
 
 const byId = new Map();
-['agentDashboardBody', 'agentDashboardTotals', 'agentDashboardNotice', 'agentDashboardRefreshBtn']
-    .forEach(id => byId.set(id, fakeElement(id)));
+[
+    'agentDashboardShell',
+    'agentDashboardBody',
+    'agentDashboardTotals',
+    'agentDashboardNotice',
+    'agentDashboardRefreshBtn',
+    'agentDashboardCloseBtn'
+].forEach(id => byId.set(id, fakeElement(id)));
 
 const document = {
     activeElement: null,
     hidden: false,
     getElementById: id => byId.get(id) || null,
+    /* The Escape guard asks the page which shells are up; this harness has
+       exactly the one. */
+    querySelectorAll: () => (
+        byId.get('agentDashboardShell').classList.contains('visible')
+            ? [byId.get('agentDashboardShell')]
+            : []
+    ),
     ...fakeListeners()
 };
+
+/* The reading is fetched only while the dialog is open, so every case here
+   opens it: the controls being asserted do not exist until it is. */
+function showDashboard() {
+    wireAgentDashboard();
+    openAgentDashboardDialog();
+}
 
 /* `window` is the real global object so both UMD modules attach themselves
    where the page looks for them — and `document` is published on it too,
@@ -704,7 +729,7 @@ class DashboardCloseControlsTestCase(DashboardCloseNodeTestCase):
             + DASHBOARD_CLOSE_JS.read_text(encoding="utf-8")
             + AGENT_IDENTITY_JS.read_text(encoding="utf-8")
             + AGENT_GLYPHS_JS.read_text(encoding="utf-8")
-            + DASHBOARD_WINDOW_JS.read_text(encoding="utf-8")
+            + DASHBOARD_DIALOG_JS.read_text(encoding="utf-8")
             + "\n(async () => {\n"
             + body
             + "\n})().catch(error => { console.error(error); process.exit(1); });\n"
@@ -717,7 +742,7 @@ class DashboardCloseControlsTestCase(DashboardCloseNodeTestCase):
         result = self._run_window(
             """
             fetchAnswer = snapshot();
-            wireAgentDashboard();
+            showDashboard();
             await settle();
             const html = body().innerHTML;
             const head = html.split('<header class="dash-session-head">')[1].split('</header>')[0];
@@ -747,7 +772,7 @@ class DashboardCloseControlsTestCase(DashboardCloseNodeTestCase):
         result = self._run_window(
             """
             fetchAnswer = snapshot();
-            wireAgentDashboard();
+            showDashboard();
             await settle();
             const inBrowser = actions();
 
@@ -775,7 +800,7 @@ class DashboardCloseControlsTestCase(DashboardCloseNodeTestCase):
         result = self._run_window(
             """
             fetchAnswer = snapshot();
-            wireAgentDashboard();
+            showDashboard();
             await settle();
 
             const ran = [];
@@ -822,7 +847,7 @@ class DashboardCloseControlsTestCase(DashboardCloseNodeTestCase):
         result = self._run_window(
             """
             fetchAnswer = snapshot();
-            wireAgentDashboard();
+            showDashboard();
             await settle();
 
             setAgentDashboardNotice('Closed the window.', 'action', 'info');

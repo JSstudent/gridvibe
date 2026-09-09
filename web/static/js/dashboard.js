@@ -1,42 +1,40 @@
-    /* ─────────────────────────────────────────────
+    /* ─────────────────────────────
        The agent dashboard button — one button, both pages.
 
-       The dashboard itself is a window (`/dashboard`, dashboard-window.js),
-       not a panel inside a page, and this is everything the two host pages
-       need to know about it: how to open it, what its chord is, and how many
-       agents are running right now.
+       The dashboard itself is a dialog on this page (`dashboard-dialog.js`
+       over `partials/agent_dashboard_dialog.html`), and this is everything the
+       two host pages need to know about it: how to bring it up, what its chord
+       is, and how many agents are running right now.
 
        Three decisions worth stating:
 
-         · **It is a window because it is about every window.** A panel hangs
-           off the page that opened it, has that page's width to work in, and
-           dies when that page navigates. The dashboard reads across every
-           workspace and belongs to none of them, so — like the launcher — it
-           gets an OS window of its own in native mode and a named tab of its
-           own in the browser. The name is what makes a second press focus the
-           dashboard rather than stack another copy of it.
-         · **The badge is the page's only reading.** A slow poll keeps the
-           number on the button honest — a badge that is only correct after
-           you open the thing it labels is worse than no badge — and it stands
-           down entirely while the document is hidden. Everything finer-grained
-           than "how many" is the dashboard window's own business.
+         · **It is a dialog, and it was a window.** A window was the wrong shape
+           for the question. You ask "what is running elsewhere?" *while* you
+           are somewhere, and a separate window answered it by taking you out of
+           the window you were in, leaving a taskbar entry to find again and
+           needing two chords of its own to get back from. It now opens over the
+           page that asked and a press outside it puts that page back — which
+           also means there is no second copy to stack, no named target to keep
+           unique, and no pop-up for a browser to block.
+         · **The badge is the page's only reading while the dialog is shut.** A
+           slow poll keeps the number on the button honest — a badge that is
+           only correct after you open the thing it labels is worse than no
+           badge — and it stands down entirely while the document is hidden.
+           Everything finer-grained than "how many" is the dialog's own
+           business, and the dialog's own poll runs only while it is open.
          · **The chord is matched on `event.code` and excludes Ctrl.** AltGr
            arrives as Ctrl+Alt on Windows, so a chord that did not exclude Ctrl
            would fire while typing an accented character; and matching the
-           physical key keeps `Alt+A` on the same key whatever the layout
-           prints on it. Both are the rules Alt+Q, Alt+W and Alt+X already
-           follow.
+           physical key keeps `Alt+A` on the same key whatever the layout prints
+           on it. Both are the rules Alt+Q, Alt+W and Alt+X already follow. It
+           toggles rather than only opening, because a chord that brings a
+           surface up and cannot take it away is half a control.
 
        Loaded before terminals.js / launcher.js so their handlers can call in.
-    ───────────────────────────────────────────── */
+    ───────────────────────────── */
 
     const DASHBOARD_BUTTON_ID = 'dashboardBtn';
     const DASHBOARD_BADGE_ID = 'dashboardBadge';
-
-    const AGENT_DASHBOARD_URL = '/dashboard';
-    /* One dashboard, however many times it is asked for: a named target both
-       reuses the browser tab and names the native window. */
-    const AGENT_DASHBOARD_WINDOW_NAME = 'gridvibe-agent-dashboard';
 
     /* `A` for agents. Free on both pages, and it sits with the Alt navigation
        family (Alt+Q launcher, Alt+W workspace, Alt+1..9 sessions) that every
@@ -55,8 +53,11 @@
        to an older count. */
     let _dashboardRequestId = 0;
     let _dashboardBadgeController = null;
-    let _dashboardOpening = false;
     let _dashboardWired = false;
+    /* The cross-window dim's lease for this page, held here because this is
+       what starts it. `dashboard-dialog.js` turns it on and off through
+       `markDashboardFocusActive` below rather than reaching for the handle. */
+    let _dashboardFocusLease = null;
 
     function dashboardChordMatches(event) {
         if (!event || !event.altKey || event.ctrlKey || event.metaKey) return false;
@@ -79,72 +80,24 @@
         }
     }
 
-    function dashboardNativeApi() {
-        return (typeof window !== 'undefined' ? window.pywebview?.api : null) || null;
+    /* While the dashboard is up, every *other* GridVibe window dims — the same
+       lease the standalone window published, still worth what it was worth: a
+       surface about the other windows is one the other windows step back for.
+       A page that never started a lease answers this harmlessly. */
+    function markDashboardFocusActive(active) {
+        _dashboardFocusLease?.setDashboardActive?.(Boolean(active));
     }
 
-    /* The dashboard has an Alt+W of its own now, and it means what the
-       launcher's means: back to the workspace you came from. That is a fact
-       only the departing window knows, so it is recorded on the way out — the
-       same record, through the same function, that the launcher button already
-       writes when a workspace window hands over to it. A launcher press writes
-       nothing: the launcher is not a workspace, and overwriting the record with
-       "nowhere" is how the way back gets lost. */
-    function rememberDashboardOriginWorkspace() {
-        if (typeof CURRENT_WORKSPACE_ID === 'undefined'
-            || typeof rememberLauncherOriginWorkspace !== 'function') {
-            return;
-        }
-        rememberLauncherOriginWorkspace(CURRENT_WORKSPACE_ID);
-    }
-
-    /* Native first, browser second — the same order and the same fallback
-       `openWorkspaceWindow` uses, because the two windows are the same kind of
-       thing and a native bridge that refuses should still land somewhere. */
-    async function openAgentDashboardWindow(event) {
+    /* The button, the chord and (on the workspace page) the session menu all
+       want the same thing, so they all call this rather than each deciding
+       what a press means. */
+    function openAgentDashboard(event) {
         event?.preventDefault?.();
         event?.stopPropagation?.();
-        if (_dashboardOpening) return false;
-        _dashboardOpening = true;
-        try {
-            return await performOpenAgentDashboardWindow();
-        } catch (error) {
-            console.error('[GridVibe Dashboard] open failed:', error);
-            dashboardOpenFailure();
-            return false;
-        } finally {
-            _dashboardOpening = false;
-        }
-    }
-
-    function dashboardOpenFailure() {
-        const message = 'Could not open the agent dashboard. Allow pop-ups for this site and try again.';
-        if (typeof showGridVibeNotice === 'function') showGridVibeNotice(message, 'error');
-        else if (typeof showTerminalToast === 'function') showTerminalToast(message, 'error');
-    }
-
-    async function performOpenAgentDashboardWindow() {
-        rememberDashboardOriginWorkspace();
-        const api = dashboardNativeApi();
-        if (api?.open_dashboard_window) {
-            try {
-                const result = await api.open_dashboard_window();
-                if (result?.ok) {
-                    return true;
-                }
-                console.error('[GridVibe Dashboard] native window refused:', result?.error || '');
-            } catch (error) {
-                console.error('[GridVibe Dashboard] open_dashboard_window failed:', error);
-            }
-        }
-        const opened = window.open(AGENT_DASHBOARD_URL, AGENT_DASHBOARD_WINDOW_NAME);
-        if (!opened) {
-            console.error('[GridVibe Dashboard] the browser blocked the dashboard tab');
-            dashboardOpenFailure();
+        if (typeof toggleAgentDashboardDialog !== 'function') {
             return false;
         }
-        opened.focus?.();
-        return true;
+        return toggleAgentDashboardDialog();
     }
 
     function setDashboardBadge(snapshot) {
@@ -215,7 +168,12 @@
             return;
         }
         _dashboardWired = true;
-        window.GridVibeDashboardFocus?.start();
+        _dashboardFocusLease = window.GridVibeDashboardFocus?.start() || null;
+        /* The button and the surface it opens are one feature, so one call
+           wires both and a page carrying neither wires nothing. */
+        if (typeof wireAgentDashboard === 'function') {
+            wireAgentDashboard();
+        }
         window.addEventListener?.('focus', () => refreshDashboardBadge());
         window.addEventListener?.('pagehide', () => {
             clearInterval(_dashboardBadgeTimer);
@@ -232,7 +190,7 @@
                 return;
             }
             event.preventDefault();
-            openAgentDashboardWindow();
+            openAgentDashboard();
         });
         document.addEventListener?.('visibilitychange', () => {
             scheduleDashboardBadgeRefresh();

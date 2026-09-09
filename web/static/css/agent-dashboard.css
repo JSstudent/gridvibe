@@ -1,52 +1,72 @@
-/* The agent dashboard window.
+/* The agent dashboard — a dialog on whichever page opened it.
 
-   Its own page, so — unlike dashboard.css, which is shared by two pages that
-   each own their palette — this file states its colours. It states them from
-   the shared `--gv-dialog-*` and status tokens rather than literals, which is
-   what makes the window follow the app's light/dark preference without a
-   second palette to keep in step.
+   It used to be a page of its own, and this file used to state a page's worth
+   of rules: `color-scheme`, a `body` background, a full-height frame. None of
+   that is this file's to say any more. Both host pages already own their
+   palette, their scrim and the background blur behind a `.modal-shell`, so what
+   is left here is the one thing neither of them has — the surface itself, and
+   the three nested levels inside it.
 
-   The whole point of the layout is that the three levels look like three
+   The whole point of the layout is that those three levels look like three
    different things, because the panel this replaced made them three indent
    depths and that was unreadable:
 
-     · a **workspace** is a band across the page, with a ruled heading;
+     · a **workspace** is a band across the dialog, with a ruled heading;
      · a **session** is a bordered card inside that band, and the cards flow
-       into however many columns the window is wide enough for;
+       into however many columns the dialog is wide enough for;
      · an **agent** is a row inside a card.
 
    Nothing here is decoration: every heading and every row is a button, because
-   each one is a way out of this window and into the thing it describes. */
+   each one is a way out of this dialog and into the thing it describes.
 
-:root {
-    color-scheme: dark;
+   Colours come from the shared `--gv-dialog-*` and status tokens rather than
+   literals (guardrail 7), which is what lets one stylesheet dress this dialog
+   on two pages with two different legacy palettes and still follow the app's
+   light/dark preference. */
+
+/* The shell is the page's own `.modal-shell`; only the padding is amended, so
+   a dialog this size keeps a margin on a small window without either page
+   having to know it is here. */
+.agent-dashboard-shell {
+    padding: 24px;
 }
 
-[data-theme="light"] {
-    color-scheme: light;
-}
+/* Deliberately larger than `.modal-card`: a confirmation is a sentence and two
+   buttons, and this is a scrolling tree of three levels. Wide enough for the
+   session cards to flow into more than one column, capped so the dialog still
+   reads as something over the page rather than as a page.
 
-html,
-body {
-    height: 100%;
-}
-
-*, *::before, *::after { box-sizing: border-box; }
-
-body {
-    margin: 0;
-    background: var(--gv-bg-app);
-    color: var(--gv-dialog-text);
-    font-family: 'Segoe UI', Roboto, -apple-system, BlinkMacSystemFont, sans-serif;
-    font-size: 14px;
-    -webkit-font-smoothing: antialiased;
-}
-
-.dash-frame {
+   A **fixed** height rather than a `max-height` that fits its contents. The
+   tree behind it is repainted every couple of seconds and a session ending or
+   an agent starting changes how tall it wants to be, so a surface sized to its
+   contents would resize under the reader's pointer on an ordinary poll — and
+   would open at title-bar height while the first reading is still in flight.
+   `max-height: 100%` is what keeps that fixed height inside the shell's own
+   padding on a very short window. */
+.dash-dialog {
     display: flex;
     flex-direction: column;
-    height: 100%;
-    min-height: 100%;
+    width: min(1040px, 100%);
+    height: min(78vh, 820px);
+    max-height: 100%;
+    overflow: hidden;
+    border: 1px solid var(--gv-dialog-border);
+    border-radius: var(--gv-radius-l);
+    background: var(--gv-bg-app);
+    color: var(--gv-dialog-text);
+    box-shadow: var(--gv-dialog-shadow);
+    font-family: 'Segoe UI', Roboto, -apple-system, BlinkMacSystemFont, sans-serif;
+    font-size: 14px;
+}
+
+.dash-dialog:focus {
+    outline: none;
+}
+
+.dash-dialog *,
+.dash-dialog *::before,
+.dash-dialog *::after {
+    box-sizing: border-box;
 }
 
 /* ── The title bar ── */
@@ -77,7 +97,7 @@ body {
     flex: 0 0 auto;
 }
 
-.dash-titlebar-text h1 {
+.dash-title {
     margin: 0;
     font-size: 1rem;
     font-weight: 700;
@@ -104,7 +124,7 @@ body {
     font-variant-numeric: tabular-nums;
 }
 
-.dash-refresh-btn {
+.dash-titlebar-btn {
     display: inline-flex;
     align-items: center;
     justify-content: center;
@@ -118,13 +138,13 @@ body {
     cursor: pointer;
 }
 
-.dash-refresh-btn svg {
+.dash-titlebar-btn svg {
     width: 15px;
     height: 15px;
 }
 
-.dash-refresh-btn:hover,
-.dash-refresh-btn:focus-visible {
+.dash-titlebar-btn:hover,
+.dash-titlebar-btn:focus-visible {
     border-color: var(--gv-accent);
     color: var(--gv-accent);
     outline: none;
@@ -638,108 +658,6 @@ body {
     color: var(--gv-accent);
 }
 
-/* ── The dialogs ──
-
-   Both are shared partials (`close_session_modal.html`,
-   `generic_confirm_modal.html`) whose chrome each page states from its own
-   palette; the launcher and the workspace window declare theirs in their own
-   legacy stylesheets. This page has neither, so the shell is declared here —
-   from the same `--gv-dialog-*` tokens the rest of this file uses, which is
-   what keeps one dialog from being dark inside a light window. */
-
-.modal-shell {
-    position: fixed;
-    inset: 0;
-    display: none;
-    align-items: center;
-    justify-content: center;
-    padding: 20px;
-    background: var(--gv-dialog-scrim);
-    z-index: 12000;
-}
-
-.modal-shell.visible {
-    display: flex;
-}
-
-.modal-card {
-    width: min(560px, 100%);
-    display: grid;
-    gap: 16px;
-    padding: 20px;
-    border: 1px solid var(--gv-dialog-border);
-    border-radius: var(--gv-radius-l);
-    background: var(--gv-bg-app);
-    box-shadow: var(--gv-dialog-shadow);
-}
-
-.modal-head,
-.modal-actions {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 16px;
-    flex-wrap: wrap;
-}
-
-.modal-title {
-    color: var(--gv-dialog-text);
-    font-size: 1rem;
-    font-weight: 700;
-}
-
-.modal-copy {
-    color: var(--gv-dialog-muted);
-    font-size: .82rem;
-    line-height: 1.45;
-}
-
-.modal-actions-buttons {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    margin-left: auto;
-}
-
-.btn {
-    padding: 6px 14px;
-    border: 1px solid transparent;
-    border-radius: var(--gv-radius-s);
-    font: inherit;
-    font-size: .82rem;
-    font-weight: 500;
-    cursor: pointer;
-}
-
-.btn-neutral {
-    border-color: var(--gv-dialog-border);
-    background: transparent;
-    color: var(--gv-dialog-text);
-}
-
-.btn-neutral:hover {
-    border-color: var(--gv-accent);
-    color: var(--gv-accent);
-}
-
-.btn-primary {
-    background: var(--gv-accent);
-    color: var(--gv-bg-app);
-}
-
-.btn-primary:hover {
-    background: var(--gv-accent-hover);
-}
-
-.btn-danger {
-    background: var(--gv-danger);
-    color: #fff;
-}
-
-.btn-danger:hover {
-    filter: brightness(1.1);
-}
-
 @container (max-width: 340px) {
     .dash-agent { flex-wrap: wrap; padding-left: 8px; gap: 5px 8px; }
     .dash-agent-line { flex-basis: 100%; }
@@ -751,6 +669,8 @@ body {
 }
 
 @media (max-width: 500px) {
+    .agent-dashboard-shell { padding: 10px; }
+    .dash-dialog { height: min(88vh, 820px); }
     .dash-titlebar { padding: 10px 12px; gap: 8px; }
     .dash-titlebar-right { width: 100%; justify-content: space-between; }
     .dash-body { padding: 12px; }

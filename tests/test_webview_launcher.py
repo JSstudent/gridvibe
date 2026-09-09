@@ -117,16 +117,18 @@ class WebviewLauncherTestCase(unittest.TestCase):
             webview_launcher._should_exit_after_window_close("session", {"launcher"})
         )
 
-    def test_a_dashboard_left_alone_is_not_a_reason_to_keep_running(self):
-        """It exists to describe the other windows; on its own it describes
-        nothing."""
-        self.assertTrue(
-            webview_launcher._should_exit_after_window_close("session", {"dashboard"})
-        )
+    def test_every_remaining_window_is_a_reason_to_keep_running(self):
+        """The agent dashboard used to be the one exception -- a window that
+        described the others and was no reason on its own to stay up. It is a
+        dialog on those windows now, so there is no window kind left that the
+        app may close itself out from under."""
         self.assertFalse(
             webview_launcher._should_exit_after_window_close(
-                "dashboard", {"launcher"}
+                "session", {"workspace:abc123def456"}
             )
+        )
+        self.assertTrue(
+            webview_launcher._should_exit_after_window_close("session", set())
         )
 
     def test_preferred_pywebview_gui_uses_qt_on_linux(self):
@@ -1086,89 +1088,6 @@ class _MinimizableWindow:
         self.minimize_calls += 1
         if self._on_minimize is not None:
             self._on_minimize()
-
-
-class DashboardWindowBridgeTestCase(unittest.TestCase):
-    """The agent dashboard window: one of it, and it belongs to no workspace."""
-
-    def test_it_opens_its_own_window_on_the_dashboard_page(self):
-        api_bridge = webview_launcher.GridVibeApi("http://127.0.0.1:5050")
-        window = _ExplodingWindow()
-        fake_webview = Mock()
-        fake_webview.create_window.return_value = window
-
-        with patch.object(webview_launcher, "webview", fake_webview):
-            result = api_bridge.open_dashboard_window()
-
-        self.assertEqual(result, {"ok": True, "reused": False})
-        self.assertIs(api_bridge._dashboard_window, window)
-        fake_webview.create_window.assert_called_once()
-        # No workspace argument: it reads across every workspace and is in none.
-        self.assertEqual(
-            fake_webview.create_window.call_args.args[1],
-            "http://127.0.0.1:5050/dashboard",
-        )
-        self.assertTrue(fake_webview.create_window.call_args.kwargs["resizable"])
-        self.assertFalse(fake_webview.create_window.call_args.kwargs["frameless"])
-
-    def test_a_second_request_focuses_the_one_that_is_open(self):
-        api_bridge = webview_launcher.GridVibeApi("http://127.0.0.1:5050")
-        window = _ExplodingWindow()
-        fake_webview = Mock()
-        fake_webview.create_window.return_value = window
-
-        with patch.object(webview_launcher, "webview", fake_webview):
-            api_bridge.open_dashboard_window()
-            reused = api_bridge.open_dashboard_window()
-
-        self.assertEqual(reused, {"ok": True, "reused": True})
-        self.assertEqual(fake_webview.create_window.call_count, 1)
-        self.assertEqual(window.show_calls, 1)
-
-    def test_it_refuses_rather_than_failing_without_pywebview(self):
-        api_bridge = webview_launcher.GridVibeApi("http://127.0.0.1:5050")
-        with patch.object(webview_launcher, "webview", None):
-            result = api_bridge.open_dashboard_window()
-        self.assertFalse(result["ok"])
-        self.assertIn("pywebview", result["error"])
-
-    def test_closing_it_releases_the_slot_so_the_next_press_opens_a_fresh_one(self):
-        """Focusing a destroyed window is the defect a kept reference makes."""
-        api_bridge = webview_launcher.GridVibeApi("http://127.0.0.1:5050")
-        first = _ExplodingWindow()
-        second = _ExplodingWindow()
-        fake_webview = Mock()
-        fake_webview.create_window.side_effect = [first, second]
-        registered = []
-
-        def _register(window, kind):
-            registered.append((window, kind))
-
-        api_bridge._set_register_window(_register)
-        with patch.object(webview_launcher, "webview", fake_webview):
-            api_bridge.open_dashboard_window()
-            self.assertEqual(registered[0][1], "dashboard")
-            # What register_window's own closed handler does for this kind.
-            api_bridge._dashboard_window = None
-            reopened = api_bridge.open_dashboard_window()
-
-        self.assertEqual(reopened, {"ok": True, "reused": False})
-        self.assertIs(api_bridge._dashboard_window, second)
-
-    def test_minimize_all_takes_the_dashboard_with_it(self):
-        api_bridge = webview_launcher.GridVibeApi("http://127.0.0.1:5050")
-        workspace = _MinimizableWindow()
-        dashboard = _MinimizableWindow()
-        launcher = _MinimizableWindow()
-        api_bridge._attach_workspace_window("default", workspace)
-        api_bridge._dashboard_window = dashboard
-        api_bridge._attach_window(launcher)
-
-        result = api_bridge.minimize_all_windows()
-
-        self.assertEqual(result["minimized"], 3)
-        self.assertEqual(dashboard.minimize_calls, 1)
-        self.assertTrue(api_bridge._is_window_minimized("dashboard"))
 
 
 class MinimizeAllWindowsTestCase(unittest.TestCase):

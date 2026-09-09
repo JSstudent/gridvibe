@@ -1,13 +1,16 @@
 """The dashboard button both host pages carry, driven through its own wiring.
 
-`dashboard.js` is small on purpose — the dashboard itself is a window with its
+`dashboard.js` is small on purpose — the dashboard itself is a dialog with its
 own module — so what is pinned here is the whole of what the host pages know
 about it:
 
-- **The button opens a window, and only one.** Native first (the pywebview
-  bridge), a *named* `window.open` second, so a second press focuses the
-  dashboard rather than stacking another copy of it. A native bridge that
-  refuses still lands somewhere.
+- **The button raises the dialog on this page, and opens nothing.** It was a
+  window: native first through the pywebview bridge, a named `window.open`
+  second. Both are gone, and the assertion that neither happens is the point —
+  a leftover `window.open` is how "it opens in a new tab sometimes" comes back.
+- **A second press puts it away.** A control that brings a surface up and
+  cannot take it away is half a control, and the button and the chord are the
+  same control.
 - **The chord is `Alt+A`, matched on `event.code`.** Ctrl is excluded because
   AltGr arrives as Ctrl+Alt on Windows, and a page that says the chord may not
   fire from here — the same answer it already gives Alt+X — is obeyed rather
@@ -16,6 +19,9 @@ about it:
   lands after a newer one was asked for is dropped rather than painted.
 - **A hidden document costs nothing**: the poll is torn down rather than left
   running, and reads once on the way back.
+- **The cross-window dim is started here and driven from there.** This page
+  starts the lease; the dialog turns it on and off, through the one named
+  function rather than by reaching for the handle.
 """
 
 import json
@@ -68,37 +74,60 @@ const document = {
 };
 
 const window = globalThis;
-const calls = { fetches: 0, opens: [], bridge: [], intervals: 0, cleared: 0 };
+const calls = { fetches: 0, opens: [], bridge: [], intervals: 0, cleared: 0, lease: [] };
 
 Object.assign(globalThis, {
     /* Real timers would keep the process alive, and the cadence itself is not
        what these cases are about — only whether one is armed at all. */
     setInterval: () => { calls.intervals += 1; return calls.intervals; },
     clearInterval: () => { calls.cleared += 1; },
+    /* Still here, and still counted: what these cases assert about it now is
+       that it is never reached. A leftover window.open is how "it opens in a
+       new tab sometimes" comes back. */
     open(url, name) {
         calls.opens.push({ url, name });
-        return openAnswer === null ? null : { focus() { openAnswer.focused = true; } };
+        return { focus() {} };
     }
 });
 
-/* Swapped per case: `null` is a browser that blocked the pop-up. */
-let openAnswer = {};
-/* Swapped per case: `null` is browser mode (no native window at all). */
-let bridgeAnswer = null;
+/* Still here for the same reason `open` is. Nothing in this module may reach
+   for a native window any more. */
 Object.defineProperty(globalThis, 'pywebview', {
     get() {
-        if (bridgeAnswer === null) { return undefined; }
         return {
-            api: {
-                open_dashboard_window() {
-                    calls.bridge.push('open_dashboard_window');
-                    if (bridgeAnswer instanceof Error) { throw bridgeAnswer; }
-                    return Promise.resolve(bridgeAnswer);
+            api: new Proxy({}, {
+                get(_target, name) {
+                    calls.bridge.push(String(name));
+                    return () => Promise.resolve({ ok: true });
                 }
-            }
+            })
         };
     }
 });
+
+/* dashboard-dialog.js's half of the pair, recorded rather than loaded: what the
+   button owes the dialog is one call, and what the dialog does with it is that
+   module's own test. */
+let dialogUp = false;
+let wiredDialog = 0;
+/* Assigned onto the global rather than declared, because "this page did not
+   load the dialog module" is a case below and a declaration cannot be taken
+   away. */
+globalThis.toggleAgentDashboardDialog = () => {
+    dialogUp = !dialogUp;
+    return dialogUp;
+};
+globalThis.wireAgentDashboard = () => { wiredDialog += 1; };
+
+/* The focus lease this page starts. `setDashboardActive` is the whole of what
+   dashboard-dialog.js asks of it. */
+globalThis.GridVibeDashboardFocus = {
+    started: 0,
+    start() {
+        this.started += 1;
+        return { setDashboardActive: active => calls.lease.push(active) };
+    }
+};
 
 /* Each page's own answer to "may a chord fire from here". Declared, because a
    page that has one is the normal case; a case that wants the other deletes
@@ -171,61 +200,103 @@ class DashboardButtonTestCase(unittest.TestCase):
             self.fail(f"node harness failed:\n{completed.stderr}")
         return json.loads(completed.stdout)
 
-    def test_the_native_window_is_asked_first_and_nothing_else_is_opened(self):
+    def test_the_button_raises_the_dialog_and_opens_no_window_at_all(self):
+        """It was a window — a native one through the bridge, a named tab
+        otherwise. Both are gone, and asserting that neither is reached is the
+        point: a leftover `window.open` here is how "it opens in a new tab
+        sometimes" comes back."""
         result = self._run_node(
             """
-            bridgeAnswer = { ok: true };
-            const opened = await openAgentDashboardWindow();
-            report({ opened, bridge: calls.bridge, opens: calls.opens });
+            const raised = openAgentDashboard();
+            report({ raised, up: dialogUp, opens: calls.opens, bridge: calls.bridge });
             """
         )
-        self.assertTrue(result["opened"])
-        self.assertEqual(result["bridge"], ["open_dashboard_window"])
+        self.assertTrue(result["raised"])
+        self.assertTrue(result["up"])
         self.assertEqual(result["opens"], [])
-
-    def test_the_browser_opens_one_named_target_so_a_second_press_focuses_it(self):
-        result = self._run_node(
-            """
-            await openAgentDashboardWindow();
-            await openAgentDashboardWindow();
-            report({ opens: calls.opens, bridge: calls.bridge });
-            """
-        )
         self.assertEqual(result["bridge"], [])
-        self.assertEqual(len(result["opens"]), 2)
-        # Same URL and the same name both times: the name is what makes the
-        # second press reuse the tab instead of stacking another one.
-        self.assertEqual({open_["url"] for open_ in result["opens"]}, {"/dashboard"})
-        self.assertEqual(
-            {open_["name"] for open_ in result["opens"]},
-            {"gridvibe-agent-dashboard"},
-        )
 
-    def test_a_native_bridge_that_refuses_still_lands_somewhere(self):
+    def test_a_second_press_puts_it_away(self):
+        """The button and the chord are one control, and a control that brings
+        a surface up and cannot take it away is half a control."""
         result = self._run_node(
             """
-            bridgeAnswer = { ok: false, error: 'pywebview is unavailable' };
-            const refused = await openAgentDashboardWindow();
-            bridgeAnswer = new Error('bridge exploded');
-            const threw = await openAgentDashboardWindow();
-            report({ refused, threw, opens: calls.opens.length, bridge: calls.bridge.length });
+            const states = [openAgentDashboard(), openAgentDashboard(), openAgentDashboard()];
+            report({ states, opens: calls.opens.length });
             """
         )
-        self.assertTrue(result["refused"])
-        self.assertTrue(result["threw"])
-        self.assertEqual(result["bridge"], 2)
-        self.assertEqual(result["opens"], 2)
+        self.assertEqual(result["states"], [True, False, True])
+        self.assertEqual(result["opens"], 0)
 
-    def test_a_blocked_pop_up_is_reported_rather_than_claimed(self):
+    def test_the_press_is_the_button_press_and_stops_there(self):
+        """It sits inside the session bar and inside the launcher's action row,
+        both of which have handlers of their own."""
         result = self._run_node(
             """
-            openAnswer = null;
-            report({ opened: await openAgentDashboardWindow() });
+            const seen = [];
+            openAgentDashboard({
+                preventDefault() { seen.push('preventDefault'); },
+                stopPropagation() { seen.push('stopPropagation'); }
+            });
+            report({ seen, up: dialogUp });
             """
         )
-        self.assertFalse(result["opened"])
+        self.assertEqual(result["seen"], ["preventDefault", "stopPropagation"])
+        self.assertTrue(result["up"])
 
-    def test_the_chord_opens_it_and_takes_the_key(self):
+    def test_a_page_without_the_dialog_module_refuses_rather_than_throwing(self):
+        """The button's partial and the dialog's are two includes, so a page
+        that ships one without the other is a real state — and it must be a
+        press that does nothing, never an exception in an inline onclick."""
+        result = self._run_node(
+            """
+            globalThis.toggleAgentDashboardDialog = undefined;
+            report({ raised: openAgentDashboard() });
+            """
+        )
+        self.assertFalse(result["raised"])
+
+    def test_wiring_the_button_wires_the_dialog_and_starts_the_dim_lease(self):
+        """One feature, one call: a page carrying the button carries the
+        surface it opens, and the lease that dims the other windows while it is
+        up is started here because this is what starts once per page."""
+        result = self._run_node(
+            """
+            fetchAnswer = snapshot(0);
+            wireDashboard();
+            wireDashboard();
+            await settle();
+            markDashboardFocusActive(true);
+            markDashboardFocusActive(false);
+            report({
+                wiredDialog,
+                started: GridVibeDashboardFocus.started,
+                lease: calls.lease
+            });
+            """
+        )
+        # Once, however many times the page asks.
+        self.assertEqual(result["wiredDialog"], 1)
+        self.assertEqual(result["started"], 1)
+        self.assertEqual(result["lease"], [True, False])
+
+    def test_a_page_that_never_started_a_lease_answers_harmlessly(self):
+        """`GridVibeDashboardFocus` is a separate script tag, so "it is not
+        there" is a real state and must not be an exception thrown out of the
+        dialog's own open."""
+        result = self._run_node(
+            """
+            globalThis.GridVibeDashboardFocus = undefined;
+            fetchAnswer = snapshot(0);
+            wireDashboard();
+            await settle();
+            markDashboardFocusActive(true);
+            report({ ok: true });
+            """
+        )
+        self.assertTrue(result["ok"])
+
+    def test_the_chord_raises_it_and_takes_the_key(self):
         result = self._run_node(
             """
             fetchAnswer = snapshot(0);
@@ -233,11 +304,12 @@ class DashboardButtonTestCase(unittest.TestCase):
             await settle();
             const prevented = chord();
             await settle();
-            report({ prevented, opens: calls.opens.length });
+            report({ prevented, up: dialogUp, opens: calls.opens.length });
             """
         )
         self.assertTrue(result["prevented"])
-        self.assertEqual(result["opens"], 1)
+        self.assertTrue(result["up"])
+        self.assertEqual(result["opens"], 0)
 
     def test_altgr_and_the_wrong_key_are_not_the_chord(self):
         """AltGr reaches the page as Ctrl+Alt, so Ctrl is load-bearing."""
@@ -255,11 +327,11 @@ class DashboardButtonTestCase(unittest.TestCase):
                 chord({ code: 'KeyS' })
             ];
             await settle();
-            report({ prevented, opens: calls.opens.length });
+            report({ prevented, up: dialogUp });
             """
         )
         self.assertEqual(result["prevented"], [False] * 6)
-        self.assertEqual(result["opens"], 0)
+        self.assertFalse(result["up"])
 
     def test_the_page_decides_whether_the_chord_may_fire_from_here(self):
         result = self._run_node(
@@ -269,14 +341,16 @@ class DashboardButtonTestCase(unittest.TestCase):
             wireDashboard();
             await settle();
             const inAPane = chord({ target: 'a-focused-pane' });
+            const afterPane = dialogUp;
             const onThePage = chord({ target: 'the-page' });
             await settle();
-            report({ inAPane, onThePage, opens: calls.opens.length });
+            report({ inAPane, afterPane, onThePage, up: dialogUp });
             """
         )
         self.assertFalse(result["inAPane"])
+        self.assertFalse(result["afterPane"])
         self.assertTrue(result["onThePage"])
-        self.assertEqual(result["opens"], 1)
+        self.assertTrue(result["up"])
 
     def test_the_badge_is_filled_without_anything_being_opened(self):
         result = self._run_node(
@@ -285,12 +359,12 @@ class DashboardButtonTestCase(unittest.TestCase):
             const before = { text: badge().textContent, hidden: badge().hidden, fetches: calls.fetches };
             wireDashboard();
             await settle();
-            report({ before, after: { text: badge().textContent, hidden: badge().hidden, fetches: calls.fetches }, opens: calls.opens.length });
+            report({ before, after: { text: badge().textContent, hidden: badge().hidden, fetches: calls.fetches }, up: dialogUp });
             """
         )
         self.assertEqual(result["before"]["fetches"], 0)
         self.assertEqual(result["after"], {"text": "3", "hidden": False, "fetches": 1})
-        self.assertEqual(result["opens"], 0)
+        self.assertFalse(result["up"])
 
     def test_no_agents_hides_the_badge_rather_than_showing_a_zero(self):
         result = self._run_node(
@@ -374,17 +448,26 @@ class DashboardButtonTestCase(unittest.TestCase):
         self.assertEqual(result["back"]["fetches"], 2)
 
     def test_a_page_without_the_button_wires_nothing(self):
-        """The dashboard window itself loads no button, and must not poll."""
+        """A page that carries neither the button nor the surface it opens must
+        not poll for a badge it has nowhere to draw."""
         result = self._run_node(
             """
             byId.delete('dashboardBtn');
             fetchAnswer = snapshot(4);
             wireDashboard();
             await settle();
-            report({ fetches: calls.fetches, intervals: calls.intervals, keydown: document.listenerCount('keydown') });
+            report({
+                fetches: calls.fetches,
+                intervals: calls.intervals,
+                keydown: document.listenerCount('keydown'),
+                wiredDialog
+            });
             """
         )
-        self.assertEqual(result, {"fetches": 0, "intervals": 0, "keydown": 0})
+        self.assertEqual(
+            result,
+            {"fetches": 0, "intervals": 0, "keydown": 0, "wiredDialog": 0},
+        )
 
 
 if __name__ == "__main__":

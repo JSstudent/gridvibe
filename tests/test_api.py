@@ -1141,6 +1141,79 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("position: absolute;", badge)
         self.assertNotIn("--dash-icon", badge)
 
+    def test_the_dashboard_dialog_is_the_pages_own_modal_shell(self):
+        """It was a window with a page and a stylesheet of its own. As a dialog
+        it reuses `.modal-shell`, and three things follow from that one choice:
+        the scrim and the background blur are the page's already, the shell is
+        in `EXPLORER_ESCAPE_CLAIM_SELECTOR` so Escape cannot also drop an
+        explorer pane's selection behind it, and `agent-dashboard.css` has no
+        business declaring either."""
+        agent_css = self._static("css/agent-dashboard.css")
+
+        for path in ("/terminals", "/"):
+            with self.subTest(path=path):
+                html = self.client.get(path).get_data(as_text=True)
+                self.assertIn(
+                    '<div id="agentDashboardShell" class="modal-shell agent-dashboard-shell"',
+                    html,
+                )
+                self.assertIn('role="dialog"', html)
+                self.assertIn('aria-modal="true"', html)
+
+        # The blur is the host page's, stated once per page and never here.
+        self.assertNotIn("backdrop-filter", agent_css)
+        for page_css in ("css/terminals.css", "css/launcher.css"):
+            with self.subTest(css=page_css):
+                # Not the first `.modal-shell` rule -- the launcher amends the
+                # scrim under a light theme in a rule of its own.
+                shell = self._css_rule(
+                    self._static(page_css), r"\.modal-shell", contains="position: fixed"
+                )
+                self.assertIn("backdrop-filter:", shell)
+
+        # And this file no longer states a page's worth of rules -- it is a
+        # partial on somebody else's document now.
+        for page_level in ("html,\n", "\nbody {", ".dash-frame", ".modal-card {"):
+            with self.subTest(rule=page_level):
+                self.assertNotIn(page_level, agent_css)
+
+        self.assertIn(
+            "'.modal-shell.visible',", self._static("js/explorer-viewer.js")
+        )
+
+    def test_the_dialog_stylesheet_is_loaded_after_each_pages_own(self):
+        """`.agent-dashboard-shell` and `.modal-shell` have equal specificity,
+        so which one wins is decided by source order alone -- and the amendment
+        has to be the one that wins."""
+        for path, page_css in (("/terminals", "terminals.css"), ("/", "launcher.css")):
+            with self.subTest(path=path):
+                html = self.client.get(path).get_data(as_text=True)
+                self.assertLess(
+                    html.index(f"css/{page_css}"),
+                    html.index("css/agent-dashboard.css"),
+                )
+
+    def test_the_dialogs_title_bar_carries_a_way_out_of_its_own(self):
+        """Three ways out, and the pointer needs one that is visible: Escape
+        and the backdrop are not affordances. A stroke SVG rather than a text
+        x, so it takes currentColor and shares the refresh control's box
+        instead of being centred by font metrics (guardrail 7)."""
+        html = self.client.get("/terminals").get_data(as_text=True)
+        dialog = html[html.index('id="agentDashboardShell"'):html.index('id="agentDashboardBody"')]
+
+        self.assertIn('id="agentDashboardCloseBtn"', dialog)
+        self.assertIn('class="dash-titlebar-btn"', dialog)
+        self.assertIn('aria-label="Close the agent dashboard"', dialog)
+        close = dialog[dialog.index('id="agentDashboardCloseBtn"'):]
+        self.assertIn("<svg", close)
+        self.assertNotIn("&times;", close)
+
+        # One box for both title-bar controls rather than two rules that agree
+        # by coincidence.
+        agent_css = self._static("css/agent-dashboard.css")
+        self.assertIn(".dash-titlebar-btn {", agent_css)
+        self.assertNotIn(".dash-refresh-btn", agent_css)
+
     def test_terminals_page_opens_app_settings_without_the_launcher(self):
         """The session window carries its own App Settings dialog (todo 1) —
         the shared partial plus the shared module, no launcher round-trip."""
@@ -19297,21 +19370,34 @@ class UxInteractionButtonsTestCase(unittest.TestCase):
         """One irreversible act, one prompt. The dashboard lists sessions from
         every workspace, so a second dialog there would be the one place a
         reader is warned about differently sized consequences than the window
-        that actually holds the terminals."""
-        terminals = self.client.get("/terminals").get_data(as_text=True)
-        dashboard = self.client.get("/dashboard").get_data(as_text=True)
-        for marker in (
-            'id="closeSessionConfirmModal"',
-            'id="closeSessionConfirmCancel"',
-            'id="closeSessionConfirmSave"',
-            'id="closeSessionConfirmAccept"',
-            "/static/js/close-session-modal.js",
-        ):
-            self.assertIn(marker, terminals)
-            self.assertIn(marker, dashboard)
-        # ... and the workspace verbs' own prompt, which is the launcher's.
-        self.assertIn('id="genericConfirmModal"', dashboard)
-        self.assertIn("/static/js/dashboard-close.js", dashboard)
+        that actually holds the terminals.
+
+        It is a dialog on both host pages now rather than a page of its own,
+        which is what puts the launcher under this rule too: it never shipped
+        the close prompt before, and the dashboard's session x is the first
+        thing there that ends live terminals."""
+        for path in ("/terminals", "/"):
+            page = self.client.get(path).get_data(as_text=True)
+            for marker in (
+                'id="agentDashboardShell"',
+                'id="closeSessionConfirmModal"',
+                'id="closeSessionConfirmCancel"',
+                'id="closeSessionConfirmSave"',
+                'id="closeSessionConfirmAccept"',
+                "/static/js/close-session-modal.js",
+                # ... and the workspace verbs' own prompt.
+                'id="genericConfirmModal"',
+                "/static/js/dashboard-close.js",
+            ):
+                with self.subTest(path=path, marker=marker):
+                    self.assertIn(marker, page)
+            # The prompt has to paint over the dialog that raised it, and at
+            # equal z-index that is decided by source order alone.
+            with self.subTest(path=path, marker="order"):
+                self.assertLess(
+                    page.index('id="agentDashboardShell"'),
+                    page.index('id="closeSessionConfirmModal"'),
+                )
 
     def test_close_session_group_gates_on_confirmation(self):
         terminals_js = self._static("js/terminals.js")

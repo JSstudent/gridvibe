@@ -1,6 +1,14 @@
 /* A short focus lease dims other GridVibe pages while the dashboard is active.
    No native window effects or input interception: a crashed/closed dashboard
-   loses its lease, and focusing any host immediately restores that page. */
+   loses its lease, and focusing any host immediately restores that page.
+
+   Which page owns the lease is not fixed for the life of that page any more.
+   The dashboard used to be a window, so a page either was it or was not; it is
+   now a dialog that any host page can raise, so `dashboard` is the *initial*
+   value of a flag `setDashboardActive()` moves — the page owns the lease while
+   its dialog is up and hands it straight back on close. Publishing on the way
+   down is the load-bearing half: without it every other window keeps its dim
+   until the lease simply expires. */
 (function (root, factory) {
     const api = factory();
     if (typeof module === 'object' && module.exports) module.exports = api;
@@ -13,6 +21,7 @@
 
     function start({ dashboard = false, win = window, doc = document } = {}) {
         const owner = `${Date.now()}-${Math.random()}`;
+        let owning = Boolean(dashboard);
         let channel = null;
         let lease = null;
         let heartbeat = null;
@@ -23,7 +32,7 @@
 
         function paint() {
             doc.body.classList.toggle('dashboard-background-blurred', Boolean(
-                !dashboard && !focused && lease?.active && lease.until > Date.now()
+                !owning && !focused && lease?.active && lease.until > Date.now()
             ));
         }
 
@@ -48,7 +57,7 @@
         function synchronize() {
             if (disposed) return;
             paint();
-            if (!dashboard) return;
+            if (!owning) return;
             win.clearInterval(heartbeat);
             heartbeat = null;
             const active = focused && !doc.hidden;
@@ -76,7 +85,10 @@
         }
         function dispose() {
             if (disposed) return;
-            if (dashboard) publish(false);
+            if (owning) publish(false);
+            /* Given up as well as released, so a disposed controller reports
+               what it actually holds rather than what it held last. */
+            owning = false;
             disposed = true;
             win.clearInterval(heartbeat);
             win.clearTimeout(expiry);
@@ -99,7 +111,29 @@
         doc.addEventListener('visibilitychange', onVisibility);
         try { accept(JSON.parse(win.localStorage.getItem(CHANNEL))); } catch (_) {}
         synchronize();
-        return { dispose };
+        /* The one way in and out of owning the lease. A page that is already in
+           the state it is asked for does nothing — the dialog's open and close
+           are each idempotent, and republishing on every no-op press would
+           reset every other window's expiry for a state that has not moved. */
+        function setDashboardActive(active) {
+            const next = Boolean(active);
+            if (disposed || owning === next) return owning;
+            owning = next;
+            /* Releasing publishes even from a blurred page: the lease is this
+               page's to end, and leaving it to expire dims the others for
+               another few seconds after the dialog has gone. */
+            if (!owning) {
+                win.clearInterval(heartbeat);
+                heartbeat = null;
+                publish(false);
+                paint();
+                return owning;
+            }
+            synchronize();
+            return owning;
+        }
+
+        return { dispose, setDashboardActive };
     }
 
     return { start, LEASE_MS, HEARTBEAT_MS };

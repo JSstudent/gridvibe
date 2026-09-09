@@ -765,25 +765,6 @@ def terminals_page():
                            version=__version__)
 
 
-@app.route('/dashboard')
-def dashboard_page():
-    """The agent dashboard: its own window, in no workspace.
-
-    It reads across every workspace and belongs to none of them, which is why
-    it is a page rather than a panel inside one -- and why it takes no
-    ``workspace`` argument. Everything it draws comes from ``/api/dashboard``;
-    the template is handed only what naming an agent needs.
-    """
-    logger.info("GET /dashboard")
-    settings = runtime_config.snapshot()
-    return render_template(
-        'dashboard.html',
-        agent_options=_agent_options(),
-        multi_workspace_enabled=settings.multi_workspace_enabled,
-        version=__version__,
-    )
-
-
 @app.route('/docs/images/<path:filename>')
 def docs_images(filename: str):
     """Serve bundled documentation images used by the local UI."""
@@ -2061,9 +2042,9 @@ def get_dashboard():
     """Return every agent running anywhere, under the workspace and session
     that holds it.
 
-    The one request behind the agent dashboard window, and behind the badge on
+    The one request behind the agent dashboard dialog, and behind the badge on
     the button that opens it. It exists because the alternative is N+1 requests
-    raced against each other: a window asking for workspaces, then a group list
+    raced against each other: a page asking for workspaces, then a group list
     per workspace, then a pane list per group, would render a tree assembled
     out of several different moments.
 
@@ -2217,8 +2198,8 @@ def save_session_group(group_id: str):
 
     The *Save and close* half of the three-outcome close prompt, for a surface
     that is not the window holding the group — the agent dashboard, which lists
-    sessions across every workspace and has none of their live DOM to compose a
-    preset from. The owning window is flushed first when one is open, so the
+    sessions across every workspace and, for every one it does not sit in, has
+    none of their live DOM to compose a preset from. The owning window is flushed first when one is open, so the
     preset carries what the reader sees rather than what the server last heard.
 
     It saves and nothing else: no workspace slot is captured, no teardown

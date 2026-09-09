@@ -1,0 +1,76 @@
+{# The agent dashboard — one dialog, both pages.
+
+   It reads across every workspace, and it used to be a *window* for that
+   reason. That cost more than it bought: opening it took the reader out of the
+   window they were working in, the OS gave it a taskbar entry to find again,
+   and getting back needed its own chords. It answers a question you ask *while*
+   you are somewhere — "what is running elsewhere?" — so it now opens over the
+   page that asked, and a press outside it puts that page back.
+
+   The root is the app's own `.modal-shell`, not a shell of its own: that class
+   is where both pages already declare the scrim and the background blur, and it
+   is already in `EXPLORER_ESCAPE_CLAIM_SELECTOR`, so Escape closing the
+   dashboard cannot also drop an explorer pane's selection behind it. Only the
+   surface inside it is this feature's own, because it is much larger than a
+   confirmation card and lays out three nested levels rather than a sentence and
+   two buttons.
+
+   Include it *before* the confirm dialogs on each page: a session × opens the
+   close prompt on top of this, and at equal z-index the later element wins.
+
+       {% include 'partials/agent_dashboard_dialog.html' %}
+#}
+<div id="agentDashboardShell" class="modal-shell agent-dashboard-shell" aria-hidden="true">
+    <div
+        class="dash-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="agentDashboardTitle"
+        tabindex="-1"
+    >
+        <header class="dash-titlebar">
+            <div class="dash-titlebar-left">
+                <img class="dash-logo" src="/docs/images/active_ws.ico" alt="" aria-hidden="true">
+                <div class="dash-titlebar-text">
+                    <h2 class="dash-title" id="agentDashboardTitle">Agent Dashboard</h2>
+                    <p class="dash-titlebar-sub">Every agent running, in every workspace</p>
+                </div>
+            </div>
+            <div class="dash-titlebar-right">
+                <span class="dash-totals" id="agentDashboardTotals">Reading…</span>
+                <button
+                    class="dash-titlebar-btn"
+                    id="agentDashboardRefreshBtn"
+                    type="button"
+                    title="Read again now"
+                    aria-label="Read again now"
+                >
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M21 12a9 9 0 1 1-2.64-6.36"></path><polyline points="21 3 21 9 15 9"></polyline></svg>
+                </button>
+                {# The dialog's own way out, beside the two the keyboard and the
+                   backdrop already give it. A stroke SVG rather than a text ×,
+                   so it takes `currentColor` and shares the refresh button's
+                   box instead of being centred by font metrics. #}
+                <button
+                    class="dash-titlebar-btn"
+                    id="agentDashboardCloseBtn"
+                    type="button"
+                    title="Close the agent dashboard (Esc)"
+                    aria-label="Close the agent dashboard"
+                >
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+                </button>
+            </div>
+        </header>
+
+        {# One line, and only while something is wrong: a failed read leaves the
+           last good tree on screen and says so here, rather than blanking a
+           dialog that is still telling you something true four seconds ago. #}
+        <p class="dash-notice" id="agentDashboardNotice" role="status" hidden></p>
+
+        {# The one scroller. dashboard-dialog.js owns everything inside it. #}
+        <main class="dash-body" id="agentDashboardBody">
+            <div class="dash-empty"><p class="dash-empty-title">Reading…</p></div>
+        </main>
+    </div>
+</div>

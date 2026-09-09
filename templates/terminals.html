@@ -13,6 +13,7 @@
     <link rel="stylesheet" href="{{ url_for('static', filename='css/lifecycle.css') }}?v={{ version }}">
     <link rel="stylesheet" href="{{ url_for('static', filename='css/shortcuts-help.css') }}?v={{ version }}">
     <link rel="stylesheet" href="{{ url_for('static', filename='css/dashboard.css') }}?v={{ version }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/agent-dashboard.css') }}?v={{ version }}">
 </head>
 <body
     data-voice-enabled="{{ 'true' if voice_enabled else 'false' }}"
@@ -246,6 +247,11 @@
     </div>
 </div>
 
+{# The agent dashboard, over whichever page you pressed the button on. It goes
+   *before* the confirm dialogs below it: a session × here opens the close
+   prompt on top of this, and at equal z-index the later element wins. #}
+{% include 'partials/agent_dashboard_dialog.html' %}
+
 {% set close_session_variant = 'terminals' %}
 {% include 'partials/close_session_modal.html' %}
 
@@ -363,6 +369,8 @@
 <script src="{{ url_for('static', filename='js/agent-identity.js') }}?v={{ version }}"></script>
 <script src="{{ url_for('static', filename='js/agent-glyphs.js') }}?v={{ version }}"></script>
 <script src="{{ url_for('static', filename='js/session-menu.js') }}?v={{ version }}"></script>
+<script src="{{ url_for('static', filename='js/dashboard-close.js') }}?v={{ version }}"></script>
+<script src="{{ url_for('static', filename='js/dashboard-dialog.js') }}?v={{ version }}"></script>
 <script src="{{ url_for('static', filename='js/dashboard.js') }}?v={{ version }}"></script>
 <script src="{{ url_for('static', filename='js/dashboard-focus.js') }}?v={{ version }}"></script>
 <script src="{{ url_for('static', filename='js/shortcuts-help.js') }}?v={{ version }}"></script>

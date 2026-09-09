@@ -1,23 +1,53 @@
-    /* ─────────────────────────────────────────────
-       The agent dashboard window — every agent running, wherever it runs.
+    /* ─────────────────────────────
+       The agent dashboard — every agent running, wherever it runs.
 
        GridVibe can have several workspace windows open, each with several
-       session tabs, each with several panes, and until now the only way to
-       find out which agents were working anywhere was to go and look in every
-       window. This is that answer in one window: every workspace holding an
-       agent, the sessions inside it, and the agents inside those — what each
-       one is announcing and whether it is doing anything.
+       session tabs, each with several panes, and the only way to find out which
+       agents are working anywhere is to go and look in every window. This is
+       that answer in one surface: every workspace holding an agent, the
+       sessions inside it, and the agents inside those — what each one is
+       announcing and whether it is doing anything.
 
-       Five decisions worth stating, because each is the reason something here
-       is *not* built the obvious way:
+       **It is a dialog, and it was a window.** The window was the wrong shape
+       for the question: you ask "what is running elsewhere?" *while* you are
+       somewhere, and answering it took the reader out of the window they were
+       working in, gave the answer a taskbar entry of its own to find again, and
+       needed two chords of its own to get back. So it now opens over the page
+       that asked for it and a press outside it puts that page back — on both
+       pages, from the same partial and this one module. Four consequences,
+       each of which is why something below is not the obvious code:
+
+         · **It polls only while it is open.** The reading is a whole-tree
+           compose every couple of seconds; a dialog that is shut is a dialog
+           nobody can see, and a background window quietly refetching the state
+           of every workspace forever is exactly the cost a panel is supposed to
+           avoid. Opening arms the poll and reads once immediately; closing
+           disarms it and aborts what is in flight.
+         · **Escape is claimed, and only when this is the top surface.** The
+           root is the app's own `.modal-shell`, which is already in
+           `EXPLORER_ESCAPE_CLAIM_SELECTOR`, so closing the dashboard cannot
+           also drop an explorer pane's selection behind it. And a session ×
+           here opens the close prompt *on top* of this dialog, so Escape while
+           another shell is open belongs to that shell: one key press must not
+           dismiss two surfaces.
+         · **A row that names this very workspace lands without opening
+           anything.** `openWorkspaceWindow` on the window you are already in
+           raises a window that is already raised, so no `focus` event fires and
+           the stored target is never claimed — the row would do nothing at all.
+           The page that owns the tab applies it directly instead.
+         · **Acting closes it.** Every row is a way somewhere else; a dialog
+           still covering the pane it just took you to is in the way. The close
+           verbs are the exception — they end something and leave you here.
+
+       The rest is what the reading itself is for:
 
          · **One request, not N+1.** `/api/dashboard` composes the whole tree
            server-side, already reduced to agents. A page that asked for
            workspaces, then groups per workspace, then panes per group would
            render a tree assembled out of several different moments, and the
            moments that disagree are exactly the ones worth showing.
-         · **Sections, not a list.** A window has room a dropdown never had, so
-           the three levels are three different things on the page rather than
+         · **Sections, not a list.** The dialog has room a dropdown never had,
+           so the three levels are three different things on it rather than
            three indent depths: a workspace is a titled band, a session is a
            card inside it, an agent is a row inside that. The nesting is then
            visible without counting pixels of padding — which was the whole
@@ -57,11 +87,17 @@
        Loaded after shared.js and workspaces.js, whose `openWorkspaceWindow` is
        how a row reaches the window that owns it, and after agent-identity.js
        and agent-glyphs.js, which are what a row is named and marked from.
-    ───────────────────────────────────────────── */
+       `wireDashboard()` (dashboard.js) wires it, because the button and the
+       dialog it opens are one feature on both pages.
+    ───────────────────────────── */
 
+    const AGENT_DASHBOARD_SHELL_ID = 'agentDashboardShell';
+    const AGENT_DASHBOARD_DIALOG_SELECTOR = '.dash-dialog';
     const AGENT_DASHBOARD_BODY_ID = 'agentDashboardBody';
     const AGENT_DASHBOARD_TOTALS_ID = 'agentDashboardTotals';
     const AGENT_DASHBOARD_NOTICE_ID = 'agentDashboardNotice';
+    const AGENT_DASHBOARD_REFRESH_BTN_ID = 'agentDashboardRefreshBtn';
+    const AGENT_DASHBOARD_CLOSE_BTN_ID = 'agentDashboardCloseBtn';
 
     /* A dashboard that lags the thing it describes is just a screenshot. */
     const AGENT_DASHBOARD_REFRESH_MS = 2000;
@@ -86,6 +122,10 @@
     let _agentDashboardNoticeTimer = null;
     let _agentDashboardReadNotice = '';
     let _agentDashboardWired = false;
+    /* What had focus when the dialog opened, so closing hands it back. A
+       node rather than an id: the opener is the button in the page's own
+       chrome, and this module has no business knowing which one. */
+    let _agentDashboardOpener = null;
 
     function dashboardAgentOptions() {
         return typeof AGENT_OPTIONS === 'undefined' || !Array.isArray(AGENT_OPTIONS) ? [] : AGENT_OPTIONS;
@@ -631,8 +671,12 @@
         return true;
     }
 
+    /* The one gate every reader passes through, the Refresh button included:
+       a shut dialog is not a surface with an old reading on it, it is a surface
+       nobody is looking at, and the window-focus listener above would otherwise
+       compose the whole tree every time the reader clicked back into the page. */
     async function refreshAgentDashboard() {
-        if (document.hidden) return;
+        if (!agentDashboardDialogOpen() || document.hidden) return;
         const requestId = ++_agentDashboardRequestId;
         _agentDashboardController?.abort();
         const controller = new AbortController();
@@ -680,14 +724,16 @@
         paintAgentDashboardSnapshot(snapshot);
     }
 
-    /* Stands down entirely while the window is hidden — a dashboard nobody can
-       see has nothing to keep current. */
+    /* Stands down entirely while the dialog is shut or the window is hidden —
+       a reading nobody can see has nothing to keep current, and this one is a
+       whole-tree compose every two seconds. Restarted rather than left running,
+       so a closed dialog costs exactly nothing. */
     function scheduleAgentDashboardRefresh() {
         if (_agentDashboardTimer !== null) {
             clearInterval(_agentDashboardTimer);
             _agentDashboardTimer = null;
         }
-        if (document.hidden) {
+        if (!agentDashboardDialogOpen() || document.hidden) {
             ++_agentDashboardRequestId;
             _agentDashboardController?.abort();
             _agentDashboardController = null;
@@ -698,13 +744,130 @@
         }, AGENT_DASHBOARD_REFRESH_MS);
     }
 
+    /* ── Opening and shutting ──
+
+       The dialog is the app's own `.modal-shell`, so it is shown the way every
+       other one is — a class and `aria-hidden` — and inherits both pages'
+       scrim and background blur without either of them learning it is here.
+
+       Focus moves into the surface on open and is handed back to whatever had
+       it on close, but *only if the dialog still holds it*: a close provoked by
+       a press somewhere else must not yank focus off what was pressed. That is
+       the same rule the shortcut panel follows.
+
+       The cross-window dim goes with it. It was the standalone window's own
+       lease — every other GridVibe page dimmed while the dashboard had focus —
+       and it is worth exactly what it was worth before: this surface is about
+       the other windows, so the other windows step back while it is up. */
+
+    function agentDashboardShell() {
+        return document.getElementById(AGENT_DASHBOARD_SHELL_ID);
+    }
+
+    function agentDashboardDialogOpen() {
+        return Boolean(agentDashboardShell()?.classList?.contains('visible'));
+    }
+
+    /* dashboard.js holds the focus lease it started for this page; it is asked
+       through a named function rather than reached into, and a page that never
+       started one blocks nothing. */
+    function setAgentDashboardDim(active) {
+        if (typeof markDashboardFocusActive !== 'function') {
+            return;
+        }
+        try {
+            markDashboardFocusActive(active);
+        } catch (_error) {}
+    }
+
+    function openAgentDashboardDialog() {
+        const shell = agentDashboardShell();
+        if (!shell || agentDashboardDialogOpen()) {
+            return false;
+        }
+        _agentDashboardOpener = document.activeElement || null;
+        shell.classList.add('visible');
+        shell.setAttribute('aria-hidden', 'false');
+        setAgentDashboardDim(true);
+        /* The surface itself, not the first control in it: the reader opened a
+           list to read, and parking the caret on Refresh means the first Enter
+           re-reads rather than doing what they came for. */
+        shell.querySelector?.(AGENT_DASHBOARD_DIALOG_SELECTOR)?.focus?.({ preventScroll: true });
+        scheduleAgentDashboardRefresh();
+        refreshAgentDashboard();
+        return true;
+    }
+
+    function closeAgentDashboardDialog() {
+        const shell = agentDashboardShell();
+        if (!shell || !agentDashboardDialogOpen()) {
+            return false;
+        }
+        const heldFocus = Boolean(shell.contains?.(document.activeElement));
+        shell.classList.remove('visible');
+        shell.setAttribute('aria-hidden', 'true');
+        setAgentDashboardDim(false);
+        /* An action's confirmation belongs to the pass that provoked it; a
+           reopened dialog reporting a close from four minutes ago would be
+           reporting something the reader has no way to place. The read notice
+           is left alone — it describes the tree still on screen. */
+        setAgentDashboardNotice('');
+        scheduleAgentDashboardRefresh();
+        if (heldFocus) {
+            _agentDashboardOpener?.focus?.({ preventScroll: true });
+        }
+        _agentDashboardOpener = null;
+        return true;
+    }
+
+    /* Answers with the state the dialog is now in, not with whether the press
+       did anything: the button and the chord are one control and what a caller
+       wants back from it is "is it up?". Both halves report a refusal (no
+       shell on this page) as a shut dialog, which is what it is. */
+    function toggleAgentDashboardDialog() {
+        if (agentDashboardDialogOpen()) {
+            closeAgentDashboardDialog();
+        } else {
+            openAgentDashboardDialog();
+        }
+        return agentDashboardDialogOpen();
+    }
+
     /* ── What a row does ──
-       This window is in no workspace, so every row is somewhere else: it opens
-       (or focuses) the window that owns it, at the session it names. The
-       dashboard stays open behind it — it is a place you come back to. */
+
+       Every row is somewhere else: it opens (or focuses) the window that owns
+       it, at the session it names, and the dialog closes behind it — a surface
+       still covering the pane it has just taken you to is in the way.
+
+       The workspace this page *is* is the case the window could not have:
+       asking `openWorkspaceWindow` to raise the window you are already in
+       raises a window that is already raised, so no `focus` event fires, the
+       stored target is never claimed and the row does nothing at all. The page
+       that owns the tab is asked to land on it directly instead. */
+    function dashboardWorkspaceIsHere(workspaceId) {
+        if (typeof CURRENT_WORKSPACE_ID === 'undefined'
+            || typeof normalizeWorkspaceId !== 'function') {
+            return false;
+        }
+        return normalizeWorkspaceId(workspaceId) === normalizeWorkspaceId(CURRENT_WORKSPACE_ID);
+    }
+
     async function openDashboardTarget({ workspaceId, groupId = '', sessionId = '' }) {
         const resolvedWorkspaceId = String(workspaceId || '');
-        if (!resolvedWorkspaceId || typeof openWorkspaceWindow !== 'function') {
+        if (!resolvedWorkspaceId) {
+            return false;
+        }
+        if (dashboardWorkspaceIsHere(resolvedWorkspaceId)
+            && typeof applyWorkspaceFocusTarget === 'function') {
+            setAgentDashboardNotice('');
+            /* Shut first: the landing focuses a pane, and focusing a pane under
+               an open dialog puts the caret somewhere the reader can neither
+               see nor type into. */
+            closeAgentDashboardDialog();
+            applyWorkspaceFocusTarget({ groupId, sessionId });
+            return true;
+        }
+        if (typeof openWorkspaceWindow !== 'function') {
             return false;
         }
         /* Stored before the window is asked for, because that is the only order
@@ -717,6 +880,7 @@
         try {
             if (await openWorkspaceWindow(resolvedWorkspaceId, { groupId })) {
                 setAgentDashboardNotice('');
+                closeAgentDashboardDialog();
                 return true;
             }
         } catch (error) {
@@ -725,7 +889,8 @@
             return false;
         }
         /* In browser mode the one way this fails is a blocked pop-up, and
-           workspaces.js already owns the single wording for it. */
+           workspaces.js already owns the single wording for it. The dialog
+           stays open: it is where the message is. */
         setAgentDashboardNotice(
             typeof WORKSPACE_TAB_BLOCKED_HINT === 'string'
                 ? WORKSPACE_TAB_BLOCKED_HINT
@@ -734,104 +899,49 @@
         return false;
     }
 
-    /* ── Getting out of here ──
-       This window is about workspaces without being in one, which is exactly
-       the launcher's standing, so it answers the launcher's two chords the same
-       way: Alt+W goes back to the workspace you came from, Alt+Q opens the
-       launcher. Without them the dashboard was the one GridVibe window you
-       could only leave with the mouse.
+    /* ── Dismissal ──
 
-       Both are matched on `event.code` and exclude Ctrl, the rule every Alt
-       chord in the app follows: AltGr arrives as Ctrl+Alt on Windows, so a
-       chord that did not exclude Ctrl would fire while typing an accented
-       character, and matching the physical key keeps the chord on the same key
-       whatever the layout prints on it. Shift is read the way each host page
-       reads it: there is no cycle to run backwards from a window that is not a
-       workspace, so Alt+Shift+W still means "go back", while Alt+Q is a single
-       destination and takes no modifier.
+       Three ways out, and they are the three every dialog in this app has: the
+       × in the title bar, a press on the backdrop, and Escape.
 
-       Neither is gated on multi-workspace being enabled. The launcher gates its
-       Alt+W because it is the workspace *walk* seen from outside; this is "put
-       the window I came from back in front", which is worth the same whether
-       there is one workspace or six — and this window only exists when
-       something is running in one. */
-    const DASHBOARD_WORKSPACE_CHORD_CODE = 'KeyW';
-    const DASHBOARD_LAUNCHER_CHORD_CODE = 'KeyQ';
-
-    let _dashboardWorkspaceReturnInFlight = false;
-
-    function dashboardBlockedTabHint() {
-        return typeof WORKSPACE_TAB_BLOCKED_HINT === 'string'
-            ? WORKSPACE_TAB_BLOCKED_HINT
-            : 'Could not open that window.';
-    }
-
-    /* The in-flight guard keeps a held key from queueing a burst of opens —
-       the same guard, for the same reason, as the launcher's. */
-    async function returnToDashboardOriginWorkspace() {
-        if (_dashboardWorkspaceReturnInFlight || typeof returnToOriginWorkspace !== 'function') {
-            return;
-        }
-        _dashboardWorkspaceReturnInFlight = true;
-        try {
-            const { outcome } = await returnToOriginWorkspace();
-            if (outcome === WORKSPACE_RETURN_NONE) {
-                setAgentDashboardNotice('No workspace is open to switch back to.');
-            } else if (outcome === WORKSPACE_RETURN_BLOCKED) {
-                setAgentDashboardNotice(dashboardBlockedTabHint());
-            } else {
-                setAgentDashboardNotice('');
-            }
-        } catch (error) {
-            console.error('[GridVibe Dashboard] workspace return failed:', error);
-            setAgentDashboardNotice('Could not switch to a workspace window.');
-        } finally {
-            _dashboardWorkspaceReturnInFlight = false;
-        }
-    }
-
-    async function openDashboardLauncherWindow() {
-        if (typeof openLauncherWindow !== 'function') {
-            return;
-        }
-        try {
-            if (await openLauncherWindow()) {
-                setAgentDashboardNotice('');
-                return;
-            }
-        } catch (error) {
-            console.error('[GridVibe Dashboard] launcher open failed:', error);
-        }
-        setAgentDashboardNotice(dashboardBlockedTabHint());
-    }
-
-    function dashboardWindowChordMatches(event, code, { allowShift = false } = {}) {
-        if (!event || !event.altKey || event.ctrlKey || event.metaKey || event.repeat) {
+       Escape is the one with a rule. A session × here opens the close prompt
+       *on top* of this dialog, and that prompt has an Escape handler of its
+       own, so an unguarded one here would dismiss both surfaces on one press —
+       the reader cancels a close and loses the list they were working through.
+       So the key is answered only while this is the top `.modal-shell` on the
+       page. Nothing here calls `preventDefault`: the page's own handlers read
+       `defaultPrevented`, and a dialog that claimed the key would silently
+       change what Escape means everywhere behind it. */
+    function agentDashboardEscapeBelongsHere() {
+        if (!agentDashboardDialogOpen()) {
             return false;
         }
-        if (event.shiftKey && !allowShift) {
-            return false;
-        }
-        return event.code === code;
+        const shell = agentDashboardShell();
+        const open = document.querySelectorAll?.('.modal-shell.visible') || [];
+        return ![...open].some(other => other !== shell);
     }
 
-    function wireAgentDashboardChords() {
-        document.addEventListener?.('keydown', event => {
-            if (dashboardWindowChordMatches(event, DASHBOARD_WORKSPACE_CHORD_CODE, { allowShift: true })) {
-                event.preventDefault();
-                returnToDashboardOriginWorkspace();
-                return;
+    function wireAgentDashboardDismissal(shell) {
+        shell.addEventListener('click', event => {
+            /* The backdrop and only the backdrop — the same test
+               `openGenericConfirmModal` uses for its own. */
+            if (event.target === shell) {
+                closeAgentDashboardDialog();
             }
-            if (dashboardWindowChordMatches(event, DASHBOARD_LAUNCHER_CHORD_CODE)) {
-                event.preventDefault();
-                openDashboardLauncherWindow();
+        });
+        document.getElementById(AGENT_DASHBOARD_CLOSE_BTN_ID)
+            ?.addEventListener('click', () => closeAgentDashboardDialog());
+        document.addEventListener('keydown', event => {
+            if (event.key === 'Escape' && agentDashboardEscapeBelongsHere()) {
+                closeAgentDashboardDialog();
             }
         });
     }
 
     function wireAgentDashboard() {
+        const shell = agentDashboardShell();
         const body = document.getElementById(AGENT_DASHBOARD_BODY_ID);
-        if (_agentDashboardWired || !body) {
+        if (_agentDashboardWired || !shell || !body) {
             return;
         }
         _agentDashboardWired = true;
@@ -847,7 +957,8 @@
             const actions = dashboardCloseActions();
             /* The close verbs and the open verbs share one listener because
                they share one set of rows; what separates them is the action
-               the row states, never which element it is. */
+               the row states, never which element it is. A close ends something
+               and leaves the reader here, so it does not shut the dialog. */
             if (actions?.handles(action)) {
                 actions.run(action, {
                     workspaceId: row.dataset.workspaceId || '',
@@ -864,21 +975,21 @@
                 sessionId: row.dataset.sessionId || ''
             });
         });
-        document.getElementById('agentDashboardRefreshBtn')?.addEventListener('click', () => {
+        document.getElementById(AGENT_DASHBOARD_REFRESH_BTN_ID)?.addEventListener('click', () => {
             refreshAgentDashboard();
         });
+        wireAgentDashboardDismissal(shell);
         document.addEventListener('visibilitychange', () => {
             scheduleAgentDashboardRefresh();
             if (!document.hidden) {
                 refreshAgentDashboard();
             }
         });
-        wireAgentDashboardChords();
         /* The native bridge is not there when the first tree is painted, and
            the *window* close verb exists only when it is. The repaint skip
            compares the reading, which has not changed — so the rendered
-           structure is dropped explicitly, or the row would keep its
-           browser-mode shape for the life of the window. */
+           structure is dropped explicitly, or the rows would keep their
+           browser-mode shape for as long as the page lives. */
         window.addEventListener?.('pywebviewready', () => {
             _agentDashboardStructure = '';
             _agentDashboardPainted = '';
@@ -893,8 +1004,9 @@
             _agentDashboardController = null;
         });
         window.addEventListener?.('pageshow', event => {
-            if (event.persisted) { scheduleAgentDashboardRefresh(); refreshAgentDashboard(); }
+            if (event.persisted && agentDashboardDialogOpen()) {
+                scheduleAgentDashboardRefresh();
+                refreshAgentDashboard();
+            }
         });
-        scheduleAgentDashboardRefresh();
-        refreshAgentDashboard();
     }

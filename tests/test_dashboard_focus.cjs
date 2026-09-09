@@ -110,3 +110,47 @@ for (const useChannel of [true, false]) {
     for (const p of [host, other, late]) p.controller.dispose();
     assert.equal(env.tasks.size, 0);
 }
+
+/* The dashboard is a dialog on a host page now, so which page owns the lease
+   moves while that page lives: it takes it when the dialog goes up and hands it
+   straight back when it comes down. */
+for (const useChannel of [true, false]) {
+    const env = environment(useChannel);
+    const quiet = env.page(false);
+    const raising = env.page(false, true);
+    assert(!quiet.blurred(), 'nothing is dimmed until a dialog is up');
+
+    raising.controller.setDashboardActive(true);
+    assert(quiet.blurred(), 'the other windows step back while it is up');
+    assert(!raising.blurred(), 'never the page holding the dialog');
+
+    raising.controller.setDashboardActive(false);
+    assert(!quiet.blurred(), 'closing releases the lease rather than letting it expire');
+
+    /* Idempotent in both directions: the dialog's own open and close are, and
+       republishing for a state that has not moved would reset every other
+       window's expiry on a no-op press. */
+    raising.controller.setDashboardActive(true);
+    raising.controller.setDashboardActive(true);
+    assert(quiet.blurred());
+    raising.focus(false);
+    assert(!quiet.blurred(), 'a lease-holder that loses focus stops dimming the rest');
+    raising.focus(true);
+    assert(quiet.blurred());
+
+    /* Released from a page that is not in front: the lease is this page's to
+       end, and leaving it to expire dims the others for another few seconds
+       after the dialog has gone. */
+    raising.focus(false);
+    raising.controller.setDashboardActive(false);
+    raising.focus(true);
+    assert(!quiet.blurred());
+
+    raising.controller.setDashboardActive(true);
+    raising.controller.dispose();
+    assert(!quiet.blurred(), 'a disposed holder cannot leave a permanent dim');
+    assert.equal(raising.controller.setDashboardActive(true), false,
+        'a disposed controller takes no lease back');
+    quiet.controller.dispose();
+    assert.equal(env.tasks.size, 0);
+}

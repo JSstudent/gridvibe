@@ -1,9 +1,11 @@
 {# The agent dashboard button — the same button on both pages.
 
-   It opens a window, not a panel: the dashboard reads across every workspace
-   and belongs to none of them, so it is its own window (native) or its own
-   named tab (browser), the way the launcher is. Nothing here holds rows, and
-   the only state this button carries is the badge.
+   It brings up a dialog over this page (`partials/agent_dashboard_dialog.html`,
+   driven by dashboard-dialog.js), and a second press puts it away again. It was
+   a window of its own, which answered "what is running elsewhere?" by taking
+   the reader out of the window they were in; opening it over that window is
+   what the button is for. Nothing here holds rows, and the only state this
+   button carries is the badge.
 
    Only the button's own chrome differs between the two pages — the workspace
    session bar dresses its controls as `.btn.btn-neutral.btn-icon`, the launcher
@@ -17,7 +19,7 @@
         class="{{ dashboard_button_class | default('ghost-btn icon-btn', true) }}"
         id="dashboardBtn"
         type="button"
-        onclick="openAgentDashboardWindow(event)"
+        onclick="openAgentDashboard(event)"
         title="Agent dashboard — every agent running in every workspace (Alt+A)"
         aria-label="Open the agent dashboard"
     >
