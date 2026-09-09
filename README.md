@@ -147,26 +147,35 @@ Closing a workspace ends its terminals but keeps it available to restore. **Clos
 ## Agent Dashboard
 
 The dashboard button — beside the session menu in a workspace window, and in the
-launcher's control row — opens a **window of its own** (`Alt+A`) listing **every
-agent you have running, in every workspace**. It is one window however many
-times you ask for it, and it stays open beside your work: press again, or
-`Alt+A` from anywhere, and it comes to the front rather than opening a second
-copy. The button carries a badge, and it counts the agents that are **working
-right now** — not how many you have open. How many you opened is something you
-already know, so a badge tallying those would be lit permanently and say
-nothing; what you cannot see from where you are is one of them starting or
+launcher's control row — opens a **panel over the page you are on** (`Alt+A`)
+listing **every agent you have running, in every workspace**. There is one of it
+however many windows you have: raising it anywhere puts away whichever window
+was holding it. It closes on the ×, on a press outside it, on `Escape`, and when
+you leave the window — a dashboard left behind a window you have moved away from
+is a stale answer you did not ask to keep.
+
+The button carries a badge, and it counts the agents that are **working right
+now** — not how many you have open. How many you opened is something you already
+know, so a badge tallying those would be lit permanently and say nothing; what you cannot see from where you are is one of them starting or
 finishing something. When every agent is sitting at a prompt there is no badge
 at all, which is a reading too. It is the same working/idle reading the rows
 themselves carry, counted on the server, so the number on the button and the
 states in the list cannot disagree — and a pane that is not connected is never
 counted, however recently it wrote.
 
-It lists agents and nothing else. Plain terminals, file explorers and browser
-panes are already in front of you in the window that holds them; a workspace or
-a session tab with no agent in it is not listed at all. Three levels, drawn as
-three different things:
+It lists **every session you have open**, because it is the one place all of
+them are named at once and so the quickest way to get to any of them — but it
+is still about the agents, so a session with no agent in it sorts *after* every
+session that has one, and a workspace with none after every workspace that has
+one. Each half stays in the order its own window uses. A session with no agent
+says **No active agents** where its rows would be and is dimmed to the weight
+of a signpost, and its heading opens that tab exactly as an agent row does.
 
-- a **workspace** is a titled band across the window, ruled off from the band
+**Panes are agent-only.** A plain terminal, a file explorer or a browser pane is
+already in front of you in the window that holds it, so it is never a row here.
+Three levels, drawn as three different things:
+
+- a **workspace** is a titled band across the panel, ruled off from the band
   above it;
 - a **session tab** is a card inside that band, full width, stacked under the
   card before it, and drawn in **that session's own tab colour** — the same hue
@@ -178,12 +187,17 @@ three different things:
   title it announced, `auto` when it was launched with its agent's own
   auto-approval flag, and what it is doing.
 
+The line above the list counts what the list holds — `2 agents · 5 sessions ·
+2 workspaces` — and says `no agents` rather than a bare `0` when there are
+none. An empty dashboard means nothing is running at all.
+
 Click any row — an agent, its session or its workspace — to open (or focus) the
-window that owns it, at that session tab. The dashboard stays where it is.
-While the dashboard has focus, the launcher and workspace pages behind it are
-softly blurred so the active window is obvious. Focusing another GridVibe
-window removes the blur immediately; closing, hiding, or crashing the dashboard
-also releases it automatically.
+window that owns it, at that session tab. The panel closes on the way, since it
+would otherwise be covering the pane it just took you to; the close controls are
+the exception and leave it open. While the dashboard has focus, the launcher and
+workspace pages behind it are softly blurred so the active window is obvious.
+Focusing another GridVibe window removes the blur immediately; closing, hiding,
+or crashing the dashboard also releases it automatically.
 
 Each agent row carries two readings, both taken from the pane's own output — no
 probe is ever sent, and nothing is typed into a running agent:
@@ -322,7 +336,7 @@ GridVibe does not proxy pages or bypass `X-Frame-Options`/CSP, so sites that blo
 
 **One menu holds sessions and workspaces.** The GridVibe button at the head of the tab line opens a two-row menu — **Sessions** and **Workspace** — and pointing at either row opens its items beside it: `Import Session…`, `Save Session`, `Save Session as…` and `Save All Sessions` under the first; `Save Workspace` under the second, joined by `Rename Workspace…`, `New Workspace…`, `Open Workspace`, `Move Session to Workspace` and the two close verbs when multiple workspaces are enabled. Hovering the row is enough, only one section is open at a time, and moving the pointer off the menu closes it.
 
-**The dashboard button is on both pages.** It opens the window described under [Agent Dashboard](#agent-dashboard) — every agent running in every workspace, with a badge counting the ones working right now. It sits in the session tab line in a workspace window and in the launcher's control row, and `Alt+A` opens it from either.
+**The dashboard button is on both pages.** It opens the panel described under [Agent Dashboard](#agent-dashboard) — every session you have open, agents first, with a badge counting the ones working right now. It sits in the session tab line in a workspace window and in the launcher's control row, and `Alt+A` opens it from either.
 
 **Every shortcut is listed in the app.** The keyboard button — in the workspace top bar left of App Settings, and in the launcher's bottom action bar left of the minimize-all control — opens a read-only panel with the whole list, grouped the way you'd look for it. Rows that only apply in one mode say so rather than disappearing. Nothing in it is editable; the one configurable chord in GridVibe is voice push-to-talk, set in App Settings.
 
@@ -332,7 +346,7 @@ GridVibe does not proxy pages or bypass `X-Frame-Options`/CSP, so sites that blo
 | `Alt+W` / `Alt+Shift+W` | Next / previous workspace window (multiple workspaces only) — the window you land in pulses once |
 | `Alt+W` | On the launcher, return to the workspace that opened it, or to whichever workspace is still open if that one has closed |
 | `Alt+Q` | Open the launcher (in a workspace window) |
-| `Alt+A` | Open the agent dashboard window |
+| `Alt+A` | Open the agent dashboard |
 | `Ctrl+Shift+F` | Terminal scrollback search — or, on an explorer pane, toggle repository search |
 | `Ctrl+Shift+C` | Copy the terminal selection |
 | `Ctrl+V` | Paste into the terminal |

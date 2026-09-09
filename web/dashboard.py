@@ -1,4 +1,4 @@
-"""One reading of every agent that is running, wherever it is running.
+"""One reading of every session that is open, and every agent inside them.
 
 GridVibe already answers "what is in *this* window" several times over --
 ``/api/workspaces`` lists workspaces, ``/api/session-groups`` lists one
@@ -10,17 +10,23 @@ manager.
 
 Three rules shape what it carries:
 
-* **Agents, and only agents.** This is the agent management surface, so a pane
-  that is not running one is not a row: a terminal, an explorer and a browser
-  pane are all things you already see in the window that holds them. The filter
-  is ``startup_mode == "agent"``, the same marker
+* **Every live session; agents first.** This is the agent management surface,
+  and it is also the only place every workspace and session in the process is
+  listed at once -- so it is how a reader gets to *any* of them, agent or not.
+  Those two needs meet in the ordering rather than in a filter: a session with
+  no agent in it is still a row, and so is the workspace holding it, but it
+  sorts after every session that has one, and its workspace after every
+  workspace that has one. Each half keeps the order its own window would use.
+
+  **Panes remain agent-only.** A terminal, an explorer and a browser pane are
+  things you already see in the window that holds them, and a row each would
+  bury the agents this surface exists for. The filter is
+  ``startup_mode == "agent"``, the same marker
   ``web/static/js/agent-identity.js`` reads, and it is applied here rather than
-  in the page so a workspace whose every pane is a plain terminal costs no
-  bytes and no row. A group with no agent in it, and a workspace with no such
-  group, are dropped for the same reason -- an empty heading is something to
-  scroll past, not information. Panes keep the *index they have in their own
-  group* across the filter, because that index is what names a pane and what
-  focuses it.
+  in the page so the two cannot disagree about what an agent is. Panes keep the
+  *index they have in their own group* across it, because that index is what
+  names a pane and what focuses it. A group's own ``agent_count`` is what says
+  a card has none, so the page never infers it from an empty list.
 * **Facts, not names.** The payload states what a pane *is* -- its startup
   mode, its agent selection, the transport and shell it runs on, what it has
   been announcing -- and never what to call it. Turning that into "Claude" or
@@ -194,6 +200,24 @@ def compose_group(
     }
 
 
+def agents_first(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Rows holding an agent, then rows holding none, each half as handed in.
+
+    The one place the surface's two jobs are reconciled. It lists every session
+    so a reader can reach any of them, and it is *about* agents -- so what a
+    row holds decides which half of the list it is in, and nothing else decides
+    its position within that half: the second key is the order the window that
+    owns the row would use, which is the order it arrived in.
+
+    One function for both levels, because a workspace and a group answer the
+    same question the same way: both carry ``agent_count``.
+    """
+    return (
+        [row for row in rows if row["agent_count"]]
+        + [row for row in rows if not row["agent_count"]]
+    )
+
+
 def compose_dashboard(
     *,
     workspaces: List[Dict[str, Any]],
@@ -204,10 +228,13 @@ def compose_dashboard(
 ) -> Dict[str, Any]:
     """Compose the whole reading from data already gathered.
 
-    Order is the order every other surface uses -- workspaces as
+    Within a half, order is the order every other surface uses -- workspaces as
     ``list_live_workspaces`` returns them (default first), groups in their
     workspace's own display order, panes in their group's pane order -- so a
-    row is where the window that owns it would put it.
+    row is where the window that owns it would put it. :func:`agents_first`
+    then moves the rows holding no agent to the end of their own level, and
+    only those: this is the agent surface, so an empty session is a place to
+    navigate to rather than something to read past on the way to the agents.
     """
     composed_workspaces = []
     for workspace in workspaces:
@@ -225,28 +252,18 @@ def compose_dashboard(
             )
             for group in live_groups
         ]
-        # A session with no agent in it says nothing this surface is for, and a
-        # workspace with no such session says nothing either. Both are dropped
-        # here rather than hidden in the page, so the two can never disagree
-        # about what "empty" means.
-        groups = [group for group in groups if group["agent_count"]]
-        if not groups:
-            continue
         composed_workspaces.append({
             "workspace_id": workspace_id,
             "label": str(workspace.get("label") or ""),
             "created_at": workspace.get("created_at"),
             "active_group_id": active_group_id,
+            # Every live session in the workspace, because every one of them is
+            # listed. It is therefore also what the close confirmation states:
+            # that prompt names the consequences of an irreversible act, and
+            # what it ends is what this counts.
             "group_count": len(groups),
-            # Every live session, agent-bearing or not. `group_count` is what
-            # this surface *lists*; this is what closing the workspace would
-            # *end*, and the two are different numbers whenever a workspace
-            # holds a plain terminal beside its agents. The close confirmation
-            # states consequences, so it reads this one -- naming the filtered
-            # count there would understate an irreversible act.
-            "live_group_count": len(live_groups),
             "agent_count": sum(group["agent_count"] for group in groups),
-            "groups": groups,
+            "groups": agents_first(groups),
         })
 
     panes = [
@@ -257,12 +274,13 @@ def compose_dashboard(
     ]
     return {
         "generated_at": now,
-        "workspaces": composed_workspaces,
+        "workspaces": agents_first(composed_workspaces),
         # Counted here rather than in the page so every surface that shows a
-        # badge counts the same way, and a page that has not expanded a
-        # workspace still knows what is inside it. Every count is agent-scoped:
-        # these are the workspaces and sessions that *hold* an agent, not every
-        # one that is live.
+        # badge counts the same way, and a page that has not scrolled the tree
+        # still knows what is in it. The first two are counts of what is
+        # *listed*, which is now every live workspace and session; the last two
+        # are agent-scoped, and the gap between them is the point -- "2 agents
+        # in 5 sessions" is the reading this surface exists to give.
         "totals": {
             "workspaces": len(composed_workspaces),
             "sessions": sum(workspace["group_count"] for workspace in composed_workspaces),

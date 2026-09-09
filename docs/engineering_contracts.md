@@ -518,16 +518,30 @@ unless the task explicitly changes this contract.
 - `GET /api/dashboard` is the only cross-workspace read: one pass composing
   every live workspace, its groups and their agent panes. Consumers must not fan
   out per-workspace requests to rebuild it.
-- The payload is agent-scoped, and the filter is the server's. Only
-  `startup_mode == "agent"` panes are composed; a group with no agent and a
-  workspace with no such group are dropped, so "empty" means one thing on both
-  sides. `pane["index"]` stays the pane's position in its *whole* group — it is
-  what names and focuses the pane — so the filter is applied after `enumerate`,
-  never before. Every count (`totals`, `agent_count`) is agent-scoped;
-  `pane_count` on a group and `live_group_count` on a workspace are the only
-  unfiltered numbers. A close confirmation states consequences, so it reads
-  `live_group_count`: naming the agent-scoped count there would understate an
-  irreversible act.
+- The payload carries **every live session, agents first**. The surface is the
+  agent list *and* the only place every workspace and session is named at once,
+  so it is also how a reader reaches one — which makes dropping a session the
+  removal of its only route from here. The two jobs are reconciled in the
+  order, never by omission: `agents_first()` puts the rows holding an agent
+  ahead of the rows holding none at both levels (a workspace and a group both
+  carry `agent_count`, so it is one function), and each half keeps the order
+  its own window would use. A workspace holding no session at all is still
+  absent, because `list_live_workspaces` already decided that is not a live
+  workspace.
+- **Panes stay agent-only, and the filter is the server's.** Only
+  `startup_mode == "agent"` panes are composed, so the page and the payload
+  cannot disagree about what an agent is, and a plain terminal is never a row —
+  it is already visible in the window that holds it. `pane["index"]` stays the
+  pane's position in its *whole* group — it is what names and focuses the pane
+  — so the filter is applied after `enumerate`, never before. A group's
+  `agent_count` is what says a card has none; the page must not infer that from
+  an empty `panes` list, because a card that carries no count at all is a
+  different case. `totals.agents` and `totals.working` are agent-scoped;
+  `totals.workspaces`, `totals.sessions`, a workspace's `group_count` and a
+  group's `pane_count` count what is listed. `group_count` is therefore also
+  what a close confirmation states, and it is read off the payload rather than
+  off the rendered cards: a payload and a painted tree are two different
+  moments.
 - `totals.working` is the button badge's number and is composed here, beside
   the rows, so the badge is a tally of the state dots in the list it labels
   rather than a second answer to the same question. A pane counts only when
@@ -664,6 +678,14 @@ unless the task explicitly changes this contract.
   every other window keeps its dim for the rest of the lease. BroadcastChannel
   is the fast path, localStorage is the fallback, and expiry remains the
   backstop against a page that died holding it.
+- A row holding nothing draws a statement, never rows it does not have. A
+  session card with no agent wears `is-quiet`, states its own pane count rather
+  than "0 agents", and carries one muted line where its rows would be; a band
+  with no session carries the same line where its cards would be. Quiet keeps
+  the full width, the heading control, the session hue and every close verb —
+  the card exists so the reader can go there — and gives up only the weight
+  that was drawing the eye to the agents, so it cannot read as disabled. An
+  empty tree means nothing is running at all, not that nothing agentic is.
 - Dashboard layout must remain usable without horizontal overflow at narrow
   widths. A polling update that changes only a row's title, hover, status,
   progress, or idle age updates that row in place, each field on its own
