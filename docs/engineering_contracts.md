@@ -506,6 +506,14 @@ unless the task explicitly changes this contract.
   what names and focuses the pane — so the filter is applied after `enumerate`,
   never before. Every count (`totals`, `agent_count`) is agent-scoped;
   `pane_count` on a group is the only total-pane number.
+- `totals.working` is the button badge's number and is composed here, beside
+  the rows, so the badge is a tally of the state dots in the list it labels
+  rather than a second answer to the same question. A pane counts only when
+  its `status` is `connected` **and** its activity reading is `working` — the
+  same override `dashboardPaneStateKey()` makes on the row, so a dead shell's
+  last frames and a pane that is still connecting are never counted. It is a
+  field beside `totals.agents`, never a replacement: the dialog lists what
+  exists, and the badge signals what wants looking at.
 - `web/dashboard.py` composes; the route stays thin. `compose_dashboard()` is
   pure (dictionaries in, dictionary out, no manager, no clock). The gatherer
   snapshots activity under `connection_lock` and releases it *before* taking the
@@ -552,6 +560,11 @@ unless the task explicitly changes this contract.
   badge without overlapping requests. Badge and window reads have bounded
   deadlines, cancel on hide/pagehide, refresh on focus, reject malformed
   payloads, and discard answers superseded by a newer request.
+- The badge paints `totals.working` and validates that same field — a payload
+  accepted on one count and painted from another reports `0` where it should
+  report `?`. No working agent hides the badge rather than showing a zero: a
+  badge that counts what is merely open is lit permanently and signals
+  nothing, so its absence has to be a reading too.
 - `dashboard-focus.js` owns a same-origin, short-lived focus lease. While the
   dashboard is focused and visible, unfocused launcher/workspace documents add
   the content-only blur class; focusing a host clears its own blur immediately.

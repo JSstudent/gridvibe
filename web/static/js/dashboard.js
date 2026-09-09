@@ -16,12 +16,22 @@
            page that asked and a press outside it puts that page back — which
            also means there is no second copy to stack, no named target to keep
            unique, and no pop-up for a browser to block.
+         · **The badge counts agents that are *working*, not agents that are
+           open.** How many agent panes exist is something the reader already
+           knows — they opened them — so a badge tallying those is a number that
+           is always on and never means anything. What it is for is the one
+           thing you cannot see from here: an agent somewhere else has started
+           doing something, or has stopped. So it reads `totals.working`, and
+           **no working agent hides the badge** rather than showing a zero,
+           which makes its absence a reading too. The count comes off the
+           payload rather than being derived here, so the number on the button
+           is a tally of the dots in the list it labels (`web/dashboard.py`).
          · **The badge is the page's only reading while the dialog is shut.** A
-           slow poll keeps the number on the button honest — a badge that is
-           only correct after you open the thing it labels is worse than no
-           badge — and it stands down entirely while the document is hidden.
-           Everything finer-grained than "how many" is the dialog's own
-           business, and the dialog's own poll runs only while it is open.
+           slow poll keeps it honest — a badge that is only correct after you
+           open the thing it labels is worse than no badge — and it stands down
+           entirely while the document is hidden. Everything finer-grained than
+           "how many are working" is the dialog's own business, and the dialog's
+           own poll runs only while it is open.
          · **The chord is matched on `event.code` and excludes Ctrl.** AltGr
            arrives as Ctrl+Alt on Windows, so a chord that did not exclude Ctrl
            would fire while typing an accented character; and matching the
@@ -105,7 +115,7 @@
         if (!badge) {
             return;
         }
-        const count = Number(snapshot?.totals?.agents) || 0;
+        const count = Number(snapshot?.totals?.working) || 0;
         badge.textContent = count > 99 ? '99+' : String(count);
         badge.hidden = count <= 0;
     }
@@ -124,7 +134,10 @@
                 throw new Error(`HTTP ${response.status}`);
             }
             snapshot = await response.json();
-            if (!Number.isInteger(snapshot?.totals?.agents) || snapshot.totals.agents < 0) {
+            /* The field the badge paints, and only that one: validating
+               `agents` while painting `working` is how a badge comes to draw
+               `0` off a payload that never carried the number. */
+            if (!Number.isInteger(snapshot?.totals?.working) || snapshot.totals.working < 0) {
                 throw new Error('Invalid dashboard count');
             }
         } catch (error) {

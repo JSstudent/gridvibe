@@ -15,6 +15,10 @@ about it:
   AltGr arrives as Ctrl+Alt on Windows, and a page that says the chord may not
   fire from here — the same answer it already gives Alt+X — is obeyed rather
   than second-guessed.
+- **The badge counts working agents, not open ones.** How many agent panes
+  exist is something the reader already knows; a badge tallying those is always
+  on and so signals nothing. It paints `totals.working`, and a payload full of
+  idle agents leaves it hidden — its absence is a reading too.
 - **The badge is honest without opening anything**, and a slow answer that
   lands after a newer one was asked for is dropped rather than painted.
 - **A hidden document costs nothing**: the poll is torn down rather than left
@@ -149,8 +153,14 @@ globalThis.fetch = async () => {
 
 function badge() { return byId.get('dashboardBadge'); }
 
-function snapshot(agents) {
-    return { generated_at: 100, workspaces: [], totals: { workspaces: 1, sessions: 1, agents } };
+/* `working` is what the badge paints; `agents` rides along because it is on
+   every real payload and a case below asserts the badge does not read it. */
+function snapshot(working, agents = working) {
+    return {
+        generated_at: 100,
+        workspaces: [],
+        totals: { workspaces: 1, sessions: 1, agents, working }
+    };
 }
 
 /* A key press, as the document delivers one. */
@@ -376,6 +386,44 @@ class DashboardButtonTestCase(unittest.TestCase):
             """
         )
         self.assertTrue(result["hidden"])
+
+    def test_the_badge_counts_working_agents_and_not_open_ones(self):
+        """The number on the button is `totals.working`. A window holding nine
+        agents that are all sitting at a prompt has nothing to go and look at,
+        so it wears no badge at all — reading `totals.agents` there is a number
+        that is always on and never means anything."""
+        result = self._run_node(
+            """
+            fetchAnswer = snapshot(2, 9);
+            wireDashboard();
+            await settle();
+            const working = { text: badge().textContent, hidden: badge().hidden };
+            fetchAnswer = snapshot(0, 9);
+            await refreshDashboardBadge();
+            report({ working, idle: { text: badge().textContent, hidden: badge().hidden } });
+            """
+        )
+        self.assertEqual(result["working"], {"text": "2", "hidden": False})
+        self.assertTrue(result["idle"]["hidden"])
+
+    def test_a_payload_without_the_working_count_is_not_painted_as_zero(self):
+        """The field the badge paints is the field it validates. Accepting a
+        payload on `totals.agents` while drawing `totals.working` is how a badge
+        comes to report "nothing running" off an answer that never carried the
+        number."""
+        result = self._run_node(
+            """
+            fetchAnswer = snapshot(4);
+            await refreshDashboardBadge();
+            const before = { text: badge().textContent, hidden: badge().hidden };
+            fetchAnswer = { generated_at: 100, workspaces: [], totals: { workspaces: 1, sessions: 1, agents: 4 } };
+            await refreshDashboardBadge();
+            report({ before, after: { text: badge().textContent, hidden: badge().hidden } });
+            """
+        )
+        self.assertEqual(result["before"], {"text": "4", "hidden": False})
+        # Reported as unreadable rather than quietly shown as none running.
+        self.assertEqual(result["after"], {"text": "?", "hidden": False})
 
     def test_a_very_large_count_is_capped_rather_than_overflowing_the_badge(self):
         result = self._run_node(

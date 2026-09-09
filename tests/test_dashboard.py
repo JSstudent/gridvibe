@@ -30,6 +30,12 @@ What is pinned:
 - **The two locks are never nested.** The route reads the activity snapshot
   before it touches the manager, which is what keeps a busy pane's pump thread
   off a dashboard poll.
+- **`totals.working` is the badge's number, and it is not `totals.agents`.** The
+  badge on the dashboard button is the only reading a page has while the dialog
+  is shut, and "how many agent panes are open" is something the reader already
+  knows. So the working total counts the panes that are *connected* and
+  announcing work -- the same override the row's own dot makes -- which is what
+  keeps the number a tally of the dots it labels.
 """
 
 import sys
@@ -41,9 +47,11 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 import tests  # noqa: E402,F401 - redirects durable state away from the real files
+from sessions.manager import SessionStatus  # noqa: E402
 from web import api  # noqa: E402
 from web import terminal_io as web_terminal_io  # noqa: E402
 from web.agent_activity import (  # noqa: E402
+    ACTIVITY_IDLE,
     ACTIVITY_UNKNOWN,
     ACTIVITY_WORKING,
     blank_agent_activity,
@@ -53,6 +61,7 @@ from web.dashboard import PANE_FIELDS, compose_dashboard  # noqa: E402
 
 ESC = "\x1b"
 BEL = "\x07"
+CRLF = "\r\n"
 
 
 def workspace(workspace_id, label="", active_group_id=""):
@@ -235,7 +244,8 @@ class DashboardComposerTestCase(unittest.TestCase):
             [row["group_id"] for row in snapshot["workspaces"][0]["groups"]], ["g2"]
         )
         self.assertEqual(
-            snapshot["totals"], {"workspaces": 1, "sessions": 1, "agents": 1}
+            snapshot["totals"],
+            {"workspaces": 1, "sessions": 1, "agents": 1, "working": 0},
         )
 
     def test_a_workspace_reports_what_it_lists_and_what_closing_it_would_end(self):
@@ -272,7 +282,8 @@ class DashboardComposerTestCase(unittest.TestCase):
         )
         self.assertEqual(snapshot["workspaces"], [])
         self.assertEqual(
-            snapshot["totals"], {"workspaces": 0, "sessions": 0, "agents": 0}
+            snapshot["totals"],
+            {"workspaces": 0, "sessions": 0, "agents": 0, "working": 0},
         )
 
     def test_the_active_group_hint_marks_exactly_one_row(self):
@@ -318,8 +329,92 @@ class DashboardComposerTestCase(unittest.TestCase):
         )
         self.assertEqual(
             snapshot["totals"],
-            {"workspaces": 2, "sessions": 2, "agents": 2},
+            {"workspaces": 2, "sessions": 2, "agents": 2, "working": 0},
         )
+
+    def test_the_working_total_counts_only_the_agents_that_are_working(self):
+        """The badge on the button paints this number and nothing else, so it is
+        the one that has to mean something: four open agents sitting at a prompt
+        is a window with nothing to go and look at."""
+        snapshot = self._compose(
+            sessions_by_group={
+                "g1": [
+                    session("s1", "g1"),
+                    session("s2", "g1"),
+                    session("s3", "g1"),
+                ]
+            },
+            # s1 wrote a moment ago; s2 last wrote long enough ago to be idle;
+            # s3 has a transport that has never said anything.
+            activity={
+                "s1": note_agent_output(None, 499.0),
+                "s2": note_agent_output(None, 100.0),
+                "s3": blank_agent_activity(),
+            },
+        )
+        states = [
+            pane["activity"]["state"]
+            for pane in snapshot["workspaces"][0]["groups"][0]["panes"]
+        ]
+        self.assertEqual(
+            states, [ACTIVITY_WORKING, ACTIVITY_IDLE, ACTIVITY_UNKNOWN]
+        )
+        self.assertEqual(snapshot["totals"]["agents"], 3)
+        self.assertEqual(snapshot["totals"]["working"], 1)
+
+    def test_a_pane_that_is_not_connected_is_never_counted_as_working(self):
+        """A dead shell's last reading is not an observation of a live one, and a
+        connecting pane has nothing to observe yet -- the same override the row's
+        own dot makes, so the count is a tally of the dots."""
+        snapshot = self._compose(
+            sessions_by_group={
+                "g1": [
+                    session("s1", "g1", status="disconnected"),
+                    session("s2", "g1", status="error"),
+                    session("s3", "g1", status="connecting"),
+                    session("s4", "g1", status="pending"),
+                ]
+            },
+            # Every one of them wrote a moment ago, so the reading itself says
+            # "working" in all four cases.
+            activity={
+                name: note_agent_output(None, 499.0)
+                for name in ("s1", "s2", "s3", "s4")
+            },
+        )
+        panes = snapshot["workspaces"][0]["groups"][0]["panes"]
+        self.assertEqual(
+            [pane["activity"]["state"] for pane in panes], [ACTIVITY_WORKING] * 4
+        )
+        self.assertEqual(snapshot["totals"]["agents"], 4)
+        self.assertEqual(snapshot["totals"]["working"], 0)
+
+    def test_a_pane_with_no_transport_is_not_working(self):
+        snapshot = self._compose(
+            sessions_by_group={"g1": [session("s1", "g1")]}, activity={}
+        )
+        self.assertIsNone(snapshot["workspaces"][0]["groups"][0]["panes"][0]["activity"])
+        self.assertEqual(snapshot["totals"]["working"], 0)
+
+    def test_working_agents_are_counted_across_every_workspace(self):
+        snapshot = self._compose(
+            workspaces=[workspace("default"), workspace("ws2", label="api")],
+            groups_by_workspace={
+                "default": [group("g1", "default")],
+                "ws2": [group("g2", "ws2")],
+            },
+            sessions_by_group={
+                "g1": [session("s1", "g1"), session("s2", "g1")],
+                "g2": [session("s3", "g2")],
+            },
+            activity={
+                "s1": note_agent_output(None, 499.0),
+                "s2": note_agent_output(None, 100.0),
+                "s3": note_agent_output(None, 500.0),
+            },
+        )
+        self.assertEqual(snapshot["totals"]["agents"], 3)
+        self.assertEqual(snapshot["totals"]["working"], 2)
 
 
 class DashboardObservationOwnershipTestCase(unittest.TestCase):
@@ -410,7 +505,10 @@ class DashboardRouteTestCase(unittest.TestCase):
         payload = self.client.get("/api/dashboard").get_json()
 
         self.assertEqual(
-            payload["totals"], {"workspaces": 1, "sessions": 1, "agents": 1}
+            payload["totals"],
+            # Nothing is connected and nothing has written, so the badge's own
+            # number is 0 while the list still holds a row.
+            {"workspaces": 1, "sessions": 1, "agents": 1, "working": 0},
         )
 
         group_row = payload["workspaces"][0]["groups"][0]
@@ -449,10 +547,43 @@ class DashboardRouteTestCase(unittest.TestCase):
         self.assertEqual(reading["state"], ACTIVITY_WORKING)
         self.assertEqual(reading["progress_value"], 65)
 
+    def test_the_working_total_follows_the_reading_the_route_publishes(self):
+        """End to end, the number the button paints and the row's own dot come
+        out of one pass: the pane has to be connected *and* announcing work."""
+        _, agent, _ = self._launch_group()
+        connection = {"kind": "ssh"}
+        with web_terminal_io.connection_lock:
+            web_terminal_io.ssh_connections[agent.session_id] = connection
+        web_terminal_io._observe_agent_activity(connection, "Reticulating splines" + CRLF)
+
+        # Still pending as far as the transport is concerned, so the reading is
+        # not yet a reading of anything.
+        before = self.client.get("/api/dashboard").get_json()
+        self.assertEqual(before["totals"]["agents"], 1)
+        self.assertEqual(before["totals"]["working"], 0)
+
+        api.session_manager.update_session_status(
+            agent.session_id, SessionStatus.CONNECTED
+        )
+        after = self.client.get("/api/dashboard").get_json()
+        pane = after["workspaces"][0]["groups"][0]["panes"][0]
+        self.assertEqual(pane["activity"]["state"], ACTIVITY_WORKING)
+        self.assertEqual(after["totals"]["working"], 1)
+
+        # And a pane whose transport goes away stops being counted, however
+        # recently it wrote.
+        api.session_manager.update_session_status(
+            agent.session_id, SessionStatus.DISCONNECTED
+        )
+        gone = self.client.get("/api/dashboard").get_json()
+        self.assertEqual(gone["totals"]["agents"], 1)
+        self.assertEqual(gone["totals"]["working"], 0)
+
     def test_an_empty_server_answers_rather_than_failing(self):
         payload = self.client.get("/api/dashboard").get_json()
         self.assertEqual(payload["workspaces"], [])
         self.assertEqual(payload["totals"]["agents"], 0)
+        self.assertEqual(payload["totals"]["working"], 0)
 
     def test_both_pages_carry_the_dialog_and_no_page_serves_it(self):
         """It is a dialog on the page that opened it, so it is one partial on

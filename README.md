@@ -151,7 +151,15 @@ launcher's control row — opens a **window of its own** (`Alt+A`) listing **eve
 agent you have running, in every workspace**. It is one window however many
 times you ask for it, and it stays open beside your work: press again, or
 `Alt+A` from anywhere, and it comes to the front rather than opening a second
-copy. The button carries a badge with the number of agents running right now.
+copy. The button carries a badge, and it counts the agents that are **working
+right now** — not how many you have open. How many you opened is something you
+already know, so a badge tallying those would be lit permanently and say
+nothing; what you cannot see from where you are is one of them starting or
+finishing something. When every agent is sitting at a prompt there is no badge
+at all, which is a reading too. It is the same working/idle reading the rows
+themselves carry, counted on the server, so the number on the button and the
+states in the list cannot disagree — and a pane that is not connected is never
+counted, however recently it wrote.
 
 It lists agents and nothing else. Plain terminals, file explorers and browser
 panes are already in front of you in the window that holds them; a workspace or
@@ -188,7 +196,8 @@ probe is ever sent, and nothing is typed into a running agent:
   `kimi-code` are removed. If an agent publishes no meaningful chat title, the
   row falls back to a custom pane title and then its directory; GridVibe cannot
   recover a chat name that the agent never emits.
-- **Whether it is doing anything.** A pane that has written something in the
+- **Whether it is doing anything.** This is the reading the button's badge
+  counts. A pane that has written something in the
   last few seconds reads as *working*; one that has gone quiet reads as *idle*,
   with how long it has been waiting. Title-only and terminal-control updates do
   not count as work. Agents that publish the terminal progress sequence (`OSC
@@ -304,7 +313,7 @@ GridVibe does not proxy pages or bypass `X-Frame-Options`/CSP, so sites that blo
 
 **One menu holds sessions and workspaces.** The GridVibe button at the head of the tab line opens a two-row menu — **Sessions** and **Workspace** — and pointing at either row opens its items beside it: `Import Session…`, `Save Session`, `Save Session as…` and `Save All Sessions` under the first; `Save Workspace` under the second, joined by `Rename Workspace…`, `New Workspace…`, `Open Workspace`, `Move Session to Workspace` and the two close verbs when multiple workspaces are enabled. Hovering the row is enough, only one section is open at a time, and moving the pointer off the menu closes it.
 
-**The dashboard button is on both pages.** It opens the window described under [Agent Dashboard](#agent-dashboard) — every agent running in every workspace, with a badge counting them. It sits in the session tab line in a workspace window and in the launcher's control row, and `Alt+A` opens it from either.
+**The dashboard button is on both pages.** It opens the window described under [Agent Dashboard](#agent-dashboard) — every agent running in every workspace, with a badge counting the ones working right now. It sits in the session tab line in a workspace window and in the launcher's control row, and `Alt+A` opens it from either.
 
 **Every shortcut is listed in the app.** The keyboard button — in the workspace top bar left of App Settings, and in the launcher's bottom action bar left of the minimize-all control — opens a read-only panel with the whole list, grouped the way you'd look for it. Rows that only apply in one mode say so rather than disappearing. Nothing in it is editable; the one configurable chord in GridVibe is voice push-to-talk, set in App Settings.
 

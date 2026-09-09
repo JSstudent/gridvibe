@@ -20,7 +20,7 @@
         id="dashboardBtn"
         type="button"
         onclick="openAgentDashboard(event)"
-        title="Agent dashboard — every agent running in every workspace (Alt+A)"
+        title="Agent dashboard — every agent in every workspace; the badge counts the ones working right now (Alt+A)"
         aria-label="Open the agent dashboard"
     >
         {# The one raster icon in a page of stroke SVGs, and deliberately so:
@@ -29,8 +29,11 @@
            to take the surrounding colour. Sized in the stylesheet with the
            other button icons. #}
         <img class="dashboard-icon" src="/docs/images/active_ws.ico" alt="" aria-hidden="true">
-        {# Filled by dashboard.js with the live agent count, hidden while there
-           is none: a badge that is always showing is not a signal. #}
+        {# Filled by dashboard.js with the number of agents *working* right now
+           (`totals.working`), hidden while none is: a badge showing how many
+           agent panes are open is always on and so is not a signal, and the
+           reader opened those panes anyway. What they cannot see from here is
+           an agent elsewhere starting or finishing something. #}
         <span class="dashboard-badge" id="dashboardBadge" aria-hidden="true" hidden></span>
     </button>
 </div>

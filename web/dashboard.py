@@ -43,12 +43,19 @@ manager is touched at all.
 import time
 from typing import Any, Dict, List, Optional
 
-from web.agent_activity import describe_agent_activity
+from web.agent_activity import ACTIVITY_WORKING, describe_agent_activity
 
 #: The one marker of an agent pane, mirroring ``agentKeyForSession`` on the
 #: client: a startup *command* is not an agent, and neither is a terminal that
 #: happens to have been handed one.
 AGENT_STARTUP_MODE = "agent"
+
+#: The only transport status under which an observation means *now*. A pane that
+#: is connecting has nothing to observe yet, and a disconnected or failed one is
+#: reporting whatever its dead shell last said -- which is exactly the reading
+#: ``dashboardPaneStateKey`` overrides on the client, so the count and the dot
+#: it is a tally of cannot disagree.
+CONNECTED_STATUS = "connected"
 
 #: The pane fields the dashboard publishes. Everything else a session holds --
 #: credentials, explorer view state, browser tabs, the presentation fields --
@@ -78,6 +85,29 @@ PANE_FIELDS = (
 def is_agent_pane(session: Dict[str, Any]) -> bool:
     """Whether this pane is one the agent dashboard is about."""
     return str(session.get("startup_mode") or "") == AGENT_STARTUP_MODE
+
+
+def is_working_pane(pane: Dict[str, Any]) -> bool:
+    """Whether this *composed* row is an agent doing something right now.
+
+    The badge on the dashboard button is the one reading a page has while the
+    dialog is shut, and "how many agent panes exist" is not what it is for: a
+    window holding four agents that are all sitting at a prompt is a window with
+    nothing to go and look at. So the badge counts *working* agents, and the
+    count lives here beside the rows for the same reason the others do -- one
+    definition, so the number on the button is a tally of the dots in the list.
+
+    Read off the composed row rather than the session, because both halves of
+    the answer are there: the transport status and the reading
+    :func:`~web.agent_activity.describe_agent_activity` already made. ``None``
+    activity is a pane with no transport to observe and is never working.
+    """
+    if str(pane.get("status") or "") != CONNECTED_STATUS:
+        return False
+    activity = pane.get("activity")
+    if not isinstance(activity, dict):
+        return False
+    return str(activity.get("state") or "") == ACTIVITY_WORKING
 
 
 def _pane_directory(session: Dict[str, Any]) -> str:
@@ -237,6 +267,11 @@ def compose_dashboard(
             "workspaces": len(composed_workspaces),
             "sessions": sum(workspace["group_count"] for workspace in composed_workspaces),
             "agents": len(panes),
+            # How many of those agents are working *now*. It is a separate
+            # number rather than a replacement because the two answer different
+            # questions: the dialog lists what exists, and the button's badge
+            # signals what wants looking at.
+            "working": sum(1 for pane in panes if is_working_pane(pane)),
         },
     }
 
