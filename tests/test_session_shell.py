@@ -259,9 +259,16 @@ class PaneAgentRelaunchTestCase(ShellTransitionTestCase):
         )
 
         self.assertEqual(response.status_code, 200, response.get_json())
-        self.assertEqual(_pane_state(session.session_id), before)
-        close_connection.assert_not_called()
-        start_task.assert_not_called()
+        after = _pane_state(session.session_id)
+        self.assertEqual(
+            {key: value for key, value in after.items() if key != "status"},
+            {key: value for key, value in before.items() if key != "status"},
+        )
+        self.assertEqual(after["status"], str(api.SessionStatus.PENDING))
+        close_connection.assert_called_once_with(
+            session.session_id, clear_buffer=True
+        )
+        start_task.assert_called_once_with(api._connect_session, session.session_id)
 
     def test_relaunching_the_same_agent_under_another_shell_keeps_auto_mode(self):
         """Auto mode belongs to the agent, and this pane still runs that agent."""
@@ -301,8 +308,8 @@ class PaneAgentRelaunchTestCase(ShellTransitionTestCase):
         self.assertEqual(updated.agent_selection, "codex")
         self.assertFalse(updated.agent_auto_mode)
 
-    def test_reselecting_the_running_agent_and_shell_does_not_restart(self):
-        """Clicking what a pane already runs never kills a live shell."""
+    def test_reselecting_the_running_agent_and_shell_relaunches_it(self):
+        """The checked entries remain actions rather than disabled selectors."""
         session, _repo = self._local_pane(
             startup_mode="agent",
             initial_command_mode="agent",
@@ -313,6 +320,32 @@ class PaneAgentRelaunchTestCase(ShellTransitionTestCase):
 
         response, close_connection, start_task = self._post_shell(
             session.session_id, {"shell": "cmd", "agent": "claude"}
+        )
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        after = _pane_state(session.session_id)
+        self.assertEqual(
+            {key: value for key, value in after.items() if key != "status"},
+            {key: value for key, value in before.items() if key != "status"},
+        )
+        self.assertEqual(after["status"], str(api.SessionStatus.PENDING))
+        close_connection.assert_called_once_with(
+            session.session_id, clear_buffer=True
+        )
+        start_task.assert_called_once_with(api._connect_session, session.session_id)
+
+    def test_payload_stating_neither_dimension_is_a_noop(self):
+        """Only an explicit shell or agent choice requests a relaunch."""
+        session, _repo = self._local_pane(
+            startup_mode="agent",
+            initial_command_mode="agent",
+            agent_selection="claude",
+            initial_command="claude",
+        )
+        before = _pane_state(session.session_id)
+
+        response, close_connection, start_task = self._post_shell(
+            session.session_id, {}
         )
 
         self.assertEqual(response.status_code, 200, response.get_json())

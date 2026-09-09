@@ -6340,8 +6340,8 @@ class ApiRoutesTestCase(unittest.TestCase):
         updated = api.session_manager.get_session(session.session_id)
         self.assertEqual(Path(updated.directory), repo_dir)
 
-    def test_switch_pane_shell_reselecting_active_shell_does_not_restart(self):
-        """Clicking the shell a pane already runs must not kill a live shell."""
+    def test_switch_pane_shell_reselecting_active_shell_relaunches_it(self):
+        """The checked shell row remains an explicit relaunch action."""
         repo_dir = Path(self.temp_dir.name) / "repo"
         repo_dir.mkdir()
         session = self._create_local_terminal_session(
@@ -6359,10 +6359,12 @@ class ApiRoutesTestCase(unittest.TestCase):
             )
 
         self.assertEqual(response.status_code, 200)
-        close_connection.assert_not_called()
-        start_task.assert_not_called()
+        close_connection.assert_called_once_with(
+            session.session_id, clear_buffer=True
+        )
+        start_task.assert_called_once_with(api._connect_session, session.session_id)
         updated = api.session_manager.get_session(session.session_id)
-        self.assertEqual(updated.status, api.SessionStatus.CONNECTED)
+        self.assertEqual(updated.status, api.SessionStatus.PENDING)
 
     def test_switch_pane_shell_rejects_unknown_shell(self):
         repo_dir = Path(self.temp_dir.name) / "repo"

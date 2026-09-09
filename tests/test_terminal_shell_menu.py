@@ -405,7 +405,7 @@ class RelaunchRowPayloadTestCase(TerminalShellMenuTestCase):
             {"agent": "claude", "shell": "wsl", "distribution": "Ubuntu"},
         )
 
-    def test_reselecting_what_the_pane_already_runs_costs_no_request(self):
+    def test_reselecting_what_the_pane_already_runs_requests_a_relaunch(self):
         result = self._run_node(
             """
             let rows = await openMenu(0, localPane({
@@ -415,12 +415,15 @@ class RelaunchRowPayloadTestCase(TerminalShellMenuTestCase):
             rows = rowsFor(0);
             await press(0, rows.find(row => row.label === 'Claude Code'));
             report({
-                requests: calls.requests.filter(request => request.body).length,
+                requests: calls.requests.filter(request => request.body),
                 menuClosed: paneMenu(0).hidden
             });
             """
         )
-        self.assertEqual(result["requests"], 0)
+        self.assertEqual(
+            result["requests"][0]["body"],
+            {"agent": "claude", "shell": "powershell", "distribution": ""},
+        )
         self.assertTrue(result["menuClosed"])
 
     def test_the_check_marks_report_the_family_and_the_agent_separately(self):

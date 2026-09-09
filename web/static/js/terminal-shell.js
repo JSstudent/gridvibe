@@ -466,26 +466,12 @@
         });
     }
 
-    /* True when the row the user pressed is already what the pane runs, so a
-       re-selection costs no request and never kills a live shell. The server
-       decides the same thing again; this only spares the round trip. */
-    function paneRelaunchIsNoop(session, { shell, distribution, agent }) {
-        if (shell) {
-            if (paneShellKind(session) !== shell) {
-                return false;
-            }
-            if (shell === 'wsl' && String(session?.distribution || '').trim() !== distribution) {
-                return false;
-            }
-        }
-        return paneAgentKey(session) === agent;
-    }
-
     /* Relaunch one pane under the shell family and/or agent a menu row named.
        The pane keeps its slot, its stored title and its group, so only the
        process behind it is replaced. An empty `shell` states nothing about the
        shell family — an SSH pane has none to state — while `agent` is always
-       stated.
+       stated. Pressing an already-selected row still relaunches the pane: the
+       check mark describes what will start, not a disabled state selector.
 
        What the header *prints* is not the stored title, though: an agent pane
        whose title is still the launcher's `Terminal N` placeholder is named
@@ -504,11 +490,6 @@
         if (shell && !paneSupportsShellSwitch(session)) {
             return;
         }
-        if (paneRelaunchIsNoop(session, { shell, distribution, agent })) {
-            closeAllPaneShellMenus();
-            return;
-        }
-
         const body = { agent };
         if (shell) {
             body.shell = shell;
