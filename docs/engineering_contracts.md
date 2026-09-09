@@ -527,12 +527,35 @@ unless the task explicitly changes this contract.
   row; a second implementation server-side is what would let the two disagree.
   The transport tag reads `mode` plus the `use_wsl`/`use_powershell` precedence
   `paneShellKind()` already uses, so the tag and the relaunch menu agree.
-- The dashboard conversation line prefers the agent's usable OSC tab/window
-  title, then a non-generic pane title, then the directory/remote host fallback.
-  `agentChatTitle()` removes known provider-only labels and transient status
-  marks but cannot synthesize a conversation name an agent never publishes.
-  Built-in Codex launches request `tui.terminal_title=['thread-title']` as a
-  launch-only override; saved and custom command text stays unchanged.
+- The dashboard conversation line is `paneChatLine()` in `agent-identity.js`,
+  not the dashboard's own ladder: the agent's usable OSC tab/window title, then
+  a non-generic pane title, then `New session` plus where the pane is. GridVibe
+  cannot synthesize a conversation name an agent never publishes, and the
+  fallback says so rather than substituting the next fact down — a directory
+  read as a title the agent chose, and a pane with no directory yet repeated the
+  agent's own name on a row that already states it.
+- **What a pane announces is not automatically a conversation name.** Two peer
+  rules reject a title before it can be read as one, both anchored to the whole
+  title so prose survives. `isShellSelfTitle()` covers the shell talking about
+  itself: ConPTY forwards a console-title change as OSC 0 and bash's stock `PS1`
+  carries one, so an image path, a console label and `user@host: ~/dir` arrive
+  in the field an agent publishes its chat title in. Its load-bearing clause is
+  a comparison and not a pattern — a title that *is* the pane's own directory
+  restates a fact the row already holds, whoever wrote it.
+  `isOpaqueIdentifierTitle()` covers an id standing where a name should be:
+  built-in Codex launches request `tui.terminal_title=['thread-title']` as a
+  launch-only override (saved and custom command text stays unchanged), and an
+  unnamed thread's title *is* its id, so a fresh Codex pane announces a bare
+  UUID. It is a peer rule and not a clause in the first, because nothing about
+  a thread id is a shell. Bare hex is rejected only from 24 characters, so a
+  short commit id — prose a reader may well have titled a chat with — is left
+  alone. `agentChatTitle()` still removes known provider-only labels and
+  transient status marks.
+- The line carries the pane's location as a **leaf** (`host:leaf` when remote),
+  never an absolute path: it is one `nowrap` row with an ellipsis at its end, so
+  a full path is clipped at exactly the segment that identifies the pane. The
+  full path is on the row's hover, which is what makes shortening the line
+  lossless.
 - A pane with no transport carries `activity: null`. "Nothing to observe" and
   "observed nothing yet" (`state: "unknown"`) are different answers.
 - Liveness falls back to output cadence, because most agents publish no progress

@@ -272,5 +272,216 @@ class AgentIdentityTestCase(unittest.TestCase):
         )
 
 
+    # ------------------------------------------------------------------
+    # Which conversation a pane is in, and what it says when it is in none.
+    # ------------------------------------------------------------------
+
+    def test_a_shell_announcing_itself_is_not_a_conversation_title(self):
+        """The field an agent publishes its chat name in is not its own.
+
+        ConPTY forwards a console-title change as OSC 0 and bash's stock `PS1`
+        carries one too, so a shell's idea of what to call itself lands in
+        exactly the same place -- and printing it made a freshly opened agent
+        look as though it had named a conversation after the shell.
+        """
+        rejected = self._run_node(
+            """
+            report([
+                'C:\\\\WINDOWS\\\\system32\\\\cmd.exe',
+                'Windows PowerShell',
+                'Administrator: Windows PowerShell',
+                'Select cmd',
+                'sz@DESKTOP-8H2K1: ~/work',
+                '~/work',
+                '/usr/local/bin/bash',
+                'bash'
+            ].map(title => identity.isShellSelfTitle(title, pane({}))));
+            """
+        )
+        self.assertEqual(rejected, [True] * 8)
+
+    def test_prose_survives_every_one_of_those_rules(self):
+        """A conversation title is prose, and prose is what must not be eaten.
+
+        Each of these trips one clause of the rule and has to come through it:
+        a drive root with a space after it, a leading slash that is a command
+        and not a path, an `@` inside a sentence, and a shell's name inside one.
+        """
+        kept = self._run_node(
+            """
+            report([
+                'C:\\\\Users cleanup',
+                '/clear the backlog',
+                'ping sz@example.com: no reply yet',
+                'Rewrite the bash prompt'
+            ].map(title => identity.isShellSelfTitle(title, pane({}))));
+            """
+        )
+        self.assertEqual(kept, [False] * 4)
+
+    def test_a_title_that_is_the_panes_own_directory_is_the_shell_echoing(self):
+        """The one rule here that is a comparison rather than a guess.
+
+        Whoever wrote it, a title that *is* where the pane is restates a fact
+        the row already holds -- and separators and case differ freely between a
+        title a shell printed and a directory the backend observed.
+        """
+        echoes = self._run_node(
+            """
+            const p = pane({ directory: 'C:\\\\Users\\\\sz\\\\Work' });
+            report([
+                identity.isShellSelfTitle('C:\\\\Users\\\\sz\\\\Work', p),
+                identity.isShellSelfTitle('c:/users/sz/work/', p),
+                identity.isShellSelfTitle('Work on C:\\\\Users\\\\sz\\\\Work', p)
+            ]);
+            """
+        )
+        self.assertEqual(echoes, [True, True, False])
+
+    def test_an_agent_with_no_announced_chat_says_so(self):
+        """And says *where*, because that is all that tells two of them apart.
+
+        The ladder used to fall through to the pane's directory, so this row
+        read as an absolute path -- clipped by the line's own ellipsis at
+        exactly the segment that identified it -- and a pane with no directory
+        yet read as the agent's own name a second time, on a row that already
+        states it.
+        """
+        lines = self._run_node(
+            """
+            const agent = { startup_mode: 'agent', agent_selection: 'claude' };
+            report([
+                identity.paneChatLine(pane(Object.assign({
+                    mode: 'local', directory: 'C:\\\\Users\\\\sz\\\\gridvibe'
+                }, agent)), 0, AGENT_OPTIONS),
+                identity.paneChatLine(pane(Object.assign({
+                    mode: 'ssh', host: '10.0.0.5', directory: '/srv/app'
+                }, agent)), 0, AGENT_OPTIONS),
+                identity.paneChatLine(pane(Object.assign({
+                    mode: 'local', directory: '', host: ''
+                }, agent)), 0, AGENT_OPTIONS)
+            ]);
+            """
+        )
+        self.assertEqual(lines, [
+            "New session \u00b7 gridvibe",
+            "New session \u00b7 10.0.0.5:app",
+            "New session",
+        ])
+
+    def test_an_announced_chat_and_a_typed_title_both_outrank_the_label(self):
+        # The label is what a pane falls back to, never something it is given
+        # while it has a name of its own.
+        lines = self._run_node(
+            """
+            const agent = {
+                startup_mode: 'agent', agent_selection: 'claude',
+                mode: 'local', directory: 'C:\\\\Users\\\\sz\\\\gridvibe'
+            };
+            report([
+                identity.paneChatLine(pane(Object.assign({
+                    activity: { title: '\u2733 Fix dashboard naming' }
+                }, agent)), 0, AGENT_OPTIONS),
+                identity.paneChatLine(pane(Object.assign({
+                    title: 'release cut'
+                }, agent)), 0, AGENT_OPTIONS)
+            ]);
+            """
+        )
+        self.assertEqual(lines, ["Fix dashboard naming", "release cut"])
+
+    def test_a_pane_that_is_not_an_agent_has_no_conversation_to_be_new(self):
+        # It keeps the fallback it always had: where it points, then its name.
+        lines = self._run_node(
+            """
+            report([
+                identity.paneChatLine(
+                    pane({ mode: 'local', directory: '/srv/app' }), 0, AGENT_OPTIONS
+                ),
+                identity.paneChatLine(
+                    pane({ mode: 'local', directory: '', host: '', title: '' }), 2, AGENT_OPTIONS
+                )
+            ]);
+            """
+        )
+        self.assertEqual(lines, ["app", "Terminal 3"])
+
+    def test_the_hover_carries_the_path_the_line_shortened_away(self):
+        """Shortening the line is only affordable because nothing is lost.
+
+        The leaf is what fits on one `nowrap` row; the full path is one hover
+        away, and a line with no path behind it is not given an empty one.
+        """
+        hovers = self._run_node(
+            """
+            const agent = { startup_mode: 'agent', agent_selection: 'claude' };
+            report([
+                identity.paneChatTooltip(pane(Object.assign({
+                    mode: 'local', directory: 'C:\\\\Users\\\\sz\\\\gridvibe'
+                }, agent)), 0, AGENT_OPTIONS),
+                identity.paneChatTooltip(pane(Object.assign({
+                    mode: 'ssh', host: '10.0.0.5', directory: '/srv/app'
+                }, agent)), 0, AGENT_OPTIONS),
+                identity.paneChatTooltip(pane(Object.assign({
+                    mode: 'local', directory: '', host: ''
+                }, agent)), 0, AGENT_OPTIONS)
+            ]);
+            """
+        )
+        self.assertEqual(hovers, [
+            "New session \u00b7 gridvibe\nC:\\Users\\sz\\gridvibe",
+            "New session \u00b7 10.0.0.5:app\n10.0.0.5: /srv/app",
+            "New session",
+        ])
+
+
+    def test_an_unnamed_thread_id_is_not_a_conversation_name(self):
+        """Codex publishes its thread id until the thread has a title.
+
+        GridVibe launches it asking for `thread-title` (`web/agents.py`), and an
+        unnamed thread's title *is* its id -- so a fresh Codex pane announced a
+        bare UUID and the row printed it. These three are the ids off a real
+        dashboard; the floor on bare hex is what keeps a short commit id, which
+        a reader may well have titled a chat with, out of the rule.
+        """
+        result = self._run_node(
+            """
+            report([
+                '01a08612-11ad-7673-989b-4110ba7f8494',
+                '01a085f4-cc6f-7350-bf95-768598e66852',
+                '01a085f4-cc1c-7993-8ffc-2fd04d47c731',
+                '01a0861211ad7673989b4110ba7f8494',
+                'Agent terminals session string display',
+                'Revert 22eee63',
+                'deadbeefcafe'
+            ].map(title => identity.isOpaqueIdentifierTitle(title)));
+            """
+        )
+        self.assertEqual(result, [True, True, True, True, False, False, False])
+
+    def test_a_codex_pane_on_an_unnamed_thread_reads_as_a_new_one(self):
+        # The whole point of the rule: the row says what is true of the pane
+        # rather than reciting an identifier at the reader.
+        lines = self._run_node(
+            """
+            const codex = { startup_mode: 'agent', agent_selection: 'codex' };
+            report([
+                identity.paneChatLine(pane(Object.assign({
+                    mode: 'ssh', host: '172.29.2.76', directory: '/opt/cIMS/chss',
+                    activity: { title: '01a085f4-cc1c-7993-8ffc-2fd04d47c731' }
+                }, codex)), 0, AGENT_OPTIONS),
+                identity.paneChatLine(pane(Object.assign({
+                    mode: 'ssh', host: '172.29.2.76', directory: '/opt/cIMS/chss',
+                    activity: { title: 'Agent terminals session string display' }
+                }, codex)), 0, AGENT_OPTIONS)
+            ]);
+            """
+        )
+        self.assertEqual(lines, [
+            "New session · 172.29.2.76:chss",
+            "Agent terminals session string display",
+        ])
+
+
 if __name__ == "__main__":
     unittest.main()

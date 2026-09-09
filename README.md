@@ -193,9 +193,18 @@ probe is ever sent, and nothing is typed into a running agent:
   useful title. Codex sessions launched by GridVibe request Codex's
   `thread-title`, so renaming or switching the current Codex conversation is
   reflected here. Provider status marks and generic labels such as `Codex` or
-  `kimi-code` are removed. If an agent publishes no meaningful chat title, the
-  row falls back to a custom pane title and then its directory; GridVibe cannot
-  recover a chat name that the agent never emits.
+  `kimi-code` are removed, and so is anything that is plainly not the name of a
+  conversation: a shell announcing itself (`C:\WINDOWS\system32\cmd.exe`,
+  `Windows PowerShell`, bash's `you@host: ~/dir`, or simply the pane's own
+  directory), and an identifier standing in for a name — a Codex thread that has
+  not been named yet publishes its own id, and a bare UUID is not a chat title.
+  GridVibe cannot recover a chat name the agent never emits, so a row with none
+  reads **`New session`** followed by where the pane is, rather than borrowing
+  something else and presenting it as a title the agent chose. That location is
+  the last segment of the path (with the host in front of it on a remote pane),
+  because the row is one line and an absolute path is clipped at exactly the
+  part that tells two agents apart; hover the row for the full path. A pane
+  title you typed yourself still wins over all of this.
 - **Whether it is doing anything.** This is the reading the button's badge
   counts. A pane that has written something in the
   last few seconds reads as *working*; one that has gone quiet reads as *idle*,

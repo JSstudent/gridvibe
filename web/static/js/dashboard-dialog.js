@@ -224,27 +224,24 @@
         return glyphs ? glyphs.agentGlyphMarkup(dashboardAgentKey(pane)) : '';
     }
 
-    /* The current published conversation title leads. A pane label or its
-       directory identifies panes whose agent has not announced a title.
-       Only remote panes need the host here; local shells are already tagged by
-       the transport chip beside the agent's name. */
+    /* Which conversation this row is, and the hover that carries what the line
+       had to shorten. Both are `agent-identity.js`'s answer: the rule reads the
+       same facts the pane header's naming rule does, and a second copy here is
+       how a row and a header come to disagree about the same pane. */
     function dashboardPaneLine(pane) {
         const identity = dashboardIdentity();
-        const announced = identity
-            ? identity.agentChatTitle(pane, dashboardAgentOptions())
-            : String(pane?.activity?.title || '').trim();
-        if (announced) return announced;
-        const typed = String(pane?.title || '').trim();
-        if (typed && identity && !identity.isGenericPaneTitle(typed)) {
-            return typed;
+        if (!identity) {
+            return String(pane?.activity?.title || '').trim() || dashboardPaneTitle(pane);
         }
-        const directory = String(pane?.directory || '').trim();
-        const isRemote = String(pane?.mode || '').toLowerCase() === 'ssh';
-        const host = isRemote ? String(pane?.host || '').trim() : '';
-        if (directory && host) {
-            return `${host}: ${directory}`;
+        return identity.paneChatLine(pane, Number(pane?.index) || 0, dashboardAgentOptions());
+    }
+
+    function dashboardPaneHover(pane) {
+        const identity = dashboardIdentity();
+        if (!identity) {
+            return dashboardPaneLine(pane);
         }
-        return directory || host || dashboardPaneTitle(pane);
+        return identity.paneChatTooltip(pane, Number(pane?.index) || 0, dashboardAgentOptions());
     }
 
     function dashboardStateWord(activity) {
@@ -363,7 +360,7 @@
                 data-workspace-id="${escHtml(pane?.workspace_id || '')}"
                 data-group-id="${escHtml(pane?.group_id || '')}"
                 data-session-id="${escHtml(pane?.session_id || '')}"
-                title="${escHtml(dashboardPaneLine(pane))}"
+                title="${escHtml(dashboardPaneHover(pane))}"
             >
                 <span class="dash-agent-icon" aria-hidden="true">${dashboardAgentGlyphHtml(pane)}</span>
                 <span class="dash-agent-name">${escHtml(dashboardAgentName(pane))}</span>

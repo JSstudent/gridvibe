@@ -407,6 +407,10 @@ function parseRows() {
             key: attributes['data-dashboard-key'] || '',
             dataset,
             label: label ? label[1].trim() : '',
+            /* The row's hover, which is where the line's shortened-away path
+               went. Read as the attribute rather than as rendered text: it is
+               the only place a value spans two lines. */
+            hover: attributes['title'] || '',
             agent: attributes['data-agent'] || '',
             name: /<span class="dash-agent-name">([\s\S]*?)<\/span>/.exec(inner)?.[1].trim() || '',
             transport: transport ? transport[1].trim() : '',
@@ -807,8 +811,8 @@ class DashboardDialogStructureTestCase(DashboardDialogTestCase):
         self.assertEqual(
             result,
             [
-                ["Claude Code", "PowerShell", "C:/repo"],
-                ["Claude Code", "WSL · Ubuntu", "/srv"],
+                ["Claude Code", "PowerShell", "New session · repo"],
+                ["Claude Code", "WSL · Ubuntu", "New session · srv"],
             ],
         )
 
@@ -841,16 +845,31 @@ class DashboardDialogStructureTestCase(DashboardDialogTestCase):
         for entry in result:
             self.assertIn("<svg", entry["glyph"])
 
-    def test_a_line_with_nothing_announced_falls_back_to_where_it_points(self):
+    def test_an_agent_that_has_announced_nothing_says_so(self):
+        """A freshly opened agent has no conversation, and the row states that.
+
+        It used to fall through to the pane's directory, which put an absolute
+        path on a line that is one `nowrap` row with an ellipsis at its end --
+        so the segment that identified the pane was the first thing clipped.
+        The place still rides along, shortened to that segment.
+        """
         result = self._run_node(
             """
             fetchAnswer = snapshot([group([pane()])]);
             showDashboard();
             await settle();
-            report(rowFor('pane:s1').label);
+            report({
+                line: rowFor('pane:s1').label,
+                hover: rowFor('pane:s1').hover
+            });
             """
         )
-        self.assertEqual(result, "10.0.0.5: /srv/app")
+        self.assertEqual(result["line"], "New session \u00b7 10.0.0.5:app")
+        # And the full path is one hover away, so shortening the line lost
+        # nothing that was on it.
+        self.assertEqual(
+            result["hover"], "New session \u00b7 10.0.0.5:app\n10.0.0.5: /srv/app"
+        )
 
     def test_the_active_chat_title_outranks_a_pane_label(self):
         result = self._run_node(
@@ -898,7 +917,9 @@ class DashboardDialogStructureTestCase(DashboardDialogTestCase):
             """
         )
         self.assertEqual(result["groups"], ["WSL · Ubuntu", "PowerShell"])
-        self.assertEqual(result["lines"], ["C:/repo", "C:/repo"])
+        self.assertEqual(
+            result["lines"], ["New session · repo", "New session · repo"]
+        )
 
     def test_auto_approval_is_marked_on_the_pane_that_has_it(self):
         """It is a per-pane property, and the shell chip beside it is not: two
