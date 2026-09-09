@@ -158,11 +158,17 @@ panes are already in front of you in the window that holds them; a workspace or
 a session tab with no agent in it is not listed at all. Three levels, drawn as
 three different things:
 
-- a **workspace** is a titled band across the window;
-- a **session tab** is a card inside that band, several across a wide window;
-- an **agent** is a row inside the card, tagged with what it is running on —
-  `SSH`, `WSL` (with the distro when there is one), `PowerShell` or `cmd` — and
-  marked `auto` when it was launched with its agent's own auto-approval flag.
+- a **workspace** is a titled band across the window, ruled off from the band
+  above it;
+- a **session tab** is a card inside that band, full width, stacked under the
+  card before it, and drawn in **that session's own tab colour** — the same hue
+  its tab wears in the workspace window, so a card is matched to a tab by
+  colour rather than by reading two names in two windows;
+- an **agent** is a row inside the card, and states everything about itself on
+  that one line: its mark and its name, what it is running on — `SSH`, `WSL`
+  (with the distro when there is one), `PowerShell` or `cmd` — then the chat
+  title it announced, `auto` when it was launched with its agent's own
+  auto-approval flag, and what it is doing.
 
 Click any row — an agent, its session or its workspace — to open (or focus) the
 window that owns it, at that session tab. The dashboard stays where it is.

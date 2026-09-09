@@ -28,16 +28,21 @@ What is pinned is what the dashboard is *for*:
   a card inside it, an agent is a row inside that — the complaint about the
   dropdown this replaced was that all three were the same list at different
   indents, so the nesting is asserted as structure and not as padding.
-- **One block per agent, not one per pane.** Several panes running the same
-  agent on the same shell are one heading and one line each, because the
-  heading was the part that was identical and the line is what the reader came
-  for. Two shells are two headings: a heading is a claim about every line under
-  it.
+- **One row per pane, and the row says everything.** The agent's mark, its
+  name and the shell it runs on sit to the left of the chat title on the pane's
+  own line — they used to be a heading over a block of sibling panes, which
+  bought a saving only when several panes of one agent shared a card and cost
+  every other case a two-line entry and a stack per agent.
 - **The mark says which agent.** Every row wearing the same glyph said only
   "this is a row"; the mark comes from the registry key the name does, and an
   agent GridVibe has not drawn falls back rather than disappearing.
-- **A block says what is running without going to look**: the agent's own name,
-  what it is running on, what each pane announced, and whether it is working.
+- **A row says what is running without going to look**: the agent's own name,
+  what it is running on, what the pane announced, and whether it is working.
+- **A session card is drawn in its own tab's colour.** The hue comes from
+  `session-colour.js`, which is the same answer the workspace window's tab
+  strip paints, so a card is matched to a tab by colour rather than by reading
+  two names in two windows. No colour module, no custom property — the card
+  falls back to the dialog's own tokens.
 - **The state and the percentage are separate readings.** Every agent has a
   state; only one that speaks the progress sequence has a number. A working
   agent with no number still gets a moving bar, so "no percentage" never reads
@@ -68,6 +73,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 STATIC_JS = REPO_ROOT / "web" / "static" / "js"
 AGENT_IDENTITY_JS = STATIC_JS / "agent-identity.js"
 AGENT_GLYPHS_JS = STATIC_JS / "agent-glyphs.js"
+SESSION_COLOUR_JS = STATIC_JS / "session-colour.js"
 DASHBOARD_DIALOG_JS = STATIC_JS / "dashboard-dialog.js"
 
 NODE = shutil.which("node")
@@ -318,35 +324,52 @@ function sectionCounts() {
     const count = pattern => (body().innerHTML.match(pattern) || []).length;
     return {
         workspaces: count(/<section class="dash-workspace">/g),
-        sessions: count(/<section class="dash-session">/g),
+        sessions: count(/<section class="dash-session"[ >]/g),
         agents: count(/class="dash-agent"/g)
     };
 }
 
-/* One agent block, read back as the reader meets it: the mark, the heading, the
-   shell it claims, and the lines gathered under it. */
-function parseAgentGroups() {
-    return body().innerHTML
-        .split('<div class="dash-agent-group"')
-        .slice(1)
-        .map(chunk => {
-            const scoped = chunk.split('</section>')[0];
-            const agent = /^ data-agent="([^"]*)"/.exec(scoped);
-            const title = /<span class="dash-agent-title">([\s\S]*?)<\/span>/.exec(scoped);
-            const transport = /<span class="dash-tag dash-tag-transport">([\s\S]*?)<\/span>/.exec(scoped);
-            const glyph = /<svg class="dash-agent-glyph"[\s\S]*?<\/svg>/.exec(scoped);
-            const lines = [];
-            const linePattern = /<span class="dash-agent-line">([\s\S]*?)<\/span>/g;
-            let line;
-            while ((line = linePattern.exec(scoped)) !== null) { lines.push(line[1].trim()); }
-            return {
-                agent: agent ? agent[1] : '',
-                title: title ? title[1].trim() : '',
-                transport: transport ? transport[1].trim() : '',
-                glyph: glyph ? glyph[0] : '',
-                lines
-            };
+/* One agent row, read back as the reader meets it: the mark, the agent's name,
+   the shell it claims and what it announced -- all four on the one line, in the
+   order they are painted, which is what replaced the heading-and-block. */
+function parseAgentRows() {
+    const rows = [];
+    const pattern = /<button\b[^>]*class="dash-agent"([^>]*)>([\s\S]*?)<\/button>/g;
+    let found;
+    while ((found = pattern.exec(body().innerHTML)) !== null) {
+        const agent = /data-agent="([^"]*)"/.exec(found[1]);
+        const inner = found[2];
+        const name = /<span class="dash-agent-name">([\s\S]*?)<\/span>/.exec(inner);
+        const transport = /<span class="dash-tag dash-tag-transport">([\s\S]*?)<\/span>/.exec(inner);
+        const glyph = /<svg class="dash-agent-glyph"[\s\S]*?<\/svg>/.exec(inner);
+        const line = /<span class="dash-agent-line">([\s\S]*?)<\/span>/.exec(inner);
+        rows.push({
+            agent: agent ? agent[1] : '',
+            name: name ? name[1].trim() : '',
+            transport: transport ? transport[1].trim() : '',
+            glyph: glyph ? glyph[0] : '',
+            line: line ? line[1].trim() : ''
         });
+    }
+    return rows;
+}
+
+/* The colour a session card is drawn in, as it reaches the markup: the inline
+   custom properties `session-colour.js` supplies, keyed by group id. */
+function parseSessionColours() {
+    const colours = [];
+    const pattern = /<section class="dash-session" style="([^"]*)"[\s\S]*?data-dashboard-key="session:([^"]*)"/g;
+    let found;
+    while ((found = pattern.exec(body().innerHTML)) !== null) {
+        const edge = /--dash-session-color:([^;"]*)/.exec(found[1]);
+        const soft = /--dash-session-color-soft:([^;"]*)/.exec(found[1]);
+        colours.push({
+            groupId: found[2],
+            colour: edge ? edge[1].trim() : '',
+            soft: soft ? soft[1].trim() : ''
+        });
+    }
+    return colours;
 }
 
 /* The rendered window, read back as the reader meets it. */
@@ -370,8 +393,13 @@ function parseRows() {
         const state = /class="dash-activity dash-state-([a-z]+)"/.exec(inner);
         const word = /<span class="dash-state-word">([\s\S]*?)<\/span>/.exec(inner);
         const percent = /<span class="dash-progress-value">(\d+)%<\/span>/.exec(inner);
+        /* The transport chip is read on its own: it says which shell the agent
+           runs on and is now on every agent row, while `tags` stays what it
+           always was -- the markers that are true of *this* row and not of
+           every one of its siblings. */
+        const transport = /<span class="dash-tag dash-tag-transport">([\s\S]*?)<\/span>/.exec(inner);
         const tags = [];
-        const tagPattern = /<span class="dash-tag[^"]*">([\s\S]*?)<\/span>/g;
+        const tagPattern = /<span class="dash-tag(?! dash-tag-transport)[^"]*">([\s\S]*?)<\/span>/g;
         let tag;
         while ((tag = tagPattern.exec(inner)) !== null) { tags.push(tag[1].trim()); }
         rows.push({
@@ -379,6 +407,9 @@ function parseRows() {
             key: attributes['data-dashboard-key'] || '',
             dataset,
             label: label ? label[1].trim() : '',
+            agent: attributes['data-agent'] || '',
+            name: /<span class="dash-agent-name">([\s\S]*?)<\/span>/.exec(inner)?.[1].trim() || '',
+            transport: transport ? transport[1].trim() : '',
             tags,
             state: state ? state[1] : '',
             word: word ? word[1].trim() : '',
@@ -540,6 +571,7 @@ class DashboardDialogTestCase(unittest.TestCase):
             HARNESS_STUBS
             + AGENT_IDENTITY_JS.read_text(encoding="utf-8")
             + AGENT_GLYPHS_JS.read_text(encoding="utf-8")
+            + SESSION_COLOUR_JS.read_text(encoding="utf-8")
             + DASHBOARD_DIALOG_JS.read_text(encoding="utf-8")
             + "\n(async () => {\n"
             + body
@@ -707,7 +739,7 @@ class DashboardDialogStructureTestCase(DashboardDialogTestCase):
             ["workspace", "session", "pane", "pane", "session", "pane"],
         )
 
-    def test_a_block_says_what_is_running_without_going_to_look(self):
+    def test_a_row_says_what_is_running_without_going_to_look(self):
         result = self._run_node(
             """
             fetchAnswer = snapshot([group([pane({
@@ -715,23 +747,25 @@ class DashboardDialogStructureTestCase(DashboardDialogTestCase):
             })])]);
             showDashboard();
             await settle();
-            report({ groups: parseAgentGroups(), row: rowFor('pane:s1') });
+            report({ rows: parseAgentRows(), row: rowFor('pane:s1') });
             """
         )
-        block = result["groups"][0]
-        self.assertEqual(block["title"], "Claude Code")
-        self.assertEqual(block["transport"], "SSH")
-        self.assertEqual(block["agent"], "claude")
-        self.assertIn("<svg", block["glyph"])
-        # The line is the pane's own half of the answer, and the only half.
-        self.assertEqual(block["lines"], ["Claude: fixing the parser"])
+        row = result["rows"][0]
+        # Four facts, one line: which agent, what it runs on, what it announced,
+        # and -- read off the same button by the row parser -- how it is getting
+        # on. None of them is on a heading above it any more.
+        self.assertEqual(row["name"], "Claude Code")
+        self.assertEqual(row["transport"], "SSH")
+        self.assertEqual(row["agent"], "claude")
+        self.assertIn("<svg", row["glyph"])
+        self.assertEqual(row["line"], "Claude: fixing the parser")
         self.assertEqual(result["row"]["label"], "Claude: fixing the parser")
         self.assertEqual(result["row"]["tags"], [])
 
-    def test_several_panes_of_one_agent_are_one_heading_and_a_line_each(self):
-        """The complaint the block layout answers: four panes running Claude
-        used to be four copies of "Claude Code / POWERSHELL" with one useful
-        line apiece."""
+    def test_several_panes_of_one_agent_are_one_row_each(self):
+        """The block this replaced gathered them under a shared heading, which
+        cost every single-pane agent a heading of its own. Two panes are two
+        rows, and each states its own agent."""
         result = self._run_node(
             """
             fetchAnswer = snapshot([group([
@@ -743,20 +777,21 @@ class DashboardDialogStructureTestCase(DashboardDialogTestCase):
             ])]);
             showDashboard();
             await settle();
-            report(parseAgentGroups());
+            report(parseAgentRows());
             """
         )
-        self.assertEqual(len(result), 1)
-        self.assertEqual(result[0]["title"], "Claude Code")
-        self.assertEqual(result[0]["transport"], "PowerShell")
         self.assertEqual(
-            result[0]["lines"], ["Agent dashboard todos", "Button in both windows"]
+            [(row["name"], row["transport"], row["line"]) for row in result],
+            [
+                ("Claude Code", "PowerShell", "Agent dashboard todos"),
+                ("Claude Code", "PowerShell", "Button in both windows"),
+            ],
         )
 
-    def test_one_agent_on_two_shells_is_two_headings(self):
-        """A heading is a claim about every line under it: two shells are two
-        machines as far as the work is concerned, and folding them under one
-        would state something false."""
+    def test_one_agent_on_two_shells_states_the_shell_on_each_row(self):
+        """The shell is a claim about the pane, so it rides the pane's own row:
+        two Claude panes on two shells are two machines as far as the work is
+        concerned, and nothing here can fold them into one."""
         result = self._run_node(
             """
             fetchAnswer = snapshot([group([
@@ -766,14 +801,14 @@ class DashboardDialogStructureTestCase(DashboardDialogTestCase):
             ])]);
             showDashboard();
             await settle();
-            report(parseAgentGroups().map(entry => [entry.title, entry.transport, entry.lines]));
+            report(parseAgentRows().map(row => [row.name, row.transport, row.line]));
             """
         )
         self.assertEqual(
             result,
             [
-                ["Claude Code", "PowerShell", ["C:/repo"]],
-                ["Claude Code", "WSL · Ubuntu", ["/srv"]],
+                ["Claude Code", "PowerShell", "C:/repo"],
+                ["Claude Code", "WSL · Ubuntu", "/srv"],
             ],
         )
 
@@ -788,8 +823,8 @@ class DashboardDialogStructureTestCase(DashboardDialogTestCase):
             ])]);
             showDashboard();
             await settle();
-            report(parseAgentGroups().map(entry => ({
-                agent: entry.agent, title: entry.title, glyph: entry.glyph
+            report(parseAgentRows().map(row => ({
+                agent: row.agent, name: row.name, glyph: row.glyph
             })));
             """
         )
@@ -797,7 +832,7 @@ class DashboardDialogStructureTestCase(DashboardDialogTestCase):
             [entry["agent"] for entry in result], ["claude", "codex", "default"]
         )
         self.assertEqual(
-            [entry["title"] for entry in result],
+            [entry["name"] for entry in result],
             ["Claude Code", "OpenAI Codex CLI", "house-agent"],
         )
         # Three different marks, and the agent with no mark of its own still
@@ -826,14 +861,16 @@ class DashboardDialogStructureTestCase(DashboardDialogTestCase):
             })])]);
             showDashboard();
             await settle();
-            report({ line: rowFor('pane:s1').label, heading: parseAgentGroups()[0].title });
+            report({ line: rowFor('pane:s1').label, agent: parseAgentRows()[0].name });
             """
         )
         self.assertEqual(result["line"], "Claude: fixing the parser")
-        self.assertEqual(result["heading"], "Claude Code")
+        # And the agent's own name is still stated beside it, so the title
+        # never has to identify the agent that announced it.
+        self.assertEqual(result["agent"], "Claude Code")
 
     def test_a_local_agent_is_tagged_with_the_shell_it_runs(self):
-        """And the heading's tag is the only place that is said.
+        """And the row's own chip is the only place that is said.
 
         A local pane's `host` field holds the shell it started, so a line that
         also printed it spent half of itself saying "PowerShell" twice. A remote
@@ -855,7 +892,7 @@ class DashboardDialogStructureTestCase(DashboardDialogTestCase):
             showDashboard();
             await settle();
             report({
-                groups: parseAgentGroups().map(entry => entry.transport),
+                groups: parseAgentRows().map(entry => entry.transport),
                 lines: [rowFor('pane:s1').label, rowFor('pane:s2').label]
             });
             """
@@ -864,8 +901,9 @@ class DashboardDialogStructureTestCase(DashboardDialogTestCase):
         self.assertEqual(result["lines"], ["C:/repo", "C:/repo"])
 
     def test_auto_approval_is_marked_on_the_pane_that_has_it(self):
-        """It is a per-pane property, so it rides the line rather than the
-        heading: two panes of one agent need not have been launched alike."""
+        """It is a per-pane property, and the shell chip beside it is not: two
+        panes of one agent need not have been launched alike, so `auto` is on
+        the row that has it while both rows state the same shell."""
         result = self._run_node(
             """
             fetchAnswer = snapshot([group([
@@ -877,13 +915,65 @@ class DashboardDialogStructureTestCase(DashboardDialogTestCase):
             report({
                 auto: rowFor('pane:s1').tags,
                 plain: rowFor('pane:s2').tags,
-                headings: parseAgentGroups().length
+                transports: parseAgentRows().map(entry => entry.transport),
+                rows: parseAgentRows().length
             });
             """
         )
         self.assertEqual(result["auto"], ["auto"])
         self.assertEqual(result["plain"], [])
-        self.assertEqual(result["headings"], 1)
+        self.assertEqual(result["transports"], ["SSH", "SSH"])
+        self.assertEqual(result["rows"], 2)
+
+    def test_a_session_card_wears_its_own_tab_colour(self):
+        """The card is a session, and a session already has a colour: the tab
+        strip picks one off the group id. Drawing the card in the dialog's own
+        accent made the reader match card to tab by name across two windows."""
+        result = self._run_node(
+            """
+            fetchAnswer = snapshot([
+                group([pane()]),
+                group([pane({ session_id: 's2', group_id: 'g2' })], {
+                    group_id: 'g2', name: 'Docs', is_active: false
+                })
+            ]);
+            showDashboard();
+            await settle();
+            report({
+                cards: parseSessionColours(),
+                tabs: ['g1', 'g2'].map(id => window.GridVibeSessionColour.sessionColour(id))
+            });
+            """
+        )
+        cards = result["cards"]
+        self.assertEqual([card["groupId"] for card in cards], ["g1", "g2"])
+        # The card's edge is exactly what the workspace window would paint that
+        # session's tab -- one answer from one module, not two hashes.
+        self.assertEqual([card["colour"] for card in cards], result["tabs"])
+        # And the faint companion is the same hue, so the card's hover and its
+        # heading rule cannot be tinted from somewhere else.
+        for card, colour in zip(cards, result["tabs"]):
+            self.assertTrue(card["soft"].startswith("rgba("))
+            self.assertNotEqual(card["soft"], colour)
+
+    def test_a_card_with_no_colour_module_still_renders(self):
+        """The same rule the × and the band's verbs follow: no controller, no
+        control -- the card falls back to the dialog's own tokens rather than
+        emitting a broken custom property."""
+        result = self._run_node(
+            """
+            delete globalThis.GridVibeSessionColour;
+            fetchAnswer = snapshot([group([pane()])]);
+            showDashboard();
+            await settle();
+            report({
+                styled: parseSessionColours().length,
+                cards: (body().innerHTML.match(/<section class="dash-session"[ >]/g) || []).length,
+                rows: parseAgentRows().length
+            });
+            """
+        )
+        self.assertEqual(result, {"styled": 0, "cards": 1, "rows": 1})
 
     def test_the_session_card_says_how_many_of_its_panes_are_agents(self):
         result = self._run_node(

@@ -11,10 +11,12 @@
    different things, because the panel this replaced made them three indent
    depths and that was unreadable:
 
-     · a **workspace** is a band across the dialog, with a ruled heading;
-     · a **session** is a bordered card inside that band, and the cards flow
-       into however many columns the dialog is wide enough for;
-     · an **agent** is a row inside a card.
+     · a **workspace** is a band across the dialog, under a ruled heading heavy
+       enough to be read as a divider rather than as an underline;
+     · a **session** is a bordered card inside that band, full width, stacked
+       under the card before it, and wearing its own session tab's colour;
+     · an **agent** is a row inside a card, and states everything about itself
+       on that one row.
 
    Nothing here is decoration: every heading and every row is a button, because
    each one is a way out of this dialog and into the thing it describes.
@@ -199,17 +201,26 @@
 
 /* ── A workspace: a band ── */
 
+/* Bands are now tall — every session in one is full width and stacked — so the
+   join between two of them has to be findable after a scroll rather than
+   inferred from a heading being bolder than the one above it. A rule of its
+   own, at the band's own top edge, plus the space either side of it. */
 .dash-workspace + .dash-workspace {
     margin-top: 26px;
+    padding-top: 26px;
+    border-top: 2px solid var(--gv-dialog-border);
 }
 
+/* And the heading's own rule is thicker than a hairline for the same reason it
+   is a rule at all: it separates the band's title from the band's contents, and
+   at 1px it read as an underline on the title instead. */
 .dash-workspace-head {
     display: flex;
     align-items: baseline;
     gap: 12px;
-    padding-bottom: 7px;
-    margin-bottom: 12px;
-    border-bottom: 1px solid var(--gv-dialog-border);
+    padding-bottom: 8px;
+    margin-bottom: 14px;
+    border-bottom: 2px solid var(--gv-dialog-border);
 }
 
 /* The heading's name is the pressable part, not the whole rule: a band's
@@ -254,20 +265,27 @@
 }
 
 /* ── A session: a card ──
-   Several across a wide window, one across a narrow one, with no breakpoint to
-   maintain: the track minimum is the narrowest a row of this shape stays
-   legible at. */
+   One column, always. These used to flow into as many columns as the dialog was
+   wide enough for, which made a card's width depend on how many sessions
+   happened to be open beside it — two cards side by side truncated every title
+   in both, and a third session arriving re-flowed the two already being read.
+   A row here is an agent's name, its shell, its chat title and its state on one
+   line; the title is the long part and the width belongs to it. */
 .dash-sessions {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(min(100%, 380px), 1fr));
+    display: flex;
+    flex-direction: column;
     gap: 12px;
-    align-items: start;
 }
 
+/* The edge is the session's own colour — its tab's, from `session-colour.js` —
+   so a card is matched to the tab in the workspace window by hue before its
+   name is read. Thicker than the dialog's own hairlines on purpose: this border
+   is carrying information now, not just closing a box. The fallback is what the
+   card wore before, for a page with no colour module. */
 .dash-session {
     min-width: 0;
     container-type: inline-size;
-    border: 1px solid var(--gv-dialog-border);
+    border: 2px solid var(--dash-session-color, var(--gv-dialog-border));
     border-radius: var(--gv-radius-m);
     background: var(--gv-dialog-panel-soft);
     overflow: hidden;
@@ -281,16 +299,35 @@
     display: flex;
     align-items: stretch;
     width: 100%;
-    border-bottom: 1px solid var(--gv-dialog-border);
+    border-bottom: 1px solid var(--dash-session-color-soft, var(--gv-dialog-border));
 }
 
+/* The name takes the same hue as the edge around it: the two together are what
+   make the card recognisable as *that* tab, and a coloured frame around a
+   default-coloured name reads as decoration rather than as identity.
+
+   Text and edge are two tones of one hue rather than one value, and the light
+   theme is why. Both palettes here — the ten session hues and the eight agent
+   tints — were picked to sit on the dark ground the app shipped with, where a
+   1px edge and a 12px word are both legible in the same mid-tone. On the light
+   card the edge still reads and the word does not: a session called
+   "gridvibe" in `#ffd43b` is yellow on near-white. So the *text* tone is its
+   own property, defaulting to the hue itself and mixed toward the dialog's own
+   text colour under `[data-theme="light"]` — one declaration per palette, no
+   second set of ten values to keep in step with the first, and the hue is
+   still what the eye matches to the tab. */
 .dash-session-name {
     font-size: .82rem;
     font-weight: 600;
+    color: var(--dash-session-text, var(--dash-session-color, var(--gv-dialog-text)));
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
     min-width: 0;
+}
+
+[data-theme="light"] .dash-session-name {
+    --dash-session-text: color-mix(in srgb, var(--dash-session-color) 55%, var(--gv-dialog-text));
 }
 
 .dash-session-meta {
@@ -301,6 +338,18 @@
     white-space: nowrap;
 }
 
+/* ── An agent: one row, one line ──
+
+   This was a block — a heading naming the agent and the shell it runs on, with
+   one line per pane gathered under it. The saving that bought only ever existed
+   when several panes of one agent sat in one session card; what it cost
+   everywhere else was two lines for one pane, and a session running three
+   agents drawn as three separate stacks with three headings.
+
+   So the mark, the name and the shell sit to the left of the chat title on the
+   row itself, in a fixed column order, and a card is read straight down its
+   titles with the agents scanned in the margin beside them. */
+
 .dash-agents {
     display: flex;
     flex-direction: column;
@@ -308,36 +357,32 @@
     padding: 6px;
 }
 
-/* ── An agent: a heading, and one line per pane running it ──
-   The block, not the row, is the unit here. Four panes running Claude used to
-   be four copies of the same name and the same shell tag with one useful line
-   apiece; the agent is now stated once at the top of a block and the lines
-   under it carry only what differs. That is also why the type sizes run the
-   way they do — the heading is a label on a block the reader has already found
-   by its mark, and the line is what they came to read. */
-
-.dash-agent-group {
-    /* Every agent's own tint, in one custom property, so the mark and its chip
-       are coloured by one declaration each below rather than by a rule per
-       agent per element. The fallback is the app accent, which is what an agent
-       GridVibe has not drawn a mark for wears. */
+/* One pane, one row. `data-agent` rides the button now that the block is gone,
+   so the tint below applies to the row's own mark. */
+.dash-agent {
+    /* Every agent's own tint, in one custom property, so the mark is coloured
+       by one declaration below rather than by a rule per agent per element. The
+       fallback is the app accent, which is what an agent GridVibe has not drawn
+       a mark for wears. */
     --dash-agent-accent: var(--gv-accent);
-    border-radius: var(--gv-radius-s);
-    padding: 2px 0 4px;
-}
-
-.dash-agent-group + .dash-agent-group {
-    margin-top: 4px;
-    border-top: 1px solid var(--gv-dialog-border);
-    padding-top: 6px;
-}
-
-.dash-agent-head {
     display: flex;
     align-items: center;
-    gap: 7px;
-    padding: 2px 8px 4px;
-    min-width: 0;
+    gap: 9px;
+    width: 100%;
+    padding: 6px 8px;
+    border: 0;
+    border-radius: var(--gv-radius-s);
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+}
+
+.dash-agent:hover,
+.dash-agent:focus-visible {
+    background: var(--dash-session-color-soft, var(--gv-accent-soft));
+    outline: none;
 }
 
 .dash-agent-icon {
@@ -357,41 +402,30 @@
     height: 14px;
 }
 
-.dash-agent-title {
-    font-size: .72rem;
+/* The agent's name. It never wraps and never shrinks below what it needs: it is
+   the column the eye runs down, and a name that reflowed with the title beside
+   it would stop being a column at all. */
+.dash-agent-name {
+    flex: 0 0 auto;
+    font-size: .74rem;
     font-weight: 600;
     letter-spacing: .01em;
-    color: var(--gv-dialog-muted);
-    overflow: hidden;
-    text-overflow: ellipsis;
+    color: var(--dash-agent-text, var(--dash-agent-accent));
     white-space: nowrap;
-    min-width: 0;
 }
 
-/* One pane. The line takes the width the name and the tag used to share. */
-.dash-agent {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    width: 100%;
-    padding: 6px 8px 6px 37px;
-    border: 0;
-    border-radius: var(--gv-radius-s);
-    background: transparent;
-    color: inherit;
-    font: inherit;
-    text-align: left;
-    cursor: pointer;
+/* The same rule the session name follows, for the same reason: the mark keeps
+   the full tint (a filled 22px chip carries it), the word is mixed toward the
+   dialog's text colour so it is read rather than recognised. */
+[data-theme="light"] .dash-agent-name {
+    --dash-agent-text: color-mix(in srgb, var(--dash-agent-accent) 55%, var(--gv-dialog-text));
 }
 
-.dash-agent-reading { display: inline-flex; flex: 0 0 auto; }
+.dash-agent-reading { display: inline-flex; flex: 0 0 auto; margin-left: auto; }
 
-.dash-agent:hover,
-.dash-agent:focus-visible {
-    background: var(--gv-accent-soft);
-    outline: none;
-}
-
+/* What the pane announced. One line rather than the two the block layout could
+   afford: the row now carries four things and the title is the one that gives
+   up its second line for them. */
 .dash-agent-line {
     flex: 1 1 auto;
     min-width: 0;
@@ -399,24 +433,21 @@
     font-weight: 500;
     overflow: hidden;
     text-overflow: ellipsis;
-    overflow-wrap: anywhere;
-    display: -webkit-box;
-    -webkit-box-orient: vertical;
-    -webkit-line-clamp: 2;
+    white-space: nowrap;
 }
 
 /* The marks, tinted by which agent they are. Nothing here is a brand colour
    lifted from a vendor — they are GridVibe's own hues, chosen only to be
    distinguishable from each other and legible on both grounds, which is the
    whole job of a tint on a list. */
-.dash-agent-group[data-agent="claude"] { --dash-agent-accent: #d97757; }
-.dash-agent-group[data-agent="codex"] { --dash-agent-accent: #4fd1a5; }
-.dash-agent-group[data-agent="copilot"] { --dash-agent-accent: #a371f7; }
-.dash-agent-group[data-agent="grok"] { --dash-agent-accent: #9aa3af; }
-.dash-agent-group[data-agent="opencode"] { --dash-agent-accent: #f0a868; }
-.dash-agent-group[data-agent="kilo"] { --dash-agent-accent: #7aa2f7; }
-.dash-agent-group[data-agent="kimi"] { --dash-agent-accent: #6ee7b7; }
-.dash-agent-group[data-agent="hermes"] { --dash-agent-accent: #c084fc; }
+.dash-agent[data-agent="claude"] { --dash-agent-accent: #d97757; }
+.dash-agent[data-agent="codex"] { --dash-agent-accent: #4fd1a5; }
+.dash-agent[data-agent="copilot"] { --dash-agent-accent: #a371f7; }
+.dash-agent[data-agent="grok"] { --dash-agent-accent: #9aa3af; }
+.dash-agent[data-agent="opencode"] { --dash-agent-accent: #f0a868; }
+.dash-agent[data-agent="kilo"] { --dash-agent-accent: #7aa2f7; }
+.dash-agent[data-agent="kimi"] { --dash-agent-accent: #6ee7b7; }
+.dash-agent[data-agent="hermes"] { --dash-agent-accent: #c084fc; }
 
 /* ── Tags ── */
 
@@ -611,7 +642,7 @@
 
 .dash-session-open:hover,
 .dash-session-open:focus-visible {
-    background: var(--gv-accent-soft);
+    background: var(--dash-session-color-soft, var(--gv-accent-soft));
     outline: none;
 }
 
@@ -658,13 +689,18 @@
     color: var(--gv-accent);
 }
 
-@container (max-width: 340px) {
-    .dash-agent { flex-wrap: wrap; padding-left: 8px; gap: 5px 8px; }
-    .dash-agent-line { flex-basis: 100%; }
-    .dash-agent-reading { margin-left: auto; }
+/* A card narrow enough that the row's four columns cannot share one line. The
+   title takes the second line whole — it is the long one — and the mark, the
+   name and the shell stay together on the first, which is the column order the
+   wide layout has. Wrapping is what the row gives up before the title starts
+   being truncated to nothing. */
+@container (max-width: 380px) {
+    .dash-agent { flex-wrap: wrap; gap: 5px 8px; }
+    /* The title drops below; the state stays up on the first line, where the
+       row's own `margin-left: auto` already has it hard right. */
+    .dash-agent-line { flex-basis: 100%; order: 1; }
     .dash-session-open { flex-wrap: wrap; }
     .dash-session-meta { flex-basis: 100%; margin-left: 0; }
-    .dash-agent-head { flex-wrap: wrap; }
     .dash-tag-transport { max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
 }
 

@@ -149,6 +149,10 @@
         return typeof window !== 'undefined' ? window.GridVibeAgentGlyphs : undefined;
     }
 
+    function dashboardSessionColour() {
+        return typeof window !== 'undefined' ? window.GridVibeSessionColour : undefined;
+    }
+
     /* ── The reading, as words ── */
 
     function dashboardWorkspaceLabel(workspace, index) {
@@ -192,19 +196,19 @@
         return `${Math.round(value / 3600)}h`;
     }
 
-    /* The agent this pane runs, in the registry's own prose — the heading its
-       panes are gathered under. Never empty: a custom agent with nothing to
-       name is still an agent, and a group with a blank heading would read as a
-       rendering fault rather than as a fact about the pane. */
+    /* The agent this pane runs, in the registry's own prose, printed on the
+       row itself. Never empty: a custom agent with nothing to name is still an
+       agent, and a blank name would read as a rendering fault rather than as a
+       fact about the pane. */
     function dashboardAgentName(pane) {
         const identity = dashboardIdentity();
         const name = identity ? identity.agentDisplayName(pane, dashboardAgentOptions()) : '';
         return name || 'Agent';
     }
 
-    /* Which mark the heading wears, and the mark itself. The glyph module owns
-       what an agent GridVibe has not drawn falls back to; this only hands it
-       the same registry key the name came from. */
+    /* Which mark the row wears, and the mark itself. The glyph module owns what
+       an agent GridVibe has not drawn falls back to; this only hands it the
+       same registry key the name came from. */
     function dashboardAgentKey(pane) {
         const identity = dashboardIdentity();
         return identity ? identity.agentKeyForSession(pane) : '';
@@ -222,7 +226,8 @@
 
     /* The current published conversation title leads. A pane label or its
        directory identifies panes whose agent has not announced a title.
-       Only remote panes need the host here; local shells are already tagged. */
+       Only remote panes need the host here; local shells are already tagged by
+       the transport chip beside the agent's name. */
     function dashboardPaneLine(pane) {
         const identity = dashboardIdentity();
         const announced = identity
@@ -328,12 +333,21 @@
             : '';
     }
 
-    /* One running pane, as one line. Everything that is true of the *agent*
-       rather than of this pane has moved up into the heading above, so what is
-       left is what distinguishes this pane from its siblings: what it is doing,
-       whether it was launched with its agent's own auto-approval flag — the
-       one property of a running agent worth knowing from across the room, and
-       a per-pane one — and how it is getting on.
+    /* One running pane, as one line — and the whole line, because the agent it
+       runs is now stated *on* it rather than over a block of its siblings.
+
+       It was a block: a heading naming the agent and its shell, with one line
+       per pane under it. That grouping bought a saving only when several panes
+       of one agent sat in one session card, which is the uncommon case; what it
+       cost in every other was a two-line entry for one pane, a heading and its
+       lines competing for the eye, and — because the block was keyed on the
+       agent *and* its shell — a session with three agents drawn as three
+       separate stacks. Stating the mark, the name and the shell to the left of
+       the title puts all four facts on one line, in one column order, so a card
+       is read straight down the titles with the agents scanned in the margin.
+
+       `data-agent` therefore rides the row: it is what tints the mark, and the
+       block it used to sit on is gone.
 
        The session id rides the row because the window this row opens needs it:
        naming the workspace lands in the right window, and naming the group and
@@ -343,6 +357,7 @@
             <button
                 type="button"
                 class="dash-agent"
+                data-agent="${escHtml(dashboardAgentGlyphKey(pane))}"
                 data-dashboard-action="pane"
                 data-dashboard-key="pane:${escHtml(pane?.session_id || '')}"
                 data-workspace-id="${escHtml(pane?.workspace_id || '')}"
@@ -350,54 +365,13 @@
                 data-session-id="${escHtml(pane?.session_id || '')}"
                 title="${escHtml(dashboardPaneLine(pane))}"
             >
+                <span class="dash-agent-icon" aria-hidden="true">${dashboardAgentGlyphHtml(pane)}</span>
+                <span class="dash-agent-name">${escHtml(dashboardAgentName(pane))}</span>
+                ${dashboardTagHtml(dashboardTransportLabel(pane), 'transport')}
                 <span class="dash-agent-line">${escHtml(dashboardPaneLine(pane))}</span>
                 ${pane?.agent_auto_mode ? dashboardTagHtml('auto', 'auto') : ''}
                 <span class="dash-agent-reading">${dashboardActivityHtml(pane)}</span>
             </button>
-        `;
-    }
-
-    /* Panes gathered under the agent they run, in the order they first appear.
-
-       The key is the agent *and* what it runs on, because a heading is a claim
-       about every line under it: two Claude panes on two different shells are
-       two different machines as far as their work is concerned, and folding
-       them under one "PowerShell" heading would state something false. Order is
-       first appearance rather than anything sorted, so a pane stays where the
-       window that owns it would put it. */
-    function dashboardAgentGroups(panes) {
-        const groups = [];
-        const byKey = new Map();
-        (Array.isArray(panes) ? panes : []).forEach(pane => {
-            const name = dashboardAgentName(pane);
-            const transport = dashboardTransportLabel(pane);
-            const glyphKey = dashboardAgentGlyphKey(pane);
-            const key = JSON.stringify([glyphKey, name, transport]);
-            let group = byKey.get(key);
-            if (!group) {
-                group = { key, name, transport, glyphKey, glyph: dashboardAgentGlyphHtml(pane), panes: [] };
-                byKey.set(key, group);
-                groups.push(group);
-            }
-            group.panes.push(pane);
-        });
-        return groups;
-    }
-
-    /* One agent, once, however many panes are running it. The heading is set
-       small deliberately: it is the label on a block the reader has already
-       found by its mark, and every pixel it gives up goes to the lines under
-       it, which are what they came to read. */
-    function dashboardAgentGroupHtml(group) {
-        return `
-            <div class="dash-agent-group" data-agent="${escHtml(group.glyphKey)}">
-                <div class="dash-agent-head">
-                    <span class="dash-agent-icon" aria-hidden="true">${group.glyph}</span>
-                    <span class="dash-agent-title">${escHtml(group.name)}</span>
-                    ${dashboardTagHtml(group.transport, 'transport')}
-                </div>
-                ${group.panes.map(dashboardAgentRowHtml).join('')}
-            </div>
         `;
     }
 
@@ -422,10 +396,39 @@
         return Boolean(actions && actions.canCloseWindow());
     }
 
+    /* The two custom properties that carry a session's own hue onto its card.
+
+       The card is a session, and a session already has a colour: the tab strip
+       in the workspace window picks one out of ten off the group id, and that
+       hue is how a reader finds the tab they mean before they read its name.
+       A card drawn in the dialog's accent threw that away and made the reader
+       match by name across two windows, so the edge and the name here are the
+       tab's own colour — one fact drawn the same in both places, which is the
+       whole reason `session-colour.js` is a module rather than a second copy
+       of a hash.
+
+       Inline rather than a class: there are ten hues and no stylesheet has any
+       business enumerating them, and the value is per row. It is written as a
+       style attribute on the card, so both the edge and the heading read it
+       from one declaration.
+
+       No module, no colour: the card falls back to the dialog's own border and
+       text tokens, which is what it wore before. The same rule the × and the
+       band's verbs follow for their controller. */
+    function dashboardSessionColourStyle(group) {
+        const colour = dashboardSessionColour();
+        const groupId = String(group?.group_id || '');
+        if (!colour || !groupId) {
+            return '';
+        }
+        return ` style="--dash-session-color:${escHtml(colour.sessionColour(groupId))};`
+            + `--dash-session-color-soft:${escHtml(colour.sessionColourRgba(groupId, 0.14))}"`;
+    }
+
     /* One session tab, as a card: its own heading, its own agents, its own
-       edge. The heading is pressable for the same reason the agent rows are —
-       it is the way to the tab itself, which may hold panes this surface
-       deliberately does not list.
+       edge — in its own colour, which is its tab's. The heading is pressable
+       for the same reason the agent rows are — it is the way to the tab
+       itself, which may hold panes this surface deliberately does not list.
 
        The × is a control *beside* that heading and never inside it: a button
        inside a button is not a control, and the heading already has an action
@@ -458,7 +461,7 @@
                     >${DASHBOARD_CLOSE_ICON}</button>`
             : '';
         return `
-            <section class="dash-session">
+            <section class="dash-session"${dashboardSessionColourStyle(group)}>
                 <header class="dash-session-head">
                     <button
                         type="button"
@@ -476,7 +479,7 @@
                     </button>${closeButton}
                 </header>
                 <div class="dash-agents">
-                    ${dashboardAgentGroups(panes).map(dashboardAgentGroupHtml).join('')}
+                    ${panes.map(dashboardAgentRowHtml).join('')}
                 </div>
             </section>
         `;
@@ -518,9 +521,14 @@
         return `<div class="dash-workspace-actions">${controls}</div>`;
     }
 
-    /* One workspace, as a titled band across the page. Its sessions are laid
-       out in a grid inside it, so a wide window shows several side by side
-       instead of one very long column. */
+    /* One workspace, as a titled band across the page, with its sessions stacked
+       one under another inside it — full width, every card the same width. They
+       used to flow into as many columns as the dialog was wide enough for,
+       which made a card's width a function of how many sessions happened to be
+       open beside it: two cards side by side truncated every title in both, and
+       a third session arriving re-flowed the two the reader was already reading.
+       A card is a session and a session is read along its rows, so the width
+       goes to the rows. */
     function dashboardWorkspaceHtml(workspace, index) {
         const groups = Array.isArray(workspace?.groups) ? workspace.groups : [];
         const agents = Number(workspace?.agent_count) || 0;

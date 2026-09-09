@@ -1348,25 +1348,16 @@
         reportActiveSessionGroup(groupId);
     }
 
-    const TAB_COLOUR_PALETTE = [
-        '#ff6b6b', '#ff922b', '#ffd43b', '#69db7c',
-        '#38d9a9', '#4dabf7', '#748ffc', '#da77f2',
-        '#f783ac', '#a9e34b',
-    ];
-
+    /* The palette and the hash live in `session-colour.js`, because the agent
+       dashboard paints the same session on another page and a second copy of
+       this mapping is how a card and its tab come to disagree. These two stay
+       as the names this file already reads them by. */
     function tabColourForGroup(groupId) {
-        let hash = 0;
-        for (let i = 0; i < groupId.length; i++) {
-            hash = (hash * 31 + groupId.charCodeAt(i)) & 0xffffffff;
-        }
-        return TAB_COLOUR_PALETTE[Math.abs(hash) % TAB_COLOUR_PALETTE.length];
+        return window.GridVibeSessionColour.sessionColour(groupId);
     }
 
     function hexToRgba(hex, alpha) {
-        const r = parseInt(hex.slice(1, 3), 16);
-        const g = parseInt(hex.slice(3, 5), 16);
-        const b = parseInt(hex.slice(5, 7), 16);
-        return `rgba(${r},${g},${b},${alpha})`;
+        return window.GridVibeSessionColour.hexToRgba(hex, alpha);
     }
 
     function applyTabColour(button, groupId) {
