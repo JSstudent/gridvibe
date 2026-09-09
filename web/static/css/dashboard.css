@@ -1,0 +1,93 @@
+/* The agent dashboard *button* — shared by the launcher and the workspace
+   window.
+
+   The dashboard itself is a window with a stylesheet of its own
+   (`agent-dashboard.css`); all that is shared between the two host pages is
+   the button that opens it and the badge riding on it. Written the way
+   shortcuts-help.css is, and for the same reason: both pages render the same
+   partial, so the *shape* lives here exactly once while the palette is each
+   page's own. **This file declares no palette token of its own** — the badge's
+   two colours are read as `var(--dash-x, <default>)` and the pages declare only
+   what they change. Both templates load this after their page stylesheet, so
+   anything declared here would outrank the page's amendment at equal
+   specificity; a knob this file only reads cannot be. */
+
+.dashboard {
+    position: relative;
+    display: inline-flex;
+    flex: 0 0 auto;
+}
+
+/* The supplied artwork, drawn at the size the host page asks for. It is raster
+   and carries its own palette, so it takes a radius of its own rather than
+   inheriting a glyph's currentColor.
+
+   `--dash-icon-size` is the *mark*, not the box: active_ws.ico bakes padding
+   into its own canvas and inks about 0.61 of it across the entries a button
+   this size renders, so a box set to the mark draws under two thirds of it and
+   the icon reads as a shrunken thumbnail beside anything that fills its own
+   box. `--dash-icon-scale` is 1/that fraction: the box grows by it, the
+   baked-in padding comes back out of the layout as a negative margin of half
+   the difference, and what is left occupying the row is exactly the mark. A
+   negative margin rather than `transform: scale()`, so the browser still picks
+   its source entry from the size it actually paints.
+
+   The scale is this file's because it is a property of *this asset*, and the
+   size is the host page's because it is a property of the row: the launcher's
+   row draws 18px glyphs, which is the default, and the session bar states its
+   own. Guessing a larger box to compensate is what this replaces -- it made the
+   mark bigger without making it predictable, so one declaration drew one size
+   here and another beside identically-treated artwork over there.
+
+   The badge is out of flow and so is not in any of this arithmetic -- the count
+   changes what the button says, never how big its mark is. */
+.dashboard-icon {
+    --dash-icon-mark: var(--dash-icon-size, 18px);
+    --dash-icon-scale: 1.63;
+    width: calc(var(--dash-icon-mark) * var(--dash-icon-scale));
+    height: calc(var(--dash-icon-mark) * var(--dash-icon-scale));
+    margin: calc(var(--dash-icon-mark) * (1 - var(--dash-icon-scale)) / 2);
+    border-radius: 5px;
+    display: block;
+    flex: 0 0 auto;
+}
+
+/* The badge is positioned against the button itself, and the anchor is stated
+   here rather than assumed: neither page's button chrome (`.btn-icon`,
+   `.ghost-btn.icon-btn`) declares `position`, so without this the badge would
+   fall through to `.dashboard` — correct today only because the root's box
+   happens to be the button's, and wrong the moment either page's chrome gains
+   a `position` or a padded sibling. */
+.dashboard > button {
+    position: relative;
+    overflow: visible;
+}
+
+/* The count rides the button rather than the window it opens: it is the reason
+   to open one, so it has to be legible without opening it. */
+.dashboard-badge {
+    position: absolute;
+    top: -3px;
+    right: -3px;
+    min-width: 15px;
+    height: 15px;
+    padding: 0 4px;
+    border-radius: 999px;
+    background: var(--dash-badge-bg, var(--gv-accent));
+    color: var(--dash-badge-text, var(--gv-bg-app));
+    font-size: .62rem;
+    font-weight: 700;
+    line-height: 15px;
+    text-align: center;
+    pointer-events: none;
+}
+body.dashboard-background-blurred::after {
+    content: '';
+    position: fixed;
+    inset: 0;
+    z-index: 2147483647;
+    pointer-events: none;
+    backdrop-filter: blur(3px);
+    -webkit-backdrop-filter: blur(3px);
+    background: color-mix(in srgb, var(--gv-bg-app) 18%, transparent);
+}

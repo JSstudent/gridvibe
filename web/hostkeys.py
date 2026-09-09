@@ -23,20 +23,21 @@ def _load_persistent_host_keys(client: Any) -> None:
 
     Because ``load_host_keys`` records the filename, paramiko's AutoAddPolicy
     persists newly accepted keys automatically, and a changed key for a known
-    host raises ``BadHostKeyException`` on connect. Failures degrade to the
-    historical trust-on-every-use behaviour with a warning.
+    host raises ``BadHostKeyException`` on connect. An unreadable trust store
+    refuses the connection without modifying its contents.
     """
     try:
-        if not os.path.exists(KNOWN_HOSTS_PATH):
-            with open(KNOWN_HOSTS_PATH, "a", encoding="utf-8"):
+        try:
+            with open(KNOWN_HOSTS_PATH, "x", encoding="utf-8"):
                 pass
+        except FileExistsError:
+            pass
         client.load_host_keys(KNOWN_HOSTS_PATH)
     except Exception as exc:
-        logger.warning(
-            "Could not load %s; SSH host key changes will not be detected: %s",
-            KNOWN_HOSTS_PATH,
-            exc,
-        )
+        raise OSError(
+            f"Cannot verify SSH host keys: repair access to {KNOWN_HOSTS_PATH} "
+            "or restore a valid trust file, then reconnect"
+        ) from exc
 
 
 class _WarnNewHostKeyPolicy:
@@ -77,7 +78,7 @@ def _apply_host_key_policy(client: Any, paramiko_module: Any, policy: Optional[s
             if os.path.exists(USER_KNOWN_HOSTS_PATH):
                 client.load_system_host_keys(USER_KNOWN_HOSTS_PATH)
         except Exception as exc:
-            logger.warning("Could not load %s: %s", USER_KNOWN_HOSTS_PATH, exc)
+            raise OSError(f"Cannot read SSH trust file {USER_KNOWN_HOSTS_PATH}; repair it and retry") from exc
         client.set_missing_host_key_policy(paramiko_module.RejectPolicy())
     elif resolved == "known-hosts":
         client.set_missing_host_key_policy(_WarnNewHostKeyPolicy(paramiko_module.AutoAddPolicy()))

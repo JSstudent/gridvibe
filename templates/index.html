@@ -11,6 +11,8 @@
     <link rel="stylesheet" href="{{ url_for('static', filename='css/workspaces.css') }}?v={{ version }}">
     <link rel="stylesheet" href="{{ url_for('static', filename='css/lifecycle.css') }}?v={{ version }}">
     <link rel="stylesheet" href="{{ url_for('static', filename='css/shortcuts-help.css') }}?v={{ version }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/dashboard.css') }}?v={{ version }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/agent-dashboard.css') }}?v={{ version }}">
 </head>
 <body>
 <div class="app-frame">
@@ -307,6 +309,9 @@
                             <path d="M21 12a9 9 0 0 1-15 6.7L3 16"></path>
                         </svg>
                     </button>
+                    {# Everything that is running, in every workspace window. #}
+                    {% set dashboard_button_class = 'ghost-btn icon-btn' %}
+                    {% include 'partials/dashboard.html' %}
                     {% set shortcuts_help_button_class = 'ghost-btn icon-btn' %}
                     {% include 'partials/shortcuts_help.html' %}
                     {# Native desktop mode only: revealed by minimize-all.js when
@@ -378,6 +383,16 @@
     </div>
 </div>
 
+{# The agent dashboard, over whichever page you pressed the button on. It goes
+   *before* the confirm dialogs below it: a session × here opens the close
+   prompt on top of this, and at equal z-index the later element wins. #}
+{% include 'partials/agent_dashboard_dialog.html' %}
+
+{# The dashboard's session × asks the same three-outcome question the
+   workspace window's session tab asks. One irreversible act, one prompt. #}
+{% set close_session_variant = 'launcher' %}
+{% include 'partials/close_session_modal.html' %}
+
 {% set generic_confirm_variant = 'launcher' %}
 {% include 'partials/generic_confirm_modal.html' %}
 {% set lifecycle_variant = 'launcher' %}
@@ -429,7 +444,15 @@
 <script src="{{ url_for('static', filename='js/app-settings.js') }}?v={{ version }}"></script>
 <script src="{{ url_for('static', filename='js/minimize-all.js') }}?v={{ version }}"></script>
 <script src="{{ url_for('static', filename='js/lifecycle.js') }}?v={{ version }}"></script>
+<script src="{{ url_for('static', filename='js/agent-identity.js') }}?v={{ version }}"></script>
 <script src="{{ url_for('static', filename='js/shortcuts-help.js') }}?v={{ version }}"></script>
+<script src="{{ url_for('static', filename='js/agent-glyphs.js') }}?v={{ version }}"></script>
+<script src="{{ url_for('static', filename='js/session-colour.js') }}?v={{ version }}"></script>
+<script src="{{ url_for('static', filename='js/close-session-modal.js') }}?v={{ version }}"></script>
+<script src="{{ url_for('static', filename='js/dashboard-close.js') }}?v={{ version }}"></script>
+<script src="{{ url_for('static', filename='js/dashboard-dialog.js') }}?v={{ version }}"></script>
+<script src="{{ url_for('static', filename='js/dashboard.js') }}?v={{ version }}"></script>
+<script src="{{ url_for('static', filename='js/dashboard-focus.js') }}?v={{ version }}"></script>
 <script src="{{ url_for('static', filename='js/launcher.js') }}?v={{ version }}"></script>
 </body>
 </html>

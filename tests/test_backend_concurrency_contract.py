@@ -29,8 +29,8 @@ directions:
    and the create/rename/launch-into-new paths called it and *then* called a
    separately locked manager mutation, so two concurrent requests could both
    pass. That was an accepted local-single-user tradeoff, but it contradicted
-   the stronger contract `AGENTS.md` and `CLAUDE.md` state: a non-empty label
-   identifies at most one workspace across live and saved state. The claim now
+   Configuration and durable state in docs/engineering_contracts.md: a non-empty
+   label identifies at most one workspace across live and saved state. The claim now
    holds a lock of its own across the verdict and the mutation.
 3. `_acquire_ssh_sftp()` read the pool entry under the lock but incremented
    ``in_use`` only after ``open_sftp()`` returned, so the idle reaper could

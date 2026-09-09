@@ -554,6 +554,10 @@
        arms the pulse at the departing end). Wired here, at the one place that
        knows which workspace this page is. */
     watchWorkspaceArrivals(currentWorkspaceId);
+    /* And the other half of the same arrival: a row in the agent dashboard
+       names a session tab and one pane, not just a window. Wired beside the
+       pulse, at the one place that knows which workspace this page is. */
+    watchWorkspaceFocusTargets(currentWorkspaceId, applyWorkspaceFocusTarget);
     let activeGroupId = initialRouteParams.get('group') || '';
     let sessionGroups = [];
     let activeLoadToken = 0;
@@ -574,7 +578,6 @@
     let pendingModeSwitchSessionIds = new Set();
     let savedSessionResolver = null;
     let saveSessionAsResolver = null;
-    let closeSessionConfirmResolver = null;
     const MAX_SPLIT_TERMINALS = Math.min(16, Number(MAX_SESSIONS || 16));
 
     function isSessionModeSwitchPending(sessionId) {
@@ -650,6 +653,35 @@
        browserSurfaceHtml, wireBrowserOnlyControls, navigateBrowserPane,
        reloadBrowserPane, openBrowserPaneExternally, browserSerializeTabs. */
 
+    /* What a pane's header prints. The rule -- a title the user typed wins, an
+       agent pane is otherwise named after its agent, and only then "Terminal N"
+       -- is agent-identity.js's, shared with the dashboard row that lists the
+       same pane, so the two can never disagree about what it is called.
+
+       Display only. The persisted title stays whatever the launcher wrote, so
+       naming a pane after its agent never turns that name into the pane's own.
+    */
+    function paneDisplayTitle(session, index) {
+        return window.GridVibeAgentIdentity.paneDisplayTitle(
+            session,
+            index,
+            typeof AGENT_OPTIONS === 'undefined' ? [] : AGENT_OPTIONS
+        );
+    }
+
+    function paneAgentIconHtml(session) {
+        const identity = window.GridVibeAgentIdentity;
+        if (identity.paneKindForSession(session) !== 'agent') return '';
+        return window.GridVibeAgentGlyphs.agentGlyphMarkup(identity.agentKeyForSession(session));
+    }
+
+    function syncPaneAgentIcon(icon, session) {
+        if (!icon) return;
+        const html = paneAgentIconHtml(session);
+        if (icon.innerHTML !== html) icon.innerHTML = html;
+        icon.hidden = !html;
+    }
+
     function getSessionApiPath(groupId = activeGroupId) {
         const params = new URLSearchParams({ workspace_id: currentWorkspaceId });
         if (groupId) {
@@ -717,6 +749,113 @@
             terminal,
             active: false
         };
+    }
+
+    /* ── Landing on the pane the agent dashboard named ──
+       A dashboard row names a workspace, a session tab and one pane. The
+       workspace is the window this page already is; the other two are this.
+
+       Two things make it more than one call to `switchGroup`. A window that was
+       already open is raised without being reloaded, so the tab has to be
+       changed here rather than through the URL the bridge never revisits; and a
+       window that was just *created* claims the request while its grid is still
+       being built, so the pane it names does not exist yet. The target is
+       therefore held and settled again at the end of the load that will produce
+       it — under a deadline, because a session closed between the click and the
+       arrival must not leave the window waiting for a pane that is never
+       coming. */
+    const WORKSPACE_FOCUS_TARGET_GRACE_MS = 15000;
+    let pendingWorkspaceFocusTarget = null;
+
+    function applyWorkspaceFocusTarget(target) {
+        const groupId = String(target?.groupId || '');
+        const sessionId = String(target?.sessionId || '');
+        if (!groupId && !sessionId) {
+            return;
+        }
+        pendingWorkspaceFocusTarget = {
+            groupId,
+            sessionId,
+            expiresAt: Date.now() + WORKSPACE_FOCUS_TARGET_GRACE_MS
+        };
+        settleWorkspaceFocusTarget();
+    }
+
+    async function settleWorkspaceFocusTarget() {
+        const target = pendingWorkspaceFocusTarget;
+        if (!target) {
+            return;
+        }
+        if (Date.now() > target.expiresAt) {
+            pendingWorkspaceFocusTarget = null;
+            return;
+        }
+        if (target.groupId && target.groupId !== activeGroupId) {
+            /* A tab this window has never heard of is not switched to: that is
+               how a stale row would blank the grid it landed on. It is left
+               standing instead, for the group list this window has not loaded
+               yet — or for the deadline. */
+            if (!sessionGroups.some(group => group.group_id === target.groupId)) {
+                return;
+            }
+            /* switchGroup runs the whole load and settles again from inside it.
+               It also declines — an unsaved editor, a copy in flight — and a
+               decline leaves the target standing rather than pretending the
+               trip finished. */
+            await switchGroup(target.groupId);
+            return;
+        }
+        if (!target.sessionId) {
+            pendingWorkspaceFocusTarget = null;
+            return;
+        }
+        const resolved = resolveSessionTarget(target.sessionId);
+        if (!resolved || !resolved.active) {
+            /* Not painted yet. The load that paints it settles again. */
+            return;
+        }
+        pendingWorkspaceFocusTarget = null;
+        focusPaneForArrival(resolved.index);
+    }
+
+    /* Real keyboard focus for a terminal, and the highlight a click would give
+       for a pane that cannot take it: an explorer or browser pane has no xterm
+       to focus, and landing on one still has to *show* which pane was meant. */
+    function focusPaneForArrival(index) {
+        const card = document.getElementById(`tc-${index}`);
+        card?.scrollIntoView?.({ block: 'nearest' });
+        const terminal = terminals[index];
+        if (terminal?.term && isPlainTerminalCard(card)) {
+            try { terminal.term.focus(); } catch (_error) {}
+            return;
+        }
+        card?.focus?.();
+    }
+
+    /* ── What a pane calls itself, repainted without a rebuild ──
+       A pane's agent can change while the pane stays exactly where it is: one
+       that exits hands the terminal back, and one started by hand at the prompt
+       takes it over. Both arrive as a status broadcast, and until this existed
+       the header went on naming the agent the pane was *launched* with — so a
+       Claude session could sit under a "OpenAI Codex CLI" title until something
+       else forced a rebuild.
+
+       The two header fields that read from the session record, and nothing
+       else: the reset control's affordance is decided by the transport rather
+       than by what is running in it, and syncing the shell controls here would
+       close a menu the user has open. */
+    function syncPaneIdentityChrome(index, session) {
+        syncPaneAgentIcon(document.getElementById(`ticon-${index}`), session);
+        const nameLabel = document.getElementById(`tname-${index}`);
+        const title = paneDisplayTitle(session, index);
+        if (nameLabel && nameLabel.textContent.trim() !== title) {
+            nameLabel.textContent = title;
+        }
+        const hostLabel = document.getElementById(`thost-${index}`);
+        const host = String(session.host || '');
+        if (hostLabel && hostLabel.textContent.trim() !== host) {
+            hostLabel.textContent = host;
+        }
     }
 
     function clearFitTimers(targetTerminals = terminals) {
@@ -903,6 +1042,7 @@
                    group being attached in its place. It resumes on the way
                    back with its position and its queued readers intact. */
                 explorerSuspendSourceRenderJob(terminal);
+                releaseExplorerRepoSearch(terminal);
                 /* The commit card is not suspended, it is closed: it floats on
                    document.body pinned to a row that is about to be detached,
                    so leaving it would hang one group's card over the group
@@ -1159,6 +1299,7 @@
             if (isExplorerPaneInstance(terminal)) {
                 explorerReleasePaneWork(terminal);
             }
+            if (isBrowserPaneInstance(terminal)) browserDisposePane(terminal);
             if (terminal?.term) {
                 try { terminal.term.dispose(); } catch (_) {}
             }
@@ -1207,25 +1348,16 @@
         reportActiveSessionGroup(groupId);
     }
 
-    const TAB_COLOUR_PALETTE = [
-        '#ff6b6b', '#ff922b', '#ffd43b', '#69db7c',
-        '#38d9a9', '#4dabf7', '#748ffc', '#da77f2',
-        '#f783ac', '#a9e34b',
-    ];
-
+    /* The palette and the hash live in `session-colour.js`, because the agent
+       dashboard paints the same session on another page and a second copy of
+       this mapping is how a card and its tab come to disagree. These two stay
+       as the names this file already reads them by. */
     function tabColourForGroup(groupId) {
-        let hash = 0;
-        for (let i = 0; i < groupId.length; i++) {
-            hash = (hash * 31 + groupId.charCodeAt(i)) & 0xffffffff;
-        }
-        return TAB_COLOUR_PALETTE[Math.abs(hash) % TAB_COLOUR_PALETTE.length];
+        return window.GridVibeSessionColour.sessionColour(groupId);
     }
 
     function hexToRgba(hex, alpha) {
-        const r = parseInt(hex.slice(1, 3), 16);
-        const g = parseInt(hex.slice(3, 5), 16);
-        const b = parseInt(hex.slice(5, 7), 16);
-        return `rgba(${r},${g},${b},${alpha})`;
+        return window.GridVibeSessionColour.hexToRgba(hex, alpha);
     }
 
     function applyTabColour(button, groupId) {
@@ -1287,31 +1419,9 @@
         }
     }
 
-    function notifySavedSessionUpdated(savedSession, options = {}) {
-        const sessionId = String(savedSession?.id || '').trim();
-        if (!sessionId) {
-            return;
-        }
-
-        const payload = {
-            id: sessionId,
-            name: String(savedSession?.name || '').trim(),
-            updated_at: String(savedSession?.updated_at || '').trim(),
-            activate: Boolean(options.activate),
-            timestamp: Date.now(),
-            nonce: Math.random().toString(36).slice(2)
-        };
-
-        try {
-            const channel = new BroadcastChannel(SAVED_SESSION_BROADCAST_CHANNEL);
-            channel.postMessage(payload);
-            channel.close();
-        } catch (_error) {}
-
-        try {
-            localStorage.setItem(SAVED_SESSION_UPDATE_STORAGE_KEY, JSON.stringify(payload));
-        } catch (_error) {}
-    }
+    /* notifySavedSessionUpdated() lives in shared.js, beside the two channel
+       names it writes to: a third page (the agent dashboard) now saves a
+       preset too, and the launcher listens for every one of them. */
 
     /* ─────────────────────────────────────────────
        Multi-workspace: menus, move, window lifecycle
@@ -1719,45 +1829,12 @@
         });
     }
 
-    /* The three outcomes of the close prompt. Anything that is not an explicit
-       button press (Escape, the backdrop) keeps the session. */
-    const CLOSE_SESSION_CANCEL = 'cancel';
-    const CLOSE_SESSION_CLOSE = 'close';
-    const CLOSE_SESSION_SAVE_AND_CLOSE = 'save-and-close';
+    /* The prompt itself — its markup, its three decisions and what it says —
+       is close-session-modal.js, shared with the agent dashboard, which opens
+       the same dialog over the same partial. What stays here is the one thing
+       that is this page's: which group is being asked about.
 
-    function closeCloseSessionConfirmModal(decision = CLOSE_SESSION_CANCEL) {
-        const modal = document.getElementById('closeSessionConfirmModal');
-        modal.classList.remove('visible');
-        modal.setAttribute('aria-hidden', 'true');
-
-        if (closeSessionConfirmResolver) {
-            const resolver = closeSessionConfirmResolver;
-            closeSessionConfirmResolver = null;
-            resolver(decision);
-        }
-    }
-
-    function openCloseSessionConfirmModal(group, connectedCount, totalCount) {
-        const modal = document.getElementById('closeSessionConfirmModal');
-        const copy = document.getElementById('closeSessionConfirmCopy');
-        const name = group?.name || group?.group_id || 'this session';
-        const terminalNoun = totalCount === 1 ? 'terminal' : 'terminals';
-        copy.textContent = totalCount > 0
-            ? `Close "${name}" and its ${totalCount} ${terminalNoun} (${connectedCount} connected)?`
-            : `Close "${name}"?`;
-        modal.classList.add('visible');
-        modal.setAttribute('aria-hidden', 'false');
-
-        window.setTimeout(() => {
-            document.getElementById('closeSessionConfirmCancel').focus();
-        }, 0);
-
-        return new Promise(resolve => {
-            closeSessionConfirmResolver = resolve;
-        });
-    }
-
-    /* One misclick on a tab's × must not silently kill live terminals
+       One misclick on a tab's × must not silently kill live terminals
        (sessions are memory-only), so closing a group with ≥1 connected
        terminal asks first, and offers to save the group as a preset on the
        way out. Dead groups close without the dialog. Resolves to one of the
@@ -1774,12 +1851,16 @@
             /* Status lookup failed — fall through and ask, the safe default. */
         }
 
-        const connectedCount = sessions.filter(session => session.status === 'connected').length;
-        if (sessions.length > 0 && connectedCount === 0) {
-            return CLOSE_SESSION_CLOSE;
+        const skipped = closeSessionPromptSkipDecision(sessions);
+        if (skipped) {
+            return skipped;
         }
 
-        return openCloseSessionConfirmModal(getGroupById(groupId), connectedCount, sessions.length);
+        return openCloseSessionConfirmModal({
+            group: getGroupById(groupId),
+            connectedCount: closeSessionConnectedCount(sessions),
+            totalCount: sessions.length
+        });
     }
 
     function buildSavedSessionLaunchPayload(savedSession) {
@@ -2034,23 +2115,8 @@
         });
     });
 
-    document.getElementById('closeSessionConfirmModal').addEventListener('click', event => {
-        if (event.target.id === 'closeSessionConfirmModal') {
-            closeCloseSessionConfirmModal(CLOSE_SESSION_CANCEL);
-        }
-    });
-
-    document.getElementById('closeSessionConfirmCancel').addEventListener('click', () => {
-        closeCloseSessionConfirmModal(CLOSE_SESSION_CANCEL);
-    });
-
-    document.getElementById('closeSessionConfirmSave').addEventListener('click', () => {
-        closeCloseSessionConfirmModal(CLOSE_SESSION_SAVE_AND_CLOSE);
-    });
-
-    document.getElementById('closeSessionConfirmAccept').addEventListener('click', () => {
-        closeCloseSessionConfirmModal(CLOSE_SESSION_CLOSE);
-    });
+    /* The close prompt's own backdrop, buttons and Escape are wired by
+       close-session-modal.js, over the same ids on both pages. */
 
     document.addEventListener('keydown', event => {
         if (event.key === 'Escape') {
@@ -2062,9 +2128,6 @@
             }
             if (document.getElementById('saveSessionAsModal').classList.contains('visible')) {
                 closeSaveSessionAsModal();
-            }
-            if (document.getElementById('closeSessionConfirmModal').classList.contains('visible')) {
-                closeCloseSessionConfirmModal(CLOSE_SESSION_CANCEL);
             }
         }
     });
@@ -5006,6 +5069,7 @@
             if (isExplorerPaneInstance(t)) {
                 explorerReleasePaneWork(t);
             }
+            if (isBrowserPaneInstance(t)) browserDisposePane(t);
             if (t && t.term) {
                 try { t.term.dispose(); } catch (_) {}
             }
@@ -5271,8 +5335,9 @@
         card.innerHTML = `
                 <div class="terminal-header">
                     <div class="terminal-info">
+                        <span class="terminal-agent-icon" id="ticon-${i}" aria-hidden="true" ${session.startup_mode === 'agent' ? '' : 'hidden'}>${paneAgentIconHtml(session)}</span>
                         <span class="terminal-name" id="tname-${i}">
-                            ${escHtml(session.title || `Terminal ${i + 1}`)}
+                            ${escHtml(paneDisplayTitle(session, i))}
                         </span>
                         <span class="terminal-host" id="thost-${i}">
                             ${escHtml(session.host || '')}
@@ -5865,8 +5930,9 @@
         card.style.setProperty('--session-color-dim', hexToRgba(sessionColour, 0.45));
 
         const name = card.querySelector(`#tname-${targetIndex}`);
+        syncPaneAgentIcon(card.querySelector(`#ticon-${targetIndex}`), session);
         if (name) {
-            name.textContent = session.title || `Terminal ${targetIndex + 1}`;
+            name.textContent = paneDisplayTitle(session, targetIndex);
         }
         const host = card.querySelector(`#thost-${targetIndex}`);
         if (host) {
@@ -6204,6 +6270,7 @@
         }
 
         const previousTerminal = terminals[index];
+        if (isBrowserPaneInstance(previousTerminal)) browserDisposePane(previousTerminal);
         if (previousTerminal?.term) {
             try { previousTerminal.term.dispose(); } catch (_) {}
         }
@@ -6254,15 +6321,8 @@
         }
         ensureExplorerThemeButton(card, index);
         applyExplorerThemeToCard(card, initialExplorerTheme);
-        const nameLabel = document.getElementById(`tname-${index}`);
-        const hostLabel = document.getElementById(`thost-${index}`);
-        if (nameLabel) {
-            nameLabel.textContent = session.title || `Terminal ${index + 1}`;
-        }
-        if (hostLabel) {
-            hostLabel.textContent = session.host || '';
-        }
         updateModeToggleButton(card.querySelector(`[data-session-mode-toggle="${index}"]`), true);
+        syncPaneIdentityChrome(index, session);
         syncPaneShellControls(index, session);
         wrapper.innerHTML = `
             <div class="terminal-surface">
@@ -6315,6 +6375,7 @@
         }
 
         const previousTerminal = terminals[index];
+        if (isBrowserPaneInstance(previousTerminal)) browserDisposePane(previousTerminal);
         if (previousTerminal?.term) {
             try { previousTerminal.term.dispose(); } catch (_) {}
         }
@@ -6346,14 +6407,7 @@
         ensureSplitControls(card, index, session);
         const browserButton = ensureBrowserModeButton(card, index, session, true);
         updateBrowserModeToggleButton(browserButton, true);
-        const nameLabel = document.getElementById(`tname-${index}`);
-        const hostLabel = document.getElementById(`thost-${index}`);
-        if (nameLabel) {
-            nameLabel.textContent = session.title || `Terminal ${index + 1}`;
-        }
-        if (hostLabel) {
-            hostLabel.textContent = session.host || '';
-        }
+        syncPaneIdentityChrome(index, session);
         syncPaneShellControls(index, session);
         wrapper.innerHTML = renderBrowserSurface(index, session);
         wireBrowserOnlyControls(card, index);
@@ -6369,6 +6423,7 @@
             return false;
         }
 
+        if (typeof browserDisposePane === 'function') browserDisposePane(terminals[index]);
         const terminal = makeTerminal();
         terminal._session = session;
         terminals[index] = terminal;
@@ -6391,15 +6446,8 @@
         }
         const browserButton = ensureBrowserModeButton(card, index, session, false);
         updateBrowserModeToggleButton(browserButton, false);
-        const nameLabel = document.getElementById(`tname-${index}`);
-        const hostLabel = document.getElementById(`thost-${index}`);
-        if (nameLabel) {
-            nameLabel.textContent = session.title || `Terminal ${index + 1}`;
-        }
-        if (hostLabel) {
-            hostLabel.textContent = session.host || '';
-        }
         updateModeToggleButton(card.querySelector(`[data-session-mode-toggle="${index}"]`), false);
+        syncPaneIdentityChrome(index, session);
         syncPaneShellControls(index, session);
         wrapper.innerHTML = `
             <div class="terminal-surface">
@@ -7646,6 +7694,10 @@
                     isCurrent: stillCurrent
                 });
             }
+
+            /* The grid this load just produced is what a held dashboard target
+               has been waiting for. */
+            settleWorkspaceFocusTarget();
         } catch (e) {
             if (loadToken !== activeLoadToken) {
                 return;
@@ -7970,25 +8022,17 @@
            again from a different workspace retargets the way back. */
         rememberLauncherOriginWorkspace(currentWorkspaceId);
 
-        if (window.pywebview?.api?.open_launcher_window) {
-            try {
-                logSessionWindowAction('+ New Session clicked', {
-                    pywebview: true,
-                    preserve_fullscreen: true
-                });
-                const result = await window.pywebview.api.open_launcher_window();
-                logSessionWindowAction('open_launcher_window result', result || {});
-                if (result?.ok) {
-                    return false;
-                }
-            } catch (error) {
-                console.error('[GridVibe Sessions] open_launcher_window failed:', error);
-            }
-        }
-
-        await resetFullscreenState();
-        window.open('/', 'gridvibe-launcher');
-        logSessionWindowAction('Opened browser launcher window fallback');
+        /* workspaces.js owns "open or focus the launcher window" for both of
+           the windows that ask for it. Native mode keeps this window exactly as
+           it is, fullscreen included, so the fullscreen reset is handed over as
+           the browser-fallback step rather than run first: a bridge that
+           answered would otherwise have left this window un-maximised for
+           nothing. */
+        logSessionWindowAction('Launcher window requested', { preserve_fullscreen: true });
+        const opened = await openLauncherWindow({
+            beforeBrowserFallback: resetFullscreenState
+        });
+        logSessionWindowAction('Launcher window request finished', { opened });
         return false;
     }
 
@@ -8070,6 +8114,7 @@
                 }
                 terminals[i]._session = session;
                 setStatus(i, session.status);
+                syncPaneIdentityChrome(i, session);
                 sessionIds[i] = session.session_id;
                 setSessionRoute(session.session_id, activeGroupId, i);
                 if (session.status === 'connected' && isBrowserSession(session)) {
@@ -8334,6 +8379,7 @@
 
             const { index, terminal } = target;
             setStatus(index, session.status);
+            syncPaneIdentityChrome(index, session);
             if (
                 isExplorerPaneInstance(terminal) !== isExplorerSession(session)
                 || isBrowserPaneInstance(terminal) !== isBrowserSession(session)
@@ -8502,6 +8548,7 @@
     ───────────────────────────────────────────── */
     initSurfaceMode();
     wireSessionMenu();
+    wireDashboard();
     topbarPeek.attach();
     applyTopbarVisibility(getStoredTopbarVisible());
     setupAppConfigUpdateListeners();

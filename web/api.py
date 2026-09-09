@@ -68,7 +68,7 @@ from web.app import (  # noqa: F401 - re-exported for backwards compatibility
     session_manager,
     socketio,
 )
-from web.config import (
+from web.config import (  # noqa: F401 - compatibility re-exports
     AUTOSAVE_INTERVAL_MINUTES_MAX,
     AUTOSAVE_INTERVAL_MINUTES_MIN,
     HOST_KEY_POLICY_OPTIONS,
@@ -80,6 +80,7 @@ from web.config import (
     WHISPER_MODEL_OPTIONS,
     ConfigPersistenceError,
     RuntimeConfigState,
+    _build_runtime_state,
     _config_lock,
     _merge_dicts,
     _normalize_surface_mode,
@@ -87,7 +88,9 @@ from web.config import (
     resolve_server_settings,  # noqa: F401 - re-exported for the entry points
     runtime_config,
     save_config,
+    update_config,
 )
+from web.dashboard import build_dashboard_snapshot
 from web.explorer import (  # noqa: F401 - some names re-exported for backwards compatibility
     EXPLORER_FILE_PREVIEW_MAX_BYTES,
     ExplorerRouteError,
@@ -171,6 +174,7 @@ from web.lifecycle import (
     LifecycleValidationError,
     lifecycle_coordinator,
     normalize_workspace_metadata,
+    prepare_group_save,
     prepare_lifecycle_action,
     prepare_workspace_save,
 )
@@ -292,6 +296,7 @@ from web.terminal_io import (  # noqa: F401 - re-exported for backwards compatib
     _stream_ssh_output,
     _terminal_cwd_probe_command,
     _track_terminal_agent_input,
+    agent_activity_snapshot,
     client_joined_sessions,
     connection_lock,
     effective_directory,
@@ -478,14 +483,14 @@ def _broadcast_app_config_update(apply_scope: str = "session"):
     )
 
 
-def _normalize_app_config_update(data: Any) -> Dict[str, Any]:
+def _normalize_app_config_update(data: Any, settings=None) -> Dict[str, Any]:
     """Validate and normalize launcher-editable app settings.
 
     Every omitted field falls back to the *same* captured generation
     (ISSUE-2026-041), so a partial update cannot write back a mixture of two
     configs for the settings the request did not mention.
     """
-    settings = runtime_config.snapshot()
+    settings = settings if settings is not None else runtime_config.snapshot()
     payload = data if isinstance(data, dict) else {}
     appearance = payload.get("appearance")
     if not isinstance(appearance, dict):
@@ -941,22 +946,10 @@ def set_app_config():
         terminal_payload = {}
     apply_scope = str(terminal_payload.get("apply_scope", "")).strip().lower()
 
-    # _normalize_app_config_update fills every section the payload omits from
-    # runtime_config, so the refresh has to happen under the same lock hold:
-    # otherwise a partial POST (the workspace theme toggle sends only
-    # `appearance`) landing between the save and the refresh would write the
-    # pre-save values of every other section straight back over the new ones.
-    # The broadcast stays outside the lock — never emit while holding one.
-    with _config_lock:
-        current = load_config()
-        current = _merge_dicts(current, _normalize_app_config_update(data))
-        try:
-            save_config(current)
-        except ConfigPersistenceError as exc:
-            # Not stored: answer retryably instead of echoing the settings back
-            # as saved, and leave runtime_config on the values still on disk.
-            return jsonify({"error": str(exc), "code": "config_write_failed"}), 500
-        _refresh_runtime_config()
+    try:
+        update_config(lambda current: _normalize_app_config_update(data, _build_runtime_state(current)))
+    except ConfigPersistenceError as exc:
+        return jsonify({"error": str(exc), "code": "config_write_failed"}), 500
     _broadcast_app_config_update(apply_scope)
     return jsonify(_public_app_config())
 
@@ -2044,6 +2037,26 @@ def get_workspaces():
     return jsonify({"workspaces": workspaces, "count": len(workspaces)})
 
 
+@app.route('/api/dashboard', methods=['GET'])
+def get_dashboard():
+    """Return every agent running anywhere, under the workspace and session
+    that holds it.
+
+    The one request behind the agent dashboard dialog, and behind the badge on
+    the button that opens it. It exists because the alternative is N+1 requests
+    raced against each other: a page asking for workspaces, then a group list
+    per workspace, then a pane list per group, would render a tree assembled
+    out of several different moments.
+
+    The two shared locks are taken in the allowed order and never nested --
+    ``connection_lock`` for the activity snapshot first, released, and only then
+    the manager -- so a busy pane's pump thread is never waiting on a dashboard
+    poll.
+    """
+    activity = agent_activity_snapshot()
+    return jsonify(build_dashboard_snapshot(session_manager, activity))
+
+
 @app.route('/api/workspaces', methods=['POST'])
 def create_workspace():
     """Create one live workspace, optionally labelled.
@@ -2170,6 +2183,33 @@ def save_workspace(workspace_id: str):
     payload, status = prepare_workspace_save(
         session_manager,
         resolved_workspace_id,
+        lambda target_id, request_id: socketio.emit(
+            "lifecycle_flush_requested",
+            {"request_id": request_id, "workspace_id": target_id},
+            room=workspace_room(target_id),
+        ),
+    )
+    return jsonify(payload), status
+
+
+@app.route('/api/session-groups/<group_id>/save', methods=['POST'])
+def save_session_group(group_id: str):
+    """Save one live session group as a reusable preset, from any surface.
+
+    The *Save and close* half of the three-outcome close prompt, for a surface
+    that is not the window holding the group — the agent dashboard, which lists
+    sessions across every workspace and, for every one it does not sit in, has
+    none of their live DOM to compose a preset from. The owning window is flushed first when one is open, so the
+    preset carries what the reader sees rather than what the server last heard.
+
+    It saves and nothing else: no workspace slot is captured, no teardown
+    decision is issued, and nothing is closed. The caller decides whether the
+    close follows, which is what keeps a failed save from costing the terminals
+    it was meant to preserve.
+    """
+    payload, status = prepare_group_save(
+        session_manager,
+        group_id,
         lambda target_id, request_id: socketio.emit(
             "lifecycle_flush_requested",
             {"request_id": request_id, "workspace_id": target_id},
@@ -3558,7 +3598,8 @@ def handle_voice_stop(data):
     if engine == 'whisper':
         _stop_whisper_voice_session(session_id)
     else:
-        _stop_vosk_voice_session(session_id)
+        if _stop_vosk_voice_session(session_id) is False:
+            return
 
     emit('voice_status', {'session_id': session_id, 'status': 'stopped'})
     logger.info("Voice stopped for session %s", session_id)

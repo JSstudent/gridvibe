@@ -237,11 +237,11 @@ class RemoteFindCommandTestCase(unittest.TestCase):
         self.assertIn("'/srv/project dir'", command)  # quoted for the remote shell
         self.assertIn("-prune", command)
         self.assertIn("-name node_modules", command)
-        self.assertIn("-type d -print", command)
-        self.assertIn("'!' -type d -print", command)
-        self.assertIn("sed 's|^|d |'", command)
-        self.assertIn("sed 's|^|f |'", command)
-        self.assertIn(f"head -c {explorer_search.FIND_REMOTE_MAX_OUTPUT_BYTES}", command)
+        self.assertIn('-exec sh -c', command)
+        self.assertIn('printf "d %s', command)
+        self.assertIn('printf "f %s', command)
+        self.assertNotIn('|', command)
+        self.assertNotIn('2>/dev/null', command)
         self.assertIn(f"-maxdepth {explorer_search.FIND_MAX_DEPTH}", command)
 
 

@@ -352,6 +352,20 @@
         }
 
         .session-bar {
+            /* One drawn mark for all three controls at the head of the line.
+               All three are now the app's own supplied artwork, and each .ico
+               bakes a different amount of padding into its own canvas, so what
+               is shared is the *mark* and each box is derived from it below.
+               Sharing the box instead is what the row looked like before: two
+               rules that both said 26px drew a 26px mark and a 16px one.
+
+               It is 28px against a 32px button interior, so the mark fills its
+               button the way an app tile fills a launcher cell. Sized to leave
+               a comfortable margin instead, the controls read as three small
+               pictures floating in three large frames. */
+            --session-bar-mark: 28px;
+            /* The shared dashboard stylesheet sizes its artwork from this. */
+            --dash-icon-size: var(--session-bar-mark);
             display: flex;
             align-items: stretch;
             background: var(--t-tabs-bg);
@@ -637,6 +651,14 @@
             --sh-key-text: var(--t-btn-neutral-text);
             --sh-key-border: var(--t-border-tab);
             --sh-backdrop: none;
+        }
+
+        /* The dashboard button opens a window rather than a panel, so this page
+           has no surface of its own to dress -- only the badge riding on the
+           button, which has to sit on the session bar's own accent. */
+        .dashboard-badge {
+            --dash-badge-bg: var(--t-accent);
+            --dash-badge-text: var(--t-tabs-bg);
         }
 
         .topbar-title { font-size: 1rem; color: var(--t-accent); font-weight: 700; }
@@ -934,26 +956,33 @@
             background: rgba(8, 145, 178, 0.08);
         }
 
-        .settings-window-btn {
+        /* One box for the launcher and dashboard buttons; the session menu's
+           own rule below states the same border, background and hover against
+           a wider box, because it carries a caret as well as a mark. The
+           dashboard button used to take its chrome from `.btn.btn-neutral`
+           alone -- a different fill, no border at all, and a height set by
+           whatever its artwork happened to be -- so the one control in the
+           group that is not a plain glyph was also the one that did not look
+           like a member of it. */
+        .settings-window-btn,
+        .session-bar-dashboard-btn {
             width: 38px;
             height: 34px;
             min-width: 38px;
             padding: 0;
             border: 1px solid var(--t-border-tab);
             background: var(--t-btn-bg);
-            /* The icon strokes use currentColor so they follow the theme. */
-            color: var(--t-accent);
         }
-        .settings-window-btn:hover {
+        .settings-window-btn:hover,
+        .session-bar-dashboard-btn:hover {
             border-color: var(--t-accent);
             background: var(--t-btn-hover-bg);
         }
-        /* The session/workspace menu heads the line, so it takes the leading
-           gutter the launcher button used to own; the launcher keeps only the
-           inter-button gap, which is what stops the tab strip's start moving. */
+        /* The launcher heads the line and so owns the leading gutter; the
+           menu closes the group and keeps only the inter-button gap. */
         .session-bar-menu {
             align-self: center;
-            margin: 8px 0 8px 12px;
+            margin: 8px 0 8px 8px;
         }
 
         /* Icon then caret, on one line: the icon says which app the menu
@@ -967,11 +996,12 @@
             align-items: center;
             justify-content: center;
             gap: 1px;
-            /* The launcher button's height, plus the room the caret needs. */
-            width: 46px;
-            min-width: 46px;
+            /* The launcher button's height, plus the room the caret needs
+               beside a mark the same size as the launcher's. */
+            width: 52px;
+            min-width: 52px;
             height: 34px;
-            padding: 0 3px;
+            padding: 0 2px;
             border: 1px solid var(--t-border-tab);
             border-radius: 6px;
             background: var(--t-btn-bg);
@@ -985,22 +1015,37 @@
             background: var(--t-btn-hover-bg);
         }
 
-        /* Every entry in icon_transparent.ico draws its artwork inside the
-           middle ~5/8 of its own canvas (the 48px entry inks 9..39), so a box
-           sized to the button drew a glyph two thirds that size and the icon
-           read as small however large the box got. The box is therefore sized
-           to the *artwork* — 26px, near the button's 32px interior — and the
-           baked-in padding is taken back out of the layout with a negative
-           margin rather than by shipping a second, cropped copy of the asset.
+        /* The two marks this page owns, drawn at the one shared size. Every
+           .ico bakes padding into its own canvas and they do not agree on how
+           much -- measured across the 48..128px entries, GridVibe_icon inks
+           about 0.53 of its canvas and icon_transparent about 0.61 -- so a box
+           set to the mark draws roughly half of it, and a box shared between
+           two assets draws two different marks. `--mark-scale` is 1/that
+           fraction: the box grows by it, the baked-in padding comes back out
+           of the layout as a negative margin of half the difference, and what
+           is left occupying the row is exactly --session-bar-mark.
+
            A negative margin and not `transform: scale()`, so the browser still
-           picks its source entry from the size it actually paints and the glyph
-           stays crisp: 42 × 5/8 ≈ 26 drawn, 42 − 2×8 = 26 occupied. */
+           picks its source entry from the size it actually paints and the
+           artwork stays crisp. dashboard.css carries the same two lines for
+           active_ws.ico with the fraction that asset measures, because that
+           button is shared with the launcher page and cannot read anything
+           declared here. */
+        .session-bar-launcher-icon,
         .session-bar-menu-icon {
-            width: 42px;
-            height: 42px;
-            margin: -8px;
+            width: calc(var(--session-bar-mark) * var(--mark-scale));
+            height: calc(var(--session-bar-mark) * var(--mark-scale));
+            margin: calc(var(--session-bar-mark) * (1 - var(--mark-scale)) / 2);
             display: block;
             flex: 0 0 auto;
+        }
+
+        .session-bar-launcher-icon {
+            --mark-scale: 1.87;
+        }
+
+        .session-bar-menu-icon {
+            --mark-scale: 1.63;
         }
 
         .session-bar-menu-caret {
@@ -1094,16 +1139,26 @@
             box-shadow: 0 12px 24px rgba(0, 0, 0, 0.32);
         }
 
-        /* Launcher button seated at the head of the session tab line: it keeps
-           its own size, so it only needs centring and the leading gutter the
-           tab strip would otherwise own. */
+        /* Launcher button at the head of the session tab line, so it owns the
+           leading gutter; its box, border and hover come from the shared rule
+           above. */
         .session-bar-launcher-btn {
+            flex: 0 0 auto;
+            align-self: center;
+            justify-content: center;
+            margin: 8px 0 8px 12px;
+        }
+        /* Seated between the launcher and the session menu, wearing the same
+           vertical rhythm as both so the three read as one group. */
+        .session-bar-dashboard-btn {
             flex: 0 0 auto;
             align-self: center;
             justify-content: center;
             margin: 8px 0 8px 8px;
         }
-        .session-bar-launcher-btn + .session-tabs {
+        /* The menu is the last of the three, so it is what the tab strip's
+           leading padding is measured from. */
+        .session-bar-menu + .session-tabs {
             padding-left: 10px;
         }
         .topbar-toggle-btn {
@@ -1149,12 +1204,6 @@
             width: 18px;
             height: 18px;
             display: block;
-        }
-        .vibe-flow-icon {
-            width: 24px;
-            height: 24px;
-            display: block;
-            filter: drop-shadow(0 0 5px color-mix(in srgb, currentColor 32%, transparent));
         }
         /* Every topbar icon states its own size: an unsized inline SVG falls
            back to the 300x150 replaced-element default and only *looks* right
@@ -1336,6 +1385,17 @@
             white-space: nowrap;
         }
         .terminal-name { font-weight: 600; color: var(--t-accent); font-size: .88rem; }
+        .terminal-agent-icon {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            flex: 0 0 18px;
+            width: 18px;
+            height: 18px;
+            color: var(--t-accent);
+        }
+        .terminal-agent-icon[hidden] { display: none; }
+        .terminal-agent-icon svg { width: 16px; height: 16px; }
         .terminal-host { color: var(--t-text-muted); font-size: .78rem; }
 
         .terminal-meta {
@@ -2008,23 +2068,24 @@
             padding: 5px 8px 4px;
         }
 
+        /* Max surface mode shrinks the buttons around the marks, so the one
+           mark size comes down with them and every box derived from it follows.
+           Stated once here rather than per icon, which is what let the menu's
+           mark and the dashboard's drift apart the last time this row was
+           resized. */
+        body.surface-max .session-bar {
+            --session-bar-mark: 23px;
+        }
+
         body.surface-max .session-bar-menu {
-            margin: 4px 0 4px 8px;
+            margin: 4px 0 4px 6px;
         }
 
         body.surface-max .session-bar-menu-btn {
-            width: 38px;
-            min-width: 38px;
+            width: 44px;
+            min-width: 44px;
             height: 28px;
             padding: 0 2px;
-        }
-
-        /* The same 5/8 correction against a 26px interior: 35 × 5/8 ≈ 22
-           drawn, 35 − 2×7 = 21 occupied. */
-        body.surface-max .session-bar-menu-icon {
-            width: 35px;
-            height: 35px;
-            margin: -7px;
         }
 
         body.surface-max .session-bar-menu-caret {
@@ -2033,10 +2094,14 @@
         }
 
         body.surface-max .session-bar-launcher-btn {
+            margin: 4px 0 4px 8px;
+        }
+
+        body.surface-max .session-bar-dashboard-btn {
             margin: 4px 0 4px 6px;
         }
 
-        body.surface-max .session-bar-launcher-btn + .session-tabs {
+        body.surface-max .session-bar-menu + .session-tabs {
             padding-left: 6px;
         }
 

@@ -7,6 +7,7 @@ runtime agent-command tracking, and the SSH/local/WSL session connectors.
 ``web.api`` re-exports every name for backwards compatibility.
 """
 
+import codecs
 import logging
 import os
 import re
@@ -22,6 +23,13 @@ from collections import deque
 from typing import Any, Deque, Dict, Iterable, List, Optional, Tuple
 
 from sessions.manager import SessionStatus
+from web.agent_activity import (
+    apply_agent_events,
+    blank_agent_activity,
+    has_agent_screen_output,
+    note_agent_output,
+    parse_agent_events,
+)
 from web.agents import (
     AGENT_REGISTRY,
     _compose_agent_startup_command,
@@ -208,14 +216,30 @@ def _clear_terminal_output_buffer(session_id: str):
         session_output_buffers[session_id] = _OutputBuffer()
 
 
-def _close_ssh_connection(session_id: str, clear_buffer: bool = True):
-    """Close and remove a single SSH connection."""
+def _connection_gate(connection):
     with connection_lock:
-        connection = ssh_connections.pop(session_id, None)
-        if clear_buffer:
-            session_output_buffers.pop(session_id, None)
+        return connection.setdefault('ownership_lock', threading.RLock())
 
-    _shutdown_connection(connection)
+
+def _close_ssh_connection(session_id: str, clear_buffer: bool = True, *, expected=None):
+    """Retire the captured transport after its last publication completes."""
+    with connection_lock:
+        connection = ssh_connections.get(session_id)
+        if expected is not None and connection is not expected:
+            return
+        if connection is None:
+            if clear_buffer:
+                session_output_buffers.pop(session_id, None)
+    if connection is not None:
+        with _connection_gate(connection):
+            with connection_lock:
+                if ssh_connections.get(session_id) is not connection:
+                    return
+                ssh_connections.pop(session_id, None)
+                connection['retired'] = True
+                if clear_buffer:
+                    session_output_buffers.pop(session_id, None)
+        _shutdown_connection(connection)
     _evict_pooled_ssh_client(session_id)
 
 
@@ -223,6 +247,7 @@ def _shutdown_connection(connection: Optional[Dict[str, Any]]):
     """Close one SSH or local terminal connection payload."""
     if not connection:
         return
+    connection['retired'] = True
 
     channel = connection.get("channel")
     client = connection.get("client")
@@ -314,31 +339,57 @@ def _close_all_ssh_connections(clear_buffers: bool = True):
     _evict_all_pooled_ssh_clients()
 
 
+TERMINAL_WRITE_TIMEOUT = 5.0
+
+
 def _send_connection_input(connection: Dict[str, Any], input_data: str):
-    """Send keystrokes or commands to an active SSH or local shell connection."""
-    kind = connection.get("kind")
-
-    if kind == "ssh":
-        connection["channel"].send(input_data)
-        return
-
-    pty_process = connection.get("pty_process")
-    if pty_process is not None:
-        pty_process.write(input_data)
-        return
-
-    encoded = input_data.encode("utf-8", errors="ignore")
-    master_fd = connection.get("master_fd")
-    if master_fd is not None:
-        os.write(master_fd, encoded)
-        return
-
-    stdin_handle = connection.get("stdin")
-    if stdin_handle is None:
-        raise RuntimeError("Connection does not accept input")
-
-    stdin_handle.write(encoded)
-    stdin_handle.flush()
+    """Serialize complete writes; never retry a command after a partial failure."""
+    deadline = time.monotonic() + TERMINAL_WRITE_TIMEOUT
+    with connection_lock:
+        write_lock = connection.setdefault('write_lock', threading.Lock())
+    if not write_lock.acquire(timeout=TERMINAL_WRITE_TIMEOUT):
+        raise TimeoutError('Terminal input is busy; input was not sent')
+    try:
+        if connection.get('retired'):
+            raise OSError('Terminal connection closed')
+        pty_process = connection.get('pty_process')
+        if pty_process is not None:
+            pty_process.write(input_data)
+            return
+        encoded = input_data.encode('utf-8')
+        offset = 0
+        while offset < len(encoded):
+            if connection.get('retired'):
+                raise OSError('Terminal connection closed during input')
+            if time.monotonic() >= deadline:
+                raise TimeoutError('Terminal input timed out; input may be incomplete')
+            try:
+                if connection.get('kind') == 'ssh':
+                    channel = connection['channel']
+                    if channel.closed:
+                        raise OSError('SSH channel closed during input')
+                    if not channel.send_ready():
+                        time.sleep(0.01)
+                        continue
+                    count = channel.send(encoded[offset:offset + 4096])
+                elif connection.get('master_fd') is not None:
+                    fd = connection['master_fd']
+                    if not select.select([], [fd], [], 0.05)[1]:
+                        continue
+                    count = os.write(fd, encoded[offset:offset + 4096])
+                else:
+                    handle = connection.get('stdin')
+                    if handle is None:
+                        raise RuntimeError('Connection does not accept input')
+                    count = handle.write(encoded[offset:])
+                    handle.flush()
+            except (BlockingIOError, socket.timeout):
+                continue
+            if not isinstance(count, int) or count <= 0:
+                raise OSError('Terminal closed before all input was sent')
+            offset += count
+    finally:
+        write_lock.release()
 
 
 def _terminal_cwd_probe_command(connection: Dict[str, Any], marker_start: str, marker_end: str) -> str:
@@ -440,6 +491,58 @@ def _observe_terminal_output_cwd(
 
     if _publish_observed_cwd(session_id, connection, directory):
         _broadcast_session_status(session_id)
+
+
+def _observe_agent_activity(connection: Dict[str, Any], output: str) -> None:
+    """Record what one pane just announced about itself, from its own output.
+
+    The sibling of :func:`_observe_terminal_output_cwd`, and deliberately the
+    cheaper of the two. Two properties keep it off the hot path:
+
+    * **Nothing shared is touched.** The whole reading lives in the pane's own
+      connection entry, written by the pane's own pump thread -- no lock, no
+      session write, no broadcast per chunk. A pane painting a spinner at 20
+      frames a second costs one timestamp per frame and wakes nobody.
+    * **The record is replaced, never edited.** ``agent_activity_snapshot``
+      reads these entries under ``connection_lock`` while this writes without
+      it, so a reader must never meet a half-updated dict. Each update rebinds
+      the key to a finished dict, which makes every read either the old record
+      or the new one and never a mixture.
+
+    Ownership needs no check here for the same reason: a retired connection's
+    entry is no longer the registry's, so what it goes on recording is simply
+    never read.
+    """
+    if not output:
+        return
+    now = time.time()
+    residue = str(connection.get("agent_residue") or "")
+    record = connection.get("agent_activity") or blank_agent_activity()
+    if has_agent_screen_output(output, residue):
+        record = note_agent_output(record, now)
+    if "\x1b" in output or residue:
+        events, residue = parse_agent_events(output, residue)
+        connection["agent_residue"] = residue
+        if events:
+            record = apply_agent_events(record, events, now)
+    connection["agent_activity"] = record
+
+
+def agent_activity_snapshot() -> Dict[str, Dict[str, Any]]:
+    """Return every live pane's latest observation record, by session id.
+
+    One short lock hold that copies the mapping and nothing else: the records
+    themselves are replaced rather than mutated, so handing them out by
+    reference is safe and a deep copy would only cost the caller time. Panes
+    with no transport -- explorer and browser panes -- are absent rather than
+    blank, which is what lets the dashboard tell "nothing to observe" from
+    "observed nothing".
+    """
+    with connection_lock:
+        return {
+            session_id: connection.get("agent_activity") or blank_agent_activity()
+            for session_id, connection in ssh_connections.items()
+        }
 
 
 def _publish_observed_cwd(
@@ -680,14 +783,7 @@ def _drain_until_prompt(
             return
 
         if output:
-            _cache_terminal_output(session_id, output)
-            # Emit outside connection_lock: a slow client write must not stall
-            # every other terminal's pump behind the global lock.
-            socketio.emit(
-                'terminal_output',
-                {'session_id': session_id, 'data': output},
-                room=session_id  # type: ignore
-            )
+            _publish_ssh_terminal_output(session_id, output, connection)
             time.sleep(0.15)
             return
 
@@ -866,207 +962,170 @@ def _run_startup_sequence(connection: Dict[str, Any], session: Any):
         _send_connection_input(connection, f"{startup_command}{newline}")
 
 
-def _finalize_stream(session_id: str):
-    """Mark a session disconnected after a stream ends."""
-    session = session_manager.get_session(session_id)
-    if session and _is_explorer_session(session):
-        _close_ssh_connection(session_id)
-        return
+def _connection_is_current(session_id, connection):
+    with connection_lock:
+        return connection is not None and ssh_connections.get(session_id) is connection
 
-    if session and session.status not in {SessionStatus.ERROR, SessionStatus.DISCONNECTED}:
-        session_manager.update_session_status(session_id, SessionStatus.DISCONNECTED)
+
+def _connection_status(session_id, connection, status, error_message=None):
+    with _connection_gate(connection):
+        with connection_lock:
+            if not _connection_is_current(session_id, connection):
+                return
+            session = session_manager.get_session(session_id)
+            if session is None or _is_explorer_session(session) or _is_browser_session(session):
+                return
+            if status == SessionStatus.ERROR and session.status == SessionStatus.DISCONNECTED:
+                return
+            session_manager.update_session_status(session_id, status, error_message=error_message)
         _broadcast_session_status(session_id)
-    _close_ssh_connection(session_id)
+
+
+def _begin_connection(session_id):
+    connection = {'write_lock': threading.Lock(), 'ownership_lock': threading.RLock()}
+    while True:
+        with connection_lock:
+            session = session_manager.get_session(session_id)
+            if session is None or _is_explorer_session(session) or _is_browser_session(session):
+                return None
+            old = ssh_connections.get(session_id)
+            if old is None:
+                ssh_connections[session_id] = connection
+                return connection
+        with _connection_gate(old):
+            with connection_lock:
+                if ssh_connections.get(session_id) is not old:
+                    continue
+                old['retired'] = True
+                ssh_connections[session_id] = connection
+                break
+    _shutdown_connection(old)
+    return connection
+
+
+def _finalize_stream(session_id: str, connection=None):
+    """Only the reader owning the current transport may retire the pane."""
+    if connection is None:
+        return
+    with _connection_gate(connection):
+        with connection_lock:
+            if not _connection_is_current(session_id, connection):
+                return
+            session = session_manager.get_session(session_id)
+            changed = (session and not _is_explorer_session(session) and not _is_browser_session(session)
+                       and session.status not in {SessionStatus.ERROR, SessionStatus.DISCONNECTED})
+            if changed:
+                session_manager.update_session_status(session_id, SessionStatus.DISCONNECTED)
+        if changed:
+            _broadcast_session_status(session_id)
+        _close_ssh_connection(session_id, expected=connection)
 
 
 SSH_STREAM_RECV_TIMEOUT = 0.5
 
 
-def _publish_ssh_terminal_output(session_id: str, output: str) -> None:
-    """Cache and emit one already-observed SSH output chunk."""
-    if not output:
+def _publish_ssh_terminal_output(session_id: str, output: str, connection=None) -> None:
+    """Publish before retirement, without holding either shared registry lock."""
+    if not output or connection is None:
         return
-    _cache_terminal_output(session_id, output)
-    socketio.emit(
-        'terminal_output',
-        {'session_id': session_id, 'data': output},
-        room=session_id  # type: ignore
-    )
+    with _connection_gate(connection):
+        with connection_lock:
+            if not _connection_is_current(session_id, connection):
+                return
+            _cache_terminal_output(session_id, output)
+        socketio.emit('terminal_output', {'session_id': session_id, 'data': output}, room=session_id)
 
 
-def _stream_ssh_output(session_id: str):
-    """Read terminal output from the SSH channel and forward it to clients."""
-    try:
+def _decoded_terminal_output(session_id, connection, data=b'', *, final=False):
+    decoder = connection.setdefault('decoder', codecs.getincrementaldecoder('utf-8')(errors='replace'))
+    output = data if isinstance(data, str) else decoder.decode(data, final=final)
+    _observe_terminal_output_cwd(session_id, connection, output)
+    _observe_agent_activity(connection, output)
+    if connection.get('kind') == 'ssh':
+        output = _scrub_ssh_startup_output(connection, output, force=final)
+    _publish_ssh_terminal_output(session_id, output, connection)
+
+
+def _stream_ssh_output(session_id: str, connection=None):
+    """Read from the captured channel, never from its replacement."""
+    if connection is None:
         with connection_lock:
             connection = ssh_connections.get(session_id)
-
-        if not connection:
-            return
-
-        # The connection entry never changes for a session's lifetime, so fetch
-        # the channel once and block on recv with a timeout instead of polling.
-        # An intentional close (_close_ssh_connection) closes the channel, which
-        # wakes the recv and ends the loop.
-        channel = connection["channel"]
+    if connection is None:
+        return
+    try:
+        channel = connection['channel']
         channel.settimeout(SSH_STREAM_RECV_TIMEOUT)
-
-        while not channel.closed:
+        while _connection_is_current(session_id, connection) and not channel.closed:
             try:
                 data = channel.recv(4096)
             except socket.timeout:
-                _publish_ssh_terminal_output(
-                    session_id, _scrub_ssh_startup_output(connection)
-                )
+                _publish_ssh_terminal_output(session_id, _scrub_ssh_startup_output(connection), connection)
                 if channel.exit_status_ready():
                     break
                 continue
-
             if not data:
                 break
-
-            output = data.decode("utf-8", errors="ignore")
-            # Observe the raw stream first: a line that carries the prompt's cwd
-            # marker may also carry a bootstrap echo that the visual scrub drops.
-            _observe_terminal_output_cwd(session_id, connection, output)
-            _publish_ssh_terminal_output(
-                session_id, _scrub_ssh_startup_output(connection, output)
-            )
-
-        # EOF before the marker is a failed handshake, not permission to hide
-        # the remote diagnostics that explain why the shell exited.
-        _publish_ssh_terminal_output(
-            session_id, _scrub_ssh_startup_output(connection, force=True)
-        )
-    except Exception as e:
-        session = session_manager.get_session(session_id)
-        if session and _is_explorer_session(session):
-            logger.debug("Ignoring stream shutdown for explorer session %s: %s", session_id, e)
-            return
-
-        with connection_lock:
-            intentional_close = session_id not in ssh_connections
-        if intentional_close or session is None or session.status == SessionStatus.DISCONNECTED:
-            logger.debug("Stream ended for closed session %s: %s", session_id, e)
-            return
-
-        logger.error(f"Error streaming output for session {session_id}: {e}")
-        if session and session.status != SessionStatus.DISCONNECTED:
-            session_manager.update_session_status(
-                session_id,
-                SessionStatus.ERROR,
-                error_message=str(e)
-            )
-            _broadcast_session_status(session_id)
+            _decoded_terminal_output(session_id, connection, data)
+        _decoded_terminal_output(session_id, connection, final=True)
+    except Exception as exc:
+        if _connection_is_current(session_id, connection):
+            _connection_status(session_id, connection, SessionStatus.ERROR, str(exc))
     finally:
-        _finalize_stream(session_id)
+        _finalize_stream(session_id, connection)
 
 
-def _stream_local_output(session_id: str):
-    """Read terminal output from a PTY-backed local shell."""
+def _stream_local_output(session_id: str, connection=None):
+    """Read terminal output from one captured PTY-backed local shell."""
+    if connection is None:
+        with connection_lock:
+            connection = ssh_connections.get(session_id)
+    if connection is None:
+        return
     try:
-        while True:
-            with connection_lock:
-                connection = ssh_connections.get(session_id)
-
-            if not connection:
-                break
-
-            process = connection.get("process")
-            pty_process = connection.get("pty_process")
-            master_fd = connection.get("master_fd")
-            stdout_handle = connection.get("stdout")
-
+        process = connection.get('process')
+        pty_process = connection.get('pty_process')
+        master_fd = connection.get('master_fd')
+        stdout_handle = connection.get('stdout')
+        while _connection_is_current(session_id, connection):
             if pty_process is not None:
                 try:
                     output = pty_process.read(4096)
                 except EOFError:
                     break
-
                 if output:
-                    _cache_terminal_output(session_id, output)
-                    _observe_terminal_output_cwd(session_id, connection, output)
-                    socketio.emit(
-                        'terminal_output',
-                        {'session_id': session_id, 'data': output},
-                        room=session_id # type: ignore
-                    )
+                    _decoded_terminal_output(session_id, connection, output)
                     continue
-
-                try:
-                    if not pty_process.isalive():
-                        break
-                except Exception:
+                if not pty_process.isalive():
                     break
-
                 time.sleep(0.05)
-                continue
-
-            if master_fd is not None:
+            elif master_fd is not None:
                 try:
                     ready, _, _ = select.select([master_fd], [], [], 0.05)
                     if ready:
-                        output = os.read(master_fd, 4096).decode("utf-8", errors="ignore")
-                        if output:
-                            _cache_terminal_output(session_id, output)
-                            _observe_terminal_output_cwd(session_id, connection, output)
-                            socketio.emit(
-                                'terminal_output',
-                                {'session_id': session_id, 'data': output},
-                                room=session_id # type: ignore
-                            )
+                        output = os.read(master_fd, 4096)
+                        if not output:
+                            break
+                        _decoded_terminal_output(session_id, connection, output)
                         continue
                 except OSError:
                     break
-
                 if process is not None and process.poll() is not None:
                     break
-
-                continue
-
-            if stdout_handle is None:
+            elif stdout_handle is not None:
+                read1 = getattr(stdout_handle, 'read1', None)
+                output = read1(4096) if read1 is not None else stdout_handle.read(1)
+                if not output:
+                    break
+                _decoded_terminal_output(session_id, connection, output)
+            else:
                 break
-
-            # read1 returns whatever is buffered (blocking until at least one
-            # byte or EOF) instead of one syscall + one emit per byte.
-            read1 = getattr(stdout_handle, "read1", None)
-            output = read1(4096) if read1 is not None else stdout_handle.read(1)
-            if output:
-                chunk = output.decode("utf-8", errors="ignore")
-                _cache_terminal_output(session_id, chunk)
-                _observe_terminal_output_cwd(session_id, connection, chunk)
-                socketio.emit(
-                    'terminal_output',
-                    {'session_id': session_id, 'data': chunk},
-                    room=session_id # type: ignore
-                )
-                continue
-
-            if process is not None and process.poll() is not None:
-                break
-
-            time.sleep(0.05)
-    except Exception as e:
-        session = session_manager.get_session(session_id)
-        if session and _is_explorer_session(session):
-            logger.debug("Ignoring local stream shutdown for explorer session %s: %s", session_id, e)
-            return
-
-        with connection_lock:
-            intentional_close = session_id not in ssh_connections
-        if intentional_close or session is None or session.status == SessionStatus.DISCONNECTED:
-            logger.debug("Local stream ended for closed session %s: %s", session_id, e)
-            return
-
-        logger.error(f"Error streaming local output for session {session_id}: {e}")
-        if session and session.status != SessionStatus.DISCONNECTED:
-            session_manager.update_session_status(
-                session_id,
-                SessionStatus.ERROR,
-                error_message=str(e)
-            )
-            _broadcast_session_status(session_id)
+        _decoded_terminal_output(session_id, connection, final=True)
+    except Exception as exc:
+        if _connection_is_current(session_id, connection):
+            _connection_status(session_id, connection, SessionStatus.ERROR, str(exc))
     finally:
-        _finalize_stream(session_id)
+        _finalize_stream(session_id, connection)
 
 
 def _normalize_local_directory(directory: Any, shell_kind: str) -> str:
@@ -1245,6 +1304,18 @@ def _track_terminal_agent_input(
     connection: Dict[str, Any],
     input_data: str,
 ) -> None:
+    """Apply successfully delivered input only to its owning connection."""
+    with _connection_gate(connection):
+        if not _connection_is_current(session_id, connection):
+            return
+        _track_current_terminal_agent_input(session_id, connection, input_data)
+
+
+def _track_current_terminal_agent_input(
+    session_id: str,
+    connection: Dict[str, Any],
+    input_data: str,
+) -> None:
     """Track submitted input lines and promote recognized agent commands to runtime metadata."""
     text = _TERMINAL_INPUT_ESCAPE_SEQUENCE.sub("", str(input_data or ""))
     submitted_lines = []
@@ -1262,7 +1333,6 @@ def _track_terminal_agent_input(
                 connection["_gridvibe_input_line"] = ""
                 exit_reason = "end-of-input"
             elif "\x03" in text:
-                agent_key = str(session.agent_selection or "").strip().lower()
                 now = time.monotonic()
                 last_interrupt = float(connection.get("_gridvibe_agent_interrupt_at") or 0.0)
                 interrupt_count = (
@@ -1272,7 +1342,7 @@ def _track_terminal_agent_input(
                 )
                 connection["_gridvibe_agent_interrupt_at"] = now
                 connection["_gridvibe_agent_interrupt_count"] = interrupt_count
-                if agent_key == "codex" or interrupt_count >= 2:
+                if interrupt_count >= 2:
                     connection["_gridvibe_input_line"] = ""
                     exit_reason = "interrupt"
 
@@ -1299,6 +1369,11 @@ def _track_terminal_agent_input(
         if submitted_line.strip().lower() in {"/exit", "/quit"}:
             if _mark_runtime_agent_exited(session_id, "exit command"):
                 return
+        # A prompt containing another CLI's name is conversation input while
+        # an agent owns the pane. Only a shell (or an unassigned agent pane)
+        # can promote a submitted command to a different runtime agent.
+        if session and session.startup_mode == "agent" and session.agent_selection:
+            continue
         detected = _agent_from_terminal_command(submitted_line)
         if not detected:
             continue
@@ -1363,6 +1438,9 @@ def _resolve_wsl_distribution(session: Any) -> str:
 
 def _connect_ssh_session(session_id: str, session: Any):
     """Establish an SSH connection for a single terminal session."""
+    connection = _begin_connection(session_id)
+    if connection is None:
+        return
     logger.info(
         f"[{session_id}] Connecting to {session.username}@{session.host}:{session.port}"
         f" dir={session.directory} cmd={session.initial_command!r}"
@@ -1370,16 +1448,15 @@ def _connect_ssh_session(session_id: str, session: Any):
 
     if paramiko is None:
         message = "Paramiko is not installed. Run `pip install -r requirements.txt`."
-        session_manager.update_session_status(
-            session_id,
+        _connection_status(
+            session_id, connection,
             SessionStatus.ERROR,
             error_message=message
         )
-        _broadcast_session_status(session_id)
+        _close_ssh_connection(session_id, expected=connection)
         return
 
-    session_manager.update_session_status(session_id, SessionStatus.CONNECTING)
-    _broadcast_session_status(session_id)
+    _connection_status(session_id, connection, SessionStatus.CONNECTING)
 
     client = None
     # One captured generation for both SSH settings, taken before the slow
@@ -1413,8 +1490,9 @@ def _connect_ssh_session(session_id: str, session: Any):
                 transport.set_keepalive(keepalive_interval)
 
         channel = client.invoke_shell(term='xterm', width=120, height=30)
+        channel.settimeout(SSH_STREAM_RECV_TIMEOUT)
 
-        connection = {
+        resources = {
             "kind": "ssh",
             "client": client,
             "channel": channel,
@@ -1423,31 +1501,31 @@ def _connect_ssh_session(session_id: str, session: Any):
         # Re-validate inside the lock so a concurrent close cannot slip between
         # the session check and the registry insert (which would leak the client).
         with connection_lock:
-            stale = session_manager.get_session(session_id) is None
+            stale = (not _connection_is_current(session_id, connection)
+                     or session_manager.get_session(session_id) is None)
             if not stale:
-                ssh_connections[session_id] = connection
+                connection.update(resources)
                 session_output_buffers[session_id] = _OutputBuffer()
         if stale:
             logger.info("[%s] Session was removed before SSH startup completed", session_id)
-            _shutdown_connection(connection)
+            _shutdown_connection(resources)
+            _close_ssh_connection(session_id, expected=connection)
             return
 
-        session_manager.update_session_status(session_id, SessionStatus.CONNECTED)
-        _broadcast_session_status(session_id)
+        _connection_status(session_id, connection, SessionStatus.CONNECTED)
 
         _run_startup_sequence(connection, session)
-        _stream_ssh_output(session_id)
+        _stream_ssh_output(session_id, connection)
     except (paramiko.SSHException, OSError, socket.error) as e:
         logger.error(f"Failed to connect SSH session {session_id}: {e}")
-        session_manager.update_session_status(
-            session_id,
+        _connection_status(
+            session_id, connection,
             SessionStatus.ERROR,
             error_message=str(e)
         )
-        _broadcast_session_status(session_id)
         with connection_lock:
-            was_stored = session_id in ssh_connections
-        _close_ssh_connection(session_id)
+            was_stored = connection.get("client") is client
+        _close_ssh_connection(session_id, expected=connection)
         if not was_stored and client is not None:
             try:
                 client.close()
@@ -1457,16 +1535,19 @@ def _connect_ssh_session(session_id: str, session: Any):
 
 def _connect_local_session(session_id: str, session: Any):
     """Establish a PTY-backed local or WSL shell session."""
+    connection = _begin_connection(session_id)
+    if connection is None:
+        return
     logger.info(
         f"[{session_id}] Starting local shell mode distribution={session.distribution!r}"
         f" user={session.username!r} dir={session.directory!r}"
         f" use_wsl={getattr(session, 'use_wsl', False)!r}"
         f" use_powershell={getattr(session, 'use_powershell', False)!r}"
     )
-    session_manager.update_session_status(session_id, SessionStatus.CONNECTING)
-    _broadcast_session_status(session_id)
+    _connection_status(session_id, connection, SessionStatus.CONNECTING)
 
     process = None
+    master_fd = slave_fd = None
     try:
         resolved_distribution = _resolve_wsl_distribution(session)
         shell_kind = _local_shell_kind(session)
@@ -1498,7 +1579,7 @@ def _connect_local_session(session_id: str, session: Any):
                 )
 
             process = WinPtyProcess.spawn(command, cwd=launch_cwd, env=shell_environment)
-            connection = {
+            resources = {
                 "kind": "local",
                 "pty_process": process,
                 "shell_kind": shell_kind,
@@ -1521,7 +1602,9 @@ def _connect_local_session(session_id: str, session: Any):
                 close_fds=True,
             )
             os.close(slave_fd)
-            connection = {
+            slave_fd = None
+            os.set_blocking(master_fd, False)
+            resources = {
                 "kind": "local",
                 "process": process,
                 "master_fd": master_fd,
@@ -1532,37 +1615,43 @@ def _connect_local_session(session_id: str, session: Any):
         # Re-validate inside the lock so a concurrent close cannot slip between
         # the session check and the registry insert (which would leak the PTY).
         with connection_lock:
-            stale = session_manager.get_session(session_id) is None
+            stale = (not _connection_is_current(session_id, connection)
+                     or session_manager.get_session(session_id) is None)
             if not stale:
-                ssh_connections[session_id] = connection
+                connection.update(resources)
                 session_output_buffers[session_id] = _OutputBuffer()
+        master_fd = None  # resources now owns the descriptor, even on refusal
         if stale:
             logger.info("[%s] Session was removed before local shell startup completed", session_id)
-            _shutdown_connection(connection)
+            _shutdown_connection(resources)
+            _close_ssh_connection(session_id, expected=connection)
             return
 
-        session_manager.update_session_status(session_id, SessionStatus.CONNECTED)
-        _broadcast_session_status(session_id)
+        _connection_status(session_id, connection, SessionStatus.CONNECTED)
 
         if shell_kind == "wsl":
             _drain_until_prompt(session_id, connection)
 
         _run_startup_sequence(connection, session)
-        _stream_local_output(session_id)
+        _stream_local_output(session_id, connection)
     except Exception as e:
         logger.error(f"Failed to start local session {session_id}: {e}")
-        session_manager.update_session_status(
-            session_id,
+        _connection_status(
+            session_id, connection,
             SessionStatus.ERROR,
             error_message=str(e)
         )
-        _broadcast_session_status(session_id)
-        _close_ssh_connection(session_id)
+        _close_ssh_connection(session_id, expected=connection)
         if process is not None:
             try:
                 process.kill() # type: ignore
             except Exception:
                 pass
+
+    finally:
+        for fd in (master_fd, slave_fd):
+            if fd is not None:
+                os.close(fd)
 
 
 def _connect_session(session_id: str):

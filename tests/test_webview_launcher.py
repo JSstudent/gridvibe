@@ -117,6 +117,20 @@ class WebviewLauncherTestCase(unittest.TestCase):
             webview_launcher._should_exit_after_window_close("session", {"launcher"})
         )
 
+    def test_every_remaining_window_is_a_reason_to_keep_running(self):
+        """The agent dashboard used to be the one exception -- a window that
+        described the others and was no reason on its own to stay up. It is a
+        dialog on those windows now, so there is no window kind left that the
+        app may close itself out from under."""
+        self.assertFalse(
+            webview_launcher._should_exit_after_window_close(
+                "session", {"workspace:abc123def456"}
+            )
+        )
+        self.assertTrue(
+            webview_launcher._should_exit_after_window_close("session", set())
+        )
+
     def test_preferred_pywebview_gui_uses_qt_on_linux(self):
         with patch.object(webview_launcher.sys, "platform", "linux"):
             self.assertEqual(webview_launcher._preferred_pywebview_gui(), "qt")

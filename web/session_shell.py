@@ -233,6 +233,11 @@ def apply_pane_shell_change(
         str(payload.get("distribution") or "").strip() if shell_kind == "wsl" else ""
     )
 
+    # A valid, explicitly stated dimension is also the relaunch instruction.
+    # Its value need not differ from the pane's metadata: the checked menu row
+    # is still an action, and selecting it replaces the process behind the pane.
+    relaunch_requested = shell_kind is not None or agent_key is not None
+
     updates: Dict[str, Any] = {}
     if shell_kind is not None and (
         shell_kind != _local_shell_kind(session)
@@ -242,12 +247,14 @@ def apply_pane_shell_change(
     if agent_key is not None and agent_key != _pane_agent_key(session):
         updates.update(_agent_updates(session, agent_key))
 
-    # Re-selecting what a pane already runs is a no-op rather than a restart,
-    # so clicking the active menu entry never kills a live shell.
-    if not updates:
+    # An empty payload states no choice at all and retains the old no-op API
+    # behaviour. Every menu row states at least `agent`, so a real selection
+    # always crosses the relaunch boundary even when no metadata has changed.
+    if not relaunch_requested:
         return session.to_dict()
 
-    session_manager.update_session_metadata(session_id, **updates)
+    if updates:
+        session_manager.update_session_metadata(session_id, **updates)
     logger.info(
         "Pane relaunch session_id=%s shell=%s distribution=%s agent=%s directory=%s",
         session_id,

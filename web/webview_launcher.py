@@ -554,8 +554,14 @@ def _exit_after_startup_failure(code: int = 1):
 
 
 def _should_exit_after_window_close(kind: str, open_windows: set[str]) -> bool:
-    """Treat the launcher/settings window as the owner of the desktop app lifecycle."""
-    return kind == "launcher" or not open_windows
+    """Treat the launcher/settings window as the owner of the desktop app lifecycle.
+
+    Every native window is now a window somebody works in: the agent dashboard
+    used to be the one exception -- a window that described the others and was
+    no reason on its own to keep the app running -- and it is a dialog on those
+    windows now, so the exemption it needed went with it.
+    """
+    return kind == "launcher" or not set(open_windows)
 
 
 def _request_native_close_prompt(window, api_bridge):

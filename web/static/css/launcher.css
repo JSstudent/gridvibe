@@ -903,6 +903,10 @@
             --sh-anchor-bottom: calc(100% + 6px);
         }
 
+        /* The dashboard button sits in the same control row and states no
+           anchor of its own: it opens a window, not a panel, so there is no
+           box for this page to decide a side for. */
+
         .app-footer {
             display: flex;
             align-items: center;

@@ -34,7 +34,9 @@ from web.explorer import (
     _decode_git_output,
     _explorer_content_looks_binary,
     _require_complete_git_result,
+    _run_bounded_remote_command,
 )
+from web.search_regex import SearchDeadlineExceeded, SearchMatcher
 
 SEARCH_QUERY_MAX_CHARS = 512
 SEARCH_LINE_WINDOW_CHARS = 400
@@ -57,8 +59,8 @@ SEARCH_EXCLUDE_DIRS = (
 )
 
 
-class SearchDeadlineExceeded(Exception):
-    """Internal signal: an engine stopped because the search deadline passed."""
+class SearchCommandFailed(Exception):
+    """A remote command returned partial data without successful completion."""
 
 
 class SearchOutputTruncated(Exception):
@@ -169,6 +171,41 @@ def include_match(rel_path: str, include: Tuple[str, ...]) -> bool:
     )
 
 
+def search_prefilter(options):
+    """Narrow literal candidates without delegating Python's matching rules.
+
+    ASCII case folding has four extra Unicode equivalents in Python. Spell
+    them out so grep's locale cannot drop those lines. Whole-word boundaries
+    and arbitrary expressions remain the collector's decision.
+    """
+    query = options.query
+    if options.regex or any(char in query for char in '\n\r\0\ufffd'):
+        return '-F', ''
+    if options.case_sensitive:
+        return '-F', query
+    if not query.isascii():
+        return '-F', ''
+    folds = {'i': '(i|I|İ|ı)', 'k': '(k|K|K)', 's': '(s|S|ſ)'}
+    parts = []
+    for char in query:
+        lower = char.lower()
+        if lower in folds:
+            parts.append(folds[lower])
+        elif 'a' <= lower <= 'z':
+            parts.append(f'[{lower}{lower.upper()}]')
+        else:
+            parts.append(('\\' if char in r'.^$*+?{}[]\|()' else '') + char)
+    return '-E', ''.join(parts)
+
+
+def utf16_length(text):
+    return len(text) + sum(ord(char) > 0xffff for char in text)
+
+
+def utf16_ranges(text, ranges):
+    return [[utf16_length(text[:start]), utf16_length(text[:end])] for start, end in ranges]
+
+
 def build_git_grep_args(options: SearchOptions, pathspec: str) -> List[str]:
     """Build the `git grep` argv for one bounded search.
 
@@ -178,12 +215,9 @@ def build_git_grep_args(options: SearchOptions, pathspec: str) -> List[str]:
     repository root.
     """
     args = ["grep", "-I", "-z", "-n", "--untracked", "--full-name"]
-    args.append("-E" if options.regex else "-F")
-    if not options.case_sensitive:
-        args.append("-i")
-    if options.whole_word:
-        args.append("-w")
-    args += ["-e", options.query, "--", pathspec]
+    flag, candidate = search_prefilter(options)
+    args.append(flag)
+    args += ['-e', candidate, '--', pathspec]
     return args
 
 
@@ -299,64 +333,69 @@ def walk_matches(
     SEARCH_EXCLUDE_DIRS pruned, binary and oversized files skipped, deadline
     enforced.
     """
-    matcher = compile_search_matcher(options)
-    # Decoding and matching every line of every file is what makes this engine
-    # hit the deadline on log-heavy trees, and almost every file holds no match
-    # at all. A literal query can be prefiltered against the whole decoded file
-    # in one C-level scan: a literal cannot contain a newline or anchor to one,
-    # so "absent from the file" implies "absent from every line" — and \b sees
-    # the same non-word neighbour ("\n"/"\r") either way. Regex queries keep the
-    # per-line path, where ^/$/\A stay per line. A false positive is harmless;
-    # it just falls through to the loop below.
-    prefilter = None if options.regex else matcher
-    root_real = os.path.realpath(os.path.abspath(root_path))
+    with SearchMatcher(compile_search_matcher(options), options.regex, deadline) as matcher:
+        # Decoding and matching every line of every file is what makes this engine
+        # hit the deadline on log-heavy trees, and almost every file holds no match
+        # at all. A literal query can be prefiltered against the whole decoded file
+        # in one C-level scan: a literal cannot contain a newline or anchor to one,
+        # so "absent from the file" implies "absent from every line" — and \b sees
+        # the same non-word neighbour ("\n"/"\r") either way. Regex queries keep the
+        # per-line path, where ^/$/\A stay per line. A false positive is harmless;
+        # it just falls through to the loop below.
+        prefilter = None if options.regex else matcher
+        root_real = os.path.realpath(os.path.abspath(root_path))
 
-    def inside_root(candidate: str) -> bool:
-        try:
-            common = os.path.commonpath([root_real, candidate])
-        except ValueError:
-            return False
-        return os.path.normcase(common) == os.path.normcase(root_real)
+        def inside_root(candidate: str) -> bool:
+            try:
+                common = os.path.commonpath([root_real, candidate])
+            except ValueError:
+                return False
+            return os.path.normcase(common) == os.path.normcase(root_real)
 
-    for dirpath, dirnames, filenames in os.walk(scope_path, followlinks=False):
-        if time.monotonic() > deadline:
-            raise SearchDeadlineExceeded()
-        kept = []
-        for dirname in dirnames:
-            if dirname in SEARCH_EXCLUDE_DIRS:
-                continue
-            full = os.path.join(dirpath, dirname)
-            if os.path.islink(full) and not inside_root(os.path.realpath(full)):
-                continue
-            kept.append(dirname)
-        dirnames[:] = kept
-        for filename in filenames:
+        for dirpath, dirnames, filenames in os.walk(scope_path, followlinks=False):
             if time.monotonic() > deadline:
                 raise SearchDeadlineExceeded()
-            full = os.path.join(dirpath, filename)
-            try:
-                real = os.path.realpath(full)
-                if not inside_root(real):
+            kept = []
+            for dirname in dirnames:
+                if dirname in SEARCH_EXCLUDE_DIRS:
                     continue
-                if os.path.getsize(real) > limits.max_file_bytes:
+                full = os.path.join(dirpath, dirname)
+                if os.path.islink(full) and not inside_root(os.path.realpath(full)):
                     continue
-                with open(real, "rb") as file_handle:
-                    data = file_handle.read()
-            except OSError:
-                continue
-            if _explorer_content_looks_binary(data):
-                continue
-            rel_path = os.path.relpath(real, root_real).replace(os.sep, "/")
-            if not include_match(rel_path, options.include):
-                continue
-            if prefilter is not None and not prefilter.search(
-                data.decode("utf-8", errors="replace")
-            ):
-                continue
-            for line_number, line_bytes in enumerate(data.split(b"\n"), 1):
-                text = line_bytes.rstrip(b"\r").decode("utf-8", errors="replace")
-                if matcher.search(text):
-                    yield rel_path, line_number, line_bytes
+                kept.append(dirname)
+            dirnames[:] = kept
+            for filename in filenames:
+                if time.monotonic() > deadline:
+                    raise SearchDeadlineExceeded()
+                full = os.path.join(dirpath, filename)
+                try:
+                    real = os.path.realpath(full)
+                    if not inside_root(real):
+                        continue
+                    rel_path = os.path.relpath(real, root_real).replace(os.sep, '/')
+                    if not include_match(rel_path, options.include):
+                        continue
+                    if os.path.getsize(real) > limits.max_file_bytes:
+                        continue
+                    with open(real, "rb") as file_handle:
+                        data = file_handle.read(limits.max_file_bytes + 1)
+                    if len(data) > limits.max_file_bytes:
+                        continue
+                except OSError:
+                    continue
+                if _explorer_content_looks_binary(data):
+                    continue
+                if prefilter is not None and not prefilter.search(
+                    data.decode("utf-8", errors="replace")
+                ):
+                    continue
+                lines = data.split(b"\n")
+                if lines and not lines[-1]:
+                    lines.pop()
+                for line_number, line_bytes in enumerate(lines, 1):
+                    text = line_bytes.rstrip(b"\r").decode("utf-8", errors="replace")
+                    if matcher.search(text):
+                        yield rel_path, line_number, line_bytes
 
 
 def build_remote_grep_command(scope_path: str, options: SearchOptions) -> str:
@@ -364,14 +403,33 @@ def build_remote_grep_command(scope_path: str, options: SearchOptions) -> str:
     parts = ["grep", "-rInI"]
     for dirname in SEARCH_EXCLUDE_DIRS:
         parts.append(f"--exclude-dir={dirname}")
-    parts.append("-E" if options.regex else "-F")
-    if not options.case_sensitive:
-        parts.append("-i")
-    if options.whole_word:
-        parts.append("-w")
-    parts += ["-e", options.query, "--", scope_path]
+    flag, candidate = search_prefilter(options)
+    parts.append(flag)
+    parts += ['-e', candidate, '--', scope_path]
     quoted = " ".join(shlex.quote(part) for part in parts)
-    return f"{quoted} 2>/dev/null | head -c {SEARCH_REMOTE_MAX_OUTPUT_BYTES}"
+    return quoted
+
+
+def remote_search_records(backend, command, root_path, deadline, limit, parser, no_matches_status=None):
+    try:
+        result = _run_bounded_remote_command(
+            backend.client, command, deadline=deadline, max_output_bytes=limit,
+        )
+    except TimeoutError as exc:
+        raise SearchDeadlineExceeded() from exc
+    stream = result.stdout
+    if (result.stdout_truncated or result.timed_out) and stream and not stream.endswith(b'\n'):
+        complete, separator, _partial = stream.rpartition(b'\n')
+        stream = complete + separator
+    yield from parser(backend, root_path, stream)
+    if result.timed_out:
+        raise SearchDeadlineExceeded()
+    if result.stdout_truncated:
+        raise SearchOutputTruncated()
+    if result.stderr_truncated or result.returncode not in {0, no_matches_status} or result.returncode is None:
+        raise SearchCommandFailed(
+            _decode_git_output(result.stderr).strip() or 'Remote search ended without successful completion; retry the search'
+        )
 
 
 def parse_remote_grep_output(
@@ -434,84 +492,94 @@ def collect_search_payload(
     and the deadline, decodes lines, computes match ranges server-side, and
     windows long lines — the frontend renders this verbatim.
     """
-    matcher = compile_search_matcher(options)
-    files: List[Dict[str, Any]] = []
-    index_by_path: Dict[str, Dict[str, Any]] = {}
-    total_matches = 0
-    truncated = {"files": False, "matches": False, "deadline": False, "output": False}
+    with SearchMatcher(compile_search_matcher(options), options.regex, deadline) as matcher:
+        files: List[Dict[str, Any]] = []
+        index_by_path: Dict[str, Dict[str, Any]] = {}
+        total_matches = 0
+        truncated = {"files": False, "matches": False, "deadline": False, "output": False}
 
-    iterator = iter(raw_matches)
-    while True:
-        try:
-            rel_path, line_number, line_bytes = next(iterator)
-        except StopIteration:
-            break
-        except SearchDeadlineExceeded:
-            truncated["deadline"] = True
-            break
-        except SearchOutputTruncated:
-            truncated["output"] = True
-            break
-        if time.monotonic() > deadline:
-            truncated["deadline"] = True
-            break
-        rel_path = str(rel_path).replace(os.sep, "/")
-        if not include_match(rel_path, options.include):
-            continue
-        if total_matches >= limits.max_matches:
-            truncated["matches"] = True
-            break
-        entry = index_by_path.get(rel_path)
-        if entry is None:
-            if len(files) >= limits.max_files:
-                truncated["files"] = True
+        error = None
+        iterator = iter(raw_matches)
+        while True:
+            try:
+                rel_path, line_number, line_bytes = next(iterator)
+            except StopIteration:
                 break
-            entry = {
-                "path": rel_path,
-                "name": rel_path.rsplit("/", 1)[-1],
-                "dir": rel_path.rsplit("/", 1)[0] if "/" in rel_path else "",
-                "match_count": 0,
-                "truncated": False,
-                "matches": [],
-            }
-            index_by_path[rel_path] = entry
-            files.append(entry)
-        entry["match_count"] += 1
-        total_matches += 1
-        if len(entry["matches"]) >= limits.max_matches_per_file:
-            entry["truncated"] = True
-            continue
-        text = line_bytes.rstrip(b"\r").decode("utf-8", errors="replace")
-        ranges = [list(span) for span in (match.span() for match in matcher.finditer(text))]
-        windowed_text, text_offset, windowed_ranges = window_line(text, ranges)
-        entry["matches"].append(
-            {
-                "line": line_number,
-                "text": windowed_text,
-                "text_offset": text_offset,
-                "line_length": len(text),
-                "ranges": windowed_ranges,
-            }
-        )
+            except SearchDeadlineExceeded:
+                truncated["deadline"] = True
+                break
+            except SearchOutputTruncated:
+                truncated["output"] = True
+                break
+            except SearchCommandFailed as exc:
+                error = str(exc)
+                break
+            if time.monotonic() > deadline:
+                truncated["deadline"] = True
+                break
+            rel_path = str(rel_path).replace(os.sep, "/")
+            if not include_match(rel_path, options.include):
+                continue
+            text = line_bytes.rstrip(b"\r").decode("utf-8", errors="replace")
+            try:
+                ranges = matcher.spans(text, SEARCH_LINE_WINDOW_CHARS + 1)
+            except SearchDeadlineExceeded:
+                truncated['deadline'] = True
+                break
+            if not ranges:
+                continue
+            if total_matches >= limits.max_matches:
+                truncated["matches"] = True
+                break
+            entry = index_by_path.get(rel_path)
+            if entry is None:
+                if len(files) >= limits.max_files:
+                    truncated["files"] = True
+                    break
+                entry = {
+                    "path": rel_path,
+                    "name": rel_path.rsplit("/", 1)[-1],
+                    "dir": rel_path.rsplit("/", 1)[0] if "/" in rel_path else "",
+                    "match_count": 0,
+                    "truncated": False,
+                    "matches": [],
+                }
+                index_by_path[rel_path] = entry
+                files.append(entry)
+            entry["match_count"] += 1
+            total_matches += 1
+            if len(entry["matches"]) >= limits.max_matches_per_file:
+                entry["truncated"] = True
+                continue
+            windowed_text, text_offset, windowed_ranges = window_line(text, ranges)
+            entry["matches"].append(
+                {
+                    "line": line_number,
+                    "text": windowed_text,
+                    "text_offset": utf16_length(text[:text_offset]),
+                    "line_length": utf16_length(text),
+                    "ranges": utf16_ranges(windowed_text, windowed_ranges),
+                }
+            )
 
-    return {
-        "query": options.query,
-        "options": {
-            "case": options.case_sensitive,
-            "word": options.whole_word,
-            "regex": options.regex,
-            "scope": options.scope,
-            "include": list(options.include),
-            "ignored": options.include_ignored,
-        },
-        "engine": engine,
-        "files": files,
-        "total_files": len(files),
-        "total_matches": total_matches,
-        "truncated": truncated,
-        "elapsed_ms": int((time.monotonic() - started) * 1000),
-        "error": None,
-    }
+        return {
+            "query": options.query,
+            "options": {
+                "case": options.case_sensitive,
+                "word": options.whole_word,
+                "regex": options.regex,
+                "scope": options.scope,
+                "include": list(options.include),
+                "ignored": options.include_ignored,
+            },
+            "engine": engine,
+            "files": files,
+            "total_files": len(files),
+            "total_matches": total_matches,
+            "truncated": truncated,
+            "elapsed_ms": int((time.monotonic() - started) * 1000),
+            "error": error,
+        }
 
 
 def run_explorer_search(backend: Any, args: Any) -> Dict[str, Any]:
@@ -528,7 +596,12 @@ def run_explorer_search(backend: Any, args: Any) -> Dict[str, Any]:
         limits=limits,
         deadline=deadline,
     )
-    return collect_search_payload(raw_matches, options, limits, deadline, engine, started)
+    try:
+        return collect_search_payload(raw_matches, options, limits, deadline, engine, started)
+    finally:
+        close = getattr(raw_matches, "close", None)
+        if close is not None:
+            close()
 
 
 # ==================== File / directory name search ====================
@@ -652,12 +725,9 @@ def build_remote_find_command(root_path: str) -> str:
     def quoted(parts: List[str]) -> str:
         return " ".join(shlex.quote(part) for part in parts)
 
-    directories = f"{quoted(base + ['-type', 'd', '-print'])} | sed 's|^|d |'"
-    files = f"{quoted(base + ['!', '-type', 'd', '-print'])} | sed 's|^|f |'"
-    return (
-        f"{{ {directories}; {files}; }} 2>/dev/null"
-        f" | head -c {FIND_REMOTE_MAX_OUTPUT_BYTES}"
-    )
+    classify = ('for path do if [ -d "$path" ] && [ ! -L "$path" ]; '
+                'then printf "d %s\\n" "$path"; else printf "f %s\\n" "$path"; fi; done')
+    return quoted(base + ['-exec', 'sh', '-c', classify, 'sh', '{}', '+'])
 
 
 def parse_remote_find_output(
@@ -674,7 +744,7 @@ def parse_remote_find_output(
     if len(stream) >= FIND_REMOTE_MAX_OUTPUT_BYTES and lines and not text.endswith("\n"):
         lines = lines[:-1]
     for line in lines:
-        if len(line) < 3 or line[1] != " " or line[0] not in ("d", "f"):
+        if len(line) < 3 or line[1] != " " or line[0] not in ("d", "f", "l", "b", "c", "p", "s"):
             continue
         abs_path = line[2:]
         if not backend.path_inside_root(root_path, abs_path):
@@ -700,75 +770,82 @@ def collect_find_payload(
     produces are computed here, server-side, exactly like the content search's
     — the tree only paints what this returns.
     """
-    matcher = compile_search_matcher(options)
-    entries: List[Dict[str, Any]] = []
-    result_limit = find_result_limit(limits)
-    truncated = {"results": False, "scanned": False, "deadline": False, "output": False}
+    with SearchMatcher(compile_search_matcher(options), options.regex, deadline) as matcher:
+        entries: List[Dict[str, Any]] = []
+        result_limit = find_result_limit(limits)
+        truncated = {"results": False, "scanned": False, "deadline": False, "output": False}
 
-    iterator = iter(raw_entries)
-    while True:
-        try:
-            rel_path, is_directory = next(iterator)
-        except StopIteration:
-            break
-        except SearchDeadlineExceeded:
-            truncated["deadline"] = True
-            break
-        except SearchScanLimitExceeded:
-            truncated["scanned"] = True
-            break
-        except SearchOutputTruncated:
-            truncated["output"] = True
-            break
-        if time.monotonic() > deadline:
-            truncated["deadline"] = True
-            break
-        rel_path = str(rel_path).replace(os.sep, "/").strip("/")
-        if not rel_path:
-            continue
-        name = rel_path.rsplit("/", 1)[-1]
-        if not matcher.search(name):
-            continue
-        if len(entries) >= result_limit:
-            truncated["results"] = True
-            break
-        entries.append(
-            {
-                "path": rel_path,
-                "name": name,
-                "dir": rel_path.rsplit("/", 1)[0] if "/" in rel_path else "",
-                "type": "directory" if is_directory else "file",
-                # Zero-width matches ("^", ".*" at the end) carry no visible
-                # span, so they filter the entry in without painting anything.
-                "ranges": [
-                    list(match.span())
-                    for match in matcher.finditer(name)
-                    if match.end() > match.start()
-                ],
-            }
-        )
+        error = None
+        iterator = iter(raw_entries)
+        while True:
+            try:
+                rel_path, is_directory = next(iterator)
+            except StopIteration:
+                break
+            except SearchDeadlineExceeded:
+                truncated["deadline"] = True
+                break
+            except SearchScanLimitExceeded:
+                truncated["scanned"] = True
+                break
+            except SearchOutputTruncated:
+                truncated["output"] = True
+                break
+            except SearchCommandFailed as exc:
+                error = str(exc)
+                break
+            if time.monotonic() > deadline:
+                truncated["deadline"] = True
+                break
+            rel_path = str(rel_path).replace(os.sep, "/").strip("/")
+            if not rel_path:
+                continue
+            name = rel_path.rsplit("/", 1)[-1]
+            try:
+                ranges = matcher.spans(name, FIND_QUERY_MAX_CHARS * 4)
+            except SearchDeadlineExceeded:
+                truncated['deadline'] = True
+                break
+            if not ranges:
+                continue
+            if len(entries) >= result_limit:
+                truncated["results"] = True
+                break
+            entries.append(
+                {
+                    "path": rel_path,
+                    "name": name,
+                    "dir": rel_path.rsplit("/", 1)[0] if "/" in rel_path else "",
+                    "type": "directory" if is_directory else "file",
+                    # Zero-width matches ("^", ".*" at the end) carry no visible
+                    # span, so they filter the entry in without painting anything.
+                    "ranges": [
+                        span for span in utf16_ranges(name, ranges) if span[1] > span[0]
+                    ],
+                }
+            )
 
-    entries.sort(
-        key=lambda entry: (
-            entry["dir"],
-            entry["type"] != "directory",
-            entry["name"].lower(),
+        entries.sort(
+            key=lambda entry: (
+                entry["dir"],
+                entry["type"] != "directory",
+                entry["name"].lower(),
+            )
         )
-    )
-    return {
-        "query": options.query,
-        "options": {
-            "case": options.case_sensitive,
-            "word": options.whole_word,
-            "regex": options.regex,
-        },
-        "engine": engine,
-        "entries": entries,
-        "total": len(entries),
-        "truncated": truncated,
-        "elapsed_ms": int((time.monotonic() - started) * 1000),
-        "error": None,
-    }
+        return {
+            "query": options.query,
+            "options": {
+                "case": options.case_sensitive,
+                "word": options.whole_word,
+                "regex": options.regex,
+            },
+            "engine": engine,
+            "entries": entries,
+            "total": len(entries),
+            "truncated": truncated,
+            "elapsed_ms": int((time.monotonic() - started) * 1000),
+            "error": error,
+        }
 
 
 def run_explorer_find(backend: Any, args: Any) -> Dict[str, Any]:
@@ -785,4 +862,9 @@ def run_explorer_find(backend: Any, args: Any) -> Dict[str, Any]:
         limits=limits,
         deadline=deadline,
     )
-    return collect_find_payload(raw_entries, options, limits, deadline, engine, started)
+    try:
+        return collect_find_payload(raw_entries, options, limits, deadline, engine, started)
+    finally:
+        close = getattr(raw_entries, "close", None)
+        if close is not None:
+            close()

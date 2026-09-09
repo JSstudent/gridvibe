@@ -26,6 +26,23 @@ echo.
 :: Change to project directory
 cd /d "%PROJECT_DIR%"
 
+set "SETUP_FORCE="
+if /I "%~1"=="--repair" set "SETUP_FORCE=1"
+echo  For dependency repair, run GridVibe.bat --repair.
+echo.
+echo  Choose how to start GridVibe:
+echo    [D] Desktop window
+echo    [B] Browser
+echo    [Q] Quit
+echo.
+choice /C DBQ /N /M " Select [D/B/Q]: "
+if errorlevel 3 exit /b 0
+if errorlevel 2 (
+    set "LAUNCH_MODE=browser"
+) else (
+    set "LAUNCH_MODE=auto"
+)
+
 set "BOOTSTRAP_PYTHON="
 where py >nul 2>&1
 if not errorlevel 1 (
@@ -97,6 +114,11 @@ if defined NEEDS_VENV_CREATE (
 
 set "VENV_PYTHON=%PROJECT_DIR%\.venv\Scripts\python.exe"
 
+if defined SETUP_FORCE goto install_core_dependencies
+"%VENV_PYTHON%" "%PROJECT_DIR%\utils\launcher_setup.py" check core
+if not errorlevel 1 goto core_ready
+
+:install_core_dependencies
 echo  Updating Python installer tooling...
 echo.
 
@@ -152,26 +174,29 @@ if errorlevel 1 (
     )
 )
 
-echo.
-echo  Choose how to start GridVibe:
-echo    [D] Desktop window
-echo    [B] Browser
-echo    [Q] Quit
-echo.
-choice /C DBQ /N /M " Select [D/B/Q]: "
-if errorlevel 3 exit /b 0
-if errorlevel 2 (
-    set "LAUNCH_MODE=browser"
-    goto check_voice_dependencies
+"%VENV_PYTHON%" "%PROJECT_DIR%\utils\launcher_setup.py" record core
+if errorlevel 1 (
+    echo  Core setup verification failed. Run GridVibe.bat --repair.
+    pause >nul
+    exit /b 1
 )
-set "LAUNCH_MODE=auto"
+
+:core_ready
+if "%LAUNCH_MODE%"=="browser" goto check_voice_dependencies
 
 :install_desktop_dependencies
+if defined SETUP_FORCE goto repair_desktop_dependencies
+"%VENV_PYTHON%" "%PROJECT_DIR%\utils\launcher_setup.py" check desktop
+if not errorlevel 1 goto check_voice_dependencies
+
+:repair_desktop_dependencies
 echo  Installing optional desktop dependencies...
 echo.
 
+set "DESKTOP_SETUP_OK=1"
 "%VENV_PYTHON%" -m pip install --upgrade --upgrade-strategy eager -r requirements-desktop.txt
 if errorlevel 1 (
+    set "DESKTOP_SETUP_OK="
     echo  Warning: Failed to install optional desktop dependencies.
     echo  GridVibe will still run, but may fall back to the browser.
     echo  Manual fix: "%VENV_PYTHON%" -m pip install --upgrade -r requirements-desktop.txt
@@ -187,6 +212,7 @@ if errorlevel 1 (
     echo.
     "%VENV_PYTHON%" -m pip install --upgrade --force-reinstall --no-cache-dir pywebview pywinpty
     if errorlevel 1 (
+        set "DESKTOP_SETUP_OK="
         echo  Warning: Failed to repair optional desktop dependencies.
         echo  GridVibe will still run, but may fall back to the browser.
         echo.
@@ -200,12 +226,14 @@ if errorlevel 1 (
     )
 )
 
+if defined DESKTOP_SETUP_OK "%VENV_PYTHON%" "%PROJECT_DIR%\utils\launcher_setup.py" record desktop
+
 :check_voice_dependencies
 :: Voice input is optional and ships disabled (default_config.json), so this
 :: check only runs when voice input is actually enabled in the effective
 :: config. A decline is remembered in .voice-deps-declined so the prompt never
 :: comes back; App Settings can install the packages later without a restart.
-"%VENV_PYTHON%" -c "import json, os, sys; path = 'config.json' if os.path.exists('config.json') else 'default_config.json'; sys.exit(0 if json.load(open(path, encoding='utf-8')).get('voice_input', {}).get('enabled') else 1)" >nul 2>&1
+"%VENV_PYTHON%" -c "import sys; from web.config import runtime_config; sys.exit(0 if runtime_config.voice_enabled else 1)" >nul 2>&1
 if errorlevel 1 (
     echo  Voice input is off, so the optional voice dependency check is skipped.
     echo  Turn it on in App Settings; GridVibe can install the packages from there.
@@ -216,12 +244,14 @@ if errorlevel 1 (
 echo  Checking optional voice dependencies...
 echo.
 
-"%VENV_PYTHON%" -c "import faster_whisper, numpy, vosk, websockets; print('Voice dependency import check passed.')" 2>nul
+if defined SETUP_FORCE goto offer_voice_dependencies
+"%VENV_PYTHON%" "%PROJECT_DIR%\utils\launcher_setup.py" check voice
 if not errorlevel 1 (
     if exist ".voice-deps-declined" del /q ".voice-deps-declined" >nul 2>&1
     goto start_gridvibe
 )
 
+:offer_voice_dependencies
 if exist ".voice-deps-declined" (
     echo  Voice packages are missing and were declined earlier, so this prompt stays off.
     echo  Install them from App Settings ^> Install voice dependencies, or run:
@@ -254,7 +284,7 @@ if errorlevel 1 (
 )
 
 "%VENV_PYTHON%" -c "import faster_whisper, numpy, vosk, websockets; print('Voice dependency import check passed.')" 2>nul
-if not errorlevel 1 goto start_gridvibe
+if not errorlevel 1 goto record_voice_setup
 
 echo  Voice dependency import check failed. Reinstalling native voice wheels...
 echo.
@@ -271,7 +301,14 @@ if errorlevel 1 (
     echo  Warning: Optional voice dependencies are still not importable after repair.
     echo  GridVibe will still run, but voice input may be unavailable.
     echo.
+) else (
+    goto record_voice_setup
 )
+
+goto start_gridvibe
+
+:record_voice_setup
+"%VENV_PYTHON%" "%PROJECT_DIR%\utils\launcher_setup.py" record voice
 
 :start_gridvibe
 echo.

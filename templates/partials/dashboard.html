@@ -1,0 +1,39 @@
+{# The agent dashboard button — the same button on both pages.
+
+   It brings up a dialog over this page (`partials/agent_dashboard_dialog.html`,
+   driven by dashboard-dialog.js), and a second press puts it away again. It was
+   a window of its own, which answered "what is running elsewhere?" by taking
+   the reader out of the window they were in; opening it over that window is
+   what the button is for. Nothing here holds rows, and the only state this
+   button carries is the badge.
+
+   Only the button's own chrome differs between the two pages — the workspace
+   session bar dresses its controls as `.btn.btn-neutral.btn-icon`, the launcher
+   as `.ghost-btn.icon-btn` — so the caller states that and nothing else:
+
+       {% set dashboard_button_class = 'ghost-btn icon-btn' %}
+       {% include 'partials/dashboard.html' %}
+#}
+<div class="dashboard">
+    <button
+        class="{{ dashboard_button_class | default('ghost-btn icon-btn', true) }}"
+        id="dashboardBtn"
+        type="button"
+        onclick="openAgentDashboard(event)"
+        title="Agent dashboard — every agent in every workspace; the badge counts the ones working right now (Alt+A)"
+        aria-label="Open the agent dashboard"
+    >
+        {# The one raster icon in a page of stroke SVGs, and deliberately so:
+           it is a supplied piece of artwork with its own palette, the same way
+           the launcher's own app logo is, rather than a control glyph that has
+           to take the surrounding colour. Sized in the stylesheet with the
+           other button icons. #}
+        <img class="dashboard-icon" src="/docs/images/active_ws.ico" alt="" aria-hidden="true">
+        {# Filled by dashboard.js with the number of agents *working* right now
+           (`totals.working`), hidden while none is: a badge showing how many
+           agent panes are open is always on and so is not a signal, and the
+           reader opened those panes anyway. What they cannot see from here is
+           an agent elsewhere starting or finishing something. #}
+        <span class="dashboard-badge" id="dashboardBadge" aria-hidden="true" hidden></span>
+    </button>
+</div>

@@ -105,9 +105,10 @@ class ParseSearchOptionsTestCase(unittest.TestCase):
 class GitGrepArgsTestCase(unittest.TestCase):
     def test_literal_case_insensitive(self):
         args = explorer_search.build_git_grep_args(_options(), ".")
-        self.assertIn("-F", args)
-        self.assertIn("-i", args)
-        self.assertNotIn("-E", args)
+        self.assertIn("-E", args)
+        self.assertNotIn("-i", args)
+        self.assertEqual(args[args.index('-e') + 1], '[hH][eE][lL][lL][oO]')
+        self.assertNotIn("-F", args)
         self.assertNotIn("-w", args)
         self.assertIn("--untracked", args)
         self.assertEqual(args[-2:], ["--", "."])
@@ -117,10 +118,11 @@ class GitGrepArgsTestCase(unittest.TestCase):
         args = explorer_search.build_git_grep_args(
             _options(regex=True, case_sensitive=True, whole_word=True), "web"
         )
-        self.assertIn("-E", args)
-        self.assertNotIn("-F", args)
+        self.assertNotIn("-E", args)
+        self.assertIn("-F", args)
+        self.assertEqual(args[args.index('-e') + 1], '')
         self.assertNotIn("-i", args)
-        self.assertIn("-w", args)
+        self.assertNotIn("-w", args)
         self.assertEqual(args[-2:], ["--", "web"])
 
     def test_remote_git_grep_output_is_capped_without_masking_the_exit_status(self):

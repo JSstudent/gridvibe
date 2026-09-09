@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from web import api
+from web import config as web_config
 from web import runtime_state as web_runtime_state
 from web import saved_sessions as web_saved_sessions
 from web import terminal_io as web_terminal_io
@@ -4931,6 +4932,11 @@ class MultiWorkspaceModeToggleTestCase(unittest.TestCase):
         self.addCleanup(api.session_manager.reset_sessions)
         self.temp_dir = TemporaryDirectory()
         self.addCleanup(self.temp_dir.cleanup)
+        config_patch = patch.object(web_config, 'CONFIG_PATH', str(Path(self.temp_dir.name) / 'config.json'))
+        config_patch.start()
+        self.addCleanup(config_patch.stop)
+        previous_state = api.runtime_config._state
+        self.addCleanup(setattr, api.runtime_config, '_state', previous_state)
         self.repo_dir = Path(self.temp_dir.name) / "repo"
         self.repo_dir.mkdir()
         self.state_path = Path(self.temp_dir.name) / "runtime_state.json"
@@ -5046,8 +5052,7 @@ class MultiWorkspaceModeToggleTestCase(unittest.TestCase):
         self.assertIn("toggle?.classList.add('is-busy')", launcher_js)
 
     def test_saving_the_toggle_persists_and_broadcasts_it(self):
-        with patch.object(api, "save_config") as save_config, \
-                patch.object(api, "_refresh_runtime_config"), \
+        with patch.object(web_config, "_write_config") as save_config, \
                 patch.object(api, "socketio") as socketio:
             response = self.client.post(
                 "/api/app-config", json={"workspace": {"multi_workspace_enabled": True}}

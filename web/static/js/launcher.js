@@ -2698,10 +2698,13 @@
        of it, to the window that handed over (goToSettings records which one)
        or, if that workspace has since closed, to whichever one is still open.
 
-       Reuses the launcher's existing Open path — focus the window, open it if
-       the native host has none — so the arrival pulse and the group targeting
-       are the ones every other workspace switch already gets (guardrail 6).
-       The in-flight guard keeps a held key from queueing a burst of opens. */
+       The resolution and the dispatch are workspaces.js's `returnToOriginWorkspace`,
+       shared with the agent dashboard window, which asks the same question from
+       the same standing — so the arrival pulse and the group targeting are the
+       ones every other workspace switch already gets (guardrail 6). What stays
+       here is what is the launcher's own: its single notification surface, its
+       wording, and the in-flight guard that keeps a held key from queueing a
+       burst of opens. */
     let launcherWorkspaceReturnInFlight = false;
 
     async function returnToLauncherOriginWorkspace() {
@@ -2710,24 +2713,14 @@
         }
         launcherWorkspaceReturnInFlight = true;
         try {
-            const target = launcherReturnWorkspace(
-                await fetchLiveWorkspaces(),
-                readLauncherOriginWorkspace()
-            );
-            if (!target) {
+            const { outcome } = await returnToOriginWorkspace();
+            if (outcome === WORKSPACE_RETURN_NONE) {
                 showGridVibeNotice('No workspace is open to switch back to.', 'info');
-                return;
-            }
-            if (!(await focusWorkspaceWindow(target.workspace_id))) {
-                const opened = await openWorkspaceWindow(target.workspace_id, {
-                    groupId: target.active_group_id
-                });
-                if (!opened) {
-                    showGridVibeNotice(
-                        `The workspace tab could not be opened. ${WORKSPACE_TAB_BLOCKED_HINT}`,
-                        'warning'
-                    );
-                }
+            } else if (outcome === WORKSPACE_RETURN_BLOCKED) {
+                showGridVibeNotice(
+                    `The workspace tab could not be opened. ${WORKSPACE_TAB_BLOCKED_HINT}`,
+                    'warning'
+                );
             }
         } catch (error) {
             console.error('[GridVibe Launcher] workspace return failed:', error);
@@ -3831,6 +3824,9 @@
     loadVoicePrefs().catch(() => {});
     checkRestorableWorkspace().catch(() => {});
     refreshWorkspaceDestinations().catch(() => {});
+    /* The dashboard button: its badge, and Alt+A. The dashboard itself is a
+       window of its own, so this page holds no part of it. */
+    wireDashboard();
     updateHeaderBadges();
 
     function updateHeaderBadges() {

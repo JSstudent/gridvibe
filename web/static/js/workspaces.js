@@ -330,6 +330,92 @@
         }
     }
 
+    /* ── Landing on the pane a row named ──
+       The arrival pulse above answers "which window am I now in". This answers
+       the question the agent dashboard asks next: *which pane in it*. A row
+       there names a workspace, a session tab and one pane, and until now only
+       the first survived the trip — the native bridge reuses an open workspace
+       window without retargeting it, so every row landed on whatever tab that
+       window happened to be left on.
+
+       Stored rather than broadcast, one-shot and time-boxed, for exactly the
+       reasons the pulse is: the target window may not exist yet when the
+       request is made, and a request nobody arrives on has to expire instead of
+       moving somebody's tab at an unrelated moment later. A request naming
+       neither a session nor a pane is not stored at all — "open this workspace
+       wherever it was" is what happens with no request, so writing one would
+       only leave a later arrival something stale to claim. */
+    const WORKSPACE_FOCUS_REQUEST_STORAGE_KEY = 'gridvibe.workspaceFocus';
+    const WORKSPACE_FOCUS_REQUEST_TTL_MS = 12000;
+
+    function requestWorkspaceFocusTarget(workspaceId, { groupId = '', sessionId = '' } = {}) {
+        const resolvedGroupId = String(groupId || '');
+        const resolvedSessionId = String(sessionId || '');
+        if (!resolvedGroupId && !resolvedSessionId) {
+            return false;
+        }
+        try {
+            localStorage.setItem(WORKSPACE_FOCUS_REQUEST_STORAGE_KEY, JSON.stringify({
+                workspaceId: normalizeWorkspaceId(workspaceId),
+                groupId: resolvedGroupId,
+                sessionId: resolvedSessionId,
+                timestamp: Date.now(),
+                source: GRIDVIBE_WINDOW_ID
+            }));
+            return true;
+        } catch (_error) {
+            return false;
+        }
+    }
+
+    /* At most once per request, and only in the window the request names. A
+       payload for another workspace is left alone — that window has not been
+       raised yet and the request is still its to claim. */
+    function claimWorkspaceFocusTarget(workspaceId) {
+        let payload = null;
+        try {
+            payload = JSON.parse(localStorage.getItem(WORKSPACE_FOCUS_REQUEST_STORAGE_KEY) || 'null');
+        } catch (_error) {
+            payload = null;
+        }
+        if (!payload || normalizeWorkspaceId(payload.workspaceId) !== normalizeWorkspaceId(workspaceId)) {
+            return null;
+        }
+        try {
+            localStorage.removeItem(WORKSPACE_FOCUS_REQUEST_STORAGE_KEY);
+        } catch (_error) {}
+        const age = Date.now() - Number(payload.timestamp || 0);
+        if (isOwnBroadcast(payload) || !(age >= 0 && age <= WORKSPACE_FOCUS_REQUEST_TTL_MS)) {
+            return null;
+        }
+        return {
+            groupId: String(payload.groupId || ''),
+            sessionId: String(payload.sessionId || '')
+        };
+    }
+
+    /* Called once by the workspace page with its own id, beside the pulse it
+       mirrors. Boot covers the window opened for the trip; `focus` covers the
+       one that already existed and was raised, which is the case the native
+       bridge could not handle on its own. */
+    function watchWorkspaceFocusTargets(workspaceId, handler) {
+        if (typeof handler !== 'function') {
+            return;
+        }
+        const claim = () => {
+            const target = claimWorkspaceFocusTarget(workspaceId);
+            if (target) {
+                handler(target);
+            }
+        };
+        window.addEventListener('focus', claim);
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', claim);
+        } else {
+            claim();
+        }
+    }
+
     async function createWorkspaceRecord(label = '') {
         const { ok, status, data } = await workspaceApiRequest('/api/workspaces', {
             method: 'POST',
@@ -519,6 +605,80 @@
        message per outcome (guardrail 8). */
     const WORKSPACE_TAB_BLOCKED_HINT =
         'Allow pop-ups for this site so GridVibe can open workspace tabs.';
+
+    /* ── The launcher, from anywhere that is not a workspace ──
+       Native first, browser second — the same order and the same fallback the
+       two functions above use, because all three open a GridVibe window and a
+       native bridge that refuses should still land somewhere. The name is what
+       makes a second press focus the launcher rather than stack another copy.
+
+       `beforeBrowserFallback` exists for the one caller that has something to
+       undo before a *browser* tab takes over: a workspace window in fullscreen
+       has to leave it, and must not leave it when the native bridge already
+       handled the request and its own window is staying exactly as it was. */
+    const LAUNCHER_WINDOW_NAME = 'gridvibe-launcher';
+
+    async function openLauncherWindow({ beforeBrowserFallback = null } = {}) {
+        const api = nativeWorkspaceApi();
+        if (api?.open_launcher_window) {
+            try {
+                const result = await api.open_launcher_window();
+                if (result?.ok) {
+                    return true;
+                }
+                console.error('[GridVibe Workspaces] native launcher refused:', result?.error || '');
+            } catch (error) {
+                console.error('[GridVibe Workspaces] open_launcher_window failed:', error);
+            }
+        }
+        if (typeof beforeBrowserFallback === 'function') {
+            await beforeBrowserFallback();
+        }
+        const opened = window.open('/', LAUNCHER_WINDOW_NAME);
+        if (!opened) {
+            console.error('[GridVibe Workspaces] the browser blocked the launcher tab');
+            return false;
+        }
+        opened.focus?.();
+        return true;
+    }
+
+    /* ── The way back out of a window that is no workspace ──
+       The launcher and the agent dashboard are both windows about workspaces
+       rather than windows in one, so Alt+W means the same thing in both: go
+       back to the one you came from. The resolution is one rule (the recorded
+       origin if its window is still open, otherwise whichever workspace is),
+       and the dispatch is the pair above, so both windows get the arrival pulse
+       and the group targeting every other switch already gets.
+
+       The outcome is returned rather than reported: each page has its own
+       single notification surface and its own wording, and a shared function
+       that reached for one of them would have to know which page it is on. */
+    const WORKSPACE_RETURN_NONE = 'none';
+    const WORKSPACE_RETURN_FOCUSED = 'focused';
+    const WORKSPACE_RETURN_OPENED = 'opened';
+    const WORKSPACE_RETURN_BLOCKED = 'blocked';
+
+    async function returnToOriginWorkspace() {
+        const target = launcherReturnWorkspace(
+            await fetchLiveWorkspaces(),
+            readLauncherOriginWorkspace()
+        );
+        if (!target) {
+            return { outcome: WORKSPACE_RETURN_NONE, workspaceId: '' };
+        }
+        const workspaceId = target.workspace_id;
+        if (await focusWorkspaceWindow(workspaceId)) {
+            return { outcome: WORKSPACE_RETURN_FOCUSED, workspaceId };
+        }
+        const opened = await openWorkspaceWindow(workspaceId, {
+            groupId: target.active_group_id
+        });
+        return {
+            outcome: opened ? WORKSPACE_RETURN_OPENED : WORKSPACE_RETURN_BLOCKED,
+            workspaceId
+        };
+    }
 
     async function closeWorkspaceWindow(workspaceId) {
         const api = nativeWorkspaceApi();

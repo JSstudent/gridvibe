@@ -143,6 +143,9 @@ class FakeSshStream:
         self._offset += len(chunk)
         return chunk
 
+    def close(self):
+        self.channel.close()
+
 
 class FakeSshExecClient:
     def __init__(self, responses):
@@ -155,11 +158,20 @@ class FakeSshExecClient:
         if not self.responses:
             raise OSError("Unexpected SSH command")
         returncode, stdout, stderr = self.responses.pop(0)
-        return (
-            None,
-            FakeSshStream(stdout, returncode),
-            FakeSshStream(stderr, returncode),
+        output, errors = FakeSshStream(stdout, returncode), FakeSshStream(stderr, returncode)
+        channel = SimpleNamespace(
+            settimeout=lambda timeout: None,
+            recv_ready=lambda: output._offset < len(output._data),
+            recv_stderr_ready=lambda: errors._offset < len(errors._data),
+            recv=output.read,
+            recv_stderr=errors.read,
+            exit_status_ready=lambda: True,
+            recv_exit_status=lambda: returncode,
+            closed=False,
+            close=lambda: None,
         )
+        output.channel = errors.channel = channel
+        return None, output, errors
 
     def close(self):
         self.closed = True
@@ -469,7 +481,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         voice input ships disabled, and a decline was never remembered."""
         launcher = (Path(api.BASE_DIR) / "GridVibe.bat").read_text(encoding="utf-8")
 
-        gate_index = launcher.index("get('voice_input', {}).get('enabled')")
+        gate_index = launcher.index("runtime_config.voice_enabled")
         prompt_index = launcher.index("choice /C YN")
         marker_index = launcher.index('> ".voice-deps-declined"')
 
@@ -496,14 +508,14 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertLess(reset_index, start_index)
         self.assertLess(start_index, failure_check_index)
 
-    def test_windows_launcher_selects_desktop_browser_or_quit_after_core_setup(self):
+    def test_windows_launcher_selects_desktop_browser_or_quit_before_core_setup(self):
         launcher = (Path(api.BASE_DIR) / "GridVibe.bat").read_text(encoding="utf-8")
 
         prompt_index = launcher.index("choice /C DBQ")
         core_check_index = launcher.index("Core dependency import check passed.")
         desktop_install_index = launcher.index("Installing optional desktop dependencies")
 
-        self.assertGreater(prompt_index, core_check_index)
+        self.assertLess(prompt_index, core_check_index)
         self.assertLess(prompt_index, desktop_install_index)
         self.assertIn('set "LAUNCH_MODE=auto"', launcher)
         self.assertIn('set "LAUNCH_MODE=browser"', launcher)
@@ -909,7 +921,12 @@ class ApiRoutesTestCase(unittest.TestCase):
         # Settings themselves now open in-page, so this button only opens the
         # launcher window and says so.
         self.assertIn('aria-label="Open launcher"', html)
-        self.assertIn('class="vibe-flow-icon"', html)
+        # It shows the launcher's own icon -- the same mark both top bars
+        # carry. A stroke glyph here was the one control in the session-bar
+        # group that was not supplied artwork.
+        self.assertIn('class="session-bar-launcher-icon"', html)
+        self.assertIn('src="/docs/images/GridVibe_icon.ico"', html)
+        self.assertNotIn("vibe-flow-icon", html)
 
     def test_terminals_page_launcher_button_heads_the_session_tab_line(self):
         """The launcher button sits at the head of the session tab line — ahead
@@ -945,6 +962,258 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertNotIn("Backquote", terminals_js)
         self.assertNotIn('aria-keyshortcuts="Alt+`"', html)
 
+    # ── The three controls at the head of the session tab line ──
+    #
+    # They are one group, and everything below is a consequence of that: one
+    # order, one box, one drawn mark. The mark is the part that had gone wrong
+    # in a way no rule could be read off the stylesheet -- three assets ink
+    # different fractions of their own canvases, so three rules that all said
+    # "26px" drew three different sizes.
+
+    def _css_rule(self, css: str, selector: str, contains: str = "") -> str:
+        """The first rule whose selector list matches (and whose body carries
+        `contains`, for a class that appears in a shared list as well as in a
+        rule of its own)."""
+        for rule in re.findall(rf"{selector}\s*\{{[^}}]*\}}", css, re.DOTALL):
+            if contains in rule:
+                return rule
+        self.fail(f"no rule for {selector}")
+
+    def test_session_bar_runs_launcher_then_dashboard_then_menu(self):
+        """Widest scope first: the launcher (every window), the dashboard
+        (every agent in every window), then the menu whose scope stops at this
+        one. The tab strip's leading padding follows the last of the three
+        rather than staying pinned to the launcher it no longer sits beside."""
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = response.get_data(as_text=True)
+
+        session_bar = html.index('<div class="session-bar">')
+        launcher = html.index('aria-label="Open launcher"')
+        dashboard = html.index('id="dashboardBtn"')
+        menu = html.index('id="sessionMenuRoot"')
+        tabs = html.index('id="sessionTabs"')
+
+        self.assertLess(session_bar, launcher)
+        self.assertLess(launcher, dashboard)
+        self.assertLess(dashboard, menu)
+        self.assertLess(menu, tabs)
+
+        terminals_css = self._static("css/terminals.css")
+        self.assertIn(".session-bar-menu + .session-tabs", terminals_css)
+        self.assertNotIn(".session-bar-launcher-btn + .session-tabs", terminals_css)
+
+    def test_session_bar_controls_are_three_marks_of_one_system(self):
+        """All three are the app's own supplied artwork, so the row reads as
+        one system rather than a stroke glyph beside two picture tiles."""
+        html = self.client.get("/terminals").get_data(as_text=True)
+
+        for mark, source in (
+            ("session-bar-launcher-icon", "GridVibe_icon.ico"),
+            ("dashboard-icon", "active_ws.ico"),
+            ("session-bar-menu-icon", "icon_transparent.ico"),
+        ):
+            with self.subTest(mark=mark):
+                self.assertIn(f'class="{mark}"', html)
+                self.assertIn(f'/docs/images/{source}', html)
+
+        # Nothing in that row paints from currentColor any more, so the button
+        # rule no longer carries a stroke colour for a glyph it has not got.
+        terminals_css = self._static("css/terminals.css")
+        box = self._css_rule(
+            terminals_css, r"\.settings-window-btn,\s*\.session-bar-dashboard-btn"
+        )
+        self.assertNotIn("color:", box)
+
+    def test_session_bar_controls_share_one_drawn_mark(self):
+        """One size is declared and every box is derived from it. The assets
+        do not agree on how much padding they bake into their own canvas --
+        GridVibe_icon inks about 0.53 of it, the other two about 0.61 -- so
+        each carries its own 1/fraction scale and the negative margin takes the
+        padding back out. Two rules that both said 26px are what drew a 26px
+        mark beside a 16px one."""
+        terminals_css = self._static("css/terminals.css")
+        dashboard_css = self._static("css/dashboard.css")
+
+        bar = self._css_rule(terminals_css, r"\.session-bar")
+        self.assertIn("--session-bar-mark:", bar)
+        # The shared dashboard stylesheet is handed the same size rather than
+        # keeping a second number of its own.
+        self.assertIn("--dash-icon-size: var(--session-bar-mark)", bar)
+
+        marks = self._css_rule(
+            terminals_css,
+            r"\.session-bar-launcher-icon,\s*\.session-bar-menu-icon",
+        )
+        self.assertIn("var(--session-bar-mark) * var(--mark-scale)", marks)
+        self.assertIn(
+            "calc(var(--session-bar-mark) * (1 - var(--mark-scale)) / 2)", marks
+        )
+        # ...and each asset states its own correction, because a scale shared
+        # between two assets is a box shared between two assets.
+        scales = set()
+        for mark in ("session-bar-launcher-icon", "session-bar-menu-icon"):
+            rule = self._css_rule(
+                terminals_css, rf"\.{mark}", contains="--mark-scale:"
+            )
+            self.assertIn("--mark-scale:", rule)
+            scales.add(rule.split("--mark-scale:")[1].split(";")[0].strip())
+        self.assertEqual(len(scales), 2, scales)
+
+        dashboard_mark = self._css_rule(dashboard_css, r"\.dashboard-icon")
+        self.assertIn("var(--dash-icon-mark) * var(--dash-icon-scale)", dashboard_mark)
+        self.assertIn(
+            "calc(var(--dash-icon-mark) * (1 - var(--dash-icon-scale)) / 2)",
+            dashboard_mark,
+        )
+
+        # Max surface mode shrinks the row by restating the one size, never by
+        # resizing a mark on its own -- which is how they drifted apart before.
+        max_bar = self._css_rule(
+            terminals_css, r"body\.surface-max \.session-bar"
+        )
+        self.assertIn("--session-bar-mark:", max_bar)
+        self.assertNotIn("body.surface-max .session-bar-menu-icon", terminals_css)
+        self.assertNotIn("body.surface-max .dashboard-icon", terminals_css)
+
+    def test_session_bar_marks_fill_their_buttons(self):
+        """The complaint the shared size was introduced against was not that
+        the marks disagreed but that they were small: three little pictures
+        floating in three large frames. The mark is sized against the button
+        interior, not against a comfortable margin."""
+        terminals_css = self._static("css/terminals.css")
+
+        def px(rule, prop):
+            value = rule.split(f"{prop}:")[1].split(";")[0].strip()
+            return float(value.removesuffix("px"))
+
+        for bar, button in (
+            (r"\.session-bar", r"\.settings-window-btn,\s*\.session-bar-dashboard-btn"),
+            (
+                r"body\.surface-max \.session-bar",
+                r"body\.surface-max \.settings-window-btn",
+            ),
+        ):
+            with self.subTest(bar=bar):
+                mark = px(self._css_rule(terminals_css, bar), "--session-bar-mark")
+                interior = px(self._css_rule(terminals_css, button), "height") - 2
+                self.assertGreaterEqual(mark / interior, 0.85)
+                self.assertLessEqual(mark, interior)
+
+    def test_session_bar_dashboard_button_wears_the_launcher_chrome(self):
+        """The one control in the group that is not a plain glyph was also the
+        one that did not look like a member of it: `.btn.btn-neutral` alone
+        gave it another fill, no border at all, and a height set by whatever
+        its artwork happened to be. It now shares the launcher's whole box."""
+        terminals_css = self._static("css/terminals.css")
+
+        box = self._css_rule(
+            terminals_css, r"\.settings-window-btn,\s*\.session-bar-dashboard-btn"
+        )
+        self.assertIn("width: 38px;", box)
+        self.assertIn("height: 34px;", box)
+        self.assertIn("border: 1px solid var(--t-border-tab);", box)
+        self.assertIn("background: var(--t-btn-bg);", box)
+
+        hover = self._css_rule(
+            terminals_css,
+            r"\.settings-window-btn:hover,\s*\.session-bar-dashboard-btn:hover",
+        )
+        self.assertIn("border-color: var(--t-accent);", hover)
+        self.assertIn("background: var(--t-btn-hover-bg);", hover)
+
+    def test_dashboard_icon_size_is_a_host_page_knob(self):
+        """dashboard.css declares no size of its own for the same reason it
+        declares no palette token: two pages render it, and the launcher's row
+        draws 18px stroke glyphs while the session bar's draws its own mark.
+        The badge is out of flow and enters none of that arithmetic -- the
+        count changes what the button says, never how big its mark is."""
+        dashboard_css = self._static("css/dashboard.css")
+        launcher_css = self._static("css/launcher.css")
+
+        mark = self._css_rule(dashboard_css, r"\.dashboard-icon")
+        self.assertIn("var(--dash-icon-size, 18px)", mark)
+        # The launcher takes the default rather than restating it.
+        self.assertNotIn("--dash-icon-size", launcher_css)
+
+        badge = self._css_rule(dashboard_css, r"\.dashboard-badge")
+        self.assertIn("position: absolute;", badge)
+        self.assertNotIn("--dash-icon", badge)
+
+    def test_the_dashboard_dialog_is_the_pages_own_modal_shell(self):
+        """It was a window with a page and a stylesheet of its own. As a dialog
+        it reuses `.modal-shell`, and three things follow from that one choice:
+        the scrim and the background blur are the page's already, the shell is
+        in `EXPLORER_ESCAPE_CLAIM_SELECTOR` so Escape cannot also drop an
+        explorer pane's selection behind it, and `agent-dashboard.css` has no
+        business declaring either."""
+        agent_css = self._static("css/agent-dashboard.css")
+
+        for path in ("/terminals", "/"):
+            with self.subTest(path=path):
+                html = self.client.get(path).get_data(as_text=True)
+                self.assertIn(
+                    '<div id="agentDashboardShell" class="modal-shell agent-dashboard-shell"',
+                    html,
+                )
+                self.assertIn('role="dialog"', html)
+                self.assertIn('aria-modal="true"', html)
+
+        # The blur is the host page's, stated once per page and never here.
+        self.assertNotIn("backdrop-filter", agent_css)
+        for page_css in ("css/terminals.css", "css/launcher.css"):
+            with self.subTest(css=page_css):
+                # Not the first `.modal-shell` rule -- the launcher amends the
+                # scrim under a light theme in a rule of its own.
+                shell = self._css_rule(
+                    self._static(page_css), r"\.modal-shell", contains="position: fixed"
+                )
+                self.assertIn("backdrop-filter:", shell)
+
+        # And this file no longer states a page's worth of rules -- it is a
+        # partial on somebody else's document now.
+        for page_level in ("html,\n", "\nbody {", ".dash-frame", ".modal-card {"):
+            with self.subTest(rule=page_level):
+                self.assertNotIn(page_level, agent_css)
+
+        self.assertIn(
+            "'.modal-shell.visible',", self._static("js/explorer-viewer.js")
+        )
+
+    def test_the_dialog_stylesheet_is_loaded_after_each_pages_own(self):
+        """`.agent-dashboard-shell` and `.modal-shell` have equal specificity,
+        so which one wins is decided by source order alone -- and the amendment
+        has to be the one that wins."""
+        for path, page_css in (("/terminals", "terminals.css"), ("/", "launcher.css")):
+            with self.subTest(path=path):
+                html = self.client.get(path).get_data(as_text=True)
+                self.assertLess(
+                    html.index(f"css/{page_css}"),
+                    html.index("css/agent-dashboard.css"),
+                )
+
+    def test_the_dialogs_title_bar_carries_a_way_out_of_its_own(self):
+        """Three ways out, and the pointer needs one that is visible: Escape
+        and the backdrop are not affordances. A stroke SVG rather than a text
+        x, so it takes currentColor and shares the refresh control's box
+        instead of being centred by font metrics (guardrail 7)."""
+        html = self.client.get("/terminals").get_data(as_text=True)
+        dialog = html[html.index('id="agentDashboardShell"'):html.index('id="agentDashboardBody"')]
+
+        self.assertIn('id="agentDashboardCloseBtn"', dialog)
+        self.assertIn('class="dash-titlebar-btn"', dialog)
+        self.assertIn('aria-label="Close the agent dashboard"', dialog)
+        close = dialog[dialog.index('id="agentDashboardCloseBtn"'):]
+        self.assertIn("<svg", close)
+        self.assertNotIn("&times;", close)
+
+        # One box for both title-bar controls rather than two rules that agree
+        # by coincidence.
+        agent_css = self._static("css/agent-dashboard.css")
+        self.assertIn(".dash-titlebar-btn {", agent_css)
+        self.assertNotIn(".dash-refresh-btn", agent_css)
+
     def test_terminals_page_opens_app_settings_without_the_launcher(self):
         """The session window carries its own App Settings dialog (todo 1) —
         the shared partial plus the shared module, no launcher round-trip."""
@@ -977,7 +1246,6 @@ class ApiRoutesTestCase(unittest.TestCase):
             "app-settings-icon",
             "surface-mode-icon",
             "fullscreen-icon",
-            "vibe-flow-icon",
         ):
             with self.subTest(icon=icon):
                 self.assertIn(f'class="{icon}"', html)
@@ -6072,8 +6340,8 @@ class ApiRoutesTestCase(unittest.TestCase):
         updated = api.session_manager.get_session(session.session_id)
         self.assertEqual(Path(updated.directory), repo_dir)
 
-    def test_switch_pane_shell_reselecting_active_shell_does_not_restart(self):
-        """Clicking the shell a pane already runs must not kill a live shell."""
+    def test_switch_pane_shell_reselecting_active_shell_relaunches_it(self):
+        """The checked shell row remains an explicit relaunch action."""
         repo_dir = Path(self.temp_dir.name) / "repo"
         repo_dir.mkdir()
         session = self._create_local_terminal_session(
@@ -6091,10 +6359,12 @@ class ApiRoutesTestCase(unittest.TestCase):
             )
 
         self.assertEqual(response.status_code, 200)
-        close_connection.assert_not_called()
-        start_task.assert_not_called()
+        close_connection.assert_called_once_with(
+            session.session_id, clear_buffer=True
+        )
+        start_task.assert_called_once_with(api._connect_session, session.session_id)
         updated = api.session_manager.get_session(session.session_id)
-        self.assertEqual(updated.status, api.SessionStatus.CONNECTED)
+        self.assertEqual(updated.status, api.SessionStatus.PENDING)
 
     def test_switch_pane_shell_rejects_unknown_shell(self):
         repo_dir = Path(self.temp_dir.name) / "repo"
@@ -7425,6 +7695,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         session_id = self._create_local_terminal_session(desktop).session_id
         connection = {"kind": "local", "shell_kind": "posix"}
 
+        api.ssh_connections[session_id] = connection
         with patch.object(web_terminal_io, "_broadcast_session_status"):
             web_terminal_io._track_terminal_agent_input(
                 session_id, connection, "codex\r"
@@ -13546,6 +13817,7 @@ class ApiRoutesTestCase(unittest.TestCase):
             startup_mode="terminal",
         )
         connection = {}
+        api.ssh_connections[session.session_id] = connection
 
         with patch.object(web_terminal_io, "_broadcast_session_status") as broadcast:
             api._track_terminal_agent_input(session.session_id, connection, "co")
@@ -13577,8 +13849,10 @@ class ApiRoutesTestCase(unittest.TestCase):
             initial_command_mode="agent",
         )
 
+        connection = {}
+        api.ssh_connections[session.session_id] = connection
         with patch.object(web_terminal_io, "_broadcast_session_status") as broadcast:
-            api._track_terminal_agent_input(session.session_id, {}, "claudx\be\r")
+            api._track_terminal_agent_input(session.session_id, connection, "claudx\be\r")
 
         updated = api.session_manager.get_session(session.session_id)
         self.assertEqual(updated.startup_mode, "agent")
@@ -13586,7 +13860,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(updated.initial_command, "claude")
         broadcast.assert_called_once_with(session.session_id)
 
-    def test_terminal_input_returns_codex_to_terminal_mode_on_interrupt(self):
+    def test_one_codex_interrupt_keeps_the_agent_in_the_dashboard(self):
         group = api.session_manager.create_group(
             name="Codex",
             connection_mode="ssh",
@@ -13604,8 +13878,17 @@ class ApiRoutesTestCase(unittest.TestCase):
             initial_command="codex",
         )
 
+        connection = {}
+        api.ssh_connections[session.session_id] = connection
         with patch.object(web_terminal_io, "_broadcast_session_status") as broadcast:
-            api._track_terminal_agent_input(session.session_id, {}, "\x03")
+            api._track_terminal_agent_input(session.session_id, connection, "\x03")
+
+        updated = api.session_manager.get_session(session.session_id)
+        self.assertEqual(updated.startup_mode, "agent")
+        self.assertEqual(updated.agent_selection, "codex")
+        broadcast.assert_not_called()
+        with patch.object(web_terminal_io, "_broadcast_session_status") as broadcast:
+            api._track_terminal_agent_input(session.session_id, connection, "\x03")
 
         updated = api.session_manager.get_session(session.session_id)
         self.assertEqual(updated.startup_mode, "terminal")
@@ -13632,8 +13915,10 @@ class ApiRoutesTestCase(unittest.TestCase):
             initial_command="claude",
         )
 
+        connection = {}
+        api.ssh_connections[session.session_id] = connection
         with patch.object(web_terminal_io, "_broadcast_session_status") as broadcast:
-            api._track_terminal_agent_input(session.session_id, {}, "/exit\r")
+            api._track_terminal_agent_input(session.session_id, connection, "/exit\r")
 
         updated = api.session_manager.get_session(session.session_id)
         self.assertEqual(updated.startup_mode, "terminal")
@@ -13709,7 +13994,9 @@ class ApiRoutesTestCase(unittest.TestCase):
                     with patch.object(web_terminal_io, "_stream_local_output"):
                         with patch.object(web_terminal_io, "_run_startup_sequence"):
                             with patch.object(web_terminal_io, "_drain_until_prompt"):
-                                with patch.object(api.session_manager, "update_session_status"):
+                                with patch.object(api.session_manager, "update_session_status"), patch.object(
+                                    api.session_manager, "get_session", return_value=session
+                                ):
                                     winpty.spawn.return_value = fake_process
                                     api._connect_local_session("abc123", session)
 
@@ -13745,7 +14032,9 @@ class ApiRoutesTestCase(unittest.TestCase):
                 with patch.object(web_terminal_io, "_broadcast_session_status"):
                     with patch.object(web_terminal_io, "_stream_local_output"):
                         with patch.object(web_terminal_io, "_run_startup_sequence"):
-                            with patch.object(api.session_manager, "update_session_status"):
+                            with patch.object(api.session_manager, "update_session_status"), patch.object(
+                                    api.session_manager, "get_session", return_value=session
+                                ):
                                 winpty.spawn.return_value = fake_process
                                 api._connect_local_session("abc123", session)
 
@@ -17825,11 +18114,12 @@ class KnownHostsPersistenceTestCase(unittest.TestCase):
         self.assertTrue(Path(self.known_hosts_path).exists())
         client.load_host_keys.assert_called_once_with(self.known_hosts_path)
 
-    def test_load_failure_is_non_fatal(self):
+    def test_load_failure_refuses_unverifiable_connection(self):
         client = MagicMock()
         client.load_host_keys.side_effect = OSError("file locked")
 
-        api._load_persistent_host_keys(client)  # must not raise
+        with self.assertRaisesRegex(OSError, 'Cannot verify SSH host keys'):
+            api._load_persistent_host_keys(client)
 
     @patch("web.explorer.paramiko")
     def test_open_ssh_sftp_loads_known_hosts(self, mock_paramiko):
@@ -17998,7 +18288,9 @@ class EmitOutsideConnectionLockTestCase(unittest.TestCase):
             lock_owned_during_emit.append(api.connection_lock._is_owned())
 
         with patch.object(api.socketio, "emit", side_effect=fake_emit):
-            api._drain_until_prompt(session_id, {"pty_process": FakePty()}, timeout=1.0)
+            connection = {"pty_process": FakePty()}
+            api.ssh_connections[session_id] = connection
+            api._drain_until_prompt(session_id, connection, timeout=1.0)
 
         self.assertEqual(lock_owned_during_emit, [False])
         self.assertEqual(api._get_buffered_terminal_output(session_id), "booted")
@@ -18098,6 +18390,9 @@ class AgentInputTrackingLockTestCase(unittest.TestCase):
     def setUp(self):
         api.session_manager.reset_sessions()
         self.addCleanup(api.session_manager.reset_sessions)
+        registry = patch.object(web_terminal_io, "ssh_connections", {})
+        registry.start()
+        self.addCleanup(registry.stop)
 
     def test_double_interrupt_marks_agent_exited(self):
         session = api.session_manager.create_session(
@@ -18105,6 +18400,7 @@ class AgentInputTrackingLockTestCase(unittest.TestCase):
             startup_mode="agent", agent_selection="claude",
         )
         connection = {}
+        web_terminal_io.ssh_connections[session.session_id] = connection
 
         with patch.object(web_terminal_io, "_mark_runtime_agent_exited", return_value=True) as mark:
             api._track_terminal_agent_input(session.session_id, connection, "\x03")
@@ -18117,6 +18413,7 @@ class AgentInputTrackingLockTestCase(unittest.TestCase):
             group_id="grp-line", host="local", directory="/tmp",
         )
         connection = {}
+        web_terminal_io.ssh_connections[session.session_id] = connection
 
         api._track_terminal_agent_input(session.session_id, connection, "cla")
         api._track_terminal_agent_input(session.session_id, connection, "ude")
@@ -18130,6 +18427,19 @@ class AgentInputTrackingLockTestCase(unittest.TestCase):
         self.assertEqual(updated.startup_mode, "agent")
         self.assertEqual(updated.agent_selection, "claude")
         self.assertEqual(connection["_gridvibe_input_line"], "")
+
+    def test_naming_another_cli_in_chat_does_not_change_the_running_agent(self):
+        session = api.session_manager.create_session(
+            group_id="grp-agent", host="local", directory="/tmp",
+            startup_mode="agent", agent_selection="codex", initial_command="codex",
+        )
+        connection = {}
+        web_terminal_io.ssh_connections[session.session_id] = connection
+        with patch.object(web_terminal_io, "_broadcast_session_status") as broadcast:
+            api._track_terminal_agent_input(session.session_id, connection, "claude\r")
+        self.assertEqual(session.agent_selection, "codex")
+        self.assertEqual(session.initial_command, "codex")
+        broadcast.assert_not_called()
 
 
 class ExplorerPaneDisposalTestCase(unittest.TestCase):
@@ -18617,14 +18927,23 @@ class StyleThemingTestCase(unittest.TestCase):
 
     # ── 7.3: theme-ignoring hardcoded colors replaced with tokens ───────────
 
-    def test_settings_window_icon_uses_current_color(self):
+    def test_session_bar_buttons_hold_no_palette_literal(self):
         html = self.client.get("/terminals").get_data(as_text=True)
         for literal in ("#06263a", "#5eefff", "#63f6ff", "#6dfcff", "#4fd6ff"):
             self.assertNotIn(literal, html)
         terminals_css = self._static("css/terminals.css")
-        block = re.search(r"\.settings-window-btn \{.*?\}", terminals_css,
-                          re.DOTALL).group(0)
-        self.assertIn("color: var(--t-accent)", block)
+        # The launcher button used to paint a stroke glyph from
+        # `color: var(--t-accent)`; it now carries the app's own artwork, so
+        # the rule states no colour at all and every value it does state is a
+        # token.
+        block = re.search(
+            r"\.settings-window-btn,\s*\.session-bar-dashboard-btn \{.*?\}",
+            terminals_css,
+            re.DOTALL,
+        ).group(0)
+        self.assertNotIn("color:", block)
+        self.assertIn("border: 1px solid var(--t-border-tab);", block)
+        self.assertIn("background: var(--t-btn-bg);", block)
 
     def test_browser_close_button_uses_danger_token(self):
         launcher_css = self._static("css/launcher.css")
@@ -19043,6 +19362,44 @@ class UxInteractionButtonsTestCase(unittest.TestCase):
         self.assertIn('id="closeSessionConfirmCancel"', html)
         # the third way out: keep the group as a preset, then close it
         self.assertIn('id="closeSessionConfirmSave"', html)
+        # The dialog is one shared partial driven by one shared controller, so
+        # the agent dashboard's session × asks the identical question. A page
+        # that shipped the markup without the module would render three buttons
+        # nothing listens to.
+        self.assertIn("/static/js/close-session-modal.js", html)
+
+    def test_the_dashboard_ships_the_same_close_dialog_the_workspace_does(self):
+        """One irreversible act, one prompt. The dashboard lists sessions from
+        every workspace, so a second dialog there would be the one place a
+        reader is warned about differently sized consequences than the window
+        that actually holds the terminals.
+
+        It is a dialog on both host pages now rather than a page of its own,
+        which is what puts the launcher under this rule too: it never shipped
+        the close prompt before, and the dashboard's session x is the first
+        thing there that ends live terminals."""
+        for path in ("/terminals", "/"):
+            page = self.client.get(path).get_data(as_text=True)
+            for marker in (
+                'id="agentDashboardShell"',
+                'id="closeSessionConfirmModal"',
+                'id="closeSessionConfirmCancel"',
+                'id="closeSessionConfirmSave"',
+                'id="closeSessionConfirmAccept"',
+                "/static/js/close-session-modal.js",
+                # ... and the workspace verbs' own prompt.
+                'id="genericConfirmModal"',
+                "/static/js/dashboard-close.js",
+            ):
+                with self.subTest(path=path, marker=marker):
+                    self.assertIn(marker, page)
+            # The prompt has to paint over the dialog that raised it, and at
+            # equal z-index that is decided by source order alone.
+            with self.subTest(path=path, marker="order"):
+                self.assertLess(
+                    page.index('id="agentDashboardShell"'),
+                    page.index('id="closeSessionConfirmModal"'),
+                )
 
     def test_close_session_group_gates_on_confirmation(self):
         terminals_js = self._static("js/terminals.js")
@@ -19055,15 +19412,12 @@ class UxInteractionButtonsTestCase(unittest.TestCase):
             terminals_js.index("async function confirmCloseSessionGroup"):
             terminals_js.index("function buildSavedSessionLaunchPayload")
         ]
-        # groups with no connected terminals close without the dialog
-        self.assertIn("session.status === 'connected'", confirm_fn)
-        self.assertIn("connectedCount === 0", confirm_fn)
-        # Escape / backdrop / Cancel all resolve to "keep the session"
-        self.assertIn("closeCloseSessionConfirmModal(CLOSE_SESSION_CANCEL)", terminals_js)
-        self.assertIn("closeCloseSessionConfirmModal(CLOSE_SESSION_CLOSE)", terminals_js)
-        self.assertIn(
-            "closeCloseSessionConfirmModal(CLOSE_SESSION_SAVE_AND_CLOSE)", terminals_js
-        )
+        # Which group is being asked about is this page's; what the prompt says
+        # and when it is skipped are the shared module's, executed by
+        # tests/test_close_session_modal.py rather than spelled again here.
+        self.assertIn("closeSessionPromptSkipDecision(sessions)", confirm_fn)
+        self.assertIn("openCloseSessionConfirmModal({", confirm_fn)
+        self.assertIn("group: getGroupById(groupId)", confirm_fn)
 
     def test_save_and_close_saves_before_teardown_and_aborts_on_failure(self):
         """A requested save that failed must not cost the terminals it was
@@ -21391,6 +21745,19 @@ class SettingsLauncherConfigTestCase(unittest.TestCase):
         )
         self.assertEqual(compose(session(initial_command="")), "")
 
+    def test_codex_launch_enables_chat_titles_without_persisting_the_override(self):
+        for auto in (False, True):
+            session = SimpleNamespace(
+                initial_command="codex", initial_command_mode="agent",
+                agent_selection="codex", agent_auto_mode=auto,
+            )
+            command = web_agents._compose_agent_startup_command(session)
+            self.assertIn(' -c "tui.terminal_title=[\'thread-title\']"', command)
+            self.assertEqual(session.initial_command, "codex")
+            self.assertEqual("--sandbox workspace-write" in command, auto)
+        session.initial_command = "codex resume --last"
+        self.assertEqual(web_agents._compose_agent_startup_command(session), session.initial_command)
+
     def test_startup_sequence_sends_composed_auto_mode_command(self):
         connection = {"kind": "ssh", "shell_kind": "posix"}
         session = SimpleNamespace(
@@ -21707,7 +22074,7 @@ class ConfigDurabilityTestCase(unittest.TestCase):
         client = api.app.test_client()
 
         with patch.object(
-            api, "save_config", side_effect=web_config.ConfigPersistenceError("disk full")
+            api, "update_config", side_effect=web_config.ConfigPersistenceError("disk full")
         ), patch.object(api, "_refresh_runtime_config") as refresh, patch.object(
             api, "_broadcast_app_config_update"
         ) as broadcast:

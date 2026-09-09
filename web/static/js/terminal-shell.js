@@ -39,7 +39,7 @@
        window, the first time a shell menu opens, and cached here. */
     let _wslDistroState = 'idle';
     let _wslDistroNames = [];
-    const _pendingShellSwitchIndexes = new Set();
+    const _pendingShellSwitchPanes = new Set();
     /* index → the shell row whose agent list is open, at most one per menu.
        Dropped when the menu closes: an expansion is a pointer gesture inside
        one opening of the menu, not pane state. */
@@ -287,7 +287,7 @@
         const activeKind = paneShellKind(session);
         const activeDistribution = String(session?.distribution || '').trim();
         const activeAgent = paneAgentKey(session);
-        const busy = _pendingShellSwitchIndexes.has(index);
+        const busy = _pendingShellSwitchPanes.has(terminals[index]);
 
         let sections = '';
         if (paneSupportsShellSwitch(session)) {
@@ -399,7 +399,7 @@
         menu.addEventListener('click', event => {
             event.preventDefault();
             event.stopPropagation();
-            if (_pendingShellSwitchIndexes.has(index)) {
+            if (_pendingShellSwitchPanes.has(terminals[index])) {
                 return;
             }
             /* The chevron expands its row's agent list and does nothing else:
@@ -466,46 +466,37 @@
         });
     }
 
-    /* True when the row the user pressed is already what the pane runs, so a
-       re-selection costs no request and never kills a live shell. The server
-       decides the same thing again; this only spares the round trip. */
-    function paneRelaunchIsNoop(session, { shell, distribution, agent }) {
-        if (shell) {
-            if (paneShellKind(session) !== shell) {
-                return false;
-            }
-            if (shell === 'wsl' && String(session?.distribution || '').trim() !== distribution) {
-                return false;
-            }
-        }
-        return paneAgentKey(session) === agent;
-    }
-
     /* Relaunch one pane under the shell family and/or agent a menu row named.
-       The pane keeps its slot, title and group, so only the process behind it
-       is replaced. An empty `shell` states nothing about the shell family — an
-       SSH pane has none to state — while `agent` is always stated. */
+       The pane keeps its slot, its stored title and its group, so only the
+       process behind it is replaced. An empty `shell` states nothing about the
+       shell family — an SSH pane has none to state — while `agent` is always
+       stated. Pressing an already-selected row still relaunches the pane: the
+       check mark describes what will start, not a disabled state selector.
+
+       What the header *prints* is not the stored title, though: an agent pane
+       whose title is still the launcher's `Terminal N` placeholder is named
+       after its agent, so relaunching a pane onto a different agent (or back
+       to a plain shell) changes what that header should say. The stored title
+       is untouched either way — a name the user typed keeps winning, and the
+       agent's name is still never persisted back. */
     async function relaunchSessionShell(index, { shell = '', distribution = '', agent = '' } = {}) {
         const sessionId = sessionIds[index];
-        const session = terminals[index]?._session;
+        const pane = terminals[index];
+        const session = pane?._session;
+        if (_pendingShellSwitchPanes.has(pane)) return;
         if (!sessionId || !paneIsRelaunchable(session)) {
             return;
         }
         if (shell && !paneSupportsShellSwitch(session)) {
             return;
         }
-        if (paneRelaunchIsNoop(session, { shell, distribution, agent })) {
-            closeAllPaneShellMenus();
-            return;
-        }
-
         const body = { agent };
         if (shell) {
             body.shell = shell;
             body.distribution = distribution;
         }
 
-        _pendingShellSwitchIndexes.add(index);
+        _pendingShellSwitchPanes.add(pane);
         renderPaneShellMenu(index);
         try {
             const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/shell`, {
@@ -518,15 +509,12 @@
                 throw new Error(data.error || `Relaunch failed with status ${response.status}`);
             }
 
+            pane._session = data;
+            const ownerIndex = terminals.indexOf(pane);
+            if (ownerIndex < 0 || sessionIds[ownerIndex] !== sessionId) return;
+            index = ownerIndex;
             closeAllPaneShellMenus();
-            const pane = terminals[index];
-            if (pane) {
-                pane._session = data;
-            }
-            const hostLabel = document.getElementById(`thost-${index}`);
-            if (hostLabel) {
-                hostLabel.textContent = data.host || '';
-            }
+            syncPaneIdentityChrome(index, data);
             /* The backend cleared the old shell's replay buffer; drop its output
                here too so the fresh shell starts on a clean screen. */
             pane?.term?.reset?.();
@@ -535,8 +523,11 @@
             console.error('[GridVibe Sessions] relaunchSessionShell failed:', error);
             showTerminalToast(error.message || 'Relaunch failed', 'error');
         } finally {
-            _pendingShellSwitchIndexes.delete(index);
-            if (!paneShellMenuElement(index)?.hidden) {
+            _pendingShellSwitchPanes.delete(pane);
+            const ownerIndex = terminals.indexOf(pane);
+            if (ownerIndex >= 0 && sessionIds[ownerIndex] === sessionId
+                && !paneShellMenuElement(ownerIndex)?.hidden) {
+                index = ownerIndex;
                 renderPaneShellMenu(index);
             }
         }

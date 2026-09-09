@@ -1,0 +1,715 @@
+/* The agent dashboard — a dialog on whichever page opened it.
+
+   It used to be a page of its own, and this file used to state a page's worth
+   of rules: `color-scheme`, a `body` background, a full-height frame. None of
+   that is this file's to say any more. Both host pages already own their
+   palette, their scrim and the background blur behind a `.modal-shell`, so what
+   is left here is the one thing neither of them has — the surface itself, and
+   the three nested levels inside it.
+
+   The whole point of the layout is that those three levels look like three
+   different things, because the panel this replaced made them three indent
+   depths and that was unreadable:
+
+     · a **workspace** is a band across the dialog, under a ruled heading heavy
+       enough to be read as a divider rather than as an underline;
+     · a **session** is a bordered card inside that band, full width, stacked
+       under the card before it, and wearing its own session tab's colour;
+     · an **agent** is a row inside a card, and states everything about itself
+       on that one row.
+
+   Nothing here is decoration: every heading and every row is a button, because
+   each one is a way out of this dialog and into the thing it describes.
+
+   Colours come from the shared `--gv-dialog-*` and status tokens rather than
+   literals (guardrail 7), which is what lets one stylesheet dress this dialog
+   on two pages with two different legacy palettes and still follow the app's
+   light/dark preference. */
+
+/* The shell is the page's own `.modal-shell`; only the padding is amended, so
+   a dialog this size keeps a margin on a small window without either page
+   having to know it is here. */
+.agent-dashboard-shell {
+    padding: 24px;
+}
+
+/* Deliberately larger than `.modal-card`: a confirmation is a sentence and two
+   buttons, and this is a scrolling tree of three levels. Wide enough for the
+   session cards to flow into more than one column, capped so the dialog still
+   reads as something over the page rather than as a page.
+
+   A **fixed** height rather than a `max-height` that fits its contents. The
+   tree behind it is repainted every couple of seconds and a session ending or
+   an agent starting changes how tall it wants to be, so a surface sized to its
+   contents would resize under the reader's pointer on an ordinary poll — and
+   would open at title-bar height while the first reading is still in flight.
+   `max-height: 100%` is what keeps that fixed height inside the shell's own
+   padding on a very short window. */
+.dash-dialog {
+    display: flex;
+    flex-direction: column;
+    width: min(1040px, 100%);
+    height: min(78vh, 820px);
+    max-height: 100%;
+    overflow: hidden;
+    border: 1px solid var(--gv-dialog-border);
+    border-radius: var(--gv-radius-l);
+    background: var(--gv-bg-app);
+    color: var(--gv-dialog-text);
+    box-shadow: var(--gv-dialog-shadow);
+    font-family: 'Segoe UI', Roboto, -apple-system, BlinkMacSystemFont, sans-serif;
+    font-size: 14px;
+}
+
+.dash-dialog:focus {
+    outline: none;
+}
+
+.dash-dialog *,
+.dash-dialog *::before,
+.dash-dialog *::after {
+    box-sizing: border-box;
+}
+
+/* ── The title bar ── */
+
+.dash-titlebar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    flex-wrap: wrap;
+    flex: 0 0 auto;
+    padding: 12px 20px;
+    border-bottom: 1px solid var(--gv-dialog-border);
+    background: var(--gv-dialog-panel-soft);
+}
+
+.dash-titlebar-left {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    min-width: 0;
+}
+
+.dash-logo {
+    width: 30px;
+    height: 30px;
+    border-radius: 7px;
+    flex: 0 0 auto;
+}
+
+.dash-title {
+    margin: 0;
+    font-size: 1rem;
+    font-weight: 700;
+    letter-spacing: .01em;
+    color: var(--gv-dialog-text);
+}
+
+.dash-titlebar-sub {
+    margin: 1px 0 0;
+    font-size: .72rem;
+    color: var(--gv-dialog-muted);
+}
+
+.dash-titlebar-right {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex: 0 0 auto;
+}
+
+.dash-totals {
+    font-size: .74rem;
+    color: var(--gv-dialog-muted);
+    font-variant-numeric: tabular-nums;
+}
+
+.dash-titlebar-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 30px;
+    height: 30px;
+    padding: 0;
+    border: 1px solid var(--gv-dialog-border);
+    border-radius: var(--gv-radius-s);
+    background: transparent;
+    color: var(--gv-dialog-muted);
+    cursor: pointer;
+}
+
+.dash-titlebar-btn svg {
+    width: 15px;
+    height: 15px;
+}
+
+.dash-titlebar-btn:hover,
+.dash-titlebar-btn:focus-visible {
+    border-color: var(--gv-accent);
+    color: var(--gv-accent);
+    outline: none;
+}
+
+/* Present only while a read has failed, so it is never a strip of chrome that
+   is always there saying nothing. */
+.dash-notice {
+    flex: 0 0 auto;
+    margin: 0;
+    padding: 8px 20px;
+    border-bottom: 1px solid var(--gv-dialog-border);
+    background: var(--gv-danger-soft);
+    color: var(--gv-danger);
+    font-size: .74rem;
+}
+
+/* ── The scroller ── */
+
+.dash-body {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    scrollbar-gutter: stable;
+    padding: 18px 20px 26px;
+}
+
+.dash-empty {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    min-height: 55vh;
+    text-align: center;
+    color: var(--gv-dialog-muted);
+}
+
+.dash-empty-title {
+    margin: 0;
+    font-size: .96rem;
+    font-weight: 600;
+    color: var(--gv-dialog-text);
+}
+
+.dash-empty-note {
+    margin: 0;
+    max-width: 42ch;
+    font-size: .76rem;
+    line-height: 1.5;
+}
+
+/* ── A workspace: a band ── */
+
+/* Bands are now tall — every session in one is full width and stacked — so the
+   join between two of them has to be findable after a scroll rather than
+   inferred from a heading being bolder than the one above it. A rule of its
+   own, at the band's own top edge, plus the space either side of it. */
+.dash-workspace + .dash-workspace {
+    margin-top: 26px;
+    padding-top: 26px;
+    border-top: 2px solid var(--gv-dialog-border);
+}
+
+/* And the heading's own rule is thicker than a hairline for the same reason it
+   is a rule at all: it separates the band's title from the band's contents, and
+   at 1px it read as an underline on the title instead. */
+.dash-workspace-head {
+    display: flex;
+    align-items: baseline;
+    gap: 12px;
+    padding-bottom: 8px;
+    margin-bottom: 14px;
+    border-bottom: 2px solid var(--gv-dialog-border);
+}
+
+/* The heading's name is the pressable part, not the whole rule: a band's
+   heading stretches the width of the window, and a button that wide is a
+   target you hit by accident. */
+.dash-workspace-open {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 2px 6px;
+    margin-left: -6px;
+    border: 0;
+    border-radius: var(--gv-radius-s);
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    cursor: pointer;
+    min-width: 0;
+}
+
+.dash-workspace-open:hover,
+.dash-workspace-open:focus-visible {
+    background: var(--gv-accent-soft);
+    outline: none;
+}
+
+.dash-workspace-name {
+    font-size: .92rem;
+    font-weight: 700;
+    letter-spacing: .06em;
+    text-transform: uppercase;
+    color: var(--gv-accent);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.dash-workspace-meta {
+    font-size: .7rem;
+    color: var(--gv-dialog-muted);
+    white-space: nowrap;
+}
+
+/* ── A session: a card ──
+   One column, always. These used to flow into as many columns as the dialog was
+   wide enough for, which made a card's width depend on how many sessions
+   happened to be open beside it — two cards side by side truncated every title
+   in both, and a third session arriving re-flowed the two already being read.
+   A row here is an agent's name, its shell, its chat title and its state on one
+   line; the title is the long part and the width belongs to it. */
+.dash-sessions {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+/* The edge is the session's own colour — its tab's, from `session-colour.js` —
+   so a card is matched to the tab in the workspace window by hue before its
+   name is read. Thicker than the dialog's own hairlines on purpose: this border
+   is carrying information now, not just closing a box. The fallback is what the
+   card wore before, for a page with no colour module. */
+.dash-session {
+    min-width: 0;
+    container-type: inline-size;
+    border: 2px solid var(--dash-session-color, var(--gv-dialog-border));
+    border-radius: var(--gv-radius-m);
+    background: var(--gv-dialog-panel-soft);
+    overflow: hidden;
+}
+
+/* The heading is a row of two controls -- the way in, and the way to end it --
+   so it is a container now and the pressable chrome belongs to
+   `.dash-session-open` below. The rule under it stays here, because it divides
+   the heading from the agents rather than either control from the other. */
+.dash-session-head {
+    display: flex;
+    align-items: stretch;
+    width: 100%;
+    border-bottom: 1px solid var(--dash-session-color-soft, var(--gv-dialog-border));
+}
+
+/* The name takes the same hue as the edge around it: the two together are what
+   make the card recognisable as *that* tab, and a coloured frame around a
+   default-coloured name reads as decoration rather than as identity.
+
+   Text and edge are two tones of one hue rather than one value, and the light
+   theme is why. Both palettes here — the ten session hues and the eight agent
+   tints — were picked to sit on the dark ground the app shipped with, where a
+   1px edge and a 12px word are both legible in the same mid-tone. On the light
+   card the edge still reads and the word does not: a session called
+   "gridvibe" in `#ffd43b` is yellow on near-white. So the *text* tone is its
+   own property, defaulting to the hue itself and mixed toward the dialog's own
+   text colour under `[data-theme="light"]` — one declaration per palette, no
+   second set of ten values to keep in step with the first, and the hue is
+   still what the eye matches to the tab. */
+.dash-session-name {
+    font-size: .82rem;
+    font-weight: 600;
+    color: var(--dash-session-text, var(--dash-session-color, var(--gv-dialog-text)));
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+}
+
+[data-theme="light"] .dash-session-name {
+    --dash-session-text: color-mix(in srgb, var(--dash-session-color) 55%, var(--gv-dialog-text));
+}
+
+.dash-session-meta {
+    margin-left: auto;
+    flex: 0 0 auto;
+    font-size: .68rem;
+    color: var(--gv-dialog-muted);
+    white-space: nowrap;
+}
+
+/* ── An agent: one row, one line ──
+
+   This was a block — a heading naming the agent and the shell it runs on, with
+   one line per pane gathered under it. The saving that bought only ever existed
+   when several panes of one agent sat in one session card; what it cost
+   everywhere else was two lines for one pane, and a session running three
+   agents drawn as three separate stacks with three headings.
+
+   So the mark, the name and the shell sit to the left of the chat title on the
+   row itself, in a fixed column order, and a card is read straight down its
+   titles with the agents scanned in the margin beside them. */
+
+.dash-agents {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 6px;
+}
+
+/* One pane, one row. `data-agent` rides the button now that the block is gone,
+   so the tint below applies to the row's own mark. */
+.dash-agent {
+    /* Every agent's own tint, in one custom property, so the mark is coloured
+       by one declaration below rather than by a rule per agent per element. The
+       fallback is the app accent, which is what an agent GridVibe has not drawn
+       a mark for wears. */
+    --dash-agent-accent: var(--gv-accent);
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    width: 100%;
+    padding: 6px 8px;
+    border: 0;
+    border-radius: var(--gv-radius-s);
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+}
+
+.dash-agent:hover,
+.dash-agent:focus-visible {
+    background: var(--dash-session-color-soft, var(--gv-accent-soft));
+    outline: none;
+}
+
+.dash-agent-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: 0 0 auto;
+    width: 22px;
+    height: 22px;
+    border-radius: 6px;
+    background: color-mix(in srgb, var(--dash-agent-accent) 16%, transparent);
+    color: var(--dash-agent-accent);
+}
+
+.dash-agent-glyph {
+    width: 14px;
+    height: 14px;
+}
+
+/* The agent's name. It never wraps and never shrinks below what it needs: it is
+   the column the eye runs down, and a name that reflowed with the title beside
+   it would stop being a column at all. */
+.dash-agent-name {
+    flex: 0 0 auto;
+    font-size: .74rem;
+    font-weight: 600;
+    letter-spacing: .01em;
+    color: var(--dash-agent-text, var(--dash-agent-accent));
+    white-space: nowrap;
+}
+
+/* The same rule the session name follows, for the same reason: the mark keeps
+   the full tint (a filled 22px chip carries it), the word is mixed toward the
+   dialog's text colour so it is read rather than recognised. */
+[data-theme="light"] .dash-agent-name {
+    --dash-agent-text: color-mix(in srgb, var(--dash-agent-accent) 55%, var(--gv-dialog-text));
+}
+
+.dash-agent-reading { display: inline-flex; flex: 0 0 auto; margin-left: auto; }
+
+/* What the pane announced. One line rather than the two the block layout could
+   afford: the row now carries four things and the title is the one that gives
+   up its second line for them. */
+.dash-agent-line {
+    flex: 1 1 auto;
+    min-width: 0;
+    font-size: .84rem;
+    font-weight: 500;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* The marks, tinted by which agent they are. Nothing here is a brand colour
+   lifted from a vendor — they are GridVibe's own hues, chosen only to be
+   distinguishable from each other and legible on both grounds, which is the
+   whole job of a tint on a list. */
+.dash-agent[data-agent="claude"] { --dash-agent-accent: #d97757; }
+.dash-agent[data-agent="codex"] { --dash-agent-accent: #4fd1a5; }
+.dash-agent[data-agent="copilot"] { --dash-agent-accent: #a371f7; }
+.dash-agent[data-agent="grok"] { --dash-agent-accent: #9aa3af; }
+.dash-agent[data-agent="opencode"] { --dash-agent-accent: #f0a868; }
+.dash-agent[data-agent="kilo"] { --dash-agent-accent: #7aa2f7; }
+.dash-agent[data-agent="kimi"] { --dash-agent-accent: #6ee7b7; }
+.dash-agent[data-agent="hermes"] { --dash-agent-accent: #c084fc; }
+
+/* ── Tags ── */
+
+.dash-tag {
+    flex: 0 0 auto;
+    padding: 1px 6px;
+    border: 1px solid var(--gv-dialog-border);
+    border-radius: 999px;
+    font-size: .58rem;
+    font-weight: 600;
+    letter-spacing: .05em;
+    text-transform: uppercase;
+    color: var(--gv-dialog-muted);
+    white-space: nowrap;
+}
+
+/* The auto-approval marker earns a hue: it is the one property of a running
+   agent that changes what it may do without asking. */
+.dash-tag-auto {
+    border-color: transparent;
+    background: var(--gv-warning-soft);
+    color: var(--gv-warning);
+}
+
+.dash-tag-active {
+    border-color: transparent;
+    background: var(--gv-accent);
+    color: var(--gv-bg-app);
+}
+
+/* ── The activity reading ──
+   A word and a dot for the state and, before them, either a determinate bar or
+   nothing. The two are separate on purpose: every agent has a state, and only
+   the few that speak the progress sequence have a percentage. */
+
+.dash-activity {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    flex: 0 0 auto;
+}
+
+.dash-state-word {
+    font-size: .66rem;
+    color: var(--gv-dialog-muted);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+
+.dash-state-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--gv-dialog-muted);
+}
+
+.dash-state-working .dash-state-dot {
+    background: var(--gv-success);
+    animation: dash-pulse 1.4s ease-in-out infinite;
+}
+
+.dash-state-working .dash-state-word {
+    color: var(--gv-success);
+}
+
+.dash-state-idle .dash-state-dot {
+    background: var(--gv-warning);
+}
+
+.dash-state-error .dash-state-dot {
+    background: var(--gv-danger);
+}
+
+.dash-state-error .dash-state-word {
+    color: var(--gv-danger);
+}
+
+@keyframes dash-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: .28; }
+}
+
+.dash-progress {
+    position: relative;
+    width: 52px;
+    height: 4px;
+    overflow: hidden;
+    border-radius: 999px;
+    background: var(--gv-dialog-border);
+}
+
+.dash-progress-fill {
+    display: block;
+    height: 100%;
+    border-radius: inherit;
+    background: var(--gv-success);
+}
+
+.dash-progress-error .dash-progress-fill {
+    background: var(--gv-danger);
+}
+
+.dash-progress-warning .dash-progress-fill {
+    background: var(--gv-warning);
+}
+
+/* An agent that says it is busy without saying how far along it is: the bar
+   still moves, because "working, no number" is a real reading and a bar frozen
+   at zero would read as stalled. */
+.dash-progress-fill.is-indeterminate {
+    width: 40%;
+    animation: dash-slide 1.5s ease-in-out infinite;
+}
+
+@keyframes dash-slide {
+    0% { transform: translateX(-100%); }
+    100% { transform: translateX(250%); }
+}
+
+.dash-progress-value {
+    min-width: 26px;
+    font-size: .64rem;
+    font-variant-numeric: tabular-nums;
+    color: var(--gv-dialog-muted);
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .dash-state-working .dash-state-dot { animation: none; }
+    .dash-progress-fill.is-indeterminate { animation: none; }
+}
+
+/* ── Ending things from here ──
+
+   Three close verbs, and the shape of each control says which of them it is.
+   The two workspace verbs are words: they differ by whether the sessions
+   survive, which no pair of icons this size communicates. The session verb is
+   the × every tab strip has. */
+
+.dash-workspace-actions {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-left: auto;
+    flex: 0 0 auto;
+}
+
+.dash-workspace-action {
+    padding: 3px 9px;
+    border: 1px solid var(--gv-dialog-border);
+    border-radius: var(--gv-radius-s);
+    background: transparent;
+    color: var(--gv-dialog-muted);
+    font: inherit;
+    font-size: .68rem;
+    line-height: 1.6;
+    white-space: nowrap;
+    cursor: pointer;
+}
+
+.dash-workspace-action:hover,
+.dash-workspace-action:focus-visible {
+    border-color: var(--gv-accent);
+    color: var(--gv-accent);
+    outline: none;
+}
+
+/* The destructive one is tinted only on approach: a band that is always
+   carrying a red control reads as a warning about the workspace. */
+.dash-workspace-action.is-danger:hover,
+.dash-workspace-action.is-danger:focus-visible {
+    border-color: var(--gv-danger);
+    color: var(--gv-danger);
+    background: var(--gv-danger-soft);
+}
+
+/* The card's heading is now a row of two controls rather than one button, so
+   the rule that separated it from the agents moves out here with it. */
+.dash-session-open {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex: 1 1 auto;
+    min-width: 0;
+    padding: 9px 12px;
+    border: 0;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    text-align: left;
+    cursor: pointer;
+}
+
+.dash-session-open:hover,
+.dash-session-open:focus-visible {
+    background: var(--dash-session-color-soft, var(--gv-accent-soft));
+    outline: none;
+}
+
+.dash-session-close {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: 0 0 auto;
+    align-self: stretch;
+    width: 30px;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: var(--gv-dialog-muted);
+    cursor: pointer;
+}
+
+.dash-session-close svg {
+    width: 13px;
+    height: 13px;
+}
+
+.dash-session-close:hover,
+.dash-session-close:focus-visible {
+    background: var(--gv-danger-soft);
+    color: var(--gv-danger);
+    outline: none;
+}
+
+/* Busy is a class and never rewritten markup: the reading behind these rows is
+   repainted every couple of seconds, and a control that swapped its own text
+   would flicker between the two on every poll. */
+.dash-workspace-action.is-busy,
+.dash-session-close.is-busy,
+.modal-card.is-busy {
+    pointer-events: none;
+    opacity: .55;
+}
+
+/* A confirmation rather than a failure. Same line, different hue, because two
+   lines would be a second notification surface on a window that has one. */
+.dash-notice.is-info {
+    background: var(--gv-accent-soft);
+    color: var(--gv-accent);
+}
+
+/* A card narrow enough that the row's four columns cannot share one line. The
+   title takes the second line whole — it is the long one — and the mark, the
+   name and the shell stay together on the first, which is the column order the
+   wide layout has. Wrapping is what the row gives up before the title starts
+   being truncated to nothing. */
+@container (max-width: 380px) {
+    .dash-agent { flex-wrap: wrap; gap: 5px 8px; }
+    /* The title drops below; the state stays up on the first line, where the
+       row's own `margin-left: auto` already has it hard right. */
+    .dash-agent-line { flex-basis: 100%; order: 1; }
+    .dash-session-open { flex-wrap: wrap; }
+    .dash-session-meta { flex-basis: 100%; margin-left: 0; }
+    .dash-tag-transport { max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+}
+
+@media (max-width: 500px) {
+    .agent-dashboard-shell { padding: 10px; }
+    .dash-dialog { height: min(88vh, 820px); }
+    .dash-titlebar { padding: 10px 12px; gap: 8px; }
+    .dash-titlebar-right { width: 100%; justify-content: space-between; }
+    .dash-body { padding: 12px; }
+    .dash-workspace-head { flex-wrap: wrap; gap: 4px 8px; }
+    .dash-workspace-actions { margin-left: 0; }
+}

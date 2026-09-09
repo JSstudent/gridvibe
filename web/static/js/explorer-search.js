@@ -127,6 +127,8 @@
         const state = ensureExplorerRepoSearchState(pane);
         state.abort?.abort();
         state.abort = null;
+        const requestSeq = (state.requestSeq || 0) + 1;
+        state.requestSeq = requestSeq;
         if (state.query.trim().length < EXPLORER_REPO_SEARCH_MIN_CHARS) {
             state.loading = false;
             state.error = '';
@@ -136,8 +138,6 @@
             return;
         }
 
-        const requestSeq = (state.requestSeq || 0) + 1;
-        state.requestSeq = requestSeq;
         const controller = new AbortController();
         state.abort = controller;
         state.loading = true;
@@ -180,9 +180,24 @@
             if (state.requestSeq === requestSeq) {
                 state.loading = false;
                 state.abort = null;
-                renderExplorerSearchResults(index);
+                const ownerIndex = terminals.indexOf(pane);
+                if (ownerIndex >= 0 && sessionIds[ownerIndex] === sessionId) {
+                    renderExplorerSearchResults(ownerIndex);
+                }
             }
         }
+    }
+
+    function releaseExplorerRepoSearch(pane, { dispose = false } = {}) {
+        const state = pane?._explorerRepoSearch;
+        if (!state) return;
+        clearTimeout(state.debounceTimer);
+        state.debounceTimer = null;
+        state.requestSeq += 1;
+        state.abort?.abort();
+        state.abort = null;
+        state.loading = false;
+        if (dispose) pane._explorerRepoSearch = null;
     }
 
     function scheduleExplorerRepoSearch(index, { delay = EXPLORER_REPO_SEARCH_DEBOUNCE_MS } = {}) {
@@ -192,7 +207,15 @@
         }
         const state = ensureExplorerRepoSearchState(pane);
         clearTimeout(state.debounceTimer);
-        state.debounceTimer = setTimeout(() => runExplorerRepoSearch(index), delay);
+        const sessionId = sessionIds[index];
+        const requestSeq = ++state.requestSeq;
+        state.debounceTimer = setTimeout(() => {
+            state.debounceTimer = null;
+            const ownerIndex = terminals.indexOf(pane);
+            if (state.requestSeq === requestSeq && ownerIndex >= 0 && sessionIds[ownerIndex] === sessionId) {
+                runExplorerRepoSearch(ownerIndex);
+            }
+        }, delay);
     }
 
     function explorerSearchHitTextHtml(match) {
@@ -295,6 +318,12 @@
             results.innerHTML = files.length
                 ? files.map(file => explorerSearchGroupHtml(index, file, state.collapsed.has(file.path), activeKey)).join('')
                 : '<div class="explorer-diff-sidebar-empty">No matches found.</div>';
+            if (payload.error) {
+                results.innerHTML = `<div class="explorer-diff-sidebar-error">
+                    <div>${escHtml(payload.error)}</div>
+                    <button type="button" class="explorer-search-btn explorer-search-retry" data-explorer-search-retry>Retry</button>
+                </div>` + (files.length ? results.innerHTML : '');
+            }
             const footerParts = [];
             const engineLabel = EXPLORER_SEARCH_ENGINE_LABELS[payload.engine] || payload.engine || '';
             if (engineLabel) {

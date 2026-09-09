@@ -97,6 +97,10 @@
                     /* The one row that names the launcher without being a
                        launcher chord — and this panel is on the launcher too. */
                     note: 'in a workspace window'
+                },
+                {
+                    chords: [['Alt', 'A']],
+                    action: 'Open the agent dashboard'
                 }
             ]
         },

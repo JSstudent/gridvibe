@@ -42,6 +42,7 @@ from web.process_bounds import (
     new_process_group,
     terminate_process_tree,
 )
+from web.rename_noreplace import rename_noreplace
 
 try:
     import paramiko
@@ -1689,6 +1690,63 @@ def _remote_exit_status(stream: Any) -> Optional[int]:
         return None
 
 
+def _run_bounded_remote_command(client, command, *, deadline, max_output_bytes):
+    """Drain both exec streams fairly, retaining completion and limit facts."""
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError('Remote search deadline expired')
+    stdin, stdout, stderr = client.exec_command(command, timeout=remaining)
+    channel = stdout.channel
+    chunks, errors = [], []
+    size = error_size = 0
+    truncated = error_truncated = timed_out = False
+    status = None
+    try:
+        channel.settimeout(min(0.1, remaining))
+        while True:
+            if time.monotonic() >= deadline:
+                timed_out = True
+                break
+            progress = False
+            if channel.recv_ready():
+                data = channel.recv(min(4096, max_output_bytes - size + 1))
+                available = max_output_bytes - size
+                chunks.append(data[:available])
+                size += len(data[:available])
+                truncated = len(data) > available
+                progress = bool(data)
+            if channel.recv_stderr_ready():
+                data = channel.recv_stderr(min(4096, EXPLORER_GIT_MAX_STDERR_BYTES - error_size + 1))
+                available = EXPLORER_GIT_MAX_STDERR_BYTES - error_size
+                errors.append(data[:available])
+                error_size += len(data[:available])
+                error_truncated = len(data) > available
+                progress = progress or bool(data)
+            if truncated or error_truncated:
+                break
+            if not channel.recv_ready() and not channel.recv_stderr_ready():
+                if channel.exit_status_ready():
+                    code = channel.recv_exit_status()
+                    status = code if code >= 0 else None
+                    break
+                if channel.closed:
+                    break
+            if not progress:
+                time.sleep(min(0.01, max(0, deadline - time.monotonic())))
+    finally:
+        channel.close()
+        for stream in (stdin, stdout, stderr):
+            if stream is not None:
+                stream.close()
+    result = _git_command_result(
+        args=command, returncode=status, stdout=b''.join(chunks), stderr=b''.join(errors),
+        stdout_truncated=truncated, stderr_truncated=error_truncated,
+        output_limit_terminated=truncated or error_truncated,
+    )
+    result.timed_out = timed_out
+    return result
+
+
 def _run_remote_git_command(
     client: Any,
     args: List[str],
@@ -1944,12 +2002,9 @@ class _LocalExplorerBackend:
                     raise exc
                 return
 
-        # Directories cannot be hard-linked. The policy claim excludes every
-        # GridVibe-internal race; this final existence check narrows the residual
-        # race with an external writer before rename(2).
-        if self.fs_lstat(destination) is not None:
-            raise FileExistsError(errno.EEXIST, "Destination exists", destination)
-        os.rename(source, destination)
+        # A pre-check cannot exclude an external writer. Refuse if the host or
+        # filesystem lacks the atomic primitive; never fall back to overwrite.
+        rename_noreplace(source, destination)
 
     def fs_chmod(self, path: str, mode: int) -> None:
         os.chmod(path, mode, follow_symlinks=False)
@@ -2362,16 +2417,11 @@ class _SftpExplorerBackend:
 
         def generate() -> Any:
             command = explorer_search.build_remote_grep_command(scope_path, options)
-            try:
-                _stdin, stdout, _stderr = self.client.exec_command(
-                    command, timeout=limits.timeout_seconds
-                )
-                stream = stdout.read()
-            except (socket.timeout, TimeoutError) as exc:
-                raise explorer_search.SearchDeadlineExceeded() from exc
-            if isinstance(stream, str):
-                stream = stream.encode("utf-8", errors="replace")
-            yield from explorer_search.parse_remote_grep_output(self, root_path, stream)
+            yield from explorer_search.remote_search_records(
+                self, command, root_path, deadline,
+                explorer_search.SEARCH_REMOTE_MAX_OUTPUT_BYTES,
+                explorer_search.parse_remote_grep_output, no_matches_status=1,
+            )
 
         return "remote-grep", generate()
 
@@ -2388,16 +2438,11 @@ class _SftpExplorerBackend:
 
         def generate() -> Any:
             command = explorer_search.build_remote_find_command(root_path)
-            try:
-                _stdin, stdout, _stderr = self.client.exec_command(
-                    command, timeout=limits.timeout_seconds
-                )
-                stream = stdout.read()
-            except (socket.timeout, TimeoutError) as exc:
-                raise explorer_search.SearchDeadlineExceeded() from exc
-            if isinstance(stream, str):
-                stream = stream.encode("utf-8", errors="replace")
-            yield from explorer_search.parse_remote_find_output(self, root_path, stream)
+            yield from explorer_search.remote_search_records(
+                self, command, root_path, deadline,
+                explorer_search.FIND_REMOTE_MAX_OUTPUT_BYTES,
+                explorer_search.parse_remote_find_output,
+            )
 
         return "remote-find", generate()
 
