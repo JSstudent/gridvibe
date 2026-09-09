@@ -145,7 +145,10 @@ changing any field that survives restart; it owns the complete save/restore flow
   and its ceiling. The reading lives on the pane's connection entry and is
   replaced, never edited, so a lock-free pump write and a locked snapshot read
   cannot meet a half-updated record. A retired entry's reading is unreachable
-  and needs no ownership check.
+  and needs no ownership check. Observation runs on every chunk of every pane,
+  agent or not, so it stays off the copy path: neither sequence pattern can
+  match without its own two-character head, and the liveness test searches for
+  the first visible character instead of substituting the chunk down to one.
 - `web/terminal_cwd.py` parses OSC 7 / OSC 9;9 outside locks with bounded
   per-connection residue and never filters output. `_publish_observed_cwd()`
   checks exact registry-entry identity and writes metadata in the same
@@ -478,6 +481,22 @@ unless the task explicitly changes this contract.
 - Per-row `POST /api/workspaces/<id>/save` reuses flush-then-capture for that
   workspace only, leaves presets alone, and refuses when no window is reachable.
   Never capture stale server presentation as a successful explicit save.
+- `POST /api/session-groups/<id>/save` saves one live group as a reusable preset
+  for a surface that is not the window holding it. It shares the exit save's own
+  builder (`_save_live_group_preset()`), flushes the owning window when one is
+  connected, and — deliberately unlike the workspace save — does **not** refuse
+  when none is: a session preset carries no window chrome, so with nothing open
+  there is nothing newer to wait for. It captures no workspace slot, issues no
+  teardown decision, and closes nothing; a partial result (preset written, group
+  gone before it could be linked) is reported as one rather than rounded either
+  way. An empty group is `409`, a missing one `404`.
+- The three-outcome close prompt is `close-session-modal.js` over
+  `partials/close_session_modal.html`, shared by the session tab and the
+  dashboard's session card. One irreversible act gets one prompt: a second
+  surface with its own copy is how two of them come to warn about differently
+  sized consequences. A second open resolves the outgoing prompt to cancel. The
+  prompt is skipped only for a group whose panes have *all* stopped — an empty
+  status list means the lookup failed and the safe reading is to ask.
 - Keep lifecycle credential snapshots server-only. Do not synchronously evaluate
   JS in pywebview's synchronous `closing` callback: cancel immediately and schedule
   the in-page prompt after returning.
@@ -505,7 +524,10 @@ unless the task explicitly changes this contract.
   sides. `pane["index"]` stays the pane's position in its *whole* group — it is
   what names and focuses the pane — so the filter is applied after `enumerate`,
   never before. Every count (`totals`, `agent_count`) is agent-scoped;
-  `pane_count` on a group is the only total-pane number.
+  `pane_count` on a group and `live_group_count` on a workspace are the only
+  unfiltered numbers. A close confirmation states consequences, so it reads
+  `live_group_count`: naming the agent-scoped count there would understate an
+  irreversible act.
 - `totals.working` is the button badge's number and is composed here, beside
   the rows, so the badge is a tally of the state dots in the list it labels
   rather than a second answer to the same question. A pane counts only when
@@ -555,7 +577,11 @@ unless the task explicitly changes this contract.
   never an absolute path: it is one `nowrap` row with an ellipsis at its end, so
   a full path is clipped at exactly the segment that identifies the pane. The
   full path is on the row's hover, which is what makes shortening the line
-  lossless.
+  lossless. The hover is therefore `paneChatTooltip()`'s value on every write,
+  including an in-place update, and it is compared separately from the line: a
+  pane that only moved keeps its announced title, and `directory` is absent from
+  the repaint's structure key, so the hover is the one thing on the row that
+  says where the pane now is.
 - A pane with no transport carries `activity: null`. "Nothing to observe" and
   "observed nothing yet" (`state: "unknown"`) are different answers.
 - Liveness falls back to output cadence, because most agents publish no progress
@@ -570,34 +596,80 @@ unless the task explicitly changes this contract.
   pane runs — the mode transitions and the shell/agent relaunch — repaints the
   pane header's name and agent glyph from the session it got back. Plain,
   explorer, and browser panes carry no agent glyph.
-- The dashboard is a window (`/dashboard`, `dashboard-window.js`), not a panel:
-  it reads across every workspace and is in none, so it is opened and focused
-  the way a workspace window is — the native bridge's `open_dashboard_window()`
-  first, a named `window.open` second. There is one of it; a second request
-  focuses what is open. It is registered as an auxiliary native window: it
-  minimizes and themes with the rest and is never a reason for the app to stay
-  running.
-- The host pages hold only the button: `dashboard.js` opens the window, binds
-  `Alt+A` (matched on `event.code`, Ctrl excluded so AltGr cannot fire it, and
-  gated by the page's own `minimizeAllShortcutBlocked`), and polls for the
-  badge without overlapping requests. Badge and window reads have bounded
-  deadlines, cancel on hide/pagehide, refresh on focus, reject malformed
-  payloads, and discard answers superseded by a newer request.
+- The dashboard is a **dialog over the page that raised it**
+  (`dashboard-dialog.js` over `partials/agent_dashboard_dialog.html`), not a
+  window and not a panel. It has no route and no native window of its own:
+  `/dashboard` is not served, nothing registers it for minimize or teardown,
+  and `_should_exit_after_window_close()` grants it no exemption. Its root is
+  the app's own `.modal-shell`, so both pages' scrim and blur already cover it
+  and `EXPLORER_ESCAPE_CLAIM_SELECTOR` already claims Escape for it. Include
+  the partial *before* the confirm dialogs on each page; at equal z-index the
+  later element wins.
+- It polls only while it is open. Opening arms the poll, reads once, publishes
+  the exclusivity claim below and moves focus to the surface rather than to a
+  control in it; closing disarms the poll, aborts what is in flight, and clears
+  the action notice while leaving the read notice describing the tree still on
+  screen.
+- **There is one dialog across every window, and the claim that keeps it so is
+  a notice, never a lock.** Nothing may refuse to open, or a window killed with
+  its dialog up would leave the button dead everywhere else. An arriving claim
+  is compared with this window's own: later wins, an exact tie breaks on window
+  id, and only an open is ever broadcast. `BroadcastChannel` is the fast path
+  and skips this document's own `source` (a channel does deliver to other
+  channel objects in the same document); `localStorage` is the fallback. A page
+  restored from the back/forward cache has missed every claim made while it was
+  frozen, so it claims again rather than reading.
+- Four dismissals, and leaving the window is one of them: the title-bar ×, the
+  backdrop *alone*, Escape, and `blur` plus `visibilitychange` together, since
+  neither of those covers every host and closing is idempotent. Escape is
+  answered only while this is the top visible `.modal-shell`, so a close prompt
+  raised over the dialog keeps its own key; nothing here calls `preventDefault`.
+  Focus returns to the opener only when the dialog still holds it **and** this
+  window still has focus.
+- Both host pages carry the button, the dialog partial and the close-prompt
+  partial, and `dashboard.js` wires all of it: it toggles the dialog through
+  `toggleAgentDashboardDialog()`, binds `Alt+A` (matched on `event.code`, Ctrl
+  excluded so AltGr cannot fire it, and gated by the page's own
+  `minimizeAllShortcutBlocked`), and polls for the badge without overlapping
+  requests. Badge and dialog reads have bounded deadlines, cancel on
+  hide/pagehide, refresh on focus, reject malformed payloads, and discard
+  answers superseded by a newer request.
+- A row lands on the pane it names, not merely on the window. The workspace the
+  reader is already in is applied directly through `applyWorkspaceFocusTarget`,
+  because raising an already-raised window fires no `focus` event; every other
+  workspace gets a one-shot, TTL-bounded `requestWorkspaceFocusTarget` stored
+  *before* the window is asked for, claimed once by the window it names, never
+  by the window that wrote it. A held target is settled again at the end of the
+  load that produces its pane, and expires rather than waiting for a pane that
+  is never coming.
+- The dashboard's close verbs are the app's existing ones reached from here,
+  never new questions: a session card's × opens the same three-outcome prompt
+  the session tab's × does (`close-session-modal.js`), and the band's workspace
+  verbs are `confirmCloseLiveWorkspace()` and the launcher's own close. *Save
+  and close* saves first and closes only if that succeeded. Close window is
+  **withheld** in browser mode rather than disabled, because `window.close()`
+  from here would close the dashboard's own page. The in-flight guard is module
+  state keyed by target, not a class on a button the poll may replace.
 - The badge paints `totals.working` and validates that same field — a payload
   accepted on one count and painted from another reports `0` where it should
   report `?`. No working agent hides the badge rather than showing a zero: a
   badge that counts what is merely open is lit permanently and signals
   nothing, so its absence has to be a reading too.
-- `dashboard-focus.js` owns a same-origin, short-lived focus lease. While the
-  dashboard is focused and visible, unfocused launcher/workspace documents add
-  the content-only blur class; focusing a host clears its own blur immediately.
-  BroadcastChannel is the fast path, localStorage is the fallback, and lease
-  expiry prevents a crashed dashboard from leaving pages blurred.
+- `dashboard-focus.js` owns a same-origin, short-lived focus lease, and which
+  page owns it is no longer fixed for that page's life: every host can raise the
+  dialog, so `setDashboardActive()` moves ownership and the page holds the lease
+  only while its dialog is up. While it is, unfocused launcher/workspace
+  documents add the content-only blur class; focusing a host clears its own blur
+  immediately. Releasing **publishes** rather than letting the lease lapse, or
+  every other window keeps its dim for the rest of the lease. BroadcastChannel
+  is the fast path, localStorage is the fallback, and expiry remains the
+  backstop against a page that died holding it.
 - Dashboard layout must remain usable without horizontal overflow at narrow
-  widths. A polling update that changes only a row's title, status, progress, or
-  idle age updates that row in place; structural changes rebuild the tree while
-  restoring scroll and focus. A failed read leaves the last good tree on screen
-  behind a stated retry notice, and an action failure survives successful polls.
+  widths. A polling update that changes only a row's title, hover, status,
+  progress, or idle age updates that row in place, each field on its own
+  comparison; structural changes rebuild the tree while restoring scroll and
+  focus. A failed read leaves the last good tree on screen behind a stated retry
+  notice, and an action failure survives successful polls.
 
 ## Architecture and extraction boundaries
 
@@ -646,6 +718,17 @@ unless the task explicitly changes this contract.
   Supplied artwork with a palette of its own — the app logo, the dashboard
   button's `active_ws.ico` — stays an `<img>` from `/docs/images/`; it is an
   identity, not a control glyph, and must not be converted to a stroke SVG.
+- A session's hue is `session-colour.js` and an agent's mark is
+  `agent-glyphs.js`, each DOM-free, Node-tested and read by both the workspace
+  window and the dashboard. The palette's order is load-bearing — it is what the
+  group-id hash indexes — so a hue is replaced in place and never reordered, and
+  the hash itself never changes. A glyph is emitted with its registry key on the
+  wrapper for the stylesheet to tint; an agent GridVibe has not drawn falls back
+  to the shared terminal mark, never to nothing.
+- `agent-dashboard.css` dresses one dialog on two pages and states no page's
+  palette: no `color-scheme`, no `body` rule, no full-height frame. It reads the
+  shared `--gv-dialog-*` and status tokens, so both legacy page palettes dress
+  it without either learning it is there.
 - Floating explorer surfaces use `--explorer-float-border` in all five explorer
   palette blocks. Body-mounted surfaces carry the pane's `data-explorer-theme`
   and corresponding selectors so opposite-theme panes stay consistent.

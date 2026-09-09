@@ -649,7 +649,17 @@
                 const line = dashboardPaneLine(pane);
                 if (!previous || line !== dashboardPaneLine(previous)) {
                     row.querySelector('.dash-agent-line').textContent = line;
-                    row.title = line;
+                }
+                /* The hover is its own comparison rather than a second write
+                   under the line's. It carries the full path the line
+                   shortened away, which is the whole reason shortening the
+                   line is lossless — writing the line into it would throw that
+                   away on the first title change — and `directory` is
+                   deliberately absent from the structure key above, so a pane
+                   that only moved would otherwise go on naming where it was. */
+                const hover = dashboardPaneHover(pane);
+                if (!previous || hover !== dashboardPaneHover(previous)) {
+                    row.title = hover;
                 }
                 const reading = dashboardActivityHtml(pane);
                 if (!previous || reading !== dashboardActivityHtml(previous)) {

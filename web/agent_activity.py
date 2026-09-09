@@ -79,6 +79,12 @@ _TITLE_CONTROL_PATTERN = re.compile(r"[\x00-\x1f\x7f]")
 _TERMINAL_OSC_PATTERN = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\|$)")
 _TERMINAL_CSI_PATTERN = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
+#: One character the reader would actually see: neither a control code nor
+#: whitespace. It is *searched for* rather than substituted away, because the
+#: only question ever asked of it is whether there is any -- and on ordinary
+#: output the answer is the chunk's first character.
+_VISIBLE_TEXT_PATTERN = re.compile(r"[^\s\x00-\x1f\x7f]")
+
 #: OSC 9;4 states, by the numeric code the sequence carries.
 PROGRESS_STATE_NONE = ""
 PROGRESS_STATE_NORMAL = "normal"
@@ -140,10 +146,21 @@ def has_agent_screen_output(chunk: str, residue: str = "") -> bool:
     This only classifies output; the transport still forwards every byte.
     Include the previous residue so the tail of a split title isn't mistaken
     for visible text when it arrives on its own.
+
+    It is also the pump's hot path -- it runs on every chunk of every pane,
+    whether or not that pane runs an agent -- so it answers without rewriting
+    the chunk wherever it can. Neither sequence pattern can match without its
+    own two-character head, so output carrying none is never handed to a
+    substitution at all, and colour-heavy output skips the one sequence it
+    does not carry. What is left is a search that stops at the first visible
+    character rather than a third copy of the text.
     """
-    visible = _TERMINAL_OSC_PATTERN.sub("", (residue or "") + (chunk or ""))
-    visible = _TERMINAL_CSI_PATTERN.sub("", visible)
-    return bool(_TITLE_CONTROL_PATTERN.sub("", visible).strip())
+    visible = (residue or "") + (chunk or "")
+    if "\x1b]" in visible:
+        visible = _TERMINAL_OSC_PATTERN.sub("", visible)
+    if "\x1b[" in visible:
+        visible = _TERMINAL_CSI_PATTERN.sub("", visible)
+    return bool(_VISIBLE_TEXT_PATTERN.search(visible))
 
 
 def parse_progress_payload(payload: Any) -> Optional[Tuple[str, int]]:

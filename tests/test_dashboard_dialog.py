@@ -625,8 +625,11 @@ class DashboardDialogStructureTestCase(DashboardDialogTestCase):
             const originalHtml = body().innerHTML;
             const line = { textContent: 'First chat' };
             const reading = { innerHTML: dashboardActivityHtml(first) };
-            const row = { dataset: { sessionId: 's1' }, title: 'First chat', querySelector: selector =>
-                selector === '.dash-agent-line' ? line : reading };
+            /* The hover the first render actually gave this row, path and all,
+               so an update that dropped it would show here. */
+            const row = { dataset: { sessionId: 's1' }, title: dashboardPaneHover(first),
+                querySelector: selector =>
+                    selector === '.dash-agent-line' ? line : reading };
             body().querySelectorAll = () => [row];
             body().scrollTop = 123;
             fetchAnswer = snapshot([group([pane({ activity: activity({
@@ -639,9 +642,44 @@ class DashboardDialogStructureTestCase(DashboardDialogTestCase):
         )
         self.assertTrue(result["sameButtons"])
         self.assertEqual(result["line"], "Renamed chat")
-        self.assertEqual(result["tooltip"], "Renamed chat")
+        # The line is shortened to a leaf, and that is only lossless because
+        # the hover still carries the whole path. An in-place update writes the
+        # hover's own value, never the line's.
+        self.assertEqual(result["tooltip"], "Renamed chat\n10.0.0.5: /srv/app")
         self.assertIn("Idle 1m", result["reading"])
         self.assertEqual(result["scroll"], 123)
+
+    def test_a_pane_that_only_moved_updates_the_hover_its_line_does_not_show(self):
+        """`directory` is deliberately absent from the structure key, so a pane
+        that has only changed directory takes the in-place path -- and its line,
+        which is the chat title the agent announced, does not move with it. The
+        hover is the only thing on the row that says where the pane now is, so
+        it is the thing that has to be rewritten."""
+        result = self._run_node(
+            """
+            dashboardShown();
+            const before = pane({ activity: activity({ title: 'Fix the parser', state: 'working' }) });
+            fetchAnswer = snapshot([group([before])]);
+            await refreshAgentDashboard();
+            const line = { textContent: dashboardPaneLine(before) };
+            const reading = { innerHTML: dashboardActivityHtml(before) };
+            const row = { dataset: { sessionId: 's1' }, title: dashboardPaneHover(before),
+                querySelector: selector =>
+                    selector === '.dash-agent-line' ? line : reading };
+            body().querySelectorAll = () => [row];
+            const originalHtml = body().innerHTML;
+            fetchAnswer = snapshot([group([pane({
+                directory: '/srv/app/worker',
+                activity: activity({ title: 'Fix the parser', state: 'working' })
+            })])]);
+            await refreshAgentDashboard();
+            report({ sameButtons: body().innerHTML === originalHtml,
+                line: line.textContent, tooltip: row.title });
+            """
+        )
+        self.assertTrue(result["sameButtons"])
+        self.assertEqual(result["line"], "Fix the parser")
+        self.assertEqual(result["tooltip"], "Fix the parser\n10.0.0.5: /srv/app/worker")
 
     def test_a_hidden_page_aborts_its_request_and_ignores_the_late_result(self):
         result = self._run_node(
