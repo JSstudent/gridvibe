@@ -252,6 +252,22 @@ Object.assign(globalThis, {
     fireWindow: windowListeners.fire
 });
 
+/* The two transports the dialog's one-at-a-time claim rides, stubbed to
+   nothing. Node has a real `BroadcastChannel` of its own and an open one holds
+   its event loop up, so a harness that let the module reach for the genuine
+   article would never let this process exit. What the claim *does* is
+   `test_dashboard_dialog.py`'s subject; here it only has to be harmless. */
+globalThis.BroadcastChannel = class {
+    postMessage() {}
+    close() {}
+};
+globalThis.localStorage = {
+    getItem: () => null,
+    setItem() {},
+    removeItem() {}
+};
+const GRIDVIBE_WINDOW_ID = 'dashboard-close-harness';
+
 /* Swapped per case: `null` is a browser tab, an object is the native window. */
 let nativeBridge = null;
 Object.defineProperty(globalThis, 'pywebview', {

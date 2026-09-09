@@ -14,7 +14,7 @@
        working in, gave the answer a taskbar entry of its own to find again, and
        needed two chords of its own to get back. So it now opens over the page
        that asked for it and a press outside it puts that page back — on both
-       pages, from the same partial and this one module. Four consequences,
+       pages, from the same partial and this one module. Five consequences,
        each of which is why something below is not the obvious code:
 
          · **It polls only while it is open.** The reading is a whole-tree
@@ -35,9 +35,19 @@
            raises a window that is already raised, so no `focus` event fires and
            the stored target is never claimed — the row would do nothing at all.
            The page that owns the tab applies it directly instead.
-         · **Acting closes it.** Every row is a way somewhere else; a dialog
-           still covering the pane it just took you to is in the way. The close
-           verbs are the exception — they end something and leave you here.
+         · **Acting closes it, and so does leaving.** Every row is a way
+           somewhere else; a dialog still covering the pane it just took you to
+           is in the way. The close verbs are the exception — they end something
+           and leave you here. And leaving the *window* is the same gesture as
+           pressing the backdrop: this surface belongs to the window it was
+           raised on, so that window must not be left holding a stale one behind
+           whichever window the reader moved to.
+         · **There is one of it, across every window.** Every GridVibe window
+           carries this dialog, so raising it is a gesture the app has several
+           of — and two of them up at once is two readings of one tree drifting
+           apart on their own polls. Opening broadcasts a claim and the newest
+           open wins; nothing ever refuses to open, so a window that died with
+           its dialog up cannot leave the button dead everywhere else.
 
        The rest is what the reading itself is for:
 
@@ -673,10 +683,10 @@
 
     /* The one gate every reader passes through, the Refresh button included:
        a shut dialog is not a surface with an old reading on it, it is a surface
-       nobody is looking at, and the window-focus listener above would otherwise
-       compose the whole tree every time the reader clicked back into the page. */
+       nobody is looking at. It asks one thing, for the reason
+       `scheduleAgentDashboardRefresh` states. */
     async function refreshAgentDashboard() {
-        if (!agentDashboardDialogOpen() || document.hidden) return;
+        if (!agentDashboardDialogOpen()) return;
         const requestId = ++_agentDashboardRequestId;
         _agentDashboardController?.abort();
         const controller = new AbortController();
@@ -724,16 +734,22 @@
         paintAgentDashboardSnapshot(snapshot);
     }
 
-    /* Stands down entirely while the dialog is shut or the window is hidden —
-       a reading nobody can see has nothing to keep current, and this one is a
-       whole-tree compose every two seconds. Restarted rather than left running,
-       so a closed dialog costs exactly nothing. */
+    /* Stands down entirely while the dialog is shut — a reading nobody can see
+       has nothing to keep current, and this one is a whole-tree compose every
+       two seconds. Restarted rather than left running, so a closed dialog costs
+       exactly nothing.
+
+       One condition and not two. It used to ask about `document.hidden` as
+       well, because the dialog could outlive the reader's attention; it cannot
+       any more — leaving the window puts it away — so **open** now implies
+       visible and focused, and asking twice would state a rule the module no
+       longer has. */
     function scheduleAgentDashboardRefresh() {
         if (_agentDashboardTimer !== null) {
             clearInterval(_agentDashboardTimer);
             _agentDashboardTimer = null;
         }
-        if (!agentDashboardDialogOpen() || document.hidden) {
+        if (!agentDashboardDialogOpen()) {
             ++_agentDashboardRequestId;
             _agentDashboardController?.abort();
             _agentDashboardController = null;
@@ -742,6 +758,127 @@
         _agentDashboardTimer = setInterval(() => {
             if (!_agentDashboardController) refreshAgentDashboard();
         }, AGENT_DASHBOARD_REFRESH_MS);
+    }
+
+    /* ── One dashboard at a time, across every window ──
+
+       Every GridVibe window carries this dialog now, so "open it" is a gesture
+       the app has several of — and two windows each holding one up is two
+       readings of the same tree, drifting apart on their own polls, with the
+       reader's × and Close workspace on both of them. It is one surface, so
+       there is one of it: raising it anywhere puts away whichever window had it.
+
+       **A claim is a notice, never a lock, and the newest open always wins.**
+       Nothing here asks permission and nothing can refuse to open, which is the
+       whole reason it is built this way round: a window that crashed or was
+       killed with its dialog up would otherwise leave a claim standing that no
+       one can release, and the button would be dead in every other window until
+       something expired it. There is no such state to be in. The cost is that
+       two opens inside one message round trip could each tell the other to
+       close — so a claim is *compared* with this window's own rather than
+       obeyed, later wins, and an exact tie is broken on the window id. Both
+       halves of that are needed: without the comparison the two dialogs
+       annihilate each other, and without the tie-break a coarse clock can make
+       two claims genuinely equal.
+
+       **Both transports, and the message is tagged.** The same pair the dim
+       lease already rides (`dashboard-focus.js`), for the same reasons and with
+       the same caveats: a `BroadcastChannel` never delivers to the object that
+       posted, but it *does* deliver to any other channel object in the same
+       document — and the publisher below opens a fresh one per message while
+       the listener holds one open — so skipping our own `source` is
+       load-bearing here rather than tidy. `storage` covers what the channel
+       cannot and genuinely never fires in the sending document.
+
+       **Only an open is broadcast.** A close leaves nothing for another window
+       to do — it has no dialog up — so a "closed" message would be a second
+       piece of cross-window state with no reader and one more way to fall out
+       of step. */
+    const AGENT_DASHBOARD_CLAIM_CHANNEL = 'gridvibe.dashboardOpen';
+    const AGENT_DASHBOARD_CLAIM_STORAGE_KEY = 'gridvibe.dashboardOpen';
+
+    /* This window's own last claim, so an arriving one can be compared with it
+       instead of obeyed. Deliberately not cleared on close: a shut dialog
+       ignores claims outright, and the next open writes a fresh one. */
+    let _agentDashboardClaim = null;
+    let _agentDashboardClaimChannel = null;
+
+    /* shared.js's identity for this document, which is what every other
+       cross-window message in the app is tagged with. A page that somehow has
+       not got it publishes nothing rather than an untaggable claim every window
+       including this one would act on. */
+    function agentDashboardWindowId() {
+        return typeof GRIDVIBE_WINDOW_ID === 'string' ? GRIDVIBE_WINDOW_ID : '';
+    }
+
+    function publishAgentDashboardClaim() {
+        const source = agentDashboardWindowId();
+        if (!source) {
+            return null;
+        }
+        const claim = {
+            source,
+            at: Date.now(),
+            /* `setItem` with an unchanged value fires no storage event, and two
+               opens from one window inside a millisecond would otherwise write
+               the identical string. */
+            nonce: Math.random().toString(36).slice(2)
+        };
+        _agentDashboardClaim = claim;
+        try {
+            const channel = new BroadcastChannel(AGENT_DASHBOARD_CLAIM_CHANNEL);
+            channel.postMessage(claim);
+            channel.close();
+        } catch (_error) {}
+        try {
+            localStorage.setItem(AGENT_DASHBOARD_CLAIM_STORAGE_KEY, JSON.stringify(claim));
+        } catch (_error) {}
+        return claim;
+    }
+
+    /* Later wins, and a tie goes to the higher window id — any total order does,
+       as long as both windows compute the same one. */
+    function agentDashboardClaimSupersedes(claim) {
+        const source = String(claim?.source || '');
+        const at = Number(claim?.at);
+        if (!source || source === agentDashboardWindowId() || !Number.isFinite(at)) {
+            return false;
+        }
+        const mine = _agentDashboardClaim;
+        if (!mine) {
+            return true;
+        }
+        return at === Number(mine.at) ? source > String(mine.source) : at > Number(mine.at);
+    }
+
+    function receiveAgentDashboardClaim(claim) {
+        if (!agentDashboardDialogOpen() || !agentDashboardClaimSupersedes(claim)) {
+            return false;
+        }
+        closeAgentDashboardDialog();
+        return true;
+    }
+
+    function wireAgentDashboardExclusivity() {
+        try {
+            /* Held open for the life of the page. A channel opened per message
+               would miss every claim sent while it was shut, which is all of
+               them. */
+            _agentDashboardClaimChannel = new BroadcastChannel(AGENT_DASHBOARD_CLAIM_CHANNEL);
+            _agentDashboardClaimChannel.onmessage = event => {
+                receiveAgentDashboardClaim(event?.data);
+            };
+        } catch (_error) {
+            _agentDashboardClaimChannel = null;
+        }
+        window.addEventListener?.('storage', event => {
+            if (event?.key !== AGENT_DASHBOARD_CLAIM_STORAGE_KEY || !event.newValue) {
+                return;
+            }
+            try {
+                receiveAgentDashboardClaim(JSON.parse(event.newValue));
+            } catch (_error) {}
+        });
     }
 
     /* ── Opening and shutting ──
@@ -768,6 +905,13 @@
         return Boolean(agentDashboardShell()?.classList?.contains('visible'));
     }
 
+    /* Absent rather than false when the page cannot answer: every caller uses
+       it to decide whether to *move* focus, and declining to move it because a
+       stub could not say is the wrong default. */
+    function agentDashboardWindowHasFocus() {
+        return typeof document.hasFocus === 'function' ? document.hasFocus() : true;
+    }
+
     /* dashboard.js holds the focus lease it started for this page; it is asked
        through a named function rather than reached into, and a page that never
        started one blocks nothing. */
@@ -788,6 +932,9 @@
         _agentDashboardOpener = document.activeElement || null;
         shell.classList.add('visible');
         shell.setAttribute('aria-hidden', 'false');
+        /* Before the dim and before the read: this is the one message that puts
+           another window's dialog away, and it costs nothing to be first. */
+        publishAgentDashboardClaim();
         setAgentDashboardDim(true);
         /* The surface itself, not the first control in it: the reader opened a
            list to read, and parking the caret on Refresh means the first Enter
@@ -803,7 +950,18 @@
         if (!shell || !agentDashboardDialogOpen()) {
             return false;
         }
-        const heldFocus = Boolean(shell.contains?.(document.activeElement));
+        /* Two conditions, not one. The dialog has to still hold the caret —
+           a close provoked by a press somewhere else on this page must not
+           yank focus off what was pressed — and this window has to still be
+           the focused one, because the commonest close now is the reader
+           leaving for another window entirely. `activeElement` does not move
+           when a window is deactivated, so without `hasFocus()` a departure
+           would look exactly like an in-page dismissal and put the caret on a
+           button in a window nobody is looking at — and in a host where
+           `element.focus()` raises its window, would pull that window back in
+           front of the one the reader just chose. */
+        const heldFocus = Boolean(shell.contains?.(document.activeElement))
+            && agentDashboardWindowHasFocus();
         shell.classList.remove('visible');
         shell.setAttribute('aria-hidden', 'true');
         setAgentDashboardDim(false);
@@ -901,8 +1059,31 @@
 
     /* ── Dismissal ──
 
-       Three ways out, and they are the three every dialog in this app has: the
-       × in the title bar, a press on the backdrop, and Escape.
+       Four ways out. Three are the ones every dialog in this app has — the ×
+       in the title bar, a press on the backdrop, and Escape — and the fourth
+       is leaving the window.
+
+       **Leaving is the same gesture as pressing the backdrop, one level out.**
+       Every GridVibe window carries this dialog, and it is a surface on the
+       window it was raised from rather than a window of its own; clicking
+       across to another workspace is the reader saying they are done with it
+       exactly as clicking beside it is. Left open, that window sits behind
+       whichever one they moved to still showing a tree it has stopped polling
+       — a stale answer they did not ask to keep — and comes back to the front
+       later still wearing it.
+
+       Two events say it, because neither says it everywhere. `blur` is the
+       one that fires when another window takes the focus, which is the case
+       the reader is actually in; `visibilitychange` covers a tab that is put
+       behind another tab or a window that is minimized. They overlap almost
+       always and close is idempotent, so overlapping costs nothing and the
+       gap either one leaves is covered.
+
+       This is also why the cross-window claim above is a backstop rather than
+       the mechanism: opening the dialog anywhere requires focusing that window
+       first, so in any host that reports deactivation the previous one has
+       already put itself away before the claim is even sent. The claim is what
+       keeps the invariant in a host that does not.
 
        Escape is the one with a rule. A session × here opens the close prompt
        *on top* of this dialog, and that prompt has an Escape handler of its
@@ -933,6 +1114,12 @@
             ?.addEventListener('click', () => closeAgentDashboardDialog());
         document.addEventListener('keydown', event => {
             if (event.key === 'Escape' && agentDashboardEscapeBelongsHere()) {
+                closeAgentDashboardDialog();
+            }
+        });
+        window.addEventListener?.('blur', () => closeAgentDashboardDialog());
+        document.addEventListener('visibilitychange', () => {
+            if (document.hidden) {
                 closeAgentDashboardDialog();
             }
         });
@@ -979,13 +1166,15 @@
             refreshAgentDashboard();
         });
         wireAgentDashboardDismissal(shell);
-        document.addEventListener('visibilitychange', () => {
-            scheduleAgentDashboardRefresh();
-            if (!document.hidden) {
-                refreshAgentDashboard();
-            }
-        });
-        /* The native bridge is not there when the first tree is painted, and
+        wireAgentDashboardExclusivity();
+        /* There is deliberately nothing here for coming *back* to the window.
+           A `visibilitychange` that re-armed the poll and a `focus` that read
+           once both existed to revive a dialog that had gone quiet while the
+           reader was elsewhere, and a dialog no longer survives the reader
+           going elsewhere: it was dismissed, not suspended. Reviving one would
+           put the stale surface this rule removes back on screen a second time.
+
+           The native bridge is not there when the first tree is painted, and
            the *window* close verb exists only when it is. The repaint skip
            compares the reading, which has not changed — so the rendered
            structure is dropped explicitly, or the rows would keep their
@@ -995,7 +1184,8 @@
             _agentDashboardPainted = '';
             refreshAgentDashboard();
         });
-        window.addEventListener?.('focus', () => refreshAgentDashboard());
+        /* Not a dismissal: the page itself is going away, so this runs
+           whatever the dialog's state, and it is the abort that matters. */
         window.addEventListener?.('pagehide', () => {
             clearInterval(_agentDashboardTimer);
             _agentDashboardTimer = null;
@@ -1005,6 +1195,12 @@
         });
         window.addEventListener?.('pageshow', event => {
             if (event.persisted && agentDashboardDialogOpen()) {
+                /* Frozen pages receive no messages, so a dialog coming back out
+                   of the back/forward cache has missed every claim made while
+                   it was away and may now be the second one up. It claims
+                   again rather than reading anything: it is the surface in
+                   front of the reader, so it is the one that should win. */
+                publishAgentDashboardClaim();
                 scheduleAgentDashboardRefresh();
                 refreshAgentDashboard();
             }

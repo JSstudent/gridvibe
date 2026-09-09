@@ -10,15 +10,20 @@ What is pinned is what the dashboard is *for*:
 - **It is a dialog on the page that opened it.** Opening arms the poll and
   reads once; closing disarms it and aborts what is in flight, because a shut
   dialog is not a stale surface, it is one nobody is looking at. It goes away on
-  the ×, on a press on the backdrop and on Escape — but Escape only while it is
-  the top `.modal-shell` on the page, or cancelling the close prompt it raised
-  would take the list away with it.
+  the ×, on a press on the backdrop, on Escape and on the reader leaving the
+  window — but Escape only while it is the top `.modal-shell` on the page, or
+  cancelling the close prompt it raised would take the list away with it.
 - **A row that names the workspace this page already is lands without opening
   anything.** Raising a window that is already raised fires no `focus` event, so
   the stored target would never be claimed and the row would do nothing at all.
 - **Acting closes it.** Every row is a way somewhere else and a dialog over the
   pane it just took you to is in the way — but a close verb ends something and
   leaves you here, so it does not.
+- **There is one of it, across every window.** Opening broadcasts a claim and
+  the newest open wins. A claim is a notice and never a lock, so nothing can
+  refuse to open — a window that died with its dialog up leaves nothing standing
+  that could make the button dead somewhere else — and two opens inside one
+  round trip cannot annihilate each other.
 - **Three levels, drawn as three things.** A workspace is a band, a session is
   a card inside it, an agent is a row inside that — the complaint about the
   dropdown this replaced was that all three were the same list at different
@@ -215,9 +220,17 @@ const byId = new Map();
    what a session × raises. */
 let otherShellOpen = false;
 
+/* Swapped per case: `false` is this window no longer being the one in front,
+   which is what the close asks before it moves focus anywhere. `activeElement`
+   deliberately does *not* move with it — that is exactly how a real page
+   behaves when its window is deactivated, and it is why `hasFocus()` has to be
+   asked at all. */
+let documentFocused = true;
+
 const document = {
     activeElement: null,
     hidden: false,
+    hasFocus: () => documentFocused,
     getElementById: id => byId.get(id) || null,
     /* The Escape guard asks the page which shells are up. This one is the
        dialog itself; the other is whatever it raised on top of itself. */
@@ -453,6 +466,67 @@ function snapshot(groups, overrides) {
         }],
         totals: { workspaces: 1, sessions: list.length, agents }
     }, overrides || {});
+}
+
+/* shared.js's identity for this document — every cross-window message in the
+   app is tagged with it, and this dialog's claim is no exception. */
+let GRIDVIBE_WINDOW_ID = 'window-a';
+
+/* The two transports the claim rides, as a ledger. `BroadcastChannel` is
+   modelled the way the real one behaves and the way this module depends on:
+   a post never reaches the object that sent it, but it *does* reach every
+   other channel object — including the listening one in this same document,
+   which is what makes skipping our own `source` load-bearing rather than
+   tidy. */
+const channels = new Set();
+const posted = [];
+globalThis.BroadcastChannel = class {
+    constructor(name) { this.name = name; channels.add(this); }
+    postMessage(data) {
+        posted.push({ name: this.name, data });
+        channels.forEach(other => {
+            if (other !== this && other.name === this.name) { other.onmessage?.({ data }); }
+        });
+    }
+    close() { channels.delete(this); }
+};
+
+const stored = new Map();
+globalThis.localStorage = {
+    getItem: key => (stored.has(key) ? stored.get(key) : null),
+    setItem: (key, value) => stored.set(key, value),
+    removeItem: key => stored.delete(key)
+};
+
+/* Another window raising its own dialog, seen from here. `at` defaults to a
+   moment after this window's own claim, which is the ordinary case: the reader
+   pressed the button over there second. */
+function claimFrom(source, overrides) {
+    return Object.assign({
+        source,
+        at: Date.now() + 1000,
+        nonce: 'n'
+    }, overrides || {});
+}
+
+/* Through the channel, which is how a claim arrives when the browser has one. */
+function broadcastClaim(claim) {
+    const sender = new BroadcastChannel('gridvibe.dashboardOpen');
+    sender.postMessage(claim);
+    sender.close();
+}
+
+/* And through `storage`, which is how it arrives when it has not. */
+function storageClaim(claim, key) {
+    fireWindow('storage', {
+        key: key === undefined ? 'gridvibe.dashboardOpen' : key,
+        newValue: claim === null ? null : JSON.stringify(claim)
+    });
+}
+
+/* This window's own last published claim, read back out of the ledger. */
+function myClaim() {
+    return JSON.parse(stored.get('gridvibe.dashboardOpen') || 'null');
 }
 
 function report(value) { process.stdout.write(JSON.stringify(value)); }
@@ -1324,6 +1398,107 @@ class DashboardDialogLifecycleTestCase(DashboardDialogTestCase):
             result, {"wired": True, "toggled": False, "opened": False, "closed": False}
         )
 
+    def test_leaving_the_window_puts_it_away(self):
+        """The gesture the reader actually makes: they click across to another
+        workspace. This surface belongs to the window it was raised on, so that
+        window must not be left sitting behind the one they moved to still
+        showing a tree it has stopped polling — and still wearing it when they
+        come back to it later."""
+        result = self._run_node(
+            """
+            fetchAnswer = snapshot();
+            showDashboard();
+            await settle();
+            const cleared = timers.cleared;
+            documentFocused = false;
+            fireWindow('blur', {});
+            report({
+                open: dialogOpen(),
+                hidden: shell().attributes['aria-hidden'],
+                disarmed: timers.cleared > cleared
+            });
+            """
+        )
+        self.assertFalse(result["open"])
+        self.assertEqual(result["hidden"], "true")
+        self.assertTrue(result["disarmed"])
+
+    def test_a_window_put_behind_another_puts_it_away_too(self):
+        """`blur` and `visibilitychange` overlap almost always, and neither
+        says it everywhere: `blur` is another window taking the focus, and this
+        is a tab put behind another tab or a window minimized. Close is
+        idempotent, so the overlap costs nothing and the gap either one leaves
+        is covered."""
+        result = self._run_node(
+            """
+            fetchAnswer = snapshot();
+            showDashboard();
+            await settle();
+            document.hidden = true;
+            documentFocused = false;
+            document.fire('visibilitychange');
+            await settle();
+            report({ open: dialogOpen(), fetches: calls.fetches });
+            """
+        )
+        self.assertFalse(result["open"])
+        # And nothing is read on the way out.
+        self.assertEqual(result["fetches"], 1)
+
+    def test_leaving_never_pulls_focus_back_into_the_window_being_left(self):
+        """`activeElement` does not move when a window is deactivated, so a
+        departure looks exactly like an in-page dismissal unless `hasFocus()` is
+        asked. Putting the caret on a button in a window nobody is looking at is
+        meaningless at best, and in a host where `element.focus()` raises its
+        window it is that window yanking itself back in front of the one the
+        reader has just chosen."""
+        result = self._run_node(
+            """
+            fetchAnswer = snapshot();
+            const opener = { focused: false, focus() { this.focused = true; } };
+            document.activeElement = opener;
+            focusIsInside = true;
+            showDashboard();
+            await settle();
+
+            documentFocused = false;
+            fireWindow('blur', {});
+            const afterLeaving = opener.focused;
+
+            /* The same close from a window that still has focus is an in-page
+               dismissal and does hand it back. */
+            documentFocused = true;
+            openAgentDashboardDialog();
+            await settle();
+            closeAgentDashboardDialog();
+            report({ afterLeaving, afterDismissing: opener.focused });
+            """
+        )
+        self.assertFalse(result["afterLeaving"])
+        self.assertTrue(result["afterDismissing"])
+
+    def test_coming_back_to_the_window_does_not_bring_it_back(self):
+        """It was dismissed, not suspended. Returning to a window that silently
+        restored a dialog would be the stale surface this rule exists to
+        remove, arriving a second time."""
+        result = self._run_node(
+            """
+            fetchAnswer = snapshot();
+            showDashboard();
+            await settle();
+            document.hidden = true;
+            document.fire('visibilitychange');
+            document.hidden = false;
+            document.fire('visibilitychange');
+            fireWindow('focus', {});
+            await settle();
+            report({ open: dialogOpen(), fetches: calls.fetches });
+            """
+        )
+        self.assertFalse(result["open"])
+        # And a shut dialog reads nothing on the way back in either.
+        self.assertEqual(result["fetches"], 1)
+
     def test_the_other_windows_dim_while_it_is_up_and_only_while_it_is_up(self):
         """The lease the standalone window published, kept for what it was
         worth: a surface about the other windows is one the other windows step
@@ -1431,6 +1606,239 @@ class DashboardDialogHereTestCase(DashboardDialogTestCase):
         self.assertEqual(result["opened"], 1)
         self.assertEqual(result["stored"], 1)
 
+class DashboardDialogExclusivityTestCase(DashboardDialogTestCase):
+    """One dashboard at a time, across every window.
+
+    Every GridVibe window carries this dialog now, so two of them up at once is
+    two readings of one tree drifting apart on their own polls, each with the
+    reader's x and Close workspace on it. Raising it anywhere puts away whichever
+    window had it -- and the direction that rule runs in is the whole design: a
+    claim is a notice, never a lock, so nothing can refuse to open and a window
+    that died with its dialog up leaves no claim to make the button dead
+    somewhere else.
+    """
+
+    def test_opening_it_tells_every_other_window_to_put_theirs_away(self):
+        result = self._run_node(
+            """
+            fetchAnswer = snapshot();
+            showDashboard();
+            await settle();
+            const claim = myClaim();
+            report({
+                open: dialogOpen(),
+                source: claim && claim.source,
+                dated: Number.isFinite(claim && claim.at),
+                /* Both transports, because a claim that only rode one would be
+                   silently lost wherever that one is unavailable. */
+                channels: posted.map(entry => entry.name),
+                stored: stored.has('gridvibe.dashboardOpen')
+            });
+            """
+        )
+        self.assertTrue(result["open"])
+        self.assertEqual(result["source"], "window-a")
+        self.assertTrue(result["dated"])
+        self.assertEqual(result["channels"], ["gridvibe.dashboardOpen"])
+        self.assertTrue(result["stored"])
+
+    def test_a_claim_from_another_window_closes_this_one(self):
+        """Over both transports: a browser without `BroadcastChannel` falls
+        back to `storage`, and a rule that only ran on one of them would leave
+        two dialogs up exactly there."""
+        for arrival in ("broadcastClaim", "storageClaim"):
+            with self.subTest(arrival=arrival):
+                result = self._run_node(
+                    """
+                    fetchAnswer = snapshot();
+                    showDashboard();
+                    await settle();
+                    const before = dialogOpen();
+                    %s(claimFrom('window-b'));
+                    report({
+                        before,
+                        after: dialogOpen(),
+                        hidden: shell().attributes['aria-hidden']
+                    });
+                    """
+                    % arrival
+                )
+                self.assertTrue(result["before"])
+                self.assertFalse(result["after"])
+                self.assertEqual(result["hidden"], "true")
+
+    def test_this_windows_own_claim_never_closes_its_own_dialog(self):
+        """A `BroadcastChannel` post never reaches the object that sent it, but
+        it does reach every other channel object in the same document -- and the
+        publisher opens a fresh one per message while the listener holds one
+        open. So the dialog hears its own claim, and skipping it is what stops
+        the open from immediately undoing itself."""
+        result = self._run_node(
+            """
+            fetchAnswer = snapshot();
+            showDashboard();
+            await settle();
+            const afterOwnBroadcast = dialogOpen();
+            /* And the storage path, which a same-origin window in another tab
+               would deliver but this one never does. */
+            storageClaim(myClaim());
+            report({ afterOwnBroadcast, afterOwnStorage: dialogOpen() });
+            """
+        )
+        self.assertTrue(result["afterOwnBroadcast"])
+        self.assertTrue(result["afterOwnStorage"])
+
+    def test_an_older_claim_is_not_obeyed_so_two_opens_cannot_annihilate(self):
+        """Two presses inside one message round trip would otherwise each tell
+        the other to close and leave the reader with none. A claim is compared
+        with this window's own: later wins, and an exact tie -- which a coarse
+        clock can genuinely produce -- is broken on the window id, any total
+        order serving as long as both windows compute the same one."""
+        result = self._run_node(
+            """
+            fetchAnswer = snapshot();
+            showDashboard();
+            await settle();
+            const mine = myClaim();
+
+            broadcastClaim(claimFrom('window-b', { at: mine.at - 1 }));
+            const afterOlder = dialogOpen();
+
+            /* A tie this window wins: 'window-a' sorts above 'window-0'. */
+            broadcastClaim(claimFrom('window-0', { at: mine.at }));
+            const afterTieWon = dialogOpen();
+
+            /* And one it loses. */
+            broadcastClaim(claimFrom('window-z', { at: mine.at }));
+            report({ afterOlder, afterTieWon, afterTieLost: dialogOpen() });
+            """
+        )
+        self.assertTrue(result["afterOlder"])
+        self.assertTrue(result["afterTieWon"])
+        self.assertFalse(result["afterTieLost"])
+
+    def test_a_claim_never_refuses_an_open_however_stale_it_is(self):
+        """The direction the whole rule runs in. A window killed with its dialog
+        up leaves a claim nobody can release, so a design that asked permission
+        before opening would leave this button dead in every other window until
+        something expired that claim. There is no such state to be in."""
+        result = self._run_node(
+            """
+            fetchAnswer = snapshot();
+            wireAgentDashboard();
+            /* Somebody else's claim, standing before this window ever opened. */
+            broadcastClaim(claimFrom('window-b', { at: Date.now() + 60000 }));
+            storageClaim(claimFrom('window-b', { at: Date.now() + 60000 }));
+            const opened = openAgentDashboardDialog();
+            await settle();
+            report({ opened, open: dialogOpen(), agents: sectionCounts().agents });
+            """
+        )
+        self.assertTrue(result["opened"])
+        self.assertTrue(result["open"])
+        self.assertEqual(result["agents"], 1)
+
+    def test_a_shut_dialog_has_nothing_to_close_and_stays_shut(self):
+        result = self._run_node(
+            """
+            fetchAnswer = snapshot();
+            showDashboard();
+            await settle();
+            closeAgentDashboardDialog();
+            broadcastClaim(claimFrom('window-b'));
+            const afterClaim = dialogOpen();
+            /* And the next open still wins, with a claim of its own. */
+            const before = stored.get('gridvibe.dashboardOpen');
+            openAgentDashboardDialog();
+            await settle();
+            report({ afterClaim, reopened: dialogOpen(), republished: stored.get('gridvibe.dashboardOpen') !== before });
+            """
+        )
+        self.assertFalse(result["afterClaim"])
+        self.assertTrue(result["reopened"])
+        self.assertTrue(result["republished"])
+
+    def test_coming_back_from_the_back_forward_cache_claims_again(self):
+        """A frozen page receives no messages, so a dialog restored from the
+        back/forward cache has missed every claim made while it was away and may
+        be the second one up. It claims rather than reads: it is the surface in
+        front of the reader, so it is the one that should win."""
+        result = self._run_node(
+            """
+            fetchAnswer = snapshot();
+            showDashboard();
+            await settle();
+            const first = myClaim();
+            fireWindow('pagehide', {});
+            fireWindow('pageshow', { persisted: true });
+            await settle();
+            const back = myClaim();
+
+            /* And a shut one claims nothing, because it is not in front of
+               anybody. */
+            closeAgentDashboardDialog();
+            fireWindow('pageshow', { persisted: true });
+            report({
+                reclaimed: back.nonce !== first.nonce,
+                whileShut: myClaim().nonce === back.nonce
+            });
+            """
+        )
+        self.assertTrue(result["reclaimed"])
+        self.assertTrue(result["whileShut"])
+
+    def test_a_close_is_not_broadcast_because_nothing_reads_it(self):
+        """The other windows have no dialog up, so there is nothing for them to
+        do about it -- and a second piece of cross-window state with no reader is
+        one more thing to fall out of step."""
+        result = self._run_node(
+            """
+            fetchAnswer = snapshot();
+            showDashboard();
+            await settle();
+            const afterOpen = posted.length;
+            closeAgentDashboardDialog();
+            report({ afterOpen, afterClose: posted.length });
+            """
+        )
+        self.assertEqual(result["afterOpen"], 1)
+        self.assertEqual(result["afterClose"], 1)
+
+    def test_a_malformed_or_unrelated_message_is_ignored(self):
+        result = self._run_node(
+            """
+            fetchAnswer = snapshot();
+            showDashboard();
+            await settle();
+            broadcastClaim(null);
+            broadcastClaim({ source: 'window-b' });
+            broadcastClaim({ source: '', at: Date.now() + 5000 });
+            storageClaim(claimFrom('window-b'), 'gridvibe.somethingElse');
+            storageClaim(null);
+            fireWindow('storage', { key: 'gridvibe.dashboardOpen', newValue: 'not json' });
+            report({ open: dialogOpen() });
+            """
+        )
+        self.assertTrue(result["open"])
+
+    def test_a_page_with_no_window_identity_claims_nothing(self):
+        """Every cross-window message in the app is tagged with shared.js's id.
+        An untagged claim is one every window would act on, this one included,
+        so a page somehow without that id publishes nothing rather than
+        something worse than nothing."""
+        result = self._run_node(
+            """
+            GRIDVIBE_WINDOW_ID = undefined;
+            fetchAnswer = snapshot();
+            showDashboard();
+            await settle();
+            report({ open: dialogOpen(), posted: posted.length, stored: stored.size });
+            """
+        )
+        self.assertTrue(result["open"])
+        self.assertEqual(result["posted"], 0)
+        self.assertEqual(result["stored"], 0)
+
 class DashboardDialogRepaintTestCase(DashboardDialogTestCase):
     def test_an_unchanged_reading_is_not_repainted_at_all(self):
         """This window stays open while it is read, so an identical tick must
@@ -1515,28 +1923,48 @@ class DashboardDialogRepaintTestCase(DashboardDialogTestCase):
         self.assertTrue(result["recovered"]["hidden"])
         self.assertEqual(result["recovered"]["rows"], 3)
 
-    def test_a_hidden_page_arms_no_poll_and_reads_again_on_the_way_back(self):
+    def test_a_page_the_reader_left_arms_no_poll_and_none_on_the_way_back(self):
+        """This used to pin a suspend: hiding the page stood the poll down and
+        coming back re-armed it and read once. The dialog does not survive the
+        reader leaving any more, so there is nothing to re-arm -- and the poll
+        gate asks one thing rather than two, because open now implies visible
+        and focused."""
         result = self._run_node(
             """
             fetchAnswer = snapshot();
             showDashboard();
             await settle();
-            const wired = { armed: timers.armed, fetches: calls.fetches };
+            const up = { armed: timers.armed, fetches: calls.fetches };
             document.hidden = true;
+            documentFocused = false;
             document.fire('visibilitychange');
+            fireWindow('blur', {});
             await settle();
-            const hidden = { armed: timers.armed, cleared: timers.cleared, fetches: calls.fetches };
+            const away = {
+                open: dialogOpen(),
+                armed: timers.armed,
+                cleared: timers.cleared,
+                fetches: calls.fetches
+            };
             document.hidden = false;
+            documentFocused = true;
             document.fire('visibilitychange');
+            fireWindow('focus', {});
             await settle();
-            report({ wired, hidden, back: { armed: timers.armed, fetches: calls.fetches } });
+            report({ up, away, back: { open: dialogOpen(), armed: timers.armed, fetches: calls.fetches } });
             """
         )
-        self.assertEqual(result["wired"], {"armed": 1, "fetches": 1})
-        self.assertEqual(result["hidden"]["armed"], 1)
-        self.assertGreaterEqual(result["hidden"]["cleared"], 1)
-        self.assertEqual(result["hidden"]["fetches"], 1)
-        self.assertEqual(result["back"], {"armed": 2, "fetches": 2})
+        self.assertEqual(result["up"], {"armed": 1, "fetches": 1})
+        # Away: shut, disarmed, and nothing read on the way out.
+        self.assertFalse(result["away"]["open"])
+        self.assertEqual(result["away"]["armed"], 1)
+        self.assertGreaterEqual(result["away"]["cleared"], 1)
+        self.assertEqual(result["away"]["fetches"], 1)
+        # Back: it was dismissed, not suspended, so nothing comes back and
+        # nothing is read for it.
+        self.assertEqual(
+            result["back"], {"open": False, "armed": 1, "fetches": 1}
+        )
 
 
 
