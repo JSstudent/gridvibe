@@ -21,6 +21,7 @@ from sessions.manager import SessionManager, SessionStatus  # noqa: F401 - re-ex
 from web.agents import (  # noqa: F401 - re-exported for backwards compatibility
     AGENT_REGISTRY,
     AGENT_REGISTRY_PATH,
+    _agent_absent_reason,
     _agent_detection_cache,
     _agent_detection_cache_key,
     _agent_detection_cache_lock,
@@ -284,6 +285,7 @@ from web.terminal_io import (  # noqa: F401 - re-exported for backwards compatib
     _normalize_local_directory,
     _normalize_local_shell_kind,
     _normalize_probed_local_cwd,
+    _record_terminal_size,
     _resize_connection,
     _resolve_live_terminal_cwd,
     _resolve_local_launch_cwd,
@@ -3409,6 +3411,15 @@ def handle_terminal_resize(data):
     rows = data.get('rows')
 
     if not session_id or cols is None or rows is None:
+        return
+
+    # Recorded before the connection is looked up, because the record is what
+    # the *next* PTY behind this pane is opened at -- a pane whose shell is
+    # being relaunched has no connection to resize at all, and it is precisely
+    # that pane whose replacement must not start at the default geometry.
+    try:
+        _record_terminal_size(session_id, cols, rows)
+    except (TypeError, ValueError):
         return
 
     with connection_lock:

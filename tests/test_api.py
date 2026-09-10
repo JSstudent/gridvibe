@@ -5010,6 +5010,10 @@ class ApiRoutesTestCase(unittest.TestCase):
                     "title": "Claude",
                     "directory": "/home/ubuntu/project",
                     "initial_command": "claude",
+                    "startup_mode": "agent",
+                    "initial_command_mode": "agent",
+                    "agent_selection": "claude",
+                    "agent_auto_mode": True,
                 }
             ],
         }
@@ -5033,6 +5037,86 @@ class ApiRoutesTestCase(unittest.TestCase):
         start_task.assert_called_once()
         session = api.session_manager.get_all_sessions()[0]
         self.assertEqual(session.initial_command, "")
+        # A pane whose agent command was cleared is not going to run an agent,
+        # so it stops being called one: a plain shell still labelled "Claude"
+        # is a dashboard row that would never do anything.
+        self.assertEqual(session.startup_mode, "terminal")
+        self.assertEqual(session.initial_command_mode, "command")
+        self.assertEqual(session.agent_selection, "")
+        self.assertFalse(session.agent_auto_mode)
+
+    def test_create_sessions_opens_a_missing_agent_as_a_terminal_but_still_runs_it(self):
+        # The earliest and most reliable moment GridVibe knows the pane will not
+        # run an agent -- earlier than any signal the pane can give, because the
+        # pane's own answer is a prompt drawn before its output has been read.
+        # The command is kept, so the reader still gets the real error.
+        sessions_payload = {
+            "connection_mode": "ssh",
+            "layout": "single",
+            "sessions": [
+                {
+                    "host": "example.com",
+                    "username": "ubuntu",
+                    "port": 22,
+                    "title": "Kilo",
+                    "directory": "/home/ubuntu/project",
+                    "initial_command": "kilo",
+                    "startup_mode": "agent",
+                    "initial_command_mode": "agent",
+                    "agent_selection": "kilo",
+                }
+            ],
+        }
+
+        with patch.object(
+            web_agents,
+            "_agent_preflight_payload",
+            return_value={"status": "missing", "message": "Kilo CLI is missing on example.com."},
+        ), patch.object(api.socketio, "start_background_task"):
+            response = self.client.post("/api/sessions", json=sessions_payload)
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(
+            response.get_json()["warnings"],
+            ["Kilo: Kilo CLI is missing on example.com. Opened as a terminal."],
+        )
+        session = api.session_manager.get_all_sessions()[0]
+        self.assertEqual(session.initial_command, "kilo")
+        self.assertEqual(session.startup_mode, "terminal")
+        self.assertEqual(session.agent_selection, "")
+
+    def test_create_sessions_keeps_an_installed_agent_untouched(self):
+        sessions_payload = {
+            "connection_mode": "ssh",
+            "layout": "single",
+            "sessions": [
+                {
+                    "host": "example.com",
+                    "username": "ubuntu",
+                    "port": 22,
+                    "title": "Claude",
+                    "directory": "/home/ubuntu/project",
+                    "initial_command": "claude",
+                    "startup_mode": "agent",
+                    "initial_command_mode": "agent",
+                    "agent_selection": "claude",
+                }
+            ],
+        }
+
+        with patch.object(
+            web_agents,
+            "_agent_preflight_payload",
+            return_value={"status": "installed", "message": "Claude Code is available."},
+        ), patch.object(api.socketio, "start_background_task"):
+            response = self.client.post("/api/sessions", json=sessions_payload)
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.get_json()["warnings"], [])
+        session = api.session_manager.get_all_sessions()[0]
+        self.assertEqual(session.startup_mode, "agent")
+        self.assertEqual(session.agent_selection, "claude")
+        self.assertEqual(session.initial_command, "claude")
 
     def test_agent_preflight_endpoint_rejects_unknown_agent(self):
         response = self.client.post("/api/agent-preflight", json={"agent": "unknown"})
@@ -13560,6 +13644,28 @@ class ApiRoutesTestCase(unittest.TestCase):
         api._resize_connection(connection, cols=132, rows=42)
 
         channel.resize_pty.assert_called_once_with(width=132, height=42)
+
+    def test_a_reported_viewport_is_remembered_even_with_no_pty_to_resize(self):
+        """The pane whose shell is being relaunched has no connection at all,
+        and its replacement PTY is opened at whatever this remembered."""
+        sizes = {}
+        with patch.object(web_terminal_io, "session_terminal_sizes", sizes),                 patch.object(web_terminal_io, "ssh_connections", {}):
+            api.handle_terminal_resize(
+                {"session_id": "pane", "cols": 132, "rows": 42}
+            )
+
+            self.assertEqual(sizes["pane"], (132, 42))
+            self.assertEqual(web_terminal_io._terminal_size_for("pane"), (132, 42))
+
+    def test_a_reconnected_pane_re_announces_the_size_it_never_changed(self):
+        """terminals.js skips an unchanged resize, so a pane that keeps its
+        xterm across a new transport has to forget the memo to announce at
+        all -- the counterpart of opening the PTY at the pane's own size."""
+        terminals_js = self._static("js/terminals.js")
+
+        self.assertIn("if (previousStatus && previousStatus !== 'connected') {", terminals_js)
+        self.assertIn("terminal._lastCols = null;", terminals_js)
+        self.assertIn("terminal._lastRows = null;", terminals_js)
 
     def test_run_startup_sequence_uses_cmd_syntax_for_windows_local_repo(self):
         connection = {"kind": "local", "pty_process": object()}

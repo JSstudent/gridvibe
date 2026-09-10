@@ -323,8 +323,8 @@ function camel(name) {
 function sectionCounts() {
     const count = pattern => (body().innerHTML.match(pattern) || []).length;
     return {
-        workspaces: count(/<section class="dash-workspace">/g),
-        sessions: count(/<section class="dash-session"[ >]/g),
+        workspaces: count(/<section class="dash-workspace[ "]/g),
+        sessions: count(/<section class="dash-session[ "]/g),
         agents: count(/class="dash-agent"/g)
     };
 }
@@ -484,6 +484,20 @@ function group(panes, overrides) {
         agent_count: list.length,
         panes: list
     }, overrides || {});
+}
+
+/* A session the server kept and sorted last: it is listed so the reader can
+   get to it, and it carries no agent row because it holds no agent. Its own
+   builder rather than an override, because `agent_count: 0` beside a non-empty
+   pane list is not a state the payload can be in. */
+function quietGroup(overrides) {
+    return group([], Object.assign({
+        group_id: 'g9',
+        name: 'Notes',
+        is_active: false,
+        pane_count: 3,
+        agent_count: 0
+    }, overrides || {}));
 }
 
 function snapshot(groups, overrides) {
@@ -1058,6 +1072,8 @@ class DashboardDialogStructureTestCase(DashboardDialogTestCase):
         self.assertEqual(result, "2 agents · 1 session · 1 workspace")
 
     def test_nothing_running_says_so_rather_than_showing_an_empty_frame(self):
+        """The tree carries every live workspace now, so an absent one is a
+        server with nothing open rather than one with nothing agentic open."""
         result = self._run_node(
             """
             fetchAnswer = { generated_at: 1, workspaces: [], totals: { workspaces: 0, sessions: 0, agents: 0 } };
@@ -1066,9 +1082,72 @@ class DashboardDialogStructureTestCase(DashboardDialogTestCase):
             report({ html: body().innerHTML, totals: totals().textContent, rows: parseRows().length });
             """
         )
-        self.assertIn("No agents are running.", result["html"])
+        self.assertIn("Nothing is running.", result["html"])
         self.assertEqual(result["totals"], "Nothing running")
         self.assertEqual(result["rows"], 0)
+
+    def test_a_session_with_no_agent_is_a_card_that_says_so(self):
+        """The reason it is listed at all is that it is a way to that tab, so
+        it is a card with the same heading control the others have -- and where
+        the rows would be there is one muted line saying why there are none."""
+        result = self._run_node(
+            """
+            fetchAnswer = snapshot([group(), quietGroup()]);
+            showDashboard();
+            await settle();
+            report({
+                html: body().innerHTML,
+                cards: sectionCounts().sessions,
+                agents: parseAgentRows().length,
+                quiet: rowFor('session:g9'),
+                loud: rowFor('session:g1')
+            });
+            """
+        )
+        self.assertEqual(result["cards"], 2)
+        # The agent-free card draws no rows, so every agent row on the page
+        # still belongs to a session that has one.
+        self.assertEqual(result["agents"], 1)
+        self.assertIn("No active agents", result["html"])
+        self.assertIn('class="dash-session is-quiet"', result["html"])
+        self.assertEqual(result["quiet"]["label"], "Notes")
+        # The two headings are the same control, naming the same two ids the
+        # landing needs; only the card around them differs.
+        self.assertEqual(result["quiet"]["kind"], result["loud"]["kind"])
+        self.assertEqual(result["quiet"]["dataset"]["workspaceId"], "default")
+        self.assertEqual(result["quiet"]["dataset"]["groupId"], "g9")
+
+    def test_a_card_with_no_agent_states_its_size_rather_than_its_lack(self):
+        """"0 agents - 3 other panes" describes the session by what it is not
+        and makes the reader subtract to find out what it is."""
+        result = self._run_node(
+            """
+            fetchAnswer = snapshot([group(), quietGroup()]);
+            showDashboard();
+            await settle();
+            report(body().innerHTML);
+            """
+        )
+        self.assertIn("3 panes", result)
+        self.assertNotIn("0 agent", result)
+
+    def test_the_totals_line_states_the_agent_count_even_at_zero(self):
+        """The list is every session now, so the line has to say how many of
+        them hold an agent -- and a zero must not read like a missing word."""
+        result = self._run_node(
+            """
+            fetchAnswer = snapshot([quietGroup()], {
+                totals: { workspaces: 1, sessions: 1, agents: 0, working: 0 }
+            });
+            showDashboard();
+            await settle();
+            report({ totals: totals().textContent, html: body().innerHTML });
+            """
+        )
+        self.assertEqual(result["totals"], "no agents · 1 session · 1 workspace")
+        # And the band above it says the same thing about itself.
+        self.assertIn("1 session · no agents", result["html"])
+        self.assertIn('class="dash-workspace is-quiet"', result["html"])
 
     def test_an_announced_title_cannot_rewrite_the_rows(self):
         result = self._run_node(
@@ -1711,6 +1790,25 @@ class DashboardDialogHereTestCase(DashboardDialogTestCase):
         # Shut before the landing, because the landing focuses a pane and a pane
         # focused under an open dialog takes the caret somewhere the reader can
         # neither see nor type into.
+        self.assertFalse(result["open"])
+
+    def test_a_session_heading_lands_on_its_tab_with_no_agent_in_it(self):
+        """Pressed, not merely rendered: the card that exists so a reader can
+        reach an agent-free tab has to actually reach it, by the same route the
+        agent-bearing ones take."""
+        result = self._run_node(
+            self.HERE
+            + """
+            fetchAnswer = snapshot([group(), quietGroup()]);
+            showDashboard();
+            await settle();
+            clickRow('session:g9');
+            await settle();
+            report({ landed: calls.landed, opened: calls.openWorkspaceWindow.length, open: dialogOpen() });
+            """
+        )
+        self.assertEqual(result["landed"], [{"groupId": "g9", "sessionId": ""}])
+        self.assertEqual(result["opened"], 0)
         self.assertFalse(result["open"])
 
     def test_a_row_for_another_workspace_still_opens_its_window(self):

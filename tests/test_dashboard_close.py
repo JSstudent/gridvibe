@@ -310,8 +310,7 @@ function snapshot(overrides) {
             workspace_id: 'default',
             label: '',
             active_group_id: 'g1',
-            group_count: 1,
-            live_group_count: 4,
+            group_count: 4,
             agent_count: 1,
             groups: [{
                 group_id: 'g1',
@@ -807,7 +806,9 @@ class DashboardCloseControlsTestCase(DashboardCloseNodeTestCase):
         # changed — so the rendered structure has to be dropped explicitly or
         # the band keeps its browser-mode shape for the life of the window.
         self.assertIn("close-workspace-window", result["inNative"])
-        # The confirmation counts every live session, not only the listed ones.
+        # The confirmation counts every live session in the band, off the
+        # workspace's own `group_count` rather than off the cards rendered under
+        # it: a payload and a painted tree are two different moments.
         self.assertEqual(result["closes"]["data-group-count"], "4")
         self.assertEqual(result["closes"]["data-workspace-label"], "Main workspace")
         self.assertIn("is-danger", result["closes"]["class"])

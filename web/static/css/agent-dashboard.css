@@ -338,6 +338,43 @@
     white-space: nowrap;
 }
 
+/* ── The half of the tree with no agent in it ──
+
+   Every live session is listed here, because this is the only surface that
+   names all of them at once and so the fastest way to reach any of them. The
+   server sorts the ones holding no agent to the end of their own level; this
+   is the second half of that same rule, and it is set in the type rather than
+   in the layout. A quiet band or card keeps its full width, its heading, its
+   hue and every control it had — it is a way somewhere, and the reader is
+   looking at it precisely because they want to go there — and gives up only
+   the weight that was drawing the eye to the agents. Dimming the name and not
+   the box is what keeps "nothing running in here" from reading as "disabled".
+
+   `is-quiet` on the band affects the band's own heading only: the sessions
+   inside it carry their own, because a workspace with one busy session and
+   four empty ones has to draw that difference at the card level. */
+.dash-workspace.is-quiet > .dash-workspace-head .dash-workspace-name,
+.dash-session.is-quiet .dash-session-name {
+    color: var(--gv-dialog-muted);
+}
+
+.dash-session.is-quiet {
+    border-color: var(--dash-session-color-soft, var(--gv-dialog-border));
+}
+
+/* What a card with no agent in it says where its rows would be, and what a
+   band with no session at all says where its cards would be. One class: it is
+   the same sentence at two levels — "there is nothing of the next thing down
+   in here" — and it is a statement rather than a control, so it is never
+   pressable and the heading above it remains the way in. */
+.dash-session-none {
+    margin: 0;
+    padding: 8px 10px;
+    font-size: .72rem;
+    font-style: italic;
+    color: var(--gv-dialog-muted);
+}
+
 /* ── An agent: one row, one line ──
 
    This was a block — a heading naming the agent and the shell it runs on, with

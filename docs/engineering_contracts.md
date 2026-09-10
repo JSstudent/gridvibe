@@ -129,6 +129,21 @@ changing any field that survives restart; it owns the complete save/restore flow
   purges the server buffer; Reset view waits for replay acknowledgement or a
   bounded fallback and resets exactly once, on the captured pane. A live TUI may
   need to re-arm mouse reporting afterwards.
+- **A PTY is opened at the size the pane is already drawn at, never at a
+  default it waits to be corrected from.** `session_terminal_sizes` records the
+  last viewport a client reported, keyed by *session id* so it outlives the
+  transport a relaunch discards, and every connector reads it through
+  `_terminal_size_for()` before spawning — SSH `invoke_shell`, WinPty
+  `dimensions`, POSIX `TIOCSWINSZ` on the master before `Popen`.
+  `DEFAULT_TERMINAL_COLS`/`ROWS` apply only to a pane that has never reported
+  one. Record on every reported resize, including when there is no connection to
+  resize: that gap is exactly the relaunch window whose replacement the record
+  decides. The record is dropped only with the session itself. A late correction
+  is not equivalent — `_run_startup_sequence()` types an agent's command as soon
+  as the shell is up, so the agent's first frame is drawn before any resize could
+  arrive. On the client, `emitTerminalResize()` skips an unchanged size, so a
+  pane reconnecting with its xterm attached must forget that memo and
+  re-announce; a relaunch changes no dimension the page can see.
 - Ask `effective_directory()` where a pane is: prompt observation, then
   `/proc/<pid>/cwd`, then an explicitly opted-in marker probe, then a directory
   fallback reported as an assumption. Never probe an agent's input box.
@@ -154,6 +169,70 @@ changing any field that survives restart; it owns the complete save/restore flow
   checks exact registry-entry identity and writes metadata in the same
   `connection_lock` → manager-lock hold; broadcast follows release. Retargeting
   clears `current_directory`, and retired pumps must not republish it.
+- **A pane stops being an agent pane when its shell draws a prompt.** An agent
+  CLI owns the terminal while it runs and so emits no prompt hook; the pane's
+  next prompt is the shell taking the terminal back, whatever ended the agent —
+  an exit by any key, a crash, a kill, or a binary that was never installed.
+  `_arm_agent_runtime()` starts watching at the one moment GridVibe knows an
+  agent command was handed to the shell (runtime promotion, and the launch
+  sequence's own startup command), and `_note_shell_prompt()` retires the pane
+  through `_mark_runtime_agent_exited()` on the first prompt past the arming
+  mark. It checks registry-entry identity exactly as `_publish_observed_cwd()`
+  does, so a retiring pump cannot demote the relaunch that replaced it.
+  Arming survives a swallowed prompt: a pane stays watched until it is retired.
+- **The mark is only meaningful at a moment when nothing of GridVibe's own is
+  in flight, and `_run_startup_sequence()` is not such a moment.** It runs
+  *before* the pump, so the prompts its own `cd`/hook/marker lines draw are
+  still in the transport when it returns — three commands' worth on a remote
+  pane, and `_REMOTE_HOOK` emits twice — and a watch armed there retires a
+  healthy agent as its own bootstrap arrives. It must never arm; it records
+  `startup_finished_at` and nothing else.
+- **There are exactly two honest arming moments.** A runtime promotion: the
+  user was at a prompt to type the command, so the mark is exact — and it is
+  taken *before* `effective_directory()`, which can wait out the bounded remote
+  read, with the arming re-asking at once. And a launched pane's **first
+  meaningful reader input** (`_arm_agent_runtime_on_input()`), by which time the
+  bootstrap output is long read. xterm capability replies, focus reports and
+  TUI mouse packets share the browser's `onData` callback with keystrokes, but
+  become empty when terminal escape sequences are removed and must not arm the
+  watch. That moment is not a compromise: ending an agent takes input, so the
+  gesture that ends it is the one that arms the watch for it, and the prompt
+  that follows is retired on that same gesture.
+  `AGENT_RUNTIME_ARM_MIN_AGE_SECONDS` is a floor under *when arming may begin*,
+  never a window in which a prompt is ignored, so failing it costs nothing —
+  the next input arms instead.
+- **A binary that is not installed is the preflight's answer, not the pane's.**
+  It is knowable before the pane opens, and the pane's own answer is a prompt
+  drawn before its output has been read. `_sanitize_agent_launch_commands()`
+  therefore answers two questions: `check_failed` (the check could not run)
+  clears the command, and `AGENT_PREFLIGHT_ABSENT_STATUSES` (the binary is not
+  there) **keeps** the command so the reader still gets the real error in the
+  terminal. Both clear the agent identity, as one unit. Restore skips this
+  entirely.
+- **Every path that starts an agent asks that one question, and it is one
+  function.** `_agent_absent_reason()` is the registry probe reduced to the
+  true/false a caller needs — the message when the binary is not there, `""`
+  otherwise, reading the same `AGENT_PREFLIGHT_ABSENT_STATUSES` -- so the
+  launcher row and the pane's relaunch menu cannot answer it differently. A
+  second implementation of "is this agent here" is what would let them. What
+  the two callers *do* with the answer differs, because what they hold
+  differs: see the relaunch rule under [Pane
+  transitions](#pane-transitions).
+- **Where the prompt is observed, the keystroke heuristics stand down.** The
+  double-Ctrl+C and `/exit` readings guess at the same question from what the
+  user typed, and typing is not the same fact — two interrupts are how Codex
+  quits *and* how a reader interrupts two turns. `_agent_runtime_is_observed()`
+  requires both that the pane is armed and that it has actually drawn a prompt
+  GridVibe read, because `terminal.shell_integration` is a kill switch and a
+  remote shell may refuse the hook; a pane with no working hook keeps the
+  guesses as its only answer.
+- **Retiring a pane retires the title it announced as an agent, too.** Codex
+  does not clear its own title on the way out and the inheriting shell says
+  nothing, so `_mark_runtime_agent_exited()` raises `agent_title_floor` and
+  `agent_activity_snapshot()` applies it through `mask_agent_titles()`. The
+  record itself is never edited — the pump thread is its only writer — and a
+  title the pane announces *after* the floor stands, so the next agent's first
+  announcement replaces the mask rather than fighting it.
 - Splits, reconnects, saves, and restores use the observed directory. Persist it
   in the snapshot's existing `directory` slot; promotion stamps
   `current_directory`, and reconnect uses shell `cd A || cd B` fallback instead of
@@ -175,6 +254,18 @@ changing any field that survives restart; it owns the complete save/restore flow
   arbitrary startup command is not an agent. Only a shell-family change retargets
   the directory; agent-only relaunch preserves the observed cwd. Reselecting the
   current choice is a no-op on both sides.
+- **A stated agent is preflighted before anything moves, and an absent binary
+  refuses the relaunch.** The launcher has no pane yet, so it opens one as a
+  plain terminal; the menu's pane is already running, so the honest outcome is
+  that nothing happens and the page says why — rather than a plain shell
+  wearing the agent's name until its exit is observed. The probe describes the
+  environment the row would launch *into* (the chevron's shell family and
+  distro, or an SSH pane's own host/username/port), never the one the pane is
+  in. It runs after validation and before any mutation, so the refusal is
+  atomic like every other. `check_failed` is not an absence: the check did not
+  run, so the relaunch proceeds and the reader gets the shell's own error. A
+  stated `""` and an unstated agent probe nothing. The refusal message is the
+  toast, so it names the agent, the target, and that the pane was left alone.
 - Header shell rows state both family and agent; pressing a family row is its
   plain-shell relaunch. A separate adjacent chevron lazily expands agents. Windows
   Local Repo panes have families; SSH/POSIX panes get the flat agent list without
@@ -518,16 +609,30 @@ unless the task explicitly changes this contract.
 - `GET /api/dashboard` is the only cross-workspace read: one pass composing
   every live workspace, its groups and their agent panes. Consumers must not fan
   out per-workspace requests to rebuild it.
-- The payload is agent-scoped, and the filter is the server's. Only
-  `startup_mode == "agent"` panes are composed; a group with no agent and a
-  workspace with no such group are dropped, so "empty" means one thing on both
-  sides. `pane["index"]` stays the pane's position in its *whole* group — it is
-  what names and focuses the pane — so the filter is applied after `enumerate`,
-  never before. Every count (`totals`, `agent_count`) is agent-scoped;
-  `pane_count` on a group and `live_group_count` on a workspace are the only
-  unfiltered numbers. A close confirmation states consequences, so it reads
-  `live_group_count`: naming the agent-scoped count there would understate an
-  irreversible act.
+- The payload carries **every live session, agents first**. The surface is the
+  agent list *and* the only place every workspace and session is named at once,
+  so it is also how a reader reaches one — which makes dropping a session the
+  removal of its only route from here. The two jobs are reconciled in the
+  order, never by omission: `agents_first()` puts the rows holding an agent
+  ahead of the rows holding none at both levels (a workspace and a group both
+  carry `agent_count`, so it is one function), and each half keeps the order
+  its own window would use. A workspace holding no session at all is still
+  absent, because `list_live_workspaces` already decided that is not a live
+  workspace.
+- **Panes stay agent-only, and the filter is the server's.** Only
+  `startup_mode == "agent"` panes are composed, so the page and the payload
+  cannot disagree about what an agent is, and a plain terminal is never a row —
+  it is already visible in the window that holds it. `pane["index"]` stays the
+  pane's position in its *whole* group — it is what names and focuses the pane
+  — so the filter is applied after `enumerate`, never before. A group's
+  `agent_count` is what says a card has none; the page must not infer that from
+  an empty `panes` list, because a card that carries no count at all is a
+  different case. `totals.agents` and `totals.working` are agent-scoped;
+  `totals.workspaces`, `totals.sessions`, a workspace's `group_count` and a
+  group's `pane_count` count what is listed. `group_count` is therefore also
+  what a close confirmation states, and it is read off the payload rather than
+  off the rendered cards: a payload and a painted tree are two different
+  moments.
 - `totals.working` is the button badge's number and is composed here, beside
   the rows, so the badge is a tally of the state dots in the list it labels
   rather than a second answer to the same question. A pane counts only when
@@ -584,6 +689,14 @@ unless the task explicitly changes this contract.
   says where the pane now is.
 - A pane with no transport carries `activity: null`. "Nothing to observe" and
   "observed nothing yet" (`state: "unknown"`) are different answers.
+- **A row leaves this surface when its pane stops running an agent**, and that
+  is decided in one place for both surfaces: the pane's own metadata. See the
+  prompt-hook retirement rule under [Terminal transport and working
+  directories](#terminal-transport-and-working-directories) — a dashboard that
+  went on listening for its own signal would be a second definition of "is this
+  still an agent". A preflight that clears a pane's agent command clears its
+  agent identity with it, for the same reason: a plain shell that is still
+  *called* Codex is a row that would never do anything.
 - Liveness falls back to output cadence, because most agents publish no progress
   at all; a published progress state stops driving the reading once stale. The
   state names the input that decided it. Fresh OSC 9;4 error state is reported
@@ -664,6 +777,14 @@ unless the task explicitly changes this contract.
   every other window keeps its dim for the rest of the lease. BroadcastChannel
   is the fast path, localStorage is the fallback, and expiry remains the
   backstop against a page that died holding it.
+- A row holding nothing draws a statement, never rows it does not have. A
+  session card with no agent wears `is-quiet`, states its own pane count rather
+  than "0 agents", and carries one muted line where its rows would be; a band
+  with no session carries the same line where its cards would be. Quiet keeps
+  the full width, the heading control, the session hue and every close verb —
+  the card exists so the reader can go there — and gives up only the weight
+  that was drawing the eye to the agents, so it cannot read as disabled. An
+  empty tree means nothing is running at all, not that nothing agentic is.
 - Dashboard layout must remain usable without horizontal overflow at narrow
   widths. A polling update that changes only a row's title, hover, status,
   progress, or idle age updates that row in place, each field on its own

@@ -11,9 +11,13 @@ Three layers, each exercised where it actually decides something:
 
 What is pinned:
 
-- **Agents, and only agents.** A pane that is not running one is not a row, and
-  a group or workspace left holding none is not a heading. The filter is the
-  server's so the page and the payload cannot disagree about what "empty" is.
+- **Every live session, agents first.** A pane that is not running an agent is
+  not a row -- the filter is the server's, so the page and the payload cannot
+  disagree about what an agent is -- but the session holding it is still a row,
+  and so is its workspace: this is also the one surface every session can be
+  reached from. What separates the two halves is order. A session with no agent
+  sorts after every session that has one, a workspace with none after every
+  workspace that has one, and each half keeps the order its own window uses.
 - **The filter does not renumber the panes.** A pane's `index` is its position
   in its *whole* group — it is what names the pane and what focuses it — so an
   agent sitting third in a four-pane group still says 2 after the two panes in
@@ -224,35 +228,75 @@ class DashboardComposerTestCase(unittest.TestCase):
         self.assertEqual([pane["session_id"] for pane in panes], ["s3", "s5"])
         self.assertEqual([pane["index"] for pane in panes], [2, 4])
 
-    def test_a_session_with_no_agent_is_dropped_with_its_workspace(self):
+    def test_a_session_with_no_agent_is_listed_after_every_one_that_has_one(self):
+        """It is kept, and it is kept *last*. The surface is how a reader gets
+        to any session, so dropping one removes the only way to reach it from
+        here; sorting it down is what keeps that from costing the agents the
+        top of the list."""
         snapshot = self._compose(
-            workspaces=[workspace("default"), workspace("ws2", label="api")],
+            workspaces=[workspace("default")],
             groups_by_workspace={
-                "default": [group("g1", "default"), group("g2", "default")],
-                "ws2": [group("g3", "ws2")],
+                "default": [
+                    group("g1", "default"),
+                    group("g2", "default"),
+                    group("g3", "default"),
+                    group("g4", "default"),
+                ]
             },
             sessions_by_group={
                 "g1": [plain_session("s1", "g1")],
                 "g2": [session("s2", "g2")],
                 "g3": [plain_session("s3", "g3"), plain_session("s4", "g3")],
+                "g4": [session("s5", "g4")],
+            },
+        )
+        groups = snapshot["workspaces"][0]["groups"]
+        # The two agent-bearing sessions first in their own display order, then
+        # the two without in theirs.
+        self.assertEqual(
+            [row["group_id"] for row in groups], ["g2", "g4", "g1", "g3"]
+        )
+        self.assertEqual([row["agent_count"] for row in groups], [1, 1, 0, 0])
+        # An agent-free session still says how big it is, so its card can name
+        # what it holds rather than what it does not.
+        self.assertEqual([row["pane_count"] for row in groups], [1, 1, 1, 2])
+        self.assertEqual(
+            snapshot["totals"],
+            {"workspaces": 1, "sessions": 4, "agents": 2, "working": 0},
+        )
+
+    def test_a_workspace_with_no_agent_is_listed_after_every_one_that_has_one(self):
+        """The same rule one level up, out of the same function."""
+        snapshot = self._compose(
+            workspaces=[
+                workspace("default"),
+                workspace("ws2", label="api"),
+                workspace("ws3", label="docs"),
+            ],
+            groups_by_workspace={
+                "default": [group("g1", "default")],
+                "ws2": [group("g2", "ws2")],
+                "ws3": [group("g3", "ws3")],
+            },
+            sessions_by_group={
+                "g1": [plain_session("s1", "g1")],
+                "g2": [session("s2", "g2")],
+                "g3": [plain_session("s3", "g3")],
             },
         )
         self.assertEqual(
-            [row["workspace_id"] for row in snapshot["workspaces"]], ["default"]
-        )
-        self.assertEqual(
-            [row["group_id"] for row in snapshot["workspaces"][0]["groups"]], ["g2"]
+            [row["workspace_id"] for row in snapshot["workspaces"]],
+            ["ws2", "default", "ws3"],
         )
         self.assertEqual(
             snapshot["totals"],
-            {"workspaces": 1, "sessions": 1, "agents": 1, "working": 0},
+            {"workspaces": 3, "sessions": 3, "agents": 1, "working": 0},
         )
 
-    def test_a_workspace_reports_what_it_lists_and_what_closing_it_would_end(self):
-        """Two counts, and they are different numbers whenever a workspace holds
-        a plain terminal beside its agents. `group_count` is what this surface
-        lists; `live_group_count` is what the close confirmation states, because
-        a prompt about an irreversible act must not understate it."""
+    def test_a_workspace_states_every_session_closing_it_would_end(self):
+        """One count and not two. `group_count` is what the band lists *and*
+        what the close confirmation states, because nothing is dropped any
+        more -- and a prompt about an irreversible act must not understate it."""
         snapshot = self._compose(
             workspaces=[workspace("default")],
             groups_by_workspace={
@@ -269,16 +313,29 @@ class DashboardComposerTestCase(unittest.TestCase):
             },
         )
         workspace_row = snapshot["workspaces"][0]
-        self.assertEqual(workspace_row["group_count"], 1)
-        self.assertEqual(workspace_row["live_group_count"], 3)
-        # The listed count is still what the totals are built from: this
-        # surface is about agents, and only the confirmation asks the other
-        # question.
-        self.assertEqual(snapshot["totals"]["sessions"], 1)
+        self.assertEqual(workspace_row["group_count"], 3)
+        self.assertEqual(workspace_row["agent_count"], 1)
+        self.assertEqual(snapshot["totals"]["sessions"], 3)
 
-    def test_a_server_with_no_agent_anywhere_composes_an_empty_tree(self):
+    def test_a_server_with_no_agent_anywhere_still_lists_what_is_open(self):
+        """"No agents anywhere" and "nothing running" are different answers, and
+        the payload now gives the first rather than the empty tree it used to."""
         snapshot = self._compose(
             sessions_by_group={"g1": [plain_session("s1", "g1")]}
+        )
+        self.assertEqual(
+            [row["workspace_id"] for row in snapshot["workspaces"]], ["default"]
+        )
+        self.assertEqual(snapshot["workspaces"][0]["groups"][0]["panes"], [])
+        self.assertEqual(snapshot["workspaces"][0]["agent_count"], 0)
+        self.assertEqual(
+            snapshot["totals"],
+            {"workspaces": 1, "sessions": 1, "agents": 0, "working": 0},
+        )
+
+    def test_a_server_with_nothing_open_composes_an_empty_tree(self):
+        snapshot = self._compose(
+            workspaces=[], groups_by_workspace={}, sessions_by_group={}
         )
         self.assertEqual(snapshot["workspaces"], [])
         self.assertEqual(
@@ -526,6 +583,39 @@ class DashboardRouteTestCase(unittest.TestCase):
         self.assertEqual(group_row["panes"][0]["agent_selection"], "claude")
         self.assertEqual(group_row["panes"][0]["startup_mode"], "agent")
 
+    def test_a_session_with_no_agent_reaches_the_route_and_sorts_last(self):
+        """End to end: the surface is how a reader reaches any session, so a
+        group of plain terminals is a card here -- behind the agents, holding
+        no rows, and still saying how many panes it has."""
+        created, _, _ = self._launch_group()
+        plain_group = api.session_manager.create_group(
+            name="Notes",
+            connection_mode="local",
+            layout="grid",
+            terminal_count=1,
+            workspace_id="default",
+        )
+        api.session_manager.create_session(
+            group_id=plain_group.group_id, host="", directory="", title="Terminal 1"
+        )
+
+        payload = self.client.get("/api/dashboard").get_json()
+        groups = payload["workspaces"][0]["groups"]
+        self.assertEqual(
+            [row["group_id"] for row in groups],
+            [created.group_id, plain_group.group_id],
+        )
+        self.assertEqual(groups[1]["agent_count"], 0)
+        self.assertEqual(groups[1]["pane_count"], 1)
+        self.assertEqual(groups[1]["panes"], [])
+        # The workspace counts every session it would end, and only the agents
+        # it actually holds.
+        self.assertEqual(payload["workspaces"][0]["group_count"], 2)
+        self.assertEqual(
+            payload["totals"],
+            {"workspaces": 1, "sessions": 2, "agents": 1, "working": 0},
+        )
+
     def test_the_route_publishes_no_credential(self):
         self._launch_group()
         body = self.client.get("/api/dashboard").get_data(as_text=True)
@@ -580,6 +670,9 @@ class DashboardRouteTestCase(unittest.TestCase):
         self.assertEqual(gone["totals"]["working"], 0)
 
     def test_an_empty_server_answers_rather_than_failing(self):
+        """A workspace record with no session in it is not a live workspace --
+        `list_live_workspaces` already decided that -- so an idle server is an
+        empty tree here rather than a band with nothing under it."""
         payload = self.client.get("/api/dashboard").get_json()
         self.assertEqual(payload["workspaces"], [])
         self.assertEqual(payload["totals"]["agents"], 0)

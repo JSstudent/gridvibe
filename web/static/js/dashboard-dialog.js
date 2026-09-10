@@ -1,12 +1,21 @@
     /* ─────────────────────────────
-       The agent dashboard — every agent running, wherever it runs.
+       The agent dashboard — every agent running, wherever it runs, and every
+       session you might want to get to.
 
        GridVibe can have several workspace windows open, each with several
        session tabs, each with several panes, and the only way to find out which
        agents are working anywhere is to go and look in every window. This is
-       that answer in one surface: every workspace holding an agent, the
-       sessions inside it, and the agents inside those — what each one is
-       announcing and whether it is doing anything.
+       that answer in one surface: every live workspace, the sessions inside it,
+       and the agents inside those — what each one is announcing and whether it
+       is doing anything.
+
+       **It lists every session, and it is still about the agents.** Being the
+       one place all of them are named at once makes it the fastest way to
+       *reach* any of them, so a session with no agent in it is a row here too.
+       What keeps that from burying the agents is order and not omission: the
+       server sorts every agent-free session to the end of its workspace and
+       every agent-free workspace to the end of the tree, and a card with none
+       says so in one muted line instead of drawing rows it does not have.
 
        **It is a dialog, and it was a window.** The window was the wrong shape
        for the question: you ask "what is running elsewhere?" *while* you are
@@ -52,10 +61,11 @@
        The rest is what the reading itself is for:
 
          · **One request, not N+1.** `/api/dashboard` composes the whole tree
-           server-side, already reduced to agents. A page that asked for
-           workspaces, then groups per workspace, then panes per group would
-           render a tree assembled out of several different moments, and the
-           moments that disagree are exactly the ones worth showing.
+           server-side, ordered and already reduced to agent *panes*. A page
+           that asked for workspaces, then groups per workspace, then panes per
+           group would render a tree assembled out of several different
+           moments, and the moments that disagree are exactly the ones worth
+           showing.
          · **Sections, not a list.** The dialog has room a dropdown never had,
            so the three levels are three different things on it rather than
            three indent depths: a workspace is a titled band, a session is a
@@ -433,7 +443,13 @@
        three-outcome prompt the session tab's × does. */
     function dashboardSessionHtml(group) {
         const panes = Array.isArray(group?.panes) ? group.panes : [];
-        const agents = Number(group?.agent_count) || panes.length;
+        /* `agent_count` and not `panes.length`: an empty list is exactly what a
+           session with no agent in it has, so falling back to the length would
+           make the two cases indistinguishable at the one point that has to
+           tell them apart. The fallback stays for a card that carries no count
+           at all, where a list of rows is the better guess than none. */
+        const declared = Number(group?.agent_count);
+        const agents = Number.isFinite(declared) ? declared : panes.length;
         const total = Number(group?.pane_count) || panes.length;
         const others = Math.max(0, total - agents);
         const name = String(group?.name || group?.group_id || '');
@@ -457,8 +473,16 @@
                         aria-label="${escHtml(closeTitle)}"
                     >${DASHBOARD_CLOSE_ICON}</button>`
             : '';
+        /* What the card is a card *of*. With an agent in it that is how many,
+           and the panes around them; with none it is simply the session's
+           size, because "0 agents · 3 other panes" describes the row by what
+           it is not and makes the reader do the subtraction to find out what
+           it is. */
+        const meta = agents
+            ? `${agents} agent${agents === 1 ? '' : 's'}${others ? ` · ${others} other pane${others === 1 ? '' : 's'}` : ''}`
+            : `${total} pane${total === 1 ? '' : 's'}`;
         return `
-            <section class="dash-session"${dashboardSessionColourStyle(group)}>
+            <section class="dash-session${agents ? '' : ' is-quiet'}"${dashboardSessionColourStyle(group)}>
                 <header class="dash-session-head">
                     <button
                         type="button"
@@ -470,13 +494,13 @@
                     >
                         <span class="dash-session-name">${escHtml(name)}</span>
                         ${group?.is_active ? dashboardTagHtml('active', 'active') : ''}
-                        <span class="dash-session-meta">
-                            ${agents} agent${agents === 1 ? '' : 's'}${others ? ` · ${others} other pane${others === 1 ? '' : 's'}` : ''}
-                        </span>
+                        <span class="dash-session-meta">${escHtml(meta)}</span>
                     </button>${closeButton}
                 </header>
                 <div class="dash-agents">
-                    ${panes.map(dashboardAgentRowHtml).join('')}
+                    ${agents
+                        ? panes.map(dashboardAgentRowHtml).join('')
+                        : '<p class="dash-session-none">No active agents</p>'}
                 </div>
             </section>
         `;
@@ -494,12 +518,9 @@
         const label = dashboardWorkspaceLabel(workspace, index);
         const workspaceId = escHtml(workspace?.workspace_id || '');
         /* What closing the workspace would end, which is every live session in
-           it and not only the ones listed here. The agent-scoped count is the
-           fallback rather than zero: a band exists because something is
-           running in it, and a zero would make the confirmation skip itself. */
-        const closes = Number(workspace?.live_group_count)
-            || Number(workspace?.group_count)
-            || 0;
+           it — and now also every session the band lists, because the tree no
+           longer drops any. It was two fields while it was two numbers. */
+        const closes = Number(workspace?.group_count) || 0;
         const controls = actions.policy
             .workspaceControls(workspace, { native: dashboardCanCloseWindows() })
             .map(control => `
@@ -529,8 +550,12 @@
     function dashboardWorkspaceHtml(workspace, index) {
         const groups = Array.isArray(workspace?.groups) ? workspace.groups : [];
         const agents = Number(workspace?.agent_count) || 0;
+        /* "no agents" rather than "0 agents": the band still exists, so the
+           zero is a fact about it and not a count that failed to arrive. */
+        const meta = `${groups.length} session${groups.length === 1 ? '' : 's'} · `
+            + (agents ? `${agents} agent${agents === 1 ? '' : 's'}` : 'no agents');
         return `
-            <section class="dash-workspace">
+            <section class="dash-workspace${agents ? '' : ' is-quiet'}">
                 <header class="dash-workspace-head">
                     <button
                         type="button"
@@ -541,27 +566,31 @@
                     >
                         <span class="dash-workspace-name">${escHtml(dashboardWorkspaceLabel(workspace, index))}</span>
                     </button>
-                    <span class="dash-workspace-meta">
-                        ${groups.length} session${groups.length === 1 ? '' : 's'} · ${agents} agent${agents === 1 ? '' : 's'}
-                    </span>
+                    <span class="dash-workspace-meta">${escHtml(meta)}</span>
                     ${dashboardWorkspaceActionsHtml(workspace, index)}
                 </header>
                 <div class="dash-sessions">
-                    ${groups.map(dashboardSessionHtml).join('')}
+                    ${groups.length
+                        ? groups.map(dashboardSessionHtml).join('')
+                        : '<p class="dash-session-none">No sessions</p>'}
                 </div>
             </section>
         `;
     }
 
+    /* Empty now means empty: the tree carries every live workspace, so an
+       absent one is a server with nothing open on it rather than a server with
+       nothing *agentic* open on it. The copy says the first thing, which is
+       also the only one of the two a reader can act on from here. */
     function dashboardBodyHtml(snapshot) {
         const workspaces = Array.isArray(snapshot?.workspaces) ? snapshot.workspaces : [];
         if (!workspaces.length) {
             return `
                 <div class="dash-empty">
-                    <p class="dash-empty-title">No agents are running.</p>
+                    <p class="dash-empty-title">Nothing is running.</p>
                     <p class="dash-empty-note">
-                        Launch a pane with an agent, or point an open pane at one from its
-                        reset menu, and it appears here.
+                        Launch a session and it appears here, with the agents inside it
+                        listed first.
                     </p>
                 </div>
             `;
@@ -569,15 +598,20 @@
         return workspaces.map((workspace, index) => dashboardWorkspaceHtml(workspace, index)).join('');
     }
 
+    /* The three counts always, once anything is open. The agent count leads
+       because it is what the surface is for, and it is stated even at zero:
+       "no agents · 3 sessions · 1 workspace" is the whole reading in one line,
+       and dropping the zero would leave the reader to work out from the
+       absence of a word whether the count was zero or missing. */
     function dashboardTotalsText(snapshot) {
         const totals = snapshot?.totals || {};
         const agents = Number(totals.agents) || 0;
         const sessions = Number(totals.sessions) || 0;
         const workspaces = Number(totals.workspaces) || 0;
-        if (!agents) {
+        if (!sessions && !workspaces) {
             return 'Nothing running';
         }
-        return `${agents} agent${agents === 1 ? '' : 's'} · `
+        return `${agents ? `${agents} agent${agents === 1 ? '' : 's'}` : 'no agents'} · `
             + `${sessions} session${sessions === 1 ? '' : 's'} · `
             + `${workspaces} workspace${workspaces === 1 ? '' : 's'}`;
     }

@@ -27,6 +27,7 @@ from web.agent_activity import (
     apply_agent_events,
     blank_agent_activity,
     has_agent_screen_output,
+    mask_agent_titles,
     note_agent_output,
     parse_agent_events,
 )
@@ -86,6 +87,23 @@ WINDOWS_DEVICE_ATTRIBUTES_RESPONSE = "[?1;2c"
 # Store active SSH connections and buffered output
 ssh_connections: Dict[str, Dict[str, Any]] = {}
 TERMINAL_OUTPUT_BUFFER_MAX_CHARS = 50000
+
+# The geometry a fresh PTY is opened with when no client has reported one yet
+# -- the first pane of a session, before its xterm has been fitted.
+DEFAULT_TERMINAL_COLS = 120
+DEFAULT_TERMINAL_ROWS = 30
+TERMINAL_SIZE_BOUNDS = ((8, 400), (8, 200))
+
+# The last viewport a client reported for a session, kept *per session id*
+# rather than on the connection, because a relaunch (the header's reset menu,
+# a mode or shell switch) closes the connection and opens a new one behind the
+# same pane. The pane on screen is not redrawn by that, so the replacement PTY
+# has to be opened at the size the pane already has: opening it at the default
+# instead is what left a restarted full-screen agent drawing an 80-column UI
+# into a wider pane until the reader resized the grid by hand. A client only
+# re-announces its size when that size *changes*, so nothing corrects it.
+session_terminal_sizes: Dict[str, tuple[int, int]] = {}
+_MAX_TRACKED_TERMINAL_SIZES = 1000
 
 
 class _OutputBuffer(deque):
@@ -240,6 +258,11 @@ def _close_ssh_connection(session_id: str, clear_buffer: bool = True, *, expecte
                 if clear_buffer:
                     session_output_buffers.pop(session_id, None)
         _shutdown_connection(connection)
+    # A relaunch closes the connection with the pane still on screen, and the
+    # replacement PTY is owed that pane's size -- so the remembered viewport
+    # outlives the transport and is dropped only with the session itself.
+    if session_manager.get_session(session_id) is None:
+        _forget_terminal_size(session_id)
     _evict_pooled_ssh_client(session_id)
 
 
@@ -442,6 +465,16 @@ CWD_SOURCE_LAUNCH = "launch"
 REMOTE_CWD_READ_TIMEOUT = 3.0
 REMOTE_CWD_MAX_OUTPUT_BYTES = 4096
 
+#: The floor under a *launched* agent pane's arming, and the only timer in this
+#: signal.
+#:
+#: A launched pane is armed by the reader's first input rather than by its own
+#: startup, and the one thing that could still go wrong is a reader who types
+#: into the pane while GridVibe's own bootstrap output is still arriving. The
+#: floor is a lower bound on when arming may *begin*, never a window in which a
+#: prompt is ignored, so failing it costs nothing: the next input arms instead.
+AGENT_RUNTIME_ARM_MIN_AGE_SECONDS = 2.0
+
 
 def _observe_terminal_output_cwd(
     session_id: str,
@@ -480,17 +513,147 @@ def _observe_terminal_output_cwd(
     if not reported:
         return
 
+    # A directory event *is* a prompt: the hook runs when the shell draws one.
+    # The count is this pane's own, written only by this pump thread, and it is
+    # what tells an agent still holding the terminal (which draws no prompt at
+    # all) from one that has handed it back. It is counted here, before the
+    # value is normalized, because a path this host cannot make sense of was
+    # still a prompt.
+    connection["prompt_count"] = int(connection.get("prompt_count") or 0) + sum(
+        1 for kind, _ in events if kind == CWD_EVENT_DIRECTORY
+    )
+
     directory = normalize_observed_cwd(
         reported,
         str(connection.get("shell_kind") or ""),
         # A remote pane's paths are the remote host's, whatever this host is.
         on_windows=connection.get("kind") != "ssh" and os.name == "nt",
     )
-    if not directory:
-        return
+    moved = bool(directory) and _publish_observed_cwd(session_id, connection, directory)
 
-    if _publish_observed_cwd(session_id, connection, directory):
+    # Last, so that when this prompt is also the one that retires the pane's
+    # agent the single broadcast below carries both facts.
+    retired = _note_shell_prompt(session_id, connection)
+    if moved and not retired:
         _broadcast_session_status(session_id)
+
+
+def _prompt_observation_mark(connection: Dict[str, Any]) -> int:
+    """How many prompts this pane had drawn when the caller looked.
+
+    Taken *before* the slow part of a promotion (``effective_directory`` can
+    open an exec channel on a remote pane and wait out its bounded timeout), so
+    a command that fails and prompts again during that wait is still counted
+    against the moment it was submitted rather than the moment the metadata
+    landed.
+    """
+    return int(connection.get("prompt_count") or 0)
+
+
+def _arm_agent_runtime(
+    session_id: str,
+    connection: Dict[str, Any],
+    prompt_mark: int,
+) -> None:
+    """Watch for the prompt that says this pane's agent is no longer running.
+
+    An agent CLI owns the terminal while it runs: it draws no shell prompt, so
+    the hook installed at startup emits nothing for as long as it is there.
+    That silence is the observation -- the pane's *next* prompt is the shell
+    taking the terminal back, whether the agent exited, crashed, was killed, or
+    never started because its binary is not installed.
+
+    It is the answer to the same question the two keystroke heuristics in
+    ``_track_current_terminal_agent_input`` guess at, and it is an observation
+    where those are a guess: they read what the user typed and so cannot tell a
+    Ctrl+C that quit Codex from the second of two that only interrupted a turn,
+    and they see nothing at all when the agent is closed any other way. Those
+    stay as the fallback for a pane with no working hook (``shell_integration``
+    off, a remote shell that would not take it); this fires first wherever the
+    pane is actually reporting.
+
+    **The mark is everything, and it is only meaningful at a moment when
+    nothing of GridVibe's own is still in flight.** There are exactly two such
+    moments, and neither is the end of the startup sequence: a runtime promotion
+    (the user was at a prompt to type the command) and the reader's first input
+    into a launched agent pane (the bootstrap output is long read by then). The
+    check runs once here as well as on every later prompt, because on the
+    promotion path the mark is taken before a wait the shell can finish inside.
+    """
+    connection["agent_runtime_armed"] = True
+    connection["agent_runtime_prompt_mark"] = int(prompt_mark)
+    _note_shell_prompt(session_id, connection)
+
+
+def _arm_agent_runtime_on_input(session_id: str, connection: Dict[str, Any]) -> None:
+    """Start watching a *launched* agent pane, on the reader's first input.
+
+    A pane GridVibe started the agent in has no moment of its own to arm at --
+    see ``_run_startup_sequence`` -- and this is the first moment that is both
+    late enough and free: to end an agent you have to type at it, so the gesture
+    that ends the agent is also the one that arms the watch for it, and the
+    prompt that follows is retired on that same gesture.
+
+    The mark is the count as it stands *now*, so nothing already drawn counts.
+    A launched agent that never started is therefore retired by the reader's
+    next command rather than immediately -- they are looking at its error and
+    about to type something anyway -- and a preflight that already knows the
+    binary is missing never labels the pane an agent in the first place.
+    """
+    if connection.get("agent_runtime_armed"):
+        return
+    started_at = float(connection.get("startup_finished_at") or 0.0)
+    if started_at and (time.monotonic() - started_at) < AGENT_RUNTIME_ARM_MIN_AGE_SECONDS:
+        return
+    # By construction this cannot retire the pane here: the mark *is* the count.
+    _arm_agent_runtime(session_id, connection, _prompt_observation_mark(connection))
+
+
+def _agent_runtime_is_observed(connection: Dict[str, Any]) -> bool:
+    """Is this pane's own prompt reporting the answer, rather than a guess?
+
+    Both halves are required and neither is enough. ``agent_runtime_armed`` says
+    GridVibe is watching for the prompt that ends this agent; a non-zero prompt
+    count says the pane has actually drawn one GridVibe could read, which is the
+    only proof the hook took at all -- ``terminal.shell_integration`` is a real
+    kill switch, and a remote shell may refuse the line that installs it.
+
+    Where both hold, the keystroke heuristics stand down: they read what the
+    user typed, and typing is not the same fact. Two Ctrl+C in quick succession
+    are how Codex quits *and* how a reader interrupts two turns in a row, and
+    "/exit" is a command to one agent and a message to another -- while a prompt
+    is the shell itself saying it has the terminal back.
+    """
+    return bool(connection.get("agent_runtime_armed")) and bool(connection.get("prompt_count"))
+
+
+def _disarm_agent_runtime(connection: Optional[Dict[str, Any]]) -> None:
+    """Stop watching: this pane is no longer running an agent GridVibe placed."""
+    if connection is not None:
+        connection["agent_runtime_armed"] = False
+
+
+def _note_shell_prompt(session_id: str, connection: Dict[str, Any]) -> bool:
+    """Retire the pane's agent metadata once the shell has the terminal back.
+
+    Returns whether it did, so the caller knows the status has already gone out.
+
+    Identity is checked the way :func:`_publish_observed_cwd` checks it, and for
+    the same reason: a retiring pump can still be holding the last prompt of the
+    shell it belonged to, and letting that demote the session would undo a
+    relaunch that has already put a fresh agent in the pane. The demotion itself
+    broadcasts, so it runs with no lock held.
+
+    """
+    if not connection.get("agent_runtime_armed"):
+        return False
+    mark = int(connection.get("agent_runtime_prompt_mark") or 0)
+    if int(connection.get("prompt_count") or 0) <= mark:
+        return False
+    if not _connection_is_current(session_id, connection):
+        return False
+    connection["agent_runtime_armed"] = False
+    return _mark_runtime_agent_exited(session_id, "shell prompt")
 
 
 def _observe_agent_activity(connection: Dict[str, Any], output: str) -> None:
@@ -537,10 +700,17 @@ def agent_activity_snapshot() -> Dict[str, Dict[str, Any]]:
     with no transport -- explorer and browser panes -- are absent rather than
     blank, which is what lets the dashboard tell "nothing to observe" from
     "observed nothing".
+
+    The title floor is applied here rather than by clearing the record, because
+    the pump thread is the record's only writer and a second writer would race
+    it. See :func:`~web.agent_activity.mask_agent_titles`.
     """
     with connection_lock:
         return {
-            session_id: connection.get("agent_activity") or blank_agent_activity()
+            session_id: mask_agent_titles(
+                connection.get("agent_activity") or blank_agent_activity(),
+                float(connection.get("agent_title_floor") or 0.0),
+            )
             for session_id, connection in ssh_connections.items()
         }
 
@@ -730,10 +900,47 @@ def _resolve_live_terminal_cwd(session_id: str, session: Any, timeout: float = 0
     return None
 
 
+def _normalize_terminal_size(cols: Any, rows: Any) -> tuple[int, int]:
+    """Clamp one reported viewport to the geometry a PTY may be opened at."""
+    (min_cols, max_cols), (min_rows, max_rows) = TERMINAL_SIZE_BOUNDS
+    return (
+        max(min_cols, min(int(cols), max_cols)),
+        max(min_rows, min(int(rows), max_rows)),
+    )
+
+
+def _record_terminal_size(session_id: str, cols: Any, rows: Any) -> tuple[int, int]:
+    """Remember one pane's viewport for the next PTY opened behind it.
+
+    Recorded even when there is no live connection to resize: the size a client
+    reports while its transport is down is exactly the size the replacement has
+    to start at.
+    """
+    size = _normalize_terminal_size(cols, rows)
+    with connection_lock:
+        session_terminal_sizes[session_id] = size
+        while len(session_terminal_sizes) > _MAX_TRACKED_TERMINAL_SIZES:
+            session_terminal_sizes.pop(next(iter(session_terminal_sizes)), None)
+    return size
+
+
+def _terminal_size_for(session_id: str) -> tuple[int, int]:
+    """The size to open a PTY at: the pane's own, or the default."""
+    with connection_lock:
+        return session_terminal_sizes.get(
+            session_id, (DEFAULT_TERMINAL_COLS, DEFAULT_TERMINAL_ROWS)
+        )
+
+
+def _forget_terminal_size(session_id: str):
+    """Drop a closed pane's remembered viewport."""
+    with connection_lock:
+        session_terminal_sizes.pop(session_id, None)
+
+
 def _resize_connection(connection: Dict[str, Any], cols: Any, rows: Any):
     """Resize an active remote or local terminal session."""
-    cols = max(8, min(int(cols), 400))
-    rows = max(8, min(int(rows), 200))
+    cols, rows = _normalize_terminal_size(cols, rows)
     kind = connection.get("kind")
 
     if kind == "ssh":
@@ -748,12 +955,14 @@ def _resize_connection(connection: Dict[str, Any], cols: Any, rows: Any):
         pty_process.setwinsize(rows, cols)
         return
 
-    master_fd = connection.get("master_fd")
+    _set_pty_winsize(connection.get("master_fd"), cols, rows)
+
+
+def _set_pty_winsize(master_fd: Any, cols: int, rows: int):
+    """Set one POSIX PTY's window size, or do nothing where it has none."""
     if master_fd is None or fcntl is None or termios is None:
         return
 
-    assert fcntl is not None
-    assert termios is not None
     winsize = struct.pack("HHHH", rows, cols, 0, 0)
     fcntl.ioctl(master_fd, termios.TIOCSWINSZ, winsize) # type: ignore
 
@@ -960,6 +1169,16 @@ def _run_startup_sequence(connection: Dict[str, Any], session: Any):
     startup_command = _compose_agent_startup_command(session)
     if startup_command:
         _send_connection_input(connection, f"{startup_command}{newline}")
+
+    # Deliberately not the moment to arm an agent pane's retirement watch.
+    # Nothing typed above has been *read* yet -- the pump only starts once this
+    # returns -- so every prompt those lines draw is still in the transport, and
+    # a watch armed here retires the agent as soon as they arrive. On a remote
+    # pane that is three commands' worth (and the hook emits twice), which is
+    # exactly how a healthy agent came to be retired a second after it started.
+    # `_arm_agent_runtime` is the reader's first input's job instead; all this
+    # records is when GridVibe stopped typing, for the floor under it.
+    connection["startup_finished_at"] = time.monotonic()
 
 
 def _connection_is_current(session_id, connection):
@@ -1274,7 +1493,19 @@ def _sanitize_terminal_input(connection: Dict[str, Any], input_data: Any) -> str
     return text
 
 
-_TERMINAL_INPUT_ESCAPE_SEQUENCE = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|.)")
+_TERMINAL_INPUT_ESCAPE_SEQUENCE = re.compile(
+    r"\x1b(?:"
+    # Legacy X10 mouse reports carry three bytes after the CSI final. This
+    # alternative must precede the generic CSI one or those bytes would look
+    # like reader input.
+    r"\[M[\s\S]{3}"
+    r"|\[[0-?]*[ -/]*[@-~]"
+    # xterm answers colour queries with a complete OSC string through onData.
+    # Consuming only its ESC+] head would leave the printable payload behind.
+    r"|\][^\x07\x1b]*(?:\x07|\x1b\\)"
+    r"|."
+    r")"
+)
 _MAX_TRACKED_TERMINAL_COMMAND_LENGTH = 4096
 
 
@@ -1323,12 +1554,29 @@ def _track_current_terminal_agent_input(
 
     session = session_manager.get_session(session_id)
 
+    # A pane that reports its own prompts has an observation coming; nothing
+    # below needs to guess at one. See `_agent_runtime_is_observed`. Read
+    # before the arming below, so the very first input into a pane still gets
+    # the fallback it would have had.
+    guess_allowed = not _agent_runtime_is_observed(connection)
+
+    # xterm's onData is not a user-input-only event. Terminal capability
+    # replies (DA/DSR), focus reports and TUI mouse packets come through the
+    # same callback as keystrokes. They are escape-only after the normalization
+    # above and must not arm the prompt watcher: during launch, one can race a
+    # prompt still draining from GridVibe's own bootstrap and make a healthy
+    # agent look as though it returned to the shell. A real reader gesture that
+    # can end or interact with an agent leaves something here -- printable
+    # input, Enter, Ctrl+C, Ctrl+D, and so on.
+    if session and session.startup_mode == "agent" and text:
+        _arm_agent_runtime_on_input(session_id, connection)
+
     # The _gridvibe_* tracking keys are shared across Socket.IO handler
     # threads (two windows may drive the same session), so read-modify-write
     # them only under connection_lock; the string handling inside is trivial.
     # Metadata updates and broadcasts happen after the lock is released.
     with connection_lock:
-        if session and session.startup_mode == "agent":
+        if session and session.startup_mode == "agent" and guess_allowed:
             if "\x04" in text:
                 connection["_gridvibe_input_line"] = ""
                 exit_reason = "end-of-input"
@@ -1366,7 +1614,7 @@ def _track_current_terminal_agent_input(
         return
 
     for submitted_line in submitted_lines:
-        if submitted_line.strip().lower() in {"/exit", "/quit"}:
+        if guess_allowed and submitted_line.strip().lower() in {"/exit", "/quit"}:
             if _mark_runtime_agent_exited(session_id, "exit command"):
                 return
         # A prompt containing another CLI's name is conversation input while
@@ -1378,6 +1626,11 @@ def _track_current_terminal_agent_input(
         if not detected:
             continue
         agent_selection, initial_command = detected
+        # Taken before the read below, which on a remote pane with no
+        # shell-integration observation opens an exec channel and waits out its
+        # bounded timeout -- long enough for a command that is not installed to
+        # fail and draw its prompt again.
+        prompt_mark = _prompt_observation_mark(connection)
         # Promotion is the one moment GridVibe knows where the agent is being
         # started: the shell is still at its prompt, and a beat later the agent
         # owns the terminal and emits no prompt of its own. Stamp the observed
@@ -1405,12 +1658,24 @@ def _track_current_terminal_agent_input(
                 session_id,
                 agent_selection,
             )
+            # No grace: the user was at a prompt to type this, so nothing of
+            # GridVibe's is in flight and the pane's next prompt is this
+            # command's own outcome -- the agent exiting, or never starting.
+            _arm_agent_runtime(session_id, connection, prompt_mark)
             _broadcast_session_status(session_id)
         return
 
 
 def _mark_runtime_agent_exited(session_id: str, reason: str) -> bool:
-    """Return an agent-backed runtime pane to ordinary terminal metadata."""
+    """Return an agent-backed runtime pane to ordinary terminal metadata.
+
+    The pane stops being an agent in both of the places that say so: its
+    metadata, which is what the pane header and the dashboard read, and the
+    title it announced while it was one. An agent that exits without clearing
+    its own title -- Codex does not, and neither does the shell that inherits
+    the pane -- otherwise leaves the last thing it said standing as a fact about
+    what the pane is now.
+    """
     session = session_manager.get_session(session_id)
     if not session or session.startup_mode != "agent":
         return False
@@ -1424,6 +1689,11 @@ def _mark_runtime_agent_exited(session_id: str, reason: str) -> bool:
     )
     if not updated:
         return False
+    with connection_lock:
+        connection = ssh_connections.get(session_id)
+    if connection is not None:
+        _disarm_agent_runtime(connection)
+        connection["agent_title_floor"] = time.time()
     logger.info("Detected runtime agent exit for session %s: %s", session_id, reason)
     _broadcast_session_status(session_id)
     return True
@@ -1489,7 +1759,12 @@ def _connect_ssh_session(session_id: str, session: Any):
             if transport is not None:
                 transport.set_keepalive(keepalive_interval)
 
-        channel = client.invoke_shell(term='xterm', width=120, height=30)
+        # Opened at the pane's own size, not a fixed default: see
+        # `session_terminal_sizes`. A shell that starts an agent starts it
+        # before any resize could arrive, so the first frame it draws has to
+        # be drawn at the right width.
+        pty_cols, pty_rows = _terminal_size_for(session_id)
+        channel = client.invoke_shell(term='xterm', width=pty_cols, height=pty_rows)
         channel.settimeout(SSH_STREAM_RECV_TIMEOUT)
 
         resources = {
@@ -1571,6 +1846,10 @@ def _connect_local_session(session_id: str, session: Any):
         )
         logger.info(f"[{session_id}] local command: {command}")
 
+        # Same rule as the SSH connector: the replacement PTY behind a relaunched
+        # pane opens at the size that pane is already drawn at.
+        pty_cols, pty_rows = _terminal_size_for(session_id)
+
         if os.name == "nt":
             if WinPtyProcess is None:
                 raise RuntimeError(
@@ -1578,7 +1857,12 @@ def _connect_local_session(session_id: str, session: Any):
                     "Install core dependencies with `pip install -r requirements.txt`."
                 )
 
-            process = WinPtyProcess.spawn(command, cwd=launch_cwd, env=shell_environment)
+            process = WinPtyProcess.spawn(
+                command,
+                cwd=launch_cwd,
+                env=shell_environment,
+                dimensions=(pty_rows, pty_cols),
+            )
             resources = {
                 "kind": "local",
                 "pty_process": process,
@@ -1589,6 +1873,7 @@ def _connect_local_session(session_id: str, session: Any):
             if pty is None:
                 raise RuntimeError("PTY support is unavailable on this system")
             master_fd, slave_fd = pty.openpty()
+            _set_pty_winsize(master_fd, pty_cols, pty_rows)
             env = dict(shell_environment)
             env.setdefault("TERM", "xterm-256color")
             process = subprocess.Popen(
