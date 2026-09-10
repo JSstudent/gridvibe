@@ -4,6 +4,8 @@ All notable changes to GridVibe will be documented in this file.
 
 ## Unreleased
 
+## 1.11.1 - 2026-09-10
+
 - **(doc) README.md reads as a product tour again rather than a specification.** The Agent Dashboard and File Explorer sections had grown into prose essays — roughly a hundred lines between them, arguing why each reading is the right one and what each fallback does — which is the wrong altitude for the first page someone lands on. Both are now bullet lists of what the feature does, as are Voice Input, Sessions & Workspaces, the pane relaunch menu, and the Git sidebar. The whole document is about a third shorter, and the reasoning that was cut lives in `docs/engineering_contracts.md` where it is maintained.
 
   **Shortcuts have their own section now**, lifted out of the mixed "Icons & Shortcuts" heading and grouped the way the in-app panel groups them: Navigation, Terminal, Explorer, Editor, Window, and the pointer gestures beneath. It is still the single table `test_shortcuts_help.py` pins to `shortcutHelpChordNames()`, so the same 21 chords are listed and the docs still cannot drift from what the app binds. The icon tables stay under their own **Icons** heading. Also corrected: the feature list said six agent CLIs where the table beneath it listed eight.
