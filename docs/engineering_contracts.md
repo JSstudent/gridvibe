@@ -129,6 +129,21 @@ changing any field that survives restart; it owns the complete save/restore flow
   purges the server buffer; Reset view waits for replay acknowledgement or a
   bounded fallback and resets exactly once, on the captured pane. A live TUI may
   need to re-arm mouse reporting afterwards.
+- **A PTY is opened at the size the pane is already drawn at, never at a
+  default it waits to be corrected from.** `session_terminal_sizes` records the
+  last viewport a client reported, keyed by *session id* so it outlives the
+  transport a relaunch discards, and every connector reads it through
+  `_terminal_size_for()` before spawning — SSH `invoke_shell`, WinPty
+  `dimensions`, POSIX `TIOCSWINSZ` on the master before `Popen`.
+  `DEFAULT_TERMINAL_COLS`/`ROWS` apply only to a pane that has never reported
+  one. Record on every reported resize, including when there is no connection to
+  resize: that gap is exactly the relaunch window whose replacement the record
+  decides. The record is dropped only with the session itself. A late correction
+  is not equivalent — `_run_startup_sequence()` types an agent's command as soon
+  as the shell is up, so the agent's first frame is drawn before any resize could
+  arrive. On the client, `emitTerminalResize()` skips an unchanged size, so a
+  pane reconnecting with its xterm attached must forget that memo and
+  re-announce; a relaunch changes no dimension the page can see.
 - Ask `effective_directory()` where a pane is: prompt observation, then
   `/proc/<pid>/cwd`, then an explicitly opted-in marker probe, then a directory
   fallback reported as an assumption. Never probe an agent's input box.

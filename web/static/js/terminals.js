@@ -8372,6 +8372,7 @@
             const target = resolveSessionTarget(session.session_id);
             if (!target) return;
 
+            const previousStatus = target.terminal._session?.status;
             target.terminal._session = session;
             if (!target.active) {
                 return;
@@ -8401,6 +8402,18 @@
                 /* A reconnected pane keeps its attached xterm; drop any
                    error/disconnected overlay left behind by the retry flow. */
                 document.getElementById(`ph-${index}`)?.remove();
+                /* ...and it keeps its dimensions, which is exactly why the new
+                   transport has to be told them. A relaunch (reset menu, mode
+                   or shell switch, retry) replaces the PTY behind a pane that
+                   was never redrawn, so `emitTerminalResize` would skip the
+                   announcement as unchanged and leave a full-screen agent
+                   drawing at the PTY's opening geometry until the reader
+                   resized the grid by hand. Forgetting the memo makes the
+                   fit's own emit land. */
+                if (previousStatus && previousStatus !== 'connected') {
+                    terminal._lastCols = null;
+                    terminal._lastRows = null;
+                }
                 scheduleFit(index);
             } else if (session.status === 'error') {
                 showPlaceholderError(index, session.error_message || 'Connection failed');

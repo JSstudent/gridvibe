@@ -88,6 +88,23 @@ WINDOWS_DEVICE_ATTRIBUTES_RESPONSE = "[?1;2c"
 ssh_connections: Dict[str, Dict[str, Any]] = {}
 TERMINAL_OUTPUT_BUFFER_MAX_CHARS = 50000
 
+# The geometry a fresh PTY is opened with when no client has reported one yet
+# -- the first pane of a session, before its xterm has been fitted.
+DEFAULT_TERMINAL_COLS = 120
+DEFAULT_TERMINAL_ROWS = 30
+TERMINAL_SIZE_BOUNDS = ((8, 400), (8, 200))
+
+# The last viewport a client reported for a session, kept *per session id*
+# rather than on the connection, because a relaunch (the header's reset menu,
+# a mode or shell switch) closes the connection and opens a new one behind the
+# same pane. The pane on screen is not redrawn by that, so the replacement PTY
+# has to be opened at the size the pane already has: opening it at the default
+# instead is what left a restarted full-screen agent drawing an 80-column UI
+# into a wider pane until the reader resized the grid by hand. A client only
+# re-announces its size when that size *changes*, so nothing corrects it.
+session_terminal_sizes: Dict[str, tuple[int, int]] = {}
+_MAX_TRACKED_TERMINAL_SIZES = 1000
+
 
 class _OutputBuffer(deque):
     """Chunk deque that carries its own character total.
@@ -241,6 +258,11 @@ def _close_ssh_connection(session_id: str, clear_buffer: bool = True, *, expecte
                 if clear_buffer:
                     session_output_buffers.pop(session_id, None)
         _shutdown_connection(connection)
+    # A relaunch closes the connection with the pane still on screen, and the
+    # replacement PTY is owed that pane's size -- so the remembered viewport
+    # outlives the transport and is dropped only with the session itself.
+    if session_manager.get_session(session_id) is None:
+        _forget_terminal_size(session_id)
     _evict_pooled_ssh_client(session_id)
 
 
@@ -878,10 +900,47 @@ def _resolve_live_terminal_cwd(session_id: str, session: Any, timeout: float = 0
     return None
 
 
+def _normalize_terminal_size(cols: Any, rows: Any) -> tuple[int, int]:
+    """Clamp one reported viewport to the geometry a PTY may be opened at."""
+    (min_cols, max_cols), (min_rows, max_rows) = TERMINAL_SIZE_BOUNDS
+    return (
+        max(min_cols, min(int(cols), max_cols)),
+        max(min_rows, min(int(rows), max_rows)),
+    )
+
+
+def _record_terminal_size(session_id: str, cols: Any, rows: Any) -> tuple[int, int]:
+    """Remember one pane's viewport for the next PTY opened behind it.
+
+    Recorded even when there is no live connection to resize: the size a client
+    reports while its transport is down is exactly the size the replacement has
+    to start at.
+    """
+    size = _normalize_terminal_size(cols, rows)
+    with connection_lock:
+        session_terminal_sizes[session_id] = size
+        while len(session_terminal_sizes) > _MAX_TRACKED_TERMINAL_SIZES:
+            session_terminal_sizes.pop(next(iter(session_terminal_sizes)), None)
+    return size
+
+
+def _terminal_size_for(session_id: str) -> tuple[int, int]:
+    """The size to open a PTY at: the pane's own, or the default."""
+    with connection_lock:
+        return session_terminal_sizes.get(
+            session_id, (DEFAULT_TERMINAL_COLS, DEFAULT_TERMINAL_ROWS)
+        )
+
+
+def _forget_terminal_size(session_id: str):
+    """Drop a closed pane's remembered viewport."""
+    with connection_lock:
+        session_terminal_sizes.pop(session_id, None)
+
+
 def _resize_connection(connection: Dict[str, Any], cols: Any, rows: Any):
     """Resize an active remote or local terminal session."""
-    cols = max(8, min(int(cols), 400))
-    rows = max(8, min(int(rows), 200))
+    cols, rows = _normalize_terminal_size(cols, rows)
     kind = connection.get("kind")
 
     if kind == "ssh":
@@ -896,12 +955,14 @@ def _resize_connection(connection: Dict[str, Any], cols: Any, rows: Any):
         pty_process.setwinsize(rows, cols)
         return
 
-    master_fd = connection.get("master_fd")
+    _set_pty_winsize(connection.get("master_fd"), cols, rows)
+
+
+def _set_pty_winsize(master_fd: Any, cols: int, rows: int):
+    """Set one POSIX PTY's window size, or do nothing where it has none."""
     if master_fd is None or fcntl is None or termios is None:
         return
 
-    assert fcntl is not None
-    assert termios is not None
     winsize = struct.pack("HHHH", rows, cols, 0, 0)
     fcntl.ioctl(master_fd, termios.TIOCSWINSZ, winsize) # type: ignore
 
@@ -1698,7 +1759,12 @@ def _connect_ssh_session(session_id: str, session: Any):
             if transport is not None:
                 transport.set_keepalive(keepalive_interval)
 
-        channel = client.invoke_shell(term='xterm', width=120, height=30)
+        # Opened at the pane's own size, not a fixed default: see
+        # `session_terminal_sizes`. A shell that starts an agent starts it
+        # before any resize could arrive, so the first frame it draws has to
+        # be drawn at the right width.
+        pty_cols, pty_rows = _terminal_size_for(session_id)
+        channel = client.invoke_shell(term='xterm', width=pty_cols, height=pty_rows)
         channel.settimeout(SSH_STREAM_RECV_TIMEOUT)
 
         resources = {
@@ -1780,6 +1846,10 @@ def _connect_local_session(session_id: str, session: Any):
         )
         logger.info(f"[{session_id}] local command: {command}")
 
+        # Same rule as the SSH connector: the replacement PTY behind a relaunched
+        # pane opens at the size that pane is already drawn at.
+        pty_cols, pty_rows = _terminal_size_for(session_id)
+
         if os.name == "nt":
             if WinPtyProcess is None:
                 raise RuntimeError(
@@ -1787,7 +1857,12 @@ def _connect_local_session(session_id: str, session: Any):
                     "Install core dependencies with `pip install -r requirements.txt`."
                 )
 
-            process = WinPtyProcess.spawn(command, cwd=launch_cwd, env=shell_environment)
+            process = WinPtyProcess.spawn(
+                command,
+                cwd=launch_cwd,
+                env=shell_environment,
+                dimensions=(pty_rows, pty_cols),
+            )
             resources = {
                 "kind": "local",
                 "pty_process": process,
@@ -1798,6 +1873,7 @@ def _connect_local_session(session_id: str, session: Any):
             if pty is None:
                 raise RuntimeError("PTY support is unavailable on this system")
             master_fd, slave_fd = pty.openpty()
+            _set_pty_winsize(master_fd, pty_cols, pty_rows)
             env = dict(shell_environment)
             env.setdefault("TERM", "xterm-256color")
             process = subprocess.Popen(

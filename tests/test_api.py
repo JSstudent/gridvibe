@@ -13645,6 +13645,28 @@ class ApiRoutesTestCase(unittest.TestCase):
 
         channel.resize_pty.assert_called_once_with(width=132, height=42)
 
+    def test_a_reported_viewport_is_remembered_even_with_no_pty_to_resize(self):
+        """The pane whose shell is being relaunched has no connection at all,
+        and its replacement PTY is opened at whatever this remembered."""
+        sizes = {}
+        with patch.object(web_terminal_io, "session_terminal_sizes", sizes),                 patch.object(web_terminal_io, "ssh_connections", {}):
+            api.handle_terminal_resize(
+                {"session_id": "pane", "cols": 132, "rows": 42}
+            )
+
+            self.assertEqual(sizes["pane"], (132, 42))
+            self.assertEqual(web_terminal_io._terminal_size_for("pane"), (132, 42))
+
+    def test_a_reconnected_pane_re_announces_the_size_it_never_changed(self):
+        """terminals.js skips an unchanged resize, so a pane that keeps its
+        xterm across a new transport has to forget the memo to announce at
+        all -- the counterpart of opening the PTY at the pane's own size."""
+        terminals_js = self._static("js/terminals.js")
+
+        self.assertIn("if (previousStatus && previousStatus !== 'connected') {", terminals_js)
+        self.assertIn("terminal._lastCols = null;", terminals_js)
+        self.assertIn("terminal._lastRows = null;", terminals_js)
+
     def test_run_startup_sequence_uses_cmd_syntax_for_windows_local_repo(self):
         connection = {"kind": "local", "pty_process": object()}
         session = SimpleNamespace(
