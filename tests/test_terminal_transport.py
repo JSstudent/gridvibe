@@ -280,7 +280,19 @@ class TerminalTransportTestCase(unittest.TestCase):
         order = []
         fcntl = MagicMock()
         fcntl.ioctl.side_effect = lambda *args: order.append(('ioctl', args[2]))
-        with patch.object(terminal.os, 'name', 'posix'), patch.object(terminal, 'pty') as pty,                 patch.object(terminal, 'fcntl', fcntl), patch.object(terminal, 'termios') as termios,                 patch.object(terminal.subprocess, 'Popen', side_effect=lambda *a, **kw: order.append(('spawn',))),                 patch.object(terminal.os, 'close'), patch.object(terminal.os, 'set_blocking'),                 patch.object(terminal, '_local_shell_integration', side_effect=lambda _, cmd, env: (cmd, env)),                 patch.object(terminal, '_run_startup_sequence'),                 patch.object(terminal, '_stream_local_output'):
+        with (
+            patch.object(terminal.os, 'name', 'posix'),
+            patch.object(terminal, 'pty') as pty,
+            patch.object(terminal, 'fcntl', fcntl),
+            patch.object(terminal, 'termios') as termios,
+            patch.object(terminal.subprocess, 'Popen', side_effect=lambda *a, **kw: order.append(('spawn',))),
+            patch.object(terminal.os, 'close'),
+            # Windows Python 3.11 lacks this POSIX API; provide it for the simulation.
+            patch.object(terminal.os, 'set_blocking', create=True),
+            patch.object(terminal, '_local_shell_integration', side_effect=lambda _, cmd, env: (cmd, env)),
+            patch.object(terminal, '_run_startup_sequence'),
+            patch.object(terminal, '_stream_local_output'),
+        ):
             pty.openpty.return_value = (101, 102)
             terminal._connect_local_session('pane', self._local_session())
 
