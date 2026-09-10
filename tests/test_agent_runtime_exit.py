@@ -19,11 +19,11 @@ pinned:
   at once, or an instantly failing command on a remote pane is missed.
 - **An agent still holding the terminal is left alone** -- output, titles and
   progress are not prompts.
-- **A launched pane is not armed by its own startup at all.** Its bootstrap
-  output has not been read when the agent command goes out, so there is no
-  honest mark to take; the reader's first input is the moment that is both late
-  enough and free -- and ending an agent takes input, so the gesture that ends
-  it arms the watch for it.
+- **A launched pane is not armed by its own startup or by terminal protocol
+  traffic.** Its bootstrap output has not been read when the agent command goes
+  out, so there is no honest mark to take; the reader's first meaningful input
+  is the moment that is both late enough and free. xterm capability replies and
+  TUI mouse packets share its input callback but are not that gesture.
 - **A retired pump may not retire the pane it no longer owns.**
 - **Where the prompt is observed, the keystroke heuristics stand down**, and
   where it is not, they still answer.
@@ -222,6 +222,42 @@ class AgentRuntimeExitTestCase(unittest.TestCase):
         self.send("i")
         self.assertTrue(self.connection["agent_runtime_armed"])
         self.assertIsAgent()
+
+    def test_terminal_protocol_traffic_cannot_arm_a_launched_agent(self):
+        """xterm replies and mouse reports are transport, not reader intent.
+
+        The restored pane's first live output can ask xterm for its secondary
+        device attributes. xterm answers through the same ``onData`` callback
+        as a key, and a TUI's mouse report takes that route too. Arming on either
+        let a still-draining bootstrap prompt retire Claude while it was visibly
+        running.
+        """
+        self.launch_agent_pane(command="claude")
+        self.age_past_arm_floor()
+
+        for packet in [
+            ESC + "[>0;276;0c",  # xterm secondary device attributes
+            ESC + "[1;1R",  # cursor position report
+            ESC + "[<0;20;5M",  # SGR mouse press
+            ESC + "[M" + " *%",  # legacy X10 mouse press + coordinates
+            ESC + "]10;rgb:ffff/ffff/ffff" + ESC + "\\",  # colour reply
+        ]:
+            with self.subTest(packet=packet):
+                self.send(packet)
+                self.assertFalse(self.connection.get("agent_runtime_armed"))
+                self.assertIsAgent()
+
+        # A late prompt from the launch burst is harmless while no reader
+        # gesture has armed the pane.
+        self.output(PROMPT)
+        self.assertIsAgent()
+
+        # Genuine input still arms the same observation and its next prompt
+        # still retires the agent.
+        self.send("\x03")
+        self.assertTrue(self.connection["agent_runtime_armed"])
+        self.output(PROMPT)
+        self.assertIsAgent(False)
 
     def test_a_launched_terminal_pane_is_never_armed(self):
         self.session.initial_command = "npm run dev"

@@ -176,10 +176,13 @@ changing any field that survives restart; it owns the complete save/restore flow
   user was at a prompt to type the command, so the mark is exact — and it is
   taken *before* `effective_directory()`, which can wait out the bounded remote
   read, with the arming re-asking at once. And a launched pane's **first
-  reader input** (`_arm_agent_runtime_on_input()`), by which time the bootstrap
-  output is long read. That moment is not a compromise: ending an agent takes
-  input, so the gesture that ends it is the one that arms the watch for it, and
-  the prompt that follows is retired on that same gesture.
+  meaningful reader input** (`_arm_agent_runtime_on_input()`), by which time the
+  bootstrap output is long read. xterm capability replies, focus reports and
+  TUI mouse packets share the browser's `onData` callback with keystrokes, but
+  become empty when terminal escape sequences are removed and must not arm the
+  watch. That moment is not a compromise: ending an agent takes input, so the
+  gesture that ends it is the one that arms the watch for it, and the prompt
+  that follows is retired on that same gesture.
   `AGENT_RUNTIME_ARM_MIN_AGE_SECONDS` is a floor under *when arming may begin*,
   never a window in which a prompt is ignored, so failing it costs nothing —
   the next input arms instead.

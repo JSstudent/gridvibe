@@ -1432,7 +1432,19 @@ def _sanitize_terminal_input(connection: Dict[str, Any], input_data: Any) -> str
     return text
 
 
-_TERMINAL_INPUT_ESCAPE_SEQUENCE = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|.)")
+_TERMINAL_INPUT_ESCAPE_SEQUENCE = re.compile(
+    r"\x1b(?:"
+    # Legacy X10 mouse reports carry three bytes after the CSI final. This
+    # alternative must precede the generic CSI one or those bytes would look
+    # like reader input.
+    r"\[M[\s\S]{3}"
+    r"|\[[0-?]*[ -/]*[@-~]"
+    # xterm answers colour queries with a complete OSC string through onData.
+    # Consuming only its ESC+] head would leave the printable payload behind.
+    r"|\][^\x07\x1b]*(?:\x07|\x1b\\)"
+    r"|."
+    r")"
+)
 _MAX_TRACKED_TERMINAL_COMMAND_LENGTH = 4096
 
 
@@ -1487,8 +1499,15 @@ def _track_current_terminal_agent_input(
     # the fallback it would have had.
     guess_allowed = not _agent_runtime_is_observed(connection)
 
-    # This input is what makes a launched agent pane watchable at all.
-    if session and session.startup_mode == "agent":
+    # xterm's onData is not a user-input-only event. Terminal capability
+    # replies (DA/DSR), focus reports and TUI mouse packets come through the
+    # same callback as keystrokes. They are escape-only after the normalization
+    # above and must not arm the prompt watcher: during launch, one can race a
+    # prompt still draining from GridVibe's own bootstrap and make a healthy
+    # agent look as though it returned to the shell. A real reader gesture that
+    # can end or interact with an agent leaves something here -- printable
+    # input, Enter, Ctrl+C, Ctrl+D, and so on.
+    if session and session.startup_mode == "agent" and text:
         _arm_agent_runtime_on_input(session_id, connection)
 
     # The _gridvibe_* tracking keys are shared across Socket.IO handler
