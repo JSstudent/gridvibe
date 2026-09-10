@@ -872,8 +872,45 @@ def _build_agent_preflight_request(agent_key: str, connection_mode: str, session
     }
 
 
+#: Preflight verdicts that mean the binary is not there to be started.
+#:
+#: Distinct from ``check_failed``, which means the *check* did not run and says
+#: nothing about the binary. Both cost the pane its agent identity; only
+#: ``check_failed`` costs it the command as well.
+AGENT_PREFLIGHT_ABSENT_STATUSES = frozenset(
+    {"missing", "needs_manual_install", "missing_prerequisite", "unsupported_here"}
+)
+
+
+def _clear_agent_launch_identity(session: Dict[str, Any]) -> None:
+    """Make this a plain terminal pane. Its startup command is left alone."""
+    session["initial_command_mode"] = "command"
+    session["startup_mode"] = "terminal"
+    session["agent_selection"] = ""
+    session["custom_agent"] = ""
+    session["agent_auto_mode"] = False
+
+
 def _sanitize_agent_launch_commands(connection_mode: str, sessions: List[Dict[str, Any]]) -> List[str]:
-    """Clear startup commands that already failed preflight inspection."""
+    """Answer the preflight before the pane opens, on two separate questions.
+
+    **Can the check run?** ``check_failed`` means it could not, so the command
+    is cleared as it always has been.
+
+    **Is the binary there?** A fresh probe saying it is not is the earliest and
+    most reliable moment GridVibe ever knows the pane will not run an agent --
+    earlier than any signal the pane itself can give, because the pane's own
+    answer is a shell prompt that arrives before its output has even been read.
+    So the pane stops being an agent here, in its header and on the dashboard,
+    while the command is **kept**: the reader still gets the real error in the
+    terminal, which is what tells them what to install, and a probe that turns
+    out to have been wrong costs a label rather than a launch. The launcher has
+    already shown this same verdict beside the row, so nothing here is news.
+
+    Either way the identity goes as one unit. Leaving it behind produced a pane
+    that opened a plain shell and was still *called* Codex -- the same defect as
+    an agent pane that outlives its agent, arriving before the pane has started.
+    """
     normalized_mode = _normalize_connection_mode(connection_mode)
     warnings: List[str] = []
     for index, session in enumerate(sessions):
@@ -886,13 +923,20 @@ def _sanitize_agent_launch_commands(connection_mode: str, sessions: List[Dict[st
             agent_key,
             _build_agent_preflight_request(agent_key, normalized_mode, session),
         )
-        if preflight.get("status") != "check_failed":
+        status = str(preflight.get("status") or "")
+        if status not in AGENT_PREFLIGHT_ABSENT_STATUSES and status != "check_failed":
             continue
 
         title = str(session.get("title") or f"Terminal {index + 1}").strip() or f"Terminal {index + 1}"
-        warning = f"{title}: {preflight.get('message') or 'Agent preflight failed.'} Startup command cleared."
-        logger.warning("Clearing startup command because agent preflight failed: %s", warning)
-        session["initial_command"] = ""
+        message = str(preflight.get("message") or "Agent preflight failed.")
+        if status == "check_failed":
+            warning = f"{title}: {message} Startup command cleared."
+            logger.warning("Clearing startup command because agent preflight failed: %s", warning)
+            session["initial_command"] = ""
+        else:
+            warning = f"{title}: {message} Opened as a terminal."
+            logger.info("Clearing agent identity because the binary is absent: %s", warning)
+        _clear_agent_launch_identity(session)
         warnings.append(warning)
 
     return warnings

@@ -22,6 +22,9 @@ What is pinned, and why each one is a way the reading could go quietly wrong:
   never sends the `0` that would clear its own progress.
 - **"Nothing observed" is not "idle".** A pane whose transport never came up
   and an agent waiting for you are different answers.
+- **A title outlives the agent that wrote it.** Codex sets one and does not
+  clear it on the way out, so the reading has to stop publishing it when the
+  pane is retargeted -- and has to keep publishing whatever the pane says next.
 """
 
 import sys
@@ -52,6 +55,7 @@ from web.agent_activity import (  # noqa: E402
     blank_agent_activity,
     describe_agent_activity,
     has_agent_screen_output,
+    mask_agent_titles,
     normalize_agent_title,
     note_agent_output,
     parse_agent_events,
@@ -312,6 +316,46 @@ class AgentActivityStateTestCase(unittest.TestCase):
         self.assertIsNot(second, third)
         self.assertEqual(first["last_output_at"], 1.0)
         self.assertEqual(second["title"], "")
+
+
+class AgentTitleFloorTestCase(unittest.TestCase):
+    """What a pane announced before it was retargeted is not what it is now."""
+
+    def record(self, title="OpenAI Codex CLI", tab="", at=10.0):
+        events = [(AGENT_EVENT_TITLE, title)]
+        if tab:
+            events.append((AGENT_EVENT_TAB_TITLE, tab))
+        return apply_agent_events(None, events, at)
+
+    def test_no_floor_publishes_the_title_and_allocates_nothing(self):
+        record = self.record()
+        self.assertIs(mask_agent_titles(record, 0.0), record)
+        self.assertEqual(describe_agent_activity(record, 11.0)["title"], "OpenAI Codex CLI")
+
+    def test_a_title_from_before_the_floor_stops_being_published(self):
+        record = self.record(at=10.0)
+        masked = mask_agent_titles(record, 10.0)
+        self.assertEqual(describe_agent_activity(masked, 11.0)["title"], "")
+        # The record itself is untouched: the pump thread owns it.
+        self.assertEqual(record["title"], "OpenAI Codex CLI")
+
+    def test_a_title_announced_after_the_floor_stands(self):
+        record = self.record(title="Claude Code", at=12.0)
+        self.assertIs(mask_agent_titles(record, 10.0), record)
+        self.assertEqual(describe_agent_activity(record, 13.0)["title"], "Claude Code")
+
+    def test_the_tab_title_is_floored_on_its_own_stamp(self):
+        # OSC 1 and OSC 2 move independently, so one timestamp for both would
+        # either strand a stale tab title or drop a fresh one.
+        record = apply_agent_events(None, [(AGENT_EVENT_TAB_TITLE, "Chat A")], 10.0)
+        record = apply_agent_events(record, [(AGENT_EVENT_TITLE, "Chat A - repo")], 12.0)
+        masked = mask_agent_titles(record, 11.0)
+        self.assertEqual(masked["tab_title"], "")
+        self.assertEqual(describe_agent_activity(masked, 13.0)["title"], "Chat A - repo")
+
+    def test_a_blank_record_needs_no_mask(self):
+        blank = blank_agent_activity()
+        self.assertIs(mask_agent_titles(blank, 99.0), blank)
 
 
 if __name__ == "__main__":

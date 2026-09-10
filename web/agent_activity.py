@@ -33,6 +33,14 @@ keeps this out of the session record: a live observation is not session state,
 it is never saved, never restored, and a relaunched pane starts a fresh one
 because it starts a fresh connection.
 
+The one thing that outlives the agent is its title -- Codex sets one and does
+not clear it on the way out, and the shell that inherits the pane says nothing
+at all -- so the pane's connection carries a floor and the *reader* stops
+publishing what was announced before it. :func:`mask_agent_titles` is that half;
+raising the floor is ``web/terminal_io.py``'s, at the moment the pane is
+retargeted. Clearing the record instead would put a second writer on a dict this
+module's whole no-lock design rests on having exactly one.
+
 Text and values in, values out -- no imports from ``web`` except the shared
 sequence scanner -- so ``tests/test_agent_activity.py`` executes it directly.
 The stream side stays in ``web/terminal_io.py``.
@@ -220,6 +228,7 @@ def blank_agent_activity() -> Dict[str, Any]:
         "title": "",
         "tab_title": "",
         "title_at": 0.0,
+        "tab_title_at": 0.0,
         "progress_state": PROGRESS_STATE_NONE,
         "progress_value": 0,
         "progress_at": 0.0,
@@ -254,6 +263,7 @@ def apply_agent_events(
     for kind, value in events:
         if kind == AGENT_EVENT_TAB_TITLE:
             updated["tab_title"] = normalize_agent_title(value)
+            updated["tab_title_at"] = float(now)
             continue
         if kind == AGENT_EVENT_TITLE:
             updated["title"] = normalize_agent_title(value)
@@ -269,6 +279,44 @@ def apply_agent_events(
         updated["progress_value"] = progress_value
         updated["progress_at"] = float(now)
     return updated
+
+
+def mask_agent_titles(
+    record: Optional[Dict[str, Any]],
+    floor: float,
+) -> Dict[str, Any]:
+    """Drop announced titles the pane published before it was retargeted.
+
+    An agent that exits without clearing its own title leaves the last thing it
+    said standing in the record, and the shell that inherits the pane has no
+    reason to say anything at all -- so "OpenAI Codex CLI" survives the agent
+    that wrote it and is then read as a fact about whatever the pane became.
+    Clearing the record itself would race the pump thread that owns it (the
+    only writer), so the reader is what stops publishing instead: the caller
+    raises a floor at the moment of the retargeting, and a title stamped at or
+    before it is no longer an observation of the pane that is there now.
+
+    This is the title half of the rule ``_publish_observed_cwd`` follows for the
+    directory: a dead shell's last report is not an observation of the live one.
+    A title the pane announces *after* the floor is a fresh one and stands, so
+    the next agent's first announcement replaces the mask rather than fighting
+    it. Returns the record unchanged when there is nothing to mask, so the
+    common poll allocates nothing.
+    """
+    source = record or blank_agent_activity()
+    limit = float(floor or 0.0)
+    if limit <= 0.0:
+        return source
+    stale_title = bool(source.get("title")) and float(source.get("title_at") or 0.0) <= limit
+    stale_tab = bool(source.get("tab_title")) and float(source.get("tab_title_at") or 0.0) <= limit
+    if not stale_title and not stale_tab:
+        return source
+    masked = dict(source)
+    if stale_title:
+        masked["title"] = ""
+    if stale_tab:
+        masked["tab_title"] = ""
+    return masked
 
 
 def describe_agent_activity(

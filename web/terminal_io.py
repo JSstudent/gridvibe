@@ -27,6 +27,7 @@ from web.agent_activity import (
     apply_agent_events,
     blank_agent_activity,
     has_agent_screen_output,
+    mask_agent_titles,
     note_agent_output,
     parse_agent_events,
 )
@@ -442,6 +443,16 @@ CWD_SOURCE_LAUNCH = "launch"
 REMOTE_CWD_READ_TIMEOUT = 3.0
 REMOTE_CWD_MAX_OUTPUT_BYTES = 4096
 
+#: The floor under a *launched* agent pane's arming, and the only timer in this
+#: signal.
+#:
+#: A launched pane is armed by the reader's first input rather than by its own
+#: startup, and the one thing that could still go wrong is a reader who types
+#: into the pane while GridVibe's own bootstrap output is still arriving. The
+#: floor is a lower bound on when arming may *begin*, never a window in which a
+#: prompt is ignored, so failing it costs nothing: the next input arms instead.
+AGENT_RUNTIME_ARM_MIN_AGE_SECONDS = 2.0
+
 
 def _observe_terminal_output_cwd(
     session_id: str,
@@ -480,17 +491,147 @@ def _observe_terminal_output_cwd(
     if not reported:
         return
 
+    # A directory event *is* a prompt: the hook runs when the shell draws one.
+    # The count is this pane's own, written only by this pump thread, and it is
+    # what tells an agent still holding the terminal (which draws no prompt at
+    # all) from one that has handed it back. It is counted here, before the
+    # value is normalized, because a path this host cannot make sense of was
+    # still a prompt.
+    connection["prompt_count"] = int(connection.get("prompt_count") or 0) + sum(
+        1 for kind, _ in events if kind == CWD_EVENT_DIRECTORY
+    )
+
     directory = normalize_observed_cwd(
         reported,
         str(connection.get("shell_kind") or ""),
         # A remote pane's paths are the remote host's, whatever this host is.
         on_windows=connection.get("kind") != "ssh" and os.name == "nt",
     )
-    if not directory:
-        return
+    moved = bool(directory) and _publish_observed_cwd(session_id, connection, directory)
 
-    if _publish_observed_cwd(session_id, connection, directory):
+    # Last, so that when this prompt is also the one that retires the pane's
+    # agent the single broadcast below carries both facts.
+    retired = _note_shell_prompt(session_id, connection)
+    if moved and not retired:
         _broadcast_session_status(session_id)
+
+
+def _prompt_observation_mark(connection: Dict[str, Any]) -> int:
+    """How many prompts this pane had drawn when the caller looked.
+
+    Taken *before* the slow part of a promotion (``effective_directory`` can
+    open an exec channel on a remote pane and wait out its bounded timeout), so
+    a command that fails and prompts again during that wait is still counted
+    against the moment it was submitted rather than the moment the metadata
+    landed.
+    """
+    return int(connection.get("prompt_count") or 0)
+
+
+def _arm_agent_runtime(
+    session_id: str,
+    connection: Dict[str, Any],
+    prompt_mark: int,
+) -> None:
+    """Watch for the prompt that says this pane's agent is no longer running.
+
+    An agent CLI owns the terminal while it runs: it draws no shell prompt, so
+    the hook installed at startup emits nothing for as long as it is there.
+    That silence is the observation -- the pane's *next* prompt is the shell
+    taking the terminal back, whether the agent exited, crashed, was killed, or
+    never started because its binary is not installed.
+
+    It is the answer to the same question the two keystroke heuristics in
+    ``_track_current_terminal_agent_input`` guess at, and it is an observation
+    where those are a guess: they read what the user typed and so cannot tell a
+    Ctrl+C that quit Codex from the second of two that only interrupted a turn,
+    and they see nothing at all when the agent is closed any other way. Those
+    stay as the fallback for a pane with no working hook (``shell_integration``
+    off, a remote shell that would not take it); this fires first wherever the
+    pane is actually reporting.
+
+    **The mark is everything, and it is only meaningful at a moment when
+    nothing of GridVibe's own is still in flight.** There are exactly two such
+    moments, and neither is the end of the startup sequence: a runtime promotion
+    (the user was at a prompt to type the command) and the reader's first input
+    into a launched agent pane (the bootstrap output is long read by then). The
+    check runs once here as well as on every later prompt, because on the
+    promotion path the mark is taken before a wait the shell can finish inside.
+    """
+    connection["agent_runtime_armed"] = True
+    connection["agent_runtime_prompt_mark"] = int(prompt_mark)
+    _note_shell_prompt(session_id, connection)
+
+
+def _arm_agent_runtime_on_input(session_id: str, connection: Dict[str, Any]) -> None:
+    """Start watching a *launched* agent pane, on the reader's first input.
+
+    A pane GridVibe started the agent in has no moment of its own to arm at --
+    see ``_run_startup_sequence`` -- and this is the first moment that is both
+    late enough and free: to end an agent you have to type at it, so the gesture
+    that ends the agent is also the one that arms the watch for it, and the
+    prompt that follows is retired on that same gesture.
+
+    The mark is the count as it stands *now*, so nothing already drawn counts.
+    A launched agent that never started is therefore retired by the reader's
+    next command rather than immediately -- they are looking at its error and
+    about to type something anyway -- and a preflight that already knows the
+    binary is missing never labels the pane an agent in the first place.
+    """
+    if connection.get("agent_runtime_armed"):
+        return
+    started_at = float(connection.get("startup_finished_at") or 0.0)
+    if started_at and (time.monotonic() - started_at) < AGENT_RUNTIME_ARM_MIN_AGE_SECONDS:
+        return
+    # By construction this cannot retire the pane here: the mark *is* the count.
+    _arm_agent_runtime(session_id, connection, _prompt_observation_mark(connection))
+
+
+def _agent_runtime_is_observed(connection: Dict[str, Any]) -> bool:
+    """Is this pane's own prompt reporting the answer, rather than a guess?
+
+    Both halves are required and neither is enough. ``agent_runtime_armed`` says
+    GridVibe is watching for the prompt that ends this agent; a non-zero prompt
+    count says the pane has actually drawn one GridVibe could read, which is the
+    only proof the hook took at all -- ``terminal.shell_integration`` is a real
+    kill switch, and a remote shell may refuse the line that installs it.
+
+    Where both hold, the keystroke heuristics stand down: they read what the
+    user typed, and typing is not the same fact. Two Ctrl+C in quick succession
+    are how Codex quits *and* how a reader interrupts two turns in a row, and
+    "/exit" is a command to one agent and a message to another -- while a prompt
+    is the shell itself saying it has the terminal back.
+    """
+    return bool(connection.get("agent_runtime_armed")) and bool(connection.get("prompt_count"))
+
+
+def _disarm_agent_runtime(connection: Optional[Dict[str, Any]]) -> None:
+    """Stop watching: this pane is no longer running an agent GridVibe placed."""
+    if connection is not None:
+        connection["agent_runtime_armed"] = False
+
+
+def _note_shell_prompt(session_id: str, connection: Dict[str, Any]) -> bool:
+    """Retire the pane's agent metadata once the shell has the terminal back.
+
+    Returns whether it did, so the caller knows the status has already gone out.
+
+    Identity is checked the way :func:`_publish_observed_cwd` checks it, and for
+    the same reason: a retiring pump can still be holding the last prompt of the
+    shell it belonged to, and letting that demote the session would undo a
+    relaunch that has already put a fresh agent in the pane. The demotion itself
+    broadcasts, so it runs with no lock held.
+
+    """
+    if not connection.get("agent_runtime_armed"):
+        return False
+    mark = int(connection.get("agent_runtime_prompt_mark") or 0)
+    if int(connection.get("prompt_count") or 0) <= mark:
+        return False
+    if not _connection_is_current(session_id, connection):
+        return False
+    connection["agent_runtime_armed"] = False
+    return _mark_runtime_agent_exited(session_id, "shell prompt")
 
 
 def _observe_agent_activity(connection: Dict[str, Any], output: str) -> None:
@@ -537,10 +678,17 @@ def agent_activity_snapshot() -> Dict[str, Dict[str, Any]]:
     with no transport -- explorer and browser panes -- are absent rather than
     blank, which is what lets the dashboard tell "nothing to observe" from
     "observed nothing".
+
+    The title floor is applied here rather than by clearing the record, because
+    the pump thread is the record's only writer and a second writer would race
+    it. See :func:`~web.agent_activity.mask_agent_titles`.
     """
     with connection_lock:
         return {
-            session_id: connection.get("agent_activity") or blank_agent_activity()
+            session_id: mask_agent_titles(
+                connection.get("agent_activity") or blank_agent_activity(),
+                float(connection.get("agent_title_floor") or 0.0),
+            )
             for session_id, connection in ssh_connections.items()
         }
 
@@ -961,6 +1109,16 @@ def _run_startup_sequence(connection: Dict[str, Any], session: Any):
     if startup_command:
         _send_connection_input(connection, f"{startup_command}{newline}")
 
+    # Deliberately not the moment to arm an agent pane's retirement watch.
+    # Nothing typed above has been *read* yet -- the pump only starts once this
+    # returns -- so every prompt those lines draw is still in the transport, and
+    # a watch armed here retires the agent as soon as they arrive. On a remote
+    # pane that is three commands' worth (and the hook emits twice), which is
+    # exactly how a healthy agent came to be retired a second after it started.
+    # `_arm_agent_runtime` is the reader's first input's job instead; all this
+    # records is when GridVibe stopped typing, for the floor under it.
+    connection["startup_finished_at"] = time.monotonic()
+
 
 def _connection_is_current(session_id, connection):
     with connection_lock:
@@ -1323,12 +1481,22 @@ def _track_current_terminal_agent_input(
 
     session = session_manager.get_session(session_id)
 
+    # A pane that reports its own prompts has an observation coming; nothing
+    # below needs to guess at one. See `_agent_runtime_is_observed`. Read
+    # before the arming below, so the very first input into a pane still gets
+    # the fallback it would have had.
+    guess_allowed = not _agent_runtime_is_observed(connection)
+
+    # This input is what makes a launched agent pane watchable at all.
+    if session and session.startup_mode == "agent":
+        _arm_agent_runtime_on_input(session_id, connection)
+
     # The _gridvibe_* tracking keys are shared across Socket.IO handler
     # threads (two windows may drive the same session), so read-modify-write
     # them only under connection_lock; the string handling inside is trivial.
     # Metadata updates and broadcasts happen after the lock is released.
     with connection_lock:
-        if session and session.startup_mode == "agent":
+        if session and session.startup_mode == "agent" and guess_allowed:
             if "\x04" in text:
                 connection["_gridvibe_input_line"] = ""
                 exit_reason = "end-of-input"
@@ -1366,7 +1534,7 @@ def _track_current_terminal_agent_input(
         return
 
     for submitted_line in submitted_lines:
-        if submitted_line.strip().lower() in {"/exit", "/quit"}:
+        if guess_allowed and submitted_line.strip().lower() in {"/exit", "/quit"}:
             if _mark_runtime_agent_exited(session_id, "exit command"):
                 return
         # A prompt containing another CLI's name is conversation input while
@@ -1378,6 +1546,11 @@ def _track_current_terminal_agent_input(
         if not detected:
             continue
         agent_selection, initial_command = detected
+        # Taken before the read below, which on a remote pane with no
+        # shell-integration observation opens an exec channel and waits out its
+        # bounded timeout -- long enough for a command that is not installed to
+        # fail and draw its prompt again.
+        prompt_mark = _prompt_observation_mark(connection)
         # Promotion is the one moment GridVibe knows where the agent is being
         # started: the shell is still at its prompt, and a beat later the agent
         # owns the terminal and emits no prompt of its own. Stamp the observed
@@ -1405,12 +1578,24 @@ def _track_current_terminal_agent_input(
                 session_id,
                 agent_selection,
             )
+            # No grace: the user was at a prompt to type this, so nothing of
+            # GridVibe's is in flight and the pane's next prompt is this
+            # command's own outcome -- the agent exiting, or never starting.
+            _arm_agent_runtime(session_id, connection, prompt_mark)
             _broadcast_session_status(session_id)
         return
 
 
 def _mark_runtime_agent_exited(session_id: str, reason: str) -> bool:
-    """Return an agent-backed runtime pane to ordinary terminal metadata."""
+    """Return an agent-backed runtime pane to ordinary terminal metadata.
+
+    The pane stops being an agent in both of the places that say so: its
+    metadata, which is what the pane header and the dashboard read, and the
+    title it announced while it was one. An agent that exits without clearing
+    its own title -- Codex does not, and neither does the shell that inherits
+    the pane -- otherwise leaves the last thing it said standing as a fact about
+    what the pane is now.
+    """
     session = session_manager.get_session(session_id)
     if not session or session.startup_mode != "agent":
         return False
@@ -1424,6 +1609,11 @@ def _mark_runtime_agent_exited(session_id: str, reason: str) -> bool:
     )
     if not updated:
         return False
+    with connection_lock:
+        connection = ssh_connections.get(session_id)
+    if connection is not None:
+        _disarm_agent_runtime(connection)
+        connection["agent_title_floor"] = time.time()
     logger.info("Detected runtime agent exit for session %s: %s", session_id, reason)
     _broadcast_session_status(session_id)
     return True

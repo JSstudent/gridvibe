@@ -154,6 +154,58 @@ changing any field that survives restart; it owns the complete save/restore flow
   checks exact registry-entry identity and writes metadata in the same
   `connection_lock` → manager-lock hold; broadcast follows release. Retargeting
   clears `current_directory`, and retired pumps must not republish it.
+- **A pane stops being an agent pane when its shell draws a prompt.** An agent
+  CLI owns the terminal while it runs and so emits no prompt hook; the pane's
+  next prompt is the shell taking the terminal back, whatever ended the agent —
+  an exit by any key, a crash, a kill, or a binary that was never installed.
+  `_arm_agent_runtime()` starts watching at the one moment GridVibe knows an
+  agent command was handed to the shell (runtime promotion, and the launch
+  sequence's own startup command), and `_note_shell_prompt()` retires the pane
+  through `_mark_runtime_agent_exited()` on the first prompt past the arming
+  mark. It checks registry-entry identity exactly as `_publish_observed_cwd()`
+  does, so a retiring pump cannot demote the relaunch that replaced it.
+  Arming survives a swallowed prompt: a pane stays watched until it is retired.
+- **The mark is only meaningful at a moment when nothing of GridVibe's own is
+  in flight, and `_run_startup_sequence()` is not such a moment.** It runs
+  *before* the pump, so the prompts its own `cd`/hook/marker lines draw are
+  still in the transport when it returns — three commands' worth on a remote
+  pane, and `_REMOTE_HOOK` emits twice — and a watch armed there retires a
+  healthy agent as its own bootstrap arrives. It must never arm; it records
+  `startup_finished_at` and nothing else.
+- **There are exactly two honest arming moments.** A runtime promotion: the
+  user was at a prompt to type the command, so the mark is exact — and it is
+  taken *before* `effective_directory()`, which can wait out the bounded remote
+  read, with the arming re-asking at once. And a launched pane's **first
+  reader input** (`_arm_agent_runtime_on_input()`), by which time the bootstrap
+  output is long read. That moment is not a compromise: ending an agent takes
+  input, so the gesture that ends it is the one that arms the watch for it, and
+  the prompt that follows is retired on that same gesture.
+  `AGENT_RUNTIME_ARM_MIN_AGE_SECONDS` is a floor under *when arming may begin*,
+  never a window in which a prompt is ignored, so failing it costs nothing —
+  the next input arms instead.
+- **A binary that is not installed is the preflight's answer, not the pane's.**
+  It is knowable before the pane opens, and the pane's own answer is a prompt
+  drawn before its output has been read. `_sanitize_agent_launch_commands()`
+  therefore answers two questions: `check_failed` (the check could not run)
+  clears the command, and `AGENT_PREFLIGHT_ABSENT_STATUSES` (the binary is not
+  there) **keeps** the command so the reader still gets the real error in the
+  terminal. Both clear the agent identity, as one unit. Restore skips this
+  entirely.
+- **Where the prompt is observed, the keystroke heuristics stand down.** The
+  double-Ctrl+C and `/exit` readings guess at the same question from what the
+  user typed, and typing is not the same fact — two interrupts are how Codex
+  quits *and* how a reader interrupts two turns. `_agent_runtime_is_observed()`
+  requires both that the pane is armed and that it has actually drawn a prompt
+  GridVibe read, because `terminal.shell_integration` is a kill switch and a
+  remote shell may refuse the hook; a pane with no working hook keeps the
+  guesses as its only answer.
+- **Retiring a pane retires the title it announced as an agent, too.** Codex
+  does not clear its own title on the way out and the inheriting shell says
+  nothing, so `_mark_runtime_agent_exited()` raises `agent_title_floor` and
+  `agent_activity_snapshot()` applies it through `mask_agent_titles()`. The
+  record itself is never edited — the pump thread is its only writer — and a
+  title the pane announces *after* the floor stands, so the next agent's first
+  announcement replaces the mask rather than fighting it.
 - Splits, reconnects, saves, and restores use the observed directory. Persist it
   in the snapshot's existing `directory` slot; promotion stamps
   `current_directory`, and reconnect uses shell `cd A || cd B` fallback instead of
@@ -598,6 +650,14 @@ unless the task explicitly changes this contract.
   says where the pane now is.
 - A pane with no transport carries `activity: null`. "Nothing to observe" and
   "observed nothing yet" (`state: "unknown"`) are different answers.
+- **A row leaves this surface when its pane stops running an agent**, and that
+  is decided in one place for both surfaces: the pane's own metadata. See the
+  prompt-hook retirement rule under [Terminal transport and working
+  directories](#terminal-transport-and-working-directories) — a dashboard that
+  went on listening for its own signal would be a second definition of "is this
+  still an agent". A preflight that clears a pane's agent command clears its
+  agent identity with it, for the same reason: a plain shell that is still
+  *called* Codex is a row that would never do anything.
 - Liveness falls back to output cadence, because most agents publish no progress
   at all; a published progress state stops driving the reading once stale. The
   state names the input that decided it. Fresh OSC 9;4 error state is reported
