@@ -286,6 +286,8 @@ Launched a pane in cmd and wanted PowerShell — or WSL? Click the pane's 🔄 b
 
 Each shell row carries a chevron that opens that shell's **agent** list — **Plain shell** plus Claude, Codex, Copilot, OpenCode, Kilo, Kimi, Grok and Hermes — so “this pane, but Codex in WSL” is one click; pressing the shell row itself is the plain relaunch. An **SSH pane**, or a Local Repo pane on a non-Windows host, has no shell family to pick and gets the same agent list flat under an **Agent** heading. **Plain shell** drops a running agent and comes back to an ordinary prompt. Picking the checked shell or agent relaunches it too, so every row remains a restart action regardless of what the pane currently runs. Explorer and browser panes keep the plain one-click reset.
 
+Choosing an agent that isn't installed where the row would launch it — Codex on a WSL distro that doesn't have it, say — **doesn't relaunch the pane at all**. GridVibe runs the same install check the launcher shows beside each agent, against that row's own target, and a missing binary comes back as a message (*OpenAI Codex CLI is missing in WSL Ubuntu.*) with your pane left running exactly as it was. If the check itself can't run, the relaunch goes ahead as before and the terminal shows you the real error.
+
 The agent's **Auto mode** follows the agent rather than the pane: relaunch the same agent under another shell and it stays on, switch to a different agent and it starts from that agent's plain launch. Set it per pane in the launcher's Terminal Setup as before.
 
 ## Browser Preview

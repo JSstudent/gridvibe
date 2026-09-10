@@ -21,6 +21,7 @@ from sessions.manager import SessionManager, SessionStatus  # noqa: F401 - re-ex
 from web.agents import (  # noqa: F401 - re-exported for backwards compatibility
     AGENT_REGISTRY,
     AGENT_REGISTRY_PATH,
+    _agent_absent_reason,
     _agent_detection_cache,
     _agent_detection_cache_key,
     _agent_detection_cache_lock,

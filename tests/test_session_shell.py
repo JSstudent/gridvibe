@@ -33,6 +33,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import api
+from web import agents as web_agents
 from web import config as web_config
 from web import runtime_state as web_runtime_state
 from web import saved_sessions as web_saved_sessions
@@ -146,16 +147,43 @@ class ShellTransitionTestCase(unittest.TestCase):
         )
         return api.session_manager.get_session(session.session_id)
 
-    def _post_shell(self, session_id, body, os_name="nt"):
-        """POST one relaunch with every side effect observable."""
+    def _post_shell(self, session_id, body, os_name="nt", detection=None):
+        """POST one relaunch with every side effect observable.
+
+        The agent probe is the one thing stubbed: `detection` stands in for
+        what `_detect_agent_binary_cached()` reports about the *agent's own*
+        binary, so the real preflight composes the verdict and the real guard
+        reads it. Everything it is asked about anything else (an install
+        prerequisite such as npm) answers found, so a stubbed absence is the
+        agent's and not a prerequisite's. Installed by default: an agent this
+        machine happens not to have installed is not a fixture.
+        """
+        found = dict(detection or {"found": True, "path": "/usr/bin/agent"})
+        probes = []
+
+        def _detect(target, binary):
+            probes.append((dict(target), binary))
+            registry_binaries = {
+                str((spec or {}).get("binary") or key)
+                for key, spec in web_agents.AGENT_REGISTRY.items()
+            }
+            if binary not in registry_binaries:
+                return {"found": True, "path": f"/usr/bin/{binary}"}
+            return dict(found)
+
         with patch.object(api.os, "name", os_name), patch.object(
             web_terminal_io, "_resolve_live_terminal_cwd", return_value=None
-        ), patch.object(api, "_close_ssh_connection") as close_connection, patch.object(
+        ), patch.object(
+            web_agents, "_detect_agent_binary_cached", side_effect=_detect
+        ), patch.object(
+            api, "_close_ssh_connection"
+        ) as close_connection, patch.object(
             api.socketio, "start_background_task"
         ) as start_task:
             response = self.client.post(
                 f"/api/sessions/{session_id}/shell", json=body
             )
+        self.agent_probes = probes
         return response, close_connection, start_task
 
 
@@ -434,6 +462,180 @@ class PaneAgentRelaunchTestCase(ShellTransitionTestCase):
         start_task.assert_not_called()
 
 
+class PaneAgentPreflightTestCase(ShellTransitionTestCase):
+    """The launcher's install check, asked by the pane menu.
+
+    The launcher answers "is this binary there" before a pane opens and, when
+    it is not, opens the pane as a plain terminal. The reset dropdown is the
+    other way into the same launch and used to ask nothing at all: the pane was
+    renamed after the agent, the dashboard listed it, and only the shell's own
+    error -- read whenever the reader next looked -- said otherwise. Here the
+    same check refuses instead, because the pane the reader is looking at is
+    already running and a refusal costs nothing.
+    """
+
+    _MISSING = {"found": False, "path": ""}
+    _CHECK_FAILED = {
+        "found": False,
+        "path": "",
+        "failed": True,
+        "error": "probe blew up",
+    }
+
+    def test_an_agent_that_is_not_installed_is_refused_and_mutates_nothing(self):
+        session, _repo = self._local_pane()
+        before = _pane_state(session.session_id)
+
+        response, close_connection, start_task = self._post_shell(
+            session.session_id,
+            {"shell": "cmd", "agent": "codex"},
+            detection=self._MISSING,
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(_pane_state(session.session_id), before)
+        close_connection.assert_not_called()
+        start_task.assert_not_called()
+
+    def test_the_refusal_names_the_agent_the_target_and_what_it_did_not_do(self):
+        """The message is the toast, so it has to say all three."""
+        session, _repo = self._local_pane()
+
+        response, _close, _start = self._post_shell(
+            session.session_id,
+            {"shell": "cmd", "agent": "codex"},
+            detection=self._MISSING,
+        )
+
+        error = response.get_json()["error"]
+        self.assertIn("OpenAI Codex CLI", error)
+        self.assertIn("cmd", error)
+        self.assertIn("left as it is", error)
+
+    def test_the_probe_asks_about_the_shell_family_the_row_would_launch(self):
+        """A WSL row's agent lives in that distro, not in the pane's cmd."""
+        session, _repo = self._local_pane()
+
+        response, _close, _start = self._post_shell(
+            session.session_id,
+            {"shell": "wsl", "distribution": "Ubuntu", "agent": "codex"},
+            detection=self._MISSING,
+        )
+
+        self.assertEqual(response.status_code, 400)
+        agent_probes = [probe for probe in self.agent_probes if probe[1] == "codex"]
+        self.assertTrue(agent_probes)
+        target, _binary = agent_probes[0]
+        self.assertEqual(target["environment_key"], "wsl_linux")
+        self.assertEqual(target["shell_kind"], "wsl")
+        self.assertEqual(target["distribution"], "Ubuntu")
+
+    def test_an_ssh_pane_is_probed_on_its_own_host(self):
+        """The pane already holds the target; nothing is re-asked of the client."""
+        session = self._ssh_pane(username="deploy", port=2222)
+
+        response, _close, _start = self._post_shell(
+            session.session_id, {"agent": "claude"}, detection=self._MISSING
+        )
+
+        self.assertEqual(response.status_code, 400)
+        target, _binary = next(
+            probe for probe in self.agent_probes if probe[1] == "claude"
+        )
+        self.assertEqual(target["environment_key"], "ssh")
+        self.assertEqual(target["host"], "example.com")
+        self.assertEqual(target["username"], "deploy")
+        self.assertEqual(target["port"], 2222)
+
+    def test_a_check_that_could_not_run_is_not_an_absence(self):
+        """`check_failed` says nothing about the binary, so the relaunch stands.
+
+        Refusing here would turn a broken probe into a pane that cannot be
+        relaunched at all, and the reader still gets the shell's own error.
+        """
+        session, _repo = self._local_pane()
+
+        response, close_connection, start_task = self._post_shell(
+            session.session_id,
+            {"shell": "cmd", "agent": "codex"},
+            detection=self._CHECK_FAILED,
+        )
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        close_connection.assert_called_once()
+        start_task.assert_called_once()
+        updated = api.session_manager.get_session(session.session_id)
+        self.assertEqual(updated.agent_selection, "codex")
+
+    def test_returning_a_pane_to_a_plain_shell_probes_nothing(self):
+        """There is no binary to look for, and no reason to wait for a probe."""
+        session, _repo = self._local_pane(
+            startup_mode="agent",
+            initial_command_mode="agent",
+            agent_selection="claude",
+            initial_command="claude",
+        )
+
+        response, close_connection, _start = self._post_shell(
+            session.session_id, {"shell": "cmd", "agent": ""}, detection=self._MISSING
+        )
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        close_connection.assert_called_once()
+        self.assertEqual(self.agent_probes, [])
+
+    def test_a_shell_only_relaunch_probes_nothing(self):
+        """An unstated agent is not a launch of one, whatever the pane runs."""
+        session, _repo = self._local_pane(
+            startup_mode="agent",
+            initial_command_mode="agent",
+            agent_selection="claude",
+            initial_command="claude",
+        )
+
+        response, _close, _start = self._post_shell(
+            session.session_id, {"shell": "powershell"}, detection=self._MISSING
+        )
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertEqual(self.agent_probes, [])
+        updated = api.session_manager.get_session(session.session_id)
+        self.assertEqual(updated.agent_selection, "claude")
+
+    def test_the_pane_menu_and_the_launcher_read_one_verdict(self):
+        """Both read the same registry check; a second one could disagree."""
+        self.assertIs(
+            web_session_shell._agent_absent_reason, web_agents._agent_absent_reason
+        )
+        launcher_sessions = [
+            {
+                "title": "Terminal 1",
+                "initial_command": "codex",
+                "use_wsl": True,
+                "distribution": "Ubuntu",
+                "startup_mode": "agent",
+                "initial_command_mode": "agent",
+                "agent_selection": "codex",
+            }
+        ]
+        with patch.object(
+            web_agents, "_detect_agent_binary_cached", return_value=dict(self._MISSING)
+        ):
+            reason = web_agents._agent_absent_reason(
+                "codex", "wsl", {"use_wsl": True, "distribution": "Ubuntu"}
+            )
+            warnings = web_agents._sanitize_agent_launch_commands(
+                "wsl", launcher_sessions
+            )
+
+        self.assertTrue(reason)
+        self.assertTrue(warnings)
+        self.assertIn(reason.rstrip(), warnings[0])
+        # The launcher has no pane to keep, so it opens one as a terminal; the
+        # menu, with the pane already open, keeps it exactly as it was.
+        self.assertEqual(launcher_sessions[0]["startup_mode"], "terminal")
+
+
 class ShellTransitionBoundaryTestCase(ShellTransitionTestCase):
     """What the extraction itself has to hold, beyond behaviour parity."""
 
@@ -447,9 +649,14 @@ class ShellTransitionBoundaryTestCase(ShellTransitionTestCase):
             start_connector=lambda pane_id: calls.append(("start", pane_id)),
         )
 
-        payload = web_session_shell.apply_pane_shell_change(
-            session.session_id, {"agent": "claude"}, effects
-        )
+        with patch.object(
+            web_agents,
+            "_detect_agent_binary_cached",
+            return_value={"found": True, "path": "/usr/bin/claude"},
+        ):
+            payload = web_session_shell.apply_pane_shell_change(
+                session.session_id, {"agent": "claude"}, effects
+            )
 
         self.assertIsInstance(payload, dict)
         self.assertEqual(payload["agent_selection"], "claude")

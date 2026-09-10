@@ -191,6 +191,15 @@ changing any field that survives restart; it owns the complete save/restore flow
   there) **keeps** the command so the reader still gets the real error in the
   terminal. Both clear the agent identity, as one unit. Restore skips this
   entirely.
+- **Every path that starts an agent asks that one question, and it is one
+  function.** `_agent_absent_reason()` is the registry probe reduced to the
+  true/false a caller needs — the message when the binary is not there, `""`
+  otherwise, reading the same `AGENT_PREFLIGHT_ABSENT_STATUSES` -- so the
+  launcher row and the pane's relaunch menu cannot answer it differently. A
+  second implementation of "is this agent here" is what would let them. What
+  the two callers *do* with the answer differs, because what they hold
+  differs: see the relaunch rule under [Pane
+  transitions](#pane-transitions).
 - **Where the prompt is observed, the keystroke heuristics stand down.** The
   double-Ctrl+C and `/exit` readings guess at the same question from what the
   user typed, and typing is not the same fact — two interrupts are how Codex
@@ -227,6 +236,18 @@ changing any field that survives restart; it owns the complete save/restore flow
   arbitrary startup command is not an agent. Only a shell-family change retargets
   the directory; agent-only relaunch preserves the observed cwd. Reselecting the
   current choice is a no-op on both sides.
+- **A stated agent is preflighted before anything moves, and an absent binary
+  refuses the relaunch.** The launcher has no pane yet, so it opens one as a
+  plain terminal; the menu's pane is already running, so the honest outcome is
+  that nothing happens and the page says why — rather than a plain shell
+  wearing the agent's name until its exit is observed. The probe describes the
+  environment the row would launch *into* (the chevron's shell family and
+  distro, or an SSH pane's own host/username/port), never the one the pane is
+  in. It runs after validation and before any mutation, so the refusal is
+  atomic like every other. `check_failed` is not an absence: the check did not
+  run, so the relaunch proceeds and the reader gets the shell's own error. A
+  stated `""` and an unstated agent probe nothing. The refusal message is the
+  toast, so it names the agent, the target, and that the pane was left alone.
 - Header shell rows state both family and agent; pressing a family row is its
   plain-shell relaunch. A separate adjacent chevron lazily expands agents. Windows
   Local Repo panes have families; SSH/POSIX panes get the flat agent list without

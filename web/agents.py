@@ -942,6 +942,41 @@ def _sanitize_agent_launch_commands(connection_mode: str, sessions: List[Dict[st
     return warnings
 
 
+def _agent_absent_reason(
+    agent_key: Any,
+    connection_mode: Any,
+    session_config: Dict[str, Any],
+) -> str:
+    """Return why this agent cannot start in that environment, or ``""``.
+
+    The launcher's own check, asked as the one true/false question a caller
+    with a pane already open needs: *is the binary there?* It is the same
+    registry-driven probe behind ``_sanitize_agent_launch_commands()``, reading
+    the same ``AGENT_PREFLIGHT_ABSENT_STATUSES``, so the pane menu and the
+    launcher row cannot answer it differently.
+
+    ``check_failed`` is deliberately not an absence. The check did not run, so
+    it says nothing about the binary, and a caller that refused on it would
+    turn a broken probe into a pane that cannot be relaunched at all. Only a
+    verdict that the binary is *not there* comes back as a reason.
+    """
+    normalized_key = _normalize_agent_key(agent_key)
+    if normalized_key not in AGENT_REGISTRY:
+        return ""
+
+    preflight = _agent_preflight_payload(
+        normalized_key,
+        _build_agent_preflight_request(
+            normalized_key,
+            connection_mode,
+            session_config if isinstance(session_config, dict) else {},
+        ),
+    )
+    if str(preflight.get("status") or "") not in AGENT_PREFLIGHT_ABSENT_STATUSES:
+        return ""
+    return str(preflight.get("message") or f"{normalized_key} is not available here.")
+
+
 def _agent_preflight_payload(agent_key: str, payload: Dict[str, Any]) -> Dict[str, Any]:
     """Build a registry-driven agent preflight response."""
     spec = AGENT_REGISTRY.get(agent_key)

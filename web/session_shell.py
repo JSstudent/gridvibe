@@ -20,6 +20,12 @@ payload rather than a value with a default:
   exactly "shell stated, agent not". ``""`` is a *stated* choice of no agent,
   and only that clears a pane's agent metadata.
 
+A stated agent is also checked before anything moves: the launcher's own
+registry-driven preflight (``_agent_absent_reason()``) is asked about the
+environment the replacement shell will start in, and a binary that is not there
+refuses the relaunch. The pane in front of the reader is already running, so a
+refusal costs nothing -- unlike at launch, where there is no pane yet to keep.
+
 Nothing here imports ``web.api``: that would cycle, and the transaction has no
 business knowing what a Flask response looks like. The three effects it cannot
 own -- closing the pane's connection, broadcasting its status, starting the
@@ -33,7 +39,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional
 
 from sessions.manager import SessionStatus
-from web.agents import AGENT_REGISTRY, _normalize_agent_key
+from web.agents import AGENT_REGISTRY, _agent_absent_reason, _normalize_agent_key
 from web.app import session_manager
 from web.explorer import _is_browser_session, _is_explorer_session
 from web.terminal_io import (
@@ -123,6 +129,70 @@ def _pane_agent_key(session: Any) -> str:
     return _normalize_agent_key(
         getattr(session, "agent_selection", "")
     ) or _normalize_agent_key(getattr(session, "custom_agent", ""))
+
+
+def _agent_preflight_config(
+    session: Any,
+    shell_kind: Optional[str],
+    distribution: str,
+) -> Dict[str, Any]:
+    """Describe the environment the replacement shell will start in.
+
+    The preflight is asked about where the pane is *going*, not where it is: a
+    row under the WSL chevron relaunches into that distro, so its agent has to
+    be looked for there. An unstated shell family means the pane keeps the one
+    it has, which is also the only thing an SSH pane can mean.
+    """
+    if shell_kind is None:
+        use_wsl = bool(getattr(session, "use_wsl", False))
+        use_powershell = bool(getattr(session, "use_powershell", False))
+        target_distribution = str(getattr(session, "distribution", "") or "").strip()
+    else:
+        use_wsl = shell_kind == "wsl"
+        use_powershell = shell_kind == "powershell"
+        target_distribution = distribution
+
+    return {
+        "host": str(getattr(session, "host", "") or ""),
+        "username": str(getattr(session, "username", "") or ""),
+        "password": getattr(session, "password", "") or "",
+        "port": getattr(session, "port", 22),
+        "directory": str(getattr(session, "directory", "") or ""),
+        "distribution": target_distribution,
+        "use_wsl": use_wsl,
+        "use_powershell": use_powershell,
+    }
+
+
+def _refuse_an_agent_that_is_not_installed(
+    session: Any,
+    agent_key: str,
+    shell_kind: Optional[str],
+    distribution: str,
+) -> None:
+    """Refuse a relaunch onto an agent whose binary is not on the target.
+
+    The launcher answers this before a pane opens, and the pane menu is the
+    other way into the same launch, so it asks the same question here --
+    before anything is mutated, closed or restarted. Refusing is what the
+    launcher cannot do: the pane the reader is looking at is already running,
+    so the honest outcome is that nothing happens and the menu says why,
+    rather than a plain shell wearing the agent's name until its exit is
+    observed.
+
+    Only "the binary is not there" refuses. A check that could not run says
+    nothing about the binary, so the relaunch proceeds exactly as it did
+    before this guard existed and the reader gets the shell's own error.
+    """
+    reason = _agent_absent_reason(
+        agent_key,
+        str(getattr(session, "mode", "") or ""),
+        _agent_preflight_config(session, shell_kind, distribution),
+    )
+    if not reason:
+        return
+    logger.info("Refusing pane relaunch onto a missing agent: %s", reason)
+    raise ShellTransitionError(f"{reason} This pane was left as it is.")
 
 
 def _shell_updates(
@@ -232,6 +302,11 @@ def apply_pane_shell_change(
     distribution = (
         str(payload.get("distribution") or "").strip() if shell_kind == "wsl" else ""
     )
+
+    if agent_key:
+        _refuse_an_agent_that_is_not_installed(
+            session, agent_key, shell_kind, distribution
+        )
 
     # A valid, explicitly stated dimension is also the relaunch instruction.
     # Its value need not differ from the pane's metadata: the checked menu row
