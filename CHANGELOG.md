@@ -4,6 +4,18 @@ All notable changes to GridVibe will be documented in this file.
 
 ## Unreleased
 
+- **(feat) The launcher window now comes up on the screen of the workspace that asked for it.** The native window keeps one launcher for the life of the app, wherever it was last left, so on a multi-monitor desk pressing `Alt+Q` in front of one screen routinely answered on another — and the only way to see what you had just asked for was to go looking for it.
+
+  The request now names the workspace window it was made from, and the launcher is brought onto that window's screen, centred on it and held inside the monitor's work area rather than under the taskbar or half off an edge. A launcher **already on that screen is left exactly where it is**: bringing a window up is not a request to move it, and one parked beside the workspace it belongs to was put there deliberately. A maximized launcher is restored, moved, and maximized again on the screen it arrives on; a minimized one is placed after the restore rather than before it, because until then it has no position to move.
+
+  The rule is `plan_window_placement()` in `web/webview_launcher.py`, read by both movers: Win32 on Windows, where every rect is one physical coordinate space and monitors scaled differently cannot describe their positions in different units, and pywebview's own screen list everywhere else. Placement is a courtesy on top of focusing the launcher, so a workspace with no window, an id that means nothing, or geometry that cannot be read all cost the focus call nothing. Browser mode is unchanged.
+
+- **(feat) A launch set up from a workspace now lands in that workspace.** Pressing `Alt+Q` in a workspace, filling in the form and pressing **Launch** put the session in a brand new window as soon as a second workspace was open: the destination's only defaults were "the one workspace there is" and "a new one", and neither of them asked where you had come from.
+
+  The record that already points the launcher's `Alt+W` back at that workspace now answers this too, so the Launch button names the workspace before you commit to it and the caret beside it still picks any other. It stays a hint. It is resolved against the live workspaces, so one closed while the launcher sat in front of it is never launched into; it is claimed once per handover, so a destination you pick after arriving stands; and it expires, so a record left by an earlier run cannot steer the first launch of this one. Opening the launcher again from somewhere else retargets the launch exactly as it retargets the way back — including into a launcher window that is already open, which hears that handover as a focus rather than as a page load.
+
+  The claim lives in `launcherHandoverDestination()` in `web/static/js/workspaces.js`, beside the record's reader and the way back that shares it; `launcher.js` asks it on every destination refresh.
+
 ## 1.11.1 - 2026-09-10
 
 - **(doc) README.md reads as a product tour again rather than a specification.** The Agent Dashboard and File Explorer sections had grown into prose essays — roughly a hundred lines between them, arguing why each reading is the right one and what each fallback does — which is the wrong altitude for the first page someone lands on. Both are now bullet lists of what the feature does, as are Voice Input, Sessions & Workspaces, the pane relaunch menu, and the Git sidebar. The whole document is about a third shorter, and the reasoning that was cut lives in `docs/engineering_contracts.md` where it is maintained.

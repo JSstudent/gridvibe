@@ -116,6 +116,7 @@ Browser mode is the most reliable for microphone permissions. Settings apply liv
 - **Save & restore** — GridVibe autosaves, and **Save Workspace** saves on demand. A restart brings back tabs, layouts, commands, the active group, and explorer presentation, with each pane reopening in the directory it was *working in*.
 - **Close & restart** — voluntary close, manual restart, and update restart share one in-page choice: continue without saving, save every workspace, or save every preset and then every workspace. A failed save leaves the app open.
 - **Multiple workspaces** — optionally keep separate projects in separate windows, move tabs between them without restarting terminals, and switch with `Alt+W` / `Alt+Shift+W`.
+- **The launcher follows you** — opening it from a workspace (`Alt+Q`) brings its window up on that workspace's screen, with the next launch already aimed at that workspace. The caret beside **Launch** picks any other destination, and a launcher already on that screen stays where you put it.
 - **Updates** — **Check for updates** fast-forwards a Git clone, then offers the same save choices.
 
 Closing a workspace ends its terminals but keeps it available to restore. **Close and forget** drops both the workspace and its snapshot; closing only the window leaves its terminals running.

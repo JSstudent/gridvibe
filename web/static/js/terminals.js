@@ -8028,9 +8028,13 @@
            the browser-fallback step rather than run first: a bridge that
            answered would otherwise have left this window un-maximised for
            nothing. */
-        logSessionWindowAction('Launcher window requested', { preserve_fullscreen: true });
+        logSessionWindowAction('Launcher window requested', {
+            preserve_fullscreen: true,
+            workspace_id: currentWorkspaceId
+        });
         const opened = await openLauncherWindow({
-            beforeBrowserFallback: resetFullscreenState
+            beforeBrowserFallback: resetFullscreenState,
+            originWorkspaceId: currentWorkspaceId
         });
         logSessionWindowAction('Launcher window request finished', { opened });
         return false;

@@ -148,15 +148,24 @@
 
     /* '' rather than the normalized default when nothing was recorded: no
        origin is not the same claim as "the default workspace", and only the
-       first can fall back to whatever window is actually open. */
-    function readLauncherOriginWorkspace() {
+       first can fall back to whatever window is actually open. The timestamp
+       comes back with the id because the reader below claims the record by its
+       age; 0 is "nothing was recorded" for the same reason '' is. */
+    function readLauncherOriginRecord() {
         let payload = null;
         try {
             payload = JSON.parse(localStorage.getItem(WORKSPACE_LAUNCHER_ORIGIN_STORAGE_KEY) || 'null');
         } catch (_error) {
             payload = null;
         }
-        return payload?.workspaceId ? normalizeWorkspaceId(payload.workspaceId) : '';
+        return {
+            workspaceId: payload?.workspaceId ? normalizeWorkspaceId(payload.workspaceId) : '',
+            timestamp: Number(payload?.timestamp) || 0
+        };
+    }
+
+    function readLauncherOriginWorkspace() {
+        return readLauncherOriginRecord().workspaceId;
     }
 
     /* Resolve that hint against what is open, through the same user-visible
@@ -169,6 +178,42 @@
         const open = (Array.isArray(workspaces) ? workspaces : []).filter(isUserVisibleWorkspace);
         const origin = String(originWorkspaceId || '');
         return open.find(workspace => workspace.workspace_id === origin) || open[0] || null;
+    }
+
+    /* ── The same record read forwards: where the next launch lands ──
+       Opening the launcher from a workspace says something about where the
+       session being set up belongs — the user is looking at that workspace and
+       asking for one more thing in it. Without this the destination fell back
+       to "a workspace this launch creates" as soon as a second window existed,
+       so the ordinary trip (Alt+Q from a workspace, fill the form, Launch)
+       ended in a window nobody asked for.
+
+       The claim cannot consume the record the way the arrival pulse consumes
+       its own: the way back has to keep working for as long as the launcher
+       stays open. So it is claimed by timestamp instead — at most one adoption
+       per handover, which is what leaves a destination the user picks
+       afterwards alone, and only while the handover is fresh, which is what
+       stops a record left by an earlier run from steering the first launch of
+       this one. The workspace itself is still resolved against the live list
+       through the predicate the walk uses: a record with no window is no more a
+       destination than it is a way back.
+
+       Same window as the arrival claim, and for the same race — the page that
+       has to boot before it can read what the handover left for it. */
+    const WORKSPACE_LAUNCHER_HANDOVER_TTL_MS = 12000;
+
+    function launcherHandoverDestination(record, workspaces, adoptedTimestamp = 0, now = Date.now()) {
+        const timestamp = Number(record?.timestamp) || 0;
+        const age = now - timestamp;
+        if (timestamp <= (Number(adoptedTimestamp) || 0)
+            || !(age >= 0 && age <= WORKSPACE_LAUNCHER_HANDOVER_TTL_MS)) {
+            return null;
+        }
+        const workspaceId = String(record?.workspaceId || '');
+        const open = (Array.isArray(workspaces) ? workspaces : []).filter(isUserVisibleWorkspace);
+        return workspaceId && open.some(workspace => workspace.workspace_id === workspaceId)
+            ? { workspaceId, timestamp }
+            : null;
     }
 
     /* ── Cross-window workspace invalidation ──
@@ -618,11 +663,19 @@
        handled the request and its own window is staying exactly as it was. */
     const LAUNCHER_WINDOW_NAME = 'gridvibe-launcher';
 
-    async function openLauncherWindow({ beforeBrowserFallback = null } = {}) {
+    async function openLauncherWindow({
+        beforeBrowserFallback = null,
+        originWorkspaceId = ''
+    } = {}) {
         const api = nativeWorkspaceApi();
         if (api?.open_launcher_window) {
             try {
-                const result = await api.open_launcher_window();
+                /* Passed raw, never normalized: '' is "nobody in particular
+                   asked", and the normalizer would turn that into a claim that
+                   the default workspace did. The bridge places the launcher on
+                   the screen of the window named here, and leaves it alone
+                   without one. */
+                const result = await api.open_launcher_window(String(originWorkspaceId || ''));
                 if (result?.ok) {
                     return true;
                 }

@@ -597,6 +597,25 @@ unless the task explicitly changes this contract.
   per batch with `WORKSPACE_TAB_BLOCKED_HINT` and per-row Open; attempt every
   restored workspace even if earlier tabs were blocked. Pre-reserved blanks do
   not bypass browser gesture limits.
+- The workspace a launcher is opened from is recorded once per handover
+  (`gridvibe.launcherOrigin`: id + timestamp) and answers two questions — Alt+W's
+  way back, and what the next launch targets. Resolve it against the live list
+  through `isUserVisibleWorkspace` for both: a record with no window is neither.
+  The destination claims it by timestamp (newer than the last adopted, and within
+  `WORKSPACE_LAUNCHER_HANDOVER_TTL_MS`), so a destination picked after arriving
+  stands and a record left by an earlier run steers nothing. Never consume the
+  record — the way back needs it for as long as the launcher stays open. Claim on
+  every destination refresh, including the focus/visibility arrival that is all a
+  handover into an already-open launcher window amounts to.
+- `open_launcher_window(workspace_id)` places the native launcher on the screen
+  holding that workspace's window before showing it, and after the restore when it
+  was minimized. `plan_window_placement()` is the one rule: a window already on
+  that monitor is never moved, otherwise centre it on the anchor and clamp it into
+  the work area. Read and write geometry in one coordinate space — Win32 physical
+  pixels on Windows, pywebview logical ones elsewhere — and restore a maximized
+  window before moving it, then maximize it again. Placement is a courtesy on top
+  of focus: an unusable id, a workspace with no window, or geometry that cannot be
+  read costs the focus call nothing, and browser mode places nothing.
 - Native Alt+X/button and opt-in, default-off minimize cascade share
   `minimize_all_windows()`. Minimize, never hide; taskbar restores individual
   windows and restore never cascades. Preserve maximized-window restoration.

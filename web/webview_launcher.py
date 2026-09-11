@@ -130,6 +130,237 @@ def _restore_minimized_window(window) -> bool:
         return False
 
 
+# ── Where a window called up from another window belongs ──
+# Bringing the launcher up from a workspace is a request to look at it, and a
+# launcher parked on a monitor the user is not sitting in front of answers that
+# request somewhere they cannot see. So the window is put on the screen holding
+# the workspace that asked for it.
+#
+# Rects are (left, top, right, bottom) in one coordinate space, whichever the
+# reader below works in: the Win32 reader speaks physical pixels, the pywebview
+# reader logical ones, and each hands its own units straight back to its own
+# mover, so the two are never mixed.
+MONITOR_DEFAULTTONEAREST = 2
+SWP_NOSIZE = 0x0001
+SWP_NOZORDER = 0x0004
+SWP_NOACTIVATE = 0x0010
+SW_MAXIMIZE = 3
+SW_RESTORE = 9
+
+
+class _WindowsRect(ctypes.Structure):
+    _fields_ = [
+        ("left", ctypes.c_long),
+        ("top", ctypes.c_long),
+        ("right", ctypes.c_long),
+        ("bottom", ctypes.c_long),
+    ]
+
+
+class _WindowsMonitorInfo(ctypes.Structure):
+    _fields_ = [
+        ("cbSize", ctypes.c_ulong),
+        ("rcMonitor", _WindowsRect),
+        ("rcWork", _WindowsRect),
+        ("dwFlags", ctypes.c_ulong),
+    ]
+
+
+def _rect_center(rect):
+    left, top, right, bottom = rect
+    return (left + right) // 2, (top + bottom) // 2
+
+
+def _rect_holds(rect, point) -> bool:
+    left, top, right, bottom = rect
+    x, y = point
+    return left <= x < right and top <= y < bottom
+
+
+def plan_window_placement(anchor, window, monitor, work_area):
+    """Return the (left, top) that puts `window` on the anchor's screen.
+
+    ``None`` means leave it where it is. A window already on that screen was
+    put there by the user — often deliberately, beside the workspace it belongs
+    to — and asking for it is not asking for it to be moved; only a window on
+    another screen is answering somewhere nobody is looking.
+
+    Otherwise it is centred on the anchor (over the workspace window, so a
+    maximized one hands it the middle of that monitor) and then clamped into
+    the work area, which is what keeps it clear of the taskbar and on screen
+    when the anchor sits against an edge. A window larger than the work area
+    has no position that fits, so it takes that area's top-left corner.
+    """
+    left, top, right, bottom = window
+    width = right - left
+    height = bottom - top
+    if _rect_holds(monitor, _rect_center(window)):
+        return None
+
+    anchor_x, anchor_y = _rect_center(anchor)
+    work_left, work_top, work_right, work_bottom = work_area
+    return (
+        max(work_left, min(anchor_x - width // 2, work_right - width)),
+        max(work_top, min(anchor_y - height // 2, work_bottom - height)),
+    )
+
+
+def _windows_user32():
+    """Return user32 with the pointer-returning calls typed, or None."""
+    windll = getattr(ctypes, "windll", None)
+    user32 = getattr(windll, "user32", None) if windll is not None else None
+    if user32 is None:
+        return None
+    # HMONITOR is pointer-sized: without this it comes back truncated to an int
+    # on 64-bit and every monitor lookup after it fails.
+    user32.MonitorFromWindow.restype = ctypes.c_void_p
+    return user32
+
+
+def _windows_window_rect(user32, hwnd):
+    rect = _WindowsRect()
+    if not user32.GetWindowRect(ctypes.c_void_p(hwnd), ctypes.byref(rect)):
+        return None
+    return (rect.left, rect.top, rect.right, rect.bottom)
+
+
+def _windows_screen_rects(user32, hwnd):
+    """Return (monitor bounds, work area) for the screen holding one window."""
+    monitor = user32.MonitorFromWindow(ctypes.c_void_p(hwnd), MONITOR_DEFAULTTONEAREST)
+    if not monitor:
+        return None
+    info = _WindowsMonitorInfo()
+    info.cbSize = ctypes.sizeof(_WindowsMonitorInfo)
+    if not user32.GetMonitorInfoW(ctypes.c_void_p(monitor), ctypes.byref(info)):
+        return None
+    return (
+        (
+            info.rcMonitor.left,
+            info.rcMonitor.top,
+            info.rcMonitor.right,
+            info.rcMonitor.bottom,
+        ),
+        (info.rcWork.left, info.rcWork.top, info.rcWork.right, info.rcWork.bottom),
+    )
+
+
+def _place_window_via_windows(window, anchor):
+    """Win32 placement, or None when this is not a Windows window pair.
+
+    Preferred on Windows because every rect here is read and written in the one
+    physical coordinate space. pywebview reports positions divided by the
+    window's own DPI scale, so two windows on monitors scaled differently
+    describe their positions in different units — exactly the setup this
+    feature exists for.
+    """
+    if sys.platform != "win32":
+        return None
+    user32 = _windows_user32()
+    hwnd = _resolve_native_window_handle(window)
+    anchor_hwnd = _resolve_native_window_handle(anchor)
+    if user32 is None or hwnd is None or anchor_hwnd is None:
+        return None
+
+    window_rect = _windows_window_rect(user32, hwnd)
+    anchor_rect = _windows_window_rect(user32, anchor_hwnd)
+    screen = _windows_screen_rects(user32, anchor_hwnd)
+    if window_rect is None or anchor_rect is None or screen is None:
+        return None
+
+    monitor, work_area = screen
+    if plan_window_placement(anchor_rect, window_rect, monitor, work_area) is None:
+        return False
+
+    # A maximized window cannot simply be moved: it would keep the maximized
+    # state while covering no monitor in particular. Restore it, place the
+    # window it becomes, and maximize it again — on the screen it now sits on.
+    # The decision above is made on the rect the user can see, so a launcher
+    # maximized on the workspace's own screen is still left alone.
+    maximized = bool(user32.IsZoomed(ctypes.c_void_p(hwnd)))
+    if maximized:
+        user32.ShowWindow(ctypes.c_void_p(hwnd), SW_RESTORE)
+        window_rect = _windows_window_rect(user32, hwnd) or window_rect
+
+    target = plan_window_placement(anchor_rect, window_rect, monitor, work_area)
+    if target is not None:
+        user32.SetWindowPos(
+            ctypes.c_void_p(hwnd),
+            ctypes.c_void_p(0),
+            int(target[0]),
+            int(target[1]),
+            0,
+            0,
+            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+        )
+    if maximized:
+        user32.ShowWindow(ctypes.c_void_p(hwnd), SW_MAXIMIZE)
+    return True
+
+
+def _pywebview_window_rect(window):
+    try:
+        left = int(window.x)
+        top = int(window.y)
+        return (left, top, left + int(window.width), top + int(window.height))
+    except Exception:
+        logger.debug("Could not read a pywebview window rect", exc_info=True)
+        return None
+
+
+def _place_window_via_pywebview(window, anchor):
+    """The portable placement: pywebview's own geometry and screen list."""
+    screens = getattr(webview, "screens", None) if webview is not None else None
+    move = getattr(window, "move", None)
+    if not screens or not callable(move):
+        return None
+
+    window_rect = _pywebview_window_rect(window)
+    anchor_rect = _pywebview_window_rect(anchor)
+    if window_rect is None or anchor_rect is None:
+        return None
+
+    anchor_center = _rect_center(anchor_rect)
+    for screen in screens:
+        bounds = (
+            int(screen.x),
+            int(screen.y),
+            int(screen.x) + int(screen.width),
+            int(screen.y) + int(screen.height),
+        )
+        if not _rect_holds(bounds, anchor_center):
+            continue
+        # No work area is published here, so the screen's own bounds serve as
+        # both: a centred window that fits is clear of a panel either way.
+        target = plan_window_placement(anchor_rect, window_rect, bounds, bounds)
+        if target is None:
+            return False
+        move(int(target[0]), int(target[1]))
+        return True
+    return None
+
+
+def place_window_on_anchor_screen(window, anchor, window_name: str = "window") -> bool:
+    """Move one window onto the screen holding another. True when it moved."""
+    if window is None or anchor is None or window is anchor:
+        return False
+    for place in (_place_window_via_windows, _place_window_via_pywebview):
+        try:
+            moved = place(window, anchor)
+        except Exception:
+            logger.debug("%s window placement failed", window_name, exc_info=True)
+            continue
+        if moved is None:
+            continue
+        logger.debug(
+            "%s window placement: %s",
+            window_name,
+            "moved onto the requesting window's screen" if moved else "already there",
+        )
+        return moved
+    logger.debug("No usable placement reader for the %s window", window_name)
+    return False
+
+
 def _run_on_native_ui_thread(window, callback):
     """Run a native-window callback on the WinForms UI thread when possible."""
     native = getattr(window, "native", None)
@@ -1544,20 +1775,49 @@ class GridVibeApi:
             )
             return {"ok": False, "error": str(exc)}
 
-    def open_launcher_window(self):
-        """Focus the launcher window without reloading or resizing it."""
+    def open_launcher_window(self, workspace_id=""):
+        """Focus the launcher window without reloading or resizing it.
+
+        `workspace_id` names the workspace window the request came from. The
+        launcher is one window for the life of the app, so without it a request
+        made from the monitor in front of the user is answered on whichever
+        monitor the launcher was last left on. It is a hint and never required:
+        an id for a workspace with no window, or none at all, simply leaves the
+        launcher where it is.
+        """
         if self._window is None:
             logger.warning("Launcher window focus requested, but no launcher window is registered")
             return {"ok": False, "error": "Launcher window is not ready"}
 
+        anchor = self._requesting_workspace_window(workspace_id)
         try:
+            # A window that is up can be placed before it is shown, so it never
+            # appears on the old screen and jumps. A minimized one has no
+            # position to move until it has been restored, so it is placed
+            # after the focus call that restores it.
+            minimized = self._is_window_minimized("launcher")
+            if anchor is not None and not minimized:
+                place_window_on_anchor_screen(self._window, anchor, "launcher")
             if not self._bring_to_front(self._window, "launcher"):
                 return {"ok": False, "error": "Failed to focus launcher window"}
+            if anchor is not None and minimized:
+                place_window_on_anchor_screen(self._window, anchor, "launcher")
             logger.debug("Focused launcher window")
             return {"ok": True}
         except Exception as exc:
             logger.exception("Failed to focus launcher window")
             return {"ok": False, "error": str(exc)}
+
+    def _requesting_workspace_window(self, workspace_id):
+        """Return the workspace window a bridge call names, if it has one."""
+        if not str(workspace_id or "").strip():
+            return None
+        try:
+            resolved_workspace_id = normalize_workspace_id(workspace_id)
+        except ValueError:
+            logger.debug("Ignoring unusable requesting workspace id %r", workspace_id)
+            return None
+        return self._workspace_windows.get(resolved_workspace_id)
 
     def close_session_window(self):
         """Close the default workspace window."""

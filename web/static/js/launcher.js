@@ -2954,6 +2954,7 @@
     let workspaceDestination = '';
     let workspaceDestinationLabelDraft = '';
     let liveWorkspaceCache = [];
+    let adoptedLauncherHandover = 0;
     let restorableWorkspaceSummaries = [];
     let workspaceRestoreInFlight = false;
 
@@ -3104,6 +3105,33 @@
         syncLaunchDestinationControl();
     }
 
+    /* ── Launched from a workspace, launching into it ──
+       The workspace that opened this launcher is the one the user was looking
+       at when they asked for another session, so it is the destination until
+       they say otherwise. workspaces.js owns the record and the claim rule —
+       one adoption per handover, resolved against the live list — and this file
+       owns only when to ask, which is every time the destination list is
+       refreshed. That covers both ways a handover arrives: the page that loads
+       on it, and (native mode keeps one launcher window for the life of the
+       app) the page that was already open and was merely given focus.
+
+       It sets the destination instead of being consulted at launch time, so the
+       CTA names the workspace before the user commits to it, and a pick made
+       afterwards is an ordinary explicit choice that outranks it. */
+    function adoptLauncherHandoverDestination() {
+        const claim = launcherHandoverDestination(
+            readLauncherOriginRecord(),
+            liveWorkspaceCache,
+            adoptedLauncherHandover
+        );
+        if (!claim) {
+            return false;
+        }
+        adoptedLauncherHandover = claim.timestamp;
+        setWorkspaceDestination(claim.workspaceId);
+        return true;
+    }
+
     async function chooseNewWorkspaceDestination(initialError = '') {
         /* A new choice is always a new draft. In particular, a name rejected
            by the server must never remain cached behind "Use this name" and
@@ -3168,6 +3196,7 @@
            server-side; the same predicate is applied here so a stale cache
            cannot render a row the server would no longer send. */
         liveWorkspaceCache = await fetchLiveWorkspaces();
+        adoptLauncherHandoverDestination();
         syncLaunchDestinationControl();
 
         const list = document.getElementById('workspaceLiveList');
@@ -3771,6 +3800,34 @@
         loadWorkspaceRestoreChooser({
             autoOpen: isWorkspaceRestoreModalVisible()
         }).catch(() => {});
+    });
+
+    /* A handover to a launcher that is already open changes nothing about the
+       workspaces themselves, so the broadcast above never fires for it: the
+       only thing that happens in this window is that it comes to the front.
+       Refreshing there is what lets the handover be claimed at all, and the
+       lists it refreshes are ones a window returning to the front wants current
+       anyway. Focus and visibility both fire on a browser tab switch, so the
+       two share one in-flight refresh rather than fetching the same lists
+       twice. */
+    let launcherArrivalRefresh = null;
+
+    function refreshOnLauncherArrival() {
+        if (!isMultiWorkspaceEnabled() || launcherArrivalRefresh) {
+            return;
+        }
+        launcherArrivalRefresh = refreshWorkspaceDestinations()
+            .catch(() => {})
+            .finally(() => {
+                launcherArrivalRefresh = null;
+            });
+    }
+
+    window.addEventListener('focus', refreshOnLauncherArrival);
+    document.addEventListener('visibilitychange', () => {
+        if (!document.hidden) {
+            refreshOnLauncherArrival();
+        }
     });
 
     /* The launcher has no Socket.IO connection, so App Settings changes made in

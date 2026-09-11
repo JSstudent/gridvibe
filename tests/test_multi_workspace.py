@@ -3170,6 +3170,7 @@ async function fetch(path, options) {
                     "isUserVisibleWorkspace",
                     "normalizeWorkspaceId",
                     "rememberLauncherOriginWorkspace",
+                    "readLauncherOriginRecord",
                     "readLauncherOriginWorkspace",
                     "launcherReturnWorkspace",
                 )
@@ -3201,6 +3202,320 @@ async function fetch(path, options) {
                 check=True,
             )
         return json.loads(completed.stdout)
+
+    def test_the_launcher_launches_into_the_workspace_that_opened_it(self):
+        """A launch set up in the launcher lands where the user came from.
+
+        The handover record that points Alt+W back at the workspace also
+        answers "where does this launch go": pressing Alt+Q (or the launcher
+        button) in a workspace and filling in the form used to end in a brand
+        new window as soon as a second workspace was open, because the
+        destination's only defaults were "the one workspace there is" and "a
+        new one".
+
+        It stays a hint. The record is resolved against the live list, so a
+        workspace closed while the launcher sat in front of it is not launched
+        into; it is claimed once per handover, so a destination the user picks
+        afterwards stands; and it expires, so a record left by an earlier run
+        cannot steer the first launch of this one.
+        """
+        work = {"workspace_id": "aaaaaaaaaaaa", "group_count": 1}
+        other = {"workspace_id": "bbbbbbbbbbbb", "group_count": 2}
+        retained = {
+            "workspace_id": "bbbbbbbbbbbb",
+            "group_count": 0,
+            "retain_when_empty": True,
+        }
+
+        destinations = self._js_launch_destination(
+            [
+                # The trip this exists for: opened from `other`, two windows
+                # open, so the old answer was "New workspace".
+                {"origin": "bbbbbbbbbbbb", "workspaces": [work, other]},
+                # A workspace kept deliberately empty is still a window the
+                # user is looking at, and still a destination.
+                {"origin": "bbbbbbbbbbbb", "workspaces": [work, retained]},
+                # No handover: the launcher was opened on its own, and the
+                # existing defaults answer exactly as they did before.
+                {"origin": None, "workspaces": [work, other]},
+                {"origin": None, "workspaces": [work]},
+                # A record left by an earlier run is not a handover.
+                {"origin": "bbbbbbbbbbbb", "ageMs": 13000, "workspaces": [work, other]},
+                # The origin closed while the launcher was in front of it: a
+                # record with no window is not launched into.
+                {"origin": "bbbbbbbbbbbb", "workspaces": [work]},
+                {"origin": "cccccccccccc", "workspaces": [work, other]},
+                # An empty `default` is the backend container, not a window.
+                {"origin": "default", "workspaces": [work, other]},
+                # Picked after arriving: the user's own choice stands, and the
+                # refreshes that follow do not claim the same handover again.
+                {
+                    "origin": "bbbbbbbbbbbb",
+                    "workspaces": [work, other],
+                    "pick": "__new__",
+                },
+                # ...but a second handover is a new answer to the same
+                # question, so opening the launcher again from somewhere else
+                # retargets the launch exactly as it retargets the way back.
+                # The first trip is dated a moment earlier because that is what
+                # separates two handovers: a record is claimed once, and "once"
+                # is the timestamp it was written with.
+                {
+                    "origin": "bbbbbbbbbbbb",
+                    "ageMs": 25,
+                    "workspaces": [work, other],
+                    "pick": "__new__",
+                    "origin2": "aaaaaaaaaaaa",
+                },
+            ]
+        )
+
+        self.assertEqual(
+            destinations,
+            [
+                "bbbbbbbbbbbb",
+                "bbbbbbbbbbbb",
+                "__new__",
+                "aaaaaaaaaaaa",
+                "__new__",
+                "aaaaaaaaaaaa",
+                "__new__",
+                "__new__",
+                "__new__",
+                "aaaaaaaaaaaa",
+            ],
+        )
+
+    def _js_launch_destination(self, cases):
+        """Run one handover from the workspace window into the launcher.
+
+        Both ends ship: the record is written by the writer the session window
+        calls, claimed by the shipped policy, and read back through the
+        launcher's own `resolveWorkspaceDestination` — the value a launch is
+        actually sent with. A test that asserted the claim alone could not catch
+        the launcher resolving it away again.
+
+        Each case is {origin, ageMs, workspaces, pick, origin2}: the handover,
+        how long ago it happened, the live list, a destination the user picks
+        after arriving, and a second handover from another workspace. The list
+        is refreshed twice either way, because a launcher that stays open
+        refreshes on every workspace change and every arrival, and none of those
+        may claim a handover that is already spent.
+        """
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node is not installed")
+        workspaces_js = self._static("js/workspaces.js")
+        launcher_js = self._static("js/launcher.js")
+        source = "\n".join(
+            [
+                _js_const_source(workspaces_js, name)
+                for name in (
+                    "WORKSPACE_DEFAULT_ID",
+                    "WORKSPACE_ID_PATTERN",
+                    "WORKSPACE_NEW_DESTINATION",
+                    "WORKSPACE_LAUNCHER_ORIGIN_STORAGE_KEY",
+                    "WORKSPACE_LAUNCHER_HANDOVER_TTL_MS",
+                )
+            ]
+            + [
+                _js_function_source(workspaces_js, name)
+                for name in (
+                    "isUserVisibleWorkspace",
+                    "normalizeWorkspaceId",
+                    "rememberLauncherOriginWorkspace",
+                    "readLauncherOriginRecord",
+                    "launcherHandoverDestination",
+                )
+            ]
+            + [
+                _js_function_source(launcher_js, name)
+                for name in (
+                    "findLiveWorkspace",
+                    "resolveWorkspaceDestination",
+                    "setWorkspaceDestination",
+                    "adoptLauncherHandoverDestination",
+                )
+            ]
+        )
+        script = (
+            "const store = new Map();\n"
+            "const localStorage = {\n"
+            "    getItem: key => (store.has(key) ? store.get(key) : null),\n"
+            "    setItem: (key, value) => store.set(key, String(value)),\n"
+            "    removeItem: key => store.delete(key)\n"
+            "};\n"
+            # The launcher module state the extracted functions close over, and
+            # the one DOM call among them: what the CTA says about a
+            # destination is the subject of its own test, not of this one.
+            "let workspaceDestination = '';\n"
+            "let workspaceDestinationLabelDraft = '';\n"
+            "let liveWorkspaceCache = [];\n"
+            "let adoptedLauncherHandover = 0;\n"
+            "function syncLaunchDestinationControl() {}\n"
+            f"{source}\n"
+            # The record carries its own age, so a handover is aged by writing
+            # it through the shipped writer with the clock moved back.
+            "function handOver(workspaceId, ageMs) {\n"
+            "    const realNow = Date.now;\n"
+            "    Date.now = () => realNow() - ageMs;\n"
+            "    try { rememberLauncherOriginWorkspace(workspaceId); }\n"
+            "    finally { Date.now = realNow; }\n"
+            "}\n"
+            "function refresh(workspaces) {\n"
+            "    liveWorkspaceCache = workspaces;\n"
+            "    adoptLauncherHandoverDestination();\n"
+            "}\n"
+            "const out = JSON.parse(process.argv[2]).map(step => {\n"
+            "    store.clear();\n"
+            "    workspaceDestination = '';\n"
+            "    workspaceDestinationLabelDraft = '';\n"
+            "    liveWorkspaceCache = [];\n"
+            "    adoptedLauncherHandover = 0;\n"
+            "    if (step.origin) { handOver(step.origin, step.ageMs || 0); }\n"
+            "    refresh(step.workspaces);\n"
+            "    if (step.pick) { setWorkspaceDestination(step.pick); }\n"
+            "    if (step.origin2) { handOver(step.origin2, 0); }\n"
+            "    refresh(step.workspaces);\n"
+            "    return resolveWorkspaceDestination();\n"
+            "});\n"
+            "process.stdout.write(JSON.stringify(out));\n"
+        )
+        with TemporaryDirectory() as script_dir:
+            script_path = Path(script_dir) / "launch-destination.js"
+            script_path.write_text(script, encoding="utf-8")
+            completed = subprocess.run(
+                [node, str(script_path), json.dumps(cases)],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+        return json.loads(completed.stdout)
+
+    def test_the_launcher_window_is_asked_for_by_the_workspace_that_wants_it(self):
+        """The request names the window it was made from.
+
+        Native mode keeps one launcher window for the life of the app, wherever
+        it was last left — which on a multi-monitor desk is routinely a screen
+        the user is not looking at. The bridge can only bring it over if the
+        request says which workspace window asked, so the id travels with every
+        native call and browser mode is left exactly as it was.
+        """
+        requests = self._js_launcher_request(
+            [
+                # Native, from a workspace: the id travels.
+                {"origin": "aaaaaaaaaaaa", "bridge": "ok"},
+                # Native, from nowhere in particular: '' is passed through as
+                # itself, because "no workspace asked" must not arrive at the
+                # bridge as a claim that the default one did.
+                {"origin": None, "bridge": "ok"},
+                # A bridge that refuses still falls back to a browser window,
+                # and only that path resets fullscreen first.
+                {"origin": "aaaaaaaaaaaa", "bridge": "refuse"},
+                # Browser mode: no bridge, no placement, same tab as before.
+                {"origin": "aaaaaaaaaaaa", "bridge": "missing"},
+            ]
+        )
+
+        self.assertEqual(
+            requests,
+            [
+                {"bridge": "aaaaaaaaaaaa", "opened": None, "before": 0},
+                {"bridge": "", "opened": None, "before": 0},
+                {
+                    "bridge": "aaaaaaaaaaaa",
+                    "opened": ["/", "gridvibe-launcher"],
+                    "before": 1,
+                },
+                {"bridge": None, "opened": ["/", "gridvibe-launcher"], "before": 1},
+            ],
+        )
+
+        # The one caller: the workspace window hands over its own id, so the
+        # window that comes up is the one in front of the user.
+        terminals_js = self._static("js/terminals.js")
+        self.assertIn("originWorkspaceId: currentWorkspaceId", terminals_js)
+
+    def _js_launcher_request(self, cases):
+        """Drive the shipped openLauncherWindow against a stubbed bridge.
+
+        Each case is {origin, bridge}: the workspace the request is made from,
+        and whether the native bridge answers, refuses, or is not there at all
+        (browser mode). Returned per case: the argument the bridge was given,
+        the browser window that was opened instead, and whether the
+        before-fallback step ran.
+        """
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node is not installed")
+        workspaces_js = self._static("js/workspaces.js")
+        source = "\n".join(
+            [_js_const_source(workspaces_js, "LAUNCHER_WINDOW_NAME")]
+            + [_js_function_source(workspaces_js, "openLauncherWindow")]
+        )
+        script = (
+            "let currentApi = null;\n"
+            "let opened = null;\n"
+            "function nativeWorkspaceApi() { return currentApi; }\n"
+            "const window = {\n"
+            "    open: (url, name) => { opened = [url, name]; return { focus: () => {} }; }\n"
+            "};\n"
+            # The refusal path logs; the test is about what it does, not what
+            # it says, so the console is quiet here.
+            "const console = { error: () => {} };\n"
+            f"{source}\n"
+            "(async () => {\n"
+            "    const out = [];\n"
+            "    for (const step of JSON.parse(process.argv[2])) {\n"
+            "        opened = null;\n"
+            "        let seen = null;\n"
+            "        let before = 0;\n"
+            "        currentApi = step.bridge === 'missing' ? {} : {\n"
+            "            open_launcher_window: workspaceId => {\n"
+            "                seen = workspaceId;\n"
+            "                return { ok: step.bridge === 'ok' };\n"
+            "            }\n"
+            "        };\n"
+            "        await openLauncherWindow({\n"
+            "            beforeBrowserFallback: () => { before += 1; },\n"
+            "            ...(step.origin === null ? {} : { originWorkspaceId: step.origin })\n"
+            "        });\n"
+            "        out.push({ bridge: seen, opened, before });\n"
+            "    }\n"
+            "    process.stdout.write(JSON.stringify(out));\n"
+            "})();\n"
+        )
+        with TemporaryDirectory() as script_dir:
+            script_path = Path(script_dir) / "launcher-request.js"
+            script_path.write_text(script, encoding="utf-8")
+            completed = subprocess.run(
+                [node, str(script_path), json.dumps(cases)],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+        return json.loads(completed.stdout)
+
+    def test_an_open_launcher_hears_the_next_handover(self):
+        """The second handover arrives as focus, not as a page load.
+
+        Native mode keeps one launcher window for the life of the app, and
+        pressing Alt+Q in a second workspace only brings it to the front: no
+        load, and no workspace changed, so neither the page's own startup nor
+        the cross-window invalidation broadcast runs. Without a hook on the
+        arrival itself, a launcher already open would go on offering the first
+        workspace it was opened from.
+        """
+        launcher_js = self._static("js/launcher.js")
+        terminals_js = self._static("js/terminals.js")
+
+        # Both halves of the handover: the window that leaves a record of where
+        # it was, and the window that claims it while refreshing the list the
+        # claim is resolved against.
+        self.assertIn("rememberLauncherOriginWorkspace(currentWorkspaceId);", terminals_js)
+        self.assertIn("adoptLauncherHandoverDestination();", launcher_js)
+        self.assertIn("window.addEventListener('focus', refreshOnLauncherArrival);", launcher_js)
+        self.assertIn("document.addEventListener('visibilitychange'", launcher_js)
 
     def test_alt_w_still_cycles_from_a_focused_terminal(self):
         terminals_js = self._static("js/terminals.js")
