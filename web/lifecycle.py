@@ -17,6 +17,7 @@ import time
 import uuid
 from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple
 
+from web.pane_paths import capture_pane_paths
 from web.runtime_state import (
     RuntimeStatePersistenceError,
     capture_live_workspaces,
@@ -512,15 +513,23 @@ lifecycle_coordinator = LifecycleCoordinator()
 
 
 def _live_group_config(group: Dict[str, Any]) -> Dict[str, Any]:
-    """Build one server-only reusable-preset candidate from a live group."""
+    """Build one server-only reusable-preset candidate from a live group.
+
+    The path fields come from :func:`web.pane_paths.capture_pane_paths`, the
+    same reading the runtime snapshot takes, so an exit save and a Save
+    Workspace from the terminal page cannot disagree about where a pane was:
+    this producer used to copy the recorded ``directory`` and drop the
+    observation and the explorer root entirely, which saved a different
+    location from the one the page had just shown.
+    """
     panes = [pane for pane in group.get("sessions") or [] if isinstance(pane, dict)]
+    first_paths = capture_pane_paths(panes[0]) if panes else {}
     first = panes[0] if panes else {}
     connection_mode = "wsl" if group.get("connection_mode") == "wsl" else "ssh"
     terminals = []
     terminal_fields = (
         "session_id",
         "title",
-        "directory",
         "initial_command",
         "initial_command_mode",
         "startup_mode",
@@ -544,7 +553,20 @@ def _live_group_config(group: Dict[str, Any]) -> Dict[str, Any]:
         "use_powershell",
     )
     for pane in panes:
-        terminals.append({field: pane.get(field) for field in terminal_fields})
+        terminals.append(
+            {
+                **{field: pane.get(field) for field in terminal_fields},
+                **capture_pane_paths(pane),
+            }
+        )
+    # Step 2's default directory is launcher setup, so it names the group's own
+    # connection target rather than a per-pane location: the first pane's
+    # explorer boundary when it has one, and where that pane is otherwise.
+    default_dir = (
+        first_paths.get("explorer_root_directory")
+        or first_paths.get("directory")
+        or ""
+    )
     return {
         "connection_mode": connection_mode,
         "terminal_count": len(panes),
@@ -555,12 +577,12 @@ def _live_group_config(group: Dict[str, Any]) -> Dict[str, Any]:
             "username": first.get("username"),
             "password": first.get("password") or "",
             "port": first.get("port"),
-            "default_dir": first.get("directory"),
+            "default_dir": default_dir,
         },
         "wsl": {
             "distribution": first.get("distribution"),
             "username": first.get("username"),
-            "default_dir": first.get("directory"),
+            "default_dir": default_dir,
         },
         "terminals": terminals,
     }

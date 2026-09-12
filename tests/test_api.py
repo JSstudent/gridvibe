@@ -806,11 +806,12 @@ class ApiRoutesTestCase(unittest.TestCase):
         entry_end = html.index("function buildActiveWorkspaceSessionConfig(groupId = activeGroupId)", entry_start)
         entry_html = html[entry_start:entry_end]
         self.assertIn("session_id: session.session_id || ''", entry_html)
-        # Where the pane *is*, not where it started -- and an explorer pane
-        # still answers with the root, which is the boundary a relaunch has to
-        # reproduce.
+        # Where the pane *is*, not where it started -- and the same thing in
+        # every mode. The explorer's boundary is a second field beside it, not
+        # the same one wearing a different meaning on explorer panes.
         self.assertIn("session.current_directory || session.directory", entry_html)
-        self.assertIn("session.explorer_root_directory || liveDirectory", entry_html)
+        self.assertIn("explorer_root_directory: startupMode === 'explorer'", entry_html)
+        self.assertIn("explorer_root_configured: startupMode === 'explorer'", entry_html)
         self.assertNotIn("terminal?._explorerPath", entry_html)
         self.assertIn("Boolean(terminal?._explorerTreeSidebarOpen)", entry_html)
         self.assertIn("Boolean(terminal?._explorerGitSidebarOpen)", entry_html)
@@ -6702,7 +6703,15 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(updated.initial_command, "")
         self.assertEqual(updated.status, api.SessionStatus.PENDING)
 
-    def test_switch_roundtrip_preserves_explorer_root_for_parent_navigation(self):
+    def test_switch_roundtrip_reroots_on_where_the_terminal_was_and_confines_there(self):
+        """The round trip re-roots, and the new root is the boundary that binds.
+
+        A pane opened as Files on `repo`, sent to a terminal in `repo/src` and
+        opened as Files again roots on `src`: the root is read off where the
+        pane is, and the parent it used to be rooted at is not a pin. Walking
+        back up to `repo` is a navigation the user makes in the terminal, and
+        while the pane is rooted at `src` the explorer is confined to it.
+        """
         repo_dir = Path(self.temp_dir.name) / "repo"
         selected_dir = repo_dir / "src"
         selected_dir.mkdir(parents=True)
@@ -6726,22 +6735,26 @@ class ApiRoutesTestCase(unittest.TestCase):
                 },
             )
         self.assertEqual(explorer_response.status_code, 200)
+        # It opens *at* the new root, so there is no folder to open inside it.
+        self.assertEqual(explorer_response.get_json()["explorer_open_path"], "")
 
         current_response = self.client.get(f"/api/explorer/{session_id}/entries")
         self.assertEqual(current_response.status_code, 200)
         current_payload = current_response.get_json()
-        self.assertEqual(current_payload["path"], "src")
+        self.assertEqual(current_payload["path"], "")
         self.assertEqual(current_payload["parent_path"], "")
-        self.assertEqual(current_payload["root"], str(repo_dir.resolve()))
+        self.assertEqual(current_payload["root"], str(selected_dir.resolve()))
 
-        parent_response = self.client.get(
+        # Confinement follows the root it re-derived: the old parent is now
+        # outside this pane, and asking for it is refused rather than served.
+        outside_response = self.client.get(
             f"/api/explorer/{session_id}/entries",
-            query_string={"path": current_payload["parent_path"]},
+            query_string={"path": ".."},
         )
-        self.assertEqual(parent_response.status_code, 200)
-        parent_payload = parent_response.get_json()
-        self.assertEqual(parent_payload["path"], "")
-        self.assertEqual(parent_payload["parent_path"], "")
+        self.assertEqual(outside_response.status_code, 400)
+        self.assertIn(
+            "inside the configured root", outside_response.get_json()["error"]
+        )
 
     def test_switch_terminal_to_explorer_roots_on_repo_below_launch_directory(self):
         """The reported case: launch above a repo, cd into it, open the explorer.
@@ -6775,8 +6788,14 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(Path(updated.directory), nested.resolve())
         self.assertEqual(Path(updated.explorer_root_directory), repo_dir.resolve())
 
-    def test_switch_terminal_to_explorer_does_not_widen_root_above_launch_directory(self):
-        """A pane launched inside a repository subdirectory keeps that floor."""
+    def test_a_pane_launched_in_a_subdirectory_still_roots_on_its_repository(self):
+        """The launch directory is not a floor: the repository wins.
+
+        A pane built in `project/src` and opened as Files from there roots on
+        `project`, because that is the worktree holding the working directory.
+        Clamping to where the pane happened to be launched left the Git sidebar
+        without its anchor and the reader unable to navigate up to the repo.
+        """
         repo_dir = Path(self.temp_dir.name) / "project"
         nested = repo_dir / "src"
         nested.mkdir(parents=True)
@@ -6792,9 +6811,12 @@ class ApiRoutesTestCase(unittest.TestCase):
             )
 
         self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["explorer_open_path"], "src")
         updated = api.session_manager.get_session(session_id)
         self.assertEqual(Path(updated.directory), nested.resolve())
-        self.assertEqual(Path(updated.explorer_root_directory), nested.resolve())
+        self.assertEqual(Path(updated.explorer_root_directory), repo_dir.resolve())
+        # Derived from the pane's own cwd, so it cannot pin the next switch.
+        self.assertFalse(updated.explorer_root_configured)
 
     def test_switch_terminal_to_explorer_reports_a_failed_cwd_probe(self):
         """A probe that cannot answer is reported, not silently swallowed."""
@@ -7410,8 +7432,13 @@ class ApiRoutesTestCase(unittest.TestCase):
         updated = api.session_manager.get_session(session_id)
         self.assertEqual(Path(updated.explorer_root_directory), repo_dir.resolve())
 
-    def test_the_widen_guard_still_holds_while_the_pane_is_inside_it(self):
-        """Walking *down* from the launch directory does not widen the root."""
+    def test_a_shell_deep_inside_a_repository_roots_on_the_repository(self):
+        """Two levels down is still the same worktree, and it is still the root.
+
+        The pane is built in `project/src` and its shell has walked to
+        `project/src/inner`. Both directories belong to `project`, so Files
+        opens rooted there with `src/inner` showing.
+        """
         repo_dir = Path(self.temp_dir.name) / "project"
         nested = repo_dir / "src"
         deeper = nested / "inner"
@@ -7422,16 +7449,15 @@ class ApiRoutesTestCase(unittest.TestCase):
         with patch.object(
             web_terminal_io, "_resolve_live_terminal_cwd", return_value=str(deeper)
         ), patch.object(api, "_close_ssh_connection"):
-            self.client.post(
+            response = self.client.post(
                 f"/api/sessions/{session_id}/mode",
                 json={"startup_mode": "explorer", "refresh_cwd": True},
             )
 
+        self.assertEqual(response.get_json()["explorer_open_path"], "src/inner")
         updated = api.session_manager.get_session(session_id)
-        # The repository root is above the directory the user picked, so the
-        # floor holds and the pane roots where it was launched.
         self.assertEqual(Path(updated.directory), deeper.resolve())
-        self.assertEqual(Path(updated.explorer_root_directory), nested.resolve())
+        self.assertEqual(Path(updated.explorer_root_directory), repo_dir.resolve())
 
     def test_a_mode_switch_never_moves_the_launch_directory(self):
         """`directory` is rewritten by a switch; the floor read from it is not."""
@@ -7506,8 +7532,16 @@ class ApiRoutesTestCase(unittest.TestCase):
         )
         self.assertIsNone(malformed["explorer_root_configured"])
 
-    def test_a_configured_root_survives_the_round_trip_and_still_pins(self):
-        """The other half of D2: a chosen root is not what stage 3 drops."""
+    def test_a_configured_root_survives_the_round_trip_but_never_pins(self):
+        """A chosen root is carried out of explorer mode, and does not bind the way back.
+
+        Both halves matter and they are different questions. Leaving Files
+        keeps the root the pane was confined to, so nothing about the pane is
+        lost on the way to a terminal. *Re*-opening Files is an explicit
+        gesture made from wherever the shell now stands, and it re-derives:
+        a pane rooted at `repo` whose shell is in `repo/src` comes back rooted
+        at `src`, not at the parent it used to hold.
+        """
         repo_dir = Path(self.temp_dir.name) / "repo"
         nested = repo_dir / "src"
         nested.mkdir(parents=True)
@@ -7526,7 +7560,6 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(Path(back.explorer_root_directory), repo_dir.resolve())
         self.assertTrue(back.explorer_root_configured)
 
-        # ...and it still pins, even though the pane is now sitting in `src`.
         with patch.object(
             web_terminal_io, "_resolve_live_terminal_cwd", return_value=str(nested)
         ), patch.object(api, "_close_ssh_connection"):
@@ -7536,7 +7569,8 @@ class ApiRoutesTestCase(unittest.TestCase):
             )
 
         reopened = api.session_manager.get_session(session_id)
-        self.assertEqual(Path(reopened.explorer_root_directory), repo_dir.resolve())
+        self.assertEqual(Path(reopened.explorer_root_directory), nested.resolve())
+        self.assertFalse(reopened.explorer_root_configured)
 
     def test_a_shell_outside_the_configured_root_stores_a_derived_one(self):
         """F15: the one branch where the flag and the root disagree.
@@ -11723,7 +11757,16 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(get_response.status_code, 200)
         self.assertEqual(get_response.get_json()["config"]["ssh"]["host"], "10.0.0.20")
 
-    def test_workspace_save_preserves_launcher_directories_and_connection_setup(self):
+    def test_workspace_save_keeps_connection_setup_and_saves_where_each_pane_is(self):
+        """The two halves of a preset update, which are not the same half.
+
+        Connection setup -- the host, user, port, distribution and Step 2
+        default folder -- belongs to the preset and a workspace payload may not
+        retarget it. Each pane's own location does not: updating a preset used
+        to rewind every pane to the folder the preset was created with, while
+        the same save against a preset that did not exist yet stored the live
+        location, so two identical gestures produced different presets.
+        """
         original = self.client.post(
             "/api/saved-sessions",
             json={
@@ -11774,7 +11817,9 @@ class ApiRoutesTestCase(unittest.TestCase):
                     "terminals": [
                         {
                             "title": "Changed title",
-                            "directory": "src/services",
+                            "directory": "C:\\repos\\gridvibe\\src\\services",
+                            "explorer_root_directory": "C:\\repos\\gridvibe",
+                            "explorer_root_configured": False,
                             "startup_mode": "explorer",
                             "explorer_tree_open": True,
                             "explorer_git_open": True,
@@ -11804,8 +11849,22 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(config["wsl"]["default_dir"], "C:\\repos\\gridvibe")
         self.assertEqual(config["wsl"]["distribution"], "Ubuntu")
         self.assertEqual(config["wsl"]["username"], "saso")
-        self.assertEqual(config["terminals"][0]["directory"], "C:\\repos\\gridvibe")
-        self.assertEqual(config["terminals"][1]["directory"], "backend")
+        # Where each pane is now, saved separately from the boundary its
+        # explorer is confined to: the pane is browsing a subdirectory of a
+        # root that stays wider than it, and both facts survive one save.
+        self.assertEqual(
+            config["terminals"][0]["directory"], "C:\\repos\\gridvibe\\src\\services"
+        )
+        self.assertEqual(
+            config["terminals"][0]["explorer_root_directory"], "C:\\repos\\gridvibe"
+        )
+        # Stated `false` is a value: a root this pane derived from its own
+        # working directory must not come back as one somebody chose.
+        self.assertFalse(config["terminals"][0]["explorer_root_configured"])
+        self.assertEqual(config["terminals"][1]["directory"], "C:\\other-repo")
+        # A pane that is not an explorer carries no root at all.
+        self.assertEqual(config["terminals"][1]["explorer_root_directory"], "")
+        self.assertFalse(config["terminals"][1]["explorer_root_configured"])
         self.assertEqual(config["terminals"][0]["title"], "Shell")
         self.assertEqual(config["terminals"][1]["title"], "Server")
         self.assertEqual(config["terminals"][0]["startup_mode"], "explorer")
@@ -12205,7 +12264,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(config["terminals"][1]["explorer_open_tabs"], [])
         self.assertEqual(config["terminals"][1]["explorer_active_tab"], "")
 
-    def test_workspace_save_as_clones_source_directories_before_applying_modes(self):
+    def test_workspace_save_as_clones_connection_setup_and_takes_the_live_path(self):
         original = self.client.post(
             "/api/saved-sessions",
             json={
@@ -12254,10 +12313,14 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(copied.status_code, 201)
         body = copied.get_json()
         self.assertNotEqual(body["id"], original["id"])
+        # Connection identity is still the source preset's: Save As must not
+        # let a workspace payload retarget the host, port, or default folder.
         self.assertEqual(body["config"]["ssh"]["host"], "example.com")
         self.assertEqual(body["config"]["ssh"]["port"], 2222)
         self.assertEqual(body["config"]["ssh"]["default_dir"], "/srv/gridvibe")
-        self.assertEqual(body["config"]["terminals"][0]["directory"], "services/api")
+        # The pane's own location is not connection setup: the copy saves where
+        # the live pane is, not the folder the source preset was created with.
+        self.assertEqual(body["config"]["terminals"][0]["directory"], "tmp/navigation")
         self.assertEqual(body["config"]["terminals"][0]["startup_mode"], "explorer")
 
     def test_workspace_save_preserves_running_agent_identity_and_command(self):
@@ -12317,12 +12380,15 @@ class ApiRoutesTestCase(unittest.TestCase):
 
         self.assertEqual(response.status_code, 201)
         terminals = response.get_json()["config"]["terminals"]
-        self.assertEqual(terminals[0]["directory"], "")
+        # The agent's identity *and* the directory it is running in: an agent
+        # that saved with the preset's creation directory came back in the
+        # wrong place, which is the whole point of recording where it is.
+        self.assertEqual(terminals[0]["directory"], "tmp/navigation")
         self.assertEqual(terminals[0]["startup_mode"], "agent")
         self.assertEqual(terminals[0]["initial_command_mode"], "agent")
         self.assertEqual(terminals[0]["agent_selection"], "codex")
         self.assertEqual(terminals[0]["initial_command"], "codex")
-        self.assertEqual(terminals[1]["directory"], "backend")
+        self.assertEqual(terminals[1]["directory"], "/other/repo")
         self.assertEqual(terminals[1]["agent_selection"], "other")
         self.assertEqual(terminals[1]["custom_agent"], "claude-code")
         self.assertEqual(terminals[1]["initial_command"], "claude-code")
@@ -12338,8 +12404,8 @@ class ApiRoutesTestCase(unittest.TestCase):
                     "terminal_count": 2,
                     "layout": "horizontal",
                     "terminals": [
-                        {"directory": "wrong", "startup_mode": "terminal"},
-                        {"directory": "also-wrong", "startup_mode": "terminal"},
+                        {"directory": "tmp/navigation", "startup_mode": "terminal"},
+                        {"directory": "/other/repo", "startup_mode": "terminal"},
                     ],
                 },
             },
@@ -12347,8 +12413,8 @@ class ApiRoutesTestCase(unittest.TestCase):
 
         self.assertEqual(terminal_response.status_code, 201)
         terminal_modes = terminal_response.get_json()["config"]["terminals"]
-        self.assertEqual(terminal_modes[0]["directory"], "")
-        self.assertEqual(terminal_modes[1]["directory"], "backend")
+        self.assertEqual(terminal_modes[0]["directory"], "tmp/navigation")
+        self.assertEqual(terminal_modes[1]["directory"], "/other/repo")
         for terminal in terminal_modes[:2]:
             self.assertEqual(terminal["startup_mode"], "terminal")
             self.assertEqual(terminal["initial_command_mode"], "command")
@@ -13667,10 +13733,22 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("terminal._lastCols = null;", terminals_js)
         self.assertIn("terminal._lastRows = null;", terminals_js)
 
+    def _local_repo_with_a_space(self) -> Path:
+        """A real directory whose name has a space, for the quoting cases.
+
+        Real rather than invented: a startup command is not typed into a shell
+        standing somewhere the reader did not ask for, so a fictional path now
+        tests the refusal rather than the quoting.
+        """
+        repo_path = Path(self.temp_dir.name) / "repo path"
+        repo_path.mkdir(exist_ok=True)
+        return repo_path
+
     def test_run_startup_sequence_uses_cmd_syntax_for_windows_local_repo(self):
+        repo_path = self._local_repo_with_a_space()
         connection = {"kind": "local", "pty_process": object()}
         session = SimpleNamespace(
-            directory='C:\\repo path',
+            directory=str(repo_path),
             initial_command='npm run dev',
         )
 
@@ -13682,7 +13760,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(
             send_input.call_args_list,
             [
-                unittest.mock.call(connection, 'cd /d "C:\\repo path"\r'),
+                unittest.mock.call(connection, f'cd /d "{repo_path}"\r'),
                 unittest.mock.call(connection, 'npm run dev\r'),
             ],
         )
@@ -13763,9 +13841,10 @@ class ApiRoutesTestCase(unittest.TestCase):
         sleep.assert_not_called()
 
     def test_run_startup_sequence_uses_powershell_literal_cd(self):
+        repo_path = self._local_repo_with_a_space()
         connection = {"kind": "local", "pty_process": object(), "shell_kind": "powershell"}
         session = SimpleNamespace(
-            directory='C:\\repo path',
+            directory=str(repo_path),
             initial_command='npm run dev',
         )
 
@@ -13777,7 +13856,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(
             send_input.call_args_list,
             [
-                unittest.mock.call(connection, "Set-Location -LiteralPath 'C:\\repo path'\r"),
+                unittest.mock.call(connection, f"Set-Location -LiteralPath '{repo_path}'\r"),
                 unittest.mock.call(connection, 'npm run dev\r'),
             ],
         )
@@ -17743,7 +17822,6 @@ class ExtractedFrontendAssetsTestCase(unittest.TestCase):
             "getStoredTheme",
             "resolveTheme",
             "buildLaunchDirectory",
-            "resolveTerminalDirectory",
             "resolvePaneStartupMode",
             "buildPaneLaunchFields",
         )

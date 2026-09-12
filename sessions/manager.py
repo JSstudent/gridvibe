@@ -60,8 +60,10 @@ class TerminalSession:
     # The directory this pane was *built* on, and the one thing here that never
     # moves afterwards. `directory` is rewritten to wherever the pane last was
     # by every mode switch and by the shell switch, so it stops naming the
-    # launcher's choice after the first of those -- which is why the explorer's
-    # widen-guard floor (`_resolve_explorer_open_root`) reads this instead.
+    # launcher's choice after the first of those; this keeps the record of it.
+    # It is a record and nothing more: it does not clamp the root a
+    # Terminal -> Files switch derives (`_resolve_explorer_open_root`), which
+    # reads only where the pane is standing now.
     # `None` means "not stated"; __post_init__ takes it from `directory`.
     launch_directory: Optional[str] = None
     username: str = "root"
@@ -144,9 +146,9 @@ class TerminalSession:
             "directory": self.directory,
             "current_directory": self.current_directory,
             # Two directory fields, deliberately: `directory` answers "where is
-            # this pane", `launch_directory` answers "what may the explorer not
-            # widen past". The second only differs from the first once a mode
-            # switch has rewritten `directory`, which is exactly when it matters.
+            # this pane", `launch_directory` answers "where was it built". The
+            # second only differs from the first once a mode switch has
+            # rewritten `directory`.
             "launch_directory": self.launch_directory,
             "username": self.username,
             "port": self.port,

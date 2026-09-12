@@ -449,6 +449,13 @@ restart together, and a config that does not state the flag (the launcher, or a
 snapshot written before the field existed) is answered from the pane: a root on
 an explorer pane is configured, a root on any other pane is a derived leftover.
 
+Superseded 2026-09-12: the widen guard and the configured-root precedence it
+sat beside are both gone. A terminal/agent -> Files switch now derives its root
+from the pane's working directory alone, so this symptom cannot recur by any
+route. The current rule is in
+[engineering_contracts.md](engineering_contracts.md#pane-transitions);
+`explorer_root_configured` still travels with the root it qualifies.
+
 ### Issue ID: ISSUE-2026-045
 - Title: A saved workspace restores an agent pane at its launch directory, not the directory the agent was started in
 - Priority: High

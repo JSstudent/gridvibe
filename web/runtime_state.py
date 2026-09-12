@@ -57,6 +57,7 @@ import threading
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from web.pane_paths import capture_pane_paths
 from web.paths import BASE_DIR
 from web.session_presentation import (
     MAX_STORED_SESSION_PANES,
@@ -156,10 +157,9 @@ _SESSION_SNAPSHOT_FIELDS = (
     # A second directory field, and both are needed: `directory` answers "where
     # is this pane" (`_snapshot_session()` writes the *observed* directory into
     # it, so a restore replays a `cd` to where the pane was), while
-    # `launch_directory` answers "what may the explorer not widen past".
-    # Rebuilding the second from the first moved the floor to wherever the pane
-    # happened to be, so the same pane in the same directory opened a different
-    # explorer root before and after a restart.
+    # `launch_directory` answers "where was it built". A restore is the same
+    # pane coming back, so it is the one replay that carries the second -- a
+    # preset is a template and its panes are built where the preset puts them.
     "launch_directory",
     "username",
     "port",
@@ -224,12 +224,15 @@ def _snapshot_session(session: Any) -> Dict[str, Any]:
     carried that root back as a configured one. A snapshot written before this
     field existed simply does not state it, and `TerminalSession` answers from
     the pane instead.
+
+    All four of those decisions are `web.pane_paths.capture_pane_paths()`, not
+    this function's own: a reusable preset saved from the same live pane has to
+    record the same location, and the two products drifted apart precisely
+    because each decided separately.
     """
     data = session if isinstance(session, dict) else session.to_dict()
     snapshot = {key: data.get(key) for key in _SESSION_SNAPSHOT_FIELDS}
-    observed = str(data.get("current_directory") or "").strip()
-    if observed:
-        snapshot["directory"] = observed
+    snapshot.update(capture_pane_paths(data))
     return snapshot
 
 

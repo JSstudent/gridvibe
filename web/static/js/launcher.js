@@ -765,6 +765,18 @@
             return {
                 title: row.querySelector('.t-title')?.value.trim() || `Terminal ${index + 1}`,
                 directory,
+                /* An imported explorer row carries the root it was saved under
+                   through the form, so re-saving a preset from here keeps a
+                   root that is wider than the folder the pane was browsing.
+                   It is dropped by the same signal as the tabs and the pin:
+                   once the row's directory has been edited the saved root no
+                   longer describes this row, and the launch derives one from
+                   the directory the user typed instead. */
+                explorer_root_directory: commandMode === 'explorer' && explorerTabsMatchRoot
+                    ? (row.dataset.explorerRootDir || '')
+                    : '',
+                explorer_root_configured: commandMode === 'explorer' && explorerTabsMatchRoot
+                    && row.dataset.explorerRootConfigured === 'true',
                 initial_command: initialCommand,
                 initial_command_mode: commandMode === 'agent'
                     ? 'agent'
@@ -1916,6 +1928,8 @@
                     data-explorer-search-open="${terminal.explorer_search_open ? 'true' : 'false'}"
                     data-explorer-open-tabs="${escHtml(JSON.stringify(Array.isArray(terminal.explorer_open_tabs) ? terminal.explorer_open_tabs : []))}"
                     data-explorer-tabs-dir="${escHtml(terminal.directory || '')}"
+                    data-explorer-root-dir="${escHtml(terminal.explorer_root_directory || '')}"
+                    data-explorer-root-configured="${terminal.explorer_root_configured ? 'true' : 'false'}"
                     data-explorer-active-tab="${escHtml(terminal.explorer_active_tab || '')}"
                     data-explorer-tab-views="${escHtml(JSON.stringify(terminal.explorer_tab_views && typeof terminal.explorer_tab_views === 'object' ? terminal.explorer_tab_views : {}))}"
                     data-explorer-md-preset="${escHtml(terminal.explorer_md_preset || '')}"

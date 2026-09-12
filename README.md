@@ -112,12 +112,14 @@ Browser mode is the most reliable for microphone permissions. Settings apply liv
 ## Sessions & Workspaces
 
 - **Session tabs** — keep related panes together in draggable tabs. `Alt+1`–`Alt+9` switches, middle-click closes, and broadcast typing sends your keystrokes to every pane in the active tab.
-- **Saved sessions** — save a setup as a reusable preset and import it later. Stored SSH passwords are encrypted, and are never written to a workspace snapshot.
+- **Saved sessions** — save a setup as a reusable preset and import it later; re-saving one records where each pane is working now, not where the preset was created. Stored SSH passwords are encrypted, and are never written to a workspace snapshot.
 - **Save & restore** — GridVibe autosaves, and **Save Workspace** saves on demand. A restart brings back tabs, layouts, commands, the active group, and explorer presentation, with each pane reopening in the directory it was *working in*.
 - **Close & restart** — voluntary close, manual restart, and update restart share one in-page choice: continue without saving, save every workspace, or save every preset and then every workspace. A failed save leaves the app open.
 - **Multiple workspaces** — optionally keep separate projects in separate windows, move tabs between them without restarting terminals, and switch with `Alt+W` / `Alt+Shift+W`.
 - **The launcher follows you** — opening it from a workspace (`Alt+Q`) brings its window up on that workspace's screen, with the next launch already aimed at that workspace. The caret beside **Launch** picks any other destination, and a launcher already on that screen stays where you put it.
 - **Updates** — **Check for updates** fast-forwards a Git clone, then offers the same save choices.
+
+If a local pane's folder has been deleted since it was saved, the pane opens with a notice naming it and does not run its startup command or agent somewhere else. The saved path is kept, so the pane comes back correctly once the folder does.
 
 Closing a workspace ends its terminals but keeps it available to restore. **Close and forget** drops both the workspace and its snapshot; closing only the window leaves its terminals running.
 
@@ -136,8 +138,9 @@ A pane running an agent also renames itself after it: `Terminal 1` becomes `Clau
 
 ## File Explorer
 
-Swap any pane between a terminal and a file explorer with one button — same directory, no re-navigation. Works on a local repo folder or a remote host over SFTP, and roots on the Git repository containing that directory so the Git sidebar works.
+Swap any pane between a terminal and a file explorer with one button — same directory, no re-navigation. Works on a local repo folder or a remote host over SFTP.
 
+- **Files follows your shell** — opening the explorer roots on the Git repository your terminal is standing in, whatever root the pane had before. `cd` somewhere else and open Files again to re-root there.
 - **Browse & preview** — breadcrumbs, a lazy Files tree, draggable file tabs, syntax-coloured source, rendered Markdown and Mermaid, inline images, and downloads.
 - **Edit in place** — open any UTF-8 text file, edit it, and save with `Ctrl+S`. Saves are atomic, and a conflict prompt protects files that changed on disk.
 - **Search the repo** (`Ctrl+Shift+F`) — case, whole-word, regex, file-pattern, scope, and `.gitignore` controls, with results marked when a limit is hit.

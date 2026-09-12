@@ -76,10 +76,25 @@ published. Multi-field readers still take one `runtime_config.snapshot()`.
 
 **Launchable shape** — what it takes to relaunch a pane: host, port, username,
 `directory` (where the pane *is*, not where it started), `launch_directory`
-(the explorer's widen floor, which is why it is persisted rather than
-re-derived), `startup_mode`, `initial_command`, agent selection, WSL/PowerShell
-flags, explorer root plus `explorer_root_configured`. The allowlist is
-`_SESSION_SNAPSHOT_FIELDS` in `web/runtime_state.py`.
+(the immutable record of where it was built), `startup_mode`,
+`initial_command`, agent selection, WSL/PowerShell flags, explorer root plus
+`explorer_root_configured`. The allowlist is `_SESSION_SNAPSHOT_FIELDS` in
+`web/runtime_state.py`.
+
+The four path fields have **one reader**, `web/pane_paths.py`, and every
+surface that saves a pane goes through it — the runtime snapshot, the
+exit/dashboard preset builder, and saved-preset normalization. They used to
+decide separately and disagreed: the snapshot folded in the observed directory
+while updating a preset deliberately kept the folder that preset was created
+with, so the same gesture on the same pane saved two different locations
+depending on which product it wrote to.
+
+| Fact | Field | Rule |
+|---|---|---|
+| Where the pane is, and launches next | `directory` | The observation (`current_directory`) when the pane produced one, the recorded directory otherwise. Never a guess — an absent observation is absent, not wrong. |
+| Where it was built | `launch_directory` | Nothing moves it. A record only: it clamps no root and gates no transition. **Snapshot only** — a preset is a template, and a pane launched from one is built where the preset puts it. |
+| The explorer's boundary | `explorer_root_directory` | Saved independently of the launch directory: a terminal may work inside a subdirectory while Files is confined to a wider project, and both survive one save. |
+| Whether anybody chose that boundary | `explorer_root_configured` | Explicit `False` is a value, not an absence. The legacy default (a root on an explorer pane is chosen; on any other pane it is one an old transition derived) applies **only** when a record does not state it. |
 
 **Presentation** — what the pane looks like: explorer tabs / sidebar / Git
 scope, browser tabs, Markdown and font choices, layout geometry. Normalized in
@@ -104,7 +119,12 @@ a value comes back wearing the wrong meaning.
 - **`explorer_root_directory` + `explorer_root_configured`** — a root, and
   whether anybody *chose* it. The flag qualifies **the root actually stored**,
   never the candidate it was chosen among, so a derived root cannot come back
-  looking like a configured one and pin the pane for good.
+  looking like a configured one. What the flag is *for* is narrow: what a pane
+  hands back when it leaves explorer mode, and what a split clone inherits.
+  Where a shell **reopens** Files never asks — that root is derived from the
+  pane's working directory every time, and is stored `False` because that is
+  what it is. A root a snapshot or preset restores is replayed exactly and
+  never re-derived; it is still not a pin on the next explicit switch.
 - **`explorer_git_pin_active` + `explorer_git_pinned_path` +
   `explorer_git_pin_kind`** — the Git sidebar's frozen path scope, as three
   fields for one fact. `''` is a real pinned path — the explorer root itself —
@@ -317,6 +337,14 @@ For a **launch** field (something a relaunch needs):
 4. Decide what `None` means. It must mean "not stated by this build", answered
    from the pane, so a snapshot written before the field existed stays
    restorable.
+5. If a **reusable preset** must carry it too, it needs three more places:
+   `_normalize_terminal_entries()` and `_default_terminal_entries()`
+   (`web/saved_sessions.py`), the preset merge that takes it from a live pane
+   (`_merge_workspace_session_config()`), and the two client launch adapters
+   through `buildPaneLaunchFields()` (`shared.js`). A path field belongs in
+   `web/pane_paths.py` so the snapshot and the preset cannot read it
+   differently. A field that only a restore can honestly replay — the same pane
+   coming back, not a template building a new one — stays out of the preset.
 
 For a **presentation** field:
 
@@ -354,6 +382,13 @@ that then *types* its `initial_command` at the prompt.
   The round trip is parametrised over the pin's kind, so a file pin and a folder
   pin are the same test rather than two, and an out-of-allowlist
   `explorer_git_pin_kind` is asserted to be refused rather than coerced.
+- `tests/test_pane_paths.py` — the four path facts: the capture policy itself,
+  the preset merge (root and provenance carried, an absent directory leaving
+  the preset alone, each pane keeping its own path across a reorder), the
+  snapshot and the exit save agreeing about one live pane, the transitions that
+  derive a root and the restored one that does not, the startup command that is
+  not run in a folder that has gone, and the real page builders executed in
+  Node.
 - `tests/test_saved_session_store.py` — preset and encryption-key durability.
 - `tests/test_config_transactions.py` — malformed config recovery, backup
   preservation, refused writes/refreshes, and two real processes merging
