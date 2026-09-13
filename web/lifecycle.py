@@ -57,7 +57,9 @@ LIFECYCLE_DECISION_TTL_SECONDS = 60.0
 LIFECYCLE_STALE_WINDOW_GRACE_SECONDS = 120.0
 _MAX_DECISIONS = 128
 _MAX_CLIENT_ERROR_LENGTH = 300
-_MAX_WINDOW_ID_LENGTH = 128
+# Read by the native bridge too, which refuses an id past it rather than
+# storing a key that could never name a record here.
+LIFECYCLE_MAX_WINDOW_ID_LENGTH = 128
 # Safety net behind the grace period and the stable per-window id: even if both
 # are somehow bypassed, one workspace can never accumulate window records
 # without bound. Generous enough that real multi-window use never reaches it.
@@ -100,7 +102,7 @@ class LifecycleCoordinator:
         client = str(client_id or "").strip()
         workspace = str(workspace_id or "").strip()
         window = str(window_id or client).strip()
-        if len(window) > _MAX_WINDOW_ID_LENGTH:
+        if len(window) > LIFECYCLE_MAX_WINDOW_ID_LENGTH:
             window = client
         if not client or not workspace or not window:
             return
@@ -152,6 +154,44 @@ class LifecycleCoordinator:
                 self._client_windows.pop(client, None)
             self._drop_pending_windows_locked(departed)
             self._condition.notify_all()
+
+    def forget_window(self, window_id: Any, workspace_id: Any = None) -> bool:
+        """Forget one window's registration on a deliberate close, by its id.
+
+        A native workspace window is destroyed by the launcher process, not by
+        its page: ``pagehide`` either never runs or loses the race with the
+        teardown, so the socket drop is all the coordinator would otherwise
+        hear and :meth:`disconnect_client` would file the record as stale --
+        indistinguishable from a crashed window, and blocking every flush for
+        that workspace until the grace period expires, including the flush
+        behind a save made from the window that replaced it. This is the same
+        deliberate departure :meth:`leave_workspace` records for a page that
+        got to announce its own, addressed by window id because the closing
+        side knows which window it is destroying and not which socket it held.
+
+        ``workspace_id`` is verified when given, so a stale id can only ever
+        drop the record it names. Returns whether a record was dropped.
+        """
+        window = str(window_id or "").strip()
+        workspace = str(workspace_id or "").strip()
+        if not window:
+            return False
+        with self._condition:
+            record = self._windows.get(window)
+            if record is None:
+                return False
+            if workspace and record["workspace_id"] != workspace:
+                return False
+            self._drop_window_locked(window, record)
+            # A flush in flight forgets it the way it forgets a window that
+            # left mid-flush: a deliberate departure is not a failed save.
+            self._drop_pending_windows_locked({window})
+            logger.debug(
+                "Lifecycle window forgot a deliberate close workspace=%s",
+                record["workspace_id"],
+            )
+            self._condition.notify_all()
+            return True
 
     def disconnect_client(self, client_id: Any):
         """Mark the client's windows stale; they stay recoverable, not permanent.

@@ -4266,6 +4266,35 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("path.setAttribute('d', visible ? 'M6 15l6-6 6 6' : 'M6 9l6 6 6-6');", html)
         self.assertIn("applyTopbarVisibility(getStoredTopbarVisible());", html)
 
+    def test_terminals_page_registers_its_lifecycle_window_with_the_native_bridge(self):
+        """The page's half of the deliberate-close announcement.
+
+        Closing a native workspace window destroys the webview from the
+        outside, so the page never gets to emit its own `leave_workspace` and
+        the coordinator would file the close as a possible crash — blocking
+        every save for that workspace until the stale-window grace period
+        expires, including one made from the window that reopened it. The
+        launcher can announce the close instead, but only if it knows which
+        registration this window holds, and that id lives in this window's own
+        sessionStorage. This is the call boundary terminals.js has no Node
+        harness for; what happens on the other side of it is executed in
+        tests/test_webview_launcher.py and tests/test_lifecycle.py.
+        """
+        terminals_js = self._static("js/terminals.js")
+
+        self.assertIn(
+            "await api.register_workspace_lifecycle_window(currentWorkspaceId, lifecycleWindowId);",
+            terminals_js,
+        )
+        # The id the bridge is handed must be the same one `join_workspace`
+        # registered, or the announcement names a record that does not exist.
+        self.assertIn("window_id: lifecycleWindowId", terminals_js)
+        # Called from boot as well as from `pywebviewready`: the bridge is
+        # often injected before this script runs, and the event has then
+        # already fired with no listener to hear it.
+        self.assertIn("window.addEventListener('pywebviewready'", terminals_js)
+        self.assertEqual(terminals_js.count("registerNativeLifecycleWindow();"), 2)
+
     def test_terminals_page_centers_topbar_actions_without_custom_window_controls(self):
         response = self.client.get("/terminals")
 

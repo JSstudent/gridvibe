@@ -33,7 +33,7 @@ from web.api import (
     session_manager,
 )
 from web.config import runtime_config
-from web.lifecycle import lifecycle_coordinator
+from web.lifecycle import LIFECYCLE_MAX_WINDOW_ID_LENGTH, lifecycle_coordinator
 from web.runtime_state import normalize_native_zoom_factor
 from web.workspaces import DEFAULT_WORKSPACE_ID, normalize_workspace_id
 
@@ -970,6 +970,7 @@ class GridVibeApi:
         self._window = None
         self._workspace_windows = {}
         self._workspace_window_group_ids = {}
+        self._workspace_lifecycle_window_ids = {}
         self._is_fullscreen = False
         self._workspace_fullscreen_states = {}
         self._register_window = None
@@ -1819,6 +1820,82 @@ class GridVibeApi:
             return None
         return self._workspace_windows.get(resolved_workspace_id)
 
+    def register_workspace_lifecycle_window(self, workspace_id, window_id):
+        """Record which flush-coordinator window id this window's page carries.
+
+        The page owns that id (it lives in the window's own `sessionStorage`)
+        and the launcher process owns the window, so neither half can announce
+        a deliberate close on its own. This is the page telling the closing
+        side which registration its window holds, so
+        :meth:`_forget_workspace_lifecycle_window` can retire exactly that one.
+        """
+        try:
+            resolved_workspace_id = normalize_workspace_id(workspace_id)
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}
+        resolved_window_id = str(window_id or "").strip()
+        if not resolved_window_id:
+            return {"ok": False, "error": "A lifecycle window id is required"}
+        if len(resolved_window_id) > LIFECYCLE_MAX_WINDOW_ID_LENGTH:
+            # An id this long is one the coordinator itself would refuse and
+            # replace with the socket id, leaving nothing here that could ever
+            # match a record. Refusing it says so instead of storing a key that
+            # silently retires nothing.
+            logger.warning(
+                "Ignoring oversized lifecycle window id for workspace=%s",
+                resolved_workspace_id,
+            )
+            return {"ok": False, "error": "Lifecycle window id is too long"}
+        self._workspace_lifecycle_window_ids[resolved_workspace_id] = (
+            resolved_window_id
+        )
+        logger.debug(
+            "Registered lifecycle window id for workspace=%s",
+            resolved_workspace_id,
+        )
+        return {"ok": True}
+
+    def _forget_workspace_lifecycle_window(self, workspace_id, window=None):
+        """Announce one native window's deliberate close to the coordinator.
+
+        Closing a workspace window is a departure, not a loss, but the page
+        cannot say so: the webview is destroyed under it, so `pagehide` either
+        never runs or loses the race with the teardown and the socket drop is
+        all the coordinator hears. Left at that the record is stale rather than
+        departed -- and a stale record blocks every flush for its workspace
+        until the grace period expires, so the save made from the window that
+        reopened the workspace fails for two minutes with nothing wrong.
+
+        ``window`` is the window being closed. When it is given and the
+        workspace's slot already holds a *different* window, the stored id
+        belongs to the replacement and is left alone: retiring a live
+        registration would drop the one window a later flush must wait for.
+        """
+        try:
+            resolved_workspace_id = normalize_workspace_id(workspace_id)
+        except ValueError:
+            logger.debug("Ignoring unusable workspace id %r on close", workspace_id)
+            return False
+        if (
+            window is not None
+            and self._workspace_windows.get(resolved_workspace_id) is not window
+        ):
+            logger.debug(
+                "Keeping the lifecycle window id of the window that replaced workspace=%s",
+                resolved_workspace_id,
+            )
+            return False
+        resolved_window_id = self._workspace_lifecycle_window_ids.pop(
+            resolved_workspace_id,
+            "",
+        )
+        if not resolved_window_id:
+            return False
+        return lifecycle_coordinator.forget_window(
+            resolved_window_id,
+            resolved_workspace_id,
+        )
+
     def close_session_window(self):
         """Close the default workspace window."""
         return self.close_workspace_window(DEFAULT_WORKSPACE_ID)
@@ -1836,6 +1913,9 @@ class GridVibeApi:
                 resolved_workspace_id,
             )
             return {"ok": False, "error": "No workspace window open"}
+        # Before the window goes, not after: once it is destroyed there is no
+        # page left to tell the coordinator this was deliberate.
+        self._forget_workspace_lifecycle_window(resolved_workspace_id, window)
         try:
             logger.info("Closing workspace window workspace=%s", resolved_workspace_id)
             window.destroy()
@@ -2160,12 +2240,18 @@ def main():
             api_bridge._set_window_minimized(kind, False)
             if kind == "session":
                 workspace_id = DEFAULT_WORKSPACE_ID
+                api_bridge._forget_workspace_lifecycle_window(workspace_id, window)
                 api_bridge._workspace_windows.pop(workspace_id, None)
                 api_bridge._workspace_window_group_ids.pop(workspace_id, None)
                 api_bridge._workspace_fullscreen_states.pop(workspace_id, None)
                 api_bridge._workspace_window_minimized.pop(workspace_id, None)
             elif kind.startswith("workspace:"):
                 workspace_id = normalize_workspace_id(kind.split(":", 1)[1])
+                # The title-bar X reaches here and nowhere else, so this is
+                # where a close the bridge verb did not make is announced.
+                # Read before the pop below: the guard inside needs the slot
+                # to still say which window this workspace currently has.
+                api_bridge._forget_workspace_lifecycle_window(workspace_id, window)
                 api_bridge._workspace_windows.pop(workspace_id, None)
                 api_bridge._workspace_window_group_ids.pop(workspace_id, None)
                 api_bridge._workspace_fullscreen_states.pop(workspace_id, None)

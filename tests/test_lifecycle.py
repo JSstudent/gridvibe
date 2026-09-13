@@ -206,6 +206,121 @@ class LifecycleCoordinatorTestCase(unittest.TestCase):
         self.assertEqual(len(result["metadata"]["default"]), 1)
         self.assertLess(elapsed, 1.0)
 
+    def test_a_deliberately_closed_window_does_not_block_the_workspace_it_reopens(self):
+        """A native close is a departure, not a crash — and its replacement saves.
+
+        Closing a workspace window destroys the webview from the outside, so
+        the page never gets to emit its own leave and the coordinator would
+        hear only the socket drop. Reopening the workspace brings a *new*
+        window id (fresh sessionStorage), so the abandoned record cannot be
+        replaced the way a reload replaces its own — it sits beside the live
+        one and fails every flush for the whole grace period. `forget_window`
+        is the deliberate close arriving from the side that made it.
+        """
+        coordinator = LifecycleCoordinator()
+        coordinator.join_workspace("socket-old", "default", "window-a")
+
+        # The close: announced by the launcher, then the socket drops.
+        self.assertTrue(coordinator.forget_window("window-a", "default"))
+        coordinator.disconnect_client("socket-old")
+
+        # Reopened — a different window, so a different id.
+        coordinator.join_workspace("socket-new", "default", "window-b")
+        self.assertEqual(len(coordinator._windows), 1)
+
+        def acknowledge(workspace_id, request_id):
+            coordinator.acknowledge_flush(
+                "socket-new",
+                {
+                    "request_id": request_id,
+                    "workspace_id": workspace_id,
+                    "ok": True,
+                },
+            )
+
+        result = coordinator.request_flush({"default"}, acknowledge, timeout=0.1)
+
+        self.assertTrue(result["ok"], result["errors"])
+        self.assertEqual(result["errors"], [])
+
+    def test_an_unannounced_close_still_blocks_the_workspace_it_reopens(self):
+        """The defect the announcement exists to prevent, pinned as its mirror.
+
+        Identical to the test above with the announcement removed: this is what
+        a save from the reopened window met before the launcher made one, and
+        what it would meet again if the announcement stopped arriving.
+        """
+        coordinator = LifecycleCoordinator()
+        coordinator.join_workspace("socket-old", "default", "window-a")
+        coordinator.disconnect_client("socket-old")
+        coordinator.join_workspace("socket-new", "default", "window-b")
+
+        def acknowledge(workspace_id, request_id):
+            coordinator.acknowledge_flush(
+                "socket-new",
+                {
+                    "request_id": request_id,
+                    "workspace_id": workspace_id,
+                    "ok": True,
+                },
+            )
+
+        result = coordinator.request_flush({"default"}, acknowledge, timeout=0.1)
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(
+            [error["category"] for error in result["errors"]], ["client_stale"]
+        )
+
+    def test_forgetting_a_window_only_ever_drops_the_record_it_names(self):
+        """A stale id must not retire a live window's registration."""
+        coordinator = LifecycleCoordinator()
+        coordinator.join_workspace("socket-a", "default", "window-a")
+        coordinator.join_workspace("socket-b", "research", "window-b")
+
+        # Right id, wrong workspace: the caller is naming a record that moved
+        # on, so nothing is dropped.
+        self.assertFalse(coordinator.forget_window("window-b", "default"))
+        self.assertFalse(coordinator.forget_window("window-never-joined", "default"))
+        self.assertFalse(coordinator.forget_window("", "default"))
+        self.assertEqual(len(coordinator._windows), 2)
+
+        # No workspace named at all still works, and still drops exactly one.
+        self.assertTrue(coordinator.forget_window("window-b"))
+        self.assertEqual(set(coordinator._windows), {"window-a"})
+        self.assertEqual(coordinator.connected_window_count("research"), 0)
+
+    def test_a_window_forgotten_mid_flush_is_released_not_reported(self):
+        """A close that lands during a flush costs that flush nothing.
+
+        The same rule `leave_workspace` follows: a window that departed before
+        the flush was never expected, so one that departs during it is
+        released rather than reported as a failed save.
+        """
+        coordinator = LifecycleCoordinator()
+        coordinator.join_workspace("socket-a", "default", "window-a")
+        coordinator.join_workspace("socket-b", "default", "window-b")
+
+        def emit(workspace_id, request_id):
+            coordinator.forget_window("window-a", "default")
+            coordinator.acknowledge_flush(
+                "socket-b",
+                {
+                    "request_id": request_id,
+                    "workspace_id": workspace_id,
+                    "ok": True,
+                    "metadata": {"topbar_visible": True},
+                },
+            )
+
+        started = time.monotonic()
+        result = coordinator.request_flush({"default"}, emit, timeout=5.0)
+        elapsed = time.monotonic() - started
+
+        self.assertTrue(result["ok"], result["errors"])
+        self.assertEqual(len(result["metadata"]["default"]), 1)
+        self.assertLess(elapsed, 1.0)
+
     def test_a_reloaded_window_replaces_its_own_record_without_leave(self):
         """SGP-12: same stable id, no pagehide — one record, not two."""
         coordinator = LifecycleCoordinator()

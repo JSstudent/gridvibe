@@ -626,6 +626,17 @@ unless the task explicitly changes this contract.
   Registrations are bounded. Fresh disconnection is `client_stale`; past a bounded
   grace it is departed. A drop during flush resolves immediately; deliberate leave
   is forgotten. No dead registration may block saving forever.
+- A native window close is announced, never inferred. The page registers its
+  window id through `register_workspace_lifecycle_window()`, and both close paths
+  — the `close_workspace_window()` verb and the title-bar X in `_handle_closed` —
+  retire that one record via `forget_window()` before the window is destroyed.
+  The webview dies before `pagehide` can emit a leave, so an unannounced close
+  reads as a crash: its `client_stale` record then fails every flush for that
+  workspace until the grace expires, including the save made from the window that
+  reopened it, which a new id cannot replace the way a reload replaces its own.
+  Never retire a record whose workspace slot already holds a different window.
+  The window-id ceiling has one owner (`LIFECYCLE_MAX_WINDOW_ID_LENGTH`); the
+  bridge refuses an id past it rather than storing one that can match nothing.
 - Resolve workspace chrome per field, oldest-joined first so the newest window
   wins. Stale `active_group_id` falls back to the server hint; malformed types or
   out-of-range zoom still raise. `topbar_visible` stores only the chevron choice

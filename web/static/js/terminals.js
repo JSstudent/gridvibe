@@ -7953,6 +7953,25 @@
         button.setAttribute('aria-pressed', active ? 'true' : 'false');
     }
 
+    /* Native mode only: hand this window's flush-coordinator id to the
+       launcher process. Closing a workspace window destroys the webview from
+       the outside, so `pagehide` either never runs or loses the race with the
+       teardown and the close reaches the server as a bare socket drop -- read
+       as a possible crash, which blocks this workspace's saves for the whole
+       stale-window grace period. The launcher can say the close was
+       deliberate, but only if it knows which registration this window holds,
+       and that id lives here, in this window's own sessionStorage. */
+    async function registerNativeLifecycleWindow() {
+        if (!isPywebviewAvailable()) return;
+        const api = window.pywebview.api;
+        if (!api.register_workspace_lifecycle_window) return;
+        try {
+            await api.register_workspace_lifecycle_window(currentWorkspaceId, lifecycleWindowId);
+        } catch (error) {
+            console.error('Lifecycle window registration failed:', error);
+        }
+    }
+
     async function syncNativeFullscreenState() {
         if (!isPywebviewAvailable()) {
             nativeFullscreen = false;
@@ -8599,6 +8618,7 @@
     }
 
     window.addEventListener('pywebviewready', () => {
+        registerNativeLifecycleWindow();
         syncNativeFullscreenState();
     });
     window.addEventListener('focus', () => {
@@ -8619,6 +8639,9 @@
        Boot
     ───────────────────────────────────────────── */
     initSurfaceMode();
+    /* The bridge is often injected before this script runs, and
+       `pywebviewready` has then already fired with no listener to hear it. */
+    registerNativeLifecycleWindow();
     wireSessionMenu();
     wireDashboard();
     wireAgentDashboardSidebar();
