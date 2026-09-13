@@ -655,12 +655,29 @@ unless the task explicitly changes this contract.
   gone before it could be linked) is reported as one rather than rounded either
   way. An empty group is `409`, a missing one `404`.
 - The three-outcome close prompt is `close-session-modal.js` over
-  `partials/close_session_modal.html`, shared by the session tab and the
-  dashboard's session card. One irreversible act gets one prompt: a second
-  surface with its own copy is how two of them come to warn about differently
-  sized consequences. A second open resolves the outgoing prompt to cancel. The
-  prompt is skipped only for a group whose panes have *all* stopped — an empty
-  status list means the lookup failed and the safe reading is to ask.
+  `partials/close_session_modal.html`, and it asks about two kinds: one session
+  group, and one whole workspace. One irreversible act gets one prompt — a
+  second surface with its own copy is how two of them come to warn about
+  differently sized consequences — so the session tab, the dashboard's session
+  card, the Workspace menu's Close Workspace, the dashboard band's Close
+  workspace and the launcher's per-row Close all raise this one. The kind
+  decides the title, the sentence, the note and the danger button's label, and
+  all four are written on every open: one modal serves both, so a field left
+  alone is the previous question still on screen. A second open resolves the
+  outgoing prompt to cancel. The session prompt is skipped only for a group
+  whose panes have *all* stopped — an empty status list means the lookup failed
+  and the safe reading is to ask. The workspace prompt is skipped only at zero
+  sessions, where the count is a field of the record rather than a lookup that
+  may have failed.
+- `confirmCloseLiveWorkspace()` resolves to a `CLOSE_SESSION_*` decision, never
+  a boolean: `'cancel'` is truthy, so a caller testing it as one closes the
+  workspace on every dismissal. What the decision does has one owner,
+  `runWorkspaceCloseDecision()` in `workspaces.js` — the per-workspace save runs
+  first and a failed save cancels the close, and it returns `{ ok, step, error }`
+  instead of throwing so each surface can report *which* half failed on its own
+  line. Do not repeat that ordering in a caller. `{ forget: true }` keeps the
+  two-outcome generic confirm, because it removes the snapshot a save would
+  have just written.
 - Keep lifecycle credential snapshots server-only. Do not synchronously evaluate
   JS in pywebview's synchronous `closing` callback: cancel immediately and schedule
   the in-page prompt after returning.
@@ -873,11 +890,16 @@ unless the task explicitly changes this contract.
   is never coming.
 - The dashboard's close verbs are the app's existing ones reached from here,
   never new questions: a session card's × opens the same three-outcome prompt
-  the session tab's × does (`close-session-modal.js`), and the band's workspace
-  verbs are `confirmCloseLiveWorkspace()` and the launcher's own close. *Save
-  and close* saves first and closes only if that succeeded. Close window is
-  **withheld** in browser mode rather than disabled, because `window.close()`
-  from here would close the dashboard's own page. The in-flight guard is module
+  the session tab's × does (`close-session-modal.js`), and the band's **Close
+  workspace** opens that same prompt through `confirmCloseLiveWorkspace()`.
+  *Save and close* saves first and closes only if that succeeded — for a
+  session that ordering is this controller's, because only this window can ask
+  for the preset; for a workspace it is `runWorkspaceCloseDecision()`'s, shared
+  with the launcher's card and the in-window menu, so this controller hands the
+  decision over and reports which half failed rather than keeping a third copy
+  of the rule. Close window is **withheld** in browser mode rather than
+  disabled, because `window.close()` from here would close the dashboard's own
+  page. The in-flight guard is module
   state keyed by target, not a class on a button the poll may replace. The
   dialog and sidebar share one `GridVibeDashboardClose` controller instance;
   it claims the guard before reading status or opening a prompt and releases

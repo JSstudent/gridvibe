@@ -121,7 +121,7 @@ Browser mode is the most reliable for microphone permissions. Settings apply liv
 
 If a local pane's folder has been deleted since it was saved, the pane opens with a notice naming it and does not run its startup command or agent somewhere else. The saved path is kept, so the pane comes back correctly once the folder does.
 
-Closing a workspace ends its terminals but keeps it available to restore. **Close and forget** drops both the workspace and its snapshot; closing only the window leaves its terminals running.
+Closing a workspace asks first and offers **Cancel**, **Save and close**, or **Close workspace**; a failed save cancels the close. It ends the workspace's terminals but keeps it available to restore. **Close and forget** drops both the workspace and its snapshot; closing only the window leaves its terminals running.
 
 ## Agent Dashboard
 
@@ -135,7 +135,7 @@ See **every session in every workspace**, agents first. Open the dashboard dialo
 - **The rest is one hover away** — pointing at a row gives the full chat title, where the pane is, and what it runs on (`SSH`, `WSL`, `PowerShell`, `cmd`).
 - **A badge that means something** — the button counts the agents **working right now**, not how many you have open. No badge means every agent is sitting at a prompt.
 - **Click anything to go there** — a row, its session, or its workspace opens or focuses that window at that tab.
-- **Close from either view** — a session card's **×** offers **Cancel**, **Save and close**, or **Close session**; a failed save cancels the close. **Close workspace** ends its sessions, while **Close window** in native mode keeps them running; these actions leave the dashboard open.
+- **Close from either view** — a session card's **×** and a band's **Close workspace** both offer **Cancel**, **Save and close**, or the plain close; a failed save cancels the close. **Close window** in native mode keeps the sessions running; these actions leave the dashboard open.
 - **Sessions without agents are listed too**, sorted after the ones that have them, because this is also the fastest way to reach any tab in any window.
 - **Nothing is probed** — both readings come from the pane's own output, and nothing is ever typed into a running agent.
 

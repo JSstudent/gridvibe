@@ -1629,7 +1629,14 @@
     /* Close live workspace: ends every session here and drops the workspace,
        while whatever autosave or Save Workspace captured stays on offer — the
        verb that closing the last tab does not give you, since that forgets the
-       snapshot too. The window has nothing left to show afterwards. */
+       snapshot too. The window has nothing left to show afterwards.
+
+       The prompt and what its answer does are both workspaces.js's, shared
+       with the launcher's Workspaces card and the agent dashboard: three ways
+       out, and a *Save and close* whose save runs first and whose failure
+       keeps the workspace. What stays here is the reporting surface — a failed
+       save and a failed close say different things on the same line, because
+       they leave the window open for opposite reasons. */
     async function closeCurrentWorkspace() {
         const workspaces = await fetchLiveWorkspaces();
         const current = workspaces.find(
@@ -1639,13 +1646,17 @@
             label: currentWorkspaceLabel,
             group_count: sessionGroups.length
         };
-        if (!(await confirmCloseLiveWorkspace(current))) {
-            return;
-        }
-        try {
-            await closeLiveWorkspace(currentWorkspaceId);
-        } catch (error) {
-            setWorkspaceSaveMessage(`Close failed: ${error.message} — try again.`, 'error');
+        const decision = await confirmCloseLiveWorkspace(current);
+        const result = await runWorkspaceCloseDecision(currentWorkspaceId, decision);
+        if (!result.ok) {
+            if (result.step === 'save') {
+                setWorkspaceSaveMessage(
+                    `Workspace save failed: ${result.error.message} — nothing was closed.`,
+                    'error'
+                );
+            } else if (result.step === 'close') {
+                setWorkspaceSaveMessage(`Close failed: ${result.error.message} — try again.`, 'error');
+            }
             return;
         }
         workspaceGone = true;

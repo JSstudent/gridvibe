@@ -4,14 +4,19 @@
 runtime, so both halves execute in Node: what the prompt says, when it is not
 shown at all, and what each way out of it resolves to.
 
-It is shared by two pages -- the workspace window's session tab and the agent
-dashboard's session card -- and that is the reason these are behavioural rather
-than source-text assertions. The two surfaces read from different payloads and
-sit in different windows; the only thing keeping them asking the same question
-about the same irreversible act is this module, so what it decides is what has
-to be pinned.
+It is shared by two pages -- the workspace window's session tab and Workspace
+menu, and the agent dashboard's session card and workspace band -- and that is
+the reason these are behavioural rather than source-text assertions. The
+surfaces read from different payloads and sit in different windows; the only
+thing keeping them asking the same question about the same irreversible act is
+this module, so what it decides is what has to be pinned.
 
-Four things are pinned because getting them wrong is silent:
+One modal now asks two questions -- about a session group and about a whole
+workspace -- which adds a fifth thing to pin below: every word is rewritten on
+every open, because a field left alone is the previous question still on
+screen.
+
+Five things are pinned because getting them wrong is silent:
 
 - **Cancel is the default.** Escape, the backdrop and a second open all resolve
   to "keep the session". A prompt that resolved to anything else on a dismissal
@@ -23,6 +28,9 @@ Four things are pinned because getting them wrong is silent:
   fact that makes the prompt worth reading.
 - **A page without the modal still resolves**, rather than leaving the caller
   awaiting a promise nothing will settle.
+- **The workspace question is the workspace's**, in its title, its sentence,
+  its note and its danger button -- and a session opened after it inherits none
+  of those words.
 """
 
 import json
@@ -73,7 +81,9 @@ function harness(options) {
     const settings = options || {};
     const ids = [
         'closeSessionConfirmModal',
+        'closeSessionConfirmTitle',
         'closeSessionConfirmCopy',
+        'closeSessionConfirmNote',
         'closeSessionConfirmCancel',
         'closeSessionConfirmSave',
         'closeSessionConfirmAccept'
@@ -99,6 +109,13 @@ function harness(options) {
         byId,
         modal: byId.get('closeSessionConfirmModal'),
         copy: byId.get('closeSessionConfirmCopy'),
+        /* What the reader is looking at, in the four places it is written. */
+        words: () => ({
+            title: byId.get('closeSessionConfirmTitle')?.textContent,
+            copy: byId.get('closeSessionConfirmCopy')?.textContent,
+            note: byId.get('closeSessionConfirmNote')?.textContent,
+            accept: byId.get('closeSessionConfirmAccept')?.textContent
+        }),
         press: id => byId.get(id)?.fire('click', {}),
         key: key => [...(documentHandlers.get('keydown') || [])].forEach(h => h({ key }))
     };
@@ -311,6 +328,160 @@ class CloseSessionPromptControllerTestCase(CloseSessionModalNodeTestCase):
         )
         self.assertFalse(result["wired"])
         self.assertEqual(result["decision"], "cancel")
+
+
+
+
+class CloseWorkspacePromptPolicyTestCase(CloseSessionModalNodeTestCase):
+    """The workspace question -- the same act, one size up."""
+
+    def test_an_empty_workspace_is_never_asked_about(self):
+        """Unlike a session's pane list, where empty is also what a failed
+        lookup produces, a workspace's session count is a field of the record.
+        Zero means zero: nothing to lose, and nothing for *Save and close* to
+        save."""
+        result = self._run_node(
+            """
+            const { workspaceSkipDecision, CLOSE } = closeSessionModal.policy;
+            report({
+                empty: workspaceSkipDecision(0),
+                missing: workspaceSkipDecision(undefined),
+                notANumber: workspaceSkipDecision('nonsense'),
+                oneSession: workspaceSkipDecision(1),
+                close: CLOSE
+            });
+            """
+        )
+        self.assertEqual(result["empty"], result["close"])
+        self.assertEqual(result["missing"], result["close"])
+        self.assertEqual(result["notANumber"], result["close"])
+        self.assertIsNone(result["oneSession"])
+
+    def test_the_workspace_question_counts_sessions_not_terminals(self):
+        """Sessions are the unit every surface offering this verb actually
+        shows, and closing the workspace ends all of them."""
+        result = self._run_node(
+            """
+            const { workspacePromptCopy, workspacePromptName } = closeSessionModal.policy;
+            report({
+                several: workspacePromptCopy('Docs', 3),
+                one: workspacePromptCopy('Docs', 1),
+                unknown: workspacePromptCopy('Docs', 0),
+                named: workspacePromptName({ name: 'Docs', workspace_id: 'ws-2' }),
+                labelled: workspacePromptName({ label: 'Docs' }),
+                byId: workspacePromptName({ workspace_id: 'ws-2' }),
+                nameless: workspacePromptName(null)
+            });
+            """
+        )
+        self.assertEqual(result["several"], 'Close "Docs" and its 3 sessions?')
+        self.assertEqual(result["one"], 'Close "Docs" and its 1 session?')
+        # A count that could not be established asks the short question rather
+        # than inventing a zero, exactly as the session copy does.
+        self.assertEqual(result["unknown"], 'Close "Docs"?')
+        self.assertEqual(result["named"], "Docs")
+        self.assertEqual(result["labelled"], "Docs")
+        self.assertEqual(result["byId"], "ws-2")
+        self.assertEqual(result["nameless"], "this workspace")
+
+
+class CloseWorkspacePromptControllerTestCase(CloseSessionModalNodeTestCase):
+    """One dialog, two questions -- driven through the page's own listeners."""
+
+    def test_the_workspace_prompt_offers_the_same_three_ways_out(self):
+        """The reason the workspace close was worth changing at all: it had
+        two. Each button must resolve to the decision the callers branch on --
+        and they read these constants from here rather than spelling them."""
+        result = self._run_node(
+            """
+            const { CANCEL, CLOSE, SAVE_AND_CLOSE, WORKSPACE_KIND } = closeSessionModal.policy;
+            const decisions = {};
+            for (const [name, id] of [
+                ['cancel', 'closeSessionConfirmCancel'],
+                ['save', 'closeSessionConfirmSave'],
+                ['accept', 'closeSessionConfirmAccept']
+            ]) {
+                const page = harness();
+                const answer = page.controller.open({
+                    kind: WORKSPACE_KIND,
+                    workspace: { name: 'Docs' },
+                    sessionCount: 3
+                });
+                page.press(id);
+                decisions[name] = await answer;
+            }
+            const escaped = harness();
+            const dismissed = escaped.controller.open({
+                kind: WORKSPACE_KIND,
+                workspace: { name: 'Docs' },
+                sessionCount: 3
+            });
+            escaped.key('Escape');
+            report({
+                decisions,
+                escape: await dismissed,
+                CANCEL,
+                CLOSE,
+                SAVE_AND_CLOSE
+            });
+            """
+        )
+        self.assertEqual(result["decisions"]["cancel"], result["CANCEL"])
+        self.assertEqual(result["decisions"]["save"], result["SAVE_AND_CLOSE"])
+        self.assertEqual(result["decisions"]["accept"], result["CLOSE"])
+        # Dismissal keeps the workspace, the same way it keeps a session.
+        self.assertEqual(result["escape"], result["CANCEL"])
+
+    def test_the_workspace_question_is_asked_in_the_workspaces_own_words(self):
+        result = self._run_node(
+            """
+            const page = harness();
+            page.controller.open({
+                kind: closeSessionModal.policy.WORKSPACE_KIND,
+                workspace: { name: 'Docs' },
+                sessionCount: 3
+            });
+            report(page.words());
+            """
+        )
+        self.assertEqual(result["title"], "Close workspace?")
+        self.assertEqual(result["copy"], 'Close "Docs" and its 3 sessions?')
+        self.assertEqual(result["accept"], "Close workspace")
+        # The note still states the irreversible half first, then the half that
+        # makes this verb different from closing the last tab.
+        self.assertIn("memory-only", result["note"])
+        self.assertIn("restore chooser", result["note"])
+
+    def test_a_session_asked_after_a_workspace_inherits_none_of_its_words(self):
+        """One modal serves both kinds, so every field is written on every
+        open. A field left alone is the previous question still on screen --
+        and the reader would be pressing "Close workspace" on a session."""
+        result = self._run_node(
+            """
+            const page = harness();
+            page.controller.open({
+                kind: closeSessionModal.policy.WORKSPACE_KIND,
+                workspace: { name: 'Docs' },
+                sessionCount: 3
+            });
+            const asWorkspace = page.words();
+            page.controller.open({ group: { name: 'API work' }, connectedCount: 2, totalCount: 3 });
+            const asSession = page.words();
+            report({ asWorkspace, asSession });
+            """
+        )
+        self.assertEqual(result["asWorkspace"]["title"], "Close workspace?")
+        self.assertEqual(result["asSession"]["title"], "Close session?")
+        self.assertEqual(result["asSession"]["accept"], "Close session")
+        self.assertEqual(
+            result["asSession"]["copy"],
+            'Close "API work" and its 3 terminals (2 connected)?',
+        )
+        self.assertEqual(
+            result["asSession"]["note"],
+            "Live terminals are memory-only and cannot be recovered.",
+        )
+        self.assertNotIn("restore chooser", result["asSession"]["note"])
 
 
 if __name__ == "__main__":

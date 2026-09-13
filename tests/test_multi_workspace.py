@@ -5807,6 +5807,242 @@ class WorkspaceVisibilityTestCase(unittest.TestCase):
         self.assertEqual(json.loads(completed.stdout), server)
 
 
+class WorkspaceCloseDecisionTestCase(unittest.TestCase):
+    """*Save and close* for a whole workspace, executed rather than read.
+
+    Closing a workspace ends every session in it, which is the same
+    irreversible act a session close asks about, one size up -- and it used to
+    offer only two ways out. Three surfaces raise it (the launcher's Workspaces
+    card, the in-window Workspace menu, and the agent dashboard with its
+    sidebar), so both halves live in `workspaces.js`: `confirmCloseLiveWorkspace`
+    asks, `runWorkspaceCloseDecision` acts. This runs the shipped pair against
+    the shipped prompt policy.
+
+    Four rules, each silent if it broke:
+
+    - **The answer is a decision, never a boolean.** 'cancel' is a truthy
+      string; a caller that tested it as a boolean would close on a dismissal.
+    - **The save runs first, and a failed save cancels the close.** Closing
+      anyway after a failed save costs exactly what the button was pressed to
+      preserve.
+    - **Which half failed is reported**, because a failed save and a failed
+      close both leave the workspace open, for opposite reasons.
+    - **Forgetting keeps the two-outcome confirm**, since it removes the
+      snapshot a save would have just written.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.node = shutil.which("node")
+        static_js = Path(__file__).resolve().parent.parent / "web" / "static" / "js"
+        cls.workspaces_js = (static_js / "workspaces.js").read_text(encoding="utf-8")
+        cls.modal_js = static_js / "close-session-modal.js"
+
+    # The page around the two functions: the real prompt policy for the
+    # decisions, the skip rule and the wording, and a ledger for everything
+    # they reach for.
+    HARNESS = """
+const closeModal = require(process.argv[2]);
+const CLOSE_SESSION_CANCEL = closeModal.policy.CANCEL;
+const CLOSE_SESSION_CLOSE = closeModal.policy.CLOSE;
+const CLOSE_SESSION_SAVE_AND_CLOSE = closeModal.policy.SAVE_AND_CLOSE;
+const closeWorkspacePromptSkipDecision = sessions =>
+    closeModal.policy.workspaceSkipDecision(sessions);
+
+const log = [];
+const prompts = [];
+const generic = [];
+let promptAnswer = CLOSE_SESSION_CLOSE;
+let genericAnswer = true;
+let saveFails = false;
+let closeFails = false;
+
+function workspaceDisplayLabel(workspace) {
+    return String((workspace && workspace.label) || '') || 'Main workspace';
+}
+
+async function openCloseWorkspaceConfirmModal(request) {
+    prompts.push({
+        request,
+        words: closeModal.policy.promptWording({
+            ...request,
+            kind: closeModal.policy.WORKSPACE_KIND
+        })
+    });
+    return promptAnswer;
+}
+
+async function openGenericConfirmModal(request) {
+    generic.push(request);
+    return genericAnswer;
+}
+
+async function saveLiveWorkspace(workspaceId) {
+    log.push(`save:${workspaceId}`);
+    if (saveFails) throw new Error('The workspace window did not flush');
+    return { saved: true, workspace_id: workspaceId };
+}
+
+async function closeLiveWorkspace(workspaceId, { forget = false } = {}) {
+    log.push(`close:${workspaceId}${forget ? ':forget' : ''}`);
+    if (closeFails) throw new Error('Could not close this workspace');
+    return { closed: true };
+}
+
+function report(value) { process.stdout.write(JSON.stringify(value)); }
+"""
+
+    def _run_node(self, body):
+        if not self.node:
+            self.skipTest("node is not installed")
+        script = (
+            self.HARNESS
+            + _js_function_source(self.workspaces_js, "confirmCloseLiveWorkspace")
+            + "\n"
+            + _js_function_source(self.workspaces_js, "runWorkspaceCloseDecision")
+            + "\n(async () => {\n"
+            + body
+            + "\n})().catch(error => { console.error(error); process.exit(1); });\n"
+        )
+        with TemporaryDirectory() as script_dir:
+            script_path = Path(script_dir) / "close-decision.js"
+            script_path.write_text(script, encoding="utf-8")
+            completed = subprocess.run(
+                [self.node, str(script_path), str(self.modal_js)],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                check=False,
+            )
+        if completed.returncode != 0:
+            self.fail(f"node harness failed:\n{completed.stderr}")
+        return json.loads(completed.stdout)
+
+    def test_the_prompt_names_the_workspace_and_offers_three_ways_out(self):
+        result = self._run_node(
+            """
+            const decisions = {};
+            for (const answer of [CLOSE_SESSION_CANCEL, CLOSE_SESSION_CLOSE,
+                    CLOSE_SESSION_SAVE_AND_CLOSE]) {
+                promptAnswer = answer;
+                decisions[answer] = await confirmCloseLiveWorkspace({
+                    workspace_id: 'ws-2', label: 'Docs', group_count: 3
+                });
+            }
+            report({ decisions, prompts, generic });
+            """
+        )
+        # Whatever the reader pressed reaches the caller unchanged.
+        self.assertEqual(
+            result["decisions"],
+            {"cancel": "cancel", "close": "close", "save-and-close": "save-and-close"},
+        )
+        self.assertEqual(len(result["prompts"]), 3)
+        self.assertEqual(result["prompts"][0]["request"]["sessionCount"], 3)
+        self.assertEqual(result["prompts"][0]["request"]["workspace"]["name"], "Docs")
+        self.assertEqual(
+            result["prompts"][0]["words"]["copy"], 'Close "Docs" and its 3 sessions?'
+        )
+        # The shared prompt, not the generic confirm shell it used to raise.
+        self.assertEqual(result["generic"], [])
+
+    def test_an_empty_workspace_is_closed_without_being_asked_about(self):
+        """Nothing to lose, and nothing for a save to capture."""
+        result = self._run_node(
+            """
+            const decision = await confirmCloseLiveWorkspace({
+                workspace_id: 'ws-2', label: 'Docs', group_count: 0
+            });
+            report({ decision, prompts: prompts.length, close: CLOSE_SESSION_CLOSE });
+            """
+        )
+        self.assertEqual(result["decision"], result["close"])
+        self.assertEqual(result["prompts"], 0)
+
+    def test_close_and_forget_keeps_the_two_outcome_confirm(self):
+        """Forgetting removes the saved snapshot, so offering to save first
+        would write exactly what the same press then deletes."""
+        result = self._run_node(
+            """
+            const confirmed = await confirmCloseLiveWorkspace(
+                { workspace_id: 'ws-2', label: 'Docs', group_count: 3 },
+                { forget: true }
+            );
+            genericAnswer = false;
+            const declined = await confirmCloseLiveWorkspace(
+                { workspace_id: 'ws-2', label: 'Docs', group_count: 3 },
+                { forget: true }
+            );
+            report({
+                confirmed, declined, prompts: prompts.length,
+                generic, close: CLOSE_SESSION_CLOSE, cancel: CLOSE_SESSION_CANCEL
+            });
+            """
+        )
+        self.assertEqual(result["confirmed"], result["close"])
+        self.assertEqual(result["declined"], result["cancel"])
+        # Still a decision, so this caller cannot be the one that drifts back
+        # to reading a boolean.
+        self.assertEqual(result["prompts"], 0)
+        self.assertEqual(len(result["generic"]), 2)
+        self.assertEqual(result["generic"][0]["confirmLabel"], "Close and forget")
+
+    def test_save_and_close_saves_first_and_a_failed_save_keeps_the_workspace(self):
+        result = self._run_node(
+            """
+            const ordered = await runWorkspaceCloseDecision('ws-2', CLOSE_SESSION_SAVE_AND_CLOSE);
+            const orderedLog = log.splice(0);
+            saveFails = true;
+            const refused = await runWorkspaceCloseDecision('ws-2', CLOSE_SESSION_SAVE_AND_CLOSE);
+            report({
+                ordered, orderedLog, refused, refusedLog: log.splice(0),
+                message: refused.error && refused.error.message
+            });
+            """
+        )
+        self.assertTrue(result["ordered"]["ok"])
+        self.assertEqual(result["orderedLog"], ["save:ws-2", "close:ws-2"])
+        # The whole point of the button: a save that failed must not cost the
+        # sessions it was pressed to preserve.
+        self.assertFalse(result["refused"]["ok"])
+        self.assertEqual(result["refused"]["step"], "save")
+        self.assertEqual(result["refusedLog"], ["save:ws-2"])
+        self.assertEqual(result["message"], "The workspace window did not flush")
+
+    def test_a_plain_close_saves_nothing_and_a_cancel_does_neither(self):
+        result = self._run_node(
+            """
+            const closed = await runWorkspaceCloseDecision('ws-2', CLOSE_SESSION_CLOSE);
+            const closedLog = log.splice(0);
+            const cancelled = await runWorkspaceCloseDecision('ws-2', CLOSE_SESSION_CANCEL);
+            const nothing = await runWorkspaceCloseDecision('ws-2', undefined);
+            report({ closed, closedLog, cancelled, nothing, log: log.splice(0) });
+            """
+        )
+        self.assertTrue(result["closed"]["ok"])
+        self.assertEqual(result["closedLog"], ["close:ws-2"])
+        self.assertEqual(result["cancelled"], {"ok": False, "step": "cancel"})
+        self.assertEqual(result["nothing"], {"ok": False, "step": "cancel"})
+        self.assertEqual(result["log"], [])
+
+    def test_a_failed_close_is_reported_as_the_close_it_was(self):
+        """Both failures leave the workspace open; only the step says which
+        one the reader should retry."""
+        result = self._run_node(
+            """
+            closeFails = true;
+            const failed = await runWorkspaceCloseDecision('ws-2', CLOSE_SESSION_SAVE_AND_CLOSE);
+            report({ failed, step: failed.step, message: failed.error.message, log });
+            """
+        )
+        self.assertFalse(result["failed"]["ok"])
+        self.assertEqual(result["step"], "close")
+        self.assertEqual(result["message"], "Could not close this workspace")
+        # The save still ran and still succeeded, which is what makes this
+        # failure the retryable one.
+        self.assertEqual(result["log"], ["save:ws-2", "close:ws-2"])
+
+
 class WorkspaceCloseActionMatrixTestCase(unittest.TestCase):
     """MW-15/MW-12: each close verb has one documented persistence effect.
 

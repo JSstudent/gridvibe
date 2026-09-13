@@ -797,27 +797,82 @@
     }
 
     /* Ending live shells is irreversible, so it confirms in page (guardrail 8,
-       never window.confirm). An empty workspace has nothing to lose and is
-       released without a prompt. */
+       never window.confirm), and it offers the same three ways out a session
+       close does: keep it, save it and *then* close it, or close it outright.
+       The prompt is the shared one in close-session-modal.js — the workspace
+       question and the session question are the same irreversible act at two
+       sizes, and two dialogs for it is how they come to warn differently.
+
+       An empty workspace has nothing to lose and nothing to save, and is
+       released without a prompt.
+
+       Forgetting is the exception, and keeps the two-outcome confirm: it
+       removes the saved snapshot, so "save and close" would offer to write
+       exactly what the same press then deletes.
+
+       Resolves to one of the CLOSE_SESSION_* decisions — never a boolean,
+       because 'cancel' is truthy and a caller that tested it as one would
+       close on a dismissal. */
     async function confirmCloseLiveWorkspace(workspace, { forget = false } = {}) {
         const sessionCount = Number(workspace?.group_count) || 0;
-        if (!sessionCount && !forget) {
-            return true;
-        }
         const name = workspaceDisplayLabel(workspace);
-        return openGenericConfirmModal({
-            title: forget ? `Close and forget "${name}"?` : `Close "${name}"?`,
-            copy: sessionCount
-                ? `${sessionCount} session${sessionCount === 1 ? '' : 's'} in this workspace`
-                    + ' will be closed.'
-                : 'This workspace has no sessions open.',
-            note: forget
-                ? 'Its saved snapshot is removed too, so it will not be offered after a restart.'
-                : 'Whatever auto-save or Workspace ▸ Save Workspace captured stays'
-                    + ' on offer in the restore chooser.',
-            confirmLabel: forget ? 'Close and forget' : 'Close workspace',
-            danger: true
-        });
+        if (forget) {
+            const confirmed = await openGenericConfirmModal({
+                title: `Close and forget "${name}"?`,
+                copy: sessionCount
+                    ? `${sessionCount} session${sessionCount === 1 ? '' : 's'} in this workspace`
+                        + ' will be closed.'
+                    : 'This workspace has no sessions open.',
+                note: 'Its saved snapshot is removed too, so it will not be offered'
+                    + ' after a restart.',
+                confirmLabel: 'Close and forget',
+                danger: true
+            });
+            return confirmed ? CLOSE_SESSION_CLOSE : CLOSE_SESSION_CANCEL;
+        }
+        return closeWorkspacePromptSkipDecision(sessionCount)
+            || openCloseWorkspaceConfirmModal({
+                workspace: { name, workspace_id: workspace?.workspace_id },
+                sessionCount
+            });
+    }
+
+    /* What the prompt's answer actually does, in one place for every surface
+       that raises it — the launcher's Workspaces card, the in-window Workspace
+       menu, and the agent dashboard and its sidebar.
+
+       Two rules, and both are silent when they break:
+
+       - **The save runs first, and a failed save cancels the close.** The
+         whole point of *Save and close* is to not lose the workspace; closing
+         anyway after a failed save costs exactly what the button was pressed
+         to preserve.
+       - **The save is the per-workspace save** (SGP-14), so the owning window
+         flushes before the capture and the snapshot carries what the reader
+         sees rather than what the server last heard. It refuses rather than
+         capturing stale state, which is the failure the rule above protects.
+
+       Returns `{ ok, step, error }` rather than throwing: the caller reports on
+       its own surface and needs to know *which* half went wrong, because a
+       failed save leaves the workspace open and a failed close leaves it open
+       too — for opposite reasons. `step` is 'cancel', 'save' or 'close'. */
+    async function runWorkspaceCloseDecision(workspaceId, decision, { forget = false } = {}) {
+        if (!decision || decision === CLOSE_SESSION_CANCEL) {
+            return { ok: false, step: 'cancel' };
+        }
+        if (decision === CLOSE_SESSION_SAVE_AND_CLOSE) {
+            try {
+                await saveLiveWorkspace(workspaceId);
+            } catch (error) {
+                return { ok: false, step: 'save', error };
+            }
+        }
+        try {
+            const data = await closeLiveWorkspace(workspaceId, { forget });
+            return { ok: true, step: 'close', data };
+        } catch (error) {
+            return { ok: false, step: 'close', error };
+        }
     }
 
     /* ── Turning the multi-workspace mode on and off ──

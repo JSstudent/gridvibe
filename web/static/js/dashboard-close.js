@@ -7,19 +7,26 @@
    the rest of the app has, reached from here:
 
      · **Close session** — the session tab's ×, with its three-outcome prompt.
-     · **Close workspace** — the launcher's per-row Close: ends every session in
-       the workspace, and leaves whatever autosave or Save Workspace captured
-       on offer in the restore chooser.
+     · **Close workspace** — the launcher's per-row Close, with its own
+       three-outcome prompt: ends every session in the workspace, and leaves
+       whatever autosave, Save Workspace or *Save and close* captured on offer
+       in the restore chooser.
      · **Close workspace window** — the in-window Workspace ▸ Close Workspace
        Window: the window goes, the sessions keep running.
 
    Nothing here is a new verb, and nothing here asks a new question. Both
    dialogs are the existing ones — `close-session-modal.js` over the shared
-   partial, and `confirmCloseLiveWorkspace()` over the generic confirm shell —
-   because a second prompt for one irreversible act is how two surfaces come to
-   warn about differently sized consequences. That matters more here than
-   anywhere else: the reader pressing × on this window is looking at a list,
-   not at the terminals they are about to end.
+   partial, reached for a session directly and for a workspace through
+   `confirmCloseLiveWorkspace()` — because a second prompt for one irreversible
+   act is how two surfaces come to warn about differently sized consequences.
+   That matters more here than anywhere else: the reader pressing × on this
+   window is looking at a list, not at the terminals they are about to end.
+
+   The same is why the workspace verb's *save* is not written here. A session's
+   ordering is below, because no other surface can compose that preset from
+   this window; a workspace's lives in `runWorkspaceCloseDecision()`, which the
+   launcher's card and the in-window menu run too, so all three save the same
+   thing in the same order.
 
    Five decisions are the reason this is not the obvious code:
 
@@ -77,7 +84,8 @@
             get saveAndClose() { return root.CLOSE_SESSION_SAVE_AND_CLOSE; }
         },
         confirmCloseWorkspace: workspace => root.confirmCloseLiveWorkspace(workspace),
-        closeLiveWorkspace: workspaceId => root.closeLiveWorkspace(workspaceId),
+        closeWorkspaceDecided: (workspaceId, decision) =>
+            root.runWorkspaceCloseDecision(workspaceId, decision),
         notifySavedSession: saved => root.notifySavedSessionUpdated(saved),
         notifyWorkspacesChanged: reason => root.notifyWorkspacesChanged(reason),
         notice: (message, tone) => root.setAgentDashboardNotice(message, 'action', tone),
@@ -179,7 +187,7 @@
             connectedCount,
             decisions = {},
             confirmCloseWorkspace,
-            closeLiveWorkspace,
+            closeWorkspaceDecided,
             notifySavedSession = () => {},
             notifyWorkspacesChanged = () => {},
             notice: defaultNotice = () => {},
@@ -300,15 +308,40 @@
             inFlight.add(key);
             markBusy(element, true);
             try {
-                const confirmed = await confirmCloseWorkspace({
+                /* The prompt resolves to a decision, never a boolean: 'cancel'
+                   is truthy, so a page that tested it as one would close on a
+                   dismissal. */
+                const decision = await confirmCloseWorkspace({
                     workspace_id: target.workspaceId,
                     label: target.label,
                     group_count: target.groupCount
                 });
-                if (!confirmed) {
+                if (!decision || decision === decisions.cancel) {
                     return false;
                 }
-                await closeLiveWorkspace(target.workspaceId);
+                /* Save-then-close, and the refusal to close after a failed
+                   save, belong to the workspace close service; what is this
+                   window's is only saying which half went wrong. */
+                const result = await closeWorkspaceDecided(target.workspaceId, decision);
+                if (!result || !result.ok) {
+                    /* The service refuses a cancel too, and says so rather
+                       than failing: the check above only spares it the call,
+                       and it cannot spare it one if the prompt's constants
+                       never loaded. Nothing happened either way. */
+                    if (result && result.step === 'cancel') {
+                        return false;
+                    }
+                    notice(
+                        failureMessage(
+                            result && result.step === 'save'
+                                ? 'This workspace could not be saved, so it was not closed.'
+                                : 'This workspace could not be closed.',
+                            { error: result?.error?.message }
+                        ),
+                        'error'
+                    );
+                    return false;
+                }
             } catch (error) {
                 logError('[GridVibe Dashboard] closing the workspace failed:', error);
                 notice(

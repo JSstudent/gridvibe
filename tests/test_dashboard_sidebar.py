@@ -199,6 +199,8 @@ const windowListeners = fakeListeners();
 const closeCalls = { requests: [], prompts: 0, notices: [], refreshes: 0 };
 let bridge = null;
 let closeDecision = 'close';
+let workspaceDecision = 'close';
+let workspaceCloseResult = { ok: true, step: 'close' };
 let closeSaveOk = true;
 let holdPrompt = null;
 let holdDelete = null;
@@ -220,8 +222,11 @@ const closeActions = dashboardClose.create({
     skipDecision: () => null,
     connectedCount: sessions => sessions.length,
     decisions: { cancel: 'cancel', saveAndClose: 'save-and-close' },
-    confirmCloseWorkspace: async () => { closeCalls.prompts += 1; return true; },
-    closeLiveWorkspace: async id => { closeCalls.requests.push(['WORKSPACE', id]); },
+    confirmCloseWorkspace: async () => { closeCalls.prompts += 1; return workspaceDecision; },
+    closeWorkspaceDecided: async (id, decision) => {
+        closeCalls.requests.push(['WORKSPACE', id, decision]);
+        return workspaceCloseResult;
+    },
     notice: message => closeCalls.notices.push(message),
     refresh: () => { closeCalls.refreshes += 1; }
 });
