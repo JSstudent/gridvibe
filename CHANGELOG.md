@@ -4,6 +4,8 @@ All notable changes to GridVibe will be documented in this file.
 
 ## Unreleased
 
+## 1.11.2 - 2026-09-13
+
 - **(opt) The agent dashboard now leads each row with its status dot and is half as wide.** The idle/working state was a word and a dot at the far right of every row, which is the column furthest from where a card is read from and cost the chat title about a fifth of its line to repeat what the dot's colour already said. The dot now sits at the head of the row, in front of the agent's mark and name, and the word is gone from the line: pointing at a dot gives it back in full (`Idle 4m`, `Connecting`, `Disconnected`), and it is still in the row's accessible name. The progress bar stays at the end of the row, where there is width for it and where it cannot change how far in every other row's mark starts. The shell chip (`POWERSHELL`, `CMD`, `SSH`) has left the line for the same reason and by the same route: it is on the row's hover now, under the chat title and where the pane is. With both of them off the line the dialog no longer needs the width it had, so it is half of what it was and fits beside the window it describes.
 
 - **(feat) Agent titles and dashboard rows use their brand icons and colors.** All eight bundled agents now use the supplied artwork and matching brand colors in terminal headers and the Agent Dashboard. Branding follows live agent switches and clears when an agent exits; custom agents keep the terminal fallback. Shared styling supplies contrasting backgrounds where needed in either theme.
