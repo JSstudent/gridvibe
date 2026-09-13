@@ -344,6 +344,19 @@
         return getStoredWorkspaceTopbarVisible(currentWorkspaceId) ?? true;
     }
 
+    /* The docked agent dashboard's state, read the way the top bar's is: off
+       the body class `dashboard-sidebar.js` writes on every apply. A class and
+       not the module, so a descriptor or a save built before that module has
+       wired still answers -- and answers "shut", which is what the page is. */
+    function agentSidebarIsOpen() {
+        return document.body.classList.contains('agent-sidebar-open');
+    }
+
+    function agentSidebarScale() {
+        return typeof agentDashboardSidebarScale === 'function'
+            ? agentDashboardSidebarScale() : 100;
+    }
+
     function updateTopbarToggleButton(visible) {
         const button = document.getElementById('topbarToggleBtn');
         const path = document.getElementById('topbarTogglePath');
@@ -1616,7 +1629,14 @@
     /* Close live workspace: ends every session here and drops the workspace,
        while whatever autosave or Save Workspace captured stays on offer — the
        verb that closing the last tab does not give you, since that forgets the
-       snapshot too. The window has nothing left to show afterwards. */
+       snapshot too. The window has nothing left to show afterwards.
+
+       The prompt and what its answer does are both workspaces.js's, shared
+       with the launcher's Workspaces card and the agent dashboard: three ways
+       out, and a *Save and close* whose save runs first and whose failure
+       keeps the workspace. What stays here is the reporting surface — a failed
+       save and a failed close say different things on the same line, because
+       they leave the window open for opposite reasons. */
     async function closeCurrentWorkspace() {
         const workspaces = await fetchLiveWorkspaces();
         const current = workspaces.find(
@@ -1626,13 +1646,17 @@
             label: currentWorkspaceLabel,
             group_count: sessionGroups.length
         };
-        if (!(await confirmCloseLiveWorkspace(current))) {
-            return;
-        }
-        try {
-            await closeLiveWorkspace(currentWorkspaceId);
-        } catch (error) {
-            setWorkspaceSaveMessage(`Close failed: ${error.message} — try again.`, 'error');
+        const decision = await confirmCloseLiveWorkspace(current);
+        const result = await runWorkspaceCloseDecision(currentWorkspaceId, decision);
+        if (!result.ok) {
+            if (result.step === 'save') {
+                setWorkspaceSaveMessage(
+                    `Workspace save failed: ${result.error.message} — nothing was closed.`,
+                    'error'
+                );
+            } else if (result.step === 'close') {
+                setWorkspaceSaveMessage(`Close failed: ${result.error.message} — try again.`, 'error');
+            }
             return;
         }
         workspaceGone = true;
@@ -2423,6 +2447,8 @@
                             workspaceId: currentWorkspaceId,
                             revision: workspacePresentationRevision,
                             topbarVisible: !document.body.classList.contains('topbar-collapsed'),
+                            agentSidebarOpen: agentSidebarIsOpen(),
+                            agentSidebarScale: agentSidebarScale(),
                             mdPreset: appearance.preset,
                             mdFont: appearance.font,
                             sourceFont: appearance.sourceFont
@@ -2881,7 +2907,9 @@
                     workspace_id: currentWorkspaceId,
                     active_group_id: activeGroupId,
                     native_zoom_factor: nativeZoomFactor,
-                    topbar_visible: !document.body.classList.contains('topbar-collapsed')
+                    topbar_visible: !document.body.classList.contains('topbar-collapsed'),
+                    agent_sidebar_open: agentSidebarIsOpen(),
+                    agent_sidebar_scale: agentSidebarScale()
                 })
             });
             const data = await response.json().catch(() => ({}));
@@ -7863,6 +7891,17 @@
                controller reports; nothing to decide here. */
             applyTopbarVisibility(data.topbar_visible, { persist: true });
         }
+        /* The workspace record is the authority on the docked dashboard; the
+           local cache only painted the column before this read landed. Applied
+           without reporting, because this value came *from* the server. */
+        if (typeof data.agent_sidebar_open === 'boolean'
+            || Number.isInteger(data.agent_sidebar_scale)) {
+            applyAgentDashboardSidebar(
+                typeof data.agent_sidebar_open === 'boolean'
+                    ? data.agent_sidebar_open : agentSidebarIsOpen(),
+                { persist: true, scale: data.agent_sidebar_scale }
+            );
+        }
         setExplorerWorkspaceAppearance({
             preset: data.md_preset,
             font: data.md_font,
@@ -7923,6 +7962,25 @@
         button.title = label;
         button.setAttribute('aria-label', label);
         button.setAttribute('aria-pressed', active ? 'true' : 'false');
+    }
+
+    /* Native mode only: hand this window's flush-coordinator id to the
+       launcher process. Closing a workspace window destroys the webview from
+       the outside, so `pagehide` either never runs or loses the race with the
+       teardown and the close reaches the server as a bare socket drop -- read
+       as a possible crash, which blocks this workspace's saves for the whole
+       stale-window grace period. The launcher can say the close was
+       deliberate, but only if it knows which registration this window holds,
+       and that id lives here, in this window's own sessionStorage. */
+    async function registerNativeLifecycleWindow() {
+        if (!isPywebviewAvailable()) return;
+        const api = window.pywebview.api;
+        if (!api.register_workspace_lifecycle_window) return;
+        try {
+            await api.register_workspace_lifecycle_window(currentWorkspaceId, lifecycleWindowId);
+        } catch (error) {
+            console.error('Lifecycle window registration failed:', error);
+        }
     }
 
     async function syncNativeFullscreenState() {
@@ -8368,7 +8426,9 @@
             metadata: async () => ({
                 active_group_id: activeGroupId,
                 native_zoom_factor: await getCurrentWorkspaceNativeZoomFactor(),
-                topbar_visible: !document.body.classList.contains('topbar-collapsed')
+                topbar_visible: !document.body.classList.contains('topbar-collapsed'),
+                agent_sidebar_open: agentSidebarIsOpen(),
+                agent_sidebar_scale: agentSidebarScale()
             })
         });
 
@@ -8569,6 +8629,7 @@
     }
 
     window.addEventListener('pywebviewready', () => {
+        registerNativeLifecycleWindow();
         syncNativeFullscreenState();
     });
     window.addEventListener('focus', () => {
@@ -8589,8 +8650,12 @@
        Boot
     ───────────────────────────────────────────── */
     initSurfaceMode();
+    /* The bridge is often injected before this script runs, and
+       `pywebviewready` has then already fired with no listener to hear it. */
+    registerNativeLifecycleWindow();
     wireSessionMenu();
     wireDashboard();
+    wireAgentDashboardSidebar();
     topbarPeek.attach();
     applyTopbarVisibility(getStoredTopbarVisible());
     setupAppConfigUpdateListeners();

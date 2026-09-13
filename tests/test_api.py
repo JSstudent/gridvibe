@@ -1022,9 +1022,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         # Nothing in that row paints from currentColor any more, so the button
         # rule no longer carries a stroke colour for a glyph it has not got.
         terminals_css = self._static("css/terminals.css")
-        box = self._css_rule(
-            terminals_css, r"\.settings-window-btn,\s*\.session-bar-dashboard-btn"
-        )
+        box = self._css_rule(terminals_css, r"\.settings-window-btn,[^{]*")
         self.assertNotIn("color:", box)
 
     def test_session_bar_controls_share_one_drawn_mark(self):
@@ -1090,7 +1088,7 @@ class ApiRoutesTestCase(unittest.TestCase):
             return float(value.removesuffix("px"))
 
         for bar, button in (
-            (r"\.session-bar", r"\.settings-window-btn,\s*\.session-bar-dashboard-btn"),
+            (r"\.session-bar", r"\.settings-window-btn,[^{]*"),
             (
                 r"body\.surface-max \.session-bar",
                 r"body\.surface-max \.settings-window-btn",
@@ -1109,18 +1107,13 @@ class ApiRoutesTestCase(unittest.TestCase):
         its artwork happened to be. It now shares the launcher's whole box."""
         terminals_css = self._static("css/terminals.css")
 
-        box = self._css_rule(
-            terminals_css, r"\.settings-window-btn,\s*\.session-bar-dashboard-btn"
-        )
+        box = self._css_rule(terminals_css, r"\.settings-window-btn,[^{]*")
         self.assertIn("width: 38px;", box)
         self.assertIn("height: 34px;", box)
         self.assertIn("border: 1px solid var(--t-border-tab);", box)
         self.assertIn("background: var(--t-btn-bg);", box)
 
-        hover = self._css_rule(
-            terminals_css,
-            r"\.settings-window-btn:hover,\s*\.session-bar-dashboard-btn:hover",
-        )
+        hover = self._css_rule(terminals_css, r"\.settings-window-btn:hover,[^{]*")
         self.assertIn("border-color: var(--t-accent);", hover)
         self.assertIn("background: var(--t-btn-hover-bg);", hover)
 
@@ -4272,6 +4265,35 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("document.body.classList.toggle('topbar-collapsed', !shouldShow);", html)
         self.assertIn("path.setAttribute('d', visible ? 'M6 15l6-6 6 6' : 'M6 9l6 6 6-6');", html)
         self.assertIn("applyTopbarVisibility(getStoredTopbarVisible());", html)
+
+    def test_terminals_page_registers_its_lifecycle_window_with_the_native_bridge(self):
+        """The page's half of the deliberate-close announcement.
+
+        Closing a native workspace window destroys the webview from the
+        outside, so the page never gets to emit its own `leave_workspace` and
+        the coordinator would file the close as a possible crash — blocking
+        every save for that workspace until the stale-window grace period
+        expires, including one made from the window that reopened it. The
+        launcher can announce the close instead, but only if it knows which
+        registration this window holds, and that id lives in this window's own
+        sessionStorage. This is the call boundary terminals.js has no Node
+        harness for; what happens on the other side of it is executed in
+        tests/test_webview_launcher.py and tests/test_lifecycle.py.
+        """
+        terminals_js = self._static("js/terminals.js")
+
+        self.assertIn(
+            "await api.register_workspace_lifecycle_window(currentWorkspaceId, lifecycleWindowId);",
+            terminals_js,
+        )
+        # The id the bridge is handed must be the same one `join_workspace`
+        # registered, or the announcement names a record that does not exist.
+        self.assertIn("window_id: lifecycleWindowId", terminals_js)
+        # Called from boot as well as from `pywebviewready`: the bridge is
+        # often injected before this script runs, and the event has then
+        # already fired with no listener to hear it.
+        self.assertIn("window.addEventListener('pywebviewready'", terminals_js)
+        self.assertEqual(terminals_js.count("registerNativeLifecycleWindow();"), 2)
 
     def test_terminals_page_centers_topbar_actions_without_custom_window_controls(self):
         response = self.client.get("/terminals")
@@ -19121,7 +19143,7 @@ class StyleThemingTestCase(unittest.TestCase):
         # the rule states no colour at all and every value it does state is a
         # token.
         block = re.search(
-            r"\.settings-window-btn,\s*\.session-bar-dashboard-btn \{.*?\}",
+            r"\.settings-window-btn,[^{]*\{.*?\}",
             terminals_css,
             re.DOTALL,
         ).group(0)

@@ -585,6 +585,13 @@ unless the task explicitly changes this contract.
   Reject launch/credential/status fields. The client queue keeps one write in
   flight, coalesces latest state, applies a one-second floor during continuous
   changes, rebases conflicts, bounds repair and supplies the flush barrier.
+- `agent_sidebar_open` and `agent_sidebar_scale` are optional workspace chrome
+  fields: omitting either leaves that dimension alone. The scale is an integer
+  percent from 100 to 200, normalized in `web/session_presentation.py` beside
+  `AGENT_SIDEBAR_SCALE_MIN/MAX`; booleans, strings, floats and out-of-range values
+  are invalid live input. Stored reads default absent or invalid chrome to
+  `False` and `100`. Both fields follow the workspace presentation transaction,
+  live snapshot, explicit save, autosave, lifecycle flush/capture and restore.
 - Persist durable tabs/mode/Diff/navigation intent separately from revision-bound
   per-panel scroll/folds. Never persist fetched content, search query/results or
   dirty buffers. Viewer find is runtime state of tab + path, reapplied on render
@@ -619,6 +626,17 @@ unless the task explicitly changes this contract.
   Registrations are bounded. Fresh disconnection is `client_stale`; past a bounded
   grace it is departed. A drop during flush resolves immediately; deliberate leave
   is forgotten. No dead registration may block saving forever.
+- A native window close is announced, never inferred. The page registers its
+  window id through `register_workspace_lifecycle_window()`, and both close paths
+  — the `close_workspace_window()` verb and the title-bar X in `_handle_closed` —
+  retire that one record via `forget_window()` before the window is destroyed.
+  The webview dies before `pagehide` can emit a leave, so an unannounced close
+  reads as a crash: its `client_stale` record then fails every flush for that
+  workspace until the grace expires, including the save made from the window that
+  reopened it, which a new id cannot replace the way a reload replaces its own.
+  Never retire a record whose workspace slot already holds a different window.
+  The window-id ceiling has one owner (`LIFECYCLE_MAX_WINDOW_ID_LENGTH`); the
+  bridge refuses an id past it rather than storing one that can match nothing.
 - Resolve workspace chrome per field, oldest-joined first so the newest window
   wins. Stale `active_group_id` falls back to the server hint; malformed types or
   out-of-range zoom still raise. `topbar_visible` stores only the chevron choice
@@ -637,12 +655,29 @@ unless the task explicitly changes this contract.
   gone before it could be linked) is reported as one rather than rounded either
   way. An empty group is `409`, a missing one `404`.
 - The three-outcome close prompt is `close-session-modal.js` over
-  `partials/close_session_modal.html`, shared by the session tab and the
-  dashboard's session card. One irreversible act gets one prompt: a second
-  surface with its own copy is how two of them come to warn about differently
-  sized consequences. A second open resolves the outgoing prompt to cancel. The
-  prompt is skipped only for a group whose panes have *all* stopped — an empty
-  status list means the lookup failed and the safe reading is to ask.
+  `partials/close_session_modal.html`, and it asks about two kinds: one session
+  group, and one whole workspace. One irreversible act gets one prompt — a
+  second surface with its own copy is how two of them come to warn about
+  differently sized consequences — so the session tab, the dashboard's session
+  card, the Workspace menu's Close Workspace, the dashboard band's Close
+  workspace and the launcher's per-row Close all raise this one. The kind
+  decides the title, the sentence, the note and the danger button's label, and
+  all four are written on every open: one modal serves both, so a field left
+  alone is the previous question still on screen. A second open resolves the
+  outgoing prompt to cancel. The session prompt is skipped only for a group
+  whose panes have *all* stopped — an empty status list means the lookup failed
+  and the safe reading is to ask. The workspace prompt is skipped only at zero
+  sessions, where the count is a field of the record rather than a lookup that
+  may have failed.
+- `confirmCloseLiveWorkspace()` resolves to a `CLOSE_SESSION_*` decision, never
+  a boolean: `'cancel'` is truthy, so a caller testing it as one closes the
+  workspace on every dismissal. What the decision does has one owner,
+  `runWorkspaceCloseDecision()` in `workspaces.js` — the per-workspace save runs
+  first and a failed save cancels the close, and it returns `{ ok, step, error }`
+  instead of throwing so each surface can report *which* half failed on its own
+  line. Do not repeat that ordering in a caller. `{ forget: true }` keeps the
+  two-outcome generic confirm, because it removes the snapshot a save would
+  have just written.
 - Keep lifecycle credential snapshots server-only. Do not synchronously evaluate
   JS in pywebview's synchronous `closing` callback: cancel immediately and schedule
   the in-page prompt after returning.
@@ -783,16 +818,17 @@ unless the task explicitly changes this contract.
   pane runs — the mode transitions and the shell/agent relaunch — repaints the
   pane header's name and agent glyph from the session it got back. Plain,
   explorer, and browser panes carry no agent glyph.
-- The dashboard is a **dialog over the page that raised it**
+- The dashboard opened by `Alt+A` or the dashboard button is a **dialog over
+  the page that raised it**
   (`dashboard-dialog.js` over `partials/agent_dashboard_dialog.html`), not a
-  window and not a panel. It has no route and no native window of its own:
+  separate window. It has no route and no native window of its own:
   `/dashboard` is not served, nothing registers it for minimize or teardown,
   and `_should_exit_after_window_close()` grants it no exemption. Its root is
   the app's own `.modal-shell`, so both pages' scrim and blur already cover it
   and `EXPLORER_ESCAPE_CLAIM_SELECTOR` already claims Escape for it. Include
   the partial *before* the confirm dialogs on each page; at equal z-index the
   later element wins.
-- It polls only while it is open. Opening arms the poll, reads once, publishes
+- The dialog polls only while it is open. Opening arms the poll, reads once, publishes
   the exclusivity claim below and moves focus to the surface rather than to a
   control in it; closing disarms the poll, aborts what is in flight, and clears
   the action notice while leaving the read notice describing the tree still on
@@ -821,6 +857,29 @@ unless the task explicitly changes this contract.
   requests. Badge and dialog reads have bounded deadlines, cancel on
   hide/pagehide, refresh on focus, reject malformed payloads, and discard
   answers superseded by a newer request.
+- The workspace also carries a docked dashboard: `dashboard-sidebar.js` over
+  `partials/agent_dashboard_sidebar.html`, beside the grid in `.workspace-body`.
+  Its handle heads the session tab line. It is workspace chrome, with no scrim,
+  Escape dismissal, focus lease or exclusivity claim, and stays open when the
+  reader leaves the window. It reads the same dashboard payload and uses the
+  dialog's field renderers and target resolver. The narrow row draws the dot,
+  agent mark and chat title; the agent name remains in the accessible text.
+  Polling runs every four seconds only while open and the document is visible.
+  Unchanged markup is skipped; a rebuild preserves scroll and focus. Read
+  failures retain the last good tree, and successful polls leave action notices
+  intact.
+- Sidebar width is `calc(var(--agent-sidebar-width) *
+  var(--agent-sidebar-scale, 1))`, with the base owned solely by the CSS clamp
+  `clamp(240px, 15%, 400px)`. Dragging measures the rendered border-box width
+  divided by its current scale, never restating the clamp in JavaScript. The
+  edge button captures the pointer and listens for move/up/cancel on the window;
+  each move writes a scale clamped to 100..200. Release reports the changed
+  integer percent and calls `onLayoutChanged` once; live pane ResizeObservers
+  handle the drag without a second explicit refit on every move. Cancellation
+  restores the starting width without reporting. `apply()` also refits when a
+  restored width changes. The sidebar stylesheet owns the 22px session × and
+  a separate row for workspace word buttons beneath the band heading; shared
+  `agent-dashboard.css` rules and palette tokens remain the styling owners.
 - A row lands on the pane it names, not merely on the window. The workspace the
   reader is already in is applied directly through `applyWorkspaceFocusTarget`,
   because raising an already-raised window fires no `focus` event; every other
@@ -831,12 +890,26 @@ unless the task explicitly changes this contract.
   is never coming.
 - The dashboard's close verbs are the app's existing ones reached from here,
   never new questions: a session card's × opens the same three-outcome prompt
-  the session tab's × does (`close-session-modal.js`), and the band's workspace
-  verbs are `confirmCloseLiveWorkspace()` and the launcher's own close. *Save
-  and close* saves first and closes only if that succeeded. Close window is
-  **withheld** in browser mode rather than disabled, because `window.close()`
-  from here would close the dashboard's own page. The in-flight guard is module
-  state keyed by target, not a class on a button the poll may replace.
+  the session tab's × does (`close-session-modal.js`), and the band's **Close
+  workspace** opens that same prompt through `confirmCloseLiveWorkspace()`.
+  *Save and close* saves first and closes only if that succeeded — for a
+  session that ordering is this controller's, because only this window can ask
+  for the preset; for a workspace it is `runWorkspaceCloseDecision()`'s, shared
+  with the launcher's card and the in-window menu, so this controller hands the
+  decision over and reports which half failed rather than keeping a third copy
+  of the rule. Close window is **withheld** in browser mode rather than
+  disabled, because `window.close()` from here would close the dashboard's own
+  page. The in-flight guard is module
+  state keyed by target, not a class on a button the poll may replace. The
+  dialog and sidebar share one `GridVibeDashboardClose` controller instance;
+  it claims the guard before reading status or opening a prompt and releases
+  it on cancellation, failure or completion. `run(action, target, element,
+  { notice, refresh })` accepts per-call reporting hooks, defaulting to the
+  dialog's hooks; sidebar calls supply its own notice and refresh. Hooks are
+  local to the call, never reassigned on the controller. Closing a target
+  leaves the dashboard surface open. Both surfaces invalidate their rendered
+  caches and refresh on `pywebviewready` so the native window verb can appear
+  after the first paint.
 - The badge paints `totals.working` and validates that same field — a payload
   accepted on one count and painted from another reports `0` where it should
   report `?`. No working agent hides the badge rather than showing a zero: a

@@ -18,6 +18,7 @@ from web.session_presentation import (
     DEFAULT_EXPLORER_SOURCE_FONT,
     PANE_PRESENTATION_FIELDS,
     deep_copy_presentation,
+    normalize_agent_sidebar_scale,
     normalize_pane_presentation_fields,
     pane_fields_for_mode,
     workspace_appearance_from_panes,
@@ -200,6 +201,11 @@ class Workspace:
     created_at: float = field(default_factory=time.time)
     active_group_id: str = ""
     topbar_visible: bool = True
+    # The docked agent dashboard, per workspace window and shut by default: a
+    # panel that appeared unasked would cost a workspace that never opened one
+    # a sixth of its grid to a surface nobody chose.
+    agent_sidebar_open: bool = False
+    agent_sidebar_scale: int = 100
     md_preset: str = DEFAULT_EXPLORER_MD_PRESET
     md_font: str = DEFAULT_EXPLORER_MD_FONT
     source_font: str = DEFAULT_EXPLORER_SOURCE_FONT
@@ -222,6 +228,8 @@ class Workspace:
             "created_at": self.created_at,
             "active_group_id": self.active_group_id,
             "topbar_visible": self.topbar_visible,
+            "agent_sidebar_open": self.agent_sidebar_open,
+            "agent_sidebar_scale": self.agent_sidebar_scale,
             "md_preset": self.md_preset,
             "md_font": self.md_font,
             "source_font": self.source_font,
@@ -619,6 +627,61 @@ class SessionManager:
             workspace = self.workspaces.get(resolved_workspace_id)
             return workspace.topbar_visible if workspace is not None else True
 
+    def set_agent_sidebar_open(
+        self,
+        workspace_id: str = DEFAULT_WORKSPACE_ID,
+        open_: bool = False,
+        *,
+        require_owned: bool = False,
+    ) -> Optional[bool]:
+        """Record one workspace window's docked agent-dashboard visibility."""
+        resolved_workspace_id = normalize_workspace_id(workspace_id)
+        with self.lock:
+            workspace = self.workspaces.get(resolved_workspace_id)
+            if workspace is None:
+                if require_owned:
+                    raise ValueError("Workspace not found")
+                return None
+            normalized = bool(open_)
+            if workspace.agent_sidebar_open != normalized:
+                workspace.agent_sidebar_open = normalized
+                workspace.presentation_revision += 1
+            return workspace.agent_sidebar_open
+
+    def get_agent_sidebar_open(
+        self, workspace_id: str = DEFAULT_WORKSPACE_ID
+    ) -> bool:
+        """Return one live workspace's docked-dashboard state, shut by default."""
+        resolved_workspace_id = normalize_workspace_id(workspace_id)
+        with self.lock:
+            workspace = self.workspaces.get(resolved_workspace_id)
+            return workspace.agent_sidebar_open if workspace is not None else False
+
+    def set_agent_sidebar_scale(
+        self, workspace_id: str = DEFAULT_WORKSPACE_ID, scale: int = 100,
+        *, require_owned: bool = False,
+    ) -> Optional[int]:
+        """Set bounded workspace width, revising only on a change."""
+        normalized = normalize_agent_sidebar_scale(scale)
+        if normalized is None:
+            raise ValueError("Invalid agent sidebar scale")
+        with self.lock:
+            workspace = self.workspaces.get(normalize_workspace_id(workspace_id))
+            if workspace is None:
+                if require_owned:
+                    raise ValueError("Workspace not found")
+                return None
+            if workspace.agent_sidebar_scale != normalized:
+                workspace.agent_sidebar_scale = normalized
+                workspace.presentation_revision += 1
+            return workspace.agent_sidebar_scale
+
+    def get_agent_sidebar_scale(self, workspace_id: str = DEFAULT_WORKSPACE_ID) -> int:
+        """Return the workspace width as an integer percent of its CSS base."""
+        with self.lock:
+            workspace = self.workspaces.get(normalize_workspace_id(workspace_id))
+            return workspace.agent_sidebar_scale if workspace is not None else 100
+
     def get_workspace_presentation(
         self,
         workspace_id: str = DEFAULT_WORKSPACE_ID,
@@ -631,6 +694,8 @@ class SessionManager:
                 return {
                     "workspace_id": resolved_workspace_id,
                     "topbar_visible": True,
+                    "agent_sidebar_open": False,
+                    "agent_sidebar_scale": 100,
                     "md_preset": DEFAULT_EXPLORER_MD_PRESET,
                     "md_font": DEFAULT_EXPLORER_MD_FONT,
                     "source_font": DEFAULT_EXPLORER_SOURCE_FONT,
@@ -639,6 +704,8 @@ class SessionManager:
             return {
                 "workspace_id": resolved_workspace_id,
                 "topbar_visible": workspace.topbar_visible,
+                "agent_sidebar_open": workspace.agent_sidebar_open,
+                "agent_sidebar_scale": workspace.agent_sidebar_scale,
                 "md_preset": workspace.md_preset,
                 "md_font": workspace.md_font,
                 "source_font": workspace.source_font,
@@ -689,6 +756,8 @@ class SessionManager:
         workspace_id: str,
         expected_revision: int,
         topbar_visible: bool,
+        agent_sidebar_open: Optional[bool] = None,
+        agent_sidebar_scale: Optional[int] = None,
         md_preset: Optional[str] = None,
         md_font: Optional[str] = None,
         source_font: Optional[str] = None,
@@ -706,6 +775,13 @@ class SessionManager:
                     "presentation_revision": workspace.presentation_revision,
                 }
             workspace.topbar_visible = topbar_visible
+            # Tri-state, unlike the bar beside it: a client that predates the
+            # docked dashboard states nothing about it, and an unstated
+            # dimension is left alone rather than reset to the default.
+            if agent_sidebar_open is not None:
+                workspace.agent_sidebar_open = bool(agent_sidebar_open)
+            if agent_sidebar_scale is not None:
+                workspace.agent_sidebar_scale = agent_sidebar_scale
             if md_preset is not None and md_font is not None and source_font is not None:
                 workspace.md_preset = md_preset
                 workspace.md_font = md_font
@@ -718,6 +794,8 @@ class SessionManager:
                 "workspace_id": workspace_id,
                 "presentation_revision": workspace.presentation_revision,
                 "topbar_visible": workspace.topbar_visible,
+                "agent_sidebar_open": workspace.agent_sidebar_open,
+                "agent_sidebar_scale": workspace.agent_sidebar_scale,
                 "md_preset": workspace.md_preset,
                 "md_font": workspace.md_font,
                 "source_font": workspace.source_font,
@@ -1513,6 +1591,8 @@ class SessionManager:
                     "label": workspace.label,
                     "created_at": workspace.created_at,
                     "topbar_visible": workspace.topbar_visible,
+                    "agent_sidebar_open": workspace.agent_sidebar_open,
+                    "agent_sidebar_scale": workspace.agent_sidebar_scale,
                     "md_preset": workspace.md_preset,
                     "md_font": workspace.md_font,
                     "source_font": workspace.source_font,

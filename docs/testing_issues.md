@@ -1,11 +1,104 @@
 # GridVibe Testing Issues
-Last updated: 2026-09-01
+Last updated: 2026-09-13
 
 ## Open Issues
 
 None.
 
 ## Closed Issues
+
+### Issue ID: ISSUE-2026-052
+- Title: Saving a session fails for two minutes after a workspace window is reopened
+- Priority: Medium
+- Status: Closed
+- Area: `web/lifecycle.py`, `web/webview_launcher.py`, `web/static/js/terminals.js`
+- Assignee: Unassigned
+- Tags: `workspace`, `session`, `windows`, `launcher`, `socketio`
+- Reported: 2026-09-13
+- Closed: 2026-09-13
+
+Description:
+Native mode only. Closing a workspace window with **Close window** and then
+reopening that workspace made every coordinator-backed save of it fail for the
+length of the stale-window grace period (120s), with a message telling the user
+to try again when retrying could not succeed.
+
+The lifecycle coordinator removes a window record on exactly two events: the
+page's own `leave_workspace` emit from `pagehide`, or a disconnect that outlived
+`LIFECYCLE_STALE_WINDOW_GRACE_SECONDS`. `close_workspace_window()` called
+`window.destroy()` and told the coordinator nothing, so the close arrived only as
+a socket drop and `disconnect_client()` filed the record as stale — a possible
+crash. Reopening the workspace creates a new pywebview window, so a fresh
+browsing context, empty `sessionStorage` and a new lifecycle window id
+(`getLifecycleWindowId()` in `web/static/js/shared.js`), which cannot replace the
+abandoned record the way a reload replaces its own. `request_flush()` builds
+`expected` from every record for the workspace regardless of `connected` and
+pre-acknowledges each disconnected one with a `client_stale` error, so the flush
+returned `ok: False` and the save answered 503.
+
+The gate ahead of it hid the cause: `connected_window_count()` drops departed
+records and counts only connected ones, so it returned 1 and the save decided to
+flush — then `request_flush()` counted the ghost the gate had just ignored.
+
+Steps to reproduce:
+1. Run GridVibe in native mode (`python webview_launcher.py`) and open a
+   workspace window with at least one agent session.
+2. Close that window with **Close window** (Agent Dashboard workspace band, or
+   the title bar's ×). The sessions keep running, as intended.
+3. Reopen the same workspace from the launcher.
+4. Within two minutes, save one of its sessions from the Agent Dashboard, or
+   press the launcher's per-row **Save** for that workspace.
+5. Repeat steps 2–4 without waiting; each cycle adds another blocking record.
+
+Expected behavior:
+The save flushes the window that is open and succeeds. Closing a window is a
+deliberate departure and costs the workspace nothing.
+
+Actual behavior / logs:
+`POST /api/session-groups/<id>/save` and `POST /api/workspaces/<id>/save` both
+answer 503 with `The workspace window did not finish flushing — try again` and
+`retryable: true`, carrying one `client_stale` error per unannounced close.
+Retrying fails identically until the grace expires. Server log:
+
+```
+Session save <group> flush failed: categories=['client_stale']
+```
+
+In-window **Save Workspace** succeeded throughout, because `saveWorkspace()` uses
+the page's own `flushLivePresentation()` barrier and never reaches the
+coordinator — which is what made the failure look arbitrary. Browser mode is
+exposed only intermittently: `leave_workspace` is emitted solely from `pagehide`
+and is a best-effort socket write.
+
+Resolution:
+A native close is now announced rather than inferred. The page registers its
+lifecycle window id with the bridge on load and on `pywebviewready`
+(`registerNativeLifecycleWindow()`), because the id lives in the window's own
+`sessionStorage` and the launcher process owns the window — neither half can
+announce the close alone. `LifecycleCoordinator.forget_window(window_id,
+workspace_id)` records the same deliberate departure `leave_workspace` does,
+addressed by window id because the closing side knows the window and not the
+socket it held; it releases a flush already in flight the way a mid-flush leave
+does. `GridVibeApi._forget_workspace_lifecycle_window()` retires that one record
+from both close paths — `close_workspace_window()` before `window.destroy()`, and
+`_handle_closed`, which is where the title-bar × lands. It refuses to act when
+the workspace slot already holds a different window, so a late `closed` event
+cannot retire the replacement's live registration and leave a later flush
+skipping the window the reader is looking at. The window-id ceiling moved to one
+owner, `LIFECYCLE_MAX_WINDOW_ID_LENGTH`, which the bridge reads to refuse an id
+the coordinator itself would replace.
+
+Cover: `tests/test_lifecycle.py` — the close/reopen/save sequence flushes clean,
+with the mirror case pinning the `client_stale` failure that returns if the
+announcement stops arriving; a stale id drops only the record it names; a forget
+mid-flush is released, not reported. `tests/test_webview_launcher.py`
+(`LifecycleWindowRegistrationTestCase`) — the bridge verb retires the record
+before destroying, the reopened workspace saves, the title-bar × announces the
+same thing, a late close leaves the replacement registered, an unregistered
+window closes exactly as before, and unusable ids are refused.
+`tests/test_api.py` — the page's call boundary, which `terminals.js` has no Node
+harness for. Neutering the announcement fails exactly the three tests that assert
+it.
 
 ### Issue ID: ISSUE-2026-051
 - Title: Every explorer upload fails with "parameter 2 is not of type 'Blob'"

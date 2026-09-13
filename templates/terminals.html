@@ -14,6 +14,7 @@
     <link rel="stylesheet" href="{{ url_for('static', filename='css/shortcuts-help.css') }}?v={{ version }}">
     <link rel="stylesheet" href="{{ url_for('static', filename='css/dashboard.css') }}?v={{ version }}">
     <link rel="stylesheet" href="{{ url_for('static', filename='css/agent-dashboard.css') }}?v={{ version }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/agent-dashboard-sidebar.css') }}?v={{ version }}">
     <link rel="stylesheet" href="{{ url_for('static', filename='css/agent-brand.css') }}?v={{ version }}">
 </head>
 <body
@@ -126,8 +127,35 @@
 </div>
 
 <div class="session-bar">
-    <!-- Three controls, widest scope first: the launcher (every window), the
-         dashboard (every agent in every window), then the menu whose scope
+    <!-- The docked agent dashboard's own handle, at the head of the line
+         because the panel it opens is the leftmost surface on the page: the
+         control sits over the column it produces. It is the only one of these
+         that changes the shape of the workspace, which is also why it is the
+         only one that states what it will do rather than what it is -->
+    <button
+        type="button"
+        class="btn btn-neutral btn-icon agent-sidebar-toggle-btn"
+        id="agentSidebarToggleBtn"
+        onclick="toggleAgentDashboardSidebar(event)"
+        title="Show the agent dashboard"
+        aria-label="Show the agent dashboard"
+        aria-controls="agentSidebar"
+        aria-expanded="false"
+        aria-pressed="false"
+    >
+        <!-- Supplied artwork with its own palette, like the three marks beside
+             it, and swapped rather than rotated: the two .ico files are the two
+             answers, so dashboard-sidebar.js changes the src and nothing else. -->
+        <img
+            class="agent-sidebar-toggle-icon"
+            id="agentSidebarToggleIcon"
+            src="/docs/images/show_sidebar.ico"
+            alt=""
+            aria-hidden="true"
+        >
+    </button>
+    <!-- Then three controls, widest scope first: the launcher (every window),
+         the dashboard (every agent in every window), then the menu whose scope
          stops at this one. They head the session tab line rather than the top
          bar because the bar is always in the flow, so reaching them stops being
          reveal-then-traverse and becomes one click. -->
@@ -186,19 +214,27 @@
     </button>
 </div>
 
-<!-- Grid (built dynamically) -->
-<div id="terminalsGrid"></div>
-<div id="terminalResizeOverlay" aria-hidden="true"></div>
+<!-- Everything under the two bars, as one row: the docked agent dashboard on
+     the left and the grid (or the empty state that stands in for it) taking
+     what is left. The wrapper exists only so those two can sit side by side --
+     the bars above it are still stacked on the body. -->
+<div class="workspace-body" id="workspaceBody">
+    {% include 'partials/agent_dashboard_sidebar.html' %}
 
-<!-- Empty state -->
-<div id="emptyState">
-    <svg width="52" height="52" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
-        <rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/>
-        <line x1="12" y1="17" x2="12" y2="21"/>
-    </svg>
-    <p>No active sessions.</p>
-    <a href="/" onclick="return goToSettings(event)">Launch terminals →</a>
+    <!-- Grid (built dynamically) -->
+    <div id="terminalsGrid"></div>
+
+    <!-- Empty state -->
+    <div id="emptyState">
+        <svg width="52" height="52" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+            <rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/>
+            <line x1="12" y1="17" x2="12" y2="21"/>
+        </svg>
+        <p>No active sessions.</p>
+        <a href="/" onclick="return goToSettings(event)">Launch terminals →</a>
+    </div>
 </div>
+<div id="terminalResizeOverlay" aria-hidden="true"></div>
 
 <div id="savedSessionsModal" class="modal-shell" aria-hidden="true">
     <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="savedSessionsTitle">
@@ -373,6 +409,7 @@
 <script src="{{ url_for('static', filename='js/session-menu.js') }}?v={{ version }}"></script>
 <script src="{{ url_for('static', filename='js/dashboard-close.js') }}?v={{ version }}"></script>
 <script src="{{ url_for('static', filename='js/dashboard-dialog.js') }}?v={{ version }}"></script>
+<script src="{{ url_for('static', filename='js/dashboard-sidebar.js') }}?v={{ version }}"></script>
 <script src="{{ url_for('static', filename='js/dashboard.js') }}?v={{ version }}"></script>
 <script src="{{ url_for('static', filename='js/dashboard-focus.js') }}?v={{ version }}"></script>
 <script src="{{ url_for('static', filename='js/shortcuts-help.js') }}?v={{ version }}"></script>

@@ -1,0 +1,66 @@
+{# The agent dashboard, docked to the workspace.
+
+   The same tree the dialog shows (`partials/agent_dashboard_dialog.html`), in a
+   column beside the grid rather than a surface over it — for the reader who
+   wants to see what is running *while* they work rather than stopping to ask.
+   `dashboard-sidebar.js` owns everything inside `#agentSidebarBody`, and takes
+   every field on a row from `dashboard-dialog.js`, so the two surfaces cannot
+   disagree about the same pane.
+
+   It is chrome, not a dialog: it sits inside `.workspace-body` in the flow, it
+   is toggled by the button at the head of the session tab line, and its
+   open/shut state belongs to the workspace and is saved with it. So there is no
+   scrim, no `.modal-shell`, and no Escape handler — nothing here is over
+   anything.
+
+   Workspace page only: there is no grid to dock to on the launcher. #}
+<aside
+    id="agentSidebar"
+    class="agent-sidebar"
+    aria-hidden="true"
+    aria-label="Agent dashboard"
+>
+    <header class="agent-sidebar-head">
+        <img class="agent-sidebar-logo" src="/docs/images/active_ws.ico" alt="" aria-hidden="true">
+        <div class="agent-sidebar-head-text">
+            <h2 class="agent-sidebar-title">Agent Dashboard</h2>
+            <p class="agent-sidebar-sub">Every agent running, in every workspace</p>
+        </div>
+    </header>
+
+    {# The reading's own line: what the tree adds up to, and the two controls
+       that act on the panel rather than on anything in it. #}
+    <div class="agent-sidebar-status">
+        <span class="dash-totals" id="agentSidebarTotals">Reading…</span>
+        <button
+            class="dash-titlebar-btn"
+            id="agentSidebarRefreshBtn"
+            type="button"
+            title="Read again now"
+            aria-label="Read again now"
+        >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M21 12a9 9 0 1 1-2.64-6.36"></path><polyline points="21 3 21 9 15 9"></polyline></svg>
+        </button>
+        <button
+            class="dash-titlebar-btn"
+            id="agentSidebarCloseBtn"
+            type="button"
+            title="Hide the agent dashboard"
+            aria-label="Hide the agent dashboard"
+        >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+        </button>
+    </div>
+
+    {# One line, and only while something is wrong: a failed read leaves the
+       last good tree on screen and says so here rather than blanking a column
+       that is still telling you something true four seconds ago. #}
+    <p class="dash-notice" id="agentSidebarNotice" role="status" hidden></p>
+
+    {# The one scroller. dashboard-sidebar.js owns everything inside it. #}
+    <div class="dash-body agent-sidebar-body" id="agentSidebarBody">
+        <div class="dash-empty"><p class="dash-empty-title">Reading…</p></div>
+    </div>
+    <button type="button" id="agentSidebarResizer" class="agent-sidebar-resizer"
+        aria-label="Resize agent dashboard" title="Drag to widen the agent dashboard"></button>
+</aside>

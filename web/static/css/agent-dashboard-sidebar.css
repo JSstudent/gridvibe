@@ -1,0 +1,369 @@
+/* The agent dashboard, docked — the column, and nothing else.
+
+   `agent-dashboard.css` already states what a workspace band, a session card
+   and an agent row look like, and it states all three *unscoped* — only the
+   `.dash-dialog` frame is the dialog's own. So the panel renders the same
+   `.dash-*` markup and this file says only the three things a column changes:
+
+     1. the frame itself (where it sits, how wide it is, its own header);
+     2. the vertical rhythm, because a band's 26px separators were measured
+        against a 520px dialog and a column has a sixth of a window to spend;
+     3. the one row difference — the agent's name is out of flow here, and the
+        row must therefore *not* take the dialog's narrow-card wrap, which was
+        designed to give a wrapped title its own line beneath a name that this
+        surface does not draw.
+
+   (3) is why the overrides below exist at all. `agent-dashboard.css` carries an
+   `@container (max-width: 380px)` rule, and a card in this column is always
+   narrower than that — container queries add no specificity, so a two-class
+   selector here is what wins, and it wins in both stylesheet orders.
+
+   No palette of its own (guardrail 7): every colour is a shared `--gv-*` token,
+   the same ones the dialog reads, so the panel follows the page's light/dark
+   preference without this file knowing which page it is on. */
+
+/* ── The row the whole page under the two bars now lives in ──
+
+   The grid used to be a direct flex child of `body`; it is one level in now, so
+   the panel can sit beside it. `min-height: 0` is what lets the row shrink
+   inside the body column instead of pushing the page past 100vh. */
+.workspace-body {
+    display: flex;
+    flex: 1 1 auto;
+    min-height: 0;
+    min-width: 0;
+    overflow: hidden;
+}
+
+/* Both of these grow into whatever the panel leaves. `min-width: 0` on each,
+   because a grid of terminals and a centred empty state both have intrinsic
+   widths that would otherwise refuse to shrink and push the panel off screen. */
+.workspace-body > #terminalsGrid,
+.workspace-body > #emptyState {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+/* ── The panel ──
+
+   About a sixth of the window, clamped at both ends: below ~240px a card cannot
+   hold a dot, a mark and a readable title, and above ~400px the column starts
+   taking width off the panes it is there to describe. `width` rather than a
+   percentage `flex-basis`, so the clamp resolves against the row and not
+   against whatever a browser decides a flex base is. */
+.agent-sidebar {
+    --agent-sidebar-width: clamp(240px, 15%, 400px);
+    display: none;
+    flex: 0 0 auto;
+    width: calc(var(--agent-sidebar-width) * var(--agent-sidebar-scale, 1));
+    position: relative;
+    box-sizing: border-box;
+    min-width: 0;
+    flex-direction: column;
+    overflow: hidden;
+    border-right: 1px solid var(--gv-dialog-border);
+    background: var(--gv-bg-app);
+    color: var(--gv-dialog-text);
+    font-family: 'Segoe UI', Roboto, -apple-system, BlinkMacSystemFont, sans-serif;
+    font-size: 13px;
+}
+
+.agent-sidebar.visible {
+    display: flex;
+}
+
+/* The edge stays reachable while the body scrolls. The measured border-box
+   width is the drag's base, scaled from 1 to 2; it never shrinks below 1. */
+.agent-sidebar-resizer {
+    position: absolute;
+    inset: 0 0 0 auto;
+    width: 6px;
+    min-width: 6px;
+    padding: 0;
+    border: 0;
+    border-left: 1px solid var(--gv-dialog-border);
+    background: var(--gv-dialog-panel-soft);
+    cursor: col-resize;
+    touch-action: none;
+}
+
+.agent-sidebar-resizer:hover,
+.agent-sidebar-resizer.dragging,
+.agent-sidebar-resizer:focus-visible {
+    background: var(--gv-accent);
+}
+
+/* A compact × leaves the session title its width. Workspace word buttons
+   share a dedicated second line below the name/count, even in native mode;
+   they never compete with the band title or wrap onto separate lines. */
+.agent-sidebar .dash-session-close {
+    width: 22px;
+    min-width: 22px;
+    flex: 0 0 22px;
+}
+
+.agent-sidebar .dash-session-close svg {
+    width: 12px;
+    height: 12px;
+}
+
+.agent-sidebar .dash-workspace-head {
+    flex-wrap: wrap;
+}
+
+.agent-sidebar .dash-workspace-actions {
+    flex: 0 0 100%;
+    justify-content: flex-end;
+    gap: 5px;
+    margin: 0;
+}
+
+.agent-sidebar .dash-workspace-action {
+    padding: 3px 5px;
+    font-size: .62rem;
+    white-space: nowrap;
+}
+
+.agent-sidebar *,
+.agent-sidebar *::before,
+.agent-sidebar *::after {
+    box-sizing: border-box;
+}
+
+/* ── Its own head ──
+
+   Two rows rather than the dialog's one: at this width a title, a subtitle, a
+   totals line and two controls cannot share a line without every one of them
+   being truncated. The identity is on top, the reading and the controls under
+   it — which also puts the totals directly above the tree they count. */
+.agent-sidebar-head {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    flex: 0 0 auto;
+    padding: 10px 12px 8px;
+    background: var(--gv-dialog-panel-soft);
+    min-width: 0;
+}
+
+.agent-sidebar-logo {
+    width: 26px;
+    height: 26px;
+    border-radius: 6px;
+    flex: 0 0 auto;
+}
+
+.agent-sidebar-head-text {
+    min-width: 0;
+}
+
+.agent-sidebar-title {
+    margin: 0;
+    font-size: .84rem;
+    font-weight: 700;
+    letter-spacing: .01em;
+    color: var(--gv-dialog-text);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.agent-sidebar-sub {
+    margin: 1px 0 0;
+    font-size: .66rem;
+    color: var(--gv-dialog-muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.agent-sidebar-status {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex: 0 0 auto;
+    padding: 0 12px 8px;
+    background: var(--gv-dialog-panel-soft);
+    border-bottom: 1px solid var(--gv-dialog-border);
+}
+
+/* The totals take the line and the two controls sit at its end. */
+.agent-sidebar-status .dash-totals {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* The dialog's own control box, one size down: the column has less to spend on
+   chrome and these two are beside a line of 11px type. */
+.agent-sidebar-status .dash-titlebar-btn {
+    width: 24px;
+    height: 24px;
+}
+
+.agent-sidebar-status .dash-titlebar-btn svg {
+    width: 13px;
+    height: 13px;
+}
+
+/* ── The scroller ──
+   `.dash-body`'s own rule carries the flex and the overflow; only the padding
+   is this width's, and the notice is the dialog's element at this width too.
+   Written as a descendant rather than on the class alone, so it outranks the
+   shared rule by specificity and not by which stylesheet loads second. */
+.agent-sidebar .agent-sidebar-body {
+    padding: 10px 10px 18px;
+}
+
+.agent-sidebar .dash-notice {
+    padding: 6px 12px;
+    font-size: .68rem;
+}
+
+.agent-sidebar .dash-empty {
+    min-height: 30vh;
+    padding: 0 6px;
+}
+
+/* ── The three levels, at a sixth of a window ──
+
+   Everything here is a measurement, not a new look: the same band, card and row
+   the dialog draws, with the space between them scaled to the column. */
+.agent-sidebar .dash-workspace + .dash-workspace {
+    margin-top: 16px;
+    padding-top: 16px;
+}
+
+.agent-sidebar .dash-workspace-head {
+    gap: 6px;
+    padding-bottom: 6px;
+    margin-bottom: 9px;
+}
+
+.agent-sidebar .dash-workspace-name {
+    font-size: .74rem;
+    letter-spacing: .05em;
+}
+
+.agent-sidebar .dash-workspace-meta {
+    font-size: .64rem;
+    margin-left: auto;
+}
+
+.agent-sidebar .dash-sessions {
+    gap: 8px;
+}
+
+.agent-sidebar .dash-session-open {
+    padding: 6px 8px;
+    gap: 6px;
+}
+
+.agent-sidebar .dash-session-name {
+    font-size: .75rem;
+}
+
+.agent-sidebar .dash-session-meta {
+    font-size: .62rem;
+}
+
+.agent-sidebar .dash-agents {
+    padding: 4px;
+    gap: 1px;
+}
+
+/* ── The one row difference ──
+
+   The agent's name is out of flow here (see `.dash-agent-who` below), so the
+   row is a dot, a mark, a title and — on the few rows that have one — a bar,
+   and all four fit on one line at this width. The dialog's narrow-card rule
+   would wrap the title onto a second line under a name this surface does not
+   draw, which would cost every row a line to gain nothing. Two classes, so it
+   outranks that rule wherever the two files load in. */
+.agent-sidebar .dash-agent {
+    flex-wrap: nowrap;
+    gap: 7px;
+    padding: 5px 6px;
+}
+
+.agent-sidebar .dash-agent-line {
+    flex: 1 1 auto;
+    flex-basis: auto;
+    order: 0;
+    font-size: .78rem;
+}
+
+.agent-sidebar .dash-agent-icon {
+    width: 19px;
+    height: 19px;
+    border-radius: 5px;
+}
+
+.agent-sidebar .dash-agent-icon .dash-agent-glyph {
+    width: 15px;
+    height: 15px;
+}
+
+/* Which agent this is, for a reader who is not looking at the row. The mark
+   beside it is the visible answer — every agent GridVibe draws has its own
+   artwork in its own colour — so the name is kept and not drawn, exactly as
+   `.dash-state-word` keeps the state word the dot replaced. Out of flow, so the
+   column order after it is the same on every row. */
+.dash-agent-who {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+}
+
+.agent-sidebar .dash-progress {
+    width: 34px;
+}
+
+.agent-sidebar .dash-progress-value {
+    min-width: 22px;
+    font-size: .6rem;
+}
+
+/* The card's own heading may still wrap its meta under its name — that is the
+   dialog's narrow rule doing the right thing for a two-part heading, and it is
+   deliberately left alone. */
+
+/* ── The handle in the session tab line ──
+
+   Shares the box, border and hover of the launcher and dashboard buttons
+   (`terminals.css` states those for `.settings-window-btn`), so the row reads
+   as one group; only the mark's own scale is here, because that is a property
+   of these two .ico files and of nothing else in the row.
+
+   1.23 is 1/0.81, measured: both assets ink about 0.81 of their own 128px
+   canvas. The box grows by it, the baked-in padding comes back out of the
+   layout as a negative margin of half the difference, and what is left
+   occupying the row is exactly `--session-bar-mark` -- the same arithmetic
+   terminals.css does for its two marks and dashboard.css for its one, with the
+   fraction these files actually measure rather than a shared guess. */
+.agent-sidebar-toggle-icon {
+    --sidebar-mark: var(--session-bar-mark, 28px);
+    --sidebar-mark-scale: 1.23;
+    width: calc(var(--sidebar-mark) * var(--sidebar-mark-scale));
+    height: calc(var(--sidebar-mark) * var(--sidebar-mark-scale));
+    margin: calc(var(--sidebar-mark) * (1 - var(--sidebar-mark-scale)) / 2);
+    border-radius: 5px;
+    display: block;
+    flex: 0 0 auto;
+}
+
+/* A very narrow window has no room for a column *and* a usable grid, so the
+   panel gives its width back rather than squeezing both. It is still open —
+   nothing is persisted here — and returns at the first width that can hold it. */
+@media (max-width: 700px) {
+    .agent-sidebar {
+        display: none !important;
+    }
+}

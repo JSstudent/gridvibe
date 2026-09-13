@@ -37,6 +37,8 @@ EXPLORER_MAX_EXPANDED_PATHS = 128
 EXPLORER_MAX_GIT_EXPANDED = 128
 EXPLORER_SIDEBAR_WIDTH_MIN = 180
 EXPLORER_SIDEBAR_WIDTH_MAX = 520
+AGENT_SIDEBAR_SCALE_MIN = 100
+AGENT_SIDEBAR_SCALE_MAX = 200
 EXPLORER_SCROLL_PANELS = ("source", "preview", "diff", "directory")
 # Repository-search result scroll is deliberately ephemeral (product decision
 # 4). Files and Git have structural navigation whose scroll can be restored
@@ -165,6 +167,18 @@ _VIEW_INTENT_FIELDS = frozenset({"mode", "diff_commit", "diff_mode"})
 def normalize_topbar_visible(value: Any) -> Optional[bool]:
     """Normalize optional workspace top-bar visibility without coercion."""
     return value if isinstance(value, bool) else None
+
+
+def normalize_agent_sidebar_open(value: Any) -> Optional[bool]:
+    """Normalize the docked agent dashboard's visibility without coercion."""
+    return value if isinstance(value, bool) else None
+
+
+def normalize_agent_sidebar_scale(value: Any) -> Optional[int]:
+    """Integer percent of the CSS default width; never coerce wire values."""
+    if type(value) is not int:
+        return None
+    return value if AGENT_SIDEBAR_SCALE_MIN <= value <= AGENT_SIDEBAR_SCALE_MAX else None
 
 
 def normalize_workspace_appearance(data: Any) -> Optional[Dict[str, str]]:
@@ -1145,6 +1159,8 @@ def normalize_workspace_presentation(data: Any) -> Dict[str, Any]:
         "workspace_id",
         "expected_revision",
         "topbar_visible",
+        "agent_sidebar_open",
+        "agent_sidebar_scale",
         "md_preset",
         "md_font",
         "source_font",
@@ -1168,6 +1184,25 @@ def normalize_workspace_presentation(data: Any) -> Dict[str, Any]:
         "expected_revision": revision,
         "topbar_visible": topbar_visible,
     }
+    # Optional, unlike the bar beside it. The docked dashboard postdates this
+    # transaction, so a payload that says nothing about it is a client that
+    # does not have one -- and the transaction leaves what it does not state.
+    if "agent_sidebar_open" in data:
+        agent_sidebar_open = normalize_agent_sidebar_open(
+            data.get("agent_sidebar_open")
+        )
+        if agent_sidebar_open is None:
+            raise PresentationValidationError(
+                "'agent_sidebar_open' must be a boolean"
+            )
+        normalized["agent_sidebar_open"] = agent_sidebar_open
+    if "agent_sidebar_scale" in data:
+        scale = normalize_agent_sidebar_scale(data["agent_sidebar_scale"])
+        if scale is None:
+            raise PresentationValidationError(
+                "'agent_sidebar_scale' must be an integer from 100 to 200"
+            )
+        normalized["agent_sidebar_scale"] = scale
     appearance_keys = {"md_preset", "md_font", "source_font"}
     supplied_appearance = appearance_keys & data.keys()
     if supplied_appearance and supplied_appearance != appearance_keys:

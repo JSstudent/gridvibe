@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, call, patch
 from urllib.error import HTTPError
 
+from web import lifecycle as web_lifecycle
 from web import webview_launcher
 
 
@@ -1379,6 +1380,216 @@ class MinimizeAllWindowsTestCase(unittest.TestCase):
             self.assertFalse(bridge._minimize_cascade_enabled())
 
 
+def _register_launcher_window(api_bridge, window):
+    """Run the real `register_window` from main() against one fake window.
+
+    main() is the only place the window event handlers are wired, so a test
+    that needs one of them — the minimize cascade, the close handler — has to
+    come through here rather than restate what it does.
+    """
+    fake_thread = _FakeThread()
+    fake_webview = Mock()
+    fake_webview.create_window.return_value = window
+
+    with patch.object(
+        webview_launcher.sys,
+        "argv",
+        ["webview_launcher.py", "--mode", "native"],
+    ), patch.object(
+        webview_launcher.os.path,
+        "exists",
+        return_value=False,
+    ), patch.object(
+        webview_launcher,
+        "setup_logging",
+    ), patch.object(
+        webview_launcher,
+        "_wait_for_server",
+        return_value=True,
+    ), patch.object(
+        webview_launcher.threading,
+        "Thread",
+        return_value=fake_thread,
+    ), patch.object(
+        webview_launcher,
+        "webview",
+        fake_webview,
+    ), patch.object(
+        webview_launcher,
+        "_preferred_pywebview_gui",
+        return_value=None,
+    ), patch.object(
+        webview_launcher,
+        "_set_linux_qtwebengine_env",
+    ), patch.object(
+        webview_launcher,
+        "GridVibeApi",
+        return_value=api_bridge,
+    ):
+        webview_launcher.main()
+    return window
+
+
+class LifecycleWindowRegistrationTestCase(unittest.TestCase):
+    """Closing a native workspace window announces a departure, not a crash.
+
+    The page cannot say so itself — the webview is destroyed under it, so
+    `pagehide` either never runs or loses the race with the teardown. Left
+    unannounced the record is filed as a possible crash and blocks every flush
+    for that workspace until the grace period expires, which is what made a
+    save from the window that reopened the workspace fail for two minutes.
+    """
+
+    def setUp(self):
+        webview_launcher.lifecycle_coordinator.reset()
+
+    def tearDown(self):
+        webview_launcher.lifecycle_coordinator.reset()
+
+    def _api_with_workspace_window(self, workspace_id="a1b2c3d4e5f6", window_id="window-a"):
+        """A bridge holding one workspace window whose page has registered."""
+        api_bridge = webview_launcher.GridVibeApi("http://127.0.0.1:5050")
+        window = _FakeWindow()
+        api_bridge._attach_workspace_window(workspace_id, window)
+        registered = api_bridge.register_workspace_lifecycle_window(
+            workspace_id,
+            window_id,
+        )
+        self.assertEqual(registered, {"ok": True})
+        webview_launcher.lifecycle_coordinator.join_workspace(
+            "socket-old",
+            workspace_id,
+            window_id,
+        )
+        return api_bridge, window
+
+    def _flush(self, workspace_id, client_id):
+        """Ask for the flush a save asks for, acknowledged by one live window."""
+        coordinator = webview_launcher.lifecycle_coordinator
+
+        def acknowledge(target_id, request_id):
+            coordinator.acknowledge_flush(
+                client_id,
+                {"request_id": request_id, "workspace_id": target_id, "ok": True},
+            )
+
+        return coordinator.request_flush({workspace_id}, acknowledge, timeout=0.1)
+
+    def test_the_close_verb_retires_the_record_before_the_window_goes(self):
+        api_bridge, window = self._api_with_workspace_window()
+        coordinator = webview_launcher.lifecycle_coordinator
+
+        result = api_bridge.close_workspace_window("a1b2c3d4e5f6")
+
+        self.assertEqual(result, {"ok": True})
+        window.destroy.assert_called_once_with()
+        self.assertNotIn("window-a", coordinator._windows)
+        # And the registration goes with it, so the id cannot be retired twice
+        # or, worse, retire whatever window next holds the workspace.
+        self.assertEqual(api_bridge._workspace_lifecycle_window_ids, {})
+
+    def test_the_reopened_workspace_saves_after_its_window_was_closed(self):
+        """The defect end to end: the close, the reopen, then the save."""
+        api_bridge, _window = self._api_with_workspace_window()
+        coordinator = webview_launcher.lifecycle_coordinator
+
+        api_bridge.close_workspace_window("a1b2c3d4e5f6")
+        # The socket drop arrives after the close, as it does in the real app.
+        coordinator.disconnect_client("socket-old")
+        # Reopened: a new window, so a new id — it cannot replace the old
+        # record the way a reload replaces its own.
+        coordinator.join_workspace("socket-new", "a1b2c3d4e5f6", "window-b")
+
+        result = self._flush("a1b2c3d4e5f6", "socket-new")
+
+        self.assertTrue(result["ok"], result["errors"])
+        self.assertEqual(result["errors"], [])
+
+    def test_the_title_bar_close_announces_what_the_bridge_verb_does(self):
+        """The X reaches `_handle_closed` and nowhere else — it must say so too."""
+        api_bridge = webview_launcher.GridVibeApi("http://127.0.0.1:5050")
+        _register_launcher_window(api_bridge, _FakeWindow())
+        coordinator = webview_launcher.lifecycle_coordinator
+
+        workspace_window = _FakeWindow()
+        api_bridge._attach_workspace_window("a1b2c3d4e5f6", workspace_window)
+        api_bridge.register_workspace_lifecycle_window("a1b2c3d4e5f6", "window-a")
+        coordinator.join_workspace("socket-old", "a1b2c3d4e5f6", "window-a")
+        api_bridge._register_window(workspace_window, "workspace:a1b2c3d4e5f6")
+
+        on_closed = workspace_window.events.closed.handlers[0]
+        on_closed()
+
+        self.assertNotIn("window-a", coordinator._windows)
+        self.assertEqual(api_bridge._workspace_lifecycle_window_ids, {})
+
+    def test_a_late_close_leaves_the_window_that_replaced_it_registered(self):
+        """The dangerous direction: never retire a live registration.
+
+        A `closed` event that lands after the workspace already has a new
+        window must not drop the new window's record — a flush that skipped it
+        would capture presentation the reader has already moved past.
+        """
+        api_bridge, old_window = self._api_with_workspace_window()
+        coordinator = webview_launcher.lifecycle_coordinator
+
+        # The replacement arrives and registers before the old close lands.
+        replacement = _FakeWindow()
+        api_bridge._attach_workspace_window("a1b2c3d4e5f6", replacement)
+        api_bridge.register_workspace_lifecycle_window("a1b2c3d4e5f6", "window-b")
+        coordinator.join_workspace("socket-new", "a1b2c3d4e5f6", "window-b")
+
+        self.assertFalse(
+            api_bridge._forget_workspace_lifecycle_window("a1b2c3d4e5f6", old_window)
+        )
+        self.assertIn("window-b", coordinator._windows)
+        self.assertEqual(
+            api_bridge._workspace_lifecycle_window_ids,
+            {"a1b2c3d4e5f6": "window-b"},
+        )
+
+        # The old window's record is retired by its own id, never by the
+        # replacement's — so the flush that follows waits for the live window
+        # and gets it.
+        coordinator.forget_window("window-a", "a1b2c3d4e5f6")
+        result = self._flush("a1b2c3d4e5f6", "socket-new")
+        self.assertTrue(result["ok"], result["errors"])
+
+    def test_an_unregistered_window_closes_exactly_as_it_did_before(self):
+        """Browser-mode pages and older frontends register nothing."""
+        api_bridge = webview_launcher.GridVibeApi("http://127.0.0.1:5050")
+        window = _FakeWindow()
+        api_bridge._attach_workspace_window("a1b2c3d4e5f6", window)
+
+        self.assertFalse(
+            api_bridge._forget_workspace_lifecycle_window("a1b2c3d4e5f6", window)
+        )
+        self.assertEqual(api_bridge.close_workspace_window("a1b2c3d4e5f6"), {"ok": True})
+        window.destroy.assert_called_once_with()
+
+    def test_an_id_the_coordinator_could_never_match_is_refused(self):
+        api_bridge = webview_launcher.GridVibeApi("http://127.0.0.1:5050")
+
+        blank = api_bridge.register_workspace_lifecycle_window("a1b2c3d4e5f6", "  ")
+        self.assertFalse(blank["ok"])
+
+        oversized = api_bridge.register_workspace_lifecycle_window(
+            "a1b2c3d4e5f6",
+            "w" * (webview_launcher.LIFECYCLE_MAX_WINDOW_ID_LENGTH + 1),
+        )
+        self.assertFalse(oversized["ok"])
+
+        unusable = api_bridge.register_workspace_lifecycle_window("  ", "window-a")
+        self.assertFalse(unusable["ok"])
+
+        self.assertEqual(api_bridge._workspace_lifecycle_window_ids, {})
+        # The ceiling is the coordinator's own, not a second copy of it.
+        self.assertEqual(
+            webview_launcher.LIFECYCLE_MAX_WINDOW_ID_LENGTH,
+            web_lifecycle.LIFECYCLE_MAX_WINDOW_ID_LENGTH,
+        )
+
+
 class MinimizeCascadeEventTestCase(unittest.TestCase):
     """4-D: the cascade is the `minimized` event's second trigger.
 
@@ -1388,47 +1599,7 @@ class MinimizeCascadeEventTestCase(unittest.TestCase):
 
     def _register(self, api_bridge, window):
         """Run the real `register_window` from main() against one fake window."""
-        fake_thread = _FakeThread()
-        fake_webview = Mock()
-        fake_webview.create_window.return_value = window
-
-        with patch.object(
-            webview_launcher.sys,
-            "argv",
-            ["webview_launcher.py", "--mode", "native"],
-        ), patch.object(
-            webview_launcher.os.path,
-            "exists",
-            return_value=False,
-        ), patch.object(
-            webview_launcher,
-            "setup_logging",
-        ), patch.object(
-            webview_launcher,
-            "_wait_for_server",
-            return_value=True,
-        ), patch.object(
-            webview_launcher.threading,
-            "Thread",
-            return_value=fake_thread,
-        ), patch.object(
-            webview_launcher,
-            "webview",
-            fake_webview,
-        ), patch.object(
-            webview_launcher,
-            "_preferred_pywebview_gui",
-            return_value=None,
-        ), patch.object(
-            webview_launcher,
-            "_set_linux_qtwebengine_env",
-        ), patch.object(
-            webview_launcher,
-            "GridVibeApi",
-            return_value=api_bridge,
-        ):
-            webview_launcher.main()
-        return window
+        return _register_launcher_window(api_bridge, window)
 
     def _api_with_registered_launcher(self):
         api_bridge = webview_launcher.GridVibeApi("http://127.0.0.1:5050")

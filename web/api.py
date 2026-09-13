@@ -248,6 +248,7 @@ from web.session_presentation import (
     PresentationValidationError,
     apply_group_presentation,
     apply_workspace_presentation,
+    normalize_agent_sidebar_scale,
 )
 from web.session_shell import (  # noqa: F401 - re-exported for backwards compatibility
     ShellTransitionEffects,
@@ -2274,6 +2275,8 @@ def get_session_groups():
         "groups": groups,
         "count": len(groups),
         "topbar_visible": workspace_presentation["topbar_visible"],
+        "agent_sidebar_open": workspace_presentation["agent_sidebar_open"],
+        "agent_sidebar_scale": workspace_presentation["agent_sidebar_scale"],
         "md_preset": workspace_presentation["md_preset"],
         "md_font": workspace_presentation["md_font"],
         "source_font": workspace_presentation["source_font"],
@@ -2367,6 +2370,10 @@ def get_runtime_state():
         # Optional desktop session-window zoom; null means no preference.
         "native_zoom_factor": slot.get("native_zoom_factor") if slot else None,
         "topbar_visible": slot.get("topbar_visible", True) if slot else True,
+        "agent_sidebar_open": (
+            slot.get("agent_sidebar_open", False) if slot else False
+        ),
+        "agent_sidebar_scale": slot.get("agent_sidebar_scale", 100) if slot else 100,
         "md_preset": slot.get("md_preset", "default") if slot else "default",
         "md_font": slot.get("md_font", "system") if slot else "system",
         "source_font": slot.get("source_font", "default") if slot else "default",
@@ -2390,6 +2397,14 @@ def save_runtime_state():
         return jsonify(workspace_missing_payload()), 400
     if "topbar_visible" in data and not isinstance(data["topbar_visible"], bool):
         return jsonify({"error": "'topbar_visible' must be a boolean"}), 400
+    if "agent_sidebar_open" in data and not isinstance(
+        data["agent_sidebar_open"], bool
+    ):
+        return jsonify({"error": "'agent_sidebar_open' must be a boolean"}), 400
+    if "agent_sidebar_scale" in data and normalize_agent_sidebar_scale(
+        data["agent_sidebar_scale"]
+    ) is None:
+        return jsonify({"error": "'agent_sidebar_scale' must be an integer from 100 to 200"}), 400
     label = str(data.get("label") or "").strip() or None
     active_group_id = session_manager.set_active_group(
         workspace_id,
@@ -2401,6 +2416,17 @@ def save_runtime_state():
             workspace_id,
             data["topbar_visible"],
         )
+    agent_sidebar_scale = session_manager.get_agent_sidebar_scale(workspace_id)
+    if "agent_sidebar_scale" in data:
+        agent_sidebar_scale = session_manager.set_agent_sidebar_scale(
+            workspace_id, data["agent_sidebar_scale"]
+        )
+    agent_sidebar_open = session_manager.get_agent_sidebar_open(workspace_id)
+    if "agent_sidebar_open" in data:
+        agent_sidebar_open = session_manager.set_agent_sidebar_open(
+            workspace_id,
+            data["agent_sidebar_open"],
+        )
     try:
         slot = capture_workspace(
             session_manager,
@@ -2410,6 +2436,8 @@ def save_runtime_state():
             active_group_id=active_group_id,
             native_zoom_factor=data.get("native_zoom_factor"),
             topbar_visible=topbar_visible,
+            agent_sidebar_open=agent_sidebar_open,
+            agent_sidebar_scale=agent_sidebar_scale,
         )
     except RuntimeStatePersistenceError as exc:
         # The revision never reached the disk. Never answer 200/"saved": a
@@ -2434,6 +2462,8 @@ def save_runtime_state():
         "active_group_id": slot["active_group_id"],
         "native_zoom_factor": slot.get("native_zoom_factor"),
         "topbar_visible": slot["topbar_visible"],
+        "agent_sidebar_open": slot["agent_sidebar_open"],
+        "agent_sidebar_scale": slot["agent_sidebar_scale"],
         "md_preset": slot["md_preset"],
         "md_font": slot["md_font"],
         "source_font": slot["source_font"],

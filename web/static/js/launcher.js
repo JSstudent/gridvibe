@@ -3291,19 +3291,34 @@
             closeButton.textContent = 'Close';
             closeButton.title = 'Close this workspace — its saved snapshot stays on offer';
             closeButton.addEventListener('click', async () => {
-                if (!(await confirmCloseLiveWorkspace(workspace))) {
+                /* Three ways out, and what each one does, are workspaces.js's —
+                   the same prompt and the same save-then-close ordering the
+                   in-window menu and the agent dashboard raise. The Save
+                   button above stays: it saves without closing. */
+                const decision = await confirmCloseLiveWorkspace(workspace);
+                if (decision === CLOSE_SESSION_CANCEL) {
                     return;
                 }
                 /* Busy is a class, never rewritten markup (guardrail 8). */
                 closeButton.classList.add('is-busy');
                 try {
-                    await closeLiveWorkspace(workspace.workspace_id);
-                    showGridVibeNotice(`Closed ${workspaceDisplayLabel(workspace, index)}.`, 'success');
-                } catch (error) {
-                    showGridVibeNotice(
-                        describeFailure('The workspace could not be closed.', error),
-                        'error'
+                    const result = await runWorkspaceCloseDecision(
+                        workspace.workspace_id,
+                        decision
                     );
+                    if (result.ok) {
+                        showGridVibeNotice(`Closed ${workspaceDisplayLabel(workspace, index)}.`, 'success');
+                    } else {
+                        showGridVibeNotice(
+                            describeFailure(
+                                result.step === 'save'
+                                    ? 'The workspace could not be saved, so it was not closed.'
+                                    : 'The workspace could not be closed.',
+                                result.error
+                            ),
+                            'error'
+                        );
+                    }
                 } finally {
                     closeButton.classList.remove('is-busy');
                 }

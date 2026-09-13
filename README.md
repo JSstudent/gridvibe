@@ -121,18 +121,21 @@ Browser mode is the most reliable for microphone permissions. Settings apply liv
 
 If a local pane's folder has been deleted since it was saved, the pane opens with a notice naming it and does not run its startup command or agent somewhere else. The saved path is kept, so the pane comes back correctly once the folder does.
 
-Closing a workspace ends its terminals but keeps it available to restore. **Close and forget** drops both the workspace and its snapshot; closing only the window leaves its terminals running.
+Closing a workspace asks first and offers **Cancel**, **Save and close**, or **Close workspace**; a failed save cancels the close. It ends the workspace's terminals but keeps it available to restore. **Close and forget** drops both the workspace and its snapshot; closing only the window leaves its terminals running.
 
 ## Agent Dashboard
 
-One panel over whatever page you are on (`Alt+A`, or the button beside the session menu and in the launcher's control row) listing **every session in every workspace**, agents first.
+See **every session in every workspace**, agents first. Open the dashboard dialog with `Alt+A` or the dashboard button, or keep it beside your panes with the sidebar handle at the start of the session tab line.
 
+- **Keep the overview beside your work** — the docked sidebar stays open as you work or switch windows. Each workspace remembers whether it is open.
+- **Widen it when you need more room** — drag the sidebar's right edge from its default width up to twice that width. The chosen scale is saved with the workspace and adapts to the window size.
 - **Three levels** — a workspace is a titled band, a session tab is a card inside it drawn in that tab's own colour, and each agent is one row inside the card.
-- **Every agent on one line** — a status dot leading the row, then its mark and name, the chat title it announced, and `auto` when it was launched with auto-approval.
+- **Every agent on one line** — the sidebar shows a leading status dot, the agent's mark and its chat title. The dialog also draws the agent's name and `auto` when it was launched with auto-approval.
 - **The state is the dot's colour** — green working, amber idle, red unreachable. Point at a dot for the words: how long it has been idle, or what went wrong.
 - **The rest is one hover away** — pointing at a row gives the full chat title, where the pane is, and what it runs on (`SSH`, `WSL`, `PowerShell`, `cmd`).
 - **A badge that means something** — the button counts the agents **working right now**, not how many you have open. No badge means every agent is sitting at a prompt.
 - **Click anything to go there** — a row, its session, or its workspace opens or focuses that window at that tab.
+- **Close from either view** — a session card's **×** and a band's **Close workspace** both offer **Cancel**, **Save and close**, or the plain close; a failed save cancels the close. **Close window** in native mode keeps the sessions running; these actions leave the dashboard open.
 - **Sessions without agents are listed too**, sorted after the ones that have them, because this is also the fastest way to reach any tab in any window.
 - **Nothing is probed** — both readings come from the pane's own output, and nothing is ever typed into a running agent.
 
@@ -250,7 +253,7 @@ The one configurable chord in GridVibe is voice push-to-talk, set in App Setting
 
 **Top bar:** theme · max surface · broadcast typing · fullscreen · minimize all windows (native desktop mode only) · keyboard shortcuts · App Settings · chevron to hide the bar. Hide it and it slides back on hover from the handle at the top edge.
 
-**Session tab line:** the GridVibe menu, the agent dashboard button, and the back-to-launcher button sit ahead of the first tab, so they stay reachable with the top bar hidden. The menu holds two rows — **Sessions** (import, save, save as, save all) and **Workspace** (save, rename, new, open, move session, close) — and pointing at either opens its items beside it.
+**Session tab line:** the agent sidebar handle comes first, followed by the back-to-launcher button, the dashboard dialog button, and the GridVibe menu ahead of the first tab. All stay reachable with the top bar hidden. The menu holds two rows — **Sessions** (import, save, save as, save all) and **Workspace** (save, rename, new, open, move session, close) — and pointing at either opens its items beside it.
 
 ## Configuration
 

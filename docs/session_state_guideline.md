@@ -105,9 +105,18 @@ the immutable `MAX_STORED_SESSION_PANES`, never by
 `runtime_config.max_sessions` — a lowered preference must not rewrite a wider
 snapshot; it is enforced at launch instead, through `capacity_refusal()`.
 
-Workspace **chrome** (`topbar_visible`, `active_group_id`, native zoom,
+Workspace **chrome** (`topbar_visible`, `agent_sidebar_open`,
+`agent_sidebar_scale`, `active_group_id`, native zoom,
 `md_preset` / `md_font` / `source_font`) is a third, separately revisioned
 thing, owned by the workspace rather than by a group.
+
+The agent sidebar stores its width as an integer percent of the CSS default:
+`agent_sidebar_scale` is 100..200, so a viewport change preserves the chosen
+proportion. The scale and `agent_sidebar_open` are independently optional on
+the wire; omission preserves the live value. Invalid live values are refused,
+while absent or invalid stored values default to 100 and `False`. Both ride
+the workspace presentation revision and every workspace save/restore path;
+they are not pane fields or reusable session-preset settings.
 
 ### Fields That Are One Fact In Two
 
@@ -346,7 +355,7 @@ For a **launch** field (something a relaunch needs):
    differently. A field that only a restore can honestly replay — the same pane
    coming back, not a template building a new one — stays out of the preset.
 
-For a **presentation** field:
+For a **pane presentation** field:
 
 1. Add it to `PANE_PRESENTATION_FIELDS` and write its normalizer in
    `web/session_presentation.py`. **Type-check, never coerce.**
@@ -356,6 +365,16 @@ For a **presentation** field:
    DOM adapter only; any decision belongs in a DOM-free module.
 4. Add it to `_SESSION_SNAPSHOT_FIELDS` if it must also survive a restart.
 5. Extend the frozen contract test rather than weakening it.
+
+For **workspace chrome**, follow `agent_sidebar_open` and
+`agent_sidebar_scale`: add the workspace field, dictionary representation,
+get/set helpers, presentation transaction and live snapshot in the manager;
+normalize it in `web/session_presentation.py`; carry it through session-group
+read-back, runtime-state read/save, slot validation/building and both capture
+paths, lifecycle metadata and workspace save, and restore. The client needs
+the workspace descriptor/payload, explicit-save body, lifecycle metadata and
+session-group read-back. Keep new dimensions optional so older clients leave
+them alone, and test live rejection separately from stored fallback.
 
 When a **new pane kind** is added, every place that resolves `startup_mode`
 must learn it — a missing branch silently degrades the pane to a plain shell

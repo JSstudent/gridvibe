@@ -101,15 +101,30 @@ function harness(options) {
         confirmCloseWorkspace: async workspace => {
             log.push('confirm:workspace');
             confirmedWorkspace = workspace;
-            return settings.workspaceConfirmed !== false;
+            return settings.workspaceDecision === undefined
+                ? 'close'
+                : settings.workspaceDecision;
         },
-        closeLiveWorkspace: async workspaceId => {
-            log.push(`DELETE workspace:${workspaceId}`);
-            if (settings.workspaceCloseFails) {
-                const error = new Error('Could not close this workspace');
-                throw error;
+        /* The close service, stubbed at its own boundary: this window hands it
+           a decision and reads back which half went wrong. The save-then-close
+           ordering it performs is workspaces.js's and is pinned there. */
+        closeWorkspaceDecided: async (workspaceId, decision) => {
+            log.push(`decided:${decision} ${workspaceId}`);
+            if (settings.workspaceSaveFails) {
+                return {
+                    ok: false,
+                    step: 'save',
+                    error: new Error('The workspace window did not flush')
+                };
             }
-            return { closed: true };
+            if (settings.workspaceCloseFails) {
+                return {
+                    ok: false,
+                    step: 'close',
+                    error: new Error('Could not close this workspace')
+                };
+            }
+            return { ok: true, step: 'close', data: { closed: true } };
         },
         notifySavedSession: saved => log.push(`broadcast:${saved && saved.id}`),
         notifyWorkspacesChanged: reason => log.push(`workspaces:${reason}`),
@@ -584,7 +599,7 @@ class DashboardCloseWorkspaceTestCase(DashboardCloseNodeTestCase):
         )
         self.assertTrue(result["closed"])
         self.assertEqual(
-            result["log"], ["confirm:workspace", "DELETE workspace:ws-2", "refresh"]
+            result["log"], ["confirm:workspace", "decided:close ws-2", "refresh"]
         )
         # The band lists only agent-bearing sessions; the confirmation states
         # every live one, because that is what closing the workspace ends.
@@ -594,15 +609,66 @@ class DashboardCloseWorkspaceTestCase(DashboardCloseNodeTestCase):
         )
 
     def test_declining_the_workspace_confirm_closes_nothing(self):
+        """'cancel' is a truthy string, so a page that tested the answer as a
+        boolean would close the workspace on every dismissal."""
         result = self._run_node(
             """
-            const page = harness({ workspaceConfirmed: false });
+            const page = harness({ workspaceDecision: 'cancel' });
             const closed = await page.controller.closeWorkspace(workspaceTarget);
-            report({ closed, log: page.log });
+            const never = harness({ workspaceDecision: null });
+            const neverClosed = await never.controller.closeWorkspace(workspaceTarget);
+            report({ closed, log: page.log, neverClosed, neverLog: never.log });
             """
         )
         self.assertFalse(result["closed"])
         self.assertEqual(result["log"], ["confirm:workspace"])
+        self.assertFalse(result["neverClosed"])
+        self.assertEqual(result["neverLog"], ["confirm:workspace"])
+
+    def test_save_and_close_is_handed_over_whole_rather_than_composed_here(self):
+        """A session's preset can only be built from this window, so its
+        save-then-delete ordering lives here. A workspace's save is the same
+        one the launcher's card and the in-window menu run, so this window
+        passes the decision on instead of keeping a third copy of the rule --
+        and in particular never sends a save request of its own."""
+        result = self._run_node(
+            """
+            const page = harness({ workspaceDecision: 'save-and-close' });
+            const closed = await page.controller.closeWorkspace(workspaceTarget);
+            report({ closed, log: page.log, notices: page.notices });
+            """
+        )
+        self.assertTrue(result["closed"])
+        self.assertEqual(
+            result["log"],
+            ["confirm:workspace", "decided:save-and-close ws-2", "refresh"],
+        )
+        # No POST /save from here: the decision carried the save with it.
+        self.assertFalse([entry for entry in result["log"] if "/save" in entry])
+        self.assertEqual(result["notices"], [{"message": "", "tone": None}])
+
+    def test_a_workspace_whose_save_failed_is_not_reported_as_a_failed_close(self):
+        """The two failures leave the workspace open for opposite reasons, and
+        the reader is the one who has to decide whether to retry the save or
+        close without it."""
+        result = self._run_node(
+            """
+            const page = harness({ workspaceDecision: 'save-and-close', workspaceSaveFails: true });
+            const closed = await page.controller.closeWorkspace(workspaceTarget);
+            report({ closed, log: page.log, notices: page.notices });
+            """
+        )
+        self.assertFalse(result["closed"])
+        self.assertEqual(
+            result["notices"],
+            [
+                {
+                    "message": "The workspace window did not flush",
+                    "tone": "error",
+                }
+            ],
+        )
+        self.assertNotIn("refresh", result["log"])
 
     def test_a_workspace_that_could_not_be_closed_says_so(self):
         result = self._run_node(

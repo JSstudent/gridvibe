@@ -21,9 +21,14 @@
     const SAVED_SESSION_BROADCAST_CHANNEL = 'gridvibe.savedSessions';
     const SAVED_SESSION_UPDATE_STORAGE_KEY = 'gridvibe.savedSessionUpdated';
     const TOPBAR_VISIBILITY_STORAGE_KEY = 'gridvibe.terminalTopbarVisibility';
+    const AGENT_SIDEBAR_STORAGE_KEY = 'gridvibe.agentSidebarOpen';
 
     function workspaceTopbarVisibilityStorageKey(workspaceId) {
         return `${TOPBAR_VISIBILITY_STORAGE_KEY}.${String(workspaceId || 'default')}`;
+    }
+
+    function workspaceAgentSidebarStorageKey(workspaceId) {
+        return `${AGENT_SIDEBAR_STORAGE_KEY}.${String(workspaceId || 'default')}`;
     }
 
     /* The lifecycle window id is stable per *window*, not per page load:
@@ -72,12 +77,37 @@
         } catch (_) {}
     }
 
-    /* The top-bar key is only a same-window restoration cache for a value the
-       workspace record owns, so forgetting a workspace drops its key too —
+    /* The docked agent dashboard, cached the same way and for the same reason:
+       a reload paints the panel the workspace had before the server has
+       answered. `null` is "this workspace has never said", which the page
+       distinguishes from a stored `false` only in that both end up shut — the
+       distinction is kept so a future default could change without every
+       workspace that never chose being read as having chosen. */
+    function getStoredWorkspaceAgentSidebarOpen(workspaceId) {
+        try {
+            const stored = localStorage.getItem(workspaceAgentSidebarStorageKey(workspaceId));
+            return stored === null ? null : stored === 'open';
+        } catch (_) {
+            return null;
+        }
+    }
+
+    function storeWorkspaceAgentSidebarOpen(workspaceId, open) {
+        try {
+            localStorage.setItem(
+                workspaceAgentSidebarStorageKey(workspaceId),
+                open ? 'open' : 'shut'
+            );
+        } catch (_) {}
+    }
+
+    /* These two keys are only same-window restoration caches for values the
+       workspace record owns, so forgetting a workspace drops them too —
        otherwise one dead key per forgotten workspace would linger forever. */
     function clearStoredWorkspaceTopbarVisible(workspaceId) {
         try {
             localStorage.removeItem(workspaceTopbarVisibilityStorageKey(workspaceId));
+            localStorage.removeItem(workspaceAgentSidebarStorageKey(workspaceId));
         } catch (_) {}
     }
 

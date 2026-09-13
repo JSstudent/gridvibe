@@ -381,7 +381,7 @@
             || typeof descriptor.mdFont !== 'string'
             || typeof descriptor.sourceFont !== 'string'
         ) return null;
-        return {
+        const payload = {
             workspace_id: workspaceId,
             expected_revision: Number.isInteger(descriptor.revision) && descriptor.revision >= 0
                 ? descriptor.revision
@@ -391,6 +391,16 @@
             md_font: descriptor.mdFont,
             source_font: descriptor.sourceFont
         };
+        /* Stated only when the page has an answer. The transaction leaves a
+           dimension its payload does not carry, so a descriptor built before
+           the docked dashboard exists on the page cannot reset it. */
+        if (typeof descriptor.agentSidebarOpen === 'boolean') {
+            payload.agent_sidebar_open = descriptor.agentSidebarOpen;
+        }
+        if (Number.isInteger(descriptor.agentSidebarScale)) {
+            payload.agent_sidebar_scale = descriptor.agentSidebarScale;
+        }
+        return payload;
     }
 
     /* ── The controller the page wires its change events to ──────────────
