@@ -1400,6 +1400,10 @@ def _restore_claimed_workspace(resolved_workspace_id: str) -> Dict[str, Any]:
         resolved_workspace_id,
         slot.get("topbar_visible", True),
     )
+    session_manager.set_agent_sidebar_open(
+        resolved_workspace_id,
+        slot.get("agent_sidebar_open", False),
+    )
     session_manager.set_workspace_appearance(
         resolved_workspace_id,
         md_preset=slot["md_preset"],
@@ -1431,6 +1435,7 @@ def _restore_claimed_workspace(resolved_workspace_id: str) -> Dict[str, Any]:
         "active_group_id": active_group_id,
         "native_zoom_factor": slot.get("native_zoom_factor"),
         "topbar_visible": slot.get("topbar_visible", True),
+        "agent_sidebar_open": slot.get("agent_sidebar_open", False),
         "md_preset": slot["md_preset"],
         "md_font": slot["md_font"],
         "source_font": slot["source_font"],

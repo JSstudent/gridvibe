@@ -167,6 +167,11 @@ def normalize_topbar_visible(value: Any) -> Optional[bool]:
     return value if isinstance(value, bool) else None
 
 
+def normalize_agent_sidebar_open(value: Any) -> Optional[bool]:
+    """Normalize the docked agent dashboard's visibility without coercion."""
+    return value if isinstance(value, bool) else None
+
+
 def normalize_workspace_appearance(data: Any) -> Optional[Dict[str, str]]:
     """Type-check one workspace-global explorer appearance.
 
@@ -1145,6 +1150,7 @@ def normalize_workspace_presentation(data: Any) -> Dict[str, Any]:
         "workspace_id",
         "expected_revision",
         "topbar_visible",
+        "agent_sidebar_open",
         "md_preset",
         "md_font",
         "source_font",
@@ -1168,6 +1174,18 @@ def normalize_workspace_presentation(data: Any) -> Dict[str, Any]:
         "expected_revision": revision,
         "topbar_visible": topbar_visible,
     }
+    # Optional, unlike the bar beside it. The docked dashboard postdates this
+    # transaction, so a payload that says nothing about it is a client that
+    # does not have one -- and the transaction leaves what it does not state.
+    if "agent_sidebar_open" in data:
+        agent_sidebar_open = normalize_agent_sidebar_open(
+            data.get("agent_sidebar_open")
+        )
+        if agent_sidebar_open is None:
+            raise PresentationValidationError(
+                "'agent_sidebar_open' must be a boolean"
+            )
+        normalized["agent_sidebar_open"] = agent_sidebar_open
     appearance_keys = {"md_preset", "md_font", "source_font"}
     supplied_appearance = appearance_keys & data.keys()
     if supplied_appearance and supplied_appearance != appearance_keys:

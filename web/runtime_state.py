@@ -63,6 +63,7 @@ from web.session_presentation import (
     MAX_STORED_SESSION_PANES,
     PresentationValidationError,
     default_workspace_appearance,
+    normalize_agent_sidebar_open,
     normalize_pane_presentation_fields,
     normalize_topbar_visible,
     normalize_workspace_appearance,
@@ -352,8 +353,8 @@ def _validate_group(group: Any) -> Optional[Dict[str, Any]]:
     6). Keeping the readable panes restored a *smaller* group and reported it
     as an exact restore, and the next autosave then committed the smaller shape
     over the good one. The boundary is narrow and worth stating: **launchable
-    shape fails; window chrome degrades.** An invalid stored ``topbar_visible``
-    or appearance value still falls back to its default in
+    shape fails; window chrome degrades.** An invalid stored ``topbar_visible``,
+    ``agent_sidebar_open`` or appearance value still falls back to its default in
     :func:`_validate_slot` rather than costing the user a whole workspace.
 
     Layout and connection mode are normalized through the same helpers the
@@ -463,6 +464,13 @@ def _validate_slot(workspace_id: Any, slot: Any) -> Optional[Dict[str, Any]]:
     validated["topbar_visible"] = (
         normalized_topbar_visible if normalized_topbar_visible is not None else True
     )
+    # Absent as well as invalid: every slot written before the docked dashboard
+    # existed carries no such field, and a workspace restored out of one opens
+    # with the panel shut, which is what it had.
+    normalized_agent_sidebar = normalize_agent_sidebar_open(
+        slot.get("agent_sidebar_open")
+    )
+    validated["agent_sidebar_open"] = bool(normalized_agent_sidebar)
     appearance = normalize_workspace_appearance(slot)
     if appearance is None:
         legacy_panes = [
@@ -796,6 +804,7 @@ class RuntimeStateStore:
         saved_at: float,
         native_zoom_factor: Optional[float],
         topbar_visible: bool,
+        agent_sidebar_open: bool,
         md_preset: str,
         md_font: str,
         source_font: str,
@@ -819,6 +828,7 @@ class RuntimeStateStore:
                 active_group_id if active_group_id in captured_group_ids else ""
             ),
             "topbar_visible": topbar_visible,
+            "agent_sidebar_open": agent_sidebar_open,
             "md_preset": md_preset,
             "md_font": md_font,
             "source_font": source_font,
@@ -849,6 +859,7 @@ class RuntimeStateStore:
         active_group_id: Optional[str] = None,
         native_zoom_factor: Any = None,
         topbar_visible: Any = None,
+        agent_sidebar_open: Any = None,
     ) -> Optional[Dict[str, Any]]:
         """Capture one workspace's shape and persist its slot. See module docs."""
         workspace_id = normalize_workspace_id(workspace_id)
@@ -879,6 +890,13 @@ class RuntimeStateStore:
             )
         if normalized_topbar_visible is None:
             normalized_topbar_visible = True
+        normalized_agent_sidebar = normalize_agent_sidebar_open(agent_sidebar_open)
+        if normalized_agent_sidebar is None:
+            normalized_agent_sidebar = normalize_agent_sidebar_open(
+                live_snapshot.get("agent_sidebar_open")
+            )
+        if normalized_agent_sidebar is None:
+            normalized_agent_sidebar = False
         workspace_label = str(live_snapshot.get("label") or "").strip()
         appearance = normalize_workspace_appearance(live_snapshot)
         if appearance is None:
@@ -907,6 +925,7 @@ class RuntimeStateStore:
                 saved_at=time.time(),
                 native_zoom_factor=normalized_zoom,
                 topbar_visible=normalized_topbar_visible,
+                agent_sidebar_open=normalized_agent_sidebar,
                 **appearance,
             )
             slot["revision"] = self._bump_revision(
@@ -984,6 +1003,11 @@ class RuntimeStateStore:
                     if isinstance(metadata.get("topbar_visible"), bool)
                     else snapshot.get("topbar_visible")
                 )
+                agent_sidebar_open = (
+                    metadata.get("agent_sidebar_open")
+                    if isinstance(metadata.get("agent_sidebar_open"), bool)
+                    else snapshot.get("agent_sidebar_open")
+                )
                 slot = self._build_slot(
                     workspace_id=workspace_id,
                     groups=groups,
@@ -1001,6 +1025,7 @@ class RuntimeStateStore:
                         if isinstance(topbar_visible, bool)
                         else True
                     ),
+                    agent_sidebar_open=bool(agent_sidebar_open),
                     **(
                         normalize_workspace_appearance(snapshot)
                         or default_workspace_appearance()
@@ -1228,6 +1253,7 @@ def capture_workspace(
     active_group_id: Optional[str] = None,
     native_zoom_factor: Any = None,
     topbar_visible: Any = None,
+    agent_sidebar_open: Any = None,
 ) -> Optional[Dict[str, Any]]:
     """Capture one workspace's shape from the live manager and persist its slot.
 
@@ -1257,6 +1283,7 @@ def capture_workspace(
         active_group_id=active_group_id,
         native_zoom_factor=native_zoom_factor,
         topbar_visible=topbar_visible,
+        agent_sidebar_open=agent_sidebar_open,
     )
 
 

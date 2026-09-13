@@ -635,8 +635,9 @@ def normalize_workspace_metadata(
     field is dropped and the capture falls back to the server's own hint, which
     :meth:`RuntimeStateStore._build_slot` re-validates anyway.
 
-    Malformed *types* — a non-boolean ``topbar_visible``, an out-of-range native
-    zoom — still raise: those indicate a broken client, not a disagreement.
+    Malformed *types* — a non-boolean ``topbar_visible`` or
+    ``agent_sidebar_open``, an out-of-range native zoom — still raise: those
+    indicate a broken client, not a disagreement.
     """
     if not isinstance(metadata_by_workspace, dict):
         return {}
@@ -668,6 +669,13 @@ def normalize_workspace_metadata(
                         f"Workspace {workspace_id} reported invalid top-bar state"
                     )
                 candidate["topbar_visible"] = raw["topbar_visible"]
+            if "agent_sidebar_open" in raw:
+                if not isinstance(raw.get("agent_sidebar_open"), bool):
+                    raise LifecycleValidationError(
+                        f"Workspace {workspace_id} reported invalid "
+                        "agent-sidebar state"
+                    )
+                candidate["agent_sidebar_open"] = raw["agent_sidebar_open"]
             if "native_zoom_factor" in raw and raw.get("native_zoom_factor") is not None:
                 zoom = normalize_native_zoom_factor(raw.get("native_zoom_factor"))
                 if zoom is None:
@@ -945,6 +953,7 @@ def prepare_workspace_save(
         }, 503
 
     topbar_visible = metadata.get("topbar_visible")
+    agent_sidebar_open = metadata.get("agent_sidebar_open")
     try:
         slot = capture_workspace(
             session_manager,
@@ -953,6 +962,9 @@ def prepare_workspace_save(
             active_group_id=metadata.get("active_group_id") or None,
             native_zoom_factor=metadata.get("native_zoom_factor"),
             topbar_visible=topbar_visible if isinstance(topbar_visible, bool) else None,
+            agent_sidebar_open=(
+                agent_sidebar_open if isinstance(agent_sidebar_open, bool) else None
+            ),
         )
     except RuntimeStatePersistenceError as exc:
         # Never answer "saved" for a revision that did not reach the disk.
@@ -991,6 +1003,7 @@ def prepare_workspace_save(
         "active_group_id": slot["active_group_id"],
         "native_zoom_factor": slot.get("native_zoom_factor"),
         "topbar_visible": slot["topbar_visible"],
+        "agent_sidebar_open": slot["agent_sidebar_open"],
     }, 200
 
 

@@ -344,6 +344,14 @@
         return getStoredWorkspaceTopbarVisible(currentWorkspaceId) ?? true;
     }
 
+    /* The docked agent dashboard's state, read the way the top bar's is: off
+       the body class `dashboard-sidebar.js` writes on every apply. A class and
+       not the module, so a descriptor or a save built before that module has
+       wired still answers -- and answers "shut", which is what the page is. */
+    function agentSidebarIsOpen() {
+        return document.body.classList.contains('agent-sidebar-open');
+    }
+
     function updateTopbarToggleButton(visible) {
         const button = document.getElementById('topbarToggleBtn');
         const path = document.getElementById('topbarTogglePath');
@@ -2423,6 +2431,7 @@
                             workspaceId: currentWorkspaceId,
                             revision: workspacePresentationRevision,
                             topbarVisible: !document.body.classList.contains('topbar-collapsed'),
+                            agentSidebarOpen: agentSidebarIsOpen(),
                             mdPreset: appearance.preset,
                             mdFont: appearance.font,
                             sourceFont: appearance.sourceFont
@@ -2881,7 +2890,8 @@
                     workspace_id: currentWorkspaceId,
                     active_group_id: activeGroupId,
                     native_zoom_factor: nativeZoomFactor,
-                    topbar_visible: !document.body.classList.contains('topbar-collapsed')
+                    topbar_visible: !document.body.classList.contains('topbar-collapsed'),
+                    agent_sidebar_open: agentSidebarIsOpen()
                 })
             });
             const data = await response.json().catch(() => ({}));
@@ -7863,6 +7873,12 @@
                controller reports; nothing to decide here. */
             applyTopbarVisibility(data.topbar_visible, { persist: true });
         }
+        /* The workspace record is the authority on the docked dashboard; the
+           local cache only painted the column before this read landed. Applied
+           without reporting, because this value came *from* the server. */
+        if (typeof data.agent_sidebar_open === 'boolean') {
+            applyAgentDashboardSidebar(data.agent_sidebar_open, { persist: true });
+        }
         setExplorerWorkspaceAppearance({
             preset: data.md_preset,
             font: data.md_font,
@@ -8368,7 +8384,8 @@
             metadata: async () => ({
                 active_group_id: activeGroupId,
                 native_zoom_factor: await getCurrentWorkspaceNativeZoomFactor(),
-                topbar_visible: !document.body.classList.contains('topbar-collapsed')
+                topbar_visible: !document.body.classList.contains('topbar-collapsed'),
+                agent_sidebar_open: agentSidebarIsOpen()
             })
         });
 
@@ -8591,6 +8608,7 @@
     initSurfaceMode();
     wireSessionMenu();
     wireDashboard();
+    wireAgentDashboardSidebar();
     topbarPeek.attach();
     applyTopbarVisibility(getStoredTopbarVisible());
     setupAppConfigUpdateListeners();

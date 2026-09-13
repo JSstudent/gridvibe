@@ -1022,9 +1022,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         # Nothing in that row paints from currentColor any more, so the button
         # rule no longer carries a stroke colour for a glyph it has not got.
         terminals_css = self._static("css/terminals.css")
-        box = self._css_rule(
-            terminals_css, r"\.settings-window-btn,\s*\.session-bar-dashboard-btn"
-        )
+        box = self._css_rule(terminals_css, r"\.settings-window-btn,[^{]*")
         self.assertNotIn("color:", box)
 
     def test_session_bar_controls_share_one_drawn_mark(self):
@@ -1090,7 +1088,7 @@ class ApiRoutesTestCase(unittest.TestCase):
             return float(value.removesuffix("px"))
 
         for bar, button in (
-            (r"\.session-bar", r"\.settings-window-btn,\s*\.session-bar-dashboard-btn"),
+            (r"\.session-bar", r"\.settings-window-btn,[^{]*"),
             (
                 r"body\.surface-max \.session-bar",
                 r"body\.surface-max \.settings-window-btn",
@@ -1109,18 +1107,13 @@ class ApiRoutesTestCase(unittest.TestCase):
         its artwork happened to be. It now shares the launcher's whole box."""
         terminals_css = self._static("css/terminals.css")
 
-        box = self._css_rule(
-            terminals_css, r"\.settings-window-btn,\s*\.session-bar-dashboard-btn"
-        )
+        box = self._css_rule(terminals_css, r"\.settings-window-btn,[^{]*")
         self.assertIn("width: 38px;", box)
         self.assertIn("height: 34px;", box)
         self.assertIn("border: 1px solid var(--t-border-tab);", box)
         self.assertIn("background: var(--t-btn-bg);", box)
 
-        hover = self._css_rule(
-            terminals_css,
-            r"\.settings-window-btn:hover,\s*\.session-bar-dashboard-btn:hover",
-        )
+        hover = self._css_rule(terminals_css, r"\.settings-window-btn:hover,[^{]*")
         self.assertIn("border-color: var(--t-accent);", hover)
         self.assertIn("background: var(--t-btn-hover-bg);", hover)
 
@@ -19121,7 +19114,7 @@ class StyleThemingTestCase(unittest.TestCase):
         # the rule states no colour at all and every value it does state is a
         # token.
         block = re.search(
-            r"\.settings-window-btn,\s*\.session-bar-dashboard-btn \{.*?\}",
+            r"\.settings-window-btn,[^{]*\{.*?\}",
             terminals_css,
             re.DOTALL,
         ).group(0)

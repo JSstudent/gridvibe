@@ -965,7 +965,8 @@
            group that is not a plain glyph was also the one that did not look
            like a member of it. */
         .settings-window-btn,
-        .session-bar-dashboard-btn {
+        .session-bar-dashboard-btn,
+        .agent-sidebar-toggle-btn {
             width: 38px;
             height: 34px;
             min-width: 38px;
@@ -974,7 +975,15 @@
             background: var(--t-btn-bg);
         }
         .settings-window-btn:hover,
-        .session-bar-dashboard-btn:hover {
+        .session-bar-dashboard-btn:hover,
+        .agent-sidebar-toggle-btn:hover {
+            border-color: var(--t-accent);
+            background: var(--t-btn-hover-bg);
+        }
+        /* The one control in the row that is a *state* as well as an action:
+           while the column is up, its handle stays lit, so the panel and the
+           button that produced it can be seen to be the same thing. */
+        .agent-sidebar-toggle-btn[aria-pressed="true"] {
             border-color: var(--t-accent);
             background: var(--t-btn-hover-bg);
         }
@@ -1139,14 +1148,23 @@
             box-shadow: 0 12px 24px rgba(0, 0, 0, 0.32);
         }
 
-        /* Launcher button at the head of the session tab line, so it owns the
-           leading gutter; its box, border and hover come from the shared rule
-           above. */
-        .session-bar-launcher-btn {
+        /* The docked dashboard's handle heads the line, over the column it
+           opens, so it owns the leading gutter; its box, border and hover come
+           from the shared rule above and its mark is sized in
+           agent-dashboard-sidebar.css. */
+        .agent-sidebar-toggle-btn {
             flex: 0 0 auto;
             align-self: center;
             justify-content: center;
             margin: 8px 0 8px 12px;
+        }
+        /* Launcher button, second in the line and so on the inter-button gap;
+           its box, border and hover come from the shared rule above. */
+        .session-bar-launcher-btn {
+            flex: 0 0 auto;
+            align-self: center;
+            justify-content: center;
+            margin: 8px 0 8px 8px;
         }
         /* Seated between the launcher and the session menu, wearing the same
            vertical rhythm as both so the three read as one group. */
@@ -2093,8 +2111,12 @@
             height: 9px;
         }
 
-        body.surface-max .session-bar-launcher-btn {
+        body.surface-max .agent-sidebar-toggle-btn {
             margin: 4px 0 4px 8px;
+        }
+
+        body.surface-max .session-bar-launcher-btn {
+            margin: 4px 0 4px 6px;
         }
 
         body.surface-max .session-bar-dashboard-btn {
