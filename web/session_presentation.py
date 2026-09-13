@@ -37,6 +37,8 @@ EXPLORER_MAX_EXPANDED_PATHS = 128
 EXPLORER_MAX_GIT_EXPANDED = 128
 EXPLORER_SIDEBAR_WIDTH_MIN = 180
 EXPLORER_SIDEBAR_WIDTH_MAX = 520
+AGENT_SIDEBAR_SCALE_MIN = 100
+AGENT_SIDEBAR_SCALE_MAX = 200
 EXPLORER_SCROLL_PANELS = ("source", "preview", "diff", "directory")
 # Repository-search result scroll is deliberately ephemeral (product decision
 # 4). Files and Git have structural navigation whose scroll can be restored
@@ -170,6 +172,13 @@ def normalize_topbar_visible(value: Any) -> Optional[bool]:
 def normalize_agent_sidebar_open(value: Any) -> Optional[bool]:
     """Normalize the docked agent dashboard's visibility without coercion."""
     return value if isinstance(value, bool) else None
+
+
+def normalize_agent_sidebar_scale(value: Any) -> Optional[int]:
+    """Integer percent of the CSS default width; never coerce wire values."""
+    if type(value) is not int:
+        return None
+    return value if AGENT_SIDEBAR_SCALE_MIN <= value <= AGENT_SIDEBAR_SCALE_MAX else None
 
 
 def normalize_workspace_appearance(data: Any) -> Optional[Dict[str, str]]:
@@ -1151,6 +1160,7 @@ def normalize_workspace_presentation(data: Any) -> Dict[str, Any]:
         "expected_revision",
         "topbar_visible",
         "agent_sidebar_open",
+        "agent_sidebar_scale",
         "md_preset",
         "md_font",
         "source_font",
@@ -1186,6 +1196,13 @@ def normalize_workspace_presentation(data: Any) -> Dict[str, Any]:
                 "'agent_sidebar_open' must be a boolean"
             )
         normalized["agent_sidebar_open"] = agent_sidebar_open
+    if "agent_sidebar_scale" in data:
+        scale = normalize_agent_sidebar_scale(data["agent_sidebar_scale"])
+        if scale is None:
+            raise PresentationValidationError(
+                "'agent_sidebar_scale' must be an integer from 100 to 200"
+            )
+        normalized["agent_sidebar_scale"] = scale
     appearance_keys = {"md_preset", "md_font", "source_font"}
     supplied_appearance = appearance_keys & data.keys()
     if supplied_appearance and supplied_appearance != appearance_keys:

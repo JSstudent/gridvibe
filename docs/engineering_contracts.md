@@ -585,6 +585,13 @@ unless the task explicitly changes this contract.
   Reject launch/credential/status fields. The client queue keeps one write in
   flight, coalesces latest state, applies a one-second floor during continuous
   changes, rebases conflicts, bounds repair and supplies the flush barrier.
+- `agent_sidebar_open` and `agent_sidebar_scale` are optional workspace chrome
+  fields: omitting either leaves that dimension alone. The scale is an integer
+  percent from 100 to 200, normalized in `web/session_presentation.py` beside
+  `AGENT_SIDEBAR_SCALE_MIN/MAX`; booleans, strings, floats and out-of-range values
+  are invalid live input. Stored reads default absent or invalid chrome to
+  `False` and `100`. Both fields follow the workspace presentation transaction,
+  live snapshot, explicit save, autosave, lifecycle flush/capture and restore.
 - Persist durable tabs/mode/Diff/navigation intent separately from revision-bound
   per-panel scroll/folds. Never persist fetched content, search query/results or
   dirty buffers. Viewer find is runtime state of tab + path, reapplied on render
@@ -783,16 +790,17 @@ unless the task explicitly changes this contract.
   pane runs — the mode transitions and the shell/agent relaunch — repaints the
   pane header's name and agent glyph from the session it got back. Plain,
   explorer, and browser panes carry no agent glyph.
-- The dashboard is a **dialog over the page that raised it**
+- The dashboard opened by `Alt+A` or the dashboard button is a **dialog over
+  the page that raised it**
   (`dashboard-dialog.js` over `partials/agent_dashboard_dialog.html`), not a
-  window and not a panel. It has no route and no native window of its own:
+  separate window. It has no route and no native window of its own:
   `/dashboard` is not served, nothing registers it for minimize or teardown,
   and `_should_exit_after_window_close()` grants it no exemption. Its root is
   the app's own `.modal-shell`, so both pages' scrim and blur already cover it
   and `EXPLORER_ESCAPE_CLAIM_SELECTOR` already claims Escape for it. Include
   the partial *before* the confirm dialogs on each page; at equal z-index the
   later element wins.
-- It polls only while it is open. Opening arms the poll, reads once, publishes
+- The dialog polls only while it is open. Opening arms the poll, reads once, publishes
   the exclusivity claim below and moves focus to the surface rather than to a
   control in it; closing disarms the poll, aborts what is in flight, and clears
   the action notice while leaving the read notice describing the tree still on
@@ -821,6 +829,29 @@ unless the task explicitly changes this contract.
   requests. Badge and dialog reads have bounded deadlines, cancel on
   hide/pagehide, refresh on focus, reject malformed payloads, and discard
   answers superseded by a newer request.
+- The workspace also carries a docked dashboard: `dashboard-sidebar.js` over
+  `partials/agent_dashboard_sidebar.html`, beside the grid in `.workspace-body`.
+  Its handle heads the session tab line. It is workspace chrome, with no scrim,
+  Escape dismissal, focus lease or exclusivity claim, and stays open when the
+  reader leaves the window. It reads the same dashboard payload and uses the
+  dialog's field renderers and target resolver. The narrow row draws the dot,
+  agent mark and chat title; the agent name remains in the accessible text.
+  Polling runs every four seconds only while open and the document is visible.
+  Unchanged markup is skipped; a rebuild preserves scroll and focus. Read
+  failures retain the last good tree, and successful polls leave action notices
+  intact.
+- Sidebar width is `calc(var(--agent-sidebar-width) *
+  var(--agent-sidebar-scale, 1))`, with the base owned solely by the CSS clamp
+  `clamp(240px, 15%, 400px)`. Dragging measures the rendered border-box width
+  divided by its current scale, never restating the clamp in JavaScript. The
+  edge button captures the pointer and listens for move/up/cancel on the window;
+  each move writes a scale clamped to 100..200. Release reports the changed
+  integer percent and calls `onLayoutChanged` once; live pane ResizeObservers
+  handle the drag without a second explicit refit on every move. Cancellation
+  restores the starting width without reporting. `apply()` also refits when a
+  restored width changes. The sidebar stylesheet owns the 22px session × and
+  a separate row for workspace word buttons beneath the band heading; shared
+  `agent-dashboard.css` rules and palette tokens remain the styling owners.
 - A row lands on the pane it names, not merely on the window. The workspace the
   reader is already in is applied directly through `applyWorkspaceFocusTarget`,
   because raising an already-raised window fires no `focus` event; every other
@@ -836,7 +867,16 @@ unless the task explicitly changes this contract.
   and close* saves first and closes only if that succeeded. Close window is
   **withheld** in browser mode rather than disabled, because `window.close()`
   from here would close the dashboard's own page. The in-flight guard is module
-  state keyed by target, not a class on a button the poll may replace.
+  state keyed by target, not a class on a button the poll may replace. The
+  dialog and sidebar share one `GridVibeDashboardClose` controller instance;
+  it claims the guard before reading status or opening a prompt and releases
+  it on cancellation, failure or completion. `run(action, target, element,
+  { notice, refresh })` accepts per-call reporting hooks, defaulting to the
+  dialog's hooks; sidebar calls supply its own notice and refresh. Hooks are
+  local to the call, never reassigned on the controller. Closing a target
+  leaves the dashboard surface open. Both surfaces invalidate their rendered
+  caches and refresh on `pywebviewready` so the native window verb can appear
+  after the first paint.
 - The badge paints `totals.working` and validates that same field — a payload
   accepted on one count and painted from another reports `0` where it should
   report `?`. No working agent hides the badge rather than showing a zero: a

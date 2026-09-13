@@ -64,6 +64,7 @@ from web.session_presentation import (
     PresentationValidationError,
     default_workspace_appearance,
     normalize_agent_sidebar_open,
+    normalize_agent_sidebar_scale,
     normalize_pane_presentation_fields,
     normalize_topbar_visible,
     normalize_workspace_appearance,
@@ -471,6 +472,9 @@ def _validate_slot(workspace_id: Any, slot: Any) -> Optional[Dict[str, Any]]:
         slot.get("agent_sidebar_open")
     )
     validated["agent_sidebar_open"] = bool(normalized_agent_sidebar)
+    validated["agent_sidebar_scale"] = (
+        normalize_agent_sidebar_scale(slot.get("agent_sidebar_scale")) or 100
+    )
     appearance = normalize_workspace_appearance(slot)
     if appearance is None:
         legacy_panes = [
@@ -805,6 +809,7 @@ class RuntimeStateStore:
         native_zoom_factor: Optional[float],
         topbar_visible: bool,
         agent_sidebar_open: bool,
+        agent_sidebar_scale: int,
         md_preset: str,
         md_font: str,
         source_font: str,
@@ -829,6 +834,7 @@ class RuntimeStateStore:
             ),
             "topbar_visible": topbar_visible,
             "agent_sidebar_open": agent_sidebar_open,
+            "agent_sidebar_scale": agent_sidebar_scale,
             "md_preset": md_preset,
             "md_font": md_font,
             "source_font": source_font,
@@ -860,6 +866,7 @@ class RuntimeStateStore:
         native_zoom_factor: Any = None,
         topbar_visible: Any = None,
         agent_sidebar_open: Any = None,
+        agent_sidebar_scale: Any = None,
     ) -> Optional[Dict[str, Any]]:
         """Capture one workspace's shape and persist its slot. See module docs."""
         workspace_id = normalize_workspace_id(workspace_id)
@@ -897,6 +904,11 @@ class RuntimeStateStore:
             )
         if normalized_agent_sidebar is None:
             normalized_agent_sidebar = False
+        normalized_scale = (
+            normalize_agent_sidebar_scale(agent_sidebar_scale)
+            or normalize_agent_sidebar_scale(live_snapshot.get("agent_sidebar_scale"))
+            or 100
+        )
         workspace_label = str(live_snapshot.get("label") or "").strip()
         appearance = normalize_workspace_appearance(live_snapshot)
         if appearance is None:
@@ -926,6 +938,7 @@ class RuntimeStateStore:
                 native_zoom_factor=normalized_zoom,
                 topbar_visible=normalized_topbar_visible,
                 agent_sidebar_open=normalized_agent_sidebar,
+                agent_sidebar_scale=normalized_scale,
                 **appearance,
             )
             slot["revision"] = self._bump_revision(
@@ -1026,6 +1039,11 @@ class RuntimeStateStore:
                         else True
                     ),
                     agent_sidebar_open=bool(agent_sidebar_open),
+                    agent_sidebar_scale=(
+                        normalize_agent_sidebar_scale(metadata.get("agent_sidebar_scale"))
+                        or normalize_agent_sidebar_scale(snapshot.get("agent_sidebar_scale"))
+                        or 100
+                    ),
                     **(
                         normalize_workspace_appearance(snapshot)
                         or default_workspace_appearance()
@@ -1254,6 +1272,7 @@ def capture_workspace(
     native_zoom_factor: Any = None,
     topbar_visible: Any = None,
     agent_sidebar_open: Any = None,
+    agent_sidebar_scale: Any = None,
 ) -> Optional[Dict[str, Any]]:
     """Capture one workspace's shape from the live manager and persist its slot.
 
@@ -1284,6 +1303,7 @@ def capture_workspace(
         native_zoom_factor=native_zoom_factor,
         topbar_visible=topbar_visible,
         agent_sidebar_open=agent_sidebar_open,
+        agent_sidebar_scale=agent_sidebar_scale,
     )
 
 

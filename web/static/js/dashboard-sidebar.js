@@ -66,6 +66,10 @@
         setBodyClass: (name, on) => doc.body?.classList?.toggle(name, on),
         activeElement: () => doc.activeElement,
         onVisibilityChange: handler => doc.addEventListener('visibilitychange', handler),
+        onBridgeReady: handler => root.addEventListener?.('pywebviewready', handler),
+        addWindowListener: (type, handler) => root.addEventListener(type, handler),
+        removeWindowListener: (type, handler) => root.removeEventListener(type, handler),
+        getCloseActions: () => root.GridVibeDashboardClose,
         documentHidden: () => Boolean(doc.hidden),
         setInterval: (fn, ms) => root.setInterval(fn, ms),
         clearInterval: handle => root.clearInterval(handle),
@@ -175,6 +179,7 @@
     };
     root.applyAgentDashboardSidebar = (open, options) => controller.apply(open, options);
     root.agentDashboardSidebarOpen = () => controller.isOpen();
+    root.agentDashboardSidebarScale = () => controller.getScale();
     root.refreshAgentDashboardSidebar = () => controller.refresh();
 }(typeof window !== 'undefined' ? window : null, function () {
     const SHELL_ID = 'agentSidebar';
@@ -185,7 +190,16 @@
     const CLOSE_BTN_ID = 'agentSidebarCloseBtn';
     const TOGGLE_BTN_ID = 'agentSidebarToggleBtn';
     const TOGGLE_ICON_ID = 'agentSidebarToggleIcon';
+    const RESIZER_ID = 'agentSidebarResizer';
     const OPEN_BODY_CLASS = 'agent-sidebar-open';
+    const SIDEBAR_SCALE_MIN = 100;
+    const SIDEBAR_SCALE_MAX = 200;
+
+    function clampScale(value) {
+        return Number.isFinite(value)
+            ? Math.max(SIDEBAR_SCALE_MIN, Math.min(SIDEBAR_SCALE_MAX, Math.round(value)))
+            : SIDEBAR_SCALE_MIN;
+    }
 
     /* Slower than the dialog's two seconds, deliberately. The dialog is a
        surface the reader opened to look at and will shut again; this one may
@@ -237,12 +251,21 @@
         `;
     }
 
-    /* One session tab, as a card in its own tab's colour — the heading is the
-       way to the tab, the rows are the way to the panes inside it. No close
-       verbs: this panel is a way *to* things, and the × that ends a session
-       lives on the tab it names and in the dialog. */
-    function sessionHtml(group, render) {
+    /* The heading navigates; its compact × runs the shared close controller. */
+    function sessionHtml(group, render, actions) {
         const esc = render.esc;
+        const name = String(group?.name || group?.group_id || '');
+        const closeTitle = actions?.policy.sessionCloseTitle(`"${name}"`) || '';
+        const closeButton = actions ? `
+            <button type="button" class="dash-session-close"
+                data-dashboard-action="close-session"
+                data-dashboard-key="close-session:${esc(group?.group_id || '')}"
+                data-workspace-id="${esc(group?.workspace_id || '')}"
+                data-group-id="${esc(group?.group_id || '')}"
+                data-session-name="${esc(name)}"
+                title="${esc(closeTitle)}" aria-label="${esc(closeTitle)}">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true" focusable="false"><path d="M18 6 6 18M6 6l12 12"/></svg>
+            </button>` : '';
         const panes = Array.isArray(group?.panes) ? group.panes : [];
         const declared = Number(group?.agent_count);
         const agents = Number.isFinite(declared) ? declared : panes.length;
@@ -266,7 +289,7 @@
                     >
                         <span class="dash-session-name">${esc(group?.name || group?.group_id || '')}</span>
                         <span class="dash-session-meta">${esc(meta)}</span>
-                    </button>
+                    </button>${closeButton}
                 </header>
                 <div class="dash-agents">
                     ${agents
@@ -277,11 +300,23 @@
         `;
     }
 
-    function workspaceHtml(workspace, index, render) {
+    function workspaceHtml(workspace, index, render, actions) {
         const esc = render.esc;
         const groups = Array.isArray(workspace?.groups) ? workspace.groups : [];
         const agents = Number(workspace?.agent_count) || 0;
         const meta = agents ? `${agents} agent${agents === 1 ? '' : 's'}` : 'no agents';
+        const controls = actions ? actions.policy.workspaceControls(workspace, {
+            native: actions.canCloseWindow()
+        }).map(control => `
+            <button type="button"
+                class="dash-workspace-action${control.danger ? ' is-danger' : ''}"
+                data-dashboard-action="${esc(control.action)}"
+                data-dashboard-key="${esc(control.action)}:${esc(workspace?.workspace_id || '')}"
+                data-workspace-id="${esc(workspace?.workspace_id || '')}"
+                data-workspace-label="${esc(render.workspaceLabel(workspace, index))}"
+                data-group-count="${esc(String(Number(workspace?.group_count) || 0))}"
+                title="${esc(control.title)}">${esc(control.label)}</button>
+        `).join('') : '';
         return `
             <section class="dash-workspace${agents ? '' : ' is-quiet'}">
                 <header class="dash-workspace-head">
@@ -295,17 +330,18 @@
                         <span class="dash-workspace-name">${esc(render.workspaceLabel(workspace, index))}</span>
                     </button>
                     <span class="dash-workspace-meta">${esc(meta)}</span>
+                    ${controls ? `<div class="dash-workspace-actions">${controls}</div>` : ''}
                 </header>
                 <div class="dash-sessions">
                     ${groups.length
-                        ? groups.map(group => sessionHtml(group, render)).join('')
+                        ? groups.map(group => sessionHtml(group, render, actions)).join('')
                         : '<p class="dash-session-none">No sessions</p>'}
                 </div>
             </section>
         `;
     }
 
-    function bodyHtml(snapshot, render) {
+    function bodyHtml(snapshot, render, actions) {
         const workspaces = Array.isArray(snapshot?.workspaces) ? snapshot.workspaces : [];
         if (!workspaces.length) {
             return `
@@ -315,7 +351,7 @@
             `;
         }
         return workspaces
-            .map((workspace, index) => workspaceHtml(workspace, index, render))
+            .map((workspace, index) => workspaceHtml(workspace, index, render, actions))
             .join('');
     }
 
@@ -328,6 +364,9 @@
     }
 
     const policy = {
+        SIDEBAR_SCALE_MIN,
+        SIDEBAR_SCALE_MAX,
+        clampScale,
         SIDEBAR_REFRESH_MS,
         SIDEBAR_TIMEOUT_MS,
         SIDEBAR_SHOW_ICON,
@@ -346,6 +385,10 @@
             setBodyClass = () => {},
             activeElement = () => null,
             onVisibilityChange = () => {},
+            onBridgeReady = () => {},
+            addWindowListener = () => {},
+            removeWindowListener = () => {},
+            getCloseActions = () => null,
             documentHidden = () => false,
             setInterval: armTimer,
             clearInterval: disarmTimer,
@@ -367,6 +410,11 @@
         let inFlight = null;
         let painted = '';
         let wired = false;
+        let scale = SIDEBAR_SCALE_MIN;
+        let cancelDrag = null;
+        let actionNotice = '';
+        let actionTone = 'error';
+        let readNotice = '';
 
         function shell() { return getElement(SHELL_ID); }
         function body() { return getElement(BODY_ID); }
@@ -375,11 +423,17 @@
             return Boolean(shell()?.classList?.contains('visible'));
         }
 
-        function setNotice(message) {
+        function setNotice(message, tone = 'error', source = 'action') {
+            if (source === 'read') readNotice = message || '';
+            else {
+                actionNotice = message || '';
+                actionTone = tone;
+            }
             const notice = getElement(NOTICE_ID);
             if (!notice) return;
-            notice.textContent = message || '';
-            notice.hidden = !message;
+            notice.textContent = actionNotice || readNotice;
+            notice.hidden = !notice.textContent;
+            notice.classList?.toggle('is-info', Boolean(actionNotice) && actionTone === 'info');
         }
 
         /* The control is repainted from the state rather than flipped, so the
@@ -453,13 +507,13 @@
                 if (inFlight === request) inFlight = null;
             }
             if (id !== requestId) return false;
-            setNotice(failure);
+            setNotice(failure, 'error', 'read');
             /* The last good tree stays behind the notice: a reading from four
                seconds ago beats a blank column, as long as it says it is old. */
             if (!snapshot) return false;
             const totals = getElement(TOTALS_ID);
             if (totals) totals.textContent = render.totals(snapshot);
-            paint(bodyHtml(snapshot, render));
+            paint(bodyHtml(snapshot, render, getCloseActions()));
             return true;
         }
 
@@ -489,9 +543,12 @@
            they are separate flags because the boot path and the server's own
            read both apply a value they have just been told and must not send
            it straight back. */
-        function apply(open, { persist = false, report: shouldReport = false } = {}) {
+        function apply(open, { persist = false, report: shouldReport = false, scale: nextScale } = {}) {
+            cancelDrag?.();
             const shouldShow = Boolean(open);
-            const changed = shouldShow !== isOpen();
+            const widthChanged = nextScale !== undefined && clampScale(nextScale) !== scale;
+            const changed = shouldShow !== isOpen() || widthChanged;
+            if (nextScale !== undefined) writeScale(nextScale);
             shell()?.classList?.toggle('visible', shouldShow);
             shell()?.setAttribute?.('aria-hidden', shouldShow ? 'false' : 'true');
             setBodyClass(OPEN_BODY_CLASS, shouldShow);
@@ -506,6 +563,57 @@
             return shouldShow;
         }
 
+        function writeScale(value) {
+            scale = clampScale(value);
+            shell()?.style?.setProperty('--agent-sidebar-scale', String(scale / 100));
+        }
+
+        function wireResize() {
+            const handle = getElement(RESIZER_ID);
+            handle?.addEventListener('pointerdown', event => {
+                if (event.button !== 0 || !isOpen() || cancelDrag) return;
+                const startScale = scale;
+                // Measure the CSS clamp; no second copy of its viewport policy.
+                const baseWidth = shell().getBoundingClientRect().width / (scale / 100);
+                if (!(baseWidth > 0)) return;
+                const startX = event.clientX;
+                const pointerId = event.pointerId;
+                event.preventDefault();
+                handle.classList.add('dragging');
+                handle.setPointerCapture?.(pointerId);
+                const onMove = move => {
+                    if (move.pointerId !== pointerId) return;
+                    writeScale(startScale + (move.clientX - startX) / baseWidth * 100);
+                };
+                const finish = commit => {
+                    removeWindowListener('pointermove', onMove);
+                    removeWindowListener('pointerup', onEnd);
+                    removeWindowListener('pointercancel', onCancel);
+                    handle.classList.remove('dragging');
+                    cancelDrag = null;
+                    handle.releasePointerCapture?.(pointerId);
+                    const changed = scale !== startScale;
+                    if (!commit) writeScale(startScale);
+                    if (changed) {
+                        onLayoutChanged();
+                        if (commit) report();
+                    }
+                };
+                const onEnd = end => {
+                    if (end.pointerId !== pointerId) return;
+                    onMove(end);
+                    finish(true);
+                };
+                const onCancel = end => {
+                    if (end.pointerId === pointerId) finish(false);
+                };
+                cancelDrag = () => finish(false);
+                addWindowListener('pointermove', onMove);
+                addWindowListener('pointerup', onEnd);
+                addWindowListener('pointercancel', onCancel);
+            });
+        }
+
         function toggle() {
             return apply(!isOpen(), { persist: true, report: true });
         }
@@ -514,8 +622,18 @@
            dialog's, and so is the wording it reports into its own notice line
            — which is a line nobody can see while this panel is the surface
            that was pressed. */
-        async function handleRow(dataset) {
+        async function handleRow(dataset, element = null) {
             if (!dataset || !dataset.workspaceId) return false;
+            const actions = getCloseActions();
+            if (actions?.handles(dataset.dashboardAction)) {
+                return actions.run(dataset.dashboardAction, {
+                    workspaceId: dataset.workspaceId,
+                    groupId: dataset.groupId || '',
+                    name: dataset.sessionName || '',
+                    label: dataset.workspaceLabel || '',
+                    groupCount: Number(dataset.groupCount) || 0
+                }, element, { notice: setNotice, refresh });
+            }
             let landed = false;
             try {
                 landed = Boolean(await openTarget({
@@ -540,7 +658,7 @@
                 const row = event.target?.closest?.('[data-dashboard-action]');
                 if (!row) return;
                 event.preventDefault();
-                handleRow(row.dataset);
+                handleRow(row.dataset, row);
             });
             getElement(REFRESH_BTN_ID)?.addEventListener('click', () => refresh());
             getElement(CLOSE_BTN_ID)?.addEventListener('click', () => {
@@ -549,9 +667,15 @@
             /* The panel is chrome and survives the reader leaving, so this is
                the poll standing down rather than the surface going away. */
             onVisibilityChange(() => {
+                if (documentHidden()) cancelDrag?.();
                 schedule();
                 if (!documentHidden()) refresh();
             });
+            onBridgeReady(() => {
+                painted = '';
+                refresh();
+            });
+            wireResize();
             /* The cache is what a reload paints from; the server's own value
                arrives with the session-group read and overrides it. */
             const stored = readStored();
@@ -559,7 +683,10 @@
             return true;
         }
 
-        return { wire, apply, toggle, isOpen, refresh, schedule, handleRow, setNotice, syncToggle };
+        return {
+            wire, apply, toggle, isOpen, refresh, schedule, handleRow, setNotice, syncToggle,
+            getScale: () => scale
+        };
     }
 
     return { policy, create };

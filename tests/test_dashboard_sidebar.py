@@ -62,6 +62,7 @@ AGENT_GLYPHS_JS = STATIC_JS / "agent-glyphs.js"
 SESSION_COLOUR_JS = STATIC_JS / "session-colour.js"
 DASHBOARD_DIALOG_JS = STATIC_JS / "dashboard-dialog.js"
 DASHBOARD_SIDEBAR_JS = STATIC_JS / "dashboard-sidebar.js"
+DASHBOARD_CLOSE_JS = STATIC_JS / "dashboard-close.js"
 
 NODE = shutil.which("node")
 
@@ -138,6 +139,10 @@ function fakeElement(id) {
         hidden: false,
         scrollTop: 0,
         dataset: {},
+        style: { setProperty(name, value) { this[name] = value; } },
+        getBoundingClientRect: () => ({ width: 300 * sidebar.getScale() / 100 }),
+        setPointerCapture(id) { this.captured = id; },
+        releasePointerCapture(id) { this.released = id; },
         attributes: {},
         classList: fakeClassList(),
         setAttribute(name, value) { this.attributes[name] = value; },
@@ -159,6 +164,7 @@ const byId = new Map();
     'agentSidebarCloseBtn',
     'agentSidebarToggleBtn',
     'agentSidebarToggleIcon',
+    'agentSidebarResizer',
     /* dashboard-dialog.js's own ids: the sidebar never touches them, and a
        missing one would make an unrelated dialog call throw mid-assertion. */
     'agentDashboardShell',
@@ -189,7 +195,41 @@ const aborts = { created: 0, aborted: 0 };
 let fetchAnswer = null;
 let fetchDelay = 0;
 
+const windowListeners = fakeListeners();
+const closeCalls = { requests: [], prompts: 0, notices: [], refreshes: 0 };
+let bridge = null;
+let closeDecision = 'close';
+let closeSaveOk = true;
+let holdPrompt = null;
+let holdDelete = null;
+const closeActions = dashboardClose.create({
+    getBridge: () => bridge,
+    fetchJson: async (url, options = {}) => {
+        const method = options.method || 'GET';
+        closeCalls.requests.push([method, url]);
+        if (method === 'GET') return { ok: true, data: { sessions: [{ status: 'connected' }] } };
+        if (method === 'POST') return { ok: closeSaveOk, data: { error: 'Save failed' } };
+        if (holdDelete) await holdDelete;
+        return { ok: true, data: {} };
+    },
+    confirmCloseSession: async () => {
+        closeCalls.prompts += 1;
+        if (holdPrompt) await holdPrompt;
+        return closeDecision;
+    },
+    skipDecision: () => null,
+    connectedCount: sessions => sessions.length,
+    decisions: { cancel: 'cancel', saveAndClose: 'save-and-close' },
+    confirmCloseWorkspace: async () => { closeCalls.prompts += 1; return true; },
+    closeLiveWorkspace: async id => { closeCalls.requests.push(['WORKSPACE', id]); },
+    notice: message => closeCalls.notices.push(message),
+    refresh: () => { closeCalls.refreshes += 1; }
+});
 const sidebar = GridVibeDashboardSidebar.create({
+    getCloseActions: () => closeActions,
+    onBridgeReady: handler => windowListeners.addEventListener('pywebviewready', handler),
+    addWindowListener: (type, handler) => windowListeners.addEventListener(type, handler),
+    removeWindowListener: (type, handler) => windowListeners.removeEventListener(type, handler),
     getElement: id => byId.get(id) || null,
     setBodyClass: (name, on) => bodyClassList.toggle(name, on),
     activeElement: () => focusTarget,
@@ -437,7 +477,8 @@ function report(value) { process.stdout.write(JSON.stringify(value)); }
 class DashboardSidebarNodeTestCase(unittest.TestCase):
     def _run_node(self, body: str):
         script = (
-            "const window = globalThis;\n"
+            f"const dashboardClose = require({json.dumps(str(DASHBOARD_CLOSE_JS))});\n"
+            + "const window = globalThis;\n"
             + AGENT_IDENTITY_JS.read_text(encoding="utf-8")
             + AGENT_GLYPHS_JS.read_text(encoding="utf-8")
             + SESSION_COLOUR_JS.read_text(encoding="utf-8")
@@ -604,16 +645,14 @@ class DashboardSidebarRowTestCase(DashboardSidebarNodeTestCase):
         self.assertTrue(result["quiet"])
         self.assertEqual(
             [row["kind"] for row in result["rows"]],
-            ["workspace", "session", "pane", "pane", "session"],
+            ["workspace", "close-workspace", "session", "close-session",
+             "pane", "pane", "session", "close-session"],
         )
         # Shorter than the dialog's wording: "· 1 other" rather than
         # "· 1 other pane", because the column has the width the title needs.
         self.assertEqual(result["meta"], ["2 agents", "3 panes"])
 
-    def test_no_close_verb_reaches_the_column(self):
-        """This version is a way *to* things. Ending a session or a workspace
-        stays on the tab that names it and in the dialog, so no × and no
-        workspace verb is drawn here — and nothing here can dispatch one."""
+    def test_the_shared_close_verbs_reach_the_column(self):
         result = self._run_node(
             """
             sidebarShown();
@@ -625,14 +664,16 @@ class DashboardSidebarRowTestCase(DashboardSidebarNodeTestCase):
             });
             """
         )
-        self.assertEqual(sorted(result["actions"]), ["pane", "session", "workspace"])
-        for absent in (
+        self.assertEqual(sorted(result["actions"]), [
+            "close-session", "close-workspace", "pane", "session", "workspace"
+        ])
+        for present in (
             "close-session",
             "close-workspace",
             "dash-session-close",
             "dash-workspace-actions",
         ):
-            self.assertNotIn(absent, result["html"])
+            self.assertIn(present, result["html"])
 
     def test_an_announced_title_carrying_markup_cannot_rewrite_the_column(self):
         result = self._run_node(
@@ -1098,6 +1139,184 @@ class DashboardSidebarPageWiringTestCase(unittest.TestCase):
         self.assertEqual(result["reports"], 0)
 
 
+class DashboardSidebarActionsAndResizeTestCase(DashboardSidebarNodeTestCase):
+    def test_workspace_payload_carries_only_a_stated_integer_scale(self):
+        persistence = json.dumps(str(STATIC_JS / "session-persistence.js"))
+        result = self._run_node(f"""
+            const {{ buildWorkspacePresentationPayload: build }} = require({persistence});
+            const descriptor = {{ workspaceId: 'default', revision: 2, topbarVisible: true,
+                mdPreset: 'default', mdFont: 'system', sourceFont: 'default' }};
+            report({{
+                older: build(descriptor),
+                scaled: build({{ ...descriptor, agentSidebarScale: 175 }}),
+                fraction: build({{ ...descriptor, agentSidebarScale: 175.5 }})
+            }});
+        """)
+        self.assertNotIn("agent_sidebar_scale", result["older"])
+        self.assertNotIn("agent_sidebar_scale", result["fraction"])
+        self.assertEqual(result["scaled"]["agent_sidebar_scale"], 175)
+        self.assertNotIn("agent_sidebar_open", result["scaled"])
+
+    def test_close_reports_here_survives_polls_and_refreshes_here(self):
+        result = self._run_node("""
+            fetchAnswer = snapshot();
+            sidebar.wire();
+            sidebarShown();
+            const target = { dashboardAction: 'close-session', workspaceId: 'default',
+                groupId: 'g1', sessionName: 'Work' };
+            closeDecision = 'save-and-close';
+            closeSaveOk = false;
+            const failed = await sidebar.handleRow(target);
+            await sidebar.refresh();
+            const failure = notice().textContent;
+            const failedRequests = closeCalls.requests.slice();
+            closeSaveOk = true;
+            const reads = calls.fetches;
+            const closed = await sidebar.handleRow(target);
+            report({ failed, failure, failedRequests, closed,
+                requests: closeCalls.requests, reads: calls.fetches - reads,
+                defaults: closeCalls, open: sidebar.isOpen(), targets: calls.targets });
+        """)
+        self.assertFalse(result["failed"])
+        self.assertEqual(result["failure"], "Save failed")
+        self.assertEqual([r[0] for r in result["failedRequests"]], ["GET", "POST"])
+        self.assertTrue(result["closed"])
+        self.assertEqual([r[0] for r in result["requests"]],
+                         ["GET", "POST", "GET", "POST", "DELETE"])
+        self.assertEqual(result["reads"], 1)
+        self.assertEqual(result["defaults"]["notices"], [])
+        self.assertEqual(result["defaults"]["refreshes"], 0)
+        self.assertTrue(result["open"])
+        self.assertEqual(result["targets"], [])
+
+    def test_one_shared_guard_covers_the_prompt_and_repainted_buttons(self):
+        result = self._run_node("""
+            fetchAnswer = snapshot();
+            sidebar.wire();
+            sidebarShown();
+            let releasePrompt, releaseDelete;
+            holdPrompt = new Promise(resolve => { releasePrompt = resolve; });
+            holdDelete = new Promise(resolve => { releaseDelete = resolve; });
+            const dataset = { dashboardAction: 'close-session', workspaceId: 'default', groupId: 'g1' };
+            const pressed = fakeElement('old-row');
+            const first = sidebar.handleRow(dataset, pressed);
+            const target = { workspaceId: 'default', groupId: 'g1' };
+            const immediate = await closeActions.run('close-session', target, fakeElement('dialog-row'));
+            await settle();
+            releasePrompt();
+            await settle();
+            await sidebar.refresh();
+            const second = await sidebar.handleRow(dataset, fakeElement('new-row'));
+            releaseDelete();
+            const completed = await first;
+            report({ immediate, second, completed, prompts: closeCalls.prompts,
+                requests: closeCalls.requests, busy: pressed.classList.contains('is-busy') });
+        """)
+        self.assertFalse(result["immediate"])
+        self.assertFalse(result["second"])
+        self.assertTrue(result["completed"])
+        self.assertEqual(result["prompts"], 1)
+        self.assertEqual([r[0] for r in result["requests"]], ["GET", "DELETE"])
+        self.assertFalse(result["busy"])
+
+    def test_window_verb_arrives_with_the_bridge_and_closes_without_navigation(self):
+        result = self._run_node("""
+            fetchAnswer = snapshot();
+            sidebar.wire();
+            sidebarShown();
+            await sidebar.refresh();
+            const before = parseRows().map(row => row.kind);
+            const windows = [];
+            bridge = { close_workspace_window: async id => { windows.push(id); return { ok: true }; } };
+            windowListeners.fire('pywebviewready', {});
+            await settle();
+            const after = parseRows().map(row => row.kind);
+            const row = { dataset: { dashboardAction: 'close-workspace-window', workspaceId: 'ws-2',
+                workspaceLabel: 'Docs' }, classList: fakeClassList() };
+            body().fire('click', { target: { closest: () => row }, preventDefault() {} });
+            await settle();
+            const windowNotice = notice().textContent;
+            const reads = calls.fetches;
+            const closed = await sidebar.handleRow({ dashboardAction: 'close-workspace',
+                workspaceId: 'ws-2', groupCount: '2', workspaceLabel: 'Docs' });
+            report({ before, after, windows, windowNotice, closed, reads: calls.fetches - reads,
+                open: sidebar.isOpen(), targets: calls.targets, defaults: closeCalls });
+        """)
+        self.assertNotIn("close-workspace-window", result["before"])
+        self.assertIn("close-workspace-window", result["after"])
+        self.assertEqual(result["windows"], ["ws-2"])
+        self.assertIn("Its sessions keep running", result["windowNotice"])
+        self.assertTrue(result["closed"])
+        self.assertEqual(result["reads"], 1)
+        self.assertTrue(result["open"])
+        self.assertEqual(result["targets"], [])
+        self.assertEqual(result["defaults"]["notices"], [])
+
+    def test_drag_measures_the_base_clamps_and_reports_once_on_release(self):
+        result = self._run_node("""
+            fetchAnswer = snapshot();
+            sidebar.wire();
+            sidebar.apply(true, { scale: 150 });
+            const layouts = calls.layouts;
+            const handle = byId.get('agentSidebarResizer');
+            const event = x => ({ button: 0, pointerId: 7, clientX: x, preventDefault() {} });
+            handle.fire('pointerdown', event(450));
+            windowListeners.fire('pointermove', event(525));
+            const halfway = sidebar.getScale();
+            windowListeners.fire('pointermove', event(9999));
+            const maximum = sidebar.getScale();
+            windowListeners.fire('pointermove', event(-9999));
+            const minimum = sidebar.getScale();
+            windowListeners.fire('pointermove', event(525));
+            const during = { layouts: calls.layouts - layouts, reports: calls.reports,
+                css: shell().style['--agent-sidebar-scale'] };
+            windowListeners.fire('pointerup', event(525));
+            const committed = { layouts: calls.layouts - layouts, reports: calls.reports,
+                scale: sidebar.getScale(), capture: handle.captured, release: handle.released,
+                listeners: ['pointermove', 'pointerup', 'pointercancel'].map(t => windowListeners.listenerCount(t)) };
+            // A different viewport changes the measured base, not the stored scale.
+            shell().getBoundingClientRect = () => ({ width: 400 * sidebar.getScale() / 100 });
+            handle.fire('pointerdown', event(700));
+            windowListeners.fire('pointerup', event(800));
+            report({ halfway, maximum, minimum, during, committed, resized: sidebar.getScale() });
+        """)
+        self.assertEqual(result["halfway"], 175)
+        self.assertEqual(result["maximum"], 200)
+        self.assertEqual(result["minimum"], 100)
+        self.assertEqual(result["during"], {"layouts": 0, "reports": 0, "css": "1.75"})
+        self.assertEqual(result["committed"], {"layouts": 1, "reports": 1, "scale": 175,
+                                             "capture": 7, "release": 7, "listeners": [0, 0, 0]})
+        self.assertEqual(result["resized"], 200)
+
+    def test_cancel_restores_width_and_apply_refits_only_a_changed_width(self):
+        result = self._run_node("""
+            fetchAnswer = snapshot();
+            sidebar.wire();
+            sidebar.apply(true, { scale: 125 });
+            const layouts = calls.layouts;
+            sidebar.apply(true, { scale: 175 });
+            sidebar.apply(true, { scale: 175 });
+            sidebar.apply(true);
+            const applied = { scale: sidebar.getScale(), layouts: calls.layouts - layouts };
+            const handle = byId.get('agentSidebarResizer');
+            const event = { button: 0, pointerId: 1, clientX: 0, preventDefault() {} };
+            handle.fire('pointerdown', event);
+            windowListeners.fire('pointermove', { pointerId: 2, clientX: 900 });
+            const unrelated = sidebar.getScale();
+            windowListeners.fire('pointermove', { pointerId: 1, clientX: 75 });
+            windowListeners.fire('pointercancel', { pointerId: 1 });
+            report({ applied, unrelated, scale: sidebar.getScale(), reports: calls.reports,
+                css: shell().style['--agent-sidebar-scale'],
+                listeners: windowListeners.listenerCount('pointermove') });
+        """)
+        self.assertEqual(result["applied"], {"scale": 175, "layouts": 1})
+        self.assertEqual(result["unrelated"], 175)
+        self.assertEqual(result["scale"], 175)
+        self.assertEqual(result["css"], "1.75")
+        self.assertEqual(result["reports"], 0)
+        self.assertEqual(result["listeners"], 0)
+
+
 class DashboardSidebarStateTestCase(unittest.TestCase):
     """The per-workspace half: one boolean that survives everything the
     workspace does — an ordered transaction, a manual save, a restart and a
@@ -1136,6 +1355,106 @@ class DashboardSidebarStateTestCase(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 201, response.get_json())
         return response.get_json()["group_id"]
+
+    def test_scale_is_optional_bounded_and_an_integer_at_each_live_boundary(self):
+        self._launch()
+        payload = {"workspace_id": "default", "expected_revision": 0, "topbar_visible": True}
+        self.assertNotIn("agent_sidebar_scale", normalize_workspace_presentation(payload))
+        for invalid in (None, True, False, 1.5, 150.0, "150", [], {}, 99, 201):
+            with self.subTest(invalid=invalid):
+                stated = {**payload, "agent_sidebar_scale": invalid}
+                with self.assertRaises(PresentationValidationError):
+                    normalize_workspace_presentation(stated)
+                self.assertEqual(self.client.post("/api/workspace-presentation", json=stated).status_code, 400)
+                self.assertEqual(self.client.post("/api/runtime-state/save", json={
+                    "workspace_id": "default", "topbar_visible": False,
+                    "agent_sidebar_scale": invalid,
+                }).status_code, 400)
+                with self.assertRaises(LifecycleValidationError):
+                    normalize_workspace_metadata(
+                        {"default": [{"agent_sidebar_scale": invalid}]},
+                        {"default": {"groups": [{"group_id": "g1"}]}},
+                    )
+        self.assertTrue(api.session_manager.get_topbar_visible("default"))
+        self.assertEqual(api.session_manager.get_agent_sidebar_scale("default"), 100)
+        for value in (100, 150, 200):
+            self.assertEqual(normalize_workspace_presentation({
+                **payload, "agent_sidebar_scale": value,
+            })["agent_sidebar_scale"], value)
+
+    def test_scale_transaction_and_older_save_preserve_unstated_dimensions(self):
+        self._launch()
+        accepted = self.client.post("/api/workspace-presentation", json={
+            "workspace_id": "default", "expected_revision": 0,
+            "topbar_visible": True, "agent_sidebar_scale": 180,
+        })
+        self.assertEqual(accepted.status_code, 200, accepted.get_json())
+        self.assertEqual(accepted.get_json()["agent_sidebar_scale"], 180)
+        stale = self.client.post("/api/workspace-presentation", json={
+            "workspace_id": "default", "expected_revision": 0,
+            "topbar_visible": True, "agent_sidebar_scale": 120,
+        })
+        self.assertEqual(stale.status_code, 409)
+        silent = self.client.post("/api/workspace-presentation", json={
+            "workspace_id": "default", "expected_revision": 1,
+            "topbar_visible": False,
+        })
+        self.assertEqual(silent.get_json()["agent_sidebar_scale"], 180)
+        saved = self.client.post("/api/runtime-state/save", json={"workspace_id": "default"})
+        self.assertEqual(saved.get_json()["agent_sidebar_scale"], 180)
+        self.assertEqual(self.client.get("/api/session-groups").get_json()["agent_sidebar_scale"], 180)
+        self.assertEqual(api.session_manager.get_workspace("default").to_dict()["agent_sidebar_scale"], 180)
+
+    def test_autosave_and_exit_capture_scale_with_newest_window_metadata(self):
+        self._launch()
+        manager = api.session_manager
+        manager.set_agent_sidebar_scale("default", 125)
+        # Setter is idempotent and each workspace owns its scale.
+        revision = manager.get_workspace_presentation("default")["presentation_revision"]
+        manager.set_agent_sidebar_scale("default", 125)
+        self.assertEqual(manager.get_workspace_presentation("default")["presentation_revision"], revision)
+        self.assertEqual(manager.get_agent_sidebar_scale("absent000000"), 100)
+        web_runtime_state.capture_live_workspaces(manager)
+        self.assertEqual(web_runtime_state.load_restorable_workspace("default")["agent_sidebar_scale"], 125)
+        metadata = normalize_workspace_metadata({"default": [
+            {"agent_sidebar_scale": 140}, {"agent_sidebar_scale": 190},
+            {"topbar_visible": False},
+        ]}, manager.snapshot_live_workspaces())
+        self.assertEqual(metadata["default"]["agent_sidebar_scale"], 190)
+        web_runtime_state.capture_live_workspaces(manager, origin="manual", workspace_metadata=metadata)
+        self.assertEqual(web_runtime_state.load_restorable_workspace("default")["agent_sidebar_scale"], 190)
+
+    def test_stored_scale_defaults_when_absent_or_invalid_without_losing_shape(self):
+        self._launch()
+        self.client.post("/api/runtime-state/save", json={"workspace_id": "default"})
+        stored = json.loads(self.state_path.read_text(encoding="utf-8"))
+        for value in (None, True, "150", 99, 201, 150.5):
+            stored["workspaces"]["default"]["agent_sidebar_scale"] = value
+            self.state_path.write_text(json.dumps(stored), encoding="utf-8")
+            slot = web_runtime_state.load_restorable_workspace("default")
+            self.assertEqual(slot["agent_sidebar_scale"], 100)
+            self.assertTrue(slot["groups"])
+        del stored["workspaces"]["default"]["agent_sidebar_scale"]
+        self.state_path.write_text(json.dumps(stored), encoding="utf-8")
+        self.assertEqual(web_runtime_state.load_restorable_workspace("default")["agent_sidebar_scale"], 100)
+
+    def test_launcher_save_captures_scale_acknowledged_by_the_window(self):
+        from web import lifecycle
+
+        self._launch()
+        api.session_manager.set_agent_sidebar_scale("default", 125)
+        with patch.object(lifecycle, "lifecycle_coordinator") as coordinator:
+            coordinator.connected_window_count.return_value = 1
+            coordinator.request_flush.return_value = {
+                "ok": True,
+                "metadata": {"default": [{"agent_sidebar_scale": 160}]},
+            }
+            result, status = lifecycle.prepare_workspace_save(
+                api.session_manager, "default", lambda *_args: None
+            )
+        self.assertEqual(status, 200, result)
+        self.assertEqual(result["agent_sidebar_scale"], 160)
+        self.assertEqual(web_runtime_state.load_restorable_workspace("default")["agent_sidebar_scale"], 160)
 
     def test_an_unstated_panel_is_left_alone_and_a_non_boolean_is_refused(self):
         """The dimension postdates this transaction, so a client that says
@@ -1228,6 +1547,7 @@ class DashboardSidebarStateTestCase(unittest.TestCase):
                 "active_group_id": group_id,
                 "topbar_visible": False,
                 "agent_sidebar_open": True,
+                "agent_sidebar_scale": 175,
             },
         )
         offered = self.client.get("/api/runtime-state?workspace_id=default").get_json()
@@ -1235,6 +1555,9 @@ class DashboardSidebarStateTestCase(unittest.TestCase):
 
         self.assertEqual(saved.status_code, 200, saved.get_json())
         self.assertTrue(saved.get_json()["agent_sidebar_open"])
+        self.assertEqual(saved.get_json()["agent_sidebar_scale"], 175)
+        self.assertEqual(offered["agent_sidebar_scale"], 175)
+        self.assertEqual(stored["workspaces"]["default"]["agent_sidebar_scale"], 175)
         self.assertTrue(offered["agent_sidebar_open"])
         self.assertTrue(stored["workspaces"]["default"]["agent_sidebar_open"])
 
@@ -1247,6 +1570,10 @@ class DashboardSidebarStateTestCase(unittest.TestCase):
         workspace = restored.get_json()["workspaces"][0]
         self.assertTrue(workspace["restored"], workspace)
         self.assertTrue(workspace["agent_sidebar_open"])
+        self.assertEqual(workspace["agent_sidebar_scale"], 175)
+        self.assertEqual(
+            self.client.get("/api/session-groups").get_json()["agent_sidebar_scale"], 175
+        )
         self.assertTrue(
             self.client.get("/api/session-groups").get_json()["agent_sidebar_open"]
         )
@@ -1403,7 +1730,6 @@ class DashboardSidebarPageTestCase(unittest.TestCase):
         self.assertIn("agentSidebarOpen: agentSidebarIsOpen()", terminals)
         self.assertIn("agent_sidebar_open: agentSidebarIsOpen()", terminals)
         self.assertIn("wireAgentDashboardSidebar();", terminals)
-        self.assertIn(
-            "applyAgentDashboardSidebar(data.agent_sidebar_open, { persist: true });",
-            terminals,
-        )
+        self.assertIn("scale: data.agent_sidebar_scale", terminals)
+        self.assertIn("agentSidebarScale: agentSidebarScale()", terminals)
+        self.assertIn("agent_sidebar_scale: agentSidebarScale()", terminals)

@@ -182,8 +182,8 @@
             closeLiveWorkspace,
             notifySavedSession = () => {},
             notifyWorkspacesChanged = () => {},
-            notice = () => {},
-            refresh = () => {},
+            notice: defaultNotice = () => {},
+            refresh: defaultRefresh = () => {},
             logError = () => {}
         } = runtime || {};
 
@@ -238,25 +238,25 @@
             return { ok: true, data };
         }
 
-        async function closeSession(target, element = null) {
+        async function closeSession(target, element = null, reporting = {}) {
+            const { notice = defaultNotice, refresh = defaultRefresh } = reporting;
             const key = targetKey(SESSION_ACTION, target);
             if (!target?.workspaceId || !target?.groupId || inFlight.has(key)) {
                 return false;
             }
-            const sessions = await readGroupSessions(target);
-            const decision = skipDecision(sessions)
-                || await confirmCloseSession({
-                    group: { name: target.name, group_id: target.groupId },
-                    connectedCount: connectedCount(sessions),
-                    totalCount: sessions.length
-                });
-            if (!decision || decision === decisions.cancel) {
-                return false;
-            }
-
             inFlight.add(key);
             markBusy(element, true);
             try {
+                const sessions = await readGroupSessions(target);
+                const decision = skipDecision(sessions)
+                    || await confirmCloseSession({
+                        group: { name: target.name, group_id: target.groupId },
+                        connectedCount: connectedCount(sessions),
+                        totalCount: sessions.length
+                    });
+                if (!decision || decision === decisions.cancel) {
+                    return false;
+                }
                 /* Save first, and only close if it worked: a requested save
                    that failed must not cost the terminals it was meant to
                    preserve. */
@@ -291,23 +291,23 @@
             return true;
         }
 
-        async function closeWorkspace(target, element = null) {
+        async function closeWorkspace(target, element = null, reporting = {}) {
+            const { notice = defaultNotice, refresh = defaultRefresh } = reporting;
             const key = targetKey(WORKSPACE_ACTION, target);
             if (!target?.workspaceId || inFlight.has(key)) {
                 return false;
             }
-            const confirmed = await confirmCloseWorkspace({
-                workspace_id: target.workspaceId,
-                label: target.label,
-                group_count: target.groupCount
-            });
-            if (!confirmed) {
-                return false;
-            }
-
             inFlight.add(key);
             markBusy(element, true);
             try {
+                const confirmed = await confirmCloseWorkspace({
+                    workspace_id: target.workspaceId,
+                    label: target.label,
+                    group_count: target.groupCount
+                });
+                if (!confirmed) {
+                    return false;
+                }
                 await closeLiveWorkspace(target.workspaceId);
             } catch (error) {
                 logError('[GridVibe Dashboard] closing the workspace failed:', error);
@@ -329,7 +329,8 @@
            this page to re-read — which is also why this is the one verb here
            that reports its success: without a word, a press that worked and a
            press that did nothing look identical from the dashboard. */
-        async function closeWorkspaceWindow(target, element = null) {
+        async function closeWorkspaceWindow(target, element = null, reporting = {}) {
+            const { notice = defaultNotice } = reporting;
             const key = targetKey(WORKSPACE_WINDOW_ACTION, target);
             const api = bridge();
             if (!target?.workspaceId || inFlight.has(key) || !canCloseWindow(api)) {
@@ -362,10 +363,10 @@
             return CLOSE_ACTIONS.includes(String(action || ''));
         }
 
-        function run(action, target, element = null) {
-            if (action === SESSION_ACTION) return closeSession(target, element);
-            if (action === WORKSPACE_ACTION) return closeWorkspace(target, element);
-            if (action === WORKSPACE_WINDOW_ACTION) return closeWorkspaceWindow(target, element);
+        function run(action, target, element = null, reporting = {}) {
+            if (action === SESSION_ACTION) return closeSession(target, element, reporting);
+            if (action === WORKSPACE_ACTION) return closeWorkspace(target, element, reporting);
+            if (action === WORKSPACE_WINDOW_ACTION) return closeWorkspaceWindow(target, element, reporting);
             return Promise.resolve(false);
         }
 

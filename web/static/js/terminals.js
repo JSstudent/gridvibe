@@ -352,6 +352,11 @@
         return document.body.classList.contains('agent-sidebar-open');
     }
 
+    function agentSidebarScale() {
+        return typeof agentDashboardSidebarScale === 'function'
+            ? agentDashboardSidebarScale() : 100;
+    }
+
     function updateTopbarToggleButton(visible) {
         const button = document.getElementById('topbarToggleBtn');
         const path = document.getElementById('topbarTogglePath');
@@ -2432,6 +2437,7 @@
                             revision: workspacePresentationRevision,
                             topbarVisible: !document.body.classList.contains('topbar-collapsed'),
                             agentSidebarOpen: agentSidebarIsOpen(),
+                            agentSidebarScale: agentSidebarScale(),
                             mdPreset: appearance.preset,
                             mdFont: appearance.font,
                             sourceFont: appearance.sourceFont
@@ -2891,7 +2897,8 @@
                     active_group_id: activeGroupId,
                     native_zoom_factor: nativeZoomFactor,
                     topbar_visible: !document.body.classList.contains('topbar-collapsed'),
-                    agent_sidebar_open: agentSidebarIsOpen()
+                    agent_sidebar_open: agentSidebarIsOpen(),
+                    agent_sidebar_scale: agentSidebarScale()
                 })
             });
             const data = await response.json().catch(() => ({}));
@@ -7876,8 +7883,13 @@
         /* The workspace record is the authority on the docked dashboard; the
            local cache only painted the column before this read landed. Applied
            without reporting, because this value came *from* the server. */
-        if (typeof data.agent_sidebar_open === 'boolean') {
-            applyAgentDashboardSidebar(data.agent_sidebar_open, { persist: true });
+        if (typeof data.agent_sidebar_open === 'boolean'
+            || Number.isInteger(data.agent_sidebar_scale)) {
+            applyAgentDashboardSidebar(
+                typeof data.agent_sidebar_open === 'boolean'
+                    ? data.agent_sidebar_open : agentSidebarIsOpen(),
+                { persist: true, scale: data.agent_sidebar_scale }
+            );
         }
         setExplorerWorkspaceAppearance({
             preset: data.md_preset,
@@ -8385,7 +8397,8 @@
                 active_group_id: activeGroupId,
                 native_zoom_factor: await getCurrentWorkspaceNativeZoomFactor(),
                 topbar_visible: !document.body.classList.contains('topbar-collapsed'),
-                agent_sidebar_open: agentSidebarIsOpen()
+                agent_sidebar_open: agentSidebarIsOpen(),
+                agent_sidebar_scale: agentSidebarScale()
             })
         });
 

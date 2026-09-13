@@ -4,6 +4,10 @@ All notable changes to GridVibe will be documented in this file.
 
 ## Unreleased
 
+- **(feat) Keep a resizable agent dashboard beside your workspace.** The handle at the start of the session tab line opens a docked overview of every workspace, session and agent. Compact rows show the status dot, agent icon and chat title, and the panel stays open while you work or switch windows. Drag its right edge to widen it up to twice its default width; each workspace saves its open state and width scale for restore.
+
+  Session **×**, **Close workspace**, and native-only **Close window** use the dialog's existing close controller and prompts. A shared guard prevents duplicate requests across both views, saving finishes before deletion, and a failed save cancels the close. Sidebar actions report and refresh in the sidebar, which stays open after a close; the window verb appears when the native bridge becomes ready.
+
 ## 1.11.2 - 2026-09-13
 
 - **(opt) The agent dashboard now leads each row with its status dot and is half as wide.** The idle/working state was a word and a dot at the far right of every row, which is the column furthest from where a card is read from and cost the chat title about a fifth of its line to repeat what the dot's colour already said. The dot now sits at the head of the row, in front of the agent's mark and name, and the word is gone from the line: pointing at a dot gives it back in full (`Idle 4m`, `Connecting`, `Disconnected`), and it is still in the row's accessible name. The progress bar stays at the end of the row, where there is width for it and where it cannot change how far in every other row's mark starts. The shell chip (`POWERSHELL`, `CMD`, `SSH`) has left the line for the same reason and by the same route: it is on the row's hover now, under the chat title and where the pane is. With both of them off the line the dialog no longer needs the width it had, so it is half of what it was and fits beside the window it describes.

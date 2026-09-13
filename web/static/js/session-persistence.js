@@ -397,6 +397,9 @@
         if (typeof descriptor.agentSidebarOpen === 'boolean') {
             payload.agent_sidebar_open = descriptor.agentSidebarOpen;
         }
+        if (Number.isInteger(descriptor.agentSidebarScale)) {
+            payload.agent_sidebar_scale = descriptor.agentSidebarScale;
+        }
         return payload;
     }
 

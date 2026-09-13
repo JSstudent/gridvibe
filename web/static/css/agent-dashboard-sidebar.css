@@ -55,7 +55,9 @@
     --agent-sidebar-width: clamp(240px, 15%, 400px);
     display: none;
     flex: 0 0 auto;
-    width: var(--agent-sidebar-width);
+    width: calc(var(--agent-sidebar-width) * var(--agent-sidebar-scale, 1));
+    position: relative;
+    box-sizing: border-box;
     min-width: 0;
     flex-direction: column;
     overflow: hidden;
@@ -68,6 +70,58 @@
 
 .agent-sidebar.visible {
     display: flex;
+}
+
+/* The edge stays reachable while the body scrolls. The measured border-box
+   width is the drag's base, scaled from 1 to 2; it never shrinks below 1. */
+.agent-sidebar-resizer {
+    position: absolute;
+    inset: 0 0 0 auto;
+    width: 6px;
+    min-width: 6px;
+    padding: 0;
+    border: 0;
+    border-left: 1px solid var(--gv-dialog-border);
+    background: var(--gv-dialog-panel-soft);
+    cursor: col-resize;
+    touch-action: none;
+}
+
+.agent-sidebar-resizer:hover,
+.agent-sidebar-resizer.dragging,
+.agent-sidebar-resizer:focus-visible {
+    background: var(--gv-accent);
+}
+
+/* A compact × leaves the session title its width. Workspace word buttons
+   share a dedicated second line below the name/count, even in native mode;
+   they never compete with the band title or wrap onto separate lines. */
+.agent-sidebar .dash-session-close {
+    width: 22px;
+    min-width: 22px;
+    flex: 0 0 22px;
+}
+
+.agent-sidebar .dash-session-close svg {
+    width: 12px;
+    height: 12px;
+}
+
+.agent-sidebar .dash-workspace-head {
+    flex-wrap: wrap;
+}
+
+.agent-sidebar .dash-workspace-actions {
+    flex: 0 0 100%;
+    justify-content: flex-end;
+    gap: 5px;
+    margin: 0;
+}
+
+.agent-sidebar .dash-workspace-action {
+    padding: 3px 5px;
+    font-size: .62rem;
+    white-space: nowrap;
 }
 
 .agent-sidebar *,

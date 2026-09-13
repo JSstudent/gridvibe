@@ -34,6 +34,7 @@ from web.saved_sessions import (
     build_unique_session_name,
     upsert_saved_session,
 )
+from web.session_presentation import normalize_agent_sidebar_scale
 
 LIFECYCLE_ACTIONS = frozenset({"close", "restart"})
 LIFECYCLE_SAVE_NONE = "none"
@@ -676,6 +677,13 @@ def normalize_workspace_metadata(
                         "agent-sidebar state"
                     )
                 candidate["agent_sidebar_open"] = raw["agent_sidebar_open"]
+            if "agent_sidebar_scale" in raw:
+                scale = normalize_agent_sidebar_scale(raw["agent_sidebar_scale"])
+                if scale is None:
+                    raise LifecycleValidationError(
+                        f"Workspace {workspace_id} reported invalid agent-sidebar scale"
+                    )
+                candidate["agent_sidebar_scale"] = scale
             if "native_zoom_factor" in raw and raw.get("native_zoom_factor") is not None:
                 zoom = normalize_native_zoom_factor(raw.get("native_zoom_factor"))
                 if zoom is None:
@@ -962,6 +970,7 @@ def prepare_workspace_save(
             active_group_id=metadata.get("active_group_id") or None,
             native_zoom_factor=metadata.get("native_zoom_factor"),
             topbar_visible=topbar_visible if isinstance(topbar_visible, bool) else None,
+            agent_sidebar_scale=metadata.get("agent_sidebar_scale"),
             agent_sidebar_open=(
                 agent_sidebar_open if isinstance(agent_sidebar_open, bool) else None
             ),
@@ -1004,6 +1013,7 @@ def prepare_workspace_save(
         "native_zoom_factor": slot.get("native_zoom_factor"),
         "topbar_visible": slot["topbar_visible"],
         "agent_sidebar_open": slot["agent_sidebar_open"],
+        "agent_sidebar_scale": slot["agent_sidebar_scale"],
     }, 200
 
 
