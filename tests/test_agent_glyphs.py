@@ -11,8 +11,8 @@ What is pinned is what a mark is *for*:
 - **An unknown agent still gets one.** A custom agent, an `other` selection and
   a registry entry GridVibe has not drawn yet all land on the shared fallback,
   under a key the stylesheet can match, rather than on an empty chip.
-- **Every mark is a currentColor stroke SVG**, like every other glyph in the
-  app, so it takes the theme and the per-agent tint the page hands it.
+- **Known marks use the supplied local artwork.** Custom agents retain a
+  currentColor stroke SVG fallback.
 """
 
 import json
@@ -98,21 +98,25 @@ class AgentGlyphTestCase(unittest.TestCase):
         )
         self.assertEqual(result, ["codex", "codex", "codex"])
 
-    def test_every_mark_takes_the_colour_it_is_given(self):
+    def test_known_marks_load_bundled_artwork_and_fallback_takes_the_theme(self):
         marks = self._run_node(
             "process.stdout.write(JSON.stringify("
-            "glyphs.AGENT_GLYPH_KEYS.concat(['other'])"
-            ".map(key => glyphs.agentGlyphMarkup(key))"
+            "glyphs.AGENT_GLYPH_KEYS.map(key => glyphs.agentGlyphMarkup(key))"
             "));"
         )
         for mark in marks:
-            self.assertTrue(mark.startswith('<svg class="dash-agent-glyph"'))
-            self.assertIn('stroke="currentColor"', mark)
+            self.assertTrue(mark.startswith('<img class="dash-agent-glyph"'))
+            self.assertIn('alt=""', mark)
             self.assertIn('aria-hidden="true"', mark)
-            # No fill, no hard-coded hue: the page's per-agent tint is what
-            # colours these, through currentColor.
-            self.assertIn('fill="none"', mark)
-            self.assertNotIn("#", mark)
+            src = mark.split('src="', 1)[1].split('"', 1)[0]
+            self.assertTrue(src.startswith("/docs/images/agent/"))
+            self.assertTrue((REPO_ROOT / src.lstrip("/")).is_file())
+        fallback = self._run_node(
+            "process.stdout.write(JSON.stringify(glyphs.agentGlyphMarkup('other')));"
+        )
+        self.assertIn('stroke="currentColor"', fallback)
+        self.assertIn('fill="none"', fallback)
+        self.assertIn('aria-hidden="true"', fallback)
 
 
 if __name__ == "__main__":

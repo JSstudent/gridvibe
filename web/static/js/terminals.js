@@ -847,6 +847,13 @@
     function syncPaneIdentityChrome(index, session) {
         syncPaneAgentIcon(document.getElementById(`ticon-${index}`), session);
         const nameLabel = document.getElementById(`tname-${index}`);
+        if (nameLabel) {
+            const identity = window.GridVibeAgentIdentity;
+            const key = identity.paneKindForSession(session) === 'agent'
+                ? window.GridVibeAgentGlyphs.agentGlyphKey(identity.agentKeyForSession(session)) : '';
+            if (key && nameLabel.dataset.agent !== key) nameLabel.dataset.agent = key;
+            else if (!key && nameLabel.dataset.agent) delete nameLabel.dataset.agent;
+        }
         const title = paneDisplayTitle(session, index);
         if (nameLabel && nameLabel.textContent.trim() !== title) {
             nameLabel.textContent = title;
@@ -5354,7 +5361,7 @@
                 <div class="terminal-header">
                     <div class="terminal-info">
                         <span class="terminal-agent-icon" id="ticon-${i}" aria-hidden="true" ${session.startup_mode === 'agent' ? '' : 'hidden'}>${paneAgentIconHtml(session)}</span>
-                        <span class="terminal-name" id="tname-${i}">
+                        <span class="terminal-name" id="tname-${i}" ${window.GridVibeAgentIdentity.paneKindForSession(session) === 'agent' ? `data-agent="${window.GridVibeAgentGlyphs.agentGlyphKey(window.GridVibeAgentIdentity.agentKeyForSession(session))}"` : ''}>
                             ${escHtml(paneDisplayTitle(session, i))}
                         </span>
                         <span class="terminal-host" id="thost-${i}">

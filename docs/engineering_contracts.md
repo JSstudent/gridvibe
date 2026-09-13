@@ -918,8 +918,13 @@ unless the task explicitly changes this contract.
   window and the dashboard. The palette's order is load-bearing — it is what the
   group-id hash indexes — so a hue is replaced in place and never reordered, and
   the hash itself never changes. A glyph is emitted with its registry key on the
-  wrapper for the stylesheet to tint; an agent GridVibe has not drawn falls back
-  to the shared terminal mark, never to nothing.
+  wrapper for the stylesheet to tint. Known agents use the supplied SVG artwork
+  in `docs/images/agent/` through local `<img>` elements; unknown agents fall
+  back to the shared terminal SVG. Brand colors live in `tokens.css` and
+  `agent-brand.css` applies them to terminal titles and dashboard names. Exact
+  foregrounds are retained in both themes, with contrasting backgrounds for
+  white/yellow names on light surfaces and near-black OpenCode names. Runtime
+  agent changes update both the title's brand key and its icon in place.
 - `agent-dashboard.css` dresses one dialog on two pages and states no page's
   palette: no `color-scheme`, no `body` rule, no full-height frame. It reads the
   shared `--gv-dialog-*` and status tokens, so both legacy page palettes dress

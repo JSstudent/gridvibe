@@ -4,6 +4,8 @@ All notable changes to GridVibe will be documented in this file.
 
 ## Unreleased
 
+- **(feat) Agent titles and dashboard rows use their brand icons and colors.** All eight bundled agents now use the supplied artwork and matching brand colors in terminal headers and the Agent Dashboard. Branding follows live agent switches and clears when an agent exits; custom agents keep the terminal fallback. Shared styling supplies contrasting backgrounds where needed in either theme.
+
 - **(fix) Saving a session now records where each pane actually is.** Updating a saved session kept the folder that preset was created with. A pane that had moved — a shell you had `cd`'d into a repository, an agent you had walked somewhere else, an explorer showing a subdirectory — saved its new mode, its agent and its whole view, and then relaunched back at the folder you originally imported it from. Saving the *same* workspace as a new preset stored the live location instead, so two gestures that looked identical produced different presets, and which one you got depended on whether a source preset happened to exist.
 
   Every save now records where the pane is. Connection setup is still the preset's own and a workspace payload cannot retarget it: the host, user, port, distribution, Step 2 folder and the stored password all stay exactly as they were, which is what keeps a re-save from downgrading a working credential. A save that could not find out where a pane was leaves that pane's saved folder alone rather than erasing it — those are different answers.

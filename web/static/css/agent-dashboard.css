@@ -401,7 +401,7 @@
        by one declaration below rather than by a rule per agent per element. The
        fallback is the app accent, which is what an agent GridVibe has not drawn
        a mark for wears. */
-    --dash-agent-accent: var(--gv-accent);
+    --dash-agent-accent: var(--agent-brand, var(--gv-accent));
     display: flex;
     align-items: center;
     gap: 9px;
@@ -434,11 +434,6 @@
     color: var(--dash-agent-accent);
 }
 
-.dash-agent-glyph {
-    width: 14px;
-    height: 14px;
-}
-
 /* The agent's name. It never wraps and never shrinks below what it needs: it is
    the column the eye runs down, and a name that reflowed with the title beside
    it would stop being a column at all. */
@@ -447,15 +442,8 @@
     font-size: .74rem;
     font-weight: 600;
     letter-spacing: .01em;
-    color: var(--dash-agent-text, var(--dash-agent-accent));
+    color: var(--dash-agent-accent);
     white-space: nowrap;
-}
-
-/* The same rule the session name follows, for the same reason: the mark keeps
-   the full tint (a filled 22px chip carries it), the word is mixed toward the
-   dialog's text colour so it is read rather than recognised. */
-[data-theme="light"] .dash-agent-name {
-    --dash-agent-text: color-mix(in srgb, var(--dash-agent-accent) 55%, var(--gv-dialog-text));
 }
 
 .dash-agent-reading { display: inline-flex; flex: 0 0 auto; margin-left: auto; }
@@ -472,19 +460,6 @@
     text-overflow: ellipsis;
     white-space: nowrap;
 }
-
-/* The marks, tinted by which agent they are. Nothing here is a brand colour
-   lifted from a vendor — they are GridVibe's own hues, chosen only to be
-   distinguishable from each other and legible on both grounds, which is the
-   whole job of a tint on a list. */
-.dash-agent[data-agent="claude"] { --dash-agent-accent: #d97757; }
-.dash-agent[data-agent="codex"] { --dash-agent-accent: #4fd1a5; }
-.dash-agent[data-agent="copilot"] { --dash-agent-accent: #a371f7; }
-.dash-agent[data-agent="grok"] { --dash-agent-accent: #9aa3af; }
-.dash-agent[data-agent="opencode"] { --dash-agent-accent: #f0a868; }
-.dash-agent[data-agent="kilo"] { --dash-agent-accent: #7aa2f7; }
-.dash-agent[data-agent="kimi"] { --dash-agent-accent: #6ee7b7; }
-.dash-agent[data-agent="hermes"] { --dash-agent-accent: #c084fc; }
 
 /* ── Tags ── */
 

@@ -341,7 +341,7 @@ function parseAgentRows() {
         const inner = found[2];
         const name = /<span class="dash-agent-name">([\s\S]*?)<\/span>/.exec(inner);
         const transport = /<span class="dash-tag dash-tag-transport">([\s\S]*?)<\/span>/.exec(inner);
-        const glyph = /<svg class="dash-agent-glyph"[\s\S]*?<\/svg>/.exec(inner);
+        const glyph = /(?:<svg class="dash-agent-glyph"[\s\S]*?<\/svg>|<img class="dash-agent-glyph"[^>]*>)/.exec(inner);
         const line = /<span class="dash-agent-line">([\s\S]*?)<\/span>/.exec(inner);
         rows.push({
             agent: agent ? agent[1] : '',
@@ -813,7 +813,7 @@ class DashboardDialogStructureTestCase(DashboardDialogTestCase):
         self.assertEqual(row["name"], "Claude Code")
         self.assertEqual(row["transport"], "SSH")
         self.assertEqual(row["agent"], "claude")
-        self.assertIn("<svg", row["glyph"])
+        self.assertIn("/docs/images/agent/claude-code.svg", row["glyph"])
         self.assertEqual(row["line"], "Claude: fixing the parser")
         self.assertEqual(result["row"]["label"], "Claude: fixing the parser")
         self.assertEqual(result["row"]["tags"], [])
@@ -895,7 +895,7 @@ class DashboardDialogStructureTestCase(DashboardDialogTestCase):
         # gets one rather than an empty chip.
         self.assertEqual(len({entry["glyph"] for entry in result}), 3)
         for entry in result:
-            self.assertIn("<svg", entry["glyph"])
+            self.assertIn("<svg" if entry["agent"] == "default" else "<img", entry["glyph"])
 
     def test_an_agent_that_has_announced_nothing_says_so(self):
         """A freshly opened agent has no conversation, and the row states that.
@@ -1160,7 +1160,8 @@ class DashboardDialogStructureTestCase(DashboardDialogTestCase):
             report({ html: body().innerHTML, line: rowFor('pane:s1').label });
             """
         )
-        self.assertNotIn("<img", result["html"])
+        self.assertNotIn("<img src=x", result["html"])
+        self.assertEqual(result["html"].count('<img '), 1)  # Only bundled agent artwork.
         self.assertIn("&lt;img", result["line"])
 
 

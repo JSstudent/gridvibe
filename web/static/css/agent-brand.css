@@ -1,0 +1,39 @@
+/* Shared by terminal titles and dashboard rows. */
+[data-agent="claude"] { --agent-brand: var(--gv-agent-claude); }
+[data-agent="codex"] { --agent-brand: var(--gv-agent-codex); }
+[data-agent="copilot"] { --agent-brand: var(--gv-agent-copilot); }
+[data-agent="grok"] { --agent-brand: var(--gv-agent-grok); }
+[data-agent="opencode"] { --agent-brand: var(--gv-agent-opencode); }
+[data-agent="kilo"] { --agent-brand: var(--gv-agent-kilo); }
+[data-agent="kimi"] { --agent-brand: var(--gv-agent-kimi); }
+[data-agent="hermes"] { --agent-brand: var(--gv-agent-hermes); }
+
+/* Keep exact brand foregrounds legible on either host-page palette. */
+[data-agent="opencode"] { --agent-brand-ground: var(--gv-agent-codex); }
+[data-theme="light"] [data-agent="codex"],
+[data-theme="light"] [data-agent="kilo"],
+[data-theme="light"] [data-agent="hermes"] {
+    --agent-brand-ground: var(--gv-agent-opencode);
+}
+
+.terminal-name[data-agent],
+.dash-agent-name {
+    background: var(--agent-brand-ground, transparent);
+    border-radius: calc(var(--gv-radius-s) / 2);
+    padding-inline: 3px;
+}
+
+.dash-agent-glyph {
+    display: block;
+    width: 18px;
+    height: 18px;
+    object-fit: contain;
+}
+
+/* These assets also need contrast in the terminal's unboxed icon slot. */
+[data-theme="light"] img.dash-agent-glyph:is(
+    [src$="/openai.svg"], [src$="/kilocode.svg"], [src$="/hermes.svg"]
+) {
+    background: var(--gv-agent-opencode);
+    border-radius: calc(var(--gv-radius-s) / 2);
+}
