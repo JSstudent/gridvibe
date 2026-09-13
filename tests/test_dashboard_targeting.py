@@ -444,7 +444,7 @@ const document = {
 /* Counts writes as well as answering them, so "an unchanged reading touches
    nothing" is a fact about the field rather than about the string. */
 function makeField(id, text) {
-    const field = { id, writes: 0, _text: '' };
+    const field = { id, writes: 0, _text: '', dataset: {} };
     Object.defineProperty(field, 'textContent', {
         get() { return this._text; },
         set(value) { this._text = value; this.writes += 1; }
@@ -501,6 +501,7 @@ class PaneIdentityChromeTestCase(NodeHarnessTestCase):
         result = self._run(
             """
             const icon = { innerHTML: '', hidden: true };
+            const name = makeField('tname-0', '');
             fields.set('ticon-0', icon);
             const captures = [];
             for (const [startup_mode, agent_selection] of [
@@ -508,17 +509,19 @@ class PaneIdentityChromeTestCase(NodeHarnessTestCase):
                 ['terminal', ''], ['explorer', ''], ['browser', '']
             ]) {
                 syncPaneIdentityChrome(0, { startup_mode, agent_selection });
-                captures.push({ html: icon.innerHTML, hidden: icon.hidden });
+                captures.push({ html: icon.innerHTML, hidden: icon.hidden, brand: name.dataset.agent || '' });
             }
             report(captures);
             """
         )
-        for row in result[:3]:
-            self.assertIn("<svg", row["html"])
+        self.assertEqual([row["brand"] for row in result],
+                         ["claude", "codex", "default", "", "", ""])
+        for index, row in enumerate(result[:3]):
+            self.assertIn("<img" if index < 2 else "<svg", row["html"])
             self.assertFalse(row["hidden"])
         self.assertNotEqual(result[0]["html"], result[1]["html"])
         for row in result[3:]:
-            self.assertEqual(row, {"html": "", "hidden": True})
+            self.assertEqual(row, {"html": "", "hidden": True, "brand": ""})
 
     def test_a_pane_takes_the_name_of_the_agent_started_in_it(self):
         result = self._run(

@@ -1096,6 +1096,32 @@ def _scrub_ssh_startup_output(
     return f"{cleaned}{after_marker}"
 
 
+def _unreachable_local_startup_directory(
+    connection: Dict[str, Any], startup_directory: str, shell_kind: str
+) -> str:
+    """Name a startup directory this host can prove is not there, or ``""``.
+
+    Answered only where the host's own filesystem *is* the pane's filesystem,
+    which makes it an authoritative and free read: a directory deleted or
+    renamed since the pane last reported it is known before a single character
+    is typed.
+
+    Two kinds of pane are deliberately not answered, because on both this host
+    would be answering about the wrong filesystem. A remote pane's directory
+    lives on the SSH host, and reading it would cost a round trip on the
+    channel that exists to carry the reader's own shell. A WSL pane's
+    directory is whatever its shell last reported, which is a Linux path --
+    ``/home/me/project`` is not missing just because Windows cannot stat it.
+    Both are left to the ``cd``'s own fallback and its visible error.
+    """
+    if connection.get("kind") != "local" or shell_kind == "wsl":
+        return ""
+    candidate = str(startup_directory or "").strip()
+    if not candidate:
+        return ""
+    return "" if os.path.isdir(os.path.expanduser(candidate)) else candidate
+
+
 def _run_startup_sequence(connection: Dict[str, Any], session: Any):
     """Change into the target directory and optionally run an initial command."""
     shell_kind = connection.get("shell_kind")
@@ -1127,7 +1153,14 @@ def _run_startup_sequence(connection: Dict[str, Any], session: Any):
         time.sleep(0.15)
 
     startup_directory, fallback_directory = _startup_directories(session)
+    # Only a directory this sequence has to `cd` into can fail to be reached.
+    # A pane whose process was spawned in it is already standing there, which
+    # is proof enough that it exists.
+    unreachable_directory = ""
     if startup_directory and not connection.get("launch_cwd_applied"):
+        unreachable_directory = _unreachable_local_startup_directory(
+            connection, startup_directory, shell_kind
+        )
         target_directory = _normalize_local_directory(startup_directory, shell_kind)
         fallback_target = (
             _normalize_local_directory(fallback_directory, shell_kind)
@@ -1168,7 +1201,24 @@ def _run_startup_sequence(connection: Dict[str, Any], session: Any):
 
     startup_command = _compose_agent_startup_command(session)
     if startup_command:
-        _send_connection_input(connection, f"{startup_command}{newline}")
+        if unreachable_directory:
+            # The `cd` above could not land, so this shell is standing
+            # somewhere the reader did not ask for -- its fallback, or wherever
+            # it spawned. An agent or a startup command run there works on the
+            # wrong tree, quietly and sometimes destructively, so it is not run
+            # at all and the pane is told why. Nothing is rewritten: the pane
+            # keeps the directory it recorded, so a save still stores what the
+            # reader asked for and the command is one keystroke away once the
+            # folder is back.
+            _publish_ssh_terminal_output(
+                getattr(session, "session_id", "") or "",
+                "\r\n\x1b[33mGridVibe: "
+                f"{unreachable_directory} is not available, so the startup "
+                "command was not run here.\x1b[0m\r\n",
+                connection,
+            )
+        else:
+            _send_connection_input(connection, f"{startup_command}{newline}")
 
     # Deliberately not the moment to arm an agent pane's retirement watch.
     # Nothing typed above has been *read* yet -- the pump only starts once this

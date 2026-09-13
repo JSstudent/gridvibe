@@ -315,41 +315,33 @@
         }
         return normalized;
     }
-    function resolveTerminalDirectory(defaultDir, terminalDir, mode) {
-        const baseDirectory = String(defaultDir || '').trim();
-        const rawDirectory = String(terminalDir || '').trim();
-        if (!rawDirectory) {
-            return baseDirectory;
-        }
-        if (!baseDirectory || !isAbsoluteDirectory(rawDirectory, mode)) {
-            return rawDirectory;
-        }
+    /* Where one pane actually launches, from the Step 2 default folder and the
+       pane's own directory. Two inputs, two meanings:
 
-        const normalizedDirectory = normalizeComparableDirectory(rawDirectory, mode);
-        const normalizedBase = normalizeComparableDirectory(baseDirectory, mode);
-        if (
-            normalizedDirectory === normalizedBase
-            || normalizedBase === '/'
-            || normalizedDirectory.startsWith(`${normalizedBase}/`)
-        ) {
-            return rawDirectory;
-        }
+       - a *relative* directory is a launcher input — a subdirectory of the
+         Step 2 folder, exactly as its placeholder says — and is joined onto it;
+       - an *absolute* directory is an exact path, captured from a live pane or
+         typed as one, and is launched verbatim.
 
-        throw new Error('Step 3 directories must stay inside the Step 2 default working directory.');
-    }
+       An absolute path used to be refused when it sat outside the Step 2
+       folder, which made a saved pane unlaunchable for the ordinary reason
+       that its shell had walked out of the directory the preset was created
+       in: the capture recorded where the pane was, and the launch rejected it.
+       Nothing is rebased onto the old default either: joining an already
+       absolute path onto the Step 2 folder produces a path to nowhere.
+       Directory validation is not dropped, it moves to where it can be
+       answered: the server checks the path exists and the explorer stays
+       confined to its own root. */
     function buildLaunchDirectory(defaultDir, terminalDir, mode) {
         const baseDirectory = String(defaultDir || '').trim();
         const rawDirectory = String(terminalDir || '').trim();
         if (!rawDirectory) {
             return baseDirectory;
         }
-        if (!baseDirectory) {
+        if (!baseDirectory || isAbsoluteDirectory(rawDirectory, mode)) {
             return rawDirectory;
         }
-        if (!isAbsoluteDirectory(rawDirectory, mode)) {
-            return joinDirectories(baseDirectory, rawDirectory, mode);
-        }
-        return resolveTerminalDirectory(baseDirectory, rawDirectory, mode);
+        return joinDirectories(baseDirectory, rawDirectory, mode);
     }
     function resolvePaneStartupMode(terminal) {
         const savedStartupMode = String(terminal?.startup_mode || '').trim();
@@ -387,6 +379,18 @@
             agent_selection: resolvedStartupMode === 'agent' ? (terminal?.agent_selection || '') : '',
             custom_agent: resolvedStartupMode === 'agent' ? (terminal?.custom_agent || '') : '',
             agent_auto_mode: resolvedStartupMode === 'agent' && Boolean(terminal?.agent_auto_mode),
+            /* The explorer's confinement boundary and whether anybody chose it
+               travel together, and travel separately from `directory`: a pane
+               rooted at a project while browsing one of its subdirectories has
+               two facts to replay, and folding them into one used to bring the
+               pane back rooted wherever it had last been looking. An explicit
+               `false` is preserved — a root this pane derived from its own
+               working directory must come back derived. */
+            explorer_root_directory: resolvedStartupMode === 'explorer'
+                ? String(terminal?.explorer_root_directory || '')
+                : '',
+            explorer_root_configured: resolvedStartupMode === 'explorer'
+                && Boolean(terminal?.explorer_root_configured),
             explorer_tree_open: resolvedStartupMode === 'explorer' ? Boolean(terminal?.explorer_tree_open) : false,
             explorer_git_open: resolvedStartupMode === 'explorer' ? Boolean(terminal?.explorer_git_open) : false,
             /* Both saved-session launch surfaces end here. Keep the Git scope

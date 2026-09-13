@@ -30,7 +30,7 @@ import time
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, BinaryIO, Callable, Dict, List, Optional, Tuple
+from typing import Any, BinaryIO, Dict, List, Optional, Tuple
 
 from web.config import runtime_config
 from web.hostkeys import (  # noqa: F401 - _load_persistent_host_keys re-exported
@@ -119,11 +119,15 @@ def _configured_explorer_root_directory(session: Any) -> str:
     manufactured. `_explorer_root_directory()` falls back to
     `session.directory`, which for a pane launched as a *terminal* invents a
     root nobody picked; and the terminal->explorer switch has to *store* the
-    root it resolved, because the live explorer needs a confinement boundary,
-    which would otherwise let that resolved root pin the next switch. So the
-    stored root answers here only when `explorer_root_configured` says it came
-    from a launch config -- the launcher's own field, a saved preset, or a
-    restored snapshot. Anything deciding *where an explorer opens* asks this.
+    root it derived, because the live explorer needs a confinement boundary.
+    So the stored root answers here only when `explorer_root_configured` says
+    it came from a launch config -- the launcher's own field, a saved preset,
+    or a restored snapshot.
+
+    What that answer is *for* is narrow: what a pane hands back when it leaves
+    explorer mode (`_resolve_pane_terminal_directory()`), and what a split
+    clone inherits. Where a shell *reopens* Files no longer asks -- that root
+    is derived from the pane's working directory every time.
     """
     if not getattr(session, "explorer_root_configured", False):
         return ""
@@ -141,54 +145,32 @@ def _local_path_inside(root_path: str, candidate: str) -> bool:
     return os.path.normcase(common_path) == os.path.normcase(root_path)
 
 
-def _resolve_explorer_open_root(
-    configured_root: str,
-    observed_cwd: str,
-    launch_directory: str,
-    repo_root: Optional[str],
-    *,
-    contains: Callable[[str, str], bool],
-) -> str:
-    """Choose the root an explorer pane opens on.
+def _resolve_explorer_open_root(observed_cwd: str, repo_root: Optional[str]) -> str:
+    """Choose the root a Terminal/Agent -> Files transition opens on.
 
-    A pane's launch directory is where it started; its working directory is
-    where it is now. The explorer opens *at* the working directory and roots:
+    One rule, read entirely off where the pane *is* right now:
 
-    - on the configured root, whenever one was really chosen and still holds
-      the working directory;
-    - otherwise on the Git worktree containing the working directory, so a repo
-      below the launch directory gets a Git sidebar and can still be navigated
-      up to its own root;
-    - otherwise on the working directory itself.
+    1. the Git worktree containing the working directory, when it belongs to
+       one -- so the repository the shell is standing in gets a Git sidebar and
+       can be navigated up to its own root;
+    2. otherwise the working directory itself.
 
-    The candidate is clamped so it never widens the root *above* the launch
-    directory the user picked: a strict ancestor of that floor yields the floor.
-    ``contains(ancestor, path)`` is inclusive, so "strict ancestor" is
-    ``contains(candidate, floor) and not contains(floor, candidate)`` and needs
-    no separate equality predicate for either path flavour.
+    Nothing else participates. A root the pane was carrying and the directory
+    it was originally built on are both facts about the past, and neither may
+    override this choice: a pane launched on a parent holding three
+    repositories, whose shell has walked into the second of them, opens Files
+    on *that repository*. Returning to the parent is a navigation the user
+    performs in the terminal -- move up, reopen Files -- rather than a pin the
+    pane remembers on their behalf.
 
-    The floor binds only while the pane is still *inside* it. The guard is
-    against a repository root silently widening the view above the directory
-    the user picked, not against the user themselves: a shell that has walked
-    up out of the floor is standing somewhere on purpose, and clamping it back
-    down opens the explorer on a directory the terminal beside it is not in.
-    ``launch_directory`` is therefore ``TerminalSession.launch_directory``,
-    which nothing moves -- passing ``session.directory``, which every mode
-    switch rewrites, left the floor at the subdirectory the pane last showed
-    and the explorer could never follow the shell back up again.
+    The transition stores the result as a derived root
+    (``explorer_root_configured: False``): it confines the live explorer, which
+    needs a boundary either way, without becoming a choice nobody made.
+    A root restored from a saved explorer is replayed exactly as saved and is
+    never re-derived here -- this function is only ever asked when a shell is
+    becoming a Files pane.
     """
-    if configured_root and contains(configured_root, observed_cwd):
-        return configured_root
-
-    candidate = repo_root or observed_cwd
-    if (
-        launch_directory
-        and contains(launch_directory, observed_cwd)
-        and contains(candidate, launch_directory)
-        and not contains(launch_directory, candidate)
-    ):
-        return launch_directory
-    return candidate
+    return str(repo_root or "").strip() or str(observed_cwd or "").strip()
 
 
 def _default_explorer_candidate_path(session: Any, root_path: str) -> str:

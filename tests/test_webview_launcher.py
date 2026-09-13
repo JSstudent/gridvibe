@@ -4,6 +4,7 @@ import signal
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock, call, patch
 from urllib.error import HTTPError
 
@@ -88,6 +89,38 @@ class _FakeHandle:
 class _FakeNative:
     def __init__(self, hwnd=1234):
         self.Handle = _FakeHandle(hwnd)
+
+
+class _OrderedWindow(_ExplodingWindow):
+    """An _ExplodingWindow that records when it was shown or restored."""
+
+    def __init__(self, order):
+        super().__init__()
+        self.order = order
+
+    def show(self):
+        self.order.append("show")
+        super().show()
+
+    def restore(self):
+        self.order.append("restore")
+        super().restore()
+
+
+class _FakeGeometryWindow:
+    """A window that answers pywebview's geometry properties and move()."""
+
+    def __init__(self, x, y, width, height):
+        self.x = x
+        self.y = y
+        self.width = width
+        self.height = height
+        self.moves = []
+
+    def move(self, x, y):
+        self.moves.append((x, y))
+        self.x = x
+        self.y = y
 
 
 class _FakeZoomWebview:
@@ -841,6 +874,169 @@ class WebviewLauncherTestCase(unittest.TestCase):
         self.assertEqual(window.restore_calls, 1)
         self.assertEqual(window.show_calls, 1)
         self.assertEqual(window.loaded_urls, [])
+
+    def test_plan_window_placement_only_moves_a_window_off_the_wrong_screen(self):
+        """Where the launcher belongs when a workspace asks for it.
+
+        The monitor the request came from is the one the user is sitting in
+        front of, so a launcher parked on another one is brought over and
+        centred on the window that asked. A launcher already on that monitor is
+        left exactly where the user put it: bringing a window up is not a
+        request to move it around the desk.
+        """
+        primary = (0, 0, 1920, 1080)
+        # The work area is the monitor minus the taskbar: a window centred over
+        # a maximized workspace window must not end up underneath it.
+        primary_work = (0, 0, 1920, 1040)
+        anchor = (100, 100, 1100, 900)
+
+        # Already on the anchor's screen — including a window straddling the
+        # edge, which is judged by where its middle is.
+        self.assertIsNone(
+            webview_launcher.plan_window_placement(
+                anchor, (200, 200, 1000, 700), primary, primary_work
+            )
+        )
+        self.assertIsNone(
+            webview_launcher.plan_window_placement(
+                anchor, (-200, 200, 600, 700), primary, primary_work
+            )
+        )
+
+        # On the monitor to the left: centred on the anchor.
+        self.assertEqual(
+            webview_launcher.plan_window_placement(
+                anchor, (-1800, 100, -1000, 700), primary, primary_work
+            ),
+            (200, 200),
+        )
+
+        # Centred on a workspace window low on that screen, then held inside
+        # the work area rather than pushed under the taskbar.
+        self.assertEqual(
+            webview_launcher.plan_window_placement(
+                (960, 600, 1920, 1080), (-1800, 100, -1000, 700), primary, primary_work
+            ),
+            (1040, 440),
+        )
+
+        # Nothing fits: a window wider and taller than the work area takes its
+        # corner instead of hanging off two edges.
+        self.assertEqual(
+            webview_launcher.plan_window_placement(
+                anchor, (-4000, 100, -1800, 1300), primary, primary_work
+            ),
+            (0, 0),
+        )
+
+    def test_placement_falls_back_to_pywebview_screens_off_windows(self):
+        """The portable half: pywebview's own geometry and screen list.
+
+        Windows has the Win32 reader, which speaks one physical coordinate
+        space for every monitor. Everywhere else the move goes through
+        pywebview, and the screen list is what answers "is it already there" —
+        without it the launcher would be dragged to the middle of the workspace
+        window on every single press.
+        """
+        screens = [
+            SimpleNamespace(x=0, y=0, width=1920, height=1080),
+            SimpleNamespace(x=-1920, y=0, width=1920, height=1080),
+        ]
+        anchor = _FakeGeometryWindow(100, 100, 1000, 800)
+        launcher = _FakeGeometryWindow(-1800, 100, 800, 600)
+
+        with patch.object(webview_launcher, "webview", SimpleNamespace(screens=screens)):
+            moved = webview_launcher.place_window_on_anchor_screen(
+                launcher, anchor, "launcher"
+            )
+            self.assertTrue(moved)
+            self.assertEqual(launcher.moves, [(200, 200)])
+
+            # Same screen as the workspace window: left alone.
+            already = _FakeGeometryWindow(300, 300, 800, 600)
+            self.assertFalse(
+                webview_launcher.place_window_on_anchor_screen(already, anchor, "launcher")
+            )
+            self.assertEqual(already.moves, [])
+
+    def test_placement_never_raises_out_of_the_bridge_call(self):
+        """A window that cannot be placed still gets brought up.
+
+        Placement is a courtesy on top of focusing the launcher; a window with
+        no geometry to read, or no anchor at all, must cost the focus call
+        nothing.
+        """
+        self.assertFalse(
+            webview_launcher.place_window_on_anchor_screen(_ExplodingWindow(), None)
+        )
+        with patch.object(webview_launcher, "webview", SimpleNamespace(screens=[])):
+            self.assertFalse(
+                webview_launcher.place_window_on_anchor_screen(
+                    _ExplodingWindow(), _ExplodingWindow()
+                )
+            )
+
+    def test_open_launcher_window_comes_up_on_the_screen_that_asked(self):
+        api_bridge = webview_launcher.GridVibeApi("http://127.0.0.1:5050")
+        launcher = _ExplodingWindow()
+        workspace = _ExplodingWindow()
+        api_bridge._attach_window(launcher)
+        api_bridge._workspace_windows["aaaaaaaaaaaa"] = workspace
+
+        with patch.object(webview_launcher, "place_window_on_anchor_screen") as place:
+            result = api_bridge.open_launcher_window("aaaaaaaaaaaa")
+
+        self.assertEqual(result, {"ok": True})
+        # Placed onto the window that asked, and still focused: the launcher
+        # keeps its size and its loaded page either way.
+        place.assert_called_once_with(launcher, workspace, "launcher")
+        self.assertEqual(launcher.show_calls, 1)
+        self.assertEqual(launcher.loaded_urls, [])
+
+    def test_open_launcher_window_stays_put_without_a_workspace_to_go_to(self):
+        api_bridge = webview_launcher.GridVibeApi("http://127.0.0.1:5050")
+        launcher = _ExplodingWindow()
+        api_bridge._attach_window(launcher)
+
+        with patch.object(webview_launcher, "place_window_on_anchor_screen") as place:
+            # No id (the request came from somewhere that is not a workspace),
+            # an id whose window is closed, and an unusable id.
+            self.assertEqual(api_bridge.open_launcher_window(), {"ok": True})
+            self.assertEqual(api_bridge.open_launcher_window(""), {"ok": True})
+            self.assertEqual(api_bridge.open_launcher_window("bbbbbbbbbbbb"), {"ok": True})
+            self.assertEqual(api_bridge.open_launcher_window("not a workspace"), {"ok": True})
+
+        place.assert_not_called()
+        self.assertEqual(launcher.show_calls, 4)
+
+    def test_minimized_launcher_is_placed_after_it_is_restored(self):
+        """Order matters both ways round.
+
+        A window that is up is moved before it is shown, so it never appears on
+        the monitor it is leaving. A minimized one has no position to move until
+        it has been restored, so that one is placed afterwards.
+        """
+        api_bridge = webview_launcher.GridVibeApi("http://127.0.0.1:5050")
+        order = []
+        launcher = _OrderedWindow(order)
+        workspace = _ExplodingWindow()
+        api_bridge._attach_window(launcher)
+        api_bridge._workspace_windows["aaaaaaaaaaaa"] = workspace
+
+        def _record_placement(*_args, **_kwargs):
+            order.append("place")
+            return True
+
+        with patch.object(
+            webview_launcher, "place_window_on_anchor_screen", _record_placement
+        ):
+            api_bridge.open_launcher_window("aaaaaaaaaaaa")
+            self.assertEqual(order, ["place", "show"])
+
+            order.clear()
+            api_bridge._set_window_minimized("launcher", True)
+            api_bridge.open_launcher_window("aaaaaaaaaaaa")
+            self.assertEqual(order, ["restore", "show", "place"])
 
     def test_build_restart_command_reuses_current_launcher_arguments(self):
         with patch.object(webview_launcher.sys, "platform", "linux"):

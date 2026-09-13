@@ -103,6 +103,33 @@ changing any field that survives restart; it owns the complete save/restore flow
   validated backup recovery. This covers runtime state, saved sessions, config,
   and any future store. Invalid UTF-8/shape is corruption; a read `OSError` alone
   is not, and must not quarantine potentially valid bytes.
+- **One reading of a pane's path state, `web/pane_paths.py`, for every surface
+  that saves one.** `capture_pane_paths()` answers the four facts — `directory`
+  (the observation when the pane produced one, the recorded directory
+  otherwise), the immutable `launch_directory`, `explorer_root_directory`, and
+  `explorer_root_configured` — from one already-coherent pane snapshot, reading
+  no process and no disk so it is safe under the runtime-state lock. The
+  runtime snapshot, the exit/dashboard preset builder and saved-preset
+  normalization all read it; a surface that decides for itself is how the same
+  gesture came to save two different locations.
+- **Saving a live pane saves where it is.** Updating an existing preset takes
+  each live pane's directory and explorer root (`SAVED_PANE_PATH_FIELDS`);
+  connection setup — the `ssh`/`wsl` blocks and the stored password — stays the
+  base preset's. A payload stating no directory could not find out where its
+  pane was and leaves the preset's own alone, which is a different outcome from
+  a pane that moved. A preset never stores `launch_directory`: it is a template
+  whose panes are built where it puts them, and only a restore is the same pane
+  coming back.
+- **A captured path is launched as it was captured.** `buildLaunchDirectory()`
+  is the one rule both launch adapters read: a *relative* pane directory is a
+  launcher input and joins the Step 2 default folder; an *absolute* one is an
+  exact path and is launched verbatim, never rebased onto that folder and never
+  refused for sitting outside it — a saved pane whose shell had walked out of
+  the preset's folder was otherwise unlaunchable. Directory validation stays
+  where it can be answered: the server checks the path exists and the explorer
+  stays confined to its own root. A launcher row carries a hydrated explorer
+  root back out of the form, dropped by the same edited-directory signal that
+  drops its saved tabs and pin.
 - Persistence failures raise the store's `StateFilePersistenceError` subclass;
   callers report a retryable failure, never claim a save succeeded. Runtime-state
   reads validate without rewriting. Commits retain per-workspace ticket/revision
@@ -147,6 +174,18 @@ changing any field that survives restart; it owns the complete save/restore flow
 - Ask `effective_directory()` where a pane is: prompt observation, then
   `/proc/<pid>/cwd`, then an explicitly opted-in marker probe, then a directory
   fallback reported as an assumption. Never probe an agent's input box.
+- **A startup command is not run in a directory the reader did not ask for.**
+  `_run_startup_sequence()`'s `cd` carries the launch directory as a visible
+  shell-level fallback, and an agent or startup command that then ran would be
+  working on the wrong tree. `_unreachable_local_startup_directory()` answers
+  only where this host's filesystem *is* the pane's — a local, non-WSL pane
+  whose directory the sequence had to `cd` into — and the command is skipped
+  with a notice naming the folder. A pane whose process was spawned in its
+  directory (`launch_cwd_applied`) has already proved it exists and is not
+  re-checked; SSH and WSL panes are left to the `cd`'s own fallback, because
+  this host would be answering about another filesystem. Nothing is rewritten:
+  the pane keeps the directory it recorded, so a save still stores what was
+  asked for.
 - Local prompt hooks arrive at spawn: cmd `PROMPT`, bash `PROMPT_COMMAND` (forwarded
   to WSL through `WSLENV`), PowerShell startup arguments wrapping the user's
   prompt. Only SSH receives a typed integration command. Disabling
@@ -236,10 +275,10 @@ changing any field that survives restart; it owns the complete save/restore flow
 - Splits, reconnects, saves, and restores use the observed directory. Persist it
   in the snapshot's existing `directory` slot; promotion stamps
   `current_directory`, and reconnect uses shell `cd A || cd B` fallback instead of
-  a precheck. `launch_directory` is the immutable, persisted origin/widen-guard
-  floor; `directory` can move during mode transitions. That floor applies only
-  while the shell remains inside it. Under a shared lock, read only already-known
-  metadata, never run a probe.
+  a precheck. `launch_directory` is the immutable, persisted record of where the
+  pane was built, and a record is all it is: it clamps no root and gates no
+  transition. `directory` moves with every mode and shell transition. Under a
+  shared lock, read only already-known metadata, never run a probe.
 - Quote for the target shell: `_powershell_single_quote` for PowerShell,
   `shlex.quote` for POSIX.
 
@@ -271,12 +310,24 @@ changing any field that survives restart; it owns the complete save/restore flow
   Local Repo panes have families; SSH/POSIX panes get the flat agent list without
   a local-family choice. Use registry-backed `AGENT_OPTIONS` minus `other`.
   Expansion is temporary UI state, never persisted.
+- **Every terminal/agent→Files switch derives a fresh root from where the pane
+  is standing:** the Git worktree containing its working directory, else that
+  directory itself (`_resolve_explorer_open_root()`, which takes those two
+  inputs and nothing else). A root the pane was carrying and the directory it
+  was built on are facts about the past and may not override it, so a pane
+  launched on a parent of three repositories opens Files on the repository its
+  shell walked into. Returning to the parent is a navigation the reader makes
+  in the terminal — move up, reopen Files — never a pin the pane remembers for
+  them. The resolved root is always stored, because the live explorer needs a
+  confinement boundary, and always stored as `explorer_root_configured: False`.
 - A live terminal→explorer switch opens the response-only `explorer_open_path`
-  relative to the newly resolved root, not an old root's saved tabs. Persist
+  relative to that newly resolved root, not an old root's saved tabs. Persist
   `explorer_root_directory` with `explorer_root_configured`, computed against the
   root actually stored. Derived roots must not become configured across restart;
-  only configured roots retarget an outgoing explorer/browser terminal directory.
-  Legacy unstated flags default to configured for explorer panes only.
+  only configured roots retarget an outgoing explorer/browser terminal directory
+  and are inherited by a split clone. Legacy unstated flags default to configured
+  for explorer panes only. A root restored from a snapshot or preset is replayed
+  exactly and never re-derived — and never pins the next explicit switch either.
 
 ## Explorer filesystem and transfers
 
@@ -543,8 +594,12 @@ unless the task explicitly changes this contract.
 - Sidebar capture resolves the pane object, including cached groups without a
   slot. Explorer paths stay relative to their captured root; full restore may
   reopen saved directories, while live transitions obey the fresh open path.
-  Root/configured flag and immutable `launch_directory` travel through launch,
-  `to_dict()` and snapshot fields together; preserve local/SSH confinement.
+  The root and its configured flag travel together through launch, `to_dict()`,
+  snapshot fields and saved presets — never one without the other — while the
+  immutable `launch_directory` travels through launch, `to_dict()` and the
+  snapshot only. `directory` means the same thing in every mode: a pane rooted
+  wider than the folder it is showing states both, and neither field carries
+  the other's value. Preserve local/SSH confinement.
 - A wrong-typed pane invalidates its whole group, never silently drops a pane or
   coerces a value. Invalid window chrome/appearance degrades to defaults on stored
   read. Restore chooser and restore use the same validation gate.
@@ -597,6 +652,25 @@ unless the task explicitly changes this contract.
   per batch with `WORKSPACE_TAB_BLOCKED_HINT` and per-row Open; attempt every
   restored workspace even if earlier tabs were blocked. Pre-reserved blanks do
   not bypass browser gesture limits.
+- The workspace a launcher is opened from is recorded once per handover
+  (`gridvibe.launcherOrigin`: id + timestamp) and answers two questions — Alt+W's
+  way back, and what the next launch targets. Resolve it against the live list
+  through `isUserVisibleWorkspace` for both: a record with no window is neither.
+  The destination claims it by timestamp (newer than the last adopted, and within
+  `WORKSPACE_LAUNCHER_HANDOVER_TTL_MS`), so a destination picked after arriving
+  stands and a record left by an earlier run steers nothing. Never consume the
+  record — the way back needs it for as long as the launcher stays open. Claim on
+  every destination refresh, including the focus/visibility arrival that is all a
+  handover into an already-open launcher window amounts to.
+- `open_launcher_window(workspace_id)` places the native launcher on the screen
+  holding that workspace's window before showing it, and after the restore when it
+  was minimized. `plan_window_placement()` is the one rule: a window already on
+  that monitor is never moved, otherwise centre it on the anchor and clamp it into
+  the work area. Read and write geometry in one coordinate space — Win32 physical
+  pixels on Windows, pywebview logical ones elsewhere — and restore a maximized
+  window before moving it, then maximize it again. Placement is a courtesy on top
+  of focus: an unusable id, a workspace with no window, or geometry that cannot be
+  read costs the focus call nothing, and browser mode places nothing.
 - Native Alt+X/button and opt-in, default-off minimize cascade share
   `minimize_all_windows()`. Minimize, never hide; taskbar restores individual
   windows and restore never cascades. Preserve maximized-window restoration.
@@ -785,6 +859,19 @@ unless the task explicitly changes this contract.
   the card exists so the reader can go there — and gives up only the weight
   that was drawing the eye to the agents, so it cannot read as disabled. An
   empty tree means nothing is running at all, not that nothing agentic is.
+- An agent row's state is its **leading** column and one 8px dot: the card is
+  scanned for "is anything still going", and a colour answers that before any
+  column after it is read. The word the dot replaced is not drawn, is carried
+  verbatim on the indicator's own hover, and stays in the markup out of flow
+  so the row's accessible name still states it. The progress bar is the
+  trailing column and a separate reading: only the agents that speak the
+  progress sequence have one, so it must never widen the dot's column.
+- The drawn row is therefore the dot, the agent's mark and name, the chat
+  title and `auto`; `auto` is the only chip left on it. What the pane runs on
+  is still `paneTransportLabel()`'s single word, and the dashboard states it
+  as the last line of the row's own hover rather than as a chip on the line --
+  it is looked up when something is wrong with a pane, not scanned down a
+  card, and the width belongs to the title.
 - Dashboard layout must remain usable without horizontal overflow at narrow
   widths. A polling update that changes only a row's title, hover, status,
   progress, or idle age updates that row in place, each field on its own
@@ -844,8 +931,13 @@ unless the task explicitly changes this contract.
   window and the dashboard. The palette's order is load-bearing — it is what the
   group-id hash indexes — so a hue is replaced in place and never reordered, and
   the hash itself never changes. A glyph is emitted with its registry key on the
-  wrapper for the stylesheet to tint; an agent GridVibe has not drawn falls back
-  to the shared terminal mark, never to nothing.
+  wrapper for the stylesheet to tint. Known agents use the supplied SVG artwork
+  in `docs/images/agent/` through local `<img>` elements; unknown agents fall
+  back to the shared terminal SVG. Brand colors live in `tokens.css` and
+  `agent-brand.css` applies them to terminal titles and dashboard names. Exact
+  foregrounds are retained in both themes, with contrasting backgrounds for
+  white/yellow names on light surfaces and near-black OpenCode names. Runtime
+  agent changes update both the title's brand key and its icon in place.
 - `agent-dashboard.css` dresses one dialog on two pages and states no page's
   palette: no `color-scheme`, no `body` rule, no full-height frame. It reads the
   shared `--gv-dialog-*` and status tokens, so both legacy page palettes dress

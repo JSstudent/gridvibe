@@ -27,18 +27,15 @@ from sessions.manager import SessionStatus
 from web.app import session_manager
 from web.explorer import (
     _acquire_ssh_sftp,
-    _configured_explorer_root_directory,
     _explorer_cwd_repo_root,
     _is_browser_session,
     _is_explorer_session,
-    _local_path_inside,
     _LocalExplorerBackend,
     _relative_explorer_path,
     _relative_remote_explorer_path,
     _release_ssh_sftp,
     _remote_is_directory,
     _remote_path_clean,
-    _remote_path_inside,
     _resolve_explorer_open_root,
     _resolve_pane_terminal_directory,
     _sftp_request_error_types,
@@ -194,12 +191,6 @@ def apply_pane_mode_change(
         cwd_probe = _refresh_pane_cwd(session_id, session, bool(data.get("refresh_cwd")))
         if cwd_probe["directory"]:
             requested_directory = cwd_probe["directory"]
-        # The widen-guard floor is where the pane was *built*, never
-        # `session.directory` -- this switch rewrites that on its way out, so
-        # one round trip through explorer mode would leave the floor sitting at
-        # the subdirectory the pane last showed and the explorer could never
-        # follow the shell back up again.
-        launch_directory = session.launch_directory or session.directory
         next_directory = session.directory
         root_directory = ""
         open_path = ""
@@ -208,7 +199,6 @@ def apply_pane_mode_change(
             if requested_directory:
                 next_directory = _remote_path_clean(requested_directory)
             next_directory = _remote_path_clean(next_directory or "/")
-            configured_root = _remote_path_clean(_configured_explorer_root_directory(session))
             client = None
             sftp = None
             try:
@@ -216,25 +206,13 @@ def apply_pane_mode_change(
                 next_directory = sftp.normalize(next_directory)
                 if not _remote_is_directory(sftp, next_directory):
                     raise ValueError("Explorer root directory does not exist")
-                if configured_root:
-                    try:
-                        configured_root = sftp.normalize(configured_root)
-                        if not _remote_is_directory(sftp, configured_root):
-                            configured_root = ""
-                    except OSError:
-                        configured_root = ""
-                repo_root = None
-                if not (configured_root and _remote_path_inside(configured_root, next_directory)):
-                    repo_root = _explorer_cwd_repo_root(
-                        _SftpExplorerBackend(session, client, sftp), next_directory
-                    )
-                root_directory = _resolve_explorer_open_root(
-                    configured_root,
-                    next_directory,
-                    _remote_path_clean(launch_directory or ""),
-                    repo_root,
-                    contains=_remote_path_inside,
+                # Asked for every transition now, not only when no configured
+                # root held the cwd: the root is derived from where the pane is
+                # standing, so the repository it is standing in is the question.
+                repo_root = _explorer_cwd_repo_root(
+                    _SftpExplorerBackend(session, client, sftp), next_directory
                 )
+                root_directory = _resolve_explorer_open_root(next_directory, repo_root)
                 open_path = _relative_remote_explorer_path(root_directory, next_directory)
             except ValueError as exc:
                 raise ModeTransitionError(str(exc), 400) from exc
@@ -251,17 +229,11 @@ def apply_pane_mode_change(
                 # directory it named is what `directory` now holds.
                 current_directory=None,
                 explorer_root_directory=root_directory,
-                # The live explorer needs a confinement boundary either way, so
-                # the resolved root is always stored. The flag is what keeps a
-                # *derived* one from pinning the next switch to a directory
-                # nobody chose -- so it describes the root actually stored, not
-                # the candidate it was chosen among. Holding *a* configured root
-                # is not the same as having opened on it:
-                # `_resolve_explorer_open_root()` returns it only while it still
-                # holds the observed cwd, and a shell that has walked outside it
-                # gets a derived root that used to be stored wearing this flag.
-                explorer_root_configured=bool(configured_root)
-                and root_directory == configured_root,
+                # Always derived, because this transition now always derives:
+                # the root comes from the pane's own working directory, so no
+                # root it reaches Files carrying can pin the next transition to
+                # a directory the shell has since left.
+                explorer_root_configured=False,
                 initial_command="",
                 startup_mode="explorer",
             )
@@ -272,27 +244,8 @@ def apply_pane_mode_change(
                 raise ModeTransitionError("Explorer root directory does not exist", 400)
 
             next_directory = os.path.realpath(os.path.abspath(os.path.expanduser(next_directory)))
-            configured_root = _configured_explorer_root_directory(session)
-            if configured_root:
-                configured_root = os.path.realpath(
-                    os.path.abspath(os.path.expanduser(configured_root))
-                )
-                if not os.path.isdir(configured_root):
-                    configured_root = ""
-            if launch_directory:
-                launch_directory = os.path.realpath(
-                    os.path.abspath(os.path.expanduser(str(launch_directory)))
-                )
-            repo_root = None
-            if not (configured_root and _local_path_inside(configured_root, next_directory)):
-                repo_root = _explorer_cwd_repo_root(_LocalExplorerBackend(session), next_directory)
-            root_directory = _resolve_explorer_open_root(
-                configured_root,
-                next_directory,
-                str(launch_directory or ""),
-                repo_root,
-                contains=_local_path_inside,
-            )
+            repo_root = _explorer_cwd_repo_root(_LocalExplorerBackend(session), next_directory)
+            root_directory = _resolve_explorer_open_root(next_directory, repo_root)
             open_path = _relative_explorer_path(root_directory, next_directory)
 
             session_manager.update_session_metadata(
@@ -301,10 +254,8 @@ def apply_pane_mode_change(
                 directory=next_directory,
                 current_directory=None,
                 explorer_root_directory=root_directory,
-                # Same rule as the SSH branch above: the flag qualifies the root
-                # being stored, so a derived root never pins the pane.
-                explorer_root_configured=bool(configured_root)
-                and root_directory == configured_root,
+                # Same rule as the SSH branch above.
+                explorer_root_configured=False,
                 username="",
                 port=22,
                 password=None,

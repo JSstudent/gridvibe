@@ -847,6 +847,13 @@
     function syncPaneIdentityChrome(index, session) {
         syncPaneAgentIcon(document.getElementById(`ticon-${index}`), session);
         const nameLabel = document.getElementById(`tname-${index}`);
+        if (nameLabel) {
+            const identity = window.GridVibeAgentIdentity;
+            const key = identity.paneKindForSession(session) === 'agent'
+                ? window.GridVibeAgentGlyphs.agentGlyphKey(identity.agentKeyForSession(session)) : '';
+            if (key && nameLabel.dataset.agent !== key) nameLabel.dataset.agent = key;
+            else if (!key && nameLabel.dataset.agent) delete nameLabel.dataset.agent;
+        }
         const title = paneDisplayTitle(session, index);
         if (nameLabel && nameLabel.textContent.trim() !== title) {
             nameLabel.textContent = title;
@@ -2537,12 +2544,15 @@
         /* Where the pane *is*, not where it started: `current_directory` is the
            observed value (null until something actually observed it), and a
            saved preset that replays the launch directory is what brought an
-           agent back in the wrong place. An explorer pane keeps answering with
-           its root, which is the boundary a relaunch has to reproduce. */
-        const liveDirectory = session.current_directory || session.directory || '';
-        const selectedDirectory = startupMode === 'explorer'
-            ? (session.explorer_root_directory || liveDirectory)
-            : liveDirectory;
+           agent back in the wrong place.
+
+           An explorer pane used to answer with its *root* here, so one saved
+           field meant two different things depending on the pane's mode and a
+           pane rooted wider than the folder it was showing could not state
+           both. The root now rides in its own field beside the flag that says
+           whether anybody chose it, and `directory` means the same thing in
+           every mode. */
+        const selectedDirectory = session.current_directory || session.directory || '';
         const explorerSlot = startupMode === 'explorer' && terminal ? terminals.indexOf(terminal) : -1;
         if (explorerSlot !== -1) {
             /* Fold the shown tab's live mode + scroll into its record so the
@@ -2579,6 +2589,15 @@
             session_id: session.session_id || '',
             title: session.title || `Terminal ${index + 1}`,
             directory: selectedDirectory,
+            /* Saved for explorer panes only, and saved exactly: the relaunch
+               replays this root rather than deriving one again, and an
+               explicit `false` keeps a derived root from coming back as a pin
+               on a directory nobody picked. */
+            explorer_root_directory: startupMode === 'explorer'
+                ? (session.explorer_root_directory || '')
+                : '',
+            explorer_root_configured: startupMode === 'explorer'
+                && Boolean(session.explorer_root_configured),
             initial_command: startupMode === 'explorer' ? '' : (session.initial_command || ''),
             initial_command_mode: commandMode,
             startup_mode: startupMode,
@@ -2624,7 +2643,13 @@
             buildWorkspaceTerminalEntry(terminal, index, connectionMode)
         ));
         const firstSession = groupTerminals.find(terminal => terminal?._session)?._session || {};
-        const firstDirectory = firstSession.explorer_root_directory || firstSession.directory || '';
+        /* Step 2's default folder is launcher setup, not a pane location: the
+           first pane's explorer boundary when it has one, and where that pane
+           is otherwise. The same rule the server-side exit save applies. */
+        const firstDirectory = firstSession.explorer_root_directory
+            || firstSession.current_directory
+            || firstSession.directory
+            || '';
 
         return {
             connection_mode: connectionMode,
@@ -5336,7 +5361,7 @@
                 <div class="terminal-header">
                     <div class="terminal-info">
                         <span class="terminal-agent-icon" id="ticon-${i}" aria-hidden="true" ${session.startup_mode === 'agent' ? '' : 'hidden'}>${paneAgentIconHtml(session)}</span>
-                        <span class="terminal-name" id="tname-${i}">
+                        <span class="terminal-name" id="tname-${i}" ${window.GridVibeAgentIdentity.paneKindForSession(session) === 'agent' ? `data-agent="${window.GridVibeAgentGlyphs.agentGlyphKey(window.GridVibeAgentIdentity.agentKeyForSession(session))}"` : ''}>
                             ${escHtml(paneDisplayTitle(session, i))}
                         </span>
                         <span class="terminal-host" id="thost-${i}">
@@ -8028,9 +8053,13 @@
            the browser-fallback step rather than run first: a bridge that
            answered would otherwise have left this window un-maximised for
            nothing. */
-        logSessionWindowAction('Launcher window requested', { preserve_fullscreen: true });
+        logSessionWindowAction('Launcher window requested', {
+            preserve_fullscreen: true,
+            workspace_id: currentWorkspaceId
+        });
         const opened = await openLauncherWindow({
-            beforeBrowserFallback: resetFullscreenState
+            beforeBrowserFallback: resetFullscreenState,
+            originWorkspaceId: currentWorkspaceId
         });
         logSessionWindowAction('Launcher window request finished', { opened });
         return false;

@@ -15,6 +15,7 @@ import uuid
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from web.config import runtime_config
+from web.pane_paths import SAVED_PANE_PATH_FIELDS, saved_pane_paths
 from web.paths import BASE_DIR
 from web.saved_session_store import UNCHANGED, SavedSessionStore
 from web.secrets import _decrypt_password, _encrypt_password
@@ -88,6 +89,12 @@ def _default_terminal_entries():
         {
             "title": f"Terminal {index + 1}",
             "directory": "",
+            # The explorer's confinement boundary is stored beside the
+            # directory rather than inside it (web/pane_paths.py): a pane
+            # rooted at a project while browsing one of its subdirectories has
+            # two path facts, and one field could only ever carry one of them.
+            "explorer_root_directory": "",
+            "explorer_root_configured": False,
             "initial_command": "",
             "initial_command_mode": "command",
             "startup_mode": "terminal",
@@ -230,7 +237,13 @@ def _normalize_terminal_entries(
         normalized.append(
             {
                 "title": str(entry.get("title") or f"Terminal {index + 1}"),
-                "directory": str(entry.get("directory") or ""),
+                # The path fields travel together and keep one meaning each:
+                # where the pane launches, the explorer's boundary, and whether
+                # anybody chose that boundary. Carrying only the first is what
+                # made a saved explorer come back rooted wherever it had been
+                # browsing, and a legacy entry stating neither of the other two
+                # still reads exactly as before.
+                **saved_pane_paths(entry, startup_mode),
                 "initial_command": initial_command,
                 "initial_command_mode": startup_mode if startup_mode in {"agent", "explorer", "browser"} else "command",
                 "startup_mode": startup_mode,
@@ -451,7 +464,19 @@ def _merge_workspace_session_config(
     base_config: Dict[str, Any],
     workspace_config: Dict[str, Any],
 ) -> Dict[str, Any]:
-    """Apply saveable live-workspace state without changing launcher setup fields."""
+    """Apply saveable live-workspace state over a preset's launcher setup.
+
+    "Saveable" now includes where each pane actually is. Updating a preset used
+    to keep the directory it was created with on the premise that a pane's
+    location is launcher setup -- but the same gesture on a preset that did not
+    exist yet stored the live location, so two identical-looking saves produced
+    different presets, and a pane that had moved was silently rewound to its
+    import directory on the next launch.
+
+    Connection setup is still the base preset's: the ``ssh`` and ``wsl`` blocks
+    (host, user, port, distribution, the stored password) are never touched
+    here, which is what stops a re-save from downgrading a working credential.
+    """
     base = _normalize_session_config(base_config)
     workspace_input = dict(workspace_config or {})
     workspace_input["connection_mode"] = base["connection_mode"]
@@ -472,9 +497,18 @@ def _merge_workspace_session_config(
             startup_mode if startup_mode in {"agent", "explorer", "browser"} else "command"
         )
 
-        # Agent identity and command are required mode metadata. Unlike the
-        # terminal directory, these values must follow the live pane so the
-        # saved preset can recreate Codex, Claude, or a custom agent pane.
+        # Where the pane is, its explorer boundary, and whether anybody chose
+        # that boundary -- taken together or not at all.
+        # A payload that states no directory could not find out where its pane
+        # was; it must leave the preset's own location alone rather than erase
+        # it, which is a different outcome from a pane that moved.
+        live_paths = {name: workspace_terminal[name] for name in SAVED_PANE_PATH_FIELDS}
+        if live_paths["directory"]:
+            saved_terminal.update(live_paths)
+
+        # Agent identity and command are required mode metadata: they follow
+        # the live pane so the saved preset can recreate Codex, Claude, or a
+        # custom agent pane -- in the directory captured just above.
         if startup_mode == "agent":
             agent_selection = workspace_terminal["agent_selection"]
             custom_agent = workspace_terminal["custom_agent"]
