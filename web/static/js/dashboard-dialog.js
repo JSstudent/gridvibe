@@ -184,6 +184,13 @@
         return identity.paneDisplayTitle(pane, index, dashboardAgentOptions());
     }
 
+    /* What the pane runs on, which is a fact about the pane and no longer a
+       column on the row. It was a chip between the agent's name and its chat
+       title, and on a dialog this width that chip was costing the title more
+       room than the answer was worth: the shell an agent runs on is looked up
+       when something is wrong with it, not scanned down a card. So it is the
+       last line of the row's own hover now, beside where the pane is -- asked
+       for rather than read. */
     function dashboardTransportLabel(pane) {
         const identity = dashboardIdentity();
         return identity ? identity.paneTransportLabel(pane) : '';
@@ -251,7 +258,11 @@
         if (!identity) {
             return dashboardPaneLine(pane);
         }
-        return identity.paneChatTooltip(pane, Number(pane?.index) || 0, dashboardAgentOptions());
+        const chat = identity.paneChatTooltip(
+            pane, Number(pane?.index) || 0, dashboardAgentOptions()
+        );
+        const transport = dashboardTransportLabel(pane);
+        return transport ? `${chat}\n${transport}` : chat;
     }
 
     function dashboardStateWord(activity) {
@@ -298,13 +309,42 @@
         return String(pane?.activity?.state || 'unknown');
     }
 
-    /* The dot and its word always; the bar only when a percentage was actually
-       published, or when the agent said it is busy without saying how far
-       along it is. */
+    /* The state, as one mark at the head of the row.
+
+       It used to be a word and a dot at the far end of the line, and both of
+       those were wrong for what the reading is used for. A card is scanned for
+       "is anything still going", which is a question a colour answers before a
+       word beside it is read at all -- and the word was answering it a second
+       time, in the column furthest from where the eye starts, at the cost of
+       about a fifth of the line the chat title was being truncated into.
+
+       So the dot leads the row, in front of the mark and the name, and the word
+       is no longer drawn. What a colour cannot carry -- how long it has been
+       idle, "Connecting", "Disconnected" -- is the indicator's own hover, which
+       sits inside the row's and so answers on the dot rather than on the row.
+       The word itself stays in the markup for the reader who is not looking at
+       it: the row is a button, and its accessible name is its contents. */
     function dashboardActivityHtml(pane) {
-        const activity = pane?.activity;
         const stateKey = dashboardPaneStateKey(pane);
         const word = dashboardPaneStateWord(pane);
+        return `
+            <span class="dash-activity dash-state-${escHtml(stateKey)}" title="${escHtml(word)}">
+                <span class="dash-state-dot" aria-hidden="true"></span>
+                <span class="dash-state-word">${escHtml(word)}</span>
+            </span>
+        `;
+    }
+
+    /* How far along, which was always a separate question from whether anything
+       is happening and is now drawn in a separate place. Every agent has a
+       state; only the few that speak the progress sequence have a percentage,
+       so the bar stays at the end of the row, where there is width for it and
+       where it does not widen the one-mark column the dot now owns. Drawn only
+       when a percentage was actually published, or when the agent said it is
+       busy without saying how far along it is. */
+    function dashboardProgressHtml(pane) {
+        const activity = pane?.activity;
+        const stateKey = dashboardPaneStateKey(pane);
         const progressState = pane?.status === 'connected' && activity?.progress_fresh !== false
             ? String(activity?.progress_state || '') : '';
         const value = Math.max(0, Math.min(100, Number(activity?.progress_value) || 0));
@@ -312,25 +352,19 @@
         const indeterminate = !determinate
             && stateKey === 'working'
             && ['indeterminate', 'warning', 'normal'].includes(progressState);
-        const bar = determinate || indeterminate
-            ? `
-                <span class="dash-progress dash-progress-${escHtml(progressState || 'normal')}"
-                    role="progressbar" aria-label="Agent progress" aria-valuemin="0" aria-valuemax="100"
-                    ${determinate ? `aria-valuenow="${value}"` : ''}>
-                    <span
-                        class="dash-progress-fill${indeterminate ? ' is-indeterminate' : ''}"
-                        ${determinate ? `style="width:${Math.max(0, Math.min(100, value))}%"` : ''}
-                    ></span>
-                </span>
-                ${determinate ? `<span class="dash-progress-value">${value}%</span>` : ''}
-            `
-            : '';
+        if (!determinate && !indeterminate) {
+            return '';
+        }
         return `
-            <span class="dash-activity dash-state-${escHtml(stateKey)}">
-                ${bar}
-                <span class="dash-state-word">${escHtml(word)}</span>
-                <span class="dash-state-dot" aria-hidden="true"></span>
+            <span class="dash-progress dash-progress-${escHtml(progressState || 'normal')}"
+                role="progressbar" aria-label="Agent progress" aria-valuemin="0" aria-valuemax="100"
+                ${determinate ? `aria-valuenow="${value}"` : ''}>
+                <span
+                    class="dash-progress-fill${indeterminate ? ' is-indeterminate' : ''}"
+                    ${determinate ? `style="width:${Math.max(0, Math.min(100, value))}%"` : ''}
+                ></span>
             </span>
+            ${determinate ? `<span class="dash-progress-value">${value}%</span>` : ''}
         `;
     }
 
@@ -372,12 +406,12 @@
                 data-session-id="${escHtml(pane?.session_id || '')}"
                 title="${escHtml(dashboardPaneHover(pane))}"
             >
+                <span class="dash-agent-reading">${dashboardActivityHtml(pane)}</span>
                 <span class="dash-agent-icon" aria-hidden="true">${dashboardAgentGlyphHtml(pane)}</span>
                 <span class="dash-agent-name">${escHtml(dashboardAgentName(pane))}</span>
-                ${dashboardTagHtml(dashboardTransportLabel(pane), 'transport')}
                 <span class="dash-agent-line">${escHtml(dashboardPaneLine(pane))}</span>
                 ${pane?.agent_auto_mode ? dashboardTagHtml('auto', 'auto') : ''}
-                <span class="dash-agent-reading">${dashboardActivityHtml(pane)}</span>
+                <span class="dash-agent-progress">${dashboardProgressHtml(pane)}</span>
             </button>
         `;
     }
@@ -698,6 +732,14 @@
                 const reading = dashboardActivityHtml(pane);
                 if (!previous || reading !== dashboardActivityHtml(previous)) {
                     row.querySelector('.dash-agent-reading').innerHTML = reading;
+                }
+                /* The bar is its own comparison for the same reason it is its
+                   own element: it sits at the other end of the row from the
+                   dot, and an agent that has only crossed a percentage must not
+                   cost a repaint of the indicator the reader is watching. */
+                const progress = dashboardProgressHtml(pane);
+                if (!previous || progress !== dashboardProgressHtml(previous)) {
+                    row.querySelector('.dash-agent-progress').innerHTML = progress;
                 }
             });
             _agentDashboardPainted = '';

@@ -52,10 +52,9 @@
    running on. `paneTransportLabel` turns the three transport facts the backend
    publishes (`mode`, and the `use_wsl`/`use_powershell` precedence
    terminal-shell.js's `paneShellKind` already reads) into the one short word
-   the dashboard tags a row with. It is here rather than in the dashboard for
-   the reason the naming rule is: it is a *naming* decision over facts the
-   server states, and the server states them precisely so it does not have to
-   make it.
+   each surface states it with. It is here rather than in either of them for the
+   reason the naming rule is: it is a *naming* decision over facts the server
+   states, and the server states them precisely so it does not have to make it.
 
    DOM-free and require()-able from Node so the rule is executed by tests
    rather than asserted as source text. */
@@ -298,8 +297,8 @@
        The leaf and not the path: the line it goes on is one `nowrap` row with
        an ellipsis at its end, so an absolute path is clipped at exactly the
        segment that identifies it and two agents in two repositories read
-       identically. A remote pane keeps its host -- the transport chip says only
-       "SSH", so nothing else on the row says which machine. */
+       identically. A remote pane keeps its host, because it is the only thing
+       on the line that says which machine the work is happening on. */
     function paneLocationLabel(session) {
         const directory = text(session && session.directory);
         const leaf = pathLeaf(directory) || directory;
@@ -361,8 +360,8 @@
     /* What a pane is running on, in one word.
 
        An SSH pane is remote and that is the whole answer — which host it is on
-       is already the row's own note, and repeating it in a tag would push the
-       agent's name off the line. A local pane is named by the shell family it
+       is already the row's own note, and repeating it would say the same thing
+       twice in a sentence with room for neither. A local pane is named by the shell family it
        actually started, in terminal-shell.js's own precedence (WSL beats
        PowerShell beats cmd), because that is the dimension its relaunch menu
        offers and the two have to agree about what the pane is running now.

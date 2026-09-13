@@ -128,7 +128,9 @@ Closing a workspace ends its terminals but keeps it available to restore. **Clos
 One panel over whatever page you are on (`Alt+A`, or the button beside the session menu and in the launcher's control row) listing **every session in every workspace**, agents first.
 
 - **Three levels** — a workspace is a titled band, a session tab is a card inside it drawn in that tab's own colour, and each agent is one row inside the card.
-- **Every agent on one line** — its mark and name, what it runs on (`SSH`, `WSL`, `PowerShell`, `cmd`), the chat title it announced, `auto` when it was launched with auto-approval, and what it is doing right now.
+- **Every agent on one line** — a status dot leading the row, then its mark and name, the chat title it announced, and `auto` when it was launched with auto-approval.
+- **The state is the dot's colour** — green working, amber idle, red unreachable. Point at a dot for the words: how long it has been idle, or what went wrong.
+- **The rest is one hover away** — pointing at a row gives the full chat title, where the pane is, and what it runs on (`SSH`, `WSL`, `PowerShell`, `cmd`).
 - **A badge that means something** — the button counts the agents **working right now**, not how many you have open. No badge means every agent is sitting at a prompt.
 - **Click anything to go there** — a row, its session, or its workspace opens or focuses that window at that tab.
 - **Sessions without agents are listed too**, sorted after the ones that have them, because this is also the fastest way to reach any tab in any window.

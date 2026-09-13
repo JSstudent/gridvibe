@@ -34,9 +34,12 @@
 }
 
 /* Deliberately larger than `.modal-card`: a confirmation is a sentence and two
-   buttons, and this is a scrolling tree of three levels. Wide enough for the
-   session cards to flow into more than one column, capped so the dialog still
-   reads as something over the page rather than as a page.
+   buttons, and this is a scrolling tree of three levels. Capped at a column,
+   though, and a narrow one: the cards stack in one column and a row states four
+   short facts and a chat title, so width past what the title can use only moves
+   the reading further from the mark that starts it. Half of what it was, which
+   is also what lets the dialog sit beside the window it describes rather than
+   over all of it.
 
    A **fixed** height rather than a `max-height` that fits its contents. The
    tree behind it is repainted every couple of seconds and a session ending or
@@ -48,7 +51,7 @@
 .dash-dialog {
     display: flex;
     flex-direction: column;
-    width: min(1040px, 100%);
+    width: min(520px, 100%);
     height: min(78vh, 820px);
     max-height: 100%;
     overflow: hidden;
@@ -383,9 +386,12 @@
    everywhere else was two lines for one pane, and a session running three
    agents drawn as three separate stacks with three headings.
 
-   So the mark, the name and the shell sit to the left of the chat title on the
-   row itself, in a fixed column order, and a card is read straight down its
-   titles with the agents scanned in the margin beside them. */
+   So the state dot, the mark, the name and the shell sit to the left of the
+   chat title on the row itself, in a fixed column order, and a card is read
+   straight down its titles with the agents scanned in the margin beside them.
+   The dot leads that order because "is anything still going" is the question
+   the card is opened with, and a colour answers it before any column after it
+   is read. */
 
 .dash-agents {
     display: flex;
@@ -446,7 +452,22 @@
     white-space: nowrap;
 }
 
-.dash-agent-reading { display: inline-flex; flex: 0 0 auto; margin-left: auto; }
+/* The row's first column, and a fixed 8px of it: one dot, with its word out of
+   flow, so every mark, name and title after it starts at the same offset on
+   every row in the card. */
+.dash-agent-reading { display: inline-flex; flex: 0 0 auto; }
+
+/* And the row's last, because a percentage is not the state: it is only ever on
+   the few rows whose agent speaks the progress sequence, and putting it in the
+   leading column would make that column's width depend on which agent the row
+   happens to run. Empty on every other row, which costs nothing -- the title
+   beside it takes the space. */
+.dash-agent-progress {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    flex: 0 0 auto;
+}
 
 /* What the pane announced. One line rather than the two the block layout could
    afford: the row now carries four things and the title is the one that gives
@@ -491,25 +512,34 @@
 }
 
 /* ── The activity reading ──
-   A word and a dot for the state and, before them, either a determinate bar or
-   nothing. The two are separate on purpose: every agent has a state, and only
-   the few that speak the progress sequence have a percentage. */
+   One dot, at the head of the row, and the word it used to be drawn beside. */
 
 .dash-activity {
+    position: relative;
     display: flex;
     align-items: center;
-    gap: 7px;
     flex: 0 0 auto;
 }
 
+/* Kept, and not drawn. The colour is the reading for anyone looking at the row,
+   and the hover on `.dash-activity` carries what a colour cannot say; this is
+   the same sentence for a reader who is hearing the button rather than seeing
+   it, and dropping it would leave the row's accessible name the one place in
+   the app that does not state the pane's state. Out of flow, so the column it
+   sits in stays one dot wide. */
 .dash-state-word {
-    font-size: .66rem;
-    color: var(--gv-dialog-muted);
-    font-variant-numeric: tabular-nums;
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    overflow: hidden;
+    clip-path: inset(50%);
     white-space: nowrap;
 }
 
 .dash-state-dot {
+    flex: 0 0 auto;
     width: 8px;
     height: 8px;
     border-radius: 50%;
@@ -521,20 +551,12 @@
     animation: dash-pulse 1.4s ease-in-out infinite;
 }
 
-.dash-state-working .dash-state-word {
-    color: var(--gv-success);
-}
-
 .dash-state-idle .dash-state-dot {
     background: var(--gv-warning);
 }
 
 .dash-state-error .dash-state-dot {
     background: var(--gv-danger);
-}
-
-.dash-state-error .dash-state-word {
-    color: var(--gv-danger);
 }
 
 @keyframes dash-pulse {
@@ -708,12 +730,11 @@
    being truncated to nothing. */
 @container (max-width: 380px) {
     .dash-agent { flex-wrap: wrap; gap: 5px 8px; }
-    /* The title drops below; the state stays up on the first line, where the
-       row's own `margin-left: auto` already has it hard right. */
+    /* The title drops below; the dot keeps the head of the first line, which is
+       where it is looked for, and the bar stays on that line after the shell. */
     .dash-agent-line { flex-basis: 100%; order: 1; }
     .dash-session-open { flex-wrap: wrap; }
     .dash-session-meta { flex-basis: 100%; margin-left: 0; }
-    .dash-tag-transport { max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
 }
 
 @media (max-width: 500px) {

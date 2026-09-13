@@ -340,13 +340,16 @@ function parseAgentRows() {
         const agent = /data-agent="([^"]*)"/.exec(found[1]);
         const inner = found[2];
         const name = /<span class="dash-agent-name">([\s\S]*?)<\/span>/.exec(inner);
-        const transport = /<span class="dash-tag dash-tag-transport">([\s\S]*?)<\/span>/.exec(inner);
+        /* The shell, off the last line of the row's hover: the chip that used
+           to state it on the line itself is gone. */
+        const hover = /title="([^"]*)"/.exec(found[1]);
+        const transport = hover && hover[1].includes('\n') ? hover[1].split('\n').pop() : '';
         const glyph = /(?:<svg class="dash-agent-glyph"[\s\S]*?<\/svg>|<img class="dash-agent-glyph"[^>]*>)/.exec(inner);
         const line = /<span class="dash-agent-line">([\s\S]*?)<\/span>/.exec(inner);
         rows.push({
             agent: agent ? agent[1] : '',
             name: name ? name[1].trim() : '',
-            transport: transport ? transport[1].trim() : '',
+            transport: transport.trim(),
             glyph: glyph ? glyph[0] : '',
             line: line ? line[1].trim() : ''
         });
@@ -391,15 +394,18 @@ function parseRows() {
         const inner = found[2];
         const label = /<span class="dash-(?:agent-line|session-name|workspace-name)">([\s\S]*?)<\/span>/.exec(inner);
         const state = /class="dash-activity dash-state-([a-z]+)"/.exec(inner);
+        const stateHover = /class="dash-activity dash-state-[a-z]+" title="([^"]*)"/.exec(inner);
         const word = /<span class="dash-state-word">([\s\S]*?)<\/span>/.exec(inner);
         const percent = /<span class="dash-progress-value">(\d+)%<\/span>/.exec(inner);
-        /* The transport chip is read on its own: it says which shell the agent
-           runs on and is now on every agent row, while `tags` stays what it
-           always was -- the markers that are true of *this* row and not of
-           every one of its siblings. */
-        const transport = /<span class="dash-tag dash-tag-transport">([\s\S]*?)<\/span>/.exec(inner);
+        /* Which shell the agent runs on, read off the last line of the row's
+           own hover -- which is where it went when the chip that used to state
+           it gave the width back to the chat title. `tags` stays what it always
+           was: the markers that are true of *this* row and not of every one of
+           its siblings. */
+        const hover = attributes['title'] || '';
+        const transport = hover.includes('\n') ? hover.split('\n').pop() : '';
         const tags = [];
-        const tagPattern = /<span class="dash-tag(?! dash-tag-transport)[^"]*">([\s\S]*?)<\/span>/g;
+        const tagPattern = /<span class="dash-tag[^"]*">([\s\S]*?)<\/span>/g;
         let tag;
         while ((tag = tagPattern.exec(inner)) !== null) { tags.push(tag[1].trim()); }
         rows.push({
@@ -410,16 +416,20 @@ function parseRows() {
             /* The row's hover, which is where the line's shortened-away path
                went. Read as the attribute rather than as rendered text: it is
                the only place a value spans two lines. */
-            hover: attributes['title'] || '',
+            hover,
             agent: attributes['data-agent'] || '',
             name: /<span class="dash-agent-name">([\s\S]*?)<\/span>/.exec(inner)?.[1].trim() || '',
-            transport: transport ? transport[1].trim() : '',
+            transport: transport.trim(),
             tags,
             state: state ? state[1] : '',
+            stateHover: stateHover ? stateHover[1].trim() : '',
             word: word ? word[1].trim() : '',
             hasBar: inner.includes('dash-progress-fill'),
             indeterminate: inner.includes('is-indeterminate'),
-            percent: percent ? Number(percent[1]) : null
+            percent: percent ? Number(percent[1]) : null,
+            /* The row's own markup, for the assertion that is about where its
+               columns are rather than about what any one of them says. */
+            html: inner
         });
     }
     return rows;
@@ -621,13 +631,21 @@ class DashboardDialogStructureTestCase(DashboardDialogTestCase):
                 pane({ status: 'disconnected', activity: activity({ progress_state: 'normal', progress_value: 65 }) }),
                 pane({ status: 'connecting', activity: activity({ progress_state: 'normal', progress_value: 65 }) })
             ];
-            report(readings.map(p => dashboardActivityHtml(p)));
+            report(readings.map(p => ({
+                indicator: dashboardActivityHtml(p),
+                progress: dashboardProgressHtml(p)
+            })));
             """
         )
-        self.assertIn('width:0%', result[0])
-        self.assertIn('>0%</span>', result[0])
-        for html in result[1:]:
-            self.assertNotIn('dash-progress-fill', html)
+        self.assertIn('width:0%', result[0]["progress"])
+        self.assertIn('>0%</span>', result[0]["progress"])
+        for reading in result[1:]:
+            self.assertEqual(reading["progress"], "")
+        # The indicator is one dot and its word, on every one of them: a bar
+        # drawn there would put the row's first column at the mercy of whichever
+        # agent it happens to run.
+        for reading in result:
+            self.assertNotIn('dash-progress', reading["indicator"])
 
     def test_chat_changes_and_idle_ages_update_rows_without_rebuilding_buttons(self):
         result = self._run_node(
@@ -639,11 +657,15 @@ class DashboardDialogStructureTestCase(DashboardDialogTestCase):
             const originalHtml = body().innerHTML;
             const line = { textContent: 'First chat' };
             const reading = { innerHTML: dashboardActivityHtml(first) };
+            const progress = { innerHTML: dashboardProgressHtml(first) };
             /* The hover the first render actually gave this row, path and all,
                so an update that dropped it would show here. */
             const row = { dataset: { sessionId: 's1' }, title: dashboardPaneHover(first),
-                querySelector: selector =>
-                    selector === '.dash-agent-line' ? line : reading };
+                querySelector: selector => ({
+                    '.dash-agent-line': line,
+                    '.dash-agent-reading': reading,
+                    '.dash-agent-progress': progress
+                }[selector]) };
             body().querySelectorAll = () => [row];
             body().scrollTop = 123;
             fetchAnswer = snapshot([group([pane({ activity: activity({
@@ -659,7 +681,7 @@ class DashboardDialogStructureTestCase(DashboardDialogTestCase):
         # The line is shortened to a leaf, and that is only lossless because
         # the hover still carries the whole path. An in-place update writes the
         # hover's own value, never the line's.
-        self.assertEqual(result["tooltip"], "Renamed chat\n10.0.0.5: /srv/app")
+        self.assertEqual(result["tooltip"], "Renamed chat\n10.0.0.5: /srv/app\nSSH")
         self.assertIn("Idle 1m", result["reading"])
         self.assertEqual(result["scroll"], 123)
 
@@ -677,9 +699,13 @@ class DashboardDialogStructureTestCase(DashboardDialogTestCase):
             await refreshAgentDashboard();
             const line = { textContent: dashboardPaneLine(before) };
             const reading = { innerHTML: dashboardActivityHtml(before) };
+            const progress = { innerHTML: dashboardProgressHtml(before) };
             const row = { dataset: { sessionId: 's1' }, title: dashboardPaneHover(before),
-                querySelector: selector =>
-                    selector === '.dash-agent-line' ? line : reading };
+                querySelector: selector => ({
+                    '.dash-agent-line': line,
+                    '.dash-agent-reading': reading,
+                    '.dash-agent-progress': progress
+                }[selector]) };
             body().querySelectorAll = () => [row];
             const originalHtml = body().innerHTML;
             fetchAnswer = snapshot([group([pane({
@@ -693,7 +719,9 @@ class DashboardDialogStructureTestCase(DashboardDialogTestCase):
         )
         self.assertTrue(result["sameButtons"])
         self.assertEqual(result["line"], "Fix the parser")
-        self.assertEqual(result["tooltip"], "Fix the parser\n10.0.0.5: /srv/app/worker")
+        self.assertEqual(
+            result["tooltip"], "Fix the parser\n10.0.0.5: /srv/app/worker\nSSH"
+        )
 
     def test_a_hidden_page_aborts_its_request_and_ignores_the_late_result(self):
         result = self._run_node(
@@ -844,7 +872,7 @@ class DashboardDialogStructureTestCase(DashboardDialogTestCase):
             ],
         )
 
-    def test_one_agent_on_two_shells_states_the_shell_on_each_row(self):
+    def test_one_agent_on_two_shells_says_so_on_each_rows_hover(self):
         """The shell is a claim about the pane, so it rides the pane's own row:
         two Claude panes on two shells are two machines as far as the work is
         concerned, and nothing here can fold them into one."""
@@ -918,9 +946,11 @@ class DashboardDialogStructureTestCase(DashboardDialogTestCase):
         )
         self.assertEqual(result["line"], "New session \u00b7 10.0.0.5:app")
         # And the full path is one hover away, so shortening the line lost
-        # nothing that was on it.
+        # nothing that was on it. The shell the pane runs on is the third
+        # line, which is where it went when its chip left the row.
         self.assertEqual(
-            result["hover"], "New session \u00b7 10.0.0.5:app\n10.0.0.5: /srv/app"
+            result["hover"],
+            "New session \u00b7 10.0.0.5:app\n10.0.0.5: /srv/app\nSSH",
         )
 
     def test_the_active_chat_title_outranks_a_pane_label(self):
@@ -974,9 +1004,9 @@ class DashboardDialogStructureTestCase(DashboardDialogTestCase):
         )
 
     def test_auto_approval_is_marked_on_the_pane_that_has_it(self):
-        """It is a per-pane property, and the shell chip beside it is not: two
-        panes of one agent need not have been launched alike, so `auto` is on
-        the row that has it while both rows state the same shell."""
+        """It is a per-pane property, and the only chip the row still draws:
+        two panes of one agent need not have been launched alike, so `auto` is
+        on the row that has it and on neither of its siblings."""
         result = self._run_node(
             """
             fetchAnswer = snapshot([group([
@@ -989,6 +1019,7 @@ class DashboardDialogStructureTestCase(DashboardDialogTestCase):
                 auto: rowFor('pane:s1').tags,
                 plain: rowFor('pane:s2').tags,
                 transports: parseAgentRows().map(entry => entry.transport),
+                html: body().innerHTML,
                 rows: parseAgentRows().length
             });
             """
@@ -996,6 +1027,9 @@ class DashboardDialogStructureTestCase(DashboardDialogTestCase):
         self.assertEqual(result["auto"], ["auto"])
         self.assertEqual(result["plain"], [])
         self.assertEqual(result["transports"], ["SSH", "SSH"])
+        # And nothing on the drawn row says it: the chip is gone, so `tags` is
+        # only ever the markers that differ between two panes of one agent.
+        self.assertNotIn("dash-tag-transport", result["html"])
         self.assertEqual(result["rows"], 2)
 
     def test_a_session_card_wears_its_own_tab_colour(self):
@@ -1225,6 +1259,34 @@ class DashboardWindowActivityTestCase(DashboardDialogTestCase):
         row = self._row("{ status: 'connecting', activity: null }")
         self.assertEqual(row["state"], "unknown")
         self.assertEqual(row["word"], "Connecting")
+
+    def test_the_word_the_dot_replaced_is_the_dots_own_hover(self):
+        """The state is drawn as a colour, so the reading a colour cannot carry
+        -- how long idle, and the three transport words -- has to be somewhere a
+        reader can ask for it. It is a hover on the indicator, which is inside
+        the row's own and so answers on the dot rather than on the whole row:
+        the row's hover is still the chat line and where the pane is."""
+        idle = self._row("{ activity: activity({ state: 'idle', idle_seconds: 247 }) }")
+        self.assertEqual(idle["stateHover"], "Idle 4m")
+        self.assertNotEqual(idle["hover"], idle["stateHover"])
+        dead = self._row("{ status: 'disconnected', activity: null }")
+        self.assertEqual(dead["stateHover"], "Disconnected")
+
+    def test_the_row_comes_first_and_the_bar_comes_last(self):
+        """The dot is the row's leading column and the bar its trailing one, so
+        the mark, the name and the title start at the same offset on every row
+        whatever the agent beside them publishes."""
+        row = self._row(
+            "{ activity: activity({ progress_state: 'normal', progress_value: 65 }) }"
+        )
+        order = [
+            row["html"].index('class="dash-agent-reading"'),
+            row["html"].index('class="dash-agent-icon"'),
+            row["html"].index('class="dash-agent-name"'),
+            row["html"].index('class="dash-agent-line"'),
+            row["html"].index('class="dash-agent-progress"'),
+        ]
+        self.assertEqual(order, sorted(order))
 
 
 class DashboardDialogRowActionTestCase(DashboardDialogTestCase):

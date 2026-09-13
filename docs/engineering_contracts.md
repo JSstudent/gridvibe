@@ -859,6 +859,19 @@ unless the task explicitly changes this contract.
   the card exists so the reader can go there — and gives up only the weight
   that was drawing the eye to the agents, so it cannot read as disabled. An
   empty tree means nothing is running at all, not that nothing agentic is.
+- An agent row's state is its **leading** column and one 8px dot: the card is
+  scanned for "is anything still going", and a colour answers that before any
+  column after it is read. The word the dot replaced is not drawn, is carried
+  verbatim on the indicator's own hover, and stays in the markup out of flow
+  so the row's accessible name still states it. The progress bar is the
+  trailing column and a separate reading: only the agents that speak the
+  progress sequence have one, so it must never widen the dot's column.
+- The drawn row is therefore the dot, the agent's mark and name, the chat
+  title and `auto`; `auto` is the only chip left on it. What the pane runs on
+  is still `paneTransportLabel()`'s single word, and the dashboard states it
+  as the last line of the row's own hover rather than as a chip on the line --
+  it is looked up when something is wrong with a pane, not scanned down a
+  card, and the width belongs to the title.
 - Dashboard layout must remain usable without horizontal overflow at narrow
   widths. A polling update that changes only a row's title, hover, status,
   progress, or idle age updates that row in place, each field on its own
