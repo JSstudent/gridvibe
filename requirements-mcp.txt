@@ -1,0 +1,9 @@
+# The GridVibe MCP sidecar (gridvibe_mcp/). Optional: install it only if you
+# want agent panes to have GridVibe tools. Nothing in GridVibe itself
+# imports this -- the sidecar is a separate process that speaks HTTP.
+#
+# Pinned below 2.0 deliberately: the 2.x SDK replaced the low-level server
+# decorators (@server.list_tools / @server.call_tool) with an add_request_handler
+# registry, and the sidecar is written against the 1.x surface. Moving to 2.x
+# is its own piece of work, not a version bump.
+mcp>=1.9,<2.0

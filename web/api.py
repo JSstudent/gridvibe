@@ -67,7 +67,9 @@ from web.app import (  # noqa: F401 - re-exported for backwards compatibility
     app,
     apply_resolved_server_origins,
     session_manager,
+    set_window_mode,
     socketio,
+    window_mode,
 )
 from web.config import (  # noqa: F401 - compatibility re-exports
     AUTOSAVE_INTERVAL_MINUTES_MAX,
@@ -179,6 +181,11 @@ from web.lifecycle import (
     prepare_group_save,
     prepare_lifecycle_action,
     prepare_workspace_save,
+)
+from web.mcp_launch import (  # noqa: F401 - mcp_config_path re-exported for tests
+    mcp_config_path,
+    set_server_address,
+    write_mcp_config,
 )
 from web.paths import BASE_DIR, install_kind
 from web.runtime_state import (  # noqa: F401 - re-exported for backwards compatibility
@@ -349,6 +356,7 @@ from web.voice import (  # noqa: F401 - re-exported for backwards compatibility
     release_voice_session,
     resolve_voice_session_engine,
 )
+from web.window_intents import window_intents
 from web.workspaces import (
     DEFAULT_WORKSPACE_ID,
     WorkspaceRequestError,
@@ -791,11 +799,18 @@ def docs_images(filename: str):
 
 @app.route('/api/health', methods=['GET'])
 def health_check():
-    """Health check endpoint."""
+    """Health check endpoint.
+
+    ``window_mode`` is here because it is the one thing a process outside the
+    browser cannot work out for itself: whether asking for a workspace window
+    means leaving an intent for a native page to claim, or simply handing a URL
+    to the OS default browser.
+    """
     return jsonify({
         "status": "healthy",
         "service": "GridVibe",
-        "version": __version__
+        "version": __version__,
+        "window_mode": window_mode(),
     })
 
 
@@ -2095,6 +2110,70 @@ def create_workspace():
         return jsonify({"error": str(exc), **exc.payload}), exc.status
     logger.debug("Created workspace %s label=%r", workspace.workspace_id, workspace.label)
     return jsonify(public_workspace_payload(workspace, 0)), 201
+
+
+# ==================== Window intents (native mode) ====================
+#
+# Creating a workspace over HTTP creates a record; it does not make anything
+# appear on screen, and nothing outside a page can open a pywebview window. So
+# a local process that wants one leaves an intent here and an open GridVibe
+# page claims it. Thin routes over `web/window_intents.py`, which owns the TTL
+# and the claim-once rule.
+
+
+@app.route('/api/windows/open', methods=['POST'])
+def open_window_intent():
+    """Store one "please open this workspace" intent and return it."""
+    data = request.get_json(silent=True) or {}
+    workspace_id = str(data.get("workspace_id") or "").strip()
+    if not workspace_id:
+        return jsonify({"error": "workspace_id is required"}), 400
+    intent = window_intents.open(workspace_id, data.get("group_id") or "")
+    logger.info(
+        "Window intent %s recorded workspace=%s group=%s mode=%s",
+        intent["intent_id"],
+        intent["workspace_id"],
+        intent["group_id"] or "-",
+        window_mode(),
+    )
+    return jsonify(intent), 201
+
+
+@app.route('/api/windows/intents', methods=['GET'])
+def list_window_intents():
+    """Pending, unclaimed intents. Almost always an empty list."""
+    intents = window_intents.pending()
+    return jsonify({"intents": intents, "count": len(intents)})
+
+
+@app.route('/api/windows/intents/<intent_id>', methods=['GET'])
+def read_window_intent(intent_id: str):
+    """The sidecar's poll target."""
+    return jsonify(window_intents.read(intent_id))
+
+
+@app.route('/api/windows/intents/<intent_id>/claim', methods=['POST'])
+def claim_window_intent(intent_id: str):
+    """Claim one pending intent. Succeeds for exactly one caller.
+
+    This is what stops two open pages from delivering the same request twice
+    and leaving the user with two windows.
+    """
+    data = request.get_json(silent=True) or {}
+    claimed, payload = window_intents.claim(intent_id, data.get("claimant") or "")
+    return jsonify(payload), (200 if claimed else 409)
+
+
+@app.route('/api/windows/intents/<intent_id>/result', methods=['POST'])
+def record_window_intent_result(intent_id: str):
+    """The claimant reports `opened` or `blocked`."""
+    data = request.get_json(silent=True) or {}
+    recorded, payload = window_intents.record_result(
+        intent_id,
+        data.get("outcome") or "",
+        data.get("detail") or "",
+    )
+    return jsonify(payload), (200 if recorded else 400)
 
 
 @app.route('/api/workspaces/validate-label', methods=['POST'])
@@ -3681,6 +3760,12 @@ def run_server(
     # the resolved bind address known, and authorising the wrong one silently
     # kills every terminal's transport (audit F1).
     apply_resolved_server_origins(host, port)
+    # The generated MCP config names this interpreter and this port, and both
+    # are per-install -- so it is rewritten on every start rather than
+    # committed, and a moved install, a changed port or a rebuilt venv
+    # self-heals with no user action.
+    set_server_address(host, port)
+    write_mcp_config(host, port)
     start_workspace_autosave()
     socketio.run(
         app,

@@ -46,6 +46,7 @@ from web.explorer import (
     _is_explorer_session,
 )
 from web.hostkeys import _apply_host_key_policy
+from web.mcp_launch import apply_pane_identity, pane_identity_environment
 from web.terminal_cwd import (
     CWD_EVENT_DIRECTORY,
     CWD_EVENT_SHELL_PID,
@@ -1858,6 +1859,26 @@ def _connect_ssh_session(session_id: str, session: Any):
                 pass
 
 
+def _pane_identity_for(session_id: str, session: Any) -> Dict[str, str]:
+    """Read the five identity facts a local pane carries into its children.
+
+    The workspace id lives on the pane's *group*, not the pane, so it is read
+    here rather than guessed; a pane whose group has gone gets the default
+    workspace, which is what every other reader of a groupless pane assumes.
+    """
+    group_id = str(getattr(session, "group_id", "") or "")
+    workspace_id = DEFAULT_WORKSPACE_ID
+    group = session_manager.groups.get(group_id) if group_id else None
+    if group is not None:
+        workspace_id = normalize_workspace_id(getattr(group, "workspace_id", None))
+    return pane_identity_environment(
+        session_id=session_id,
+        group_id=group_id,
+        workspace_id=workspace_id,
+        agent_depth=getattr(session, "agent_depth", 0),
+    )
+
+
 def _connect_local_session(session_id: str, session: Any):
     """Establish a PTY-backed local or WSL shell session."""
     connection = _begin_connection(session_id)
@@ -1891,8 +1912,19 @@ def _connect_local_session(session_id: str, session: Any):
             startup_directory=wsl_startup_directory,
         )
         launch_cwd = _resolve_local_launch_cwd(startup_directory, shell_kind)
+        # Pane identity goes in *here*, at the call site, and not inside
+        # `_local_shell_integration`: that function returns unchanged when
+        # `terminal.shell_integration` is off, and that setting is a kill
+        # switch for the prompt hook -- nothing to do with MCP. A user who
+        # turns it off would otherwise get panes whose agents cannot tell what
+        # workspace they are in, with no error anywhere.
+        shell_environment = apply_pane_identity(
+            dict(os.environ),
+            _pane_identity_for(session_id, session),
+            shell_kind=shell_kind,
+        )
         command, shell_environment = _local_shell_integration(
-            shell_kind, command, dict(os.environ)
+            shell_kind, command, shell_environment
         )
         logger.info(f"[{session_id}] local command: {command}")
 

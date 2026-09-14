@@ -101,6 +101,7 @@ def _default_terminal_entries():
             "agent_selection": "",
             "custom_agent": "",
             "agent_auto_mode": False,
+            "agent_mcp": False,
             "explorer_tree_open": False,
             "explorer_git_open": False,
             "explorer_git_follow_browsing": False,
@@ -250,6 +251,7 @@ def _normalize_terminal_entries(
                 "agent_selection": str(entry.get("agent_selection") or ""),
                 "custom_agent": str(entry.get("custom_agent") or ""),
                 "agent_auto_mode": startup_mode == "agent" and bool(entry.get("agent_auto_mode")),
+                "agent_mcp": startup_mode == "agent" and bool(entry.get("agent_mcp")),
                 "explorer_tree_open": bool(entry.get("explorer_tree_open")),
                 "explorer_git_open": bool(entry.get("explorer_git_open")),
                 "explorer_git_follow_browsing": bool(
@@ -518,6 +520,7 @@ def _merge_workspace_session_config(
             saved_terminal["agent_selection"] = agent_selection
             saved_terminal["custom_agent"] = custom_agent
             saved_terminal["agent_auto_mode"] = workspace_terminal["agent_auto_mode"]
+            saved_terminal["agent_mcp"] = workspace_terminal["agent_mcp"]
             saved_terminal["initial_command"] = initial_command
         elif (
             base["terminals"][index]["initial_command_mode"] == "agent"
@@ -527,6 +530,7 @@ def _merge_workspace_session_config(
             saved_terminal["agent_selection"] = ""
             saved_terminal["custom_agent"] = ""
             saved_terminal["agent_auto_mode"] = False
+            saved_terminal["agent_mcp"] = False
             saved_terminal["initial_command"] = ""
 
         saved_terminal["explorer_tree_open"] = (

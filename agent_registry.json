@@ -355,6 +355,11 @@
     "auto_mode": {
       "flag": "--permission-mode auto",
       "description": "Launches in the auto permission mode: routine edits and commands run without prompting."
+    },
+    "mcp": {
+      "flag": "--mcp-config {config}",
+      "description": "Gives this agent tools to see and build GridVibe workspaces.",
+      "verified": true
     }
   },
   "kimi": {
@@ -549,4 +554,3 @@
     }
   }
 }
-

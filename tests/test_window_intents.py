@@ -1,0 +1,204 @@
+"""The native-mode intent store, and the four routes over it.
+
+The store exists for one reason: two open GridVibe pages polling the same
+pending intent would both open the workspace, and the user would get two
+windows. So the case that matters most here is the second claimant losing.
+
+Everything else follows from the store being in-memory and TTL-bounded: an
+intent nobody claimed is not worth remembering, and an unknown id reads
+`expired` rather than erroring — the sidecar polling it needs an answer, not an
+exception.
+"""
+
+import sys
+import unittest
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+import tests  # noqa: E402,F401 - redirects durable state away from the real files
+from web import api  # noqa: E402
+from web.window_intents import (  # noqa: E402
+    BLOCKED,
+    CLAIMED,
+    EXPIRED,
+    OPENED,
+    PENDING,
+    WindowIntentStore,
+    window_intents,
+)
+
+
+class WindowIntentStoreTestCase(unittest.TestCase):
+    def setUp(self):
+        self.store = WindowIntentStore(ttl_seconds=15.0, claim_ttl_seconds=20.0)
+
+    def test_a_recorded_intent_is_pending_and_says_how_long_it_has(self):
+        intent = self.store.open("ws-1", "g-1", now=100.0)
+
+        self.assertEqual(intent["workspace_id"], "ws-1")
+        self.assertEqual(intent["group_id"], "g-1")
+        self.assertEqual(intent["state"], PENDING)
+        self.assertEqual(intent["expires_in"], 15.0)
+        self.assertTrue(intent["intent_id"])
+
+    def test_exactly_one_of_two_claimants_wins(self):
+        intent = self.store.open("ws-1", now=100.0)
+
+        first_ok, first = self.store.claim(intent["intent_id"], "window-a", now=100.1)
+        second_ok, second = self.store.claim(intent["intent_id"], "window-b", now=100.2)
+
+        self.assertTrue(first_ok)
+        self.assertEqual(first["state"], CLAIMED)
+        self.assertFalse(second_ok)
+        # The loser is told why, rather than being handed a pending record it
+        # would act on.
+        self.assertEqual(second["state"], CLAIMED)
+        self.assertIn("already took", second["error"])
+
+    def test_a_claimed_intent_leaves_the_pending_list(self):
+        intent = self.store.open("ws-1", now=100.0)
+        self.assertEqual(len(self.store.pending(now=100.1)), 1)
+
+        self.store.claim(intent["intent_id"], "window-a", now=100.2)
+
+        self.assertEqual(self.store.pending(now=100.3), [])
+
+    def test_each_outcome_is_recorded_and_readable(self):
+        for outcome in (OPENED, BLOCKED):
+            with self.subTest(outcome=outcome):
+                intent = self.store.open("ws-1", now=100.0)
+                self.store.claim(intent["intent_id"], "window-a", now=100.1)
+
+                recorded, _payload = self.store.record_result(
+                    intent["intent_id"], outcome, "detail here", now=100.2
+                )
+
+                self.assertTrue(recorded)
+                read = self.store.read(intent["intent_id"], now=100.3)
+                self.assertEqual(read["state"], outcome)
+                self.assertEqual(read["detail"], "detail here")
+
+    def test_an_outcome_the_store_does_not_know_is_refused(self):
+        intent = self.store.open("ws-1", now=100.0)
+
+        recorded, payload = self.store.record_result(
+            intent["intent_id"], "probably", now=100.1
+        )
+
+        self.assertFalse(recorded)
+        self.assertIn("opened", payload["error"])
+
+    def test_an_unclaimed_intent_expires_rather_than_waiting_forever(self):
+        intent = self.store.open("ws-1", now=100.0)
+
+        # One tick past the TTL: no page was there to claim it.
+        read = self.store.read(intent["intent_id"], now=115.1)
+
+        self.assertEqual(read["state"], EXPIRED)
+        self.assertEqual(self.store.pending(now=115.1), [])
+
+    def test_a_claim_extends_the_deadline_so_a_slow_open_is_not_lost(self):
+        intent = self.store.open("ws-1", now=100.0)
+        self.store.claim(intent["intent_id"], "window-a", now=110.0)
+
+        # Past the original 15s TTL, but inside the claim's own 20s.
+        self.assertEqual(self.store.read(intent["intent_id"], now=120.0)["state"], CLAIMED)
+
+    def test_an_unknown_id_reads_expired_rather_than_raising(self):
+        read = self.store.read("no-such-intent", now=100.0)
+
+        self.assertEqual(read["state"], EXPIRED)
+        self.assertEqual(read["intent_id"], "no-such-intent")
+
+    def test_the_store_is_bounded(self):
+        store = WindowIntentStore(ttl_seconds=1000.0, max_intents=4)
+
+        for index in range(10):
+            store.open(f"ws-{index}", now=100.0 + index)
+
+        # A sidecar in a retry loop cannot grow the store without bound.
+        self.assertLessEqual(len(store.pending(now=110.0)), 4)
+
+
+class WindowIntentRouteTestCase(unittest.TestCase):
+    def setUp(self):
+        api.app.config["TESTING"] = True
+        self.client = api.app.test_client()
+        window_intents.reset()
+        self.addCleanup(window_intents.reset)
+
+    def test_health_publishes_the_window_mode(self):
+        payload = self.client.get("/api/health").get_json()
+
+        # The one thing a process outside the browser cannot work out itself.
+        self.assertIn(payload["window_mode"], ("browser", "native"))
+
+    def test_an_intent_round_trips_through_the_routes(self):
+        created = self.client.post(
+            "/api/windows/open", json={"workspace_id": "ws-1", "group_id": "g-1"}
+        )
+        self.assertEqual(created.status_code, 201)
+        intent_id = created.get_json()["intent_id"]
+
+        listed = self.client.get("/api/windows/intents").get_json()
+        self.assertEqual(listed["count"], 1)
+        self.assertEqual(listed["intents"][0]["intent_id"], intent_id)
+
+        claimed = self.client.post(f"/api/windows/intents/{intent_id}/claim", json={})
+        self.assertEqual(claimed.status_code, 200)
+
+        reported = self.client.post(
+            f"/api/windows/intents/{intent_id}/result", json={"outcome": "opened"}
+        )
+        self.assertEqual(reported.status_code, 200)
+
+        read = self.client.get(f"/api/windows/intents/{intent_id}").get_json()
+        self.assertEqual(read["state"], "opened")
+
+    def test_a_second_claim_is_a_conflict_not_a_second_window(self):
+        intent_id = self.client.post(
+            "/api/windows/open", json={"workspace_id": "ws-1"}
+        ).get_json()["intent_id"]
+
+        first = self.client.post(f"/api/windows/intents/{intent_id}/claim", json={})
+        second = self.client.post(f"/api/windows/intents/{intent_id}/claim", json={})
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 409)
+
+    def test_an_intent_with_no_workspace_is_refused(self):
+        response = self.client.post("/api/windows/open", json={})
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(window_intents.pending(), [])
+
+    def test_the_pending_list_is_almost_always_empty(self):
+        payload = self.client.get("/api/windows/intents").get_json()
+
+        self.assertEqual(payload, {"intents": [], "count": 0})
+
+    def test_a_result_the_store_does_not_know_is_refused(self):
+        intent_id = self.client.post(
+            "/api/windows/open", json={"workspace_id": "ws-1"}
+        ).get_json()["intent_id"]
+
+        response = self.client.post(
+            f"/api/windows/intents/{intent_id}/result", json={"outcome": "maybe"}
+        )
+
+        self.assertEqual(response.status_code, 400)
+
+    def test_nothing_about_an_intent_is_durable(self):
+        self.client.post("/api/windows/open", json={"workspace_id": "ws-1"})
+
+        # The store is memory only: no file, no lock, nothing to quarantine.
+        self.assertFalse(hasattr(window_intents, "path"))
+        window_intents.reset()
+        self.assertEqual(self.client.get("/api/windows/intents").get_json()["count"], 0)
+
+
+if __name__ == "__main__":
+    unittest.main()

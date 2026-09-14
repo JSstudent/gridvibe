@@ -457,6 +457,27 @@
         return String(option?.auto_mode_description || '').trim();
     }
 
+    /* The MCP block is read exactly like the auto-mode one, and for the same
+       reason: an agent that publishes no flag has no checkbox. Seven of the
+       eight registered CLIs publish none today. */
+    function agentMcpFlag(agentValue) {
+        const normalized = String(agentValue || '').trim().toLowerCase();
+        if (!normalized || normalized === 'other') {
+            return '';
+        }
+        const option = AGENT_OPTIONS.find(item => item.value === normalized);
+        return String(option?.mcp_flag || '').trim();
+    }
+
+    function agentMcpDescription(agentValue) {
+        const normalized = String(agentValue || '').trim().toLowerCase();
+        if (!normalized || normalized === 'other') {
+            return '';
+        }
+        const option = AGENT_OPTIONS.find(item => item.value === normalized);
+        return String(option?.mcp_description || '').trim();
+    }
+
     function normalizeTerminalCommandUi(terminal) {
         const startupMode = String(terminal?.startup_mode || '').trim();
         const initialCommandMode = String(terminal?.initial_command_mode || '').trim();
@@ -475,6 +496,7 @@
         let customAgent = String(terminal?.custom_agent || '').trim();
         let commandValue = initialCommand;
         const agentAutoMode = Boolean(terminal?.agent_auto_mode);
+        const agentMcp = Boolean(terminal?.agent_mcp);
 
         if (mode === 'agent') {
             if (!agentSelection) {
@@ -499,7 +521,8 @@
                 commandValue,
                 agentSelection,
                 customAgent,
-                agentAutoMode: agentAutoMode && Boolean(agentAutoModeFlag(agentSelection))
+                agentAutoMode: agentAutoMode && Boolean(agentAutoModeFlag(agentSelection)),
+                agentMcp: agentMcp && Boolean(agentMcpFlag(agentSelection))
             };
         }
 
@@ -791,6 +814,9 @@
                 agent_auto_mode: commandMode === 'agent'
                     && Boolean(agentAutoModeFlag(getRowAgentSelection(row)))
                     && Boolean(row.querySelector('.t-agent-auto-mode')?.checked),
+                agent_mcp: commandMode === 'agent'
+                    && Boolean(agentMcpFlag(getRowAgentSelection(row)))
+                    && Boolean(row.querySelector('.t-agent-mcp')?.checked),
                 explorer_tree_open: commandMode === 'explorer' && row.dataset.explorerTreeOpen === 'true',
                 explorer_git_open: commandMode === 'explorer' && row.dataset.explorerGitOpen === 'true',
                 explorer_git_follow_browsing: commandMode === 'explorer'
@@ -1505,6 +1531,7 @@
         customAgentField?.classList.toggle('hidden', !(commandMode === 'agent' && selectedAgent === 'other'));
         browserField?.classList.toggle('hidden', commandMode !== 'browser');
         syncTerminalAgentAutoModeState(row, commandMode, selectedAgent);
+        syncTerminalAgentMcpState(row, commandMode, selectedAgent);
         if (commandMode !== 'agent') {
             clearAgentPreflight(row);
         }
@@ -1546,6 +1573,29 @@
         }
     }
 
+    function syncTerminalAgentMcpState(row, commandMode, selectedAgent) {
+        const mcpField = row.querySelector('.t-agent-mcp-field');
+        if (!mcpField) {
+            return;
+        }
+        const available = commandMode === 'agent' && Boolean(agentMcpFlag(selectedAgent));
+        mcpField.classList.toggle('hidden', !available);
+        const help = row.querySelector('.t-agent-mcp-help');
+        if (help) {
+            help.textContent = available ? agentMcpDescription(selectedAgent) : '';
+            if (!available) {
+                help.classList.remove('visible');
+                mcpField.querySelector('.tip-btn')?.setAttribute('aria-expanded', 'false');
+            }
+        }
+        if (!available) {
+            const checkbox = mcpField.querySelector('.t-agent-mcp');
+            if (checkbox) {
+                checkbox.checked = false;
+            }
+        }
+    }
+
     function resetTerminalCommandOnModeChange(row, nextMode) {
         const previousMode = getTerminalCommandMode(row);
         const commandInput = row.querySelector('.t-cmd');
@@ -1561,6 +1611,8 @@
             if (customAgentInput) customAgentInput.value = '';
             const autoModeCheckbox = row.querySelector('.t-agent-auto-mode');
             if (autoModeCheckbox) autoModeCheckbox.checked = false;
+            const mcpCheckbox = row.querySelector('.t-agent-mcp');
+            if (mcpCheckbox) mcpCheckbox.checked = false;
         }
     }
 
@@ -1999,6 +2051,20 @@
                                 >?</button>
                             </label>
                             <div class="inline-tip t-agent-auto-help"></div>
+                            <label class="check-field t-agent-mcp-field ${commandUi.mode === 'agent' && agentMcpFlag(commandUi.agentSelection) ? '' : 'hidden'}">
+                                <input class="t-agent-mcp" type="checkbox" ${commandUi.agentMcp ? 'checked' : ''} aria-label="Give this agent GridVibe tools">
+                                <span class="check-copy">
+                                    <strong>MCP</strong>
+                                </span>
+                                <button
+                                    type="button"
+                                    class="tip-btn"
+                                    aria-expanded="false"
+                                    aria-label="Explain the GridVibe MCP"
+                                    onclick="toggleInlineTip(this)"
+                                >?</button>
+                            </label>
+                            <div class="inline-tip t-agent-mcp-help"></div>
                         </div>
                         <div class="field t-agent-custom-field ${commandUi.mode === 'agent' && commandUi.agentSelection === 'other' ? '' : 'hidden'}">
                             <label>Custom Agent</label>

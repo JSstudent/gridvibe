@@ -409,6 +409,7 @@
             agent_selection: resolvedStartupMode === 'agent' ? (terminal?.agent_selection || '') : '',
             custom_agent: resolvedStartupMode === 'agent' ? (terminal?.custom_agent || '') : '',
             agent_auto_mode: resolvedStartupMode === 'agent' && Boolean(terminal?.agent_auto_mode),
+            agent_mcp: resolvedStartupMode === 'agent' && Boolean(terminal?.agent_mcp),
             /* The explorer's confinement boundary and whether anybody chose it
                travel together, and travel separately from `directory`: a pane
                rooted at a project while browsing one of its subdirectories has

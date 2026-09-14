@@ -395,6 +395,11 @@ class ApiRoutesTestCase(unittest.TestCase):
                 "status": "healthy",
                 "service": "GridVibe",
                 "version": __version__,
+                # The one thing a local process outside the browser cannot work
+                # out for itself: whether asking for a workspace window means
+                # leaving an intent for a native page to claim, or handing a
+                # URL to the OS default browser.
+                "window_mode": "browser",
             },
         )
 
@@ -22164,6 +22169,59 @@ class SettingsLauncherConfigTestCase(unittest.TestCase):
         self.assertIn("explorer_md_font", web_runtime_state._SESSION_SNAPSHOT_FIELDS)
         self.assertIn("explorer_source_font", web_runtime_state._SESSION_SNAPSHOT_FIELDS)
         self.assertIn("explorer_theme", web_runtime_state._SESSION_SNAPSHOT_FIELDS)
+
+    def test_launcher_wires_the_mcp_toggle(self):
+        """The MCP checkbox mirrors Auto mode in every place Auto mode is.
+
+        Including the one that makes it optional: an agent publishing no
+        `mcp_flag` has no checkbox at all, which is how a CLI whose MCP
+        mechanism has not been verified needs no code.
+        """
+        html = self.client.get("/").get_data(as_text=True)
+        self.assertIn("mcp_flag", html)
+        self.assertIn("mcp_description", html)
+
+        launcher_js = self._static("js/launcher.js")
+        self.assertIn("function agentMcpFlag(agentValue)", launcher_js)
+        self.assertIn("function agentMcpDescription(agentValue)", launcher_js)
+        self.assertIn(
+            "function syncTerminalAgentMcpState(row, commandMode, selectedAgent)",
+            launcher_js,
+        )
+        self.assertIn("t-agent-mcp", launcher_js)
+        self.assertIn("t-agent-mcp-field", launcher_js)
+        collect = launcher_js[
+            launcher_js.index("function collectTerminalDrafts()"):
+            launcher_js.index("function renderCountOptions()")
+        ]
+        self.assertIn("agent_mcp:", collect)
+
+        shared_js = self._static("js/shared.js")
+        self.assertIn("agent_mcp: resolvedStartupMode === 'agent'", shared_js)
+
+    def test_agent_options_expose_registry_mcp_flags(self):
+        options = {option["value"]: option for option in web_agents._agent_options()}
+
+        self.assertEqual(options["claude"]["mcp_flag"], "--mcp-config {config}")
+        self.assertTrue(options["claude"]["mcp_description"])
+        # No block published, so no checkbox — the seven other CLIs each need
+        # their own verification against a current release before one is.
+        for key in ("codex", "copilot", "kimi", "kilo", "grok", "hermes", "opencode", "other"):
+            with self.subTest(agent=key):
+                self.assertEqual(options[key]["mcp_flag"], "")
+
+    def test_a_pane_that_did_not_ask_for_mcp_changes_in_no_way(self):
+        session = SimpleNamespace(
+            initial_command="claude",
+            initial_command_mode="agent",
+            agent_selection="claude",
+            agent_auto_mode=False,
+            agent_mcp=False,
+        )
+
+        self.assertEqual(
+            web_agents._compose_agent_startup_command(session), "claude"
+        )
 
     def test_launcher_wires_the_auto_mode_toggle(self):
         html = self.client.get("/").get_data(as_text=True)

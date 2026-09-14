@@ -28,7 +28,7 @@ do with the result -- stays in ``web/terminal_io.py``.
 """
 
 import re
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 from urllib.parse import unquote, urlsplit
 
 from web.osc_stream import pending_osc_residue
@@ -222,7 +222,26 @@ _REMOTE_HOOK = (
 
 #: `wsl.exe` only forwards the environment variables `WSLENV` names.
 _WSLENV_VARIABLE = "WSLENV"
+WSLENV_VARIABLE = _WSLENV_VARIABLE
 _WSL_FORWARDED = "PROMPT_COMMAND"
+
+
+def merge_wslenv(current: Optional[str], names: Iterable[str]) -> str:
+    """Return `WSLENV` extended with `names`, keeping what is already there.
+
+    More than one caller forwards variables across the WSL boundary -- the
+    prompt hook below, and the pane identity `web/mcp_launch.py` injects --
+    and each writing its own value would drop the other's. A name already
+    listed (with or without a `/p`-style flag suffix) is left as it stands.
+    """
+    parts = [part for part in str(current or "").strip().split(":") if part]
+    listed = {part.split("/", 1)[0] for part in parts}
+    for name in names:
+        resolved = str(name or "").strip()
+        if resolved and resolved not in listed:
+            parts.append(resolved)
+            listed.add(resolved)
+    return ":".join(parts)
 
 
 def shell_integration_environment(
@@ -242,13 +261,12 @@ def shell_integration_environment(
     if kind in {"posix", ""}:
         return {"PROMPT_COMMAND": _POSIX_PROMPT_COMMAND}
     if kind == "wsl":
-        current = str((environment or {}).get(_WSLENV_VARIABLE) or "").strip()
-        parts = [part for part in current.split(":") if part]
-        if not any(part.split("/", 1)[0] == _WSL_FORWARDED for part in parts):
-            parts.append(_WSL_FORWARDED)
         return {
             "PROMPT_COMMAND": _POSIX_PROMPT_COMMAND,
-            _WSLENV_VARIABLE: ":".join(parts),
+            _WSLENV_VARIABLE: merge_wslenv(
+                (environment or {}).get(_WSLENV_VARIABLE),
+                (_WSL_FORWARDED,),
+            ),
         }
     return {}
 

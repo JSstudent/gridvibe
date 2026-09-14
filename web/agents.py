@@ -97,6 +97,67 @@ def _agent_auto_mode_description(agent_key: Any) -> str:
     return str(auto_mode.get("description") or "").strip()
 
 
+#: The one placeholder an MCP flag template may carry: the absolute path of the
+#: generated sidecar config. Substituted (and quoted) at compose time, because
+#: the path is per-install and the registry is committed.
+_MCP_CONFIG_PLACEHOLDER = "{config}"
+
+#: `--mcp-config <path>`, and nothing more adventurous. One option token, one
+#: placeholder: a registry typo carrying a shell metacharacter resolves to no
+#: flag rather than smuggling a second command into the launch line.
+_MCP_FLAG_TEMPLATE = re.compile(r"^--?[A-Za-z0-9][A-Za-z0-9_-]*\s\{config\}$")
+
+
+def _agent_mcp_flag(agent_key: Any) -> str:
+    """Return the registry-defined MCP flag *template* for one agent, or "".
+
+    An agent with no block published here has no checkbox -- the same thing
+    ``opencode`` already does for Auto mode, and the reason a CLI whose MCP
+    mechanism has not been verified needs no code.
+    """
+    spec = AGENT_REGISTRY.get(_normalize_agent_key(agent_key))
+    if not isinstance(spec, dict):
+        return ""
+    mcp = spec.get("mcp")
+    if not isinstance(mcp, dict):
+        return ""
+    flag = str(mcp.get("flag") or "").strip()
+    if not _MCP_FLAG_TEMPLATE.match(flag):
+        return ""
+    return flag
+
+
+def _agent_mcp_description(agent_key: Any) -> str:
+    """Return the registry-defined MCP description for one agent, or ""."""
+    spec = AGENT_REGISTRY.get(_normalize_agent_key(agent_key))
+    if not isinstance(spec, dict):
+        return ""
+    mcp = spec.get("mcp")
+    if not isinstance(mcp, dict):
+        return ""
+    return str(mcp.get("description") or "").strip()
+
+
+def _agent_mcp_command_fragment(agent_key: Any, config_path: Optional[str] = None) -> str:
+    """Return the composed ``--mcp-config "<path>"``, or "".
+
+    Empty whenever the flag cannot be trusted to work: no registry block, no
+    generated config on disk (the write failed, or this is a checkout that has
+    never been started), or a path that cannot be quoted. Pointing a CLI at a
+    config file that is not there costs the user their agent, which is worse
+    than quietly having no tools.
+    """
+    template = _agent_mcp_flag(agent_key)
+    if not template:
+        return ""
+    from web.mcp_launch import mcp_config_path
+
+    resolved = str(config_path if config_path is not None else mcp_config_path())
+    if not resolved or '"' in resolved or not os.path.exists(resolved):
+        return ""
+    return template.replace(_MCP_CONFIG_PLACEHOLDER, f'"{resolved}"')
+
+
 def _agent_options() -> List[Dict[str, str]]:
     """Return launcher agent choices sourced from the registry."""
     options = [
@@ -109,6 +170,10 @@ def _agent_options() -> List[Dict[str, str]]:
             "display_name": str(spec.get("display_name") or spec.get("label") or key),
             "auto_mode_flag": _agent_auto_mode_flag(key),
             "auto_mode_description": _agent_auto_mode_description(key),
+            # Published for the same reason as the auto-mode pair: the launcher
+            # hides the checkbox for an agent that publishes no flag.
+            "mcp_flag": _agent_mcp_flag(key),
+            "mcp_description": _agent_mcp_description(key),
         }
         for key, spec in AGENT_REGISTRY.items()
     ]
@@ -120,6 +185,8 @@ def _agent_options() -> List[Dict[str, str]]:
             "display_name": "other",
             "auto_mode_flag": "",
             "auto_mode_description": "",
+            "mcp_flag": "",
+            "mcp_description": "",
         }
     )
     return options
@@ -151,6 +218,13 @@ def _compose_agent_startup_command(session: Any) -> str:
         flag = _agent_auto_mode_flag(agent_key)
         if flag:
             command += f" {flag}"
+    if bool(getattr(session, "agent_mcp", False)):
+        # Additive by construction: `--mcp-config` loads *alongside* the user's
+        # own MCP servers. The strict variant would silently cost them every
+        # server they had registered, inside GridVibe panes only.
+        fragment = _agent_mcp_command_fragment(agent_key)
+        if fragment:
+            command += f" {fragment}"
     return command
 
 
@@ -889,6 +963,7 @@ def _clear_agent_launch_identity(session: Dict[str, Any]) -> None:
     session["agent_selection"] = ""
     session["custom_agent"] = ""
     session["agent_auto_mode"] = False
+    session["agent_mcp"] = False
 
 
 def _sanitize_agent_launch_commands(connection_mode: str, sessions: List[Dict[str, Any]]) -> List[str]:

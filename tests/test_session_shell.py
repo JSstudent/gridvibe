@@ -16,6 +16,9 @@ second dimension added, and what the boundary itself has to hold:
   agent-only relaunch both send), and an unstated `agent` leaves its agent
   alone (that is what every request looked like before this dimension existed).
   A stated `""` agent is a *choice* of no agent, and only that clears one.
+  `mcp` is the third of them, and behaves the same way: unstated leaves the
+  pane's MCP setting alone, which for an agent change means it follows the
+  agent -- the rule auto mode already has.
 - **A refusal is atomic.** Each one is asserted on the response *and* on the
   whole pane, so a mutation that leaked ahead of a validation shows up here.
 - **The service is not a Flask handler**, and the route maps the error's own
@@ -55,6 +58,7 @@ _PANE_FIELDS = (
     "agent_selection",
     "custom_agent",
     "agent_auto_mode",
+    "agent_mcp",
     "status",
 )
 
@@ -736,6 +740,74 @@ class ShellTransitionBoundaryTestCase(ShellTransitionTestCase):
         }
         self.assertIn("apply_pane_shell_change", called)
         self.assertIn("jsonify", called)
+
+
+class PaneMcpRelaunchTestCase(ShellTransitionTestCase):
+    """The third tri-state on the same route."""
+
+    def _agent_pane(self, **overrides):
+        session, _repo = self._local_pane(
+            startup_mode="agent",
+            initial_command_mode="agent",
+            agent_selection="claude",
+            initial_command="claude",
+            **overrides,
+        )
+        return session
+
+    def test_an_unstated_mcp_leaves_the_pane_alone(self):
+        session = self._agent_pane(agent_mcp=True)
+        before = _pane_state(session.session_id)
+
+        response, _close, _start = self._post_shell(
+            session.session_id, {"agent": "claude"}
+        )
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertTrue(api.session_manager.get_session(session.session_id).agent_mcp)
+        self.assertEqual(_pane_state(session.session_id)["agent_mcp"], before["agent_mcp"])
+
+    def test_a_stated_mcp_is_applied_even_when_the_agent_does_not_change(self):
+        session = self._agent_pane(agent_mcp=True)
+
+        response, _close, start_task = self._post_shell(
+            session.session_id, {"agent": "claude", "mcp": False}
+        )
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertFalse(api.session_manager.get_session(session.session_id).agent_mcp)
+        # A stated dimension is also the relaunch instruction.
+        start_task.assert_called_once()
+
+    def test_mcp_follows_the_agent_it_was_chosen_for(self):
+        """A flag registered for one CLI says nothing about the next one."""
+        session = self._agent_pane(agent_mcp=True)
+
+        self._post_shell(session.session_id, {"agent": "codex"})
+
+        self.assertFalse(api.session_manager.get_session(session.session_id).agent_mcp)
+
+    def test_a_pane_sent_back_to_a_plain_shell_keeps_no_mcp(self):
+        session = self._agent_pane(agent_mcp=True)
+
+        self._post_shell(session.session_id, {"agent": ""})
+
+        updated = api.session_manager.get_session(session.session_id)
+        self.assertEqual(updated.startup_mode, "terminal")
+        self.assertFalse(updated.agent_mcp)
+
+    def test_a_non_boolean_mcp_is_refused_without_moving_the_pane(self):
+        session = self._agent_pane(agent_mcp=True)
+        before = _pane_state(session.session_id)
+
+        response, close_connection, start_task = self._post_shell(
+            session.session_id, {"agent": "claude", "mcp": "yes"}
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(_pane_state(session.session_id), before)
+        close_connection.assert_not_called()
+        start_task.assert_not_called()
 
 
 if __name__ == "__main__":

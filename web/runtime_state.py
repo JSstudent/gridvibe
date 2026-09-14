@@ -170,6 +170,10 @@ _SESSION_SNAPSHOT_FIELDS = (
     "agent_selection",
     "custom_agent",
     "agent_auto_mode",
+    "agent_mcp",
+    # Runtime lineage: a restored agent pane comes back as deep as it
+    # was, so the sidecar's spawn budget survives a restart.
+    "agent_depth",
     "title",
     "distribution",
     "use_wsl",

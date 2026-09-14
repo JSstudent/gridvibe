@@ -2655,6 +2655,7 @@
             agent_selection: commandMode === 'agent' ? (session.agent_selection || '') : '',
             custom_agent: commandMode === 'agent' ? (session.custom_agent || '') : '',
             agent_auto_mode: commandMode === 'agent' ? Boolean(session.agent_auto_mode) : false,
+            agent_mcp: commandMode === 'agent' ? Boolean(session.agent_mcp) : false,
             explorer_tree_open: startupMode === 'explorer' ? Boolean(terminal?._explorerTreeSidebarOpen) : false,
             explorer_git_open: startupMode === 'explorer' ? Boolean(terminal?._explorerGitSidebarOpen) : false,
             explorer_git_follow_browsing: startupMode === 'explorer'

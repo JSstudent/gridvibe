@@ -117,6 +117,21 @@ def _requested_agent(payload: Dict[str, Any]) -> Optional[str]:
     return agent_key
 
 
+def _requested_mcp(payload: Dict[str, Any]) -> Optional[bool]:
+    """Return the requested MCP choice, or ``None`` when none was stated.
+
+    The third tri-state, read exactly like the other two: absent leaves the
+    pane's MCP setting alone -- which for an agent change means it follows the
+    agent, the same rule auto mode has.
+    """
+    value = payload.get("mcp")
+    if value is None:
+        return None
+    if not isinstance(value, bool):
+        raise ShellTransitionError("mcp must be true or false")
+    return value
+
+
 def _pane_agent_key(session: Any) -> str:
     """Return the agent a pane runs now, or ``""`` for a plain shell.
 
@@ -248,6 +263,7 @@ def _agent_updates(session: Any, agent_key: str) -> Dict[str, Any]:
             "custom_agent": "",
             "initial_command": "",
             "agent_auto_mode": False,
+            "agent_mcp": False,
         }
     return {
         "startup_mode": "agent",
@@ -257,6 +273,10 @@ def _agent_updates(session: Any, agent_key: str) -> Dict[str, Any]:
         "initial_command": agent_key,
         "agent_auto_mode": (
             bool(getattr(session, "agent_auto_mode", False))
+            and _pane_agent_key(session) == agent_key
+        ),
+        "agent_mcp": (
+            bool(getattr(session, "agent_mcp", False))
             and _pane_agent_key(session) == agent_key
         ),
     }
@@ -288,6 +308,7 @@ def apply_pane_shell_change(
 
     shell_kind = _requested_shell(payload)
     agent_key = _requested_agent(payload)
+    mcp_enabled = _requested_mcp(payload)
 
     if shell_kind is not None:
         if session.mode != "wsl":
@@ -311,7 +332,9 @@ def apply_pane_shell_change(
     # A valid, explicitly stated dimension is also the relaunch instruction.
     # Its value need not differ from the pane's metadata: the checked menu row
     # is still an action, and selecting it replaces the process behind the pane.
-    relaunch_requested = shell_kind is not None or agent_key is not None
+    relaunch_requested = (
+        shell_kind is not None or agent_key is not None or mcp_enabled is not None
+    )
 
     updates: Dict[str, Any] = {}
     if shell_kind is not None and (
@@ -321,6 +344,12 @@ def apply_pane_shell_change(
         updates.update(_shell_updates(session, session_id, shell_kind, distribution))
     if agent_key is not None and agent_key != _pane_agent_key(session):
         updates.update(_agent_updates(session, agent_key))
+    if mcp_enabled is not None:
+        # Stated last, so it wins over the value `_agent_updates` carried
+        # forward -- and a pane with no agent cannot have MCP, because there is
+        # no CLI to register the sidecar with.
+        resolved_agent = agent_key if agent_key is not None else _pane_agent_key(session)
+        updates["agent_mcp"] = bool(mcp_enabled) and bool(resolved_agent)
 
     # An empty payload states no choice at all and retains the old no-op API
     # behaviour. Every menu row states at least `agent`, so a real selection
