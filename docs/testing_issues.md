@@ -1,9 +1,56 @@
 # GridVibe Testing Issues
-Last updated: 2026-09-13
+Last updated: 2026-09-14
 
 ## Open Issues
 
-None.
+### Issue ID: ISSUE-2026-053
+- Title: Relaunched terminal pane keeps a permanent "Connecting…" overlay
+- Priority: Medium
+- Status: Open
+- Area: `web/static/js/terminal-shell.js`, `web/static/js/terminals.js`
+- Assignee: Unassigned
+- Tags: `terminal`, `session`, `socketio`, `tests`
+- Reported: 2026-09-14
+
+Description:
+Relaunching a live terminal pane from the pane header reset dropdown — onto another shell family, onto an agent, or back to a plain shell — can leave that pane's "Connecting…" spinner on screen permanently. The shell behind it is running and connected, and its output is written into the xterm underneath, but the overlay covers the pane and nothing afterwards removes it: not the next status event, not switching session tabs, not a group reload. The reader's only recovery is reloading the whole window, and until they do the pane looks hung.
+
+Steps to reproduce:
+1. Launch a workspace holding a local PowerShell pane.
+2. Open that pane's header reset dropdown and relaunch it onto an agent (for example `claude`), then open it again and relaunch back to a plain PowerShell.
+3. Observe the spinner and "Connecting…" caption stay over the pane, while `GET /api/sessions?workspace_id=<id>&group_id=<id>` reports `"status": "connected"` for that `session_id` and typing into the pane still reaches the shell.
+
+Expected behavior:
+A relaunched pane wears the "Connecting…" overlay only until its new transport reports connected, and any later group load or refresh clears an overlay that a connected, already-attached pane is still wearing.
+
+Actual behavior / logs:
+The overlay is created after the one event that would have removed it. `apply_pane_shell_change()` broadcasts the pending status and starts the connector (`web/session_shell.py:372-373`) before the route writes its response, and a local shell is marked `CONNECTED` immediately after the spawn (`web/terminal_io.py:1997`). A relaunch of a local PowerShell pane logs the connector starting before the response is written:
+
+```
+20:01:43,845  web.session_shell  Pane relaunch session_id=5d66f259 shell=powershell agent=none
+20:01:44,048  web.terminal_io    [5d66f259] _connect_session started
+20:01:44,049  werkzeug           "POST /api/sessions/5d66f259/shell HTTP/1.1" 200 -
+20:01:44,049  web.terminal_io    [5d66f259] Starting local shell ...
+```
+
+`relaunchSessionShell()` calls `showPlaceholderConnecting(index)` only after awaiting that response (`web/static/js/terminal-shell.js:521`), so the connected `session_status` event reaches the page before the overlay exists. That the event wins the race is inferred from this log ordering rather than observed in the client, and is the one investigation target here; the rest is confirmed by inspection.
+
+What makes the state permanent is confirmed: for an already-attached pane the overlay is removed in exactly one place, the connected branch of the `session_status` handler (`web/static/js/terminals.js:8517`), and no reload path re-runs it. `attachTerminal()` drops the overlay only for a pane that is not yet attached (`web/static/js/terminals.js:7528`), and neither the `initialLoad` connected branch (`web/static/js/terminals.js:7693`) nor the `refresh` one (`web/static/js/terminals.js:8238`) handles a connected pane that is already attached.
+
+The same end state is reachable without the race: when the connected event lands while the pane's group is not the visible one, the handler returns at `if (!target.active)` (`web/static/js/terminals.js:8493`) without removing the overlay, and returning to that tab does not clear it either.
+
+Observed on `session_id=5d66f259` in a live workspace: `/api/sessions` reported `status: connected`, `startup_mode: terminal`, and the pane still showed the spinner.
+
+### Proposed solution:
+In `web/static/js/terminal-shell.js`, move `showPlaceholderConnecting(index)` — and the `pane?.term?.reset?.()` beside it — ahead of the `fetch` in `relaunchSessionShell()`, after the relaunchable guards and the `_pendingShellSwitchPanes` claim, which is the ordering `retrySessionConnection()` in `web/static/js/terminals.js` already uses. The connected event then always lands on an overlay that exists. This also closes a second exposure in the current order: resetting the xterm after the await can discard output the new shell has already emitted. The failure path keeps showing `showPlaceholderError()`.
+
+In `web/static/js/terminals.js`, give the `initialLoad` (`:7693`) and `refresh` (`:8238`) pane loops a connected-and-already-attached branch that removes `ph-<index>`, mirroring the `session_status` handler at `:8517`, so a stale overlay heals on the next group load instead of lasting the life of the window. That branch is also what makes the not-visible-group path above recoverable.
+
+No persistence or migration implications: the overlay is view-only DOM and no session field changes.
+
+Edge cases: a relaunch refused before the POST (pane not relaunchable, shell switch unsupported) must not leave an overlay behind; a pane that genuinely stays pending must keep the spinner; and a pane whose slot changed hands between the request and its answer must not have an overlay written onto its replacement — the existing `terminals.indexOf(pane)` ownership re-check should still gate everything done after the await.
+
+Tests: extend `tests/test_terminal_shell_menu.py`, which already stubs `showPlaceholderConnecting` (line 83), with a case asserting the placeholder is shown before the relaunch request is issued, and one driving a connected `session_status` at an attached pane to assert the overlay is gone. A case over the `refresh` loop covers the reload half, including the pane that connected while its group was not visible.
 
 ## Closed Issues
 
