@@ -592,6 +592,9 @@ unless the task explicitly changes this contract.
   are invalid live input. Stored reads default absent or invalid chrome to
   `False` and `100`. Both fields follow the workspace presentation transaction,
   live snapshot, explicit save, autosave, lifecycle flush/capture and restore.
+  Which side the panel docks to is not among them: it is the global
+  `workspace.agent_sidebar_side` setting (see [Agent dashboard](#agent-dashboard)),
+  and the transaction refuses it as an unknown field.
 - Persist durable tabs/mode/Diff/navigation intent separately from revision-bound
   per-panel scroll/folds. Never persist fetched content, search query/results or
   dirty buffers. Viewer find is runtime state of tab + path, reapplied on render
@@ -880,12 +883,30 @@ unless the task explicitly changes this contract.
   Unchanged markup is skipped; a rebuild preserves scroll and focus. Read
   failures retain the last good tree, and successful polls leave action notices
   intact.
+- **Which edge the sidebar docks to is the global `workspace.agent_sidebar_side`
+  setting, never a workspace's.** It follows `surface_mode`'s rules, not the
+  panel's own: `_normalize_agent_sidebar_side()` in `web/config.py` accepts
+  `left`/`right` and falls back to the captured generation's value, every
+  `/api/sessions` shape and `/api/app-config` report the *current* value so a
+  window that missed the broadcast reconciles on its next read, and a save
+  broadcasts it beside the surface mode. No workspace presentation transaction,
+  runtime-state slot or saved preset carries it — the presentation route refuses
+  the field — so `agent_sidebar_open` and `agent_sidebar_scale` restore
+  unchanged onto whichever edge the setting names. The page applies it as the
+  one body class `agent-sidebar-right`; the stylesheet orders the panel past the
+  grid (never `row-reverse`, which would also swap the empty state sharing that
+  row) and flips the frame border and the resizer's end. Markup, the single
+  toggle and its two marks, the open/shut state and the width are identical on
+  both sides.
 - Sidebar width is `calc(var(--agent-sidebar-width) *
   var(--agent-sidebar-scale, 1))`, with the base owned solely by the CSS clamp
   `clamp(240px, 15%, 400px)`. Dragging measures the rendered border-box width
   divided by its current scale, never restating the clamp in JavaScript. The
   edge button captures the pointer and listens for move/up/cancel on the window;
-  each move writes a scale clamped to 100..200. Release reports the changed
+  each move writes a scale clamped to 100..200. The drag captures its
+  direction from the side at the press, so the handle always widens away from
+  the grid; a side change under the pointer abandons the drag rather than
+  finishing it against the other edge. Release reports the changed
   integer percent and calls `onLayoutChanged` once; live pane ResizeObservers
   handle the drag without a second explicit refit on every move. Cancellation
   restores the starting width without reporting. `apply()` also refits when a

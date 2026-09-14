@@ -84,6 +84,7 @@ from web.config import (  # noqa: F401 - compatibility re-exports
     _build_runtime_state,
     _config_lock,
     _merge_dicts,
+    _normalize_agent_sidebar_side,
     _normalize_surface_mode,
     load_config,
     resolve_server_settings,  # noqa: F401 - re-exported for the entry points
@@ -433,6 +434,7 @@ def _public_app_config() -> Dict[str, Any]:
         },
         "workspace": {
             "surface_mode": settings.app_surface_mode,
+            "agent_sidebar_side": settings.agent_sidebar_side,
             "autosave_interval_minutes": settings.workspace_autosave_interval_minutes,
             "multi_workspace_enabled": settings.multi_workspace_enabled,
             "minimize_cascade": settings.workspace_minimize_cascade,
@@ -474,6 +476,7 @@ def _broadcast_app_config_update(apply_scope: str = "session"):
             },
             "workspace": {
                 "surface_mode": settings.app_surface_mode,
+                "agent_sidebar_side": settings.agent_sidebar_side,
                 "multi_workspace_enabled": settings.multi_workspace_enabled,
             },
             "terminal": {
@@ -506,6 +509,9 @@ def _normalize_app_config_update(data: Any, settings=None) -> Dict[str, Any]:
     if not isinstance(workspace, dict):
         workspace = {}
     surface_mode = _normalize_surface_mode(workspace.get("surface_mode"), settings.app_surface_mode)
+    agent_sidebar_side = _normalize_agent_sidebar_side(
+        workspace.get("agent_sidebar_side"), settings.agent_sidebar_side
+    )
     multi_workspace_enabled = workspace.get(
         "multi_workspace_enabled",
         settings.multi_workspace_enabled,
@@ -591,6 +597,7 @@ def _normalize_app_config_update(data: Any, settings=None) -> Dict[str, Any]:
         },
         "workspace": {
             "surface_mode": surface_mode,
+            "agent_sidebar_side": agent_sidebar_side,
             "autosave_interval_minutes": autosave_interval_minutes,
             "multi_workspace_enabled": multi_workspace_enabled,
             "minimize_cascade": minimize_cascade,
@@ -656,10 +663,13 @@ def _get_group_response_meta(
 ) -> Dict[str, Any]:
     """Return layout metadata for one session group.
 
-    ``surface_mode`` is always the current global setting, never a per-group
-    copy: it used to be frozen into the group at launch, so changing the App
-    Setting left every already-launched group (and every workspace restored
-    from a snapshot of one) reporting the value it launched with.
+    ``surface_mode`` and ``agent_sidebar_side`` are always the current global
+    settings, never a per-group copy: surface mode used to be frozen into the
+    group at launch, so changing the App Setting left every already-launched
+    group (and every workspace restored from a snapshot of one) reporting the
+    value it launched with. Both ride this read so a window that missed the
+    broadcast — hidden, or with a dropped socket — reconciles on its next
+    refresh instead of staying on a stale setting until it reloads.
     """
     group = session_manager.get_group(group_id)
     if not group:
@@ -674,6 +684,7 @@ def _get_group_response_meta(
             "terminal_count": 0,
             "workspace_layout": None,
             "surface_mode": runtime_config.app_surface_mode,
+            "agent_sidebar_side": runtime_config.agent_sidebar_side,
         }
 
     return {
@@ -683,6 +694,7 @@ def _get_group_response_meta(
         "terminal_count": group.terminal_count,
         "workspace_layout": group.workspace_layout,
         "surface_mode": runtime_config.app_surface_mode,
+        "agent_sidebar_side": runtime_config.agent_sidebar_side,
     }
 
 
@@ -755,6 +767,7 @@ def terminals_page():
     return render_template('terminals.html', max_sessions=settings.max_sessions,
                            agent_options=_agent_options(),
                            app_surface_mode=settings.app_surface_mode,
+                           app_agent_sidebar_side=settings.agent_sidebar_side,
                            workspace_id=workspace_id,
                            workspace_label=workspace_label(workspace_id),
                            multi_workspace_enabled=settings.multi_workspace_enabled,
@@ -1019,6 +1032,7 @@ def get_sessions():
                 "terminal_count": len(sessions),
                 "workspace_layout": None,
                 "surface_mode": runtime_config.app_surface_mode,
+                "agent_sidebar_side": runtime_config.agent_sidebar_side,
                 "workspace_id": workspace_id,
             }
         )
@@ -1032,6 +1046,7 @@ def get_sessions():
                 "terminal_count": launch_options["terminal_count"],
                 "workspace_layout": None,
                 "surface_mode": runtime_config.app_surface_mode,
+                "agent_sidebar_side": runtime_config.agent_sidebar_side,
             }
         )
     return jsonify(payload)

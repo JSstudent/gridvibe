@@ -30,6 +30,18 @@
                     <option value="max">Max surface</option>
                 </select>
             </div>
+            {# Which edge the docked agent dashboard sits on. A global setting
+               rather than the workspace's own, so it is here beside the surface
+               mode: every open window applies it the moment this saves, and no
+               saved workspace carries it. The panel is otherwise unchanged --
+               the same one toggle wearing the same two marks. #}
+            <div class="field">
+                <label>Agent Dashboard Side</label>
+                <select id="appAgentSidebarSide" aria-label="Agent dashboard panel side">
+                    <option value="left">Left side</option>
+                    <option value="right">Right side</option>
+                </select>
+            </div>
             <div class="field">
                 <label>Auto-save workspace every <span id="appWorkspaceAutosaveIntervalValue">5</span> min</label>
                 <input id="appWorkspaceAutosaveInterval" type="range" min="1" max="15" step="1" value="5" oninput="syncAutosaveIntervalLabel()" aria-label="Workspace auto-save interval in minutes">

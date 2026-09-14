@@ -4,6 +4,12 @@ All notable changes to GridVibe will be documented in this file.
 
 ## Unreleased
 
+- **(feat) The docked agent dashboard can sit on either side of the window.** The panel has always opened down the left of the grid, which is the wrong edge if your terminals, your editor or your other screen live over there — the overview you keep up all day ended up furthest from what you were watching.
+
+  **App Settings ▸ Agent Dashboard Side** now chooses left or right. Saving moves it at once, in every open workspace window, the way the theme and the surface mode already apply. Nothing else about the panel changes: the same handle at the start of the session tab line, wearing the same two marks, and the same rows. Dragging the panel's inner edge still widens it, on whichever side it is on.
+
+  Which edge it sits on is a machine setting rather than a workspace's, so it is not saved into a workspace and cannot come back differently in one window than another. What each workspace does keep is unchanged — whether the panel is up, and how wide you dragged it — so a workspace saved before the switch restores exactly as it did, on whichever side the setting names now.
+
 - **(fix) The agent dashboard no longer blurs your other workspaces.** While the dashboard dialog was up, every other GridVibe window dimmed behind a blur, and a window left that way only cleared it when you clicked into it — so the workspaces you were not looking at sat greyed out, and the one you moved to cleared itself while the rest stayed. That dim was worth having when the dialog closed the moment you left it; it is the wrong window to blur now that you can keep the dialog up and work elsewhere.
 
   The blur is the dialog's own backdrop and stops at the edge of the window showing it. Every other workspace is left alone, whichever window has the dialog and whichever one you are working in.

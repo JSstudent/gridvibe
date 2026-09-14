@@ -1125,21 +1125,29 @@ class DashboardSidebarPageWiringTestCase(unittest.TestCase):
                 'toggleAgentDashboardSidebar',
                 'applyAgentDashboardSidebar',
                 'agentDashboardSidebarOpen',
-                'refreshAgentDashboardSidebar'
+                'refreshAgentDashboardSidebar',
+                /* The side is a fourth name the page calls — at boot, off its
+                   own constant, and again on every app-config delivery. */
+                'applyAgentDashboardSidebarSide',
+                'agentDashboardSidebarSide'
             ];
             wireAgentDashboardSidebar();
             applyAgentDashboardSidebar(true, { persist: false });
+            applyAgentDashboardSidebarSide('right');
             process.stdout.write(JSON.stringify({
                 callable: named.filter(name => typeof window[name] === 'function'),
                 applied: agentDashboardSidebarOpen(),
-                /* An apply that was told the value writes nothing durable. */
+                side: agentDashboardSidebarSide(),
+                /* An apply that was told the value writes nothing durable, and
+                   neither does a side that came from the same server. */
                 writes: ledger.writes,
                 reports: ledger.reports
             }));
             """
         )
-        self.assertEqual(len(result["callable"]), 5)
+        self.assertEqual(len(result["callable"]), 7)
         self.assertTrue(result["applied"])
+        self.assertEqual(result["side"], "right")
         self.assertEqual(result["writes"], [])
         self.assertEqual(result["reports"], 0)
 
@@ -1320,6 +1328,405 @@ class DashboardSidebarActionsAndResizeTestCase(DashboardSidebarNodeTestCase):
         self.assertEqual(result["css"], "1.75")
         self.assertEqual(result["reports"], 0)
         self.assertEqual(result["listeners"], 0)
+
+
+class DashboardSidebarSideTestCase(DashboardSidebarNodeTestCase):
+    """Which edge the column lives on.
+
+    A *global* App Setting (`workspace.agent_sidebar_side`) and not the
+    workspace's own, so it follows the surface mode's rules rather than the
+    panel's: every window reads the current value live, a save reaches them all
+    at once, and no workspace snapshot ever carries it. The panel itself is
+    unchanged by the swap — same markup, same one toggle wearing the same two
+    marks, same open/shut state and the same width — so what is pinned here is
+    the one class that moves it and the one gesture that has to read the other
+    way round.
+    """
+
+    def test_the_side_is_one_body_class_and_anything_unstated_is_the_left_one(self):
+        result = self._run_node("""
+            const read = () => ({
+                side: sidebar.getSide(),
+                right: bodyClassList.contains('agent-sidebar-right')
+            });
+            const start = read();
+            sidebar.setSide('right');
+            const right = read();
+            sidebar.setSide('left');
+            const left = read();
+            // Whatever the page hands over, the column is on a real edge.
+            const odd = [null, undefined, '', 'top', 0, 'RIGHT', ' right '].map(value => {
+                sidebar.setSide('left');
+                return sidebar.setSide(value);
+            });
+            report({ start, right, left, odd });
+        """)
+        self.assertEqual(result["start"], {"side": "left", "right": False})
+        self.assertEqual(result["right"], {"side": "right", "right": True})
+        self.assertEqual(result["left"], {"side": "left", "right": False})
+        self.assertEqual(
+            result["odd"],
+            ["left", "left", "left", "left", "left", "right", "right"],
+        )
+
+    def test_swapping_sides_changes_nothing_the_workspace_owns(self):
+        """The two facts that *are* the workspace's — up or down, and how wide —
+        ride their own transaction, so moving the column must not touch either,
+        must not write the local cache, and must not report a presentation
+        change. The one toggle keeps the mark it was wearing."""
+        result = self._run_node("""
+            fetchAnswer = snapshot();
+            sidebar.wire();
+            sidebar.apply(true, { persist: true, report: true, scale: 150 });
+            const read = () => ({
+                open: sidebar.isOpen(), scale: sidebar.getScale(),
+                icon: toggleIcon().getAttribute('src'),
+                pressed: toggleButton().getAttribute('aria-pressed'),
+                label: toggleButton().getAttribute('aria-label'),
+                stored: calls.stored.slice(), reports: calls.reports
+            });
+            const before = read();
+            sidebar.setSide('right');
+            const after = read();
+            report({ before, after });
+        """)
+        self.assertEqual(result["before"], result["after"])
+        self.assertTrue(result["after"]["open"])
+        self.assertEqual(result["after"]["scale"], 150)
+        self.assertIn("hide_sidebar.ico", result["after"]["icon"])
+
+    def test_only_a_real_move_of_an_open_column_refits_the_panes_beside_it(self):
+        """The expensive thing this control does. A shut column occupies no
+        width on either edge, and a side it is already on is not a move."""
+        result = self._run_node("""
+            fetchAnswer = snapshot();
+            sidebar.wire();
+            const shut = calls.layouts;
+            sidebar.setSide('right');
+            const whileShut = calls.layouts - shut;
+            sidebar.apply(true);
+            const open = calls.layouts;
+            sidebar.setSide('left');
+            const moved = calls.layouts - open;
+            sidebar.setSide('left');
+            sidebar.setSide('nonsense');
+            const again = calls.layouts - open;
+            report({ whileShut, moved, again });
+        """)
+        self.assertEqual(result["whileShut"], 0)
+        self.assertEqual(result["moved"], 1)
+        self.assertEqual(result["again"], 1)
+
+    def test_the_handle_always_widens_away_from_the_grid(self):
+        """The handle is on the column's inner edge either way, so on the right
+        it is the panel's *left* end: the same gesture — dragging away from the
+        grid — has to widen it on both sides, which is the one thing about the
+        drag that is not symmetric."""
+        result = self._run_node("""
+            fetchAnswer = snapshot();
+            sidebar.wire();
+            const handle = byId.get('agentSidebarResizer');
+            const event = x => ({ button: 0, pointerId: 3, clientX: x, preventDefault() {} });
+            const drag = (side, from, to) => {
+                sidebar.setSide(side);
+                sidebar.apply(true, { scale: 150 });
+                handle.fire('pointerdown', event(from));
+                windowListeners.fire('pointermove', event(to));
+                const during = sidebar.getScale();
+                windowListeners.fire('pointerup', event(to));
+                return { during, committed: sidebar.getScale() };
+            };
+            report({
+                leftOut: drag('left', 450, 525),
+                leftIn: drag('left', 450, 375),
+                rightOut: drag('right', 450, 375),
+                rightIn: drag('right', 450, 525)
+            });
+        """)
+        # 75px against a 400px base is a quarter of the clamp, either way round.
+        self.assertEqual(result["leftOut"], {"during": 175, "committed": 175})
+        self.assertEqual(result["rightOut"], {"during": 175, "committed": 175})
+        self.assertEqual(result["leftIn"], {"during": 125, "committed": 125})
+        self.assertEqual(result["rightIn"], {"during": 125, "committed": 125})
+
+    def test_a_side_change_under_the_pointer_abandons_the_drag(self):
+        """The handle the gesture started on is not on that edge any more, so
+        the drag is given up rather than finished against the other one — and an
+        abandoned drag restores the width and reports nothing, exactly as a
+        cancelled one does."""
+        result = self._run_node("""
+            fetchAnswer = snapshot();
+            sidebar.wire();
+            sidebar.apply(true, { scale: 150 });
+            const handle = byId.get('agentSidebarResizer');
+            const event = x => ({ button: 0, pointerId: 4, clientX: x, preventDefault() {} });
+            handle.fire('pointerdown', event(450));
+            windowListeners.fire('pointermove', event(525));
+            const mid = sidebar.getScale();
+            sidebar.setSide('right');
+            const abandoned = { scale: sidebar.getScale(), reports: calls.reports,
+                listeners: windowListeners.listenerCount('pointermove'),
+                css: shell().style['--agent-sidebar-scale'] };
+            // The pointer is still down as far as the window knows; nothing it
+            // says afterwards may move a column that is no longer being dragged.
+            windowListeners.fire('pointermove', event(700));
+            windowListeners.fire('pointerup', event(700));
+            report({ mid, abandoned, after: sidebar.getScale(), reports: calls.reports });
+        """)
+        self.assertEqual(result["mid"], 175)
+        self.assertEqual(
+            result["abandoned"],
+            {"scale": 150, "reports": 0, "listeners": 0, "css": "1.5"},
+        )
+        self.assertEqual(result["after"], 150)
+        self.assertEqual(result["reports"], 0)
+
+
+class DashboardSidebarSideSettingTestCase(unittest.TestCase):
+    """The setting behind the side: global, read live, and never a workspace's.
+
+    It is saved from App Settings the way the surface mode is, so the same three
+    guarantees are asserted here — the route normalizes and persists it, every
+    open window is told at once, and a window that missed the telling reconciles
+    off its next session read — plus the one that keeps the workspace save and
+    restore rules exactly as they were: no durable workspace record carries it.
+    """
+
+    def setUp(self):
+        api.app.config["TESTING"] = True
+        self.client = api.app.test_client()
+        api.session_manager.reset_sessions()
+        self.addCleanup(api.session_manager.reset_sessions)
+        config = api.load_config()
+        saved_workspace = json.loads(json.dumps(config.get("workspace", {})))
+        self.addCleanup(self._restore_workspace_config, saved_workspace)
+        self.temp_dir = TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        self.repo_dir = Path(self.temp_dir.name) / "repo"
+        self.repo_dir.mkdir()
+        self.state_path = Path(self.temp_dir.name) / "runtime_state.json"
+        patcher = patch.object(
+            web_runtime_state, "RUNTIME_STATE_PATH", str(self.state_path)
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _restore_workspace_config(self, saved_workspace):
+        config = api.load_config()
+        config["workspace"] = saved_workspace
+        api.save_config(config)
+        api._refresh_runtime_config()
+
+    def _save_side(self, side):
+        with patch.object(api.socketio, "emit") as emit:
+            response = self.client.post(
+                "/api/app-config", json={"workspace": {"agent_sidebar_side": side}}
+            )
+        self.assertEqual(response.status_code, 200, response.get_json())
+        return response.get_json(), emit
+
+    def _launch(self):
+        response = self.client.post(
+            "/api/sessions",
+            json={
+                "connection_mode": "wsl",
+                "session_name": "Files",
+                "sessions": [
+                    {
+                        "directory": str(self.repo_dir),
+                        "title": "Files",
+                        "startup_mode": "explorer",
+                    }
+                ],
+            },
+        )
+        self.assertEqual(response.status_code, 201, response.get_json())
+        return response.get_json()["group_id"]
+
+    def test_the_setting_is_two_values_and_an_unknown_one_keeps_what_is_set(self):
+        """Normalized at the boundary, so a hand-edited config.json and a save
+        from the dialog land on the same value."""
+        payload, _ = self._save_side("right")
+        self.assertEqual(payload["workspace"]["agent_sidebar_side"], "right")
+        self.assertEqual(api.load_config()["workspace"]["agent_sidebar_side"], "right")
+        self.assertEqual(api.runtime_config.agent_sidebar_side, "right")
+
+        for rubbish in ("sideways", "", None, 3, ["right"], {"side": "left"}):
+            with self.subTest(rubbish=rubbish):
+                payload, _ = self._save_side(rubbish)
+                self.assertEqual(payload["workspace"]["agent_sidebar_side"], "right")
+                self.assertEqual(api.runtime_config.agent_sidebar_side, "right")
+
+        payload, _ = self._save_side("left")
+        self.assertEqual(payload["workspace"]["agent_sidebar_side"], "left")
+        self.assertEqual(api.runtime_config.agent_sidebar_side, "left")
+
+    def test_a_save_reaches_every_open_window_and_the_page_it_next_serves(self):
+        """Applied instantly: the broadcast carries it beside the surface mode,
+        and a window opened afterwards is served the same value as its own boot
+        constant rather than a default it would have to correct."""
+        _, emit = self._save_side("right")
+
+        emit.assert_called_once()
+        event, message = emit.call_args[0]
+        self.assertEqual(event, "app_config_updated")
+        self.assertEqual(message["workspace"]["agent_sidebar_side"], "right")
+
+        page = self.client.get("/terminals").get_data(as_text=True)
+        self.assertIn('const AGENT_SIDEBAR_SIDE = "right";', page)
+
+        terminals = self.client.get("/static/js/terminals.js").get_data(as_text=True)
+        self.assertIn("applyAppConfigAgentSidebarSide(message);", terminals)
+        self.assertIn("applyAgentDashboardSidebarSide(side);", terminals)
+
+        self.assertEqual(
+            self.client.get("/api/app-config").get_json()["workspace"][
+                "agent_sidebar_side"
+            ],
+            "right",
+        )
+
+    def test_a_window_that_missed_the_broadcast_reconciles_on_its_next_read(self):
+        """The same rule the surface mode follows: every session read reports
+        the *current* global value, so a hidden window or a dropped socket costs
+        a refresh rather than a reload."""
+        group_id = self._launch()
+        self._save_side("right")
+
+        for url in (
+            "/api/sessions",
+            f"/api/sessions?group={group_id}",
+            "/api/sessions?workspace_id=default",
+        ):
+            with self.subTest(url=url):
+                payload = self.client.get(url).get_json()
+                self.assertEqual(payload["agent_sidebar_side"], "right")
+
+        self._save_side("left")
+        self.assertEqual(
+            self.client.get(f"/api/sessions?group={group_id}").get_json()[
+                "agent_sidebar_side"
+            ],
+            "left",
+        )
+
+    def test_no_workspace_record_carries_the_side(self):
+        """The save/restore rules are untouched: which edge the column is on is
+        not a fact about a workspace, so the presentation transaction, the
+        runtime-state slot and the restore that reads it back all stay exactly
+        the shape they were — a workspace saved on one side comes back with the
+        panel it had, on whichever edge the setting says now."""
+        group_id = self._launch()
+        self._save_side("right")
+
+        # The transaction does not merely drop it — it refuses the request, so
+        # a client that thought the side was the workspace's is told so.
+        refused = self.client.post(
+            "/api/workspace-presentation",
+            json={
+                "workspace_id": "default",
+                "expected_revision": 0,
+                "topbar_visible": True,
+                "agent_sidebar_open": True,
+                "agent_sidebar_side": "left",
+            },
+        )
+        self.assertEqual(refused.status_code, 400, refused.get_json())
+        self.assertIn("agent_sidebar_side", refused.get_json()["error"])
+
+        accepted = self.client.post(
+            "/api/workspace-presentation",
+            json={
+                "workspace_id": "default",
+                "expected_revision": 0,
+                "topbar_visible": True,
+                "agent_sidebar_open": True,
+            },
+        )
+        self.assertEqual(accepted.status_code, 200, accepted.get_json())
+        self.assertNotIn("agent_sidebar_side", accepted.get_json())
+
+        saved = self.client.post(
+            "/api/runtime-state/save",
+            json={
+                "workspace_id": "default",
+                "active_group_id": group_id,
+                "agent_sidebar_open": True,
+                "agent_sidebar_scale": 175,
+            },
+        )
+        self.assertEqual(saved.status_code, 200, saved.get_json())
+        stored = json.loads(self.state_path.read_text(encoding="utf-8"))
+        self.assertNotIn("agent_sidebar_side", json.dumps(stored["workspaces"]))
+
+        # The setting moves; what the workspace saved does not.
+        self._save_side("left")
+        api.session_manager.reset_sessions()
+        restored = self.client.post(
+            "/api/runtime-state/restore", json={"workspace_ids": ["default"]}
+        )
+        self.assertEqual(restored.status_code, 200, restored.get_json())
+        workspace = restored.get_json()["workspaces"][0]
+        self.assertTrue(workspace["restored"], workspace)
+        self.assertTrue(workspace["agent_sidebar_open"])
+        self.assertEqual(workspace["agent_sidebar_scale"], 175)
+        self.assertNotIn("agent_sidebar_side", workspace)
+        groups = self.client.get("/api/session-groups").get_json()
+        self.assertTrue(groups["agent_sidebar_open"])
+        self.assertNotIn("agent_sidebar_side", groups)
+
+    def test_the_dialog_offers_the_two_sides_and_carries_the_choice(self):
+        """One select beside the surface mode, and the same delivery contract:
+        the collected form states it and the broadcast every open window reads
+        carries it."""
+        page = self.client.get("/terminals").get_data(as_text=True)
+        self.assertIn('id="appAgentSidebarSide"', page)
+        self.assertIn('<option value="left">Left side</option>', page)
+        self.assertIn('<option value="right">Right side</option>', page)
+
+        app_settings = self.client.get("/static/js/app-settings.js").get_data(
+            as_text=True
+        )
+        collect = app_settings[
+            app_settings.index("function collectWorkspaceSettingsForm()"):
+            app_settings.index("function syncAutosaveIntervalLabel()")
+        ]
+        self.assertIn("appAgentSidebarSide", collect)
+        notify = app_settings[
+            app_settings.index("function notifyAppConfigUpdated(appSettings"):
+            app_settings.index("async function loadAppSettings()")
+        ]
+        self.assertIn("agent_sidebar_side", notify)
+
+    def test_the_stylesheet_moves_the_column_and_flips_only_its_two_edges(self):
+        """One class, and nothing else: the panel is ordered past the grid
+        rather than the row being reversed (the empty state shares that row),
+        and the frame's border and the handle swap ends with it. The markup is
+        the same either way, which is why the page still serves the panel before
+        the grid."""
+        css = self.client.get(
+            "/static/css/agent-dashboard-sidebar.css"
+        ).get_data(as_text=True)
+        panel = re.search(
+            r"body\.agent-sidebar-right \.agent-sidebar \{([^}]*)\}", css
+        )
+        handle = re.search(
+            r"body\.agent-sidebar-right \.agent-sidebar-resizer \{([^}]*)\}", css
+        )
+        self.assertIsNotNone(panel)
+        self.assertIsNotNone(handle)
+        self.assertIn("order: 1", panel.group(1))
+        self.assertIn("border-right: 0", panel.group(1))
+        self.assertIn("border-left: 1px solid", panel.group(1))
+        self.assertNotIn("flex-direction: row-reverse", css)
+        self.assertIn("inset: 0 auto 0 0", handle.group(1))
+        self.assertIn("border-right: 1px solid", handle.group(1))
+
+        page = self.client.get("/terminals").get_data(as_text=True)
+        self.assertLess(page.index('id="agentSidebar"'), page.index('id="terminalsGrid"'))
+        # The handle keeps its one box and its two marks on either side.
+        self.assertIn('src="/docs/images/show_sidebar.ico"', page)
+        self.assertEqual(page.count('id="agentSidebarToggleBtn"'), 1)
 
 
 class DashboardSidebarStateTestCase(unittest.TestCase):

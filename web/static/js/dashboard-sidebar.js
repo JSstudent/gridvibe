@@ -2,8 +2,8 @@
 
    The dialog answers "what is running elsewhere?" for the reader who stops to
    ask. This answers the same question for the reader who wants it *while* they
-   work: the same tree, in a column down the left of the grid, staying up while
-   they type in a pane. That is the whole of the difference, and every decision
+   work: the same tree, in a column beside the grid, staying up while they type
+   in a pane. That is the whole of the difference, and every decision
    below follows from it.
 
      · **It is the dialog's reading, not a second one.** What a row is called,
@@ -33,6 +33,14 @@
        ordered compare-and-swap transaction `topbar_visible` does and is written
        into the workspace snapshot — a restored workspace comes back with the
        panel it was saved with.
+     · **Which edge it is on is not.** `workspace.agent_sidebar_side` is a
+       global App Setting, read live the way the surface mode is: the server
+       answers with the current value on every session read and broadcasts a
+       save, and no workspace snapshot ever carries it. So the panel is the same
+       piece of chrome in every window, and a saved workspace restores with the
+       panel it had — on whichever edge the setting says today. Swapping sides
+       changes nothing else: same markup, same one toggle wearing the same two
+       marks, same open/shut state and the same width.
 
    Two halves, the split `minimize-all.js` and `dashboard-close.js` use:
    `policy` is pure — no DOM, no globals, no page — so the markup and the
@@ -180,6 +188,8 @@
     root.applyAgentDashboardSidebar = (open, options) => controller.apply(open, options);
     root.agentDashboardSidebarOpen = () => controller.isOpen();
     root.agentDashboardSidebarScale = () => controller.getScale();
+    root.applyAgentDashboardSidebarSide = value => controller.setSide(value);
+    root.agentDashboardSidebarSide = () => controller.getSide();
     root.refreshAgentDashboardSidebar = () => controller.refresh();
 }(typeof window !== 'undefined' ? window : null, function () {
     const SHELL_ID = 'agentSidebar';
@@ -192,8 +202,32 @@
     const TOGGLE_ICON_ID = 'agentSidebarToggleIcon';
     const RESIZER_ID = 'agentSidebarResizer';
     const OPEN_BODY_CLASS = 'agent-sidebar-open';
+    const RIGHT_BODY_CLASS = 'agent-sidebar-right';
     const SIDEBAR_SCALE_MIN = 100;
     const SIDEBAR_SCALE_MAX = 200;
+
+    /* Which edge the column lives on. A *global* App Setting
+       (`workspace.agent_sidebar_side`) and not a workspace's own, so it is
+       applied like the surface mode — read live from the server, never written
+       into a workspace snapshot — while everything that *is* the workspace's
+       (open or shut, and how wide) keeps riding its own transaction. The panel
+       is otherwise identical on both sides: same markup, same two marks on the
+       one toggle, same rules. */
+    const SIDEBAR_SIDE_LEFT = 'left';
+    const SIDEBAR_SIDE_RIGHT = 'right';
+
+    function normalizeSide(value) {
+        return String(value || '').trim().toLowerCase() === SIDEBAR_SIDE_RIGHT
+            ? SIDEBAR_SIDE_RIGHT
+            : SIDEBAR_SIDE_LEFT;
+    }
+
+    /* Which way the handle's pointer has to travel to widen the column. The
+       handle is on the column's inner edge either way, so on the right it is
+       the *left* end of the panel and a drag toward the grid narrows it. */
+    function dragDirection(side) {
+        return normalizeSide(side) === SIDEBAR_SIDE_RIGHT ? -1 : 1;
+    }
 
     function clampScale(value) {
         return Number.isFinite(value)
@@ -372,6 +406,11 @@
         SIDEBAR_SHOW_ICON,
         SIDEBAR_HIDE_ICON,
         OPEN_BODY_CLASS,
+        RIGHT_BODY_CLASS,
+        SIDEBAR_SIDE_LEFT,
+        SIDEBAR_SIDE_RIGHT,
+        normalizeSide,
+        dragDirection,
         agentRowHtml,
         sessionHtml,
         workspaceHtml,
@@ -411,6 +450,7 @@
         let painted = '';
         let wired = false;
         let scale = SIDEBAR_SCALE_MIN;
+        let side = SIDEBAR_SIDE_LEFT;
         let cancelDrag = null;
         let actionNotice = '';
         let actionTone = 'error';
@@ -568,6 +608,24 @@
             shell()?.style?.setProperty('--agent-sidebar-scale', String(scale / 100));
         }
 
+        /* The side is a global setting's value arriving — from the page's own
+           boot constant, from the App Settings broadcast, or from the session
+           read that reconciles a window which missed it — so it is applied and
+           never reported back. One body class: the stylesheet moves the column
+           and flips its two edges, the drag reads the direction off the same
+           value, and the panel's own state (shut or open, and how wide) is
+           untouched, because which edge it is on is not a fact about it. */
+        function setSide(value) {
+            const next = normalizeSide(value);
+            if (next === side) return side;
+            side = next;
+            cancelDrag?.();
+            setBodyClass(RIGHT_BODY_CLASS, side === SIDEBAR_SIDE_RIGHT);
+            /* Only an open column changed the width of anything beside it. */
+            if (isOpen()) onLayoutChanged();
+            return side;
+        }
+
         function wireResize() {
             const handle = getElement(RESIZER_ID);
             handle?.addEventListener('pointerdown', event => {
@@ -578,12 +636,19 @@
                 if (!(baseWidth > 0)) return;
                 const startX = event.clientX;
                 const pointerId = event.pointerId;
+                /* The edge the press happened on. A side change cancels the
+                   drag outright — the handle it started on is not there any
+                   more — so this is never read against an edge other than the
+                   one the gesture was begun on. */
+                const direction = dragDirection(side);
                 event.preventDefault();
                 handle.classList.add('dragging');
                 handle.setPointerCapture?.(pointerId);
                 const onMove = move => {
                     if (move.pointerId !== pointerId) return;
-                    writeScale(startScale + (move.clientX - startX) / baseWidth * 100);
+                    writeScale(
+                        startScale + direction * (move.clientX - startX) / baseWidth * 100
+                    );
                 };
                 const finish = commit => {
                     removeWindowListener('pointermove', onMove);
@@ -685,6 +750,8 @@
 
         return {
             wire, apply, toggle, isOpen, refresh, schedule, handleRow, setNotice, syncToggle,
+            setSide,
+            getSide: () => side,
             getScale: () => scale
         };
     }

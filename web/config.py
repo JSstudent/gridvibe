@@ -43,6 +43,9 @@ _config_lock = threading.RLock()
 
 HOST_KEY_POLICY_OPTIONS = ("auto-add", "known-hosts", "strict")
 
+#: Which edge of the workspace window the docked agent dashboard sits on.
+AGENT_SIDEBAR_SIDE_OPTIONS = ("left", "right")
+
 #: Human label used in quarantine/recovery log lines for this store.
 _QUARANTINE_LABEL = "configuration"
 
@@ -305,6 +308,19 @@ def _normalize_surface_mode(value: Any, default: str = "normal") -> str:
     return default if default in {"normal", "max"} else "normal"
 
 
+def _normalize_agent_sidebar_side(value: Any, default: str = "left") -> str:
+    """Normalize which side of the workspace window the agent panel docks to.
+
+    A global setting rather than a per-workspace one: the column is the same
+    piece of chrome in every window, so which edge it lives on is read live the
+    way ``surface_mode`` is, and is never frozen into a saved workspace.
+    """
+    normalized = str(value or "").strip().lower()
+    if normalized in AGENT_SIDEBAR_SIDE_OPTIONS:
+        return normalized
+    return default if default in AGENT_SIDEBAR_SIDE_OPTIONS else "left"
+
+
 def _clamped_int(value: Any, minimum: int, maximum: int, default: int) -> int:
     """Parse an integer config value into [minimum, maximum], else default."""
     try:
@@ -334,6 +350,7 @@ class RuntimeConfigState:
     terminal_shell_integration: bool
     app_theme: str
     app_surface_mode: str
+    agent_sidebar_side: str
     multi_workspace_enabled: bool
     workspace_minimize_cascade: bool
     workspace_autosave_interval_minutes: int
@@ -454,6 +471,9 @@ def _build_runtime_state(app_config: Dict[str, Any]) -> RuntimeConfigState:
         terminal_shell_integration=terminal_shell_integration,
         app_theme=app_theme,
         app_surface_mode=_normalize_surface_mode(workspace_config.get("surface_mode")),
+        agent_sidebar_side=_normalize_agent_sidebar_side(
+            workspace_config.get("agent_sidebar_side")
+        ),
         multi_workspace_enabled=multi_workspace_enabled,
         workspace_minimize_cascade=workspace_minimize_cascade,
         workspace_autosave_interval_minutes=workspace_autosave_interval_minutes,
