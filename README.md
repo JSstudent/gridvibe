@@ -135,6 +135,7 @@ See **every session in every workspace**, agents first. Open the dashboard dialo
 - **The rest is one hover away** — pointing at a row gives the full chat title, where the pane is, and what it runs on (`SSH`, `WSL`, `PowerShell`, `cmd`).
 - **A badge that means something** — the button counts the agents **working right now**, not how many you have open. No badge means every agent is sitting at a prompt.
 - **Click anything to go there** — a row, its session, or its workspace opens or focuses that window at that tab.
+- **Keep the dialog up while you work elsewhere** — it stays open when you move to another window, so you can leave it on a second screen. It closes when you click beside it, reach a pane in its own workspace, or open it somewhere else.
 - **Close from either view** — a session card's **×** and a band's **Close workspace** both offer **Cancel**, **Save and close**, or the plain close; a failed save cancels the close. **Close window** in native mode keeps the sessions running; these actions leave the dashboard open.
 - **Sessions without agents are listed too**, sorted after the ones that have them, because this is also the fastest way to reach any tab in any window.
 - **Nothing is probed** — both readings come from the pane's own output, and nothing is ever typed into a running agent.

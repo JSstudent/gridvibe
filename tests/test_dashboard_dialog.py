@@ -8,17 +8,25 @@ markup is parsed back into the rows a reader would see.
 What is pinned is what the dashboard is *for*:
 
 - **It is a dialog on the page that opened it.** Opening arms the poll and
-  reads once; closing disarms it and aborts what is in flight, because a shut
-  dialog is not a stale surface, it is one nobody is looking at. It goes away on
-  the ×, on a press on the backdrop, on Escape and on the reader leaving the
-  window — but Escape only while it is the top `.modal-shell` on the page, or
-  cancelling the close prompt it raised would take the list away with it.
+  reads once; closing disarms it and aborts what is in flight. It goes away on
+  the ×, on a press on the backdrop and on Escape — but Escape only while it is
+  the top `.modal-shell` on the page, or cancelling the close prompt it raised
+  would take the list away with it.
+- **Leaving the window is not a dismissal.** The dialog stays up on the window
+  it was raised from while the reader works in another one, which is the whole
+  point of a surface that names what is running everywhere. A document nobody
+  can *see* stands the poll down rather than dismissing it, and coming back into
+  view re-arms it and reads once; a window merely unfocused on another monitor
+  is not hidden and never stops reading.
 - **A row that names the workspace this page already is lands without opening
   anything.** Raising a window that is already raised fires no `focus` event, so
   the stored target would never be claimed and the row would do nothing at all.
-- **Acting closes it.** Every row is a way somewhere else and a dialog over the
-  pane it just took you to is in the way — but a close verb ends something and
-  leaves you here, so it does not.
+- **Acting closes it only when the act lands here.** A row for the workspace
+  this page already is takes the dialog with it, because a dialog over the pane
+  it just took you to is in the way; a row for anywhere else leaves it standing,
+  because that pane came up in another window and this one is covering nothing
+  the reader wanted. A close verb ends something and leaves you here, so it
+  never closes it either.
 - **There is one of it, across every window.** Opening broadcasts a claim and
   the newest open wins. A claim is a notice and never a lock, so nothing can
   refuse to open — a window that died with its dialog up leaves nothing standing
@@ -236,6 +244,9 @@ let documentFocused = true;
 const document = {
     activeElement: null,
     hidden: false,
+    /* The page's own body. Nothing in this module may write to it: the scrim is
+       the shell's, and the cross-window dim that used to land here is gone. */
+    body: fakeElement('body'),
     hasFocus: () => documentFocused,
     getElementById: id => byId.get(id) || null,
     /* The Escape guard asks the page which shells are up. This one is the
@@ -1368,12 +1379,12 @@ class DashboardDialogRowActionTestCase(DashboardDialogTestCase):
             result, [{"groupId": "g1", "sessionId": ""}, {"groupId": "", "sessionId": ""}]
         )
 
-    def test_landing_somewhere_takes_the_dialog_with_it(self):
-        """It was a window and staying open behind the one it opened was the
-        point. A dialog still covering the pane it has just taken you to is in
-        the way, so it goes — and the tree it drew is left standing, because a
-        reopen has something true four seconds ago to show while the first read
-        of the next pass is in flight."""
+    def test_landing_in_another_window_leaves_the_list_standing(self):
+        """The pane the reader asked for came up somewhere else, so this dialog
+        is not in front of it and there is nothing for it to get out of the way
+        of. Leaving it up is the whole reason to raise it on a screen the work
+        is not on: one row is rarely the only one the reader wants. Only the
+        last action's confirmation goes with the press."""
         result = self._run_node(
             """
             fetchAnswer = snapshot();
@@ -1385,14 +1396,41 @@ class DashboardDialogRowActionTestCase(DashboardDialogTestCase):
                 open: dialogOpen(),
                 hidden: shell().attributes['aria-hidden'],
                 rows: parseRows().length,
-                notice: notice().hidden
+                notice: notice().hidden,
+                opened: calls.openWorkspaceWindow.length
             });
             """
         )
-        self.assertFalse(result["open"])
-        self.assertEqual(result["hidden"], "true")
+        self.assertTrue(result["open"])
+        self.assertEqual(result["hidden"], "false")
         self.assertEqual(result["rows"], 3)
         self.assertTrue(result["notice"])
+        self.assertEqual(result["opened"], 1)
+
+    def test_a_second_row_is_reachable_without_raising_the_dialog_again(self):
+        """The consequence worth pinning: a list that survives the first press
+        is a list the reader can go on using. Two rows, two windows asked for,
+        one opening."""
+        result = self._run_node(
+            """
+            fetchAnswer = snapshot([group(), quietGroup()]);
+            showDashboard();
+            await settle();
+            clickRow('pane:s1');
+            await settle();
+            clickRow('session:g9');
+            await settle();
+            report({ open: dialogOpen(), opened: calls.openWorkspaceWindow });
+            """
+        )
+        self.assertTrue(result["open"])
+        self.assertEqual(
+            result["opened"],
+            [
+                {"workspaceId": "default", "options": {"groupId": "g1"}},
+                {"workspaceId": "default", "options": {"groupId": "g9"}},
+            ],
+        )
 
     def test_a_refusal_keeps_the_dialog_up_because_that_is_where_it_is_said(self):
         result = self._run_node(
@@ -1689,12 +1727,12 @@ class DashboardDialogLifecycleTestCase(DashboardDialogTestCase):
             result, {"wired": True, "toggled": False, "opened": False, "closed": False}
         )
 
-    def test_leaving_the_window_puts_it_away(self):
-        """The gesture the reader actually makes: they click across to another
-        workspace. This surface belongs to the window it was raised on, so that
-        window must not be left sitting behind the one they moved to still
-        showing a tree it has stopped polling — and still wearing it when they
-        come back to it later."""
+    def test_leaving_the_window_leaves_it_up_and_still_reading(self):
+        """The gesture the reader actually makes, and the one this surface now
+        exists to survive: they go and work in another workspace with the list
+        up on another monitor. `blur` is a window losing the focus, not a window
+        nobody can see, so nothing is dismissed and nothing stands down —
+        a dialog that put itself away here could never be read while working."""
         result = self._run_node(
             """
             fetchAnswer = snapshot();
@@ -1703,46 +1741,66 @@ class DashboardDialogLifecycleTestCase(DashboardDialogTestCase):
             const cleared = timers.cleared;
             documentFocused = false;
             fireWindow('blur', {});
+            await settle();
+            /* Still reading: the poll was never disarmed, and the tick that
+               comes round while the reader is elsewhere is served. */
+            await refreshAgentDashboard();
             report({
                 open: dialogOpen(),
                 hidden: shell().attributes['aria-hidden'],
-                disarmed: timers.cleared > cleared
+                disarmed: timers.cleared > cleared,
+                fetches: calls.fetches
             });
             """
         )
-        self.assertFalse(result["open"])
-        self.assertEqual(result["hidden"], "true")
-        self.assertTrue(result["disarmed"])
+        self.assertTrue(result["open"])
+        self.assertEqual(result["hidden"], "false")
+        self.assertFalse(result["disarmed"])
+        self.assertEqual(result["fetches"], 2)
 
-    def test_a_window_put_behind_another_puts_it_away_too(self):
-        """`blur` and `visibilitychange` overlap almost always, and neither
-        says it everywhere: `blur` is another window taking the focus, and this
-        is a tab put behind another tab or a window minimized. Close is
-        idempotent, so the overlap costs nothing and the gap either one leaves
-        is covered."""
+    def test_a_window_nobody_can_see_keeps_it_and_stops_reading_for_it(self):
+        """The cost the old dismissal was really paying for. A minimized window
+        or a tab behind another tab can show the reader nothing, so composing
+        the whole tree every two seconds for it is waste — but it is the poll
+        that stands down, not the dialog, because the reader never said they
+        were done with it."""
         result = self._run_node(
             """
             fetchAnswer = snapshot();
             showDashboard();
             await settle();
+            const armed = timers.armed;
+            const cleared = timers.cleared;
             document.hidden = true;
             documentFocused = false;
             document.fire('visibilitychange');
             await settle();
-            report({ open: dialogOpen(), fetches: calls.fetches });
+            report({
+                open: dialogOpen(),
+                hidden: shell().attributes['aria-hidden'],
+                disarmed: timers.cleared > cleared,
+                /* Nothing put back in its place: the tick simply stops
+                   arriving until the window can be seen again. */
+                rearmed: timers.armed > armed,
+                fetches: calls.fetches
+            });
             """
         )
-        self.assertFalse(result["open"])
-        # And nothing is read on the way out.
+        self.assertTrue(result["open"])
+        self.assertEqual(result["hidden"], "false")
+        self.assertTrue(result["disarmed"])
+        self.assertFalse(result["rearmed"])
         self.assertEqual(result["fetches"], 1)
 
-    def test_leaving_never_pulls_focus_back_into_the_window_being_left(self):
+    def test_a_close_from_outside_never_pulls_focus_into_the_window_it_closed(self):
         """`activeElement` does not move when a window is deactivated, so a
-        departure looks exactly like an in-page dismissal unless `hasFocus()` is
-        asked. Putting the caret on a button in a window nobody is looking at is
-        meaningless at best, and in a host where `element.focus()` raises its
-        window it is that window yanking itself back in front of the one the
-        reader has just chosen."""
+        close arriving from elsewhere looks exactly like an in-page dismissal
+        unless `hasFocus()` is asked. Leaving the window is no longer such a
+        close, but the cross-window claim is: the reader raised the dialog over
+        *there*, and this one putting the caret on a button in a window nobody
+        is looking at is meaningless at best — in a host where `element.focus()`
+        raises its window it is this window yanking itself back in front of the
+        one the reader has just chosen."""
         result = self._run_node(
             """
             fetchAnswer = snapshot();
@@ -1753,8 +1811,9 @@ class DashboardDialogLifecycleTestCase(DashboardDialogTestCase):
             await settle();
 
             documentFocused = false;
-            fireWindow('blur', {});
-            const afterLeaving = opener.focused;
+            broadcastClaim(claimFrom('window-b'));
+            const closedFromOutside = !dialogOpen();
+            const afterClaim = opener.focused;
 
             /* The same close from a window that still has focus is an in-page
                dismissal and does hand it back. */
@@ -1762,16 +1821,17 @@ class DashboardDialogLifecycleTestCase(DashboardDialogTestCase):
             openAgentDashboardDialog();
             await settle();
             closeAgentDashboardDialog();
-            report({ afterLeaving, afterDismissing: opener.focused });
+            report({ closedFromOutside, afterClaim, afterDismissing: opener.focused });
             """
         )
-        self.assertFalse(result["afterLeaving"])
+        self.assertTrue(result["closedFromOutside"])
+        self.assertFalse(result["afterClaim"])
         self.assertTrue(result["afterDismissing"])
 
-    def test_coming_back_to_the_window_does_not_bring_it_back(self):
-        """It was dismissed, not suspended. Returning to a window that silently
-        restored a dialog would be the stale surface this rule exists to
-        remove, arriving a second time."""
+    def test_coming_back_into_view_re_arms_the_poll_and_reads_once(self):
+        """Suspended, not dismissed. The dialog is still the surface in front of
+        the reader when the window comes back, so it reads immediately rather
+        than sitting out a tick showing the tree from before it was put away."""
         result = self._run_node(
             """
             fetchAnswer = snapshot();
@@ -1779,36 +1839,47 @@ class DashboardDialogLifecycleTestCase(DashboardDialogTestCase):
             await settle();
             document.hidden = true;
             document.fire('visibilitychange');
+            await settle();
+            const away = { open: dialogOpen(), fetches: calls.fetches, armed: timers.armed };
             document.hidden = false;
             document.fire('visibilitychange');
-            fireWindow('focus', {});
             await settle();
-            report({ open: dialogOpen(), fetches: calls.fetches });
+            report({
+                away,
+                open: dialogOpen(),
+                fetches: calls.fetches,
+                rearmed: timers.armed > away.armed
+            });
             """
         )
-        self.assertFalse(result["open"])
-        # And a shut dialog reads nothing on the way back in either.
-        self.assertEqual(result["fetches"], 1)
+        self.assertTrue(result["away"]["open"])
+        self.assertEqual(result["away"]["fetches"], 1)
+        self.assertTrue(result["open"])
+        self.assertEqual(result["fetches"], 2)
+        self.assertTrue(result["rearmed"])
 
-    def test_the_other_windows_dim_while_it_is_up_and_only_while_it_is_up(self):
-        """The lease the standalone window published, kept for what it was
-        worth: a surface about the other windows is one the other windows step
-        back for. Releasing it on close is the load-bearing half -- left to
-        expire, every other window stays dim for another few seconds."""
+    def test_the_blur_stops_at_this_window_and_reaches_no_other(self):
+        """The scrim is the page's own `.modal-shell` and goes exactly as far as
+        the page does. A cross-window lease used to dim every *other* GridVibe
+        page while this dialog had focus; it was worth having while the dialog
+        put itself away the moment the reader left, and it is the wrong window
+        to dim now that they keep it up to work elsewhere. So nothing here
+        publishes a dim, and the only cross-window message an open sends is the
+        claim that keeps there being one dialog."""
         result = self._run_node(
             """
             fetchAnswer = snapshot();
-            const lease = [];
-            globalThis.markDashboardFocusActive = active => lease.push(active);
             showDashboard();
             await settle();
-            const whileUp = lease.slice();
             closeAgentDashboardDialog();
-            report({ whileUp, all: lease });
+            report({
+                messages: posted.map(entry => entry.name),
+                bodyClasses: [...(document.body?.classList?.names || [])]
+            });
             """
         )
-        self.assertEqual(result["whileUp"], [True])
-        self.assertEqual(result["all"], [True, False])
+        self.assertEqual(result["messages"], ["gridvibe.dashboardOpen"])
+        self.assertEqual(result["bodyClasses"], [])
 
 
 class DashboardDialogHereTestCase(DashboardDialogTestCase):
@@ -1892,13 +1963,16 @@ class DashboardDialogHereTestCase(DashboardDialogTestCase):
             await settle();
             clickRow('pane:s1');
             await settle();
-            report({ landed: calls.landed, opened: calls.openWorkspaceWindow });
+            report({ landed: calls.landed, opened: calls.openWorkspaceWindow, open: dialogOpen() });
             """
         )
         self.assertEqual(result["landed"], [])
         self.assertEqual(
             result["opened"], [{"workspaceId": "ws2", "options": {"groupId": "g7"}}]
         )
+        # And the list stays: the pane came up in the other window, so this
+        # dialog is in front of nothing the reader asked for.
+        self.assertTrue(result["open"])
 
     def test_a_page_that_is_no_workspace_opens_the_window_as_before(self):
         """The launcher carries the same dialog and is in no workspace at all,
@@ -2233,22 +2307,33 @@ class DashboardDialogRepaintTestCase(DashboardDialogTestCase):
         self.assertTrue(result["recovered"]["hidden"])
         self.assertEqual(result["recovered"]["rows"], 3)
 
-    def test_a_page_the_reader_left_arms_no_poll_and_none_on_the_way_back(self):
-        """This used to pin a suspend: hiding the page stood the poll down and
-        coming back re-armed it and read once. The dialog does not survive the
-        reader leaving any more, so there is nothing to re-arm -- and the poll
-        gate asks one thing rather than two, because open now implies visible
-        and focused."""
+    def test_a_page_the_reader_cannot_see_suspends_the_poll_and_resumes_it(self):
+        """The poll gate asks two things, not one: the dialog outlives the
+        reader going elsewhere, so *open* no longer implies *being looked at*.
+        Hidden stands the poll down and reads nothing on the way out; visible
+        again re-arms it and reads once, and the dialog was there the whole
+        time. Losing the focus alone does neither -- a window on another monitor
+        is exactly what this is for."""
         result = self._run_node(
             """
             fetchAnswer = snapshot();
             showDashboard();
             await settle();
             const up = { armed: timers.armed, fetches: calls.fetches };
-            document.hidden = true;
+
+            /* Unfocused but visible: nothing changes at all. */
             documentFocused = false;
-            document.fire('visibilitychange');
             fireWindow('blur', {});
+            await settle();
+            const unfocused = {
+                open: dialogOpen(),
+                armed: timers.armed,
+                cleared: timers.cleared,
+                fetches: calls.fetches
+            };
+
+            document.hidden = true;
+            document.fire('visibilitychange');
             await settle();
             const away = {
                 open: dialogOpen(),
@@ -2256,24 +2341,33 @@ class DashboardDialogRepaintTestCase(DashboardDialogTestCase):
                 cleared: timers.cleared,
                 fetches: calls.fetches
             };
+
             document.hidden = false;
             documentFocused = true;
             document.fire('visibilitychange');
-            fireWindow('focus', {});
             await settle();
-            report({ up, away, back: { open: dialogOpen(), armed: timers.armed, fetches: calls.fetches } });
+            report({
+                up,
+                unfocused,
+                away,
+                back: { open: dialogOpen(), armed: timers.armed, fetches: calls.fetches }
+            });
             """
         )
         self.assertEqual(result["up"], {"armed": 1, "fetches": 1})
-        # Away: shut, disarmed, and nothing read on the way out.
-        self.assertFalse(result["away"]["open"])
-        self.assertEqual(result["away"]["armed"], 1)
-        self.assertGreaterEqual(result["away"]["cleared"], 1)
-        self.assertEqual(result["away"]["fetches"], 1)
-        # Back: it was dismissed, not suspended, so nothing comes back and
-        # nothing is read for it.
+        # Unfocused: up, still armed, and nothing disarmed or read for it.
         self.assertEqual(
-            result["back"], {"open": False, "armed": 1, "fetches": 1}
+            result["unfocused"],
+            {"open": True, "armed": 1, "cleared": 0, "fetches": 1},
+        )
+        # Hidden: still up, disarmed, nothing read on the way out.
+        self.assertTrue(result["away"]["open"])
+        self.assertEqual(result["away"]["armed"], 1)
+        self.assertGreater(result["away"]["cleared"], result["unfocused"]["cleared"])
+        self.assertEqual(result["away"]["fetches"], 1)
+        # Back: re-armed and read once, on the dialog that never went away.
+        self.assertEqual(
+            result["back"], {"open": True, "armed": 2, "fetches": 2}
         )
 
 
