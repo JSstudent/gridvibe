@@ -64,10 +64,6 @@
     let _dashboardRequestId = 0;
     let _dashboardBadgeController = null;
     let _dashboardWired = false;
-    /* The cross-window dim's lease for this page, held here because this is
-       what starts it. `dashboard-dialog.js` turns it on and off through
-       `markDashboardFocusActive` below rather than reaching for the handle. */
-    let _dashboardFocusLease = null;
 
     function dashboardChordMatches(event) {
         if (!event || !event.altKey || event.ctrlKey || event.metaKey) return false;
@@ -88,14 +84,6 @@
         } catch (_error) {
             return false;
         }
-    }
-
-    /* While the dashboard is up, every *other* GridVibe window dims — the same
-       lease the standalone window published, still worth what it was worth: a
-       surface about the other windows is one the other windows step back for.
-       A page that never started a lease answers this harmlessly. */
-    function markDashboardFocusActive(active) {
-        _dashboardFocusLease?.setDashboardActive?.(Boolean(active));
     }
 
     /* The button, the chord and (on the workspace page) the session menu all
@@ -181,7 +169,6 @@
             return;
         }
         _dashboardWired = true;
-        _dashboardFocusLease = window.GridVibeDashboardFocus?.start() || null;
         /* The button and the surface it opens are one feature, so one call
            wires both and a page carrying neither wires nothing. */
         if (typeof wireAgentDashboard === 'function') {

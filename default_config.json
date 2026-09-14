@@ -23,6 +23,7 @@
   },
   "workspace": {
     "surface_mode": "normal",
+    "agent_sidebar_side": "left",
     "autosave_interval_minutes": 5,
     "multi_workspace_enabled": false,
     "minimize_cascade": false

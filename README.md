@@ -128,13 +128,15 @@ Closing a workspace asks first and offers **Cancel**, **Save and close**, or **C
 See **every session in every workspace**, agents first. Open the dashboard dialog with `Alt+A` or the dashboard button, or keep it beside your panes with the sidebar handle at the start of the session tab line.
 
 - **Keep the overview beside your work** — the docked sidebar stays open as you work or switch windows. Each workspace remembers whether it is open.
-- **Widen it when you need more room** — drag the sidebar's right edge from its default width up to twice that width. The chosen scale is saved with the workspace and adapts to the window size.
+- **Widen it when you need more room** — drag the sidebar's inner edge from its default width up to twice that width. The chosen scale is saved with the workspace and adapts to the window size.
+- **Put it on the side you want** — **App Settings ▸ Agent Dashboard Side** docks the sidebar left or right, and every open window moves as soon as you save. The handle, its marks and the rows are the same either way.
 - **Three levels** — a workspace is a titled band, a session tab is a card inside it drawn in that tab's own colour, and each agent is one row inside the card.
 - **Every agent on one line** — the sidebar shows a leading status dot, the agent's mark and its chat title. The dialog also draws the agent's name and `auto` when it was launched with auto-approval.
 - **The state is the dot's colour** — green working, amber idle, red unreachable. Point at a dot for the words: how long it has been idle, or what went wrong.
 - **The rest is one hover away** — pointing at a row gives the full chat title, where the pane is, and what it runs on (`SSH`, `WSL`, `PowerShell`, `cmd`).
 - **A badge that means something** — the button counts the agents **working right now**, not how many you have open. No badge means every agent is sitting at a prompt.
 - **Click anything to go there** — a row, its session, or its workspace opens or focuses that window at that tab.
+- **Keep the dialog up while you work elsewhere** — it stays open when you move to another window, so you can leave it on a second screen. It closes when you click beside it, reach a pane in its own workspace, or open it somewhere else.
 - **Close from either view** — a session card's **×** and a band's **Close workspace** both offer **Cancel**, **Save and close**, or the plain close; a failed save cancels the close. **Close window** in native mode keeps the sessions running; these actions leave the dashboard open.
 - **Sessions without agents are listed too**, sorted after the ones that have them, because this is also the fastest way to reach any tab in any window.
 - **Nothing is probed** — both readings come from the pane's own output, and nothing is ever typed into a running agent.
@@ -257,7 +259,7 @@ The one configurable chord in GridVibe is voice push-to-talk, set in App Setting
 
 ## Configuration
 
-Everything lives in **App Settings** — the same dialog from the gear on the launcher *or* a session window. It covers theme, surface mode, terminal font and size, max sessions, shell integration, autosave interval, SSH host-key policy, all voice options, and, in the native window, whether minimizing one GridVibe window minimizes them all. The one exception is **Multiple workspaces**, whose switch sits in the launcher's Workspaces card because it changes what every launch does.
+Everything lives in **App Settings** — the same dialog from the gear on the launcher *or* a session window. It covers theme, surface mode, which side the agent dashboard sidebar docks to, terminal font and size, max sessions, shell integration, autosave interval, SSH host-key policy, all voice options, and, in the native window, whether minimizing one GridVibe window minimizes them all. The one exception is **Multiple workspaces**, whose switch sits in the launcher's Workspaces card because it changes what every launch does.
 
 On disk, settings load from `config.json` (git-ignored) falling back to `default_config.json`:
 
@@ -266,7 +268,7 @@ On disk, settings load from `config.json` (git-ignored) falling back to `default
   "server": { "host": "127.0.0.1", "port": 5050 },
   "appearance": { "theme": "dark" },
   "terminal": { "max_sessions": 16, "font_size": 14, "shell_integration": true },
-  "workspace": { "surface_mode": "normal", "autosave_interval_minutes": 5, "multi_workspace_enabled": false, "minimize_cascade": false },
+  "workspace": { "surface_mode": "normal", "agent_sidebar_side": "left", "autosave_interval_minutes": 5, "multi_workspace_enabled": false, "minimize_cascade": false },
   "ssh": { "host_key_policy": "auto-add" },
   "explorer_search": { "max_files": 2000, "max_matches": 5000, "timeout_seconds": 20 }
 }

@@ -592,6 +592,9 @@ unless the task explicitly changes this contract.
   are invalid live input. Stored reads default absent or invalid chrome to
   `False` and `100`. Both fields follow the workspace presentation transaction,
   live snapshot, explicit save, autosave, lifecycle flush/capture and restore.
+  Which side the panel docks to is not among them: it is the global
+  `workspace.agent_sidebar_side` setting (see [Agent dashboard](#agent-dashboard)),
+  and the transaction refuses it as an unknown field.
 - Persist durable tabs/mode/Diff/navigation intent separately from revision-bound
   per-panel scroll/folds. Never persist fetched content, search query/results or
   dirty buffers. Viewer find is runtime state of tab + path, reapplied on render
@@ -828,11 +831,15 @@ unless the task explicitly changes this contract.
   and `EXPLORER_ESCAPE_CLAIM_SELECTOR` already claims Escape for it. Include
   the partial *before* the confirm dialogs on each page; at equal z-index the
   later element wins.
-- The dialog polls only while it is open. Opening arms the poll, reads once, publishes
-  the exclusivity claim below and moves focus to the surface rather than to a
-  control in it; closing disarms the poll, aborts what is in flight, and clears
-  the action notice while leaving the read notice describing the tree still on
-  screen.
+- The dialog polls only while it is open **and its document is visible**.
+  Opening arms the poll, reads once, publishes the exclusivity claim below and
+  moves focus to the surface rather than to a control in it; closing disarms the
+  poll, aborts what is in flight, and clears the action notice while leaving the
+  read notice describing the tree still on screen. The dialog outlives the
+  reader leaving the window, so open does not imply being looked at: hiding the
+  document disarms and aborts without dismissing, and becoming visible again
+  re-arms and reads once. Losing the focus is neither — an unfocused window on
+  another monitor keeps reading.
 - **There is one dialog across every window, and the claim that keeps it so is
   a notice, never a lock.** Nothing may refuse to open, or a window killed with
   its dialog up would leave the button dead everywhere else. An arriving claim
@@ -842,44 +849,75 @@ unless the task explicitly changes this contract.
   channel objects in the same document); `localStorage` is the fallback. A page
   restored from the back/forward cache has missed every claim made while it was
   frozen, so it claims again rather than reading.
-- Four dismissals, and leaving the window is one of them: the title-bar ×, the
-  backdrop *alone*, Escape, and `blur` plus `visibilitychange` together, since
-  neither of those covers every host and closing is idempotent. Escape is
-  answered only while this is the top visible `.modal-shell`, so a close prompt
-  raised over the dialog keeps its own key; nothing here calls `preventDefault`.
-  Focus returns to the opener only when the dialog still holds it **and** this
-  window still has focus.
+- Three dismissals, each said on the window the dialog is on: the title-bar ×,
+  the backdrop *alone*, and Escape. Escape is answered only while this is the
+  top visible `.modal-shell`, so a close prompt raised over the dialog keeps its
+  own key; nothing here calls `preventDefault`. Focus returns to the opener only
+  when the dialog still holds it **and** this window still has focus — the close
+  that arrives from outside is the exclusivity claim, and it must not pull a
+  deactivated window back in front of the one the reader chose.
+- **Leaving the window dismisses nothing.** `blur` closes nothing and a hidden
+  document suspends the poll instead; the dialog stays up on the window it was
+  raised from so it can be read on one screen while the reader works on
+  another. The exclusivity claim is therefore the mechanism rather than a
+  backstop: raising the dialog in another window is the only thing that puts
+  this one away without the reader touching it.
 - Both host pages carry the button, the dialog partial and the close-prompt
   partial, and `dashboard.js` wires all of it: it toggles the dialog through
   `toggleAgentDashboardDialog()`, binds `Alt+A` (matched on `event.code`, Ctrl
   excluded so AltGr cannot fire it, and gated by the page's own
   `minimizeAllShortcutBlocked`), and polls for the badge without overlapping
   requests. Badge and dialog reads have bounded deadlines, cancel on
-  hide/pagehide, refresh on focus, reject malformed payloads, and discard
-  answers superseded by a newer request.
+  hide/pagehide, reject malformed payloads, and discard answers superseded by a
+  newer request. Each reads once when its page comes back — the badge on
+  `focus`, the dialog on becoming visible.
 - The workspace also carries a docked dashboard: `dashboard-sidebar.js` over
   `partials/agent_dashboard_sidebar.html`, beside the grid in `.workspace-body`.
   Its handle heads the session tab line. It is workspace chrome, with no scrim,
-  Escape dismissal, focus lease or exclusivity claim, and stays open when the
-  reader leaves the window. It reads the same dashboard payload and uses the
-  dialog's field renderers and target resolver. The narrow row draws the dot,
-  agent mark and chat title; the agent name remains in the accessible text.
-  Polling runs every four seconds only while open and the document is visible.
+  no Escape dismissal and no exclusivity claim — several windows may show it at
+  once, and each remembers it per workspace. It reads the same dashboard payload
+  and uses the dialog's field renderers and target resolver. The narrow row
+  draws the dot, agent mark and chat title; the agent name remains in the
+  accessible text. Polling runs every four seconds only while open and the
+  document is visible.
   Unchanged markup is skipped; a rebuild preserves scroll and focus. Read
   failures retain the last good tree, and successful polls leave action notices
   intact.
+- **Which edge the sidebar docks to is the global `workspace.agent_sidebar_side`
+  setting, never a workspace's.** It follows `surface_mode`'s rules, not the
+  panel's own: `_normalize_agent_sidebar_side()` in `web/config.py` accepts
+  `left`/`right` and falls back to the captured generation's value, every
+  `/api/sessions` shape and `/api/app-config` report the *current* value so a
+  window that missed the broadcast reconciles on its next read, and a save
+  broadcasts it beside the surface mode. No workspace presentation transaction,
+  runtime-state slot or saved preset carries it — the presentation route refuses
+  the field — so `agent_sidebar_open` and `agent_sidebar_scale` restore
+  unchanged onto whichever edge the setting names. The page applies it as the
+  one body class `agent-sidebar-right`; the stylesheet orders the panel past the
+  grid (never `row-reverse`, which would also swap the empty state sharing that
+  row) and flips the frame border and the resizer's end. Markup, the single
+  toggle and its two marks, the open/shut state and the width are identical on
+  both sides.
 - Sidebar width is `calc(var(--agent-sidebar-width) *
   var(--agent-sidebar-scale, 1))`, with the base owned solely by the CSS clamp
   `clamp(240px, 15%, 400px)`. Dragging measures the rendered border-box width
   divided by its current scale, never restating the clamp in JavaScript. The
   edge button captures the pointer and listens for move/up/cancel on the window;
-  each move writes a scale clamped to 100..200. Release reports the changed
+  each move writes a scale clamped to 100..200. The drag captures its
+  direction from the side at the press, so the handle always widens away from
+  the grid; a side change under the pointer abandons the drag rather than
+  finishing it against the other edge. Release reports the changed
   integer percent and calls `onLayoutChanged` once; live pane ResizeObservers
   handle the drag without a second explicit refit on every move. Cancellation
   restores the starting width without reporting. `apply()` also refits when a
   restored width changes. The sidebar stylesheet owns the 22px session × and
   a separate row for workspace word buttons beneath the band heading; shared
   `agent-dashboard.css` rules and palette tokens remain the styling owners.
+- Acting closes the dialog only when the act lands on this page: a row for the
+  workspace this window already is takes the dialog with it, because a surface
+  over the pane it just reached is in the way. A row for any other workspace
+  leaves it up, and so does a refusal, which is reported on it. The close verbs
+  never close it.
 - A row lands on the pane it names, not merely on the window. The workspace the
   reader is already in is applied directly through `applyWorkspaceFocusTarget`,
   because raising an already-raised window fires no `focus` event; every other
@@ -915,15 +953,12 @@ unless the task explicitly changes this contract.
   report `?`. No working agent hides the badge rather than showing a zero: a
   badge that counts what is merely open is lit permanently and signals
   nothing, so its absence has to be a reading too.
-- `dashboard-focus.js` owns a same-origin, short-lived focus lease, and which
-  page owns it is no longer fixed for that page's life: every host can raise the
-  dialog, so `setDashboardActive()` moves ownership and the page holds the lease
-  only while its dialog is up. While it is, unfocused launcher/workspace
-  documents add the content-only blur class; focusing a host clears its own blur
-  immediately. Releasing **publishes** rather than letting the lease lapse, or
-  every other window keeps its dim for the rest of the lease. BroadcastChannel
-  is the fast path, localStorage is the fallback, and expiry remains the
-  backstop against a page that died holding it.
+- The dialog's blur is the host page's own `.modal-shell` scrim and reaches no
+  further than that page. No cross-window dim: the short focus lease that
+  blurred every *other* GridVibe document while the dialog was up is removed,
+  because a dialog the reader keeps up to work elsewhere must not dim the window
+  they are working in. Nothing in this feature may write a blur class onto
+  another page's `body`.
 - A row holding nothing draws a statement, never rows it does not have. A
   session card with no agent wears `is-quiet`, states its own pane count rather
   than "0 agents", and carries one muted line where its rows would be; a band

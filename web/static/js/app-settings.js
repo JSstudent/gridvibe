@@ -19,6 +19,7 @@
         }),
         workspace: Object.freeze({
             surface_mode: 'normal',
+            agent_sidebar_side: 'left',
             autosave_interval_minutes: 5,
             multi_workspace_enabled: false,
             minimize_cascade: false
@@ -170,6 +171,10 @@
 
         if (themeInput) themeInput.value = appearance.theme || DEFAULT_APP_SETTINGS.appearance.theme;
         if (surfaceModeInput) surfaceModeInput.value = workspace.surface_mode === 'max' ? 'max' : 'normal';
+        const agentSidebarSideInput = document.getElementById('appAgentSidebarSide');
+        if (agentSidebarSideInput) {
+            agentSidebarSideInput.value = workspace.agent_sidebar_side === 'right' ? 'right' : 'left';
+        }
         const autosaveIntervalInput = document.getElementById('appWorkspaceAutosaveInterval');
         if (autosaveIntervalInput) {
             const interval = Number(workspace.autosave_interval_minutes);
@@ -557,6 +562,8 @@
     function collectWorkspaceSettingsForm() {
         const workspace = {
             surface_mode: document.getElementById('appSurfaceMode')?.value === 'max' ? 'max' : 'normal',
+            agent_sidebar_side:
+                document.getElementById('appAgentSidebarSide')?.value === 'right' ? 'right' : 'left',
             autosave_interval_minutes: Math.min(15, Math.max(1,
                 Number(document.getElementById('appWorkspaceAutosaveInterval')?.value)
                     || DEFAULT_APP_SETTINGS.workspace.autosave_interval_minutes
@@ -624,6 +631,11 @@
             },
             workspace: {
                 surface_mode: appSettings?.workspace?.surface_mode === 'max' ? 'max' : 'normal',
+                /* The docked agent dashboard's edge, carried on the same
+                   contract as the surface mode: a workspace window applies it
+                   the moment this save lands, without waiting for a reload. */
+                agent_sidebar_side:
+                    appSettings?.workspace?.agent_sidebar_side === 'right' ? 'right' : 'left',
                 multi_workspace_enabled: Boolean(appSettings?.workspace?.multi_workspace_enabled)
             },
             terminal: {

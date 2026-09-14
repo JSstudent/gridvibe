@@ -145,6 +145,29 @@
         applySurfaceMode(mode === 'max', { refit });
     }
 
+    /* The docked agent dashboard's edge. A global setting and not the
+       workspace's, so it follows the surface mode's rules rather than the
+       panel's own: applied from the page's boot constant, from an App Settings
+       save (every delivery path) and from the current value every session read
+       reports, and never written into a workspace snapshot. Applying it is
+       idempotent, so the three paths overlapping costs nothing. */
+    function applyAgentSidebarSide(side) {
+        if (typeof applyAgentDashboardSidebarSide === 'function') {
+            applyAgentDashboardSidebarSide(side);
+        }
+    }
+
+    function applyConfiguredAgentSidebarSide(data) {
+        const side = data?.agent_sidebar_side;
+        if (side === 'left' || side === 'right') {
+            applyAgentSidebarSide(side);
+        }
+    }
+
+    function applyAppConfigAgentSidebarSide(message) {
+        applyConfiguredAgentSidebarSide(message?.workspace);
+    }
+
     function applyAppConfigSurfaceMode(message) {
         if (!message || typeof message !== 'object' || !message.workspace) {
             return;
@@ -175,6 +198,7 @@
         }
         applyAppConfigTheme(message);
         applyAppConfigSurfaceMode(message);
+        applyAppConfigAgentSidebarSide(message);
         applyAppConfigTerminalFont(message);
         applyAppConfigMultiWorkspace(message);
         /* Voice enable/engine and the push-to-talk keybind are saved from the
@@ -311,6 +335,7 @@
                 { surface_mode: data?.workspace?.surface_mode },
                 { refit: true }
             );
+            applyConfiguredAgentSidebarSide(data?.workspace);
         } catch (_error) {}
     }
 
@@ -7603,6 +7628,7 @@
             }
 
             applyConfiguredSurfaceMode(data, { refit: gridBuilt });
+            applyConfiguredAgentSidebarSide(data);
             const expectedLayoutClass = getLayoutClass(data.sessions.length, data.layout);
             const usingCurrentView = (
                 gridBuilt
@@ -8655,6 +8681,9 @@
     registerNativeLifecycleWindow();
     wireSessionMenu();
     wireDashboard();
+    applyAgentSidebarSide(
+        typeof AGENT_SIDEBAR_SIDE === 'string' ? AGENT_SIDEBAR_SIDE : 'left'
+    );
     wireAgentDashboardSidebar();
     topbarPeek.attach();
     applyTopbarVisibility(getStoredTopbarVisible());

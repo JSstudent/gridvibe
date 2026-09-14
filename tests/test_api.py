@@ -4737,6 +4737,10 @@ class ApiRoutesTestCase(unittest.TestCase):
                 },
                 "workspace": {
                     "surface_mode": "max",
+                    # Carried on the same contract as the surface mode, so an
+                    # open workspace window moves the docked dashboard the
+                    # moment this lands rather than on its next reload.
+                    "agent_sidebar_side": api.runtime_config.agent_sidebar_side,
                     "multi_workspace_enabled": False,
                 },
                 "terminal": {

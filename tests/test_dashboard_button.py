@@ -23,9 +23,12 @@ about it:
   lands after a newer one was asked for is dropped rather than painted.
 - **A hidden document costs nothing**: the poll is torn down rather than left
   running, and reads once on the way back.
-- **The cross-window dim is started here and driven from there.** This page
-  starts the lease; the dialog turns it on and off, through the one named
-  function rather than by reaching for the handle.
+- **Nothing here dims another window.** This page used to start a short
+  cross-window lease that blurred every *other* GridVibe page while the dialog
+  was up. That was worth having while the dialog closed the moment the reader
+  left; it is the wrong window to blur now that they keep it up to work
+  elsewhere, so the lease, its module and its stylesheet rule are gone and the
+  blur is the host page's own scrim.
 """
 
 import json
@@ -78,7 +81,7 @@ const document = {
 };
 
 const window = globalThis;
-const calls = { fetches: 0, opens: [], bridge: [], intervals: 0, cleared: 0, lease: [] };
+const calls = { fetches: 0, opens: [], bridge: [], intervals: 0, cleared: 0 };
 
 Object.assign(globalThis, {
     /* Real timers would keep the process alive, and the cadence itself is not
@@ -122,16 +125,6 @@ globalThis.toggleAgentDashboardDialog = () => {
     return dialogUp;
 };
 globalThis.wireAgentDashboard = () => { wiredDialog += 1; };
-
-/* The focus lease this page starts. `setDashboardActive` is the whole of what
-   dashboard-dialog.js asks of it. */
-globalThis.GridVibeDashboardFocus = {
-    started: 0,
-    start() {
-        this.started += 1;
-        return { setDashboardActive: active => calls.lease.push(active) };
-    }
-};
 
 /* Each page's own answer to "may a chord fire from here". Declared, because a
    page that has one is the normal case; a case that wants the other deletes
@@ -266,45 +259,37 @@ class DashboardButtonTestCase(unittest.TestCase):
         )
         self.assertFalse(result["raised"])
 
-    def test_wiring_the_button_wires_the_dialog_and_starts_the_dim_lease(self):
+    def test_wiring_the_button_wires_the_dialog_it_opens(self):
         """One feature, one call: a page carrying the button carries the
-        surface it opens, and the lease that dims the other windows while it is
-        up is started here because this is what starts once per page."""
+        surface it opens, however many times the page asks."""
         result = self._run_node(
             """
             fetchAnswer = snapshot(0);
             wireDashboard();
             wireDashboard();
             await settle();
-            markDashboardFocusActive(true);
-            markDashboardFocusActive(false);
-            report({
-                wiredDialog,
-                started: GridVibeDashboardFocus.started,
-                lease: calls.lease
-            });
+            report({ wiredDialog });
             """
         )
-        # Once, however many times the page asks.
         self.assertEqual(result["wiredDialog"], 1)
-        self.assertEqual(result["started"], 1)
-        self.assertEqual(result["lease"], [True, False])
 
-    def test_a_page_that_never_started_a_lease_answers_harmlessly(self):
-        """`GridVibeDashboardFocus` is a separate script tag, so "it is not
-        there" is a real state and must not be an exception thrown out of the
-        dialog's own open."""
-        result = self._run_node(
-            """
-            globalThis.GridVibeDashboardFocus = undefined;
-            fetchAnswer = snapshot(0);
-            wireDashboard();
-            await settle();
-            markDashboardFocusActive(true);
-            report({ ok: true });
-            """
-        )
-        self.assertTrue(result["ok"])
+    def test_no_page_dims_another_window_for_this_button(self):
+        """The lease that did it is gone, not merely unused: an orphan module
+        still on both pages is a dim waiting to be reintroduced. Pinned where a
+        reader would look for it -- the script the pages load, the class the
+        stylesheet painted, and the module that published it."""
+        for page in ("index.html", "terminals.html"):
+            markup = (REPO_ROOT / "templates" / page).read_text(encoding="utf-8")
+            self.assertNotIn("dashboard-focus.js", markup, page)
+        self.assertFalse((REPO_ROOT / "web" / "static" / "js" / "dashboard-focus.js").exists())
+        for source in (
+            REPO_ROOT / "web" / "static" / "css" / "dashboard.css",
+            DASHBOARD_JS,
+            REPO_ROOT / "web" / "static" / "js" / "dashboard-dialog.js",
+        ):
+            self.assertNotIn(
+                "dashboard-background-blurred", source.read_text(encoding="utf-8"), source.name
+            )
 
     def test_the_chord_raises_it_and_takes_the_key(self):
         result = self._run_node(

@@ -214,10 +214,12 @@
     </button>
 </div>
 
-<!-- Everything under the two bars, as one row: the docked agent dashboard on
-     the left and the grid (or the empty state that stands in for it) taking
-     what is left. The wrapper exists only so those two can sit side by side --
-     the bars above it are still stacked on the body. -->
+<!-- Everything under the two bars, as one row: the docked agent dashboard and
+     the grid (or the empty state that stands in for it) taking what is left.
+     The wrapper exists only so those two can sit side by side -- the bars above
+     it are still stacked on the body. Which edge the panel is on is the global
+     `workspace.agent_sidebar_side` setting, applied as one body class, so the
+     markup order here is the same on both sides. -->
 <div class="workspace-body" id="workspaceBody">
     {% include 'partials/agent_dashboard_sidebar.html' %}
 
@@ -351,6 +353,9 @@
 <script src="{{ url_for('static', filename='vendor/diff2html-ui-base.min.js') }}"></script>
 <script>
     const DEFAULT_SURFACE_MODE = {{ app_surface_mode|tojson }};
+    /* Which edge the docked agent dashboard sits on — a global App
+       Setting every window reads live, the way the surface mode is. */
+    const AGENT_SIDEBAR_SIDE = {{ app_agent_sidebar_side|tojson }};
     const MAX_SESSIONS = {{ max_sessions | tojson }};
     const CURRENT_WORKSPACE_ID = {{ workspace_id | tojson }};
     const CURRENT_WORKSPACE_LABEL = {{ workspace_label | tojson }};
@@ -411,7 +416,6 @@
 <script src="{{ url_for('static', filename='js/dashboard-dialog.js') }}?v={{ version }}"></script>
 <script src="{{ url_for('static', filename='js/dashboard-sidebar.js') }}?v={{ version }}"></script>
 <script src="{{ url_for('static', filename='js/dashboard.js') }}?v={{ version }}"></script>
-<script src="{{ url_for('static', filename='js/dashboard-focus.js') }}?v={{ version }}"></script>
 <script src="{{ url_for('static', filename='js/shortcuts-help.js') }}?v={{ version }}"></script>
 <script src="{{ url_for('static', filename='js/topbar-peek.js') }}?v={{ version }}"></script>
 <script src="{{ url_for('static', filename='js/terminal-modes.js') }}?v={{ version }}"></script>

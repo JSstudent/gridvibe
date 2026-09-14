@@ -118,6 +118,10 @@ while absent or invalid stored values default to 100 and `False`. Both ride
 the workspace presentation revision and every workspace save/restore path;
 they are not pane fields or reusable session-preset settings.
 
+Which *side* the panel docks to is not chrome and is listed under **Never
+Persisted** below: `workspace.agent_sidebar_side` is a global setting read live,
+exactly as `surface_mode` is.
+
 ### Fields That Are One Fact In Two
 
 Some state needs a second field to be readable at all. The rule for every such
@@ -310,9 +314,10 @@ server state.**
 Passwords in `runtime_state.json` · fetched explorer data, file contents, dirty
 buffers · explorer Search queries and results · the Source and Git find queries
 (in-memory; the Source one belongs to the tab and the path it was typed
-against) · voice state of any kind · `surface_mode` (chrome density is a live
-global setting, so a restore must never replay the value a group launched with)
-· anything only meaningful to one page load.
+against) · voice state of any kind · `surface_mode` and `agent_sidebar_side` (chrome
+density and the docked dashboard's edge are live global settings, so a restore
+must never replay the value a group or window was saved with) · anything only
+meaningful to one page load.
 
 ---
 
