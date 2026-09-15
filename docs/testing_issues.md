@@ -1,7 +1,65 @@
 # GridVibe Testing Issues
-Last updated: 2026-09-14
+Last updated: 2026-09-15
 
 ## Open Issues
+
+### Issue ID: ISSUE-2026-054
+- Title: Closing a split pane types xterm's query answers into the surviving agent's prompt
+- Priority: High
+- Status: Open
+- Area: `web/api.py`, `web/static/js/terminals.js`
+- Assignee: Unassigned
+- Tags: `terminal`, `agent`, `socketio`, `replay`, `tests`
+- Reported: 2026-09-15
+
+Description:
+Splitting a pane that is running a Codex agent works. Closing the pane that split off does not: the surviving Codex pane's composer fills with escape-sequence text the reader never typed, appended to whatever they had already written, and the line has to be cleared by hand before it can be sent. `docs/images/kvake.png` shows it — a half-typed `ive cloned the diagra` followed by `[?2026;0$y[?12;1$y]4;0;rgb:2e2e/3434/3636\` and fifteen more `]4;n;rgb:…` runs, one per palette index.
+
+Those strings are not program output. They are xterm's own **answers**: `CSI ? 2026 ; 0 $ y` and `CSI ? 12 ; 1 $ y` are DECRPM replies to a DECRQM query, and `OSC 4 ; n ; rgb:…` are palette reports answering `OSC 4 ; n ; ?`. xterm.js emits every one of them through `triggerDataEvent`, the same callback a keystroke takes, so `term.onData` → `forwardTerminalInput()` → `terminal_input` (`web/static/js/terminals.js:5876`, `:5860-5869`) delivers them to Codex's stdin. Codex is sitting at its prompt rather than in a query-reading state, so it takes them for typed text.
+
+What makes xterm answer at all is the rolling replay buffer being fed back through a freshly built terminal, carrying the queries the TUI wrote when it first probed the terminal.
+
+Steps to reproduce:
+1. Launch a workspace with a local pane running the `codex` agent and let it reach its prompt.
+2. Split that pane (either axis). The split is clean — the agent keeps drawing and nothing is typed at it.
+3. Type a few characters into the Codex composer without sending them.
+4. Close the pane that split off with its `×` button.
+5. The Codex pane reloads and the composer now reads what was typed followed by `[?2026;0$y[?12;1$y]4;0;rgb:…` through `]4;15;rgb:…`.
+
+Expected behavior:
+Re-joining a session and replaying its buffer paints the pane and sends the shell behind it nothing. Closing one pane never puts characters into another pane's prompt.
+
+Actual behavior / logs:
+Two halves, both confirmed by inspection.
+
+**The trigger — closing one pane leaves and re-joins every other pane.** `closeTerminalPane()` ends a non-last close with `await initialLoad()` (`web/static/js/terminals.js:6872`). The session count has changed, so `usingCurrentView` is false (`:7634-7640`) and no cached view matches, so `buildGrid()` runs; it opens with `teardownCurrentGrid()` (`:5298-5300`), which emits `leave_session` for every surviving pane (`:5133-5138`), and `initialLoad()` then emits `join_session` for each session in the rebuilt group (`:7747-7753`). Splitting takes no such path: `splitTerminalPane()` inserts the new pane in place and joins only the new session (`:6955-6957`), which is exactly why the split itself is clean and the close is not.
+
+**The defect — the replay scrubber does not cover the two sequence families involved.** `handle_join_session()` replays the rolling buffer to any socket not already in the room, stripping known query traffic first (`web/api.py:3441-3447`). `_TERMINAL_QUERY_RE` (`web/api.py:3393-3400`) covers Device Attributes, `CSI 5n`/`CSI 6n`, and the `OSC 10/11/12` colour queries — and nothing else. Checked against what the vendored build actually answers (every `triggerDataEvent` call site in `web/static/vendor/xterm.min.js`), these query forms survive the scrub and are answered on replay:
+
+- `OSC 4 ; n ; ? BEL|ST` — the palette query. xterm answers `OSC <i> ; rgb:…` from one shared branch, so the same build already trusted to answer `OSC 10/11/12` answers `OSC 4` too. This is the `]4;n;rgb:…` flood in the screenshot.
+- `CSI ? Pd $ p` / `CSI Pd $ p` — DECRQM. xterm answers `CSI [?]Pd ; Pv $ y`. This is `[?2026;0$y` and `[?12;1$y`.
+- `CSI ? 6 n` — DECXCPR. The existing branch is `\x1b\[[56]n`, which the `?` defeats; xterm answers `CSI ? r ; c R`.
+- `CSI 14 t` / `CSI 16 t` / `CSI 18 t` — xterm answers `CSI 4;h;w t`, `CSI 6;h;w t`, `CSI 8;rows;cols t`.
+- `DCS $ q … ST` (DECRQSS) and `DCS + q … ST` (XTGETTCAP) — xterm answers `ESC … ESC \`.
+
+The screenshot shows the first two because those are what Codex probes; the rest are the same defect waiting for a different TUI.
+
+Why it is intermittent: the rolling buffer is bounded at 50 000 characters (`web/terminal_io.py:90`), so a query only comes back if it is still inside that window when the rejoin happens. **Hypothesis, and the only part of this report not confirmed by inspection:** the split resizes the source pane, Codex re-probes on the resize, and that puts a fresh copy of the queries near the tail of the buffer moments before the close replays it. That would explain why split-then-close reproduces it while a **Reset view** on a long-idle Codex pane may not. Worth confirming from a capture of the pane's own output before touching anything.
+
+This is not split-specific. The same replay reaches the same panes from two other paths: **Reset view** leaves and rejoins deliberately (`refreshTerminalDisplay()` → `GridVibeTerminalModes.rejoinAndResetAfterReplay()`, `web/static/js/terminals.js:4917`), and a session-tab switch whose cached view no longer matches rebuilds the grid the same way.
+
+### Proposed solution:
+Widen `_TERMINAL_QUERY_RE` in `web/api.py` to cover the five families above, keeping it a single pre-compiled alternation applied once to the joined replay string. The buffer is joined before the substitution (`web/api.py:3441`), so a query straddling two cached chunks is already matched; no chunk-level work is needed.
+
+One precision decides the shape of the `OSC 4` branch: only the **query** form may be stripped. `OSC 4 ; n ; <colour> ST` carrying a real colour is how an application *sets* a palette entry, and it is indistinguishable in shape from the reply, so a branch written to catch replies would silently change how a themed TUI renders after a rejoin. Anchor the new branch on the literal `?` payload. DECRQM, DECXCPR, the three `t` reports and the two DCS queries carry no such ambiguity — their reply forms are never written by an application — but stripping the query alone is still sufficient there and is the smaller change, so do that uniformly.
+
+Then correct the contract: `docs/engineering_contracts.md:153` still opens "Replay buffers stay verbatim", which `_TERMINAL_QUERY_RE` already contradicts. Replace that sentence with the rule the code is actually keeping — the live stream stays verbatim so a live query gets its live answer, and the replay drops query sequences, because an answer to a replayed query has nobody waiting for it and lands on whatever now owns the shell's stdin.
+
+Narrowing the trigger is a separate, larger change and is deliberately **not** part of this fix: `closeTerminalPane()` rebuilding the whole grid to drop one pane is also what re-joins the survivors, but the two other rejoin paths above exist regardless, so the scrubber is the correct owner.
+
+Edge cases: the live path must stay untouched — `_cache_terminal_output()` keeps raw bytes and only the joined-once replay is filtered, which the current code already gets right, and a second client joining while a pane has a genuine query in flight must still see that query answered live. **Clear** purges the server buffer, so it removes the exposure rather than interacting with it. A session already in `client_joined_sessions` replays nothing (`web/api.py:3432`), so the fix changes nothing for a pane that is merely re-rendered without a leave.
+
+Tests: extend `tests/test_api.py:14715` (`test_join_session_replays_sanitized_buffered_output_to_new_client`), which already asserts the DA and `OSC 10/11` queries are stripped, with the `OSC 4` query, both DECRQM forms, `CSI ?6n`, the three `t` reports and the two DCS queries — and, in the same suite, one case asserting an `OSC 4 ; 1 ; rgb:…` **set** survives the scrub unmodified. On the client side, a case over the close path asserting a non-last close leaves and re-joins each surviving session pins the trigger, so a later change to `closeTerminalPane()` cannot quietly remove the exposure this fix is written against.
 
 ### Issue ID: ISSUE-2026-053
 - Title: Relaunched terminal pane keeps a permanent "Connecting…" overlay
