@@ -27,7 +27,12 @@ from gridvibe_mcp.windows import open_window as open_window_for
 
 #: "wsl" is GridVibe's historical spelling of a *local* launch, as opposed to
 #: "ssh". It does not mean the pane runs under WSL -- that is `use_wsl`, chosen
-#: per pane.
+#: per pane. A pane's own ``mode`` field uses the same two spellings, which is
+#: how ``whoami`` below tells a remote pane from a local one.
+#:
+#: Only ever the *fallback* now. A launch from inside a pane names that pane
+#: instead, and GridVibe resolves the connection from it -- an agent on an SSH
+#: pane has no credential to state and must not be guessed local.
 LOCAL_CONNECTION_MODE = "wsl"
 
 READ_TOOLS = (
@@ -126,9 +131,10 @@ def tool_specs() -> List[Dict[str, Any]]:
             "name": "whoami",
             "description": (
                 "Which GridVibe pane this agent is running in: its session, "
-                "group and workspace ids, its directory, and how deep in "
-                "agent-launched panes it is. Call this before resolving "
-                "'this directory' or 'this workspace'."
+                "group and workspace ids, its directory, which machine that "
+                "directory is on, and how deep in agent-launched panes it is. "
+                "Call this before resolving 'this directory' or 'this "
+                "workspace'."
             ),
             "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
         },
@@ -152,7 +158,11 @@ def tool_specs() -> List[Dict[str, Any]]:
             "description": (
                 "Launch one session group of panes, into a new workspace or an "
                 "existing one. Each pane is an agent, a plain terminal, a file "
-                "explorer or a browser preview."
+                "explorer or a browser preview. The panes open on the same "
+                "machine as this agent -- for a pane connected over SSH that "
+                "is the remote host, not the machine GridVibe runs on, and a "
+                "browser pane is refused there because GridVibe draws it "
+                "locally."
             ),
             "inputSchema": {
                 "type": "object",
@@ -172,7 +182,10 @@ def tool_specs() -> List[Dict[str, Any]]:
                                 "title": {"type": "string"},
                                 "directory": {
                                     "type": "string",
-                                    "description": "Absolute path. Use whoami's directory for 'this directory'.",
+                                    "description": (
+                                        "Absolute path on the machine this agent's pane runs "
+                                        "on. Use whoami's directory for 'this directory'."
+                                    ),
                                 },
                                 "agent": {
                                     "type": "string",
@@ -347,6 +360,12 @@ def build_launch_request(
             build_pane_request(pane, agent_depth=identity.child_depth) for pane in panes
         ],
     }
+    if identity.session_id:
+        # Where, not what. GridVibe reads the connection off this pane in its
+        # own process -- an agent is never shown its pane's credential, and an
+        # agent on an SSH pane that fell back to `connection_mode` above got
+        # panes opened on GridVibe's machine holding the remote host's paths.
+        body["origin_session_id"] = identity.session_id
     if new_workspace:
         body["new_workspace"] = True
         if workspace_label:
@@ -442,6 +461,22 @@ def _run(
             payload["directory"] = (
                 pane.get("current_directory") or pane.get("directory") or ""
             )
+            # Which machine every path in this conversation is a path on. An
+            # agent that read `directory` without it handed a remote path to
+            # panes opened on GridVibe's own machine, where the shells could
+            # not cd into a directory that does not exist. Stated only when the
+            # pane was actually read: a failed read knows nothing, and guessing
+            # "local" here is the guess that caused the defect.
+            if pane:
+                payload["host"] = str(pane.get("host") or "")
+                remote = str(pane.get("mode") or "") != LOCAL_CONNECTION_MODE
+                payload["runs_on"] = "remote_host" if remote else "gridvibe_host"
+                if remote:
+                    payload["note"] = (
+                        f"This pane's shell runs on {payload['host']} over SSH. "
+                        "Its directory is a path on that host, and panes "
+                        "launched from here open on that host too."
+                    )
         else:
             payload["directory"] = ""
             payload["note"] = (

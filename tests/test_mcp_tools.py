@@ -251,6 +251,26 @@ class LaunchRequestTestCase(unittest.TestCase):
             [(False, False), (False, True)],
         )
 
+    def test_a_launch_from_inside_a_pane_names_the_pane_it_came_from(self):
+        """Where, not what -- GridVibe reads the connection, the agent cannot."""
+        _result, opener = self.launch({"panes": [{"kind": "terminal"}]})
+
+        body = json.loads(opener.requests[0].data.decode("utf-8"))
+        self.assertEqual(body["origin_session_id"], "pane-1")
+        # And nothing resembling a credential travelled with it: an agent is
+        # never shown its own pane's password, so it cannot state one.
+        self.assertNotIn("password", json.dumps(body))
+
+    def test_an_agent_with_no_pane_names_no_origin_and_falls_back_to_local(self):
+        _result, opener = self.launch(
+            {"workspace_id": "ws-9", "panes": [{"kind": "terminal"}]},
+            environ={"GRIDVIBE_URL": "http://127.0.0.1:5050"},
+        )
+
+        body = json.loads(opener.requests[0].data.decode("utf-8"))
+        self.assertNotIn("origin_session_id", body)
+        self.assertEqual(body["connection_mode"], "wsl")
+
     def test_an_agent_at_the_limit_is_refused_with_the_depth_in_the_message(self):
         opener = StubOpener()
         result = dispatch(
@@ -305,6 +325,58 @@ class WhoamiTestCase(unittest.TestCase):
         self.assertEqual(result["directory"], "C:/project/src")
         self.assertTrue(result["may_launch_panes"])
         self.assertNotIn("password", json.dumps(result))
+
+    def test_whoami_says_which_machine_that_directory_is_on(self):
+        """The reading an agent on an SSH pane used to have to guess at."""
+        opener = StubOpener([{
+            "session_id": "pane-1",
+            "host": "saso-workstation",
+            "mode": "ssh",
+            "current_directory": "/home/ubuntu/4g_core_workspace",
+        }])
+
+        result = dispatch(
+            "whoami",
+            {},
+            client=client_for(opener),
+            identity=read_identity(INSIDE_PANE),
+        )
+
+        self.assertEqual(result["directory"], "/home/ubuntu/4g_core_workspace")
+        self.assertEqual(result["host"], "saso-workstation")
+        self.assertEqual(result["runs_on"], "remote_host")
+        self.assertIn("saso-workstation", result["note"])
+
+    def test_a_pane_on_this_machine_says_so_and_adds_no_note(self):
+        opener = StubOpener([{
+            "session_id": "pane-1",
+            "host": "PowerShell",
+            "mode": "wsl",
+            "current_directory": "C:/project",
+        }])
+
+        result = dispatch(
+            "whoami",
+            {},
+            client=client_for(opener),
+            identity=read_identity(INSIDE_PANE),
+        )
+
+        self.assertEqual(result["runs_on"], "gridvibe_host")
+        self.assertNotIn("note", result)
+
+    def test_a_pane_that_could_not_be_read_states_no_machine_at_all(self):
+        """A failed read knows nothing, and guessing local is the old defect."""
+        result = dispatch(
+            "whoami",
+            {},
+            client=client_for(StubOpener(raises=http_error(404, {"error": "gone"}))),
+            identity=read_identity(INSIDE_PANE),
+        )
+
+        self.assertIsNone(result["pane"])
+        self.assertNotIn("runs_on", result)
+        self.assertNotIn("host", result)
 
     def test_an_agent_outside_gridvibe_gets_a_note_rather_than_a_pane(self):
         opener = StubOpener()

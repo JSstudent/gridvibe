@@ -35,6 +35,8 @@ import uuid
 from contextlib import nullcontext
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
+from web.mcp_launch import LOCAL_PANE_MODE
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_WORKSPACE_ID = "default"
@@ -546,6 +548,7 @@ def _redacted_launch_summary(data: Dict[str, Any]) -> Dict[str, Any]:
         "workspace_id": str(data.get("workspace_id") or ""),
         "new_workspace": bool(data.get("new_workspace")),
         "restore": bool(data.get("restore")),
+        "origin_session_id": str(data.get("origin_session_id") or ""),
         "startup_modes": [
             str(
                 (config or {}).get("startup_mode")
@@ -577,6 +580,79 @@ def capacity_refusal(required_panes: int, current_cap: int) -> str:
         f"max_sessions limit is {current_cap}. Raise max_sessions to "
         f"{required_panes} in App Settings, then retry."
     )
+
+
+def resolve_origin_connection(origin_session_id: Any) -> Tuple[str, Dict[str, Any]]:
+    """The connection a group launched from *inside* a pane has to open.
+
+    An agent asking GridVibe for panes "here" means the machine it is itself
+    standing on, and for an SSH pane that is the remote host rather than this
+    one. The caller cannot decide it: an agent is never shown its own pane's
+    credential, so the launch body names the pane it came from and the
+    connection is read off that pane's live session, in this process. Nothing
+    of it reaches a response body, a preset, or a snapshot.
+
+    Returns ``(connection_mode, pane_fields)``. Both are empty when the origin
+    pane's shell is on this machine or when no origin was named, which is
+    exactly what a launch from the launcher already does.
+    """
+    requested = str(origin_session_id or "").strip()
+    if not requested:
+        return "", {}
+
+    session = _manager().get_session(requested)
+    if session is None:
+        # Deliberately a refusal rather than a fallback. With no pane to read,
+        # "here" would quietly mean this machine, and every path the caller
+        # quoted would be a path on a host GridVibe never connected to — which
+        # is the pane that opens on `/home/...` and cannot cd into it.
+        raise ValueError(
+            "The pane this launch was requested from is no longer open, so "
+            "GridVibe cannot tell which machine to open these panes on."
+        )
+    if str(getattr(session, "mode", "") or "") == LOCAL_PANE_MODE:
+        return "", {}
+
+    return "ssh", {
+        "host": session.host,
+        "username": session.username,
+        "port": session.port,
+        "password": session.password,
+        # The local shell family travels no further than the machine it names.
+        # A caller that stated one — the sidecar defaults every pane to
+        # PowerShell — would otherwise have it recorded on a remote pane and
+        # saved into the preset, describing a shell that host never runs.
+        "use_powershell": False,
+        "use_wsl": False,
+        "distribution": "",
+    }
+
+
+def _refuse_panes_that_cannot_leave_this_machine(
+    sessions_config: List[Dict[str, Any]],
+    host: str,
+) -> None:
+    """Refuse a browser pane in a group that is about to open on another host.
+
+    A browser pane is a surface GridVibe draws, so it exists only in a local
+    group: ``_normalize_startup_mode`` turns it into a plain terminal in an SSH
+    one. That silent downgrade is right for a restore replaying a shape the
+    user already had, and wrong for a caller that asked for a browser and would
+    be handed a shell without being told.
+    """
+    for index, config in enumerate(sessions_config):
+        if not isinstance(config, dict):
+            continue
+        requested = str(
+            config.get("startup_mode") or config.get("initial_command_mode") or ""
+        ).strip().lower()
+        if requested != "browser":
+            continue
+        title = str(config.get("title") or "").strip() or f"Terminal {index + 1}"
+        raise ValueError(
+            f"{title}: a browser pane belongs to a session group on this "
+            f"machine, and this group opens on {host}."
+        )
 
 
 def _prepare_launch_sessions(
@@ -738,7 +814,26 @@ def launch_session_group(
                 "error": capacity_refusal(len(sessions_config), max_sessions)
             }, 400
 
-        connection_mode = _normalize_connection_mode(data.get("connection_mode"))
+        # Where before what: a launch made from inside a pane opens on that
+        # pane's own machine, and the body names the pane rather than carrying
+        # a credential. A stated `connection_mode` is the fallback for a caller
+        # that is not in a pane at all — the launcher, and restore.
+        origin_mode, origin_connection = resolve_origin_connection(
+            data.get("origin_session_id")
+        )
+        connection_mode = origin_mode or _normalize_connection_mode(
+            data.get("connection_mode")
+        )
+        if origin_connection:
+            _refuse_panes_that_cannot_leave_this_machine(
+                sessions_config, str(origin_connection.get("host") or "")
+            )
+            # Applied before anything reads a pane, so the agent preflight and
+            # the transport both see the host the group is actually opening on.
+            sessions_config = [
+                {**config, **origin_connection} if isinstance(config, dict) else config
+                for config in sessions_config
+            ]
         layout = _normalize_layout(data.get("layout"), len(sessions_config))
         workspace_layout = _normalize_workspace_layout(
             data.get("workspace_layout"), len(sessions_config)

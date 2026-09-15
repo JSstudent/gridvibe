@@ -482,5 +482,232 @@ class RemoteLaunchLineTestCase(unittest.TestCase):
         )
 
 
+class AgentLaunchDestinationTestCase(unittest.TestCase):
+    """Which machine a pane an agent asked for actually opens on.
+
+    The sidecar's launch body used to state a *local* group unconditionally, so
+    an agent on an SSH pane got panes opened on GridVibe's own machine holding
+    the remote host's paths: a PowerShell pane that could not cd into
+    ``/home/ubuntu/...``, and a local-repository explorer rooted at a directory
+    that exists only on the other end of the SSH connection.
+
+    The body now names the pane it came from, and GridVibe reads the connection
+    off that pane's live session in this process. An agent is never shown its
+    own pane's credential, so this is the only place the answer can come from.
+    """
+
+    def setUp(self):
+        from web import api
+
+        api.app.config["TESTING"] = True
+        self.client = api.app.test_client()
+        self.api = api
+        api.session_manager.reset_sessions()
+        self.addCleanup(api.session_manager.reset_sessions)
+
+    def _origin(self, **overrides):
+        """One live pane for the launch to be made from."""
+        fields = {
+            "host": "saso-workstation",
+            "username": "ubuntu",
+            "port": 2222,
+            "password": "hunter2",
+            "mode": "ssh",
+            "directory": "/home/ubuntu/4g_core_workspace/test-simulator-4g",
+        }
+        fields.update(overrides)
+        group = self.api.session_manager.create_group(
+            name="origin",
+            connection_mode="ssh" if fields["mode"] == "ssh" else "wsl",
+            layout="single",
+            terminal_count=1,
+        )
+        return self.api.session_manager.create_session(group_id=group.group_id, **fields)
+
+    def _launch(self, body):
+        """POST the body the sidecar builds, with nothing actually connecting."""
+        with patch.object(self.api.socketio, "start_background_task"), patch.object(
+            web_agents, "_agent_preflight_payload", return_value={"status": "present"}
+        ):
+            response = self.client.post("/api/sessions", json=body)
+        return response.status_code, response.get_json()
+
+    def _sidecar_body(self, origin_session_id, panes, **overrides):
+        body = {
+            # The sidecar's fallback, which a launch from inside a pane must
+            # not be decided by.
+            "connection_mode": "wsl",
+            "origin_session_id": origin_session_id,
+            "new_workspace": True,
+            "workspace_label": "test",
+            "session_name": "test",
+            "layout": "split",
+            "sessions": panes,
+        }
+        body.update(overrides)
+        return body
+
+    def _agent_pane(self, directory, title="Claude 1"):
+        return {
+            "title": title,
+            "directory": directory,
+            "startup_mode": "agent",
+            "initial_command_mode": "agent",
+            "initial_command": "claude",
+            "agent_selection": "claude",
+            "agent_mcp": True,
+            "agent_depth": 1,
+            # What the sidecar stamps on every pane it cannot ask about: a
+            # local shell family, chosen by a default rather than by anybody.
+            "use_powershell": True,
+            "use_wsl": False,
+        }
+
+    def test_panes_open_on_the_machine_the_agent_is_already_on(self):
+        origin = self._origin()
+        directory = "/home/ubuntu/4g_core_workspace/test-simulator-4g"
+
+        status, body = self._launch(
+            self._sidecar_body(
+                origin.session_id,
+                [
+                    self._agent_pane(directory),
+                    self._agent_pane(directory, title="Claude 2"),
+                    {
+                        "title": "Explorer",
+                        "directory": directory,
+                        "startup_mode": "explorer",
+                        "initial_command_mode": "explorer",
+                        "initial_command": "",
+                        "explorer_root_directory": directory,
+                        "explorer_root_configured": True,
+                    },
+                ],
+            )
+        )
+
+        self.assertEqual(status, 201)
+        # An SSH group, though the body asked for a local one.
+        self.assertEqual(body["connection_mode"], "ssh")
+        panes = [
+            self.api.session_manager.get_session(pane["session_id"])
+            for pane in body["sessions"]
+        ]
+        self.assertEqual([pane.mode for pane in panes], ["ssh"] * 3)
+        self.assertEqual([pane.host for pane in panes], ["saso-workstation"] * 3)
+        self.assertEqual([pane.username for pane in panes], ["ubuntu"] * 3)
+        self.assertEqual([pane.port for pane in panes], [2222] * 3)
+        # The remote path is now a path on the machine that has it.
+        self.assertEqual([pane.directory for pane in panes], [directory] * 3)
+        self.assertEqual(panes[2].explorer_root_directory, directory)
+        # And no pane carries a local shell family onto a host that has none.
+        self.assertFalse(any(pane.use_powershell or pane.use_wsl for pane in panes))
+        # The two agents keep the tools they were asked for: a remote pane
+        # reaches GridVibe through its own reverse tunnel, not a sidecar.
+        self.assertTrue(panes[0].agent_mcp and panes[1].agent_mcp)
+        # Stamped one level deeper, so the depth budget still compounds.
+        self.assertEqual([panes[0].agent_depth, panes[1].agent_depth], [1, 1])
+
+    def test_the_credential_is_read_here_and_never_travels_through_the_agent(self):
+        origin = self._origin()
+
+        status, body = self._launch(
+            self._sidecar_body(origin.session_id, [self._agent_pane("/srv/app")])
+        )
+
+        self.assertEqual(status, 201)
+        # The launched pane can authenticate...
+        pane = self.api.session_manager.get_session(body["sessions"][0]["session_id"])
+        self.assertEqual(pane.password, "hunter2")
+        # ...and it got there without appearing in what the agent sent, or in
+        # what it is answered with.
+        self.assertNotIn("hunter2", json.dumps(body))
+
+    def test_a_pane_on_this_machine_still_launches_here(self):
+        origin = self._origin(
+            mode="wsl",
+            host="PowerShell",
+            username="",
+            password=None,
+            directory="C:/project",
+        )
+
+        status, body = self._launch(
+            self._sidecar_body(origin.session_id, [self._agent_pane("C:/project")])
+        )
+
+        self.assertEqual(status, 201)
+        self.assertEqual(body["connection_mode"], "wsl")
+        pane = self.api.session_manager.get_session(body["sessions"][0]["session_id"])
+        self.assertEqual(pane.mode, "wsl")
+        # The pane family the caller chose is still the caller's to choose.
+        self.assertTrue(pane.use_powershell)
+        self.assertIsNone(pane.password)
+
+    def test_a_launch_from_no_pane_at_all_is_the_launcher_unchanged(self):
+        status, body = self._launch(
+            {
+                "connection_mode": "wsl",
+                "new_workspace": True,
+                "workspace_label": "from-the-launcher",
+                "layout": "single",
+                "sessions": [self._agent_pane("C:/project")],
+            }
+        )
+
+        self.assertEqual(status, 201)
+        self.assertEqual(body["connection_mode"], "wsl")
+
+    def test_an_origin_pane_that_has_closed_is_refused_rather_than_opened_here(self):
+        """Falling back to local is the one wrong answer: it invents a machine."""
+        status, body = self._launch(
+            self._sidecar_body("pane-that-closed", [self._agent_pane("/srv/app")])
+        )
+
+        self.assertEqual(status, 400)
+        self.assertIn("no longer open", body["error"])
+        self.assertEqual(self.api.session_manager.get_all_sessions(), [])
+
+    def test_a_browser_pane_cannot_follow_an_agent_onto_a_remote_host(self):
+        """GridVibe draws a browser pane, so it exists only in a local group."""
+        origin = self._origin()
+
+        status, body = self._launch(
+            self._sidecar_body(
+                origin.session_id,
+                [
+                    {
+                        "title": "Preview",
+                        "startup_mode": "browser",
+                        "initial_command_mode": "browser",
+                        "initial_command": "http://example.test",
+                    },
+                ],
+            )
+        )
+
+        self.assertEqual(status, 400)
+        self.assertIn("browser pane", body["error"])
+        self.assertIn("saso-workstation", body["error"])
+        # Refused before anything was built, rather than downgraded to a shell.
+        self.assertEqual(
+            [
+                session.session_id
+                for session in self.api.session_manager.get_all_sessions()
+            ],
+            [origin.session_id],
+        )
+
+    def test_the_origin_is_a_launch_time_fact_and_is_never_stored_on_a_pane(self):
+        origin = self._origin()
+
+        _status, body = self._launch(
+            self._sidecar_body(origin.session_id, [self._agent_pane("/srv/app")])
+        )
+
+        pane = self.api.session_manager.get_session(body["sessions"][0]["session_id"])
+        self.assertNotIn("origin_session_id", pane.to_dict())
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -156,12 +156,32 @@ Nothing is installed on the remote host. The config written there names a URL,
 not a command, which is why Codex gets `-c mcp_servers.gridvibe.url=` rather
 than the inline command-and-args form a local pane gets.
 
+### Where a launched pane opens
+
+On the machine the calling agent is already on. `launch_panes` states no
+connection of its own — it names the pane the call came from
+(`origin_session_id`), and `workspaces.resolve_origin_connection` reads the
+host, user, port and password off that pane's live session in this process. An
+agent is never shown its own pane's credential, so this is the only place the
+answer can come from, and nothing of it reaches a response, a preset or a
+snapshot.
+
+A remote origin therefore produces an *SSH* group, and two things follow. A
+browser pane is refused there rather than silently downgraded to a terminal,
+because GridVibe draws that surface locally. The per-pane `shell` choice is
+dropped, because a local shell family names a machine the group is not opening
+on. An origin pane that has closed is a refusal, not a fall back to this
+machine: "here" is exactly the wrong answer, and the one that used to open a
+PowerShell pane on a `/home/...` path.
+
 **What this widens.** While a tunnelled pane is open, any process on that
 remote host that can reach the forwarded port can spend that pane's token, and
-the create tier acts on *this* machine. The bounds: sshd binds the remote
-host's own loopback (never its network), the port lives only as long as that
-connection, the token is refused the moment the pane closes, and a pane whose
-box is unticked opens no port and mints no token at all.
+the create tier acts as that pane — on its own host for the panes it launches,
+and on *this* machine for the workspaces and windows that hold them. The
+bounds: sshd binds the remote host's own loopback (never its network), the port
+lives only as long as that connection, the token is refused the moment the pane
+closes, and a pane whose box is unticked opens no port and mints no token at
+all.
 
 ## Checking the surface without a running GridVibe
 
