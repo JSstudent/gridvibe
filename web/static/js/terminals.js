@@ -7693,6 +7693,14 @@
                 } else if (session.status === 'connected') {
                     if (!terminals[i]._attached) {
                         attachTerminal(i);
+                    } else {
+                        /* Attaching takes the overlay off the pane it attaches;
+                           an already-attached one can still be wearing a
+                           "Connecting…" overlay the status event never removed —
+                           it connected while this group was not the visible one,
+                           or its relaunch raised the spinner behind the event
+                           (ISSUE-2026-053). This load is where that heals. */
+                        document.getElementById(`ph-${i}`)?.remove();
                     }
                     attachedIndices.push(i);
                 } else if (session.status === 'error') {
@@ -7875,6 +7883,24 @@
         ph.innerHTML = `
             <div class="spinner"></div>
             <span style="font-size:.78rem">Connecting…</span>`;
+    }
+
+    /* Repaint one pane's overlay from the status its own session record
+       reports: a connected pane wears none, an error or a retryable
+       disconnect wears its own, and a pane still coming up keeps the spinner
+       it has. The relaunch path calls it when its request failed, so a
+       "Connecting…" overlay raised for a transport that was never replaced
+       does not end up covering the shell that is still running. */
+    function syncPanePlaceholder(index) {
+        const session = terminals[index]?._session;
+        if (!session) return;
+        if (session.status === 'connected') {
+            document.getElementById(`ph-${index}`)?.remove();
+        } else if (session.status === 'error') {
+            showPlaceholderError(index, session.error_message || 'Connection failed');
+        } else if (isRetryableDisconnect(session)) {
+            showPlaceholderDisconnected(index);
+        }
     }
 
     async function retrySessionConnection(index) {
@@ -8238,6 +8264,10 @@
                 } else if (session.status === 'connected' && !terminals[i]?._attached) {
                     attachTerminal(i);
                     redrawAttachedTerminals([i], { forceResize: true });
+                } else if (session.status === 'connected') {
+                    /* Already attached: heal a "Connecting…" overlay that the
+                       connected status event never took off (ISSUE-2026-053). */
+                    document.getElementById(`ph-${i}`)?.remove();
                 } else if (session.status === 'error' && !terminals[i]?._attached) {
                     showPlaceholderError(i, session.error_message || 'Connection failed');
                 } else if (isRetryableDisconnect(session)) {

@@ -21,7 +21,13 @@ What is pinned here is the shape of the three dimensions the menu offers:
   which is inline rather than a flyout so a pane against the window's right
   edge cannot open it off-screen.
 
-The route's own half of the contract lives in `tests/test_session_shell.py`.
+and when the pane is painted for the relaunch it asked for: before the request
+rather than after it, because the connected broadcast that removes the overlay
+can arrive while the route is still writing its response.
+
+The route's own half of the contract lives in `tests/test_session_shell.py`,
+and the page's half -- a group load healing an overlay nobody removed -- in
+`tests/test_pane_connecting_overlay.py`.
 """
 
 import json
@@ -88,9 +94,21 @@ function paneDisplayTitle(session, index) {
     return window.GridVibeAgentIdentity.paneDisplayTitle(session, index, AGENT_OPTIONS);
 }
 
-const calls = { reset: [], connecting: [], toasts: [], requests: [] };
+/* `order` is what the overlay cases read: a relaunch has to paint the pane
+   before it asks for one, because the new transport can report connected while
+   the route is still writing its response. */
+const calls = { reset: [], connecting: [], toasts: [], requests: [], synced: [], order: [] };
 function refreshTerminalDisplay(index) { calls.reset.push(index); }
-function showPlaceholderConnecting(index) { calls.connecting.push(index); }
+function showPlaceholderConnecting(index) {
+    calls.connecting.push(index);
+    calls.order.push('connecting');
+}
+/* terminals.js's repaint-from-the-session-record helper, which the relaunch
+   calls to take its own spinner back off a request that failed. */
+function syncPanePlaceholder(index) {
+    calls.synced.push(index);
+    calls.order.push('sync-placeholder');
+}
 function showTerminalToast(message) { calls.toasts.push(message); }
 
 function fakeClassList() {
@@ -159,9 +177,19 @@ async function fetch(url, options) {
     if (String(url).includes('/api/wsl-distros')) {
         return { ok: true, json: async () => WSL_DISTROS };
     }
+    calls.order.push('request');
+    /* Whatever happens to the grid between the press and the answer. */
+    if (typeof ON_RESPONSE === 'function') { ON_RESPONSE(); }
+    if (RELAUNCH_REFUSED) {
+        return { ok: false, status: 400, json: async () => ({ error: 'claude is not installed' }) };
+    }
     return { ok: true, json: async () => Object.assign({ host: 'relaunched' }, RELAUNCH_RESPONSE) };
 }
 var RELAUNCH_RESPONSE = {};
+/* The route's own refusal — an absent agent binary, say — which arrives after
+   the pane has already been painted for the relaunch it is not getting. */
+var RELAUNCH_REFUSED = false;
+var ON_RESPONSE = null;
 
 /* The rendered menu, read back as rows. Attribute values are escaped, so the
    opening tag really does end at its first '>'. */
@@ -228,7 +256,10 @@ async function openMenu(index, session, options) {
     if (Object.prototype.hasOwnProperty.call(opts, 'windowsShells')) {
         LOCAL_SHELL_MODES_AVAILABLE = opts.windowsShells;
     }
-    terminals[index] = { _session: session, term: { reset() {} } };
+    terminals[index] = {
+        _session: session,
+        term: { reset() { calls.order.push('term-reset'); } }
+    };
     sessionIds[index] = session.session_id || 'sess-1';
     const card = { querySelector: () => paneMenu(index) };
     wirePaneShellMenu(card, index);
@@ -695,6 +726,83 @@ class RelaunchedPaneHeaderTestCase(TerminalShellMenuTestCase):
             "OpenAI Codex CLI",
         )
         self.assertEqual(result["name"], "build box")
+
+
+class RelaunchedPaneOverlayTestCase(TerminalShellMenuTestCase):
+    """When the pane is painted for the relaunch it asked for.
+
+    The new transport is started while the route is still writing its response,
+    and a local shell is marked connected inside that same request — so the
+    connected broadcast can reach the page before the response does. That event
+    is the only thing that takes the overlay off an attached pane, so a spinner
+    raised behind it is a spinner nothing removes (ISSUE-2026-053). The order is
+    therefore part of the contract, not an implementation detail.
+    """
+
+    def test_the_pane_is_painted_before_the_relaunch_is_requested(self):
+        result = self._run_node(
+            """
+            const rows = await openMenu(0, sshPane());
+            await press(0, rows.find(row => row.label === 'Claude Code'));
+            report({ order: calls.order, connecting: calls.connecting });
+            """
+        )
+        # The reset rides in front for the same reason: the backend has already
+        # dropped the old shell's replay buffer, so a reset that waited for the
+        # response would clear what the new shell had drawn in the meantime.
+        self.assertEqual(result["order"], ["term-reset", "connecting", "request"])
+        self.assertEqual(result["connecting"], [0])
+
+    def test_a_refused_relaunch_takes_its_own_spinner_back_off(self):
+        """Nothing was relaunched, so the pane is still running what it was —
+        and a live shell must not end up behind a permanent "Connecting…"."""
+        result = self._run_node(
+            """
+            RELAUNCH_REFUSED = true;
+            const rows = await openMenu(0, sshPane());
+            await press(0, rows.find(row => row.label === 'Claude Code'));
+            report({ order: calls.order, toasts: calls.toasts, synced: calls.synced });
+            """
+        )
+        self.assertEqual(result["toasts"], ["claude is not installed"])
+        # Repainted from the pane's own session record rather than blanked: a
+        # pane that was disconnected before the press still says so.
+        self.assertEqual(result["synced"], [0])
+        self.assertEqual(
+            result["order"],
+            ["term-reset", "connecting", "request", "sync-placeholder"],
+        )
+
+    def test_a_relaunch_refused_before_the_request_paints_nothing(self):
+        """An SSH pane has no local shell family, so naming one is refused where
+        it is read — and a refusal that never asked for anything must not leave
+        an overlay over the pane it declined to touch."""
+        result = self._run_node(
+            """
+            await openMenu(0, sshPane());
+            await relaunchSessionShell(0, { shell: 'powershell', agent: '' });
+            report({ order: calls.order, requests: calls.requests.filter(r => r.body) });
+            """
+        )
+        self.assertEqual(result["order"], [])
+        self.assertEqual(result["requests"], [])
+
+    def test_a_pane_whose_slot_changed_hands_is_not_repainted(self):
+        """The answer belongs to the pane that asked. If that pane left the grid
+        while the request was in flight, its replacement is not the one whose
+        relaunch failed."""
+        result = self._run_node(
+            """
+            RELAUNCH_REFUSED = true;
+            ON_RESPONSE = () => { terminals[0] = { _session: sshPane(), term: {} }; };
+            const rows = await openMenu(0, sshPane());
+            await press(0, rows.find(row => row.label === 'Claude Code'));
+            report({ synced: calls.synced, toasts: calls.toasts });
+            """
+        )
+        self.assertEqual(result["synced"], [])
+        # The failure is still reported: the toast is not addressed to a pane.
+        self.assertEqual(result["toasts"], ["claude is not installed"])
 
 
 class PaneWithoutARelaunchTestCase(TerminalShellMenuTestCase):

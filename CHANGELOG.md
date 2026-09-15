@@ -4,6 +4,12 @@ All notable changes to GridVibe will be documented in this file.
 
 ## Unreleased
 
+- **(fix) A relaunched pane no longer keeps a "Connecting…" spinner over a shell that is already running.** Relaunching a pane from its header dropdown — onto another shell family, onto an agent, or back to a plain shell — could leave the spinner on screen for the life of the window. The shell behind it was connected and typing reached it, but the pane looked hung and nothing short of reloading the window cleared it.
+
+  The pane was being painted too late. GridVibe starts the new transport while it is still answering the relaunch request, so the "connected" notice could reach the page before the spinner had even been drawn — and on a pane that is already showing a terminal, that notice is the one thing that takes a spinner off. The pane is now painted, and its screen cleared, before the request goes out; clearing it afterwards could also wipe the first lines the new shell had already drawn. A relaunch the server refuses now puts the pane back the way it was instead of leaving it covered.
+
+  A spinner left behind for any other reason heals on its own too: every session load and status refresh now takes one off a pane that is connected and on screen. That also covers a pane that finished connecting while its session tab was not the visible one, which used to stay covered even after switching back to it.
+
 - **(feat) A running pane can now be relaunched with GridVibe tools, without going back to the launcher.** The MCP choice existed only on the launcher's new-terminal row, so the one surface that can change what a live pane runs — the header's 🔄 dropdown — could move a pane between shells and between agents but never on or off the tools. Ticking the box meant closing the pane and launching a replacement.
 
   Each agent whose CLI can take the sidecar (Claude, Codex, Copilot) now carries an **MCP** button beside its row in that dropdown: the row starts that agent plainly, the button starts it with GridVibe tools, and whichever of the pair the pane is actually running wears the check — so a plain row is also the way back off the tools. Agents with no published MCP mechanism get the bare row, the same way a pane with no shell family to choose gets no chevron. SSH panes get the button too, since a remote pane's tools reach it over a reverse forward on the transport its shell is already running on.
