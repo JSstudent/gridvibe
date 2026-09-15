@@ -11,6 +11,14 @@ while ``GRIDVIBE_TEST_MODE`` is set. Individual test cases still patch
 ``RUNTIME_STATE_PATH`` for per-test isolation; this guarantees the default is
 never the user's real restore file, and makes a missed patch fail loudly
 instead of silently overwriting their saved workspaces.
+
+``.gridvibe_mcp.json`` is redirected the same way and for a sharper reason: it
+is written by ``run_server``, which a test calls with a fabricated host and
+port, and it is written with a plain ``open()`` rather than through
+``web/state_files.py`` -- so nothing else stands between the suite and the
+developer's real config. A run that reached it repointed every agent pane's
+sidecar at an address nothing answers, and the damage outlived the run: only
+the next GridVibe start rewrites the file.
 """
 
 import atexit
@@ -26,3 +34,10 @@ if not os.environ.get("GRIDVIBE_RUNTIME_STATE_PATH"):
         _state_dir, "runtime_state.json"
     )
     atexit.register(shutil.rmtree, _state_dir, ignore_errors=True)
+
+if not os.environ.get("GRIDVIBE_MCP_CONFIG_PATH"):
+    _mcp_dir = tempfile.mkdtemp(prefix="gridvibe-test-mcp-")
+    os.environ["GRIDVIBE_MCP_CONFIG_PATH"] = os.path.join(
+        _mcp_dir, ".gridvibe_mcp.json"
+    )
+    atexit.register(shutil.rmtree, _mcp_dir, ignore_errors=True)

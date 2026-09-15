@@ -48,9 +48,53 @@ _UNROUTABLE_BIND_HOSTS = {"", "0.0.0.0", "::", "*"}
 _server_base_url = ""
 
 
+#: The one file a production process owns. Overridable for the same reason
+#: ``runtime_state.json`` is: this is written by ``run_server``, which a test
+#: calls with a fabricated host and port -- and the write is a plain
+#: ``open()``, so nothing in ``web/state_files.py`` stands between the suite
+#: and the developer's real config. A test run that repointed it at an
+#: unroutable address left every later pane's agent starting a sidecar that
+#: could not reach GridVibe, until the next app start rewrote it.
+PRODUCTION_MCP_CONFIG_PATH = os.path.join(BASE_DIR, MCP_CONFIG_FILENAME)
+
+
 def mcp_config_path() -> str:
-    """Where the generated config lives."""
-    return os.path.join(BASE_DIR, MCP_CONFIG_FILENAME)
+    """Where the generated config lives, refusing production state in tests.
+
+    Read per call rather than resolved at import: ``run_server`` is reached
+    long after import, and a suite that set the override afterwards would
+    otherwise still hold the real path.
+    """
+    override = os.environ.get("GRIDVIBE_MCP_CONFIG_PATH")
+    if override:
+        return override
+    if os.environ.get("GRIDVIBE_TEST_MODE"):
+        raise RuntimeError(
+            "Refusing the production .gridvibe_mcp.json in test mode; set "
+            "GRIDVIBE_MCP_CONFIG_PATH (tests/__init__.py does this)."
+        )
+    return PRODUCTION_MCP_CONFIG_PATH
+
+
+#: The one ``TerminalSession.mode`` whose shell runs on the machine GridVibe
+#: runs on. Every other mode is a remote host reached over SSH.
+LOCAL_PANE_MODE = "wsl"
+
+
+def pane_can_run_the_sidecar(session: Any) -> bool:
+    """Return whether this pane's agent could start the sidecar at all.
+
+    Only a pane whose shell is on *this* machine can. An SSH pane's agent runs
+    on the remote host, where both halves of the flag are wrong: the config
+    path names a directory that exists only here, and ``127.0.0.1:<port>``
+    there is the remote host's own loopback, not GridVibe's.
+
+    Held here rather than at the launcher checkbox because the checkbox is not
+    the only way in -- a saved preset, a restored snapshot and the relaunch
+    route all carry ``agent_mcp`` forward, and a pane moved to SSH must not
+    keep a flag that was true when it was local.
+    """
+    return str(getattr(session, "mode", "") or "") == LOCAL_PANE_MODE
 
 
 def loopback_base_url(host: Any, port: Any) -> str:

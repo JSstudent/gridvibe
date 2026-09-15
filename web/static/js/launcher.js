@@ -457,6 +457,15 @@
         return String(option?.auto_mode_description || '').trim();
     }
 
+    /* The sidecar is a child of the pane's own shell, so it only exists where
+       that shell does. An SSH pane's agent runs on the remote host, which has
+       neither the generated config nor a route to this machine's loopback --
+       so the checkbox is not offered there at all. The server refuses the same
+       thing independently; this is only what the reader is shown. */
+    function agentMcpAvailableHere() {
+        return connectionMode === 'wsl';
+    }
+
     /* The MCP block is read exactly like the auto-mode one, and for the same
        reason: an agent that publishes no flag has no checkbox. Seven of the
        eight registered CLIs publish none today. */
@@ -522,7 +531,9 @@
                 agentSelection,
                 customAgent,
                 agentAutoMode: agentAutoMode && Boolean(agentAutoModeFlag(agentSelection)),
-                agentMcp: agentMcp && Boolean(agentMcpFlag(agentSelection))
+                agentMcp: agentMcp
+                    && agentMcpAvailableHere()
+                    && Boolean(agentMcpFlag(agentSelection))
             };
         }
 
@@ -815,6 +826,7 @@
                     && Boolean(agentAutoModeFlag(getRowAgentSelection(row)))
                     && Boolean(row.querySelector('.t-agent-auto-mode')?.checked),
                 agent_mcp: commandMode === 'agent'
+                    && agentMcpAvailableHere()
                     && Boolean(agentMcpFlag(getRowAgentSelection(row)))
                     && Boolean(row.querySelector('.t-agent-mcp')?.checked),
                 explorer_tree_open: commandMode === 'explorer' && row.dataset.explorerTreeOpen === 'true',
@@ -1578,7 +1590,9 @@
         if (!mcpField) {
             return;
         }
-        const available = commandMode === 'agent' && Boolean(agentMcpFlag(selectedAgent));
+        const available = commandMode === 'agent'
+            && agentMcpAvailableHere()
+            && Boolean(agentMcpFlag(selectedAgent));
         mcpField.classList.toggle('hidden', !available);
         const help = row.querySelector('.t-agent-mcp-help');
         if (help) {
@@ -2051,7 +2065,7 @@
                                 >?</button>
                             </label>
                             <div class="inline-tip t-agent-auto-help"></div>
-                            <label class="check-field t-agent-mcp-field ${commandUi.mode === 'agent' && agentMcpFlag(commandUi.agentSelection) ? '' : 'hidden'}">
+                            <label class="check-field t-agent-mcp-field ${commandUi.mode === 'agent' && agentMcpAvailableHere() && agentMcpFlag(commandUi.agentSelection) ? '' : 'hidden'}">
                                 <input class="t-agent-mcp" type="checkbox" ${commandUi.agentMcp ? 'checked' : ''} aria-label="Give this agent GridVibe tools">
                                 <span class="check-copy">
                                     <strong>MCP</strong>
@@ -3696,7 +3710,7 @@
                 use_wsl: resolvedUseWsl,
                 use_powershell: resolvedUsePowershell,
                 ...paneLaunchFields
-            } = buildPaneLaunchFields(terminal, startupMode);
+            } = buildPaneLaunchFields(terminal, startupMode, config.connection_mode);
             const resolvedDirectory = buildLaunchDirectory(
                 configuredDefaultDir,
                 terminal.directory,

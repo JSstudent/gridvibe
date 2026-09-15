@@ -5016,6 +5016,90 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("TF_LOGIN_SHELL", client.exec_command.call_args.args[0])
         self.assertIn("-ilc", client.exec_command.call_args.args[0])
 
+    def test_detect_windows_command_probes_cmd_through_cmd_exe_not_powershell(self):
+        """A cmd pane's agent is checked in cmd, not stood in for by PowerShell.
+
+        A CLI reachable from an interactive cmd session -- through an AutoRun
+        registry hook, a batch-file PATH shim, anything that never touched a
+        PowerShell $PROFILE -- was reported absent because detection always
+        shelled out to `powershell.exe -NoProfile` regardless of which shell
+        the pane actually runs. The pane then silently opened as a plain
+        terminal instead of the agent the reader selected.
+        """
+        completed = SimpleNamespace(returncode=0, stdout="C:\\tools\\claude.cmd\n", stderr="")
+
+        with patch.object(api.os, "name", "nt"), patch.object(
+            web_agents.subprocess, "run", return_value=completed
+        ) as run_mock:
+            detected = api._detect_windows_command("claude", "cmd")
+
+        self.assertTrue(detected["found"])
+        self.assertEqual(detected["path"], "C:\\tools\\claude.cmd")
+        command = run_mock.call_args.args[0]
+        self.assertEqual(command, ["cmd.exe", "/c", "where", "claude"])
+        # No /D: an interactive cmd session runs AutoRun, and so must this.
+        self.assertNotIn("/D", command)
+
+    def test_detect_windows_command_reports_cmd_absence_from_cmd_itself(self):
+        completed = SimpleNamespace(
+            returncode=1, stdout="", stderr="INFO: Could not find files for the given pattern(s).\n"
+        )
+
+        with patch.object(api.os, "name", "nt"), patch.object(
+            web_agents.subprocess, "run", return_value=completed
+        ):
+            detected = api._detect_windows_command("claude", "cmd")
+
+        self.assertFalse(detected["found"])
+        self.assertEqual(detected["path"], "")
+
+    def test_detect_windows_command_defaults_to_powershell(self):
+        # The default parameter, and every existing PowerShell-pane caller,
+        # keep behaving exactly as before.
+        completed = SimpleNamespace(returncode=0, stdout="C:\\tools\\claude.ps1\n", stderr="")
+
+        with patch.object(api.os, "name", "nt"), patch.object(
+            web_agents.subprocess, "run", return_value=completed
+        ) as run_mock:
+            detected = api._detect_windows_command("claude")
+
+        self.assertTrue(detected["found"])
+        self.assertEqual(run_mock.call_args.args[0][0], "powershell.exe")
+
+    def test_detect_agent_binary_reads_the_targets_own_shell_kind(self):
+        """The dispatcher forwards shell_kind rather than a fixed default."""
+        with patch.object(web_agents, "_detect_windows_command") as detect_windows:
+            detect_windows.return_value = {"found": True, "path": "x"}
+            api._detect_agent_binary(
+                {"environment_key": "windows_native", "shell_kind": "cmd"}, "claude"
+            )
+
+        detect_windows.assert_called_once_with("claude", "cmd")
+
+    def test_agent_preflight_uses_cmd_detection_for_a_cmd_launch(self):
+        """End to end: a Local Repo launch drafted for cmd is checked in cmd.
+
+        `_resolve_agent_target` already resolved `shell_kind` correctly from
+        `use_powershell`/`use_wsl`; the bug was one call downstream, where the
+        probe ignored it. This pins the whole chain from a launcher payload to
+        the subprocess actually spawned.
+        """
+        session_config = {"use_wsl": False, "use_powershell": False, "distribution": ""}
+        completed = SimpleNamespace(returncode=0, stdout="C:\\tools\\claude.cmd\n", stderr="")
+
+        with patch.object(api.os, "name", "nt"), patch.object(
+            web_agents.subprocess, "run", return_value=completed
+        ) as run_mock:
+            with api._agent_detection_cache_lock:
+                api._agent_detection_cache.clear()
+            preflight = web_agents._agent_preflight_payload(
+                "claude",
+                web_agents._build_agent_preflight_request("claude", "wsl", session_config),
+            )
+
+        self.assertEqual(preflight["target"]["shell_kind"], "cmd")
+        self.assertEqual(run_mock.call_args.args[0][0], "cmd.exe")
+
     def test_resolve_agent_target_passes_blank_distribution_when_wsl_distro_is_unspecified(self):
         payload = {
             "connection_mode": "wsl",
@@ -5149,6 +5233,79 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(session.startup_mode, "agent")
         self.assertEqual(session.agent_selection, "claude")
         self.assertEqual(session.initial_command, "claude")
+
+    def test_create_sessions_never_launches_an_ssh_pane_with_mcp(self):
+        """The sidecar is a child of the pane's own shell; SSH has none of it.
+
+        `agent_mcp: true` on an SSH launch used to reach the live session
+        untouched -- `_compose_agent_startup_command` would still drop the
+        `--mcp-config` fragment at connect time, so the agent itself launched
+        fine, but the pane's own metadata went on claiming MCP was on. Saving
+        that pane then "reset" a tick the reader never actually got to keep,
+        with nothing explaining why. `_prepare_launch_sessions` now clears the
+        field at the one place every launch (fresh or restored) passes
+        through, so the live session never carries it in the first place.
+        """
+        sessions_payload = {
+            "connection_mode": "ssh",
+            "layout": "single",
+            "sessions": [
+                {
+                    "host": "example.com",
+                    "username": "ubuntu",
+                    "port": 22,
+                    "title": "Claude",
+                    "directory": "/home/ubuntu/project",
+                    "initial_command": "claude",
+                    "startup_mode": "agent",
+                    "initial_command_mode": "agent",
+                    "agent_selection": "claude",
+                    "agent_mcp": True,
+                }
+            ],
+        }
+
+        with patch.object(
+            web_agents,
+            "_agent_preflight_payload",
+            return_value={"status": "installed", "message": "Claude Code is available."},
+        ), patch.object(api.socketio, "start_background_task"):
+            response = self.client.post("/api/sessions", json=sessions_payload)
+
+        self.assertEqual(response.status_code, 201)
+        session = api.session_manager.get_all_sessions()[0]
+        self.assertFalse(session.agent_mcp)
+
+    def test_create_sessions_keeps_mcp_for_a_local_repo_launch(self):
+        # The positive case behind the same gate: nothing here should cost a
+        # Local Repo pane -- the one connection mode the sidecar can reach --
+        # the flag it actually asked for.
+        sessions_payload = {
+            "connection_mode": "wsl",
+            "layout": "single",
+            "sessions": [
+                {
+                    "title": "Claude",
+                    "directory": "C:/repo",
+                    "initial_command": "claude",
+                    "startup_mode": "agent",
+                    "initial_command_mode": "agent",
+                    "agent_selection": "claude",
+                    "agent_mcp": True,
+                }
+            ],
+        }
+
+        with patch.object(
+            web_agents,
+            "_agent_preflight_payload",
+            return_value={"status": "installed", "message": "Claude Code is available."},
+        ), patch.object(api.socketio, "start_background_task"):
+            response = self.client.post("/api/sessions", json=sessions_payload)
+
+        self.assertEqual(response.status_code, 201)
+        session = api.session_manager.get_all_sessions()[0]
+        self.assertTrue(session.agent_mcp)
 
     def test_agent_preflight_endpoint_rejects_unknown_agent(self):
         response = self.client.post("/api/agent-preflight", json={"agent": "unknown"})
@@ -17874,13 +18031,19 @@ class ExtractedFrontendAssetsTestCase(unittest.TestCase):
 
         self.assertIn("function resolvePaneStartupMode(terminal)", shared)
         self.assertIn("function buildPaneLaunchFields(terminal, startupMode =", shared)
-        for page_name, page in (("launcher", launcher), ("terminals", terminals)):
+        # Each page's own connection mode travels in as the third argument --
+        # `config.connection_mode` on the launcher (a loaded preset can name a
+        # different mode than the page's own draft), the page's live
+        # `connectionMode` variable on terminals -- so the one place that
+        # decides whether MCP can ride along reads the mode the pane is
+        # actually about to launch under, not a stand-in for it.
+        for page_name, page, call in (
+            ("launcher", launcher, "buildPaneLaunchFields(terminal, startupMode, config.connection_mode);"),
+            ("terminals", terminals, "buildPaneLaunchFields(terminal, startupMode, connectionMode);"),
+        ):
             with self.subTest(page=page_name):
                 self.assertIn("const startupMode = resolvePaneStartupMode(terminal);", page)
-                self.assertIn(
-                    "} = buildPaneLaunchFields(terminal, startupMode);",
-                    page,
-                )
+                self.assertIn(f"}} = {call}", page)
                 self.assertNotIn("savedStartupMode", page)
 
     def test_launcher_button_and_dead_display_fixes_locked_in(self):
@@ -22195,6 +22358,12 @@ class SettingsLauncherConfigTestCase(unittest.TestCase):
             launcher_js.index("function renderCountOptions()")
         ]
         self.assertIn("agent_mcp:", collect)
+        # The sidecar is a child of the pane's own shell, so the checkbox is
+        # not offered where that shell is on another machine. One predicate,
+        # read by the sync, the row template and the collect alike -- the
+        # server refuses the same thing independently.
+        self.assertIn("function agentMcpAvailableHere()", launcher_js)
+        self.assertIn("agentMcpAvailableHere()", collect)
 
         shared_js = self._static("js/shared.js")
         self.assertIn("agent_mcp: resolvedStartupMode === 'agent'", shared_js)
@@ -22246,7 +22415,7 @@ class SettingsLauncherConfigTestCase(unittest.TestCase):
             launcher_js.index("function buildSessionsFromConfig(config, count)"):
             launcher_js.index("async function launchSessions()")
         ]
-        self.assertIn("buildPaneLaunchFields(terminal, startupMode)", launch)
+        self.assertIn("buildPaneLaunchFields(terminal, startupMode, config.connection_mode)", launch)
         shared_js = self._static("js/shared.js")
         self.assertIn(
             "agent_auto_mode: resolvedStartupMode === 'agent'",
@@ -22475,6 +22644,7 @@ class WorkspacesImportHygieneTestCase(unittest.TestCase):
                 "web.agents",
                 "web.config",
                 "web.explorer",
+                "web.mcp_launch",
                 "web.saved_sessions",
             },
         )

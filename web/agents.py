@@ -20,6 +20,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from web.config import _load_json_file, runtime_config
 from web.hostkeys import _apply_host_key_policy
+from web.mcp_launch import pane_can_run_the_sidecar
 from web.paths import BASE_DIR
 from web.saved_sessions import _normalize_connection_mode
 
@@ -218,10 +219,17 @@ def _compose_agent_startup_command(session: Any) -> str:
         flag = _agent_auto_mode_flag(agent_key)
         if flag:
             command += f" {flag}"
-    if bool(getattr(session, "agent_mcp", False)):
+    if bool(getattr(session, "agent_mcp", False)) and pane_can_run_the_sidecar(session):
         # Additive by construction: `--mcp-config` loads *alongside* the user's
         # own MCP servers. The strict variant would silently cost them every
         # server they had registered, inside GridVibe panes only.
+        #
+        # The pane check is not a duplicate of the launcher's: this line is
+        # typed into whatever shell the pane holds, and on an SSH pane that
+        # shell is on another machine. The flag would name a Windows path the
+        # remote host resolves against its own cwd, and the agent refuses to
+        # start at all -- so the pane costs the user their agent, not just its
+        # tools. Dropped silently for the same reason a missing config file is.
         fragment = _agent_mcp_command_fragment(agent_key)
         if fragment:
             command += f" {fragment}"
@@ -607,9 +615,23 @@ def _resolve_agent_target(payload: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _detect_windows_command(binary: str) -> Dict[str, Any]:
-    """Detect a command in native Windows shells."""
-    command_label = f"Get-Command {binary} -ErrorAction SilentlyContinue"
+def _detect_windows_command(binary: str, shell_kind: str = "powershell") -> Dict[str, Any]:
+    """Detect a command in native Windows shells.
+
+    The probe is the actual pane's shell family, not always PowerShell. A CLI
+    installed only through a cmd-specific mechanism -- an ``AutoRun`` registry
+    hook, a batch-file PATH shim, anything that never touched a PowerShell
+    ``$PROFILE`` -- is genuinely absent from a fresh ``-NoProfile`` PowerShell
+    subprocess even though the cmd pane about to open can run it fine. Probing
+    through PowerShell regardless of ``shell_kind`` reported that pane's own
+    agent as not installed and silently opened it as a plain shell (Guardrail
+    2.1's Windows counterpart: the check must answer for the shell that will
+    actually run the command, not a stand-in for it).
+
+    cmd's own bare-command resolution is what ``where`` implements, and
+    ``cmd.exe /c`` still runs ``AutoRun`` by default (only ``/D`` disables it),
+    so this sees exactly what typing the binary at that same cmd prompt would.
+    """
     if os.name != "nt":
         resolved = shutil.which(binary)
         return {
@@ -619,6 +641,40 @@ def _detect_windows_command(binary: str) -> Dict[str, Any]:
             "error": "",
         }
 
+    if str(shell_kind or "").strip().lower() == "cmd":
+        command_label = f"where {binary}"
+        try:
+            result = subprocess.run(
+                ["cmd.exe", "/c", "where", binary],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="ignore",
+                timeout=5,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            return {
+                "found": False,
+                "path": "",
+                "command": command_label,
+                "error": str(exc),
+                "failed": True,
+            }
+        # `where` lists every match, one per line; the first is what a bare
+        # invocation at the prompt would actually run.
+        resolved = next(
+            (line.strip() for line in (result.stdout or "").splitlines() if line.strip()),
+            "",
+        )
+        return {
+            "found": bool(resolved) and result.returncode == 0,
+            "path": resolved,
+            "command": command_label,
+            "error": (result.stderr or "").strip() if result.returncode != 0 else "",
+        }
+
+    command_label = f"Get-Command {binary} -ErrorAction SilentlyContinue"
     script = (
         f"$cmd = Get-Command {_powershell_single_quote(binary)} -ErrorAction SilentlyContinue; "
         f"if ($cmd) {{ $cmd.Source }}"
@@ -811,7 +867,7 @@ def _detect_agent_binary(target: Dict[str, Any], binary: str) -> Dict[str, Any]:
     if environment_key == "ssh":
         return _detect_ssh_command(binary, target)
     if environment_key == "windows_native":
-        return _detect_windows_command(binary)
+        return _detect_windows_command(binary, str(target.get("shell_kind") or "powershell"))
     return _detect_wsl_command(binary, str(target.get("distribution") or "").strip())
 
 

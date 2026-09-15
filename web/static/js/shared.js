@@ -387,12 +387,20 @@
         }
         return 'terminal';
     }
-    function buildPaneLaunchFields(terminal, startupMode = resolvePaneStartupMode(terminal)) {
+    function buildPaneLaunchFields(terminal, startupMode = resolvePaneStartupMode(terminal), connectionMode = 'wsl') {
         const requestedMode = String(startupMode || '').trim();
         const resolvedStartupMode = ['explorer', 'browser', 'agent', 'terminal'].includes(requestedMode)
             ? requestedMode
             : resolvePaneStartupMode(terminal);
         const shellFlagsAllowed = !['explorer', 'browser'].includes(resolvedStartupMode);
+        /* The sidecar is a child of the pane's own shell, so it only exists
+           where that shell does -- matched to the server's own
+           `mcp_launch.pane_can_run_the_sidecar` ('wsl' is the one connection
+           mode whose shell runs on this machine; 'ssh' is always remote). The
+           server refuses the flag anyway at the one place every launch passes
+           through, but a launch request should not *say* agent_mcp: true for
+           a pane it already knows can never have it. */
+        const agentMcpAllowed = connectionMode === 'wsl';
         const explorerPinActive = resolvedStartupMode === 'explorer'
             && Boolean(terminal?.explorer_git_pin_active);
         return {
@@ -409,7 +417,7 @@
             agent_selection: resolvedStartupMode === 'agent' ? (terminal?.agent_selection || '') : '',
             custom_agent: resolvedStartupMode === 'agent' ? (terminal?.custom_agent || '') : '',
             agent_auto_mode: resolvedStartupMode === 'agent' && Boolean(terminal?.agent_auto_mode),
-            agent_mcp: resolvedStartupMode === 'agent' && Boolean(terminal?.agent_mcp),
+            agent_mcp: resolvedStartupMode === 'agent' && agentMcpAllowed && Boolean(terminal?.agent_mcp),
             /* The explorer's confinement boundary and whether anybody chose it
                travel together, and travel separately from `directory`: a pane
                rooted at a project while browsing one of its subdirectories has

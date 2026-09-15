@@ -11,11 +11,33 @@ the asyncio-native MCP SDK out of the threading-mode Flask-SocketIO process.
 ## Install
 
 ```
-python -m pip install -r requirements-mcp.txt
+make mcp-deps
 ```
 
 Into the interpreter GridVibe itself runs under — that is the one the generated
-config names.
+config names, and `make mcp-deps` installs into the project venv for that reason.
+By hand it is `python -m pip install -r requirements-mcp.txt`, run with that
+interpreter.
+
+Nothing else installs it: the SDK is optional, so `make check` and a plain
+`pip install -r requirements.txt` both leave it out.
+
+## When an agent says `CONNECTION_CLOSED`
+
+```
+make mcp-status
+```
+
+The CLI reports a sidecar that exited at startup as one line with no cause, and
+the sidecar's own diagnosis goes to a stderr nothing displays. `make mcp-status`
+walks the chain from the outside, exactly as the CLI would — the generated
+config, the interpreter it names, the entry script, whether that interpreter has
+a usable SDK, and a real `initialize` handshake against the whole configured
+command line — and names the link that is broken. It exits non-zero when one is,
+so it also works in CI.
+
+A GridVibe that is not running is reported as a note, not a failure: the sidecar
+starts fine without one and fails per tool call.
 
 ## How it starts
 
@@ -79,13 +101,29 @@ running by a file an agent reads.
 
 ## Scope
 
-Phase 0 covers Windows-native local panes. SSH panes get no tools — `sshd`
+Phase 0 covers Windows-native local panes. WSL panes receive the variables but
+the checkbox waits on verifying that a Linux pane can reach the Windows
+interpreter through interop.
+
+**SSH panes get no tools, and cannot be talked into asking for them.** `sshd`
 forwards only what `AcceptEnv` permits, and a remote host has no route to the
-user's loopback. WSL panes receive the variables but the checkbox waits on
-verifying that a Linux pane can reach the Windows interpreter through interop.
+user's loopback — nor a copy of the generated config, whose path is this
+machine's. Enforced in four places rather than one, because the checkbox is not
+the only way a pane comes to carry `agent_mcp`:
+
+| Where | What it does |
+| --- | --- |
+| `launcher.js` → `agentMcpAvailableHere()` | Offers the checkbox only in Local Repo mode |
+| `agents.py` → `_compose_agent_startup_command` | Drops the flag for any pane that is not local |
+| `session_shell.py` → `apply_pane_shell_change` | Refuses a stated `mcp: true`, mutating nothing |
+| `saved_sessions.py` → `_normalize_terminal_entries` | Normalizes the field away on an SSH preset |
+
+The predicate itself is `mcp_launch.pane_can_run_the_sidecar`, and a pane whose
+record does not say where its shell runs reads as remote — the answer that
+cannot cost the user their agent.
 
 ## Checking the surface without a running GridVibe
 
 ```
-python gridvibe_mcp/__main__.py --print-tools
+make mcp-tools
 ```

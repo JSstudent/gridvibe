@@ -17,6 +17,11 @@ Four properties, each of which has a way of silently not happening:
 - **The flag is composed only when the pane asks and the agent publishes one.**
   Seven of the eight registered CLIs publish no MCP block, and their checkbox
   is simply absent — the same thing `opencode` already does for Auto mode.
+- **And only on a pane whose shell is on this machine.** The composed line is
+  typed into whatever shell the pane holds. On an SSH pane that shell is on
+  another host, where the Windows config path resolves against the remote cwd
+  and the agent refuses to start at all — so the pane costs the user their
+  agent, not just its tools.
 """
 
 import io
@@ -37,7 +42,10 @@ import tests  # noqa: E402,F401 - redirects durable state away from the real fil
 from gridvibe_mcp.identity import IDENTITY_VARIABLES  # noqa: E402
 from sessions.manager import SessionStatus  # noqa: E402
 from web import agents as web_agents  # noqa: E402
-from web import mcp_launch  # noqa: E402
+from web import (  # noqa: E402
+    mcp_launch,
+    saved_sessions,
+)
 from web import terminal_io as terminal  # noqa: E402
 from web.terminal_cwd import (  # noqa: E402
     WSLENV_VARIABLE,
@@ -95,6 +103,29 @@ class GeneratedConfigTestCase(unittest.TestCase):
 
         self.assertEqual(mcp_launch.write_mcp_config("127.0.0.1", 5050, path=unwritable), "")
 
+    def test_the_suite_can_never_write_the_developers_own_config(self):
+        """The file is written by `run_server`, which the suite calls.
+
+        `run_server` takes a host and a port and writes them straight into the
+        real `.gridvibe_mcp.json` with a plain `open()` -- no `state_files.py`
+        lock, backup or redirection between the suite and the developer's
+        install. A run that reached it repointed every agent pane's sidecar at
+        whatever address that test passed, and only the next GridVibe start put
+        it back.
+        """
+        self.assertTrue(os.environ.get("GRIDVIBE_TEST_MODE"))
+        self.assertNotEqual(
+            os.path.abspath(mcp_launch.mcp_config_path()),
+            os.path.abspath(mcp_launch.PRODUCTION_MCP_CONFIG_PATH),
+        )
+
+    def test_test_mode_without_a_redirect_refuses_rather_than_writing(self):
+        # A missed redirect fails loudly instead of quietly owning the real
+        # file -- the same guarantee `runtime_state` already makes.
+        with patch.dict(os.environ, {"GRIDVIBE_MCP_CONFIG_PATH": ""}):
+            with self.assertRaises(RuntimeError):
+                mcp_launch.mcp_config_path()
+
     def test_the_generated_file_is_gitignored(self):
         with io.open(PROJECT_ROOT / ".gitignore", encoding="utf-8") as handle:
             ignored = handle.read()
@@ -131,6 +162,11 @@ class PaneIdentityEnvironmentTestCase(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
 
+    #: What a pane inherits before GridVibe writes anything. Deliberately
+    #: carries neither the prompt hook nor any GRIDVIBE_* variable, so every
+    #: one observed at the spawn was put there by the code under test.
+    BASE_ENVIRONMENT = {"PATH": os.environ.get("PATH", ""), "SYSTEMROOT": "C:\\Windows"}
+
     def _session(self, **overrides):
         fields = dict(
             distribution="", username="", directory="", initial_command="",
@@ -141,10 +177,19 @@ class PaneIdentityEnvironmentTestCase(unittest.TestCase):
         return SimpleNamespace(**fields)
 
     def _spawn_environment(self, shell_integration=True):
-        """Run the Windows local connector to the spawn, and report its env."""
+        """Run the Windows local connector to the spawn, and report its env.
+
+        The connector spawns from ``os.environ``, so the suite supplies a bare
+        one. Not tidiness: GridVibe's own suite is routinely run *inside* a
+        GridVibe pane, and that pane's shell already exports the prompt hook
+        and the five identity variables. Inheriting them leaves "the hook is
+        off" unprovable -- the value is there either way -- and the assertion
+        then fails for the one reason that says nothing about the code.
+        """
         winpty = MagicMock()
         self.session_manager.get_session.return_value = self.session
-        with patch.object(terminal.os, "name", "nt"), \
+        with patch.dict(terminal.os.environ, self.BASE_ENVIRONMENT, clear=True), \
+                patch.object(terminal.os, "name", "nt"), \
                 patch.object(terminal, "WinPtyProcess", winpty), \
                 patch.object(terminal.runtime_config, "terminal_shell_integration",
                              shell_integration), \
@@ -219,6 +264,43 @@ class MergeWslenvTestCase(unittest.TestCase):
         self.assertEqual(environment[WSLENV_VARIABLE], "PATH/l:PROMPT_COMMAND")
 
 
+class SavedPresetTestCase(unittest.TestCase):
+    """What a preset may carry forward.
+
+    The third way in, after the launcher checkbox and the relaunch route. A
+    preset is read back long after it was written, on an install whose venv,
+    port and connection mode may all have moved -- so the local-only rule is
+    enforced where the entry is normalized rather than trusted from the file.
+    """
+
+    def _preset(self, connection_mode, **overrides):
+        entry = dict(
+            startup_mode="agent",
+            initial_command_mode="agent",
+            agent_selection="claude",
+            initial_command="claude",
+            agent_mcp=True,
+        )
+        entry.update(overrides)
+        return saved_sessions._normalize_terminal_entries(
+            [entry], connection_mode, minimum_count=1
+        )[0]
+
+    def test_a_local_preset_keeps_the_choice(self):
+        self.assertTrue(self._preset("wsl")["agent_mcp"])
+
+    def test_an_ssh_preset_carries_no_mcp_however_it_was_written(self):
+        # A preset hand-edited, or written by a build before the rule existed,
+        # still reads back as False rather than launching a broken agent.
+        self.assertFalse(self._preset("ssh")["agent_mcp"])
+
+    def test_a_non_agent_preset_carries_no_mcp_either(self):
+        # The pre-existing rule, still held: no CLI, nothing to register with.
+        self.assertFalse(
+            self._preset("wsl", startup_mode="terminal", initial_command_mode="command")["agent_mcp"]
+        )
+
+
 class FlagCompositionTestCase(unittest.TestCase):
     """What ends up on the pane's launch line."""
 
@@ -234,9 +316,13 @@ class FlagCompositionTestCase(unittest.TestCase):
         self.addCleanup(patcher.stop)
 
     def _pane(self, **overrides):
+        # `mode="wsl"` is the *local* family (cmd/PowerShell/WSL), which is the
+        # only place the sidecar can run. Stated rather than defaulted, because
+        # it is now one of the things composition reads.
         fields = dict(
             initial_command="claude", initial_command_mode="agent",
             agent_selection="claude", agent_auto_mode=False, agent_mcp=False,
+            mode="wsl",
         )
         fields.update(overrides)
         return SimpleNamespace(**fields)
@@ -288,6 +374,35 @@ class FlagCompositionTestCase(unittest.TestCase):
 
         self.assertIn("--permission-mode auto", command)
         self.assertIn("--mcp-config", command)
+
+    def test_an_ssh_pane_gets_no_flag_however_the_field_was_set(self):
+        # The config path exists *here*. Typed into a remote shell it resolves
+        # against that host's cwd, and the CLI exits with
+        # "MCP config file not found" before the agent ever starts.
+        pane = self._pane(agent_mcp=True, mode="ssh")
+
+        command = web_agents._compose_agent_startup_command(pane)
+
+        self.assertEqual(command, "claude")
+        self.assertNotIn("--mcp-config", command)
+        self.assertNotIn(str(self.config_path), command)
+
+    def test_a_pane_with_no_mode_at_all_is_treated_as_remote(self):
+        # Absent is not local. A pane record too old or too partial to say
+        # where its shell runs gets the answer that cannot break the agent.
+        pane = self._pane(agent_mcp=True)
+        del pane.mode
+
+        self.assertEqual(web_agents._compose_agent_startup_command(pane), "claude")
+
+    def test_an_ssh_pane_keeps_every_other_composed_flag(self):
+        # The refusal is the MCP fragment alone -- auto mode is a flag the
+        # remote CLI understands perfectly well.
+        command = web_agents._compose_agent_startup_command(
+            self._pane(agent_auto_mode=True, agent_mcp=True, mode="ssh")
+        )
+
+        self.assertEqual(command, "claude --permission-mode auto")
 
     def test_the_launcher_is_told_which_agents_publish_a_block(self):
         options = {option["value"]: option for option in web_agents._agent_options()}

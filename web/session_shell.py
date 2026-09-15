@@ -42,6 +42,7 @@ from sessions.manager import SessionStatus
 from web.agents import AGENT_REGISTRY, _agent_absent_reason, _normalize_agent_key
 from web.app import session_manager
 from web.explorer import _is_browser_session, _is_explorer_session
+from web.mcp_launch import pane_can_run_the_sidecar
 from web.terminal_io import (
     LOCAL_SHELL_KINDS,
     _local_shell_display_name,
@@ -309,6 +310,14 @@ def apply_pane_shell_change(
     shell_kind = _requested_shell(payload)
     agent_key = _requested_agent(payload)
     mcp_enabled = _requested_mcp(payload)
+
+    if mcp_enabled and not pane_can_run_the_sidecar(session):
+        # Refused rather than silently dropped, because this one was asked for
+        # in words: the caller stated `mcp: true`, and a pane on a remote host
+        # can never honour it. Validation, so a refusal mutates nothing.
+        raise ShellTransitionError(
+            "GridVibe tools are only available to agents running on this machine"
+        )
 
     if shell_kind is not None:
         if session.mode != "wsl":
