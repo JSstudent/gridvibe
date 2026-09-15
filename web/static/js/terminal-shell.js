@@ -1,13 +1,17 @@
     /* ─────────────────────────────────────────────
        Pane relaunch picker — the header reset control.
 
-       A terminal pane can be relaunched along two independent dimensions, and
-       the header's reset button is the dropdown for both:
+       A terminal pane can be relaunched along three independent dimensions,
+       and the header's reset button is the dropdown for all of them:
 
          · its shell family (cmd / PowerShell / a WSL distro), which only a
-           Local Repo pane on a Windows host has to pick from, and
+           Local Repo pane on a Windows host has to pick from,
          · the agent CLI its shell starts (claude, codex, opencode, …), which
-           an SSH pane has exactly as much as a local one.
+           an SSH pane has exactly as much as a local one, and
+         · whether that agent is handed GridVibe's own tools (MCP), which an
+           SSH pane also has — its tools arrive over a reverse forward on the
+           transport its shell is already running on, so the choice belongs to
+           a remote pane as much as to a local one.
 
        So each shell row carries a right-hand chevron opening that family's
        agent list, and pressing the shell row itself relaunches it plainly —
@@ -15,10 +19,19 @@
        pick (an SSH pane, or a local pane on a POSIX host) gets the agent list
        flat, under its own heading, with "Plain shell" as its first row.
 
-       Both go out as POST /api/sessions/<id>/shell, whose payload states each
-       dimension separately: a row that names no shell leaves the pane's shell
-       alone, and every row states its agent so that choosing "Plain shell" is
-       a choice and not a silence.
+       The third dimension uses that same shape one level down: an agent whose
+       CLI can be handed the sidecar carries an "MCP" button beside its row,
+       and pressing it starts that agent with GridVibe tools while the row
+       itself starts it plainly. Two one-press actions rather than a modifier
+       the reader has to set first — and an inline control rather than a
+       flyout, which is what keeps the menu inside the window on a pane docked
+       against its right edge.
+
+       All of them go out as POST /api/sessions/<id>/shell, whose payload
+       states each dimension separately: a row that names no shell leaves the
+       pane's shell alone, and every row states its agent *and* its MCP choice
+       so that "Plain shell", and plain-agent rows, are choices rather than
+       silences — which is also the only way back off GridVibe tools.
 
        Explorer and browser panes have no shell at all, so their reset button
        stays a plain one-click reset. Loaded before terminals.js so
@@ -74,6 +87,24 @@
             return '';
         }
         return String(session?.agent_selection || session?.custom_agent || '').trim().toLowerCase();
+    }
+
+    /* Whether this CLI can be handed the sidecar at launch at all — the same
+       question the launcher's MCP checkbox asks, off the same registry field.
+       Deliberately not `mcp_flag` truthiness: Codex supports MCP and publishes
+       no flag string, because its servers ride in as `-c` overrides the server
+       composes per shell. The CLIs that publish neither can only register a
+       server by editing the user's own config, which a per-pane press has no
+       business doing, so they get no button. */
+    function paneAgentSupportsMcp(option) {
+        return Boolean(option?.mcp_supported);
+    }
+
+    /* Whether the pane's agent is running with GridVibe tools. Meaningless
+       without an agent, so a plain shell reports false however the flag was
+       left by a preset written before the pane was sent back to one. */
+    function paneAgentMcp(session) {
+        return Boolean(paneAgentKey(session) && session?.agent_mcp);
     }
 
     function paneIsRelaunchable(session) {
@@ -172,13 +203,15 @@
     }
 
     /* One row per relaunch target, so nothing on this side can send a shell
-       family without saying what the pane should start under it. */
-    function paneShellLaunchAttrs(shellKind, distribution, agentKey) {
+       family without saying what the pane should start under it — or start an
+       agent without saying whether it gets GridVibe tools. */
+    function paneShellLaunchAttrs(shellKind, distribution, agentKey, mcp) {
         return (
             `data-pane-shell-launch="1"`
             + ` data-pane-shell-kind="${escHtml(shellKind)}"`
             + ` data-pane-shell-distro="${escHtml(distribution)}"`
             + ` data-pane-shell-agent="${escHtml(agentKey)}"`
+            + ` data-pane-shell-mcp="${mcp ? '1' : '0'}"`
         );
     }
 
@@ -188,29 +221,57 @@
 
     /* The agent radio group for one shell family: "Plain shell" first, then the
        registry's agents. Checked only when that family is the live one, so an
-       agent row never claims a pane it is not running in. */
-    function paneShellAgentItemsHtml(shellKind, distribution, activeAgent, familyIsActive) {
+       agent row never claims a pane it is not running in.
+
+       An agent whose CLI can take the sidecar is a pair rather than a row: the
+       row starts it plainly and the "MCP" button beside it starts it with
+       GridVibe tools, and exactly one of the two wears the check — so the pair
+       reports which of the two the pane is actually running, and either press
+       is the way off the other. Agents with no published MCP mechanism get the
+       bare row, the same way a pane with no shell family gets no chevron. */
+    function paneShellAgentItemsHtml(shellKind, distribution, activeAgent, familyIsActive, activeMcp) {
         const rows = [
             paneShellMenuItemHtml({
                 label: 'Plain shell',
                 active: familyIsActive && !activeAgent,
-                attrs: paneShellLaunchAttrs(shellKind, distribution, '')
+                attrs: paneShellLaunchAttrs(shellKind, distribution, '', false)
             })
         ];
         paneAgentMenuOptions().forEach(option => {
-            rows.push(paneShellMenuItemHtml({
-                label: option.display_name || option.label || option.value,
+            const label = option.display_name || option.label || option.value;
+            const isLive = familyIsActive && activeAgent === option.value;
+            const plainRow = paneShellMenuItemHtml({
+                label,
                 hint: option.value,
-                active: familyIsActive && activeAgent === option.value,
-                attrs: paneShellLaunchAttrs(shellKind, distribution, option.value)
-            }));
+                active: isLive && !activeMcp,
+                attrs: paneShellLaunchAttrs(shellKind, distribution, option.value, false)
+            });
+            if (!paneAgentSupportsMcp(option)) {
+                rows.push(plainRow);
+                return;
+            }
+            const toolsLabel = `${label} with GridVibe tools`;
+            rows.push(`
+                <div class="pane-shell-menu-row">
+                    ${plainRow}
+                    <button
+                        type="button"
+                        role="menuitemradio"
+                        class="pane-shell-menu-mcp${isLive && activeMcp ? ' is-active' : ''}"
+                        aria-checked="${isLive && activeMcp ? 'true' : 'false'}"
+                        title="${escHtml(toolsLabel)}"
+                        aria-label="${escHtml(toolsLabel)}"
+                        ${paneShellLaunchAttrs(shellKind, distribution, option.value, true)}
+                    >MCP</button>
+                </div>
+            `);
         });
         return rows.join('');
     }
 
     /* A shell family row plus its right-hand chevron, and — while that chevron
        is open — the family's agent list indented under it. */
-    function paneShellFamilyRowHtml({ index, label, hint, shellKind, distribution, activeAgent, familyIsActive }) {
+    function paneShellFamilyRowHtml({ index, label, hint, shellKind, distribution, activeAgent, activeMcp, familyIsActive }) {
         const rowKey = paneShellRowKey(shellKind, distribution);
         const expanded = _expandedShellAgentRows.get(index) === rowKey;
         const agentsLabel = `Agents for ${label}`;
@@ -220,7 +281,7 @@
                     label,
                     hint,
                     active: familyIsActive,
-                    attrs: paneShellLaunchAttrs(shellKind, distribution, '')
+                    attrs: paneShellLaunchAttrs(shellKind, distribution, '', false)
                 })}
                 <button
                     type="button"
@@ -233,12 +294,12 @@
             </div>
             ${expanded ? `
             <div class="pane-shell-menu-sub" role="group" aria-label="${escHtml(agentsLabel)}">
-                ${paneShellAgentItemsHtml(shellKind, distribution, activeAgent, familyIsActive)}
+                ${paneShellAgentItemsHtml(shellKind, distribution, activeAgent, familyIsActive, activeMcp)}
             </div>` : ''}
         `;
     }
 
-    function paneShellMenuWslItemsHtml(index, activeKind, activeDistribution, activeAgent) {
+    function paneShellMenuWslItemsHtml(index, activeKind, activeDistribution, activeAgent, activeMcp) {
         const rows = [
             paneShellFamilyRowHtml({
                 index,
@@ -247,6 +308,7 @@
                 shellKind: 'wsl',
                 distribution: '',
                 activeAgent,
+                activeMcp,
                 familyIsActive: activeKind === 'wsl' && !activeDistribution
             })
         ];
@@ -259,6 +321,7 @@
                 shellKind: 'wsl',
                 distribution: name,
                 activeAgent,
+                activeMcp,
                 familyIsActive: activeKind === 'wsl' && activeDistribution === name
             }));
         });
@@ -287,6 +350,7 @@
         const activeKind = paneShellKind(session);
         const activeDistribution = String(session?.distribution || '').trim();
         const activeAgent = paneAgentKey(session);
+        const activeMcp = paneAgentMcp(session);
         const busy = _pendingShellSwitchPanes.has(terminals[index]);
 
         let sections = '';
@@ -298,20 +362,23 @@
                 shellKind: option.kind,
                 distribution: '',
                 activeAgent,
+                activeMcp,
                 familyIsActive: activeKind === option.kind
             })).join('');
             sections = `
                 <div class="pane-shell-menu-title">Shell</div>
                 ${shellRows}
-                ${paneShellMenuWslItemsHtml(index, activeKind, activeDistribution, activeAgent)}
+                ${paneShellMenuWslItemsHtml(index, activeKind, activeDistribution, activeAgent, activeMcp)}
             `;
         } else if (paneSupportsAgentSwitch(session)) {
             /* No shell family to hang the chevrons on, so the agent radio group
                is the whole section — and the pane it relaunches is the one it
-               already runs, which is what an unstated shell means. */
+               already runs, which is what an unstated shell means. An SSH pane
+               lands here, and its agents keep their MCP buttons: a remote
+               pane's tools ride its own transport home. */
             sections = `
                 <div class="pane-shell-menu-title">Agent</div>
-                ${paneShellAgentItemsHtml('', '', activeAgent, true)}
+                ${paneShellAgentItemsHtml('', '', activeAgent, true, activeMcp)}
             `;
         }
 
@@ -415,6 +482,20 @@
                 renderPaneShellMenu(index);
                 return;
             }
+            /* Every relaunch target states its whole payload, so one lookup
+               covers the rows and the MCP buttons seated beside them alike —
+               the button is a second target on the row, never a second class
+               of row. */
+            const launch = event.target.closest('[data-pane-shell-launch]');
+            if (launch) {
+                relaunchSessionShell(index, {
+                    shell: launch.dataset.paneShellKind || '',
+                    distribution: launch.dataset.paneShellDistro || '',
+                    agent: launch.dataset.paneShellAgent || '',
+                    mcp: launch.dataset.paneShellMcp === '1'
+                });
+                return;
+            }
             const item = event.target.closest('.pane-shell-menu-item');
             if (!item) {
                 return;
@@ -428,14 +509,6 @@
                 _wslDistroState = 'idle';
                 ensureWslDistrosLoaded();
                 renderPaneShellMenu(index);
-                return;
-            }
-            if (item.dataset.paneShellLaunch) {
-                relaunchSessionShell(index, {
-                    shell: item.dataset.paneShellKind || '',
-                    distribution: item.dataset.paneShellDistro || '',
-                    agent: item.dataset.paneShellAgent || ''
-                });
             }
         });
     }
@@ -466,12 +539,14 @@
         });
     }
 
-    /* Relaunch one pane under the shell family and/or agent a menu row named.
-       The pane keeps its slot, its stored title and its group, so only the
-       process behind it is replaced. An empty `shell` states nothing about the
-       shell family — an SSH pane has none to state — while `agent` is always
-       stated. Pressing an already-selected row still relaunches the pane: the
-       check mark describes what will start, not a disabled state selector.
+    /* Relaunch one pane under the shell family, agent and tools a menu row
+       named. The pane keeps its slot, its stored title and its group, so only
+       the process behind it is replaced. An empty `shell` states nothing about
+       the shell family — an SSH pane has none to state — while `agent` and
+       `mcp` are always stated, so a plain row is the way off GridVibe tools
+       rather than a silence the server reads as "leave it alone". Pressing an
+       already-selected row still relaunches the pane: the check mark describes
+       what will start, not a disabled state selector.
 
        What the header *prints* is not the stored title, though: an agent pane
        whose title is still the launcher's `Terminal N` placeholder is named
@@ -479,7 +554,7 @@
        to a plain shell) changes what that header should say. The stored title
        is untouched either way — a name the user typed keeps winning, and the
        agent's name is still never persisted back. */
-    async function relaunchSessionShell(index, { shell = '', distribution = '', agent = '' } = {}) {
+    async function relaunchSessionShell(index, { shell = '', distribution = '', agent = '', mcp = false } = {}) {
         const sessionId = sessionIds[index];
         const pane = terminals[index];
         const session = pane?._session;
@@ -490,7 +565,7 @@
         if (shell && !paneSupportsShellSwitch(session)) {
             return;
         }
-        const body = { agent };
+        const body = { agent, mcp: Boolean(agent) && Boolean(mcp) };
         if (shell) {
             body.shell = shell;
             body.distribution = distribution;

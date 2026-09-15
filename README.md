@@ -175,9 +175,10 @@ Launched a pane in cmd and wanted PowerShell — or Codex in WSL? Click the pane
 
 - **Pick a shell** — a Local Repo terminal on Windows lists **Command Prompt**, **PowerShell**, **WSL**, and every detected distro. The pane restarts in place, same slot, same title, in the directory the old shell was sitting in.
 - **Pick an agent** — each shell row's chevron opens **Plain shell** plus every agent, so "this pane, but Codex in WSL" is one click. SSH panes and non-Windows hosts get that list flat.
+- **Give it GridVibe tools** — agents that support MCP carry an **MCP** button beside their row: the row starts the agent plainly, the button starts it with GridVibe's own tools. Works on SSH panes as well as local ones.
 - **Plain shell** drops a running agent and comes back to an ordinary prompt. Picking whatever is already checked relaunches it too.
 - **A missing agent never touches your pane** — GridVibe runs the same install check against that row's own target, and answers with a message (*OpenAI Codex CLI is missing in WSL Ubuntu.*) instead of relaunching.
-- **Auto mode follows the agent**, not the pane: relaunch the same agent under another shell and it stays on.
+- **Auto mode and GridVibe tools follow the agent**, not the pane: relaunch the same agent under another shell and they stay on; move to a different agent and they start from its plain launch.
 
 ## Browser Preview
 

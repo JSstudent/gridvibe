@@ -288,11 +288,20 @@ changing any field that survives restart; it owns the complete save/restore flow
   Validate every fallible input and resolve directories before presentation
   cleanup, metadata mutation, teardown, or restart. Refusal leaves the whole pane,
   status, and connection unchanged. Routes supply late-resolved side effects.
-- Shell family and agent are independent tri-state payload dimensions: omitted
-  leaves that dimension alone; explicit `agent: ""` alone clears an agent. An
-  arbitrary startup command is not an agent. Only a shell-family change retargets
-  the directory; agent-only relaunch preserves the observed cwd. Reselecting the
-  current choice is a no-op on both sides.
+- Shell family, agent and MCP are independent tri-state payload dimensions:
+  omitted leaves that dimension alone; explicit `agent: ""` alone clears an
+  agent. An arbitrary startup command is not an agent. Only a shell-family
+  change retargets the directory; agent-only relaunch preserves the observed
+  cwd. Reselecting the current choice is a no-op on both sides.
+- **MCP is resolved last and cannot outlive its agent.** An unstated `mcp`
+  follows the agent, which is the rule auto mode already has: carried forward
+  when the agent is unchanged, dropped when it changes, because a mechanism
+  registered for one CLI says nothing about the next. A stated `mcp` wins over
+  that carry-forward, and is still `and`-ed with the resolved agent — a pane
+  with no agent has no CLI to register the sidecar with. Both directions are
+  available to an SSH pane: its tools arrive over a reverse forward on the
+  transport its shell already runs on, so `pane_can_run_the_sidecar()` picks
+  the *shape* of the answer, never whether there is one.
 - **A stated agent is preflighted before anything moves, and an absent binary
   refuses the relaunch.** The launcher has no pane yet, so it opens one as a
   plain terminal; the menu's pane is already running, so the honest outcome is
@@ -305,11 +314,21 @@ changing any field that survives restart; it owns the complete save/restore flow
   run, so the relaunch proceeds and the reader gets the shell's own error. A
   stated `""` and an unstated agent probe nothing. The refusal message is the
   toast, so it names the agent, the target, and that the pane was left alone.
-- Header shell rows state both family and agent; pressing a family row is its
-  plain-shell relaunch. A separate adjacent chevron lazily expands agents. Windows
-  Local Repo panes have families; SSH/POSIX panes get the flat agent list without
-  a local-family choice. Use registry-backed `AGENT_OPTIONS` minus `other`.
+- Header rows state every dimension; pressing a family row is its plain-shell
+  relaunch. A separate adjacent chevron lazily expands agents. Windows Local
+  Repo panes have families; SSH/POSIX panes get the flat agent list without a
+  local-family choice. Use registry-backed `AGENT_OPTIONS` minus `other`.
   Expansion is temporary UI state, never persisted.
+- An agent row whose option publishes `mcp_supported` carries a second target
+  in that same adjacent slot: the row starts it plainly, the button starts it
+  with GridVibe tools, and exactly one of the pair wears the check. So a plain
+  row is the documented way *back off* the tools, which is why every row states
+  `mcp` rather than leaving it silent. The control is inline — the panel is
+  anchored to the pane's own right edge and capped, so it grows away from the
+  window edge and nothing opens sideways off a right-hand pane. An agent that
+  publishes no mechanism gets no button, exactly as a pane with no shell family
+  gets no chevron; the two surfaces read the one registry field, never a
+  second rule client-side.
 - **Every terminal/agent→Files switch derives a fresh root from where the pane
   is standing:** the Git worktree containing its working directory, else that
   directory itself (`_resolve_explorer_open_root()`, which takes those two

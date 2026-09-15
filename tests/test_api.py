@@ -1683,12 +1683,14 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("!isBrowserSession(session)", html)
         self.assertIn("`/api/sessions/${encodeURIComponent(sessionId)}/shell`", html)
         self.assertIn("fetch('/api/wsl-distros')", html)
-        # Every actionable row carries both dimensions, so nothing on this side
-        # can name a shell family without saying what to start under it.
+        # Every actionable row carries all three dimensions, so nothing on this
+        # side can name a shell family without saying what to start under it,
+        # or start an agent without saying whether it gets GridVibe tools.
         self.assertIn('data-pane-shell-launch="1"', html)
         self.assertIn('data-pane-shell-kind="${escHtml(shellKind)}"', html)
         self.assertIn('data-pane-shell-distro="${escHtml(distribution)}"', html)
         self.assertIn('data-pane-shell-agent="${escHtml(agentKey)}"', html)
+        self.assertIn("data-pane-shell-mcp=\"${mcp ? '1' : '0'}\"", html)
         # Non-switchable panes keep the plain one-click reset.
         reset_start = html.index("function handlePaneResetButton(index)")
         reset_body = html[reset_start:html.index("function syncPaneShellControls(index, session)")]
@@ -1719,6 +1721,12 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn(".pane-shell-menu-expand.is-expanded svg { transform: rotate(90deg); }", html)
         # "Plain shell" is a stated choice of no agent, not a silence.
         self.assertIn("label: 'Plain shell',", html)
+        # An MCP-capable agent's tools button uses that same two-control row.
+        # Inline, so the panel never opens sideways out of the window; and
+        # right-anchored with a ceiling, so it grows away from that edge.
+        self.assertIn("class=\"pane-shell-menu-mcp${isLive && activeMcp ? ' is-active' : ''}\"", html)
+        self.assertIn(".pane-shell-menu-mcp.is-active {", html)
+        self.assertIn("max-width: min(320px, calc(100vw - 16px));", html)
 
     def test_terminals_page_agent_options_carry_registry_display_names(self):
         """The menu names an agent in prose; the launcher keeps naming binaries."""
