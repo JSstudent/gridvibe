@@ -60,6 +60,11 @@ is already built: `POST /api/sessions` accepts and normalizes a
 split is computed by the page, not by the server — and "the terminal below" is
 only answerable from geometry the page holds.
 
+Both also need a pane that *already exists* to become an agent pane. D6 settles
+that: it ships, behind three gates. **D** passes. **C** passes on a pane this
+agent created and refuses, naming the gate, on the hand-made Terminal 4 the
+sentence actually describes — which is the honest answer rather than a gap.
+
 ---
 
 ## 2. What Phase 0 already answers
@@ -192,8 +197,9 @@ As a tool that is `set_pane_agent`, and Phase 0 left it out of the build rather
 than behind a flag — a relaunch **kills whatever is running in the pane**,
 which is exactly what a prompt-injected agent should not be able to reach.
 
-The server work for it is zero. What remains is entirely a blast-radius
-decision, which is why it is D6 rather than a work item.
+The server work for it is zero. What the phase adds is not capability but
+*refusal* — the three gates in D6, and the lineage stamp none of them can be
+written without.
 
 > `web/session_shell.py:120-131,311-352` · `gridvibe_mcp/server.py:46-51`
 
@@ -392,7 +398,7 @@ only ever configures a pane it just made, and no verb that can relaunch a pane
 someone is working in. It is also what makes chained splits possible — each
 split's result names the new pane, which the next split can target.
 
-### D6 — Open: the word "each" in Prompt C
+### D6 — Settled: `set_pane_agent` exists, behind three gates that all must hold
 
 *"Split Terminal 4 and run codex and claude in each"* asks for two agent panes
 where one terminal stood. D5 covers the pane that is created. The **existing**
@@ -400,20 +406,56 @@ Terminal 4 still has to become an agent pane, and that is a relaunch — the too
 Phase 0 deliberately did not build (F8). Prompt D has exactly the same shape:
 the terminal below already exists.
 
-Three ways out, and this one is the user's to pick:
+The decision is to build `set_pane_agent` and gate it on **lineage and mode
+together**. Either gate alone leaves a hole the other closes:
 
-1. **Narrow it.** A `set_pane_agent` that refuses any pane not in plain
-   terminal mode, so it can never interrupt a running agent — but it can still
-   interrupt a shell mid-command.
-2. **Lineage-gate it.** Allow it only on panes this agent itself created, using
-   the `agent_depth` stamp already in the session record
-   (`sessions/manager.py:98,183`). Safe, and it makes the prompt fail on a pane
-   the user made by hand — which is most of them.
-3. **Reinterpret it.** Split Terminal 4 twice and leave the original alone.
-   Honest, cheap, and not what the sentence says.
+- **Mode alone** lets an agent relaunch any plain terminal in the workspace,
+  including one the user opened and is about to type into.
+- **Lineage alone** lets an agent relaunch a pane it created, then handed to
+  the user, who has been working in it for an hour.
 
-Options 1 and 2 compose: gate on lineage *and* on plain-terminal mode. That is
-the narrowest thing that still makes Prompt D work for a pane the agent made.
+So both, and a third refusal that neither implies:
+
+| Gate | The pane must be | Refusal when it is not |
+| --- | --- | --- |
+| **Mode** | `startup_mode == "terminal"` with `agent_selection` empty | An explorer, browser or agent pane is never relaunched by a tool |
+| **Lineage** | recorded as created by the calling agent's own pane | A pane the user made by hand, or another agent made, is refused |
+| **Self** | not the caller's own pane | An agent relaunching itself kills the process mid-tool-call |
+
+**The residual risk, stated rather than designed away.** A pane that passes
+all three gates can still be sitting at a shell prompt mid-command — the gates
+establish *who made it* and *what kind of pane it is*, not *whether something is
+running in it*. `web/agent_activity.py` reads working/idle from output cadence,
+which is a liveness heuristic, not a fact about the foreground process. Making
+the tool consult it would trade a clear refusal for a guess, so it does not.
+This is the one place the phase knowingly accepts an interruption.
+
+**The lineage stamp does not exist yet.** `agent_depth` is a *counter* — "how
+many generations of agent-launched panes stand behind this one" — not a creator
+id. Two sibling agents at the same depth in the same workspace would each pass
+a depth-based gate on the other's panes, so the gate needs a new field:
+
+- `created_by_session_id` on `TerminalSession`, default `""`.
+- Stamped at launch from `origin_session_id`, which the sidecar already sends
+  (`gridvibe_mcp/server.py:368`) and `launch_session_group` already reads
+  (`web/workspaces.py:551`) — today it is used to resolve the connection and
+  then discarded. Stamping it is the smaller half of this work.
+- Stamped at split from the requesting agent's session id (D4).
+- **Runtime-only, not snapshot state.** Live sessions are in-memory; after a
+  restart the creating agent's session id names a session that no longer
+  exists. Leaving it out of `runtime_state.py`'s field list means a restored
+  workspace carries no creator ids at all and every pane in it is refused —
+  the safe direction, and one fewer durable-schema change.
+
+`agent_depth` still does its own job: the relaunched pane inherits
+`caller.child_depth`, so an agent that turns a pane into an agent pane hands
+down a budget that runs out.
+
+**What this costs Prompt C.** Terminal 4 is usually a pane the *user* made, so
+the lineage gate refuses it, and the honest agent behaviour is then to split
+twice and leave the original alone. The refusal sentence must say which
+gate failed, so the agent can relay it and offer that instead of retrying. A
+tool that says only "refused" produces an agent that tries the same call again.
 
 ### D7 — Saved presets are readable, through their own field list
 
@@ -447,7 +489,7 @@ preset launched by an agent runs on the agent's own pane's machine via
 | `launch_panes` | Accepts `workspace_layout`; layout enum corrected (F6) | A, B |
 | `list_saved_layouts` | **New.** Saved presets through their own field list | B |
 | `split_pane` | Gains `axis`, and what to create in the new pane | C, D |
-| `set_pane_agent` | **Undecided** — see D6 | C and D's "each" |
+| `set_pane_agent` | **New.** Gated on lineage + mode + not-self (D6) | C and D's "each" |
 | `close` · `move` · `resize` · `send_input` | Still absent | — |
 
 ---
@@ -492,13 +534,23 @@ takes. *Lands:* "split this and run claude in the new pane" works with no
 relaunch verb in the build — and chained splits work, because each answer names
 its pane.
 
-**8. Settle D6.**
-Whichever of the three the user picks. If it is a new verb, its refusals are
-asserted on a whole-pane snapshot the way `test_session_modes.py` and
-`test_session_shell.py` already assert theirs. *Lands:* Prompts C and D pass, or
-are reported honestly as half-supported.
+**8. Stamp lineage.**
+`created_by_session_id` on the session, written from the `origin_session_id`
+that `launch_session_group` already reads and discards, and from the requesting
+agent on a split. Runtime-only — deliberately absent from `runtime_state.py`, so
+a restored pane has no creator and is refused (D6). *Lands:* nothing
+user-visible. It is the precondition for step 9 and is worth its own commit for
+that reason.
 
-**9. Docs and the changelog.**
+**9. `set_pane_agent`, behind all three gates.**
+A thin tool over `POST /api/sessions/<id>/shell`, which already does the work
+(F8). Each refusal — mode, lineage, self — is asserted on a whole-pane snapshot
+the way `test_session_modes.py` and `test_session_shell.py` already assert
+theirs, so a leaked mutation on a refusal shows. *Lands:* Prompt D passes.
+Prompt C passes on a pane the agent made, and refuses with a sentence naming
+the gate on a pane the user made — which is the honest answer, not a bug.
+
+**10. Docs and the changelog.**
 The sidecar README's tool table, README feature bullets in the house style, one
 `(feat)` changelog bullet per the CHANGELOG shape in `CLAUDE.md`. *Lands:*
 `make check` green.
@@ -521,6 +573,12 @@ The sidecar README's tool table, README feature bullets in the house style, one
 | Two pages open when a split intent lands | One split, exactly as one window opens today |
 | A saved preset carrying an SSH password | The password never appears in a tool result; the projection test asserts it |
 | `list_panes` across a whole workspace | `index` is `null` and no `rect` or `neighbours` are published |
+| `set_pane_agent` on a pane the user created | Refused, naming the lineage gate; the pane is not touched |
+| `set_pane_agent` on an explorer or browser pane | Refused, naming the mode gate — never converted first and relaunched after |
+| `set_pane_agent` on a pane already running an agent | Refused by the mode gate, even when this agent created it |
+| `set_pane_agent` on the caller's own pane | Refused before any mutation; an agent does not end itself mid-call |
+| `set_pane_agent` after a GridVibe restart | Every pane refuses — no creator ids survive the restart (D6) |
+| Two agents in one workspace, same `agent_depth` | Neither can relaunch the other's panes; the gate is the creator id, not the depth |
 
 ---
 
@@ -531,12 +589,19 @@ was that a prompt-injected agent could waste resources but could not touch work
 in progress.
 
 Phase 0.5 lets an agent rearrange a workspace the user is looking at. A split
-reflows the panes around it. And if D6 admits a relaunch verb, an agent can
-interrupt work in a pane it did not create.
+reflows the panes around it. And D6 admits a relaunch verb, which ends a
+process — the first thing in the MCP surface that destroys anything.
 
-That is a genuine widening of what a prompt-injected agent can reach, and it is
-the reason D6 is a question here rather than a decision. The mitigations that
-survive whatever is picked:
+That is a genuine widening of what a prompt-injected agent can reach. What
+keeps it bounded:
+
+- **The relaunch verb reaches only the agent's own panes.** The lineage gate
+  means the blast radius of a prompt injection is the set of panes that
+  injection's own agent created — never the pane the user is working in, and
+  never another agent's. The residual case is a pane the agent made and the
+  user later adopted, which D6 states rather than hides.
+- **The stamp does not survive a restart**, so the set shrinks to empty across
+  one, rather than growing stale.
 
 - The destroy tier stays empty. Nothing in this phase closes a pane, a group or
   a workspace.
@@ -564,4 +629,6 @@ survive whatever is picked:
 - **Moving a group between workspaces.**
 - **Server-side split geometry** — see §5 for why.
 - **Re-rooting or mode-switching an existing pane** — `session_modes.py` and
-  `session_root.py` are the same shape of decision as D6 and wait on it.
+  `session_root.py` are the same shape of write as D6, and would inherit its
+  three gates unchanged. Held back because nothing in the four prompts needs
+  them, not because the policy is unsettled.
