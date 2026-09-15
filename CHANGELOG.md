@@ -4,6 +4,20 @@ All notable changes to GridVibe will be documented in this file.
 
 ## Unreleased
 
+- **(feat) Agents on SSH panes can now be given GridVibe tools.** They could not before, and the reason was structural rather than an oversight: the MCP sidecar is a stdio child of the pane's own shell, and on an SSH pane that shell is on another machine — one with no copy of the sidecar, no MCP SDK, and no address for this machine's loopback. Ticking the box on a remote pane did nothing, and the tick did not survive a save.
+
+  The protocol moves instead of the process. GridVibe now answers MCP over streamable HTTP itself, and a remote pane reaches it through a reverse forward on the SSH transport its own shell is already running on — so nothing is installed on the remote host and no port is opened to anything but that host's own loopback. The tools behind it are the *same* ones the local sidecar runs, not a second implementation. The pane's agent is handed a small config written over SFTP naming a URL rather than a command; Codex, which takes no config file, is given the URL directly.
+
+  Identity cannot cross a machine boundary by environment inheritance the way it does locally, so each tunnelled pane carries an opaque token in its URL that resolves back to the same pane record — minted when the pane connects, refused the moment it closes, and never written into a saved preset or a snapshot.
+
+  **This widens the local-bind guarantee, deliberately and per pane.** While a tunnelled pane is open, any process on that remote host that can reach the forwarded port can spend that pane's token, and the create-tier tools act on the machine GridVibe runs on. The bounds are the remote-loopback bind, the port living only as long as that connection, the token dying with the pane — and the box being unticked meaning no port is opened and no token minted at all. A tunnel that cannot be opened costs the pane its tools and says so in the terminal; it never costs the agent or the shell.
+
+- **(feat) Copilot and Codex panes can now be given GridVibe tools, not just Claude.** The MCP checkbox appeared for one CLI out of eight, because `claude` was the only one whose MCP mechanism had been verified. Picking any other agent made the checkbox disappear and a ticked one come back unticked after a save, with nothing saying why.
+
+  Each installed CLI was checked against its own `--help` rather than assumed, and the answer differs by more than a flag name. **Claude** takes `--mcp-config <path>`. **Copilot** takes `--additional-mcp-config @<path>` and augments the user's own `~/.copilot/mcp-config.json` for that session only. **Codex** takes no config file at all, so its sidecar rides in as `-c mcp_servers.…` overrides composed from the same generated file — which also means the launch line now has to be quoted for the shell that will read it: cmd must see the TOML literal quotes bare, while PowerShell and every POSIX shell must see the outer double quotes. Getting that backwards is not cosmetic — in cmd the override is silently ignored, and in PowerShell Codex exits with *failed to load bootstrap configuration*. The same rule now also covers the Codex terminal-title override, which had been sending the PowerShell form to every shell.
+
+  The remaining five (`grok`, `hermes`, `opencode`, `kilo`, `kimi`) still get no checkbox, and this is the reason rather than an omission: their only mechanism is an `<agent> mcp add` subcommand that edits the user's own config permanently, which a per-pane tick has no business doing and which would outlive the pane that asked.
+
 - **(fix) An agent on an SSH pane is no longer launched with a flag its host cannot resolve.** The MCP checkbox was offered on every agent pane, including one whose shell is on a remote machine. Ticking it appended this machine's Windows config path to the launch line typed into that remote shell, and the agent refused to start at all:
 
   ```

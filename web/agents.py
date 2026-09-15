@@ -103,10 +103,39 @@ def _agent_auto_mode_description(agent_key: Any) -> str:
 #: the path is per-install and the registry is committed.
 _MCP_CONFIG_PLACEHOLDER = "{config}"
 
+#: The same placeholder wearing Copilot's "this is a path, not inline JSON"
+#: marker. Matched as one token so the quote can be opened before the `@`.
+_MCP_MARKER_PLACEHOLDER = "@{config}"
+
 #: `--mcp-config <path>`, and nothing more adventurous. One option token, one
 #: placeholder: a registry typo carrying a shell metacharacter resolves to no
-#: flag rather than smuggling a second command into the launch line.
-_MCP_FLAG_TEMPLATE = re.compile(r"^--?[A-Za-z0-9][A-Za-z0-9_-]*\s\{config\}$")
+#: flag rather than smuggling a second command into the launch line. The
+#: optional `@` is Copilot's own marker for "this argument is a file path, not
+#: an inline JSON document" -- one literal character, still no metacharacter.
+_MCP_FLAG_TEMPLATE = re.compile(r"^--?[A-Za-z0-9][A-Za-z0-9_-]*\s@?\{config\}$")
+
+#: Codex takes no config *file* at launch. It takes `-c key=value` overrides
+#: whose value is parsed as TOML, so the sidecar is registered by stating the
+#: same command and args the generated file holds. Composed in code rather
+#: than templated in the registry: the template would have to carry quotes,
+#: and quotes in a registry string are exactly what the guard above exists to
+#: keep off the launch line.
+_MCP_STYLE_INLINE_TOML = "inline_toml"
+
+#: A server name is a TOML bare key here, so it may hold nothing that would
+#: need quoting or open a second table.
+_MCP_SERVER_NAME = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
+def _agent_mcp_style(agent_key: Any) -> str:
+    """Return the registry-declared composition style for one agent, or ""."""
+    spec = AGENT_REGISTRY.get(_normalize_agent_key(agent_key))
+    if not isinstance(spec, dict):
+        return ""
+    mcp = spec.get("mcp")
+    if not isinstance(mcp, dict):
+        return ""
+    return str(mcp.get("style") or "").strip()
 
 
 def _agent_mcp_flag(agent_key: Any) -> str:
@@ -115,6 +144,10 @@ def _agent_mcp_flag(agent_key: Any) -> str:
     An agent with no block published here has no checkbox -- the same thing
     ``opencode`` already does for Auto mode, and the reason a CLI whose MCP
     mechanism has not been verified needs no code.
+
+    Empty is not the same as "no MCP": an agent composed by *style* rather
+    than by template has no flag string to publish. Ask
+    :func:`_agent_supports_mcp` whether the checkbox belongs.
     """
     spec = AGENT_REGISTRY.get(_normalize_agent_key(agent_key))
     if not isinstance(spec, dict):
@@ -128,6 +161,21 @@ def _agent_mcp_flag(agent_key: Any) -> str:
     return flag
 
 
+def _agent_supports_mcp(agent_key: Any) -> bool:
+    """Whether this CLI can be handed the sidecar at launch, by any shape.
+
+    The one question the checkbox asks. Five of the eight registered CLIs can
+    only register an MCP server by *mutating the user's own config* (an
+    ``<agent> mcp add`` subcommand), which a checkbox on a pane has no business
+    doing and which would outlive the pane that asked. Those publish nothing
+    here and get no checkbox.
+    """
+    return bool(
+        _agent_mcp_flag(agent_key)
+        or _agent_mcp_style(agent_key) == _MCP_STYLE_INLINE_TOML
+    )
+
+
 def _agent_mcp_description(agent_key: Any) -> str:
     """Return the registry-defined MCP description for one agent, or ""."""
     spec = AGENT_REGISTRY.get(_normalize_agent_key(agent_key))
@@ -139,24 +187,152 @@ def _agent_mcp_description(agent_key: Any) -> str:
     return str(mcp.get("description") or "").strip()
 
 
-def _agent_mcp_command_fragment(agent_key: Any, config_path: Optional[str] = None) -> str:
-    """Return the composed ``--mcp-config "<path>"``, or "".
+def _pane_shell_family(session: Any) -> str:
+    """Which shell family is about to be handed this launch line.
 
-    Empty whenever the flag cannot be trusted to work: no registry block, no
+    Mirrors ``terminal_io._local_shell_kind``'s precedence (WSL wins over
+    PowerShell) without importing it: ``web.terminal_io`` imports *this*
+    module, so the dependency only runs one way.
+    """
+    from web.mcp_launch import LOCAL_PANE_MODE
+
+    if str(getattr(session, "mode", "") or "") != LOCAL_PANE_MODE:
+        return "posix"
+    if getattr(session, "use_wsl", False):
+        return "posix"
+    if os.name != "nt":
+        return "posix"
+    return "powershell" if getattr(session, "use_powershell", False) else "cmd"
+
+
+def _toml_override_flag(key: str, value: str, shell_family: str) -> str:
+    """One ``-c key=value`` override, quoted for the shell that will read it.
+
+    The value is a TOML *literal* string (single quotes), which processes no
+    escapes -- that is what carries a Windows path through unchanged. What
+    differs is the shell around it, and the two Windows shells want opposite
+    things:
+
+    * **cmd** must see the single quotes bare. Wrapping the pair in double
+      quotes there reaches Codex as a value it silently declines to apply --
+      no error, no server, which is the worst of the three outcomes.
+    * **PowerShell** (and every POSIX shell, which strips double quotes the
+      same way) must see the outer double quotes. Bare, PowerShell eats the
+      brackets and single quotes itself and Codex exits with *failed to load
+      bootstrap configuration* -- costing the pane its agent, not just its
+      tools.
+
+    Verified both ways against the installed CLI rather than reasoned about;
+    the two shells genuinely disagree and no single string serves both.
+    """
+    override = f"{key}={value}"
+    return f"-c {override}" if shell_family == "cmd" else f'-c "{override}"'
+
+
+def _inline_toml_mcp_fragment(config_path: str, shell_family: str) -> str:
+    """Register the sidecar through ``-c`` overrides instead of a file.
+
+    Codex reads MCP servers from ``~/.codex/config.toml`` and takes no
+    "load this file" flag, but every key in that file can be overridden on the
+    launch line, and the value is parsed as TOML. So the same command and args
+    the generated config holds are stated directly.
+
+    A value containing a quote of either kind cannot be written as a TOML
+    literal string, so it resolves to no fragment rather than to a broken
+    launch line.
+    """
+    from web.mcp_launch import MCP_SERVER_NAME, read_mcp_server_block
+
+    if not _MCP_SERVER_NAME.match(MCP_SERVER_NAME):
+        return ""
+    block = read_mcp_server_block(config_path)
+    command = str(block.get("command") or "")
+    args = [str(value) for value in block.get("args") or []]
+    if not command:
+        return ""
+    if any("'" in value or '"' in value for value in [command, *args]):
+        return ""
+    rendered_args = ",".join(f"'{value}'" for value in args)
+    return " ".join(
+        (
+            _toml_override_flag(
+                f"mcp_servers.{MCP_SERVER_NAME}.command", f"'{command}'", shell_family
+            ),
+            _toml_override_flag(
+                f"mcp_servers.{MCP_SERVER_NAME}.args", f"[{rendered_args}]", shell_family
+            ),
+        )
+    )
+
+
+def _remote_server_name() -> str:
+    """The MCP server name, as written into a remote pane's launch line."""
+    from web.mcp_launch import MCP_SERVER_NAME
+
+    return MCP_SERVER_NAME
+
+
+def _agent_mcp_command_fragment(
+    agent_key: Any,
+    config_path: Optional[str] = None,
+    shell_family: str = "",
+    *,
+    remote_url: str = "",
+) -> str:
+    """Return the composed MCP launch fragment for one agent, or "".
+
+    Two shapes, because the CLIs have two. Most take a config *file*
+    (``--mcp-config "<path>"``; Copilot's ``@`` marks the argument as a path
+    rather than inline JSON), and Codex takes the servers themselves as
+    ``-c`` overrides.
+
+    Empty whenever the result cannot be trusted to work: no registry block, no
     generated config on disk (the write failed, or this is a checkout that has
-    never been started), or a path that cannot be quoted. Pointing a CLI at a
+    never been started), or a value that cannot be quoted. Pointing a CLI at a
     config file that is not there costs the user their agent, which is worse
     than quietly having no tools.
+
+    ``remote_url`` switches both to the pane's *own* host: ``config_path`` then
+    names a file written there over SFTP, and is not checked for existence
+    because the check would ask this filesystem about a file on another one.
+    Codex takes the URL directly instead -- inlining a file it cannot read
+    would be pointless, and inlining *this* machine's interpreter into a line
+    the remote host runs would be wrong.
     """
+    from web.mcp_launch import mcp_config_path
+
+    remote = bool(str(remote_url or "").strip())
+    if remote:
+        resolved = str(config_path or "")
+        if not resolved or '"' in resolved or "'" in str(remote_url):
+            return ""
+    else:
+        resolved = str(config_path if config_path is not None else mcp_config_path())
+        if not resolved or '"' in resolved or not os.path.exists(resolved):
+            return ""
+
+    if _agent_mcp_style(agent_key) == _MCP_STYLE_INLINE_TOML:
+        if remote:
+            # One key, not three: a streamable-HTTP server is a URL, and the
+            # sidecar it would otherwise name does not exist on that host.
+            return _toml_override_flag(
+                f"mcp_servers.{_remote_server_name()}.url",
+                f"'{remote_url}'",
+                shell_family,
+            )
+        return _inline_toml_mcp_fragment(resolved, shell_family)
+
     template = _agent_mcp_flag(agent_key)
     if not template:
         return ""
-    from web.mcp_launch import mcp_config_path
-
-    resolved = str(config_path if config_path is not None else mcp_config_path())
-    if not resolved or '"' in resolved or not os.path.exists(resolved):
-        return ""
-    return template.replace(_MCP_CONFIG_PLACEHOLDER, f'"{resolved}"')
+    # The quote opens *before* any marker, never after it: `@"C:\..."` starts a
+    # here-string in PowerShell and fails to parse, while `"@C:\..."` is an
+    # ordinary quoted argument in cmd, PowerShell and POSIX shells alike, and
+    # reaches the CLI as the `@path` it asked for.
+    marked = f"{_MCP_MARKER_PLACEHOLDER}" in template
+    placeholder = _MCP_MARKER_PLACEHOLDER if marked else _MCP_CONFIG_PLACEHOLDER
+    value = f'"@{resolved}"' if marked else f'"{resolved}"'
+    return template.replace(placeholder, value)
 
 
 def _agent_options() -> List[Dict[str, str]]:
@@ -175,6 +351,10 @@ def _agent_options() -> List[Dict[str, str]]:
             # hides the checkbox for an agent that publishes no flag.
             "mcp_flag": _agent_mcp_flag(key),
             "mcp_description": _agent_mcp_description(key),
+            # The question the checkbox actually asks. Not `mcp_flag` truthiness:
+            # Codex supports MCP and publishes no flag string, because its
+            # servers ride in as `-c` overrides composed at launch.
+            "mcp_supported": _agent_supports_mcp(key),
         }
         for key, spec in AGENT_REGISTRY.items()
     ]
@@ -188,16 +368,26 @@ def _agent_options() -> List[Dict[str, str]]:
             "auto_mode_description": "",
             "mcp_flag": "",
             "mcp_description": "",
+            "mcp_supported": False,
         }
     )
     return options
 
 
-def _compose_agent_startup_command(session: Any) -> str:
+def _compose_agent_startup_command(
+    session: Any,
+    remote_config_path: str = "",
+    remote_url: str = "",
+) -> str:
     """Apply launch-only title settings and optional auto-mode flags.
 
     Keep the persisted base command intact for detection and saved sessions.
     Custom or explicitly configured commands remain verbatim.
+
+    ``remote_config_path``/``remote_url`` are the SSH tunnel's, handed in by
+    the startup sequence that opened it. They are passed rather than read
+    here because they belong to one *connection*, not to the pane record: a
+    relaunch gets a new port, a new token and a freshly written file.
     """
     base = str(getattr(session, "initial_command", "") or "").strip()
     if not base:
@@ -209,28 +399,41 @@ def _compose_agent_startup_command(session: Any) -> str:
         # Custom or already-modified commands launch verbatim.
         return base
     command = base
+    # Which shell reads this line changes how a `-c` override has to be
+    # quoted, and the two Windows shells want opposite things -- see
+    # `_toml_override_flag`. Read once here, for every override below.
+    shell_family = _pane_shell_family(session)
     if agent_key == "codex":
         # Launch-only override: the CLI's default title contains the project,
         # while thread-title follows the active conversation and /rename.
-        # TOML literal strings preserve their quotes through cmd, PowerShell
-        # and POSIX shells without platform-specific backslash escaping.
-        command += ' -c "tui.terminal_title=[\'thread-title\']"'
+        command += " " + _toml_override_flag(
+            "tui.terminal_title", "['thread-title']", shell_family
+        )
     if bool(getattr(session, "agent_auto_mode", False)):
         flag = _agent_auto_mode_flag(agent_key)
         if flag:
             command += f" {flag}"
-    if bool(getattr(session, "agent_mcp", False)) and pane_can_run_the_sidecar(session):
+    if bool(getattr(session, "agent_mcp", False)):
         # Additive by construction: `--mcp-config` loads *alongside* the user's
         # own MCP servers. The strict variant would silently cost them every
         # server they had registered, inside GridVibe panes only.
         #
-        # The pane check is not a duplicate of the launcher's: this line is
-        # typed into whatever shell the pane holds, and on an SSH pane that
-        # shell is on another machine. The flag would name a Windows path the
-        # remote host resolves against its own cwd, and the agent refuses to
-        # start at all -- so the pane costs the user their agent, not just its
-        # tools. Dropped silently for the same reason a missing config file is.
-        fragment = _agent_mcp_command_fragment(agent_key)
+        # A local pane names the generated config on this machine. A remote
+        # pane names what its own tunnel wrote on *its* host -- same flag, a
+        # path that resolves where the line is actually typed. A remote pane
+        # with no tunnel gets nothing rather than a path it cannot read: that
+        # costs the tools, never the agent.
+        if pane_can_run_the_sidecar(session):
+            fragment = _agent_mcp_command_fragment(agent_key, shell_family=shell_family)
+        elif remote_config_path:
+            fragment = _agent_mcp_command_fragment(
+                agent_key,
+                remote_config_path,
+                shell_family="posix",
+                remote_url=remote_url or "",
+            )
+        else:
+            fragment = ""
         if fragment:
             command += f" {fragment}"
     return command

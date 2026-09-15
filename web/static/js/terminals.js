@@ -1950,7 +1950,7 @@
                 use_wsl: resolvedUseWsl,
                 use_powershell: resolvedUsePowershell,
                 ...paneLaunchFields
-            } = buildPaneLaunchFields(terminal, startupMode, connectionMode);
+            } = buildPaneLaunchFields(terminal, startupMode);
             const resolvedDirectory = buildLaunchDirectory(
                 configuredDefaultDir,
                 terminal?.directory,
@@ -2655,14 +2655,7 @@
             agent_selection: commandMode === 'agent' ? (session.agent_selection || '') : '',
             custom_agent: commandMode === 'agent' ? (session.custom_agent || '') : '',
             agent_auto_mode: commandMode === 'agent' ? Boolean(session.agent_auto_mode) : false,
-            /* Matches `distribution`/`use_wsl`/`use_powershell` below: the
-               sidecar only exists where the pane's own shell does, so an SSH
-               group's live session can never really carry this true no matter
-               what its record says (the server clears it at launch), but the
-               saved snapshot should not claim it either. */
-            agent_mcp: commandMode === 'agent' && connectionMode === 'wsl'
-                ? Boolean(session.agent_mcp)
-                : false,
+            agent_mcp: commandMode === 'agent' ? Boolean(session.agent_mcp) : false,
             explorer_tree_open: startupMode === 'explorer' ? Boolean(terminal?._explorerTreeSidebarOpen) : false,
             explorer_git_open: startupMode === 'explorer' ? Boolean(terminal?._explorerGitSidebarOpen) : false,
             explorer_git_follow_browsing: startupMode === 'explorer'

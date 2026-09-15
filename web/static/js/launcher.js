@@ -457,25 +457,20 @@
         return String(option?.auto_mode_description || '').trim();
     }
 
-    /* The sidecar is a child of the pane's own shell, so it only exists where
-       that shell does. An SSH pane's agent runs on the remote host, which has
-       neither the generated config nor a route to this machine's loopback --
-       so the checkbox is not offered there at all. The server refuses the same
-       thing independently; this is only what the reader is shown. */
-    function agentMcpAvailableHere() {
-        return connectionMode === 'wsl';
-    }
-
-    /* The MCP block is read exactly like the auto-mode one, and for the same
-       reason: an agent that publishes no flag has no checkbox. Seven of the
-       eight registered CLIs publish none today. */
-    function agentMcpFlag(agentValue) {
+    /* Whether this CLI can be handed the sidecar at launch at all -- the one
+       question the checkbox asks. Deliberately not `mcp_flag` truthiness:
+       Codex supports MCP and publishes no flag string, because it takes no
+       config file and its servers ride in as `-c` overrides the server
+       composes per shell. The CLIs that publish neither can only register a
+       server by editing the user's own config, which a per-pane checkbox has
+       no business doing, so they get none. */
+    function agentMcpSupported(agentValue) {
         const normalized = String(agentValue || '').trim().toLowerCase();
         if (!normalized || normalized === 'other') {
-            return '';
+            return false;
         }
         const option = AGENT_OPTIONS.find(item => item.value === normalized);
-        return String(option?.mcp_flag || '').trim();
+        return Boolean(option?.mcp_supported);
     }
 
     function agentMcpDescription(agentValue) {
@@ -531,9 +526,7 @@
                 agentSelection,
                 customAgent,
                 agentAutoMode: agentAutoMode && Boolean(agentAutoModeFlag(agentSelection)),
-                agentMcp: agentMcp
-                    && agentMcpAvailableHere()
-                    && Boolean(agentMcpFlag(agentSelection))
+                agentMcp: agentMcp && agentMcpSupported(agentSelection)
             };
         }
 
@@ -826,8 +819,7 @@
                     && Boolean(agentAutoModeFlag(getRowAgentSelection(row)))
                     && Boolean(row.querySelector('.t-agent-auto-mode')?.checked),
                 agent_mcp: commandMode === 'agent'
-                    && agentMcpAvailableHere()
-                    && Boolean(agentMcpFlag(getRowAgentSelection(row)))
+                    && agentMcpSupported(getRowAgentSelection(row))
                     && Boolean(row.querySelector('.t-agent-mcp')?.checked),
                 explorer_tree_open: commandMode === 'explorer' && row.dataset.explorerTreeOpen === 'true',
                 explorer_git_open: commandMode === 'explorer' && row.dataset.explorerGitOpen === 'true',
@@ -1590,9 +1582,7 @@
         if (!mcpField) {
             return;
         }
-        const available = commandMode === 'agent'
-            && agentMcpAvailableHere()
-            && Boolean(agentMcpFlag(selectedAgent));
+        const available = commandMode === 'agent' && agentMcpSupported(selectedAgent);
         mcpField.classList.toggle('hidden', !available);
         const help = row.querySelector('.t-agent-mcp-help');
         if (help) {
@@ -2065,7 +2055,7 @@
                                 >?</button>
                             </label>
                             <div class="inline-tip t-agent-auto-help"></div>
-                            <label class="check-field t-agent-mcp-field ${commandUi.mode === 'agent' && agentMcpAvailableHere() && agentMcpFlag(commandUi.agentSelection) ? '' : 'hidden'}">
+                            <label class="check-field t-agent-mcp-field ${commandUi.mode === 'agent' && agentMcpSupported(commandUi.agentSelection) ? '' : 'hidden'}">
                                 <input class="t-agent-mcp" type="checkbox" ${commandUi.agentMcp ? 'checked' : ''} aria-label="Give this agent GridVibe tools">
                                 <span class="check-copy">
                                     <strong>MCP</strong>
@@ -3710,7 +3700,7 @@
                 use_wsl: resolvedUseWsl,
                 use_powershell: resolvedUsePowershell,
                 ...paneLaunchFields
-            } = buildPaneLaunchFields(terminal, startupMode, config.connection_mode);
+            } = buildPaneLaunchFields(terminal, startupMode);
             const resolvedDirectory = buildLaunchDirectory(
                 configuredDefaultDir,
                 terminal.directory,

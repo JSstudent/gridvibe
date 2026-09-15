@@ -16,8 +16,10 @@ from typing import Any, Dict, Optional, Tuple
 from flask import jsonify, render_template, request, send_file, send_from_directory
 from flask_socketio import emit, join_room, leave_room
 
+from gridvibe_mcp.identity import DEFAULT_MAX_AGENT_DEPTH
 from gridvibe_version import __version__
 from sessions.manager import SessionManager, SessionStatus  # noqa: F401 - re-exported
+from web import mcp_http
 from web.agents import (  # noqa: F401 - re-exported for backwards compatibility
     AGENT_REGISTRY,
     AGENT_REGISTRY_PATH,
@@ -184,6 +186,7 @@ from web.lifecycle import (
 )
 from web.mcp_launch import (  # noqa: F401 - mcp_config_path re-exported for tests
     mcp_config_path,
+    server_base_url,
     set_server_address,
     write_mcp_config,
 )
@@ -3738,6 +3741,30 @@ def handle_voice_stop(data):
 
     emit('voice_status', {'session_id': session_id, 'status': 'stopped'})
     logger.info("Voice stopped for session %s", session_id)
+
+
+@app.route('/mcp/<token>', methods=['POST'])
+def mcp_streamable_http(token: str):
+    """MCP over streamable HTTP, for a pane whose shell is not on this machine.
+
+    The stdio sidecar cannot exist on a remote host, so a tunnelled pane's
+    agent is handed this URL instead of a command. The token names the pane --
+    identity cannot arrive by environment inheritance across a machine
+    boundary -- and is revoked when that pane closes.
+
+    Thin route, like every other: the protocol and the token registry live in
+    `web/mcp_http.py`, and the tools are the sidecar's own `dispatch`.
+    """
+    payload, status = mcp_http.handle_request(
+        token,
+        request.get_data() or b"",
+        base_url=server_base_url(),
+        max_agent_depth=DEFAULT_MAX_AGENT_DEPTH,
+    )
+    if payload is None:
+        # A notification earns an acknowledgement, not an empty JSON body.
+        return "", status
+    return jsonify(payload), status
 
 
 # ==================== Main Entry Point ====================

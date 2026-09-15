@@ -281,6 +281,18 @@ def _shutdown_connection(connection: Optional[Dict[str, Any]]):
     stdin_handle = connection.get("stdin")
     stdout_handle = connection.get("stdout")
 
+    # Before the client closes, while its transport can still carry the
+    # cancel and the SFTP delete: a tunnel left behind is a remote listener
+    # naming a pane that has gone, and a config file naming a dead port.
+    tunnel = connection.pop("mcp_tunnel", None)
+    if tunnel is not None:
+        from web.ssh_tunnel import teardown as _teardown_mcp_tunnel
+
+        try:
+            _teardown_mcp_tunnel(client, tunnel)
+        except Exception:
+            logger.debug("MCP tunnel teardown failed", exc_info=True)
+
     try:
         if channel is not None:
             channel.close()
@@ -1200,7 +1212,15 @@ def _run_startup_sequence(connection: Dict[str, Any], session: Any):
         marker_command = _arm_ssh_startup_scrub(connection, ssh_startup_commands)
         _send_connection_input(connection, f"{marker_command}{newline}")
 
-    startup_command = _compose_agent_startup_command(session)
+    # A tunnelled remote pane names the config that was just written on *its*
+    # host, not the one on this machine -- same flag, a path that resolves
+    # where the line is actually typed.
+    tunnel = connection.get("mcp_tunnel") or {}
+    startup_command = _compose_agent_startup_command(
+        session,
+        remote_config_path=str(tunnel.get("remote_path") or ""),
+        remote_url=str(tunnel.get("url") or ""),
+    )
     if startup_command:
         if unreachable_directory:
             # The `cd` above could not land, so this shell is standing
@@ -1757,6 +1777,76 @@ def _resolve_wsl_distribution(session: Any) -> str:
     return str(getattr(session, "distribution", "") or "").strip()
 
 
+def _establish_mcp_tunnel(
+    session_id: str,
+    session: Any,
+    connection: Dict[str, Any],
+    client: Any,
+) -> None:
+    """Give one remote agent pane a route home, if it asked for one.
+
+    Only a pane that ticked MCP opens a port: an untouched checkbox mints no
+    token, asks sshd for nothing and writes nothing on the remote host.
+
+    Records the result on the *connection* rather than the session, because it
+    belongs to this transport and dies with it -- a relaunched pane gets a new
+    port, a new token and a freshly written config.
+    """
+    if not bool(getattr(session, "agent_mcp", False)):
+        return
+    if str(getattr(session, "initial_command_mode", "") or "") != "agent":
+        return
+
+    from urllib.parse import urlparse
+
+    from web.mcp_http import pane_tokens
+    from web.mcp_launch import server_base_url
+    from web.ssh_tunnel import establish
+
+    group_id = str(getattr(session, "group_id", "") or "")
+    workspace_id = DEFAULT_WORKSPACE_ID
+    group = session_manager.groups.get(group_id) if group_id else None
+    if group is not None:
+        workspace_id = normalize_workspace_id(getattr(group, "workspace_id", None))
+
+    token = pane_tokens.mint(
+        session_id=session_id,
+        group_id=group_id,
+        workspace_id=workspace_id,
+        agent_depth=getattr(session, "agent_depth", 0),
+    )
+    if not token:
+        return
+
+    parsed = urlparse(server_base_url())
+    record = establish(
+        client,
+        session_id=session_id,
+        token=token,
+        local_host=parsed.hostname or "127.0.0.1",
+        local_port=int(parsed.port or 5050),
+    )
+    if record is None:
+        # Nothing to spend the token on, so it is not left standing.
+        pane_tokens.revoke(session_id)
+        _publish_ssh_terminal_output(
+            session_id,
+            "\r\n\x1b[33mGridVibe: could not open the tools channel to this "
+            "host, so the agent starts without GridVibe tools.\x1b[0m\r\n",
+            connection,
+        )
+        return
+
+    with connection_lock:
+        connection["mcp_tunnel"] = record
+    logger.info(
+        "[%s] MCP tunnel ready on remote port %s (config %s)",
+        session_id,
+        record.get("remote_port"),
+        record.get("remote_path"),
+    )
+
+
 def _connect_ssh_session(session_id: str, session: Any):
     """Establish an SSH connection for a single terminal session."""
     connection = _begin_connection(session_id)
@@ -1839,6 +1929,12 @@ def _connect_ssh_session(session_id: str, session: Any):
             return
 
         _connection_status(session_id, connection, SessionStatus.CONNECTED)
+
+        # Before the startup sequence, because that is what types the agent's
+        # launch line and the line has to name the config this places. A
+        # failure here costs the pane its tools and nothing else -- the shell
+        # is already open and is never torn down for it.
+        _establish_mcp_tunnel(session_id, session, connection, client)
 
         _run_startup_sequence(connection, session)
         _stream_ssh_output(session_id, connection)

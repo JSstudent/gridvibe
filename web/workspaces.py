@@ -11,17 +11,16 @@ module at import time, so every collaborator that leads back to the manager
 (``web.app``, ``web.terminal_io``, ``web.saved_sessions``) is imported lazily
 inside the functions that need it — the cycle only exists at import time.
 
-The 25 function-level imports were audited and every one targets an intra-app
+The 24 function-level imports were audited and every one targets an intra-app
 peer; **the standing rule is that nothing else may join them** — a stdlib or
 leaf-module import goes in this header, where a reader can see it. Fourteen are
 genuinely cycle-breaking, because their module reaches back here at import
 time: ``web.runtime_state`` (7 sites, imports this module directly),
 ``web.terminal_io`` (4, likewise), ``web.app`` (2) and ``sessions.manager`` (1,
-the root of the cycle). The other eleven — ``web.saved_sessions`` (7),
-``web.agents``, ``web.config``, ``web.explorer`` and ``web.mcp_launch`` (1
-each) — are **not**: their transitive closure is leaf-ward (``config`` →
-``paths``/``state_files``, ``mcp_launch`` → ``paths``/``terminal_cwd``) and they
-could be hoisted. They stay deferred deliberately, because a module-level
+the root of the cycle). The other ten — ``web.saved_sessions`` (7),
+``web.agents``, ``web.config`` and ``web.explorer`` (1 each) — are **not**:
+their transitive closure is leaf-ward (``config`` → ``paths``/``state_files``)
+and they could be hoisted. They stay deferred deliberately, because a module-level
 ``from web.saved_sessions import load_saved_sessions`` binds the function once
 at import and would silently escape the per-test patching this module's
 callers rely on. Late binding is the reason, not the cycle.
@@ -585,7 +584,6 @@ def _prepare_launch_sessions(
     connection_mode: str,
 ) -> List[Dict[str, Any]]:
     """Normalize each requested pane into its TerminalSession launch fields."""
-    from web.mcp_launch import LOCAL_PANE_MODE
     from web.saved_sessions import (
         DEFAULT_BROWSER_URL,
         _normalize_browser_active_tab,
@@ -599,17 +597,6 @@ def _prepare_launch_sessions(
     for config in sessions_config:
         prepared = dict(config)
         prepared["mode"] = connection_mode
-        if connection_mode != LOCAL_PANE_MODE:
-            # The earliest and most reliable moment GridVibe knows this pane's
-            # shell is not on this machine -- earlier than the agent preflight
-            # below, and the one moment every launch passes through, restore
-            # included. A stale client payload (an old cached launcher.js, a
-            # saved preset written before this rule existed, a direct API
-            # call) must not resurrect a flag `_compose_agent_startup_command`
-            # would have to silently swallow at connect time anyway; better it
-            # never reaches the live session at all, so the pane's own
-            # metadata does not claim tools it was never going to get.
-            prepared["agent_mcp"] = False
         startup_mode = _normalize_startup_mode(
             prepared.get("startup_mode") or prepared.get("initial_command_mode"),
             connection_mode,

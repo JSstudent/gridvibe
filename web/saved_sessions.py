@@ -251,15 +251,7 @@ def _normalize_terminal_entries(
                 "agent_selection": str(entry.get("agent_selection") or ""),
                 "custom_agent": str(entry.get("custom_agent") or ""),
                 "agent_auto_mode": startup_mode == "agent" and bool(entry.get("agent_auto_mode")),
-                # Local panes only, the same shape `_normalize_startup_mode`
-                # already uses for browser: the sidecar is a child of the
-                # pane's own shell, so a preset that names a remote host
-                # cannot carry it however the entry was written.
-                "agent_mcp": (
-                    startup_mode == "agent"
-                    and connection_mode == "wsl"
-                    and bool(entry.get("agent_mcp"))
-                ),
+                "agent_mcp": startup_mode == "agent" and bool(entry.get("agent_mcp")),
                 "explorer_tree_open": bool(entry.get("explorer_tree_open")),
                 "explorer_git_open": bool(entry.get("explorer_git_open")),
                 "explorer_git_follow_browsing": bool(

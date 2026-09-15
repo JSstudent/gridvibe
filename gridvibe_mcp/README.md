@@ -105,22 +105,63 @@ Phase 0 covers Windows-native local panes. WSL panes receive the variables but
 the checkbox waits on verifying that a Linux pane can reach the Windows
 interpreter through interop.
 
-**SSH panes get no tools, and cannot be talked into asking for them.** `sshd`
-forwards only what `AcceptEnv` permits, and a remote host has no route to the
-user's loopback — nor a copy of the generated config, whose path is this
-machine's. Enforced in four places rather than one, because the checkbox is not
-the only way a pane comes to carry `agent_mcp`:
+### Which CLIs can be handed the sidecar
 
-| Where | What it does |
+Three of the eight, and the mechanism differs for each. Every row was checked
+against the installed CLI's own `--help`, which is what `"verified": true` in
+`agent_registry.json` records.
+
+| CLI | How | Shape |
+| --- | --- | --- |
+| `claude` | `--mcp-config "<path>"` | `flag` template |
+| `copilot` | `--additional-mcp-config "@<path>"` — `@` marks a path rather than inline JSON, and it *augments* `~/.copilot/mcp-config.json` for the session | `flag` template |
+| `codex` | `-c mcp_servers.gridvibe.…` overrides — it takes no config file at all | `style: inline_toml` |
+
+The quote opens *before* Copilot's `@`: `@"C:\…"` starts a here-string in
+PowerShell and fails to parse.
+
+Codex's overrides are quoted per shell, because the two Windows shells
+disagree and no single string serves both — cmd must see the TOML literal
+quotes bare (double-quoted, the override is silently ignored), PowerShell and
+POSIX shells must see the outer double quotes (bare, Codex exits with *failed
+to load bootstrap configuration*). `_toml_override_flag` owns that one rule and
+the terminal-title override reads it too.
+
+`grok`, `hermes`, `opencode`, `kilo` and `kimi` publish nothing. Their only
+mechanism is an `<agent> mcp add` subcommand that edits the user's own config
+permanently — a change that would outlive the pane whose checkbox asked for it,
+which is why it is absent rather than pending.
+
+### SSH panes
+
+A remote pane's agent cannot run the sidecar: its host has no copy of it, no
+MCP SDK, and no address for this machine's loopback. So it does not run one.
+The protocol moves instead of the process.
+
+```
+remote agent ──HTTP──▶ 127.0.0.1:<assigned>   (on the remote host)
+                          │  sshd reverse forward, on the pane's own transport
+                          ▼
+                       GridVibe  POST /mcp/<token>   ──▶ the same dispatch()
+```
+
+| Piece | Where |
 | --- | --- |
-| `launcher.js` → `agentMcpAvailableHere()` | Offers the checkbox only in Local Repo mode |
-| `agents.py` → `_compose_agent_startup_command` | Drops the flag for any pane that is not local |
-| `session_shell.py` → `apply_pane_shell_change` | Refuses a stated `mcp: true`, mutating nothing |
-| `saved_sessions.py` → `_normalize_terminal_entries` | Normalizes the field away on an SSH preset |
+| MCP over streamable HTTP | `web/mcp_http.py` — reuses the sidecar's own synchronous `dispatch`, so a tool cannot behave differently by transport |
+| Per-pane token | `web/mcp_http.py` → `pane_tokens` — identity cannot cross a machine by inheritance, so it rides in the URL |
+| Reverse tunnel + remote config | `web/ssh_tunnel.py` — `request_port_forward` on the pane's existing transport, config placed over SFTP |
+| Wiring | `terminal_io._establish_mcp_tunnel`, torn down in `_shutdown_connection` |
 
-The predicate itself is `mcp_launch.pane_can_run_the_sidecar`, and a pane whose
-record does not say where its shell runs reads as remote — the answer that
-cannot cost the user their agent.
+Nothing is installed on the remote host. The config written there names a URL,
+not a command, which is why Codex gets `-c mcp_servers.gridvibe.url=` rather
+than the inline command-and-args form a local pane gets.
+
+**What this widens.** While a tunnelled pane is open, any process on that
+remote host that can reach the forwarded port can spend that pane's token, and
+the create tier acts on *this* machine. The bounds: sshd binds the remote
+host's own loopback (never its network), the port lives only as long as that
+connection, the token is refused the moment the pane closes, and a pane whose
+box is unticked opens no port and mints no token at all.
 
 ## Checking the surface without a running GridVibe
 

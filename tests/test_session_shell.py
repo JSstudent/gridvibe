@@ -809,12 +809,12 @@ class PaneMcpRelaunchTestCase(ShellTransitionTestCase):
         close_connection.assert_not_called()
         start_task.assert_not_called()
 
-    def test_an_ssh_pane_is_refused_mcp_without_moving(self):
-        """The sidecar is a child of the pane's shell, and that shell is elsewhere.
+    def test_an_ssh_pane_may_now_be_given_mcp(self):
+        """A remote pane's tools arrive over its own SSH reverse tunnel.
 
-        Refused rather than silently dropped: the caller stated `mcp: true` in
-        words, and a pane on a remote host can never honour it. Asserted on a
-        whole-pane snapshot, so a leaked mutation shows.
+        This route refused it outright while the sidecar could only be a local
+        child process. The pane now records the choice and its next connection
+        decides whether the tunnel could be opened.
         """
         session = self._ssh_pane(
             startup_mode="agent",
@@ -822,17 +822,14 @@ class PaneMcpRelaunchTestCase(ShellTransitionTestCase):
             agent_selection="claude",
             initial_command="claude",
         )
-        before = _pane_state(session.session_id)
 
-        response, close_connection, start_task = self._post_shell(
+        response, _close, start_task = self._post_shell(
             session.session_id, {"agent": "claude", "mcp": True}
         )
 
-        self.assertEqual(response.status_code, 400)
-        self.assertIn("this machine", response.get_json().get("error", ""))
-        self.assertEqual(_pane_state(session.session_id), before)
-        close_connection.assert_not_called()
-        start_task.assert_not_called()
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertTrue(api.session_manager.get_session(session.session_id).agent_mcp)
+        start_task.assert_called_once()
 
     def test_an_ssh_pane_may_still_state_mcp_false(self):
         """Only the impossible direction is refused.

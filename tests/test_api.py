@@ -5234,17 +5234,14 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(session.agent_selection, "claude")
         self.assertEqual(session.initial_command, "claude")
 
-    def test_create_sessions_never_launches_an_ssh_pane_with_mcp(self):
-        """The sidecar is a child of the pane's own shell; SSH has none of it.
+    def test_create_sessions_carries_mcp_onto_an_ssh_pane(self):
+        """A remote pane keeps the choice; its tunnel is what answers it.
 
-        `agent_mcp: true` on an SSH launch used to reach the live session
-        untouched -- `_compose_agent_startup_command` would still drop the
-        `--mcp-config` fragment at connect time, so the agent itself launched
-        fine, but the pane's own metadata went on claiming MCP was on. Saving
-        that pane then "reset" a tick the reader never actually got to keep,
-        with nothing explaining why. `_prepare_launch_sessions` now clears the
-        field at the one place every launch (fresh or restored) passes
-        through, so the live session never carries it in the first place.
+        The flag used to be cleared here, when the sidecar could only ever be
+        a local child process. A remote pane now reaches GridVibe through the
+        SSH reverse tunnel opened at connect time, so the launch records what
+        the reader asked for and `_connect_ssh_session` decides whether it
+        could be honoured.
         """
         sessions_payload = {
             "connection_mode": "ssh",
@@ -5274,7 +5271,7 @@ class ApiRoutesTestCase(unittest.TestCase):
 
         self.assertEqual(response.status_code, 201)
         session = api.session_manager.get_all_sessions()[0]
-        self.assertFalse(session.agent_mcp)
+        self.assertTrue(session.agent_mcp)
 
     def test_create_sessions_keeps_mcp_for_a_local_repo_launch(self):
         # The positive case behind the same gate: nothing here should cost a
@@ -18031,19 +18028,13 @@ class ExtractedFrontendAssetsTestCase(unittest.TestCase):
 
         self.assertIn("function resolvePaneStartupMode(terminal)", shared)
         self.assertIn("function buildPaneLaunchFields(terminal, startupMode =", shared)
-        # Each page's own connection mode travels in as the third argument --
-        # `config.connection_mode` on the launcher (a loaded preset can name a
-        # different mode than the page's own draft), the page's live
-        # `connectionMode` variable on terminals -- so the one place that
-        # decides whether MCP can ride along reads the mode the pane is
-        # actually about to launch under, not a stand-in for it.
-        for page_name, page, call in (
-            ("launcher", launcher, "buildPaneLaunchFields(terminal, startupMode, config.connection_mode);"),
-            ("terminals", terminals, "buildPaneLaunchFields(terminal, startupMode, connectionMode);"),
-        ):
+        for page_name, page in (("launcher", launcher), ("terminals", terminals)):
             with self.subTest(page=page_name):
                 self.assertIn("const startupMode = resolvePaneStartupMode(terminal);", page)
-                self.assertIn(f"}} = {call}", page)
+                self.assertIn(
+                    "} = buildPaneLaunchFields(terminal, startupMode);",
+                    page,
+                )
                 self.assertNotIn("savedStartupMode", page)
 
     def test_launcher_button_and_dead_display_fixes_locked_in(self):
@@ -22336,16 +22327,19 @@ class SettingsLauncherConfigTestCase(unittest.TestCase):
     def test_launcher_wires_the_mcp_toggle(self):
         """The MCP checkbox mirrors Auto mode in every place Auto mode is.
 
-        Including the one that makes it optional: an agent publishing no
-        `mcp_flag` has no checkbox at all, which is how a CLI whose MCP
-        mechanism has not been verified needs no code.
+        Including the one that makes it optional: an agent that cannot be
+        handed the sidecar at launch has no checkbox at all, which is how a CLI
+        whose only MCP mechanism edits the user's own config needs no code.
         """
         html = self.client.get("/").get_data(as_text=True)
-        self.assertIn("mcp_flag", html)
+        self.assertIn("mcp_supported", html)
         self.assertIn("mcp_description", html)
 
         launcher_js = self._static("js/launcher.js")
-        self.assertIn("function agentMcpFlag(agentValue)", launcher_js)
+        # `mcp_supported`, never `mcp_flag`: Codex supports MCP and publishes
+        # no flag string, so flag truthiness would hide a working checkbox.
+        self.assertIn("function agentMcpSupported(agentValue)", launcher_js)
+        self.assertNotIn("function agentMcpFlag(", launcher_js)
         self.assertIn("function agentMcpDescription(agentValue)", launcher_js)
         self.assertIn(
             "function syncTerminalAgentMcpState(row, commandMode, selectedAgent)",
@@ -22358,12 +22352,10 @@ class SettingsLauncherConfigTestCase(unittest.TestCase):
             launcher_js.index("function renderCountOptions()")
         ]
         self.assertIn("agent_mcp:", collect)
-        # The sidecar is a child of the pane's own shell, so the checkbox is
-        # not offered where that shell is on another machine. One predicate,
-        # read by the sync, the row template and the collect alike -- the
-        # server refuses the same thing independently.
-        self.assertIn("function agentMcpAvailableHere()", launcher_js)
-        self.assertIn("agentMcpAvailableHere()", collect)
+        # A remote pane is offered the checkbox too now: its tools arrive over
+        # the SSH reverse tunnel rather than from a local sidecar, so the
+        # connection mode is no longer part of the question.
+        self.assertNotIn("agentMcpAvailableHere", launcher_js)
 
         shared_js = self._static("js/shared.js")
         self.assertIn("agent_mcp: resolvedStartupMode === 'agent'", shared_js)
@@ -22372,12 +22364,28 @@ class SettingsLauncherConfigTestCase(unittest.TestCase):
         options = {option["value"]: option for option in web_agents._agent_options()}
 
         self.assertEqual(options["claude"]["mcp_flag"], "--mcp-config {config}")
+        self.assertEqual(
+            options["copilot"]["mcp_flag"], "--additional-mcp-config @{config}"
+        )
         self.assertTrue(options["claude"]["mcp_description"])
-        # No block published, so no checkbox — the seven other CLIs each need
-        # their own verification against a current release before one is.
-        for key in ("codex", "copilot", "kimi", "kilo", "grok", "hermes", "opencode", "other"):
+        # Codex supports MCP and publishes no flag *string*: it takes no config
+        # file, so its servers are composed as `-c` overrides at launch. Which
+        # is why the checkbox asks `mcp_supported`, never `mcp_flag`.
+        self.assertEqual(options["codex"]["mcp_flag"], "")
+        self.assertTrue(options["codex"]["mcp_supported"])
+
+        for key in ("claude", "copilot", "codex"):
+            with self.subTest(supported=key):
+                self.assertTrue(options[key]["mcp_supported"])
+                self.assertTrue(options[key]["mcp_description"])
+
+        # The rest can only register a server by editing the user's own config
+        # (an `<agent> mcp add` subcommand), which would outlive the pane that
+        # asked. No launch-time mechanism, so no checkbox.
+        for key in ("kimi", "kilo", "grok", "hermes", "opencode", "other"):
             with self.subTest(agent=key):
                 self.assertEqual(options[key]["mcp_flag"], "")
+                self.assertFalse(options[key]["mcp_supported"])
 
     def test_a_pane_that_did_not_ask_for_mcp_changes_in_no_way(self):
         session = SimpleNamespace(
@@ -22415,7 +22423,7 @@ class SettingsLauncherConfigTestCase(unittest.TestCase):
             launcher_js.index("function buildSessionsFromConfig(config, count)"):
             launcher_js.index("async function launchSessions()")
         ]
-        self.assertIn("buildPaneLaunchFields(terminal, startupMode, config.connection_mode)", launch)
+        self.assertIn("buildPaneLaunchFields(terminal, startupMode)", launch)
         shared_js = self._static("js/shared.js")
         self.assertIn(
             "agent_auto_mode: resolvedStartupMode === 'agent'",
@@ -22644,7 +22652,6 @@ class WorkspacesImportHygieneTestCase(unittest.TestCase):
                 "web.agents",
                 "web.config",
                 "web.explorer",
-                "web.mcp_launch",
                 "web.saved_sessions",
             },
         )

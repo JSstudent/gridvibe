@@ -17,11 +17,18 @@ Four properties, each of which has a way of silently not happening:
 - **The flag is composed only when the pane asks and the agent publishes one.**
   Seven of the eight registered CLIs publish no MCP block, and their checkbox
   is simply absent — the same thing `opencode` already does for Auto mode.
-- **And only on a pane whose shell is on this machine.** The composed line is
-  typed into whatever shell the pane holds. On an SSH pane that shell is on
-  another host, where the Windows config path resolves against the remote cwd
-  and the agent refuses to start at all — so the pane costs the user their
-  agent, not just its tools.
+- **A remote pane names the config on its *own* host.** The composed line is
+  typed into whatever shell the pane holds. A local pane names the generated
+  file here; a tunnelled SSH pane names what its tunnel wrote over there. A
+  remote pane with no tunnel gets no fragment at all rather than a path it
+  cannot read — which costs the tools, never the agent.
+- **A `-c` override is quoted for the shell that will read it.** The two
+  Windows shells genuinely disagree, verified against the installed CLI: bare
+  single quotes are what cmd must see (wrapping them in double quotes reaches
+  Codex as a value it silently declines to apply), and the outer double quotes
+  are what PowerShell must see (bare, it eats the brackets itself and Codex
+  exits with *failed to load bootstrap configuration*). No single string
+  serves both, so the composition reads the pane's shell family.
 """
 
 import io
@@ -289,10 +296,10 @@ class SavedPresetTestCase(unittest.TestCase):
     def test_a_local_preset_keeps_the_choice(self):
         self.assertTrue(self._preset("wsl")["agent_mcp"])
 
-    def test_an_ssh_preset_carries_no_mcp_however_it_was_written(self):
-        # A preset hand-edited, or written by a build before the rule existed,
-        # still reads back as False rather than launching a broken agent.
-        self.assertFalse(self._preset("ssh")["agent_mcp"])
+    def test_an_ssh_preset_keeps_the_choice_too(self):
+        # A remote pane's tools arrive over its own SSH reverse tunnel, so the
+        # preset records what was asked for and the connection answers it.
+        self.assertTrue(self._preset("ssh")["agent_mcp"])
 
     def test_a_non_agent_preset_carries_no_mcp_either(self):
         # The pre-existing rule, still held: no CLI, nothing to register with.
@@ -318,11 +325,12 @@ class FlagCompositionTestCase(unittest.TestCase):
     def _pane(self, **overrides):
         # `mode="wsl"` is the *local* family (cmd/PowerShell/WSL), which is the
         # only place the sidecar can run. Stated rather than defaulted, because
-        # it is now one of the things composition reads.
+        # it is now one of the things composition reads, and so is the shell
+        # family: a `-c` override has to be quoted for the shell that reads it.
         fields = dict(
             initial_command="claude", initial_command_mode="agent",
             agent_selection="claude", agent_auto_mode=False, agent_mcp=False,
-            mode="wsl",
+            mode="wsl", use_wsl=False, use_powershell=False,
         )
         fields.update(overrides)
         return SimpleNamespace(**fields)
@@ -375,10 +383,11 @@ class FlagCompositionTestCase(unittest.TestCase):
         self.assertIn("--permission-mode auto", command)
         self.assertIn("--mcp-config", command)
 
-    def test_an_ssh_pane_gets_no_flag_however_the_field_was_set(self):
-        # The config path exists *here*. Typed into a remote shell it resolves
-        # against that host's cwd, and the CLI exits with
-        # "MCP config file not found" before the agent ever starts.
+    def test_a_remote_pane_with_no_tunnel_gets_no_flag(self):
+        # The local config path exists *here*. Typed into a remote shell it
+        # resolves against that host's cwd and the CLI exits with "MCP config
+        # file not found" before the agent starts, so a pane whose tunnel
+        # never opened is given nothing at all.
         pane = self._pane(agent_mcp=True, mode="ssh")
 
         command = web_agents._compose_agent_startup_command(pane)
@@ -389,20 +398,122 @@ class FlagCompositionTestCase(unittest.TestCase):
 
     def test_a_pane_with_no_mode_at_all_is_treated_as_remote(self):
         # Absent is not local. A pane record too old or too partial to say
-        # where its shell runs gets the answer that cannot break the agent.
+        # where its shell runs gets the answer that cannot break the agent:
+        # no local path, and no tunnel was passed, so no fragment.
         pane = self._pane(agent_mcp=True)
         del pane.mode
 
         self.assertEqual(web_agents._compose_agent_startup_command(pane), "claude")
 
     def test_an_ssh_pane_keeps_every_other_composed_flag(self):
-        # The refusal is the MCP fragment alone -- auto mode is a flag the
-        # remote CLI understands perfectly well.
+        # Only the MCP fragment depends on the tunnel -- auto mode is a flag
+        # the remote CLI understands perfectly well either way.
         command = web_agents._compose_agent_startup_command(
             self._pane(agent_auto_mode=True, agent_mcp=True, mode="ssh")
         )
 
         self.assertEqual(command, "claude --permission-mode auto")
+
+    def test_copilot_gets_its_path_marker_inside_the_quotes(self):
+        r"""`@"C:\..."` would start a here-string in PowerShell.
+
+        Copilot marks a file path (rather than inline JSON) with a leading
+        `@`. Placing it outside the quote is a PowerShell parse error, so the
+        quote opens first and the CLI still receives the `@path` it asked for.
+        """
+        fragment = web_agents._agent_mcp_command_fragment("copilot")
+
+        self.assertEqual(
+            fragment, f'--additional-mcp-config "@{self.config_path}"'
+        )
+        self.assertNotIn('@"', fragment)
+
+    def test_codex_registers_the_sidecar_without_a_config_file(self):
+        """Codex takes no config file, so the servers ride in as overrides."""
+        self.config_path.write_text(
+            json.dumps(
+                {
+                    "mcpServers": {
+                        "gridvibe": {
+                            "command": r"C:\venv\python.exe",
+                            "args": [r"C:\gv\__main__.py", "--url", "http://127.0.0.1:5050"],
+                        }
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        cmd_form = web_agents._agent_mcp_command_fragment("codex", shell_family="cmd")
+        ps_form = web_agents._agent_mcp_command_fragment("codex", shell_family="powershell")
+
+        # cmd must see the single quotes bare; wrapped in double quotes the
+        # override reaches Codex as a value it silently declines to apply.
+        # The backslashes survive because a TOML literal string has no escapes.
+        self.assertEqual(
+            cmd_form,
+            r"-c mcp_servers.gridvibe.command='C:\venv\python.exe'"
+            r" -c mcp_servers.gridvibe.args=['C:\gv\__main__.py','--url','http://127.0.0.1:5050']",
+        )
+        # PowerShell must see the outer double quotes; bare, it eats the
+        # brackets and Codex refuses to start at all.
+        self.assertEqual(
+            ps_form,
+            "-c \"mcp_servers.gridvibe.command='C:\\venv\\python.exe'\""
+            " -c \"mcp_servers.gridvibe.args=["
+            "'C:\\gv\\__main__.py','--url','http://127.0.0.1:5050']\"",
+        )
+        # No config *path* is named: the file's contents travel, not its name.
+        self.assertNotIn(str(self.config_path), cmd_form)
+
+    def test_a_value_holding_a_quote_costs_the_fragment_not_the_agent(self):
+        # A TOML literal string processes no escapes, so a value carrying a
+        # quote of either kind cannot be written this way at all.
+        self.config_path.write_text(
+            json.dumps(
+                {"mcpServers": {"gridvibe": {"command": r"C:\it's\python.exe", "args": []}}}
+            ),
+            encoding="utf-8",
+        )
+
+        self.assertEqual(web_agents._agent_mcp_command_fragment("codex"), "")
+
+    def test_each_local_shell_family_gets_its_own_quoting_end_to_end(self):
+        """The pane, not the caller, decides the quoting."""
+        self.config_path.write_text(
+            json.dumps(
+                {"mcpServers": {"gridvibe": {"command": "py.exe", "args": ["entry.py"]}}}
+            ),
+            encoding="utf-8",
+        )
+        pane = self._pane(
+            initial_command="codex", agent_selection="codex", agent_mcp=True
+        )
+
+        cmd_line = web_agents._compose_agent_startup_command(pane)
+        pane.use_powershell = True
+        ps_line = web_agents._compose_agent_startup_command(pane)
+
+        self.assertIn("-c mcp_servers.gridvibe.command='py.exe'", cmd_line)
+        self.assertIn("-c \"mcp_servers.gridvibe.command='py.exe'\"", ps_line)
+        # The title override is the same mechanism and follows the same rule.
+        self.assertIn("-c tui.terminal_title=['thread-title']", cmd_line)
+        self.assertIn("-c \"tui.terminal_title=['thread-title']\"", ps_line)
+
+    def test_an_agent_whose_only_mechanism_edits_the_users_config_gets_nothing(self):
+        """`<agent> mcp add` would outlive the pane that ticked a checkbox."""
+        for key in ("grok", "hermes", "opencode", "kilo", "kimi"):
+            with self.subTest(agent=key):
+                self.assertFalse(web_agents._agent_supports_mcp(key))
+                self.assertEqual(web_agents._agent_mcp_command_fragment(key), "")
+
+    def test_the_three_supported_clis_are_the_ones_that_were_verified(self):
+        for key in ("claude", "copilot", "codex"):
+            with self.subTest(agent=key):
+                self.assertTrue(web_agents._agent_supports_mcp(key))
+                self.assertTrue(
+                    web_agents.AGENT_REGISTRY[key]["mcp"].get("verified")
+                )
 
     def test_the_launcher_is_told_which_agents_publish_a_block(self):
         options = {option["value"]: option for option in web_agents._agent_options()}

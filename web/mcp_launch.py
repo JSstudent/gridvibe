@@ -169,6 +169,29 @@ def write_mcp_config(
     return target
 
 
+def read_mcp_server_block(path: Optional[str] = None) -> Dict[str, Any]:
+    """Return the generated config's own server entry, or ``{}``.
+
+    Not every agent CLI can be handed a config *file*. Codex takes inline
+    ``-c key=value`` overrides instead, so its launch line needs the same
+    command and args the file holds rather than a path to it. Read back from
+    the generated file rather than rebuilt from ``build_mcp_config`` so both
+    shapes state one thing: whatever the running install actually wrote.
+    """
+    target = path or mcp_config_path()
+    try:
+        with open(target, encoding="utf-8") as handle:
+            document = json.load(handle)
+    except (OSError, ValueError) as exc:
+        logger.warning("Could not read %s: %s", target, exc)
+        return {}
+    servers = document.get("mcpServers")
+    if not isinstance(servers, dict):
+        return {}
+    block = servers.get(MCP_SERVER_NAME)
+    return block if isinstance(block, dict) else {}
+
+
 def pane_identity_environment(
     *,
     session_id: str,
