@@ -329,6 +329,22 @@ changing any field that survives restart; it owns the complete save/restore flow
   publishes no mechanism gets no button, exactly as a pane with no shell family
   gets no chevron; the two surfaces read the one registry field, never a
   second rule client-side.
+- **A pane is painted for a relaunch before the relaunch is requested, and no
+  pane is left behind an overlay nothing removes.** The route starts the new
+  transport while it is still writing its response — a local shell is marked
+  connected inside that same request — so the connected `session_status` can
+  reach the page first, and on an already-attached pane that event is the only
+  thing that takes the overlay off. `relaunchSessionShell()` therefore raises
+  the "Connecting…" overlay, and resets the pane's xterm, before its POST: a
+  reset that waited would clear what the new shell had already drawn, and an
+  overlay that waited would outlive the window. A request that then fails
+  repaints the pane from its own session record (`syncPanePlaceholder()`)
+  rather than leaving a spinner over a shell that is still running, under the
+  same slot-ownership re-check as everything else done after an await. On the
+  receiving side the status event is not the only remover: every group load and
+  status refresh takes the overlay off a connected pane that is already
+  attached, which is also what heals a pane that connected while its group was
+  not the visible one.
 - **Every terminal/agent→Files switch derives a fresh root from where the pane
   is standing:** the Git worktree containing its working directory, else that
   directory itself (`_resolve_explorer_open_root()`, which takes those two

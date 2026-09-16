@@ -12,6 +12,7 @@ async function shellCallbacks() {
         let complete;
         let resets = 0;
         let placeholders = 0;
+        const synced = [];
         const a = pane('A'), b = pane('B');
         a.term = { reset() { resets++; } };
         b.term = { reset() { throw Error('Reset wrong pane'); } };
@@ -19,6 +20,7 @@ async function shellCallbacks() {
             isExplorerSession: () => false, isBrowserSession: () => false, document,
             syncPaneIdentityChrome() {},
             showPlaceholderConnecting() { placeholders++; }, showTerminalToast() {},
+            syncPanePlaceholder(index) { synced.push(ctx.sessionIds[index]); },
             fetch: () => new Promise(resolve => { complete = resolve; }) });
         vm.runInContext(source('terminal-shell.js'), ctx);
         const pending = ctx.relaunchSessionShell(0, { agent: 'claude' });
@@ -28,8 +30,14 @@ async function shellCallbacks() {
         complete({ ok, json: async () => ({ session_id: 'A', mode: 'ssh', startup_mode: 'agent', agent_selection: 'claude' }) });
         await pending;
         assert.equal(b._session.session_id, 'B');
-        assert.equal(resets, ok && returnToOwner ? 1 : 0);
-        assert.equal(placeholders, resets);
+        /* The pane that asked is reset and painted before the request goes out
+           — the connected broadcast can beat the response home — so the slot
+           changing hands afterwards can never move either onto B. */
+        assert.equal(resets, 1);
+        assert.equal(placeholders, 1);
+        /* Only the repaint that undoes a failed request waits for the answer,
+           and it is addressed to the pane that still owns the slot. */
+        assert.deepEqual(synced, !ok && returnToOwner ? ['A'] : []);
         assert.equal(a._session.startup_mode, ok ? 'agent' : 'terminal');
         assert.equal(vm.runInContext('_pendingShellSwitchPanes.size', ctx), 0);
     }

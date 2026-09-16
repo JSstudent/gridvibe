@@ -573,6 +573,18 @@
 
         _pendingShellSwitchPanes.add(pane);
         renderPaneShellMenu(index);
+        /* The spinner goes up before the request, never after it. The new
+           transport is started while the route is still writing its response —
+           a local shell is marked connected inside that same request — so a
+           connected `session_status` can reach the page first, and that event
+           is the one thing that takes the overlay off an attached pane: an
+           overlay raised behind it stays up for the life of the window
+           (ISSUE-2026-053). Clearing the pane's xterm here is the same race in
+           reverse: the backend has already dropped the old shell's replay
+           buffer, so a reset awaited first wipes what the *new* shell has
+           already drawn. */
+        pane?.term?.reset?.();
+        showPlaceholderConnecting(index);
         try {
             const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/shell`, {
                 method: 'POST',
@@ -590,13 +602,17 @@
             index = ownerIndex;
             closeAllPaneShellMenus();
             syncPaneIdentityChrome(index, data);
-            /* The backend cleared the old shell's replay buffer; drop its output
-               here too so the fresh shell starts on a clean screen. */
-            pane?.term?.reset?.();
-            showPlaceholderConnecting(index);
         } catch (error) {
             console.error('[GridVibe Sessions] relaunchSessionShell failed:', error);
             showTerminalToast(error.message || 'Relaunch failed', 'error');
+            /* Nothing was relaunched: the pane is still running what it was, so
+               the spinner comes back off and the pane wears whatever its own
+               session record calls for, rather than a "Connecting…" overlay
+               over a live shell. */
+            const failedIndex = terminals.indexOf(pane);
+            if (failedIndex >= 0 && sessionIds[failedIndex] === sessionId) {
+                syncPanePlaceholder(failedIndex);
+            }
         } finally {
             _pendingShellSwitchPanes.delete(pane);
             const ownerIndex = terminals.indexOf(pane);

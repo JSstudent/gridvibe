@@ -61,14 +61,17 @@ Edge cases: the live path must stay untouched — `_cache_terminal_output()` kee
 
 Tests: extend `tests/test_api.py:14715` (`test_join_session_replays_sanitized_buffered_output_to_new_client`), which already asserts the DA and `OSC 10/11` queries are stripped, with the `OSC 4` query, both DECRQM forms, `CSI ?6n`, the three `t` reports and the two DCS queries — and, in the same suite, one case asserting an `OSC 4 ; 1 ; rgb:…` **set** survives the scrub unmodified. On the client side, a case over the close path asserting a non-last close leaves and re-joins each surviving session pins the trigger, so a later change to `closeTerminalPane()` cannot quietly remove the exposure this fix is written against.
 
+## Closed Issues
+
 ### Issue ID: ISSUE-2026-053
 - Title: Relaunched terminal pane keeps a permanent "Connecting…" overlay
 - Priority: Medium
-- Status: Open
+- Status: Closed
 - Area: `web/static/js/terminal-shell.js`, `web/static/js/terminals.js`
 - Assignee: Unassigned
 - Tags: `terminal`, `session`, `socketio`, `tests`
 - Reported: 2026-09-14
+- Closed: 2026-09-15
 
 Description:
 Relaunching a live terminal pane from the pane header reset dropdown — onto another shell family, onto an agent, or back to a plain shell — can leave that pane's "Connecting…" spinner on screen permanently. The shell behind it is running and connected, and its output is written into the xterm underneath, but the overlay covers the pane and nothing afterwards removes it: not the next status event, not switching session tabs, not a group reload. The reader's only recovery is reloading the whole window, and until they do the pane looks hung.
@@ -110,7 +113,16 @@ Edge cases: a relaunch refused before the POST (pane not relaunchable, shell swi
 
 Tests: extend `tests/test_terminal_shell_menu.py`, which already stubs `showPlaceholderConnecting` (line 83), with a case asserting the placeholder is shown before the relaunch request is issued, and one driving a connected `session_status` at an attached pane to assert the overlay is gone. A case over the `refresh` loop covers the reload half, including the pane that connected while its group was not visible.
 
-## Closed Issues
+Resolution:
+Both halves, as proposed. `relaunchSessionShell()` now raises the overlay — and resets the pane's xterm — after the relaunchable guards and the `_pendingShellSwitchPanes` claim and *before* the POST, so the connected `session_status` always lands on an overlay that exists; the ordering `retrySessionConnection()` already used. That created one exposure the report did not have: a request the route then refuses had painted a pane whose old shell is still running, so the catch repaints it from its own session record through the new `syncPanePlaceholder()` in `terminals.js` (connected wears none, error and retryable disconnect wear their own, a pane still coming up keeps its spinner) under the same `terminals.indexOf(pane)` ownership re-check as the success path. A toast, not an error overlay: the pane's shell is alive underneath and must not be covered.
+
+The reload half is the two-line branch the report asked for, in the `initialLoad` and `refreshStatuses` pane loops: a connected pane that is *already* attached has its `ph-<index>` removed, mirroring the `session_status` handler. That is what heals a pane which connected while its group was not the visible one, since returning to that tab is a load.
+
+The hypothesis about the trigger was not needed: the ordering is decided by the log sequence in the report (connector started, then the response written) and the fix removes the race rather than reasoning about who wins it.
+
+Contract: `docs/engineering_contracts.md` gained a Pane-transitions bullet stating the paint-before-request rule, the failed-request repaint and the two additional removers, so a later change cannot reintroduce a raise-after-await as a tidy-up.
+
+Cover: `tests/test_terminal_shell_menu.py` (`RelaunchedPaneOverlayTestCase`) — the real module, pressed through its own menu handler: the pane is reset and painted before the request is issued, a refused relaunch repaints from the record and reports once, a relaunch refused before the POST paints nothing at all, and a pane whose slot changed hands mid-request is not repainted. `tests/test_pane_connecting_overlay.py` — the shipped `initialLoad()`, `refreshStatuses()`, `attachTerminal()` and the placeholder helpers executed in Node against a stub page holding real placeholder DOM: each load path heals a stale overlay without rebuilding the pane, a pane still coming up keeps its spinner, error and disconnected panes still get their own, the unattached pane is still attached by the branch beside it, explorer panes are untouched, and `syncPanePlaceholder()` is driven over all four statuses. Neutering either healing branch fails exactly the two cases that assert it.
 
 ### Issue ID: ISSUE-2026-052
 - Title: Saving a session fails for two minutes after a workspace window is reopened
