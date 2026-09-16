@@ -1,9 +1,18 @@
-/* GridVibeWindowIntent — the page half of "somebody please open this window".
+/* GridVibeWindowIntent — the page half of "somebody with a page please do this".
 
-   Creating a workspace over HTTP creates a record; it does not make anything
-   appear on screen. In native mode nothing outside a page can open a pywebview
-   window, so the MCP sidecar leaves an *intent* on the server and whichever
-   GridVibe page is open picks it up.
+   Two things GridVibe cannot do from outside a page, and one poll answers both:
+
+   - **Open a window.** Creating a workspace over HTTP creates a record; it
+     does not make anything appear on screen, and in native mode nothing
+     outside a page can open a pywebview window.
+   - **Split a pane.** The split axis never reaches the server. The page
+     computes the new rectangles, and its refusals — the minimum columns and
+     rows below a terminal header, the narrow-viewport rule, the pane cap — are
+     measured off the live terminal. A process that cannot measure a pane
+     cannot place one.
+
+   So the MCP sidecar leaves an *intent* on the server and whichever GridVibe
+   page can act on it picks it up.
 
    Two halves, the same split every other module here uses:
 
@@ -13,13 +22,19 @@
      read goes through the injected runtime, which is what lets Node execute
      the behaviour instead of tests asserting source text.
 
-   Three rules the poll exists to keep:
+   Four rules the poll exists to keep:
 
-   - **Claim before opening.** Two open pages see the same pending intent. The
+   - **Claim before acting.** Two open pages see the same pending intent. The
      claim endpoint succeeds for exactly one of them, so the user gets one
-     window rather than two. A page that loses the claim does nothing at all.
-   - **Report once, honestly.** `opened` or `blocked` — the page never retries
-     and never reports an outcome it did not observe.
+     window (or one new pane) rather than two. A page that loses the claim does
+     nothing at all.
+   - **Only the page that can act, claims.** A split intent names a pane, and
+     only the window holding that pane may take it. The launcher holds no
+     panes and therefore never claims a split.
+   - **Report once, honestly.** `opened`/`blocked` for a window, `split`/
+     `refused` for a split — the page never retries, never reports an outcome
+     it did not observe, and never silently splits the other way when the
+     asked-for axis will not fit.
    - **Suspend on a hidden page.** Established practice here: a background tab
      polls nothing. */
 (function (root, factory) {
@@ -36,20 +51,48 @@
 
     const OPENED = 'opened';
     const BLOCKED = 'blocked';
+    const SPLIT = 'split';
+    const REFUSED = 'refused';
+
+    const WINDOW_KIND = 'window';
+    const SPLIT_KIND = 'split';
+
+    /* What a stacked or side-by-side split is called in a sentence, so a
+       refusal can name the axis that *would* have worked in the words the
+       button uses rather than in the wire's. */
+    const AXIS_WORDS = {
+        vertical: 'side-by-side',
+        horizontal: 'stacked'
+    };
 
     const policy = {
+        /* The kind of thing an intent asks for. Defaults to a window, because
+           that is the only kind that existed before splits and an older
+           server's records carry no kind at all. */
+        kind(intent) {
+            return String(intent?.kind || WINDOW_KIND);
+        },
+
         /* The intents this page should try to claim, in the order the server
-           listed them. An entry with no workspace is not actionable, and a
-           state other than `pending` has already been taken. */
-        actionable(intents) {
+           listed them.
+
+           A window intent with no workspace is not actionable. A *split*
+           intent is only actionable on the page holding its pane: the launcher
+           holds none, and a second workspace window holding a different group
+           holds not this one. `owns` is the page's own answer to that, and a
+           page with no way to split at all passes none. */
+        actionable(intents, owns = null) {
             if (!Array.isArray(intents)) return [];
-            return intents.filter(intent => (
-                intent
-                && typeof intent === 'object'
-                && String(intent.workspace_id || '').trim()
-                && String(intent.state || 'pending') === 'pending'
-                && String(intent.intent_id || '').trim()
-            ));
+            return intents.filter(intent => {
+                if (!intent || typeof intent !== 'object') return false;
+                if (String(intent.state || 'pending') !== 'pending') return false;
+                if (!String(intent.intent_id || '').trim()) return false;
+                if (policy.kind(intent) === SPLIT_KIND) {
+                    const sessionId = String(intent.session_id || '').trim();
+                    return Boolean(sessionId && owns && owns(sessionId));
+                }
+                return Boolean(String(intent.workspace_id || '').trim());
+            });
         },
 
         /* Whether a claim response means this page won the intent. Anything
@@ -73,6 +116,37 @@
             return opened
                 ? ''
                 : 'The GridVibe window could not be opened from this page.';
+        },
+
+        /* Why an axis was refused, in GridVibe's own words, plus whether the
+           other axis would have worked.
+
+           Naming the other axis is the whole point: an agent told only
+           "refused" calls the same thing again, and an agent told "stacked
+           would work" can offer that instead. Saying it is not doing it — the
+           page never splits on an axis nobody asked for. */
+        splitRefusal(axis, candidates, reason) {
+            const other = axis === 'vertical' ? 'horizontal' : 'vertical';
+            const available = Array.isArray(candidates) ? candidates : [];
+            const sentence = String(reason || 'This pane cannot be split.').trim();
+            const tail = available.includes(other)
+                ? `A ${AXIS_WORDS[other]} split would work on this pane.`
+                : 'Neither axis would work on this pane.';
+            return `${sentence.replace(/\.$/, '')}. ${tail}`;
+        },
+
+        /* The pane a settled split reports back, as a field list rather than
+           whatever the session payload happened to carry. */
+        splitResult(result) {
+            const session = result?.session || {};
+            return {
+                session_id: String(session.session_id || ''),
+                group_id: String(session.group_id || ''),
+                title: String(session.title || ''),
+                startup_mode: String(session.startup_mode || ''),
+                agent_selection: String(session.agent_selection || ''),
+                index: Number.isInteger(result?.index) ? result.index : null
+            };
         }
     };
 
@@ -82,6 +156,9 @@
             claimIntent,
             reportResult,
             openWorkspaceWindow,
+            /* The page's split half, absent on the launcher — which is exactly
+               what stops the launcher from claiming a split it cannot do. */
+            splitBridge = null,
             setInterval: schedule,
             clearInterval: unschedule,
             isVisible = () => true,
@@ -111,6 +188,12 @@
             }
             if (!policy.claimed(claim)) return false;
 
+            return policy.kind(intent) === SPLIT_KIND
+                ? deliverSplit(intentId, intent)
+                : deliverWindow(intentId, intent);
+        }
+
+        async function deliverWindow(intentId, intent) {
             let opened = false;
             try {
                 opened = Boolean(await openWorkspaceWindow(
@@ -133,13 +216,61 @@
             return opened;
         }
 
+        async function deliverSplit(intentId, intent) {
+            const sessionId = String(intent.session_id || '');
+            const axis = String(intent.axis || '');
+            let outcome = REFUSED;
+            let detail = 'This window could not split that pane.';
+            let result = null;
+            try {
+                /* Asked before the split rather than inferred after it: a pane
+                   too small to halve is a refusal with a reason, not a failed
+                   request. The candidates are what the header button reads to
+                   decide whether its own arrow is enabled. */
+                const candidates = splitBridge.candidates(sessionId);
+                if (!Array.isArray(candidates) || !candidates.includes(axis)) {
+                    detail = policy.splitRefusal(
+                        axis,
+                        candidates,
+                        splitBridge.disabledReason(axis)
+                    );
+                } else {
+                    const performed = await splitBridge.perform(
+                        sessionId,
+                        axis,
+                        intent.split_request || null
+                    );
+                    if (performed?.ok) {
+                        outcome = SPLIT;
+                        detail = '';
+                        result = policy.splitResult(performed);
+                    } else {
+                        detail = String(performed?.error || detail);
+                    }
+                }
+            } catch (error) {
+                onError(error);
+                detail = `The split failed in this window: ${error.message}`;
+            }
+            try {
+                await reportResult(intentId, outcome, detail, result);
+            } catch (error) {
+                onError(error);
+            }
+            return outcome === SPLIT;
+        }
+
         async function tick() {
             /* A hidden page polls nothing, and a still-running pass is never
-               overlapped: opening a window can take a second or more. */
+               overlapped: opening a window or splitting a pane can take a
+               second or more. */
             if (running || !isVisible()) return;
             running = true;
             try {
-                const intents = policy.actionable(await listIntents());
+                const intents = policy.actionable(
+                    await listIntents(),
+                    splitBridge ? sessionId => splitBridge.owns(sessionId) : null
+                );
                 for (const intent of intents) {
                     await deliver(intent);
                 }
@@ -192,13 +323,15 @@
         return { ...payload, ok: response.ok };
     }
 
-    async function report(intentId, outcome, detail) {
+    async function report(intentId, outcome, detail, result) {
         await fetch(
             `/api/windows/intents/${encodeURIComponent(intentId)}/result`,
             {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ outcome, detail })
+                body: JSON.stringify(
+                    result ? { outcome, detail, result } : { outcome, detail }
+                )
             }
         );
     }
@@ -221,6 +354,10 @@
             reportResult: report,
             openWorkspaceWindow: (workspaceId, options) =>
                 host.openWorkspaceWindow(workspaceId, options),
+            /* Present on the workspace page and absent on the launcher, which
+               is the whole ownership rule: a page with no panes never claims a
+               split intent. */
+            splitBridge: host.GridVibeSplitBridge || null,
             setInterval: (handler, interval) => host.setInterval(handler, interval),
             clearInterval: handle => host.clearInterval(handle),
             isVisible: () => host.document?.visibilityState !== 'hidden',
@@ -236,5 +373,16 @@
         root.document.addEventListener('DOMContentLoaded', () => bootstrap(root));
     }
 
-    return { POLL_INTERVAL_MS, OPENED, BLOCKED, policy, create, bootstrap };
+    return {
+        POLL_INTERVAL_MS,
+        OPENED,
+        BLOCKED,
+        SPLIT,
+        REFUSED,
+        WINDOW_KIND,
+        SPLIT_KIND,
+        policy,
+        create,
+        bootstrap
+    };
 }));

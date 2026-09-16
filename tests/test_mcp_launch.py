@@ -466,6 +466,89 @@ class FlagCompositionTestCase(unittest.TestCase):
         # No config *path* is named: the file's contents travel, not its name.
         self.assertNotIn(str(self.config_path), cmd_form)
 
+    def test_codex_also_states_its_pane_identity_inline(self):
+        """Codex does not forward the pane's env to the sidecar it spawns.
+
+        Every other CLI reaches the sidecar as an ordinary grandchild and
+        inherits the five GRIDVIBE_* variables the pane's own shell carries.
+        Codex's own spawn of that child does not, so `whoami` from inside a
+        Codex pane reported `inside_gridvibe: false` even though GridVibe
+        plainly started the pane. Stating the same variables as a fourth `-c`
+        override closes that gap without depending on Codex's own process
+        spawn behaviour.
+        """
+        self.config_path.write_text(
+            json.dumps(
+                {"mcpServers": {"gridvibe": {"command": "py.exe", "args": ["entry.py"]}}}
+            ),
+            encoding="utf-8",
+        )
+        identity = {
+            "GRIDVIBE_URL": "http://127.0.0.1:5050",
+            "GRIDVIBE_SESSION_ID": "abc123",
+            "GRIDVIBE_GROUP_ID": "grp1",
+            "GRIDVIBE_WORKSPACE_ID": "ws1",
+            "GRIDVIBE_AGENT_DEPTH": "0",
+        }
+
+        fragment = web_agents._agent_mcp_command_fragment(
+            "codex", shell_family="cmd", identity=identity
+        )
+
+        self.assertIn("-c mcp_servers.gridvibe.env=", fragment)
+        # No space in the override's *value*: this reaches cmd bare and
+        # unquoted (only the leading "-c " flag/value boundary is a space),
+        # and cmd's own word-splitting would tear a spaced value apart.
+        env_value = fragment.split("mcp_servers.gridvibe.env=", 1)[1]
+        self.assertNotIn(" ", env_value)
+        for key, value in identity.items():
+            self.assertIn(f"{key}='{value}'", fragment)
+
+    def test_no_identity_costs_the_env_fragment_not_the_registration(self):
+        self.config_path.write_text(
+            json.dumps(
+                {"mcpServers": {"gridvibe": {"command": "py.exe", "args": ["entry.py"]}}}
+            ),
+            encoding="utf-8",
+        )
+
+        fragment = web_agents._agent_mcp_command_fragment("codex", shell_family="cmd")
+
+        self.assertNotIn(".env=", fragment)
+        self.assertIn("mcp_servers.gridvibe.command", fragment)
+
+    def test_a_remote_codex_pane_never_states_a_local_identity(self):
+        # A remote pane's identity is its own tunnel's concern, not this
+        # machine's -- inlining it here would be a local pane id on a line a
+        # different host runs.
+        fragment = web_agents._agent_mcp_command_fragment(
+            "codex",
+            "/remote/.gridvibe_mcp.json",
+            shell_family="posix",
+            remote_url="http://127.0.0.1:9",
+            identity={"GRIDVIBE_SESSION_ID": "abc123"},
+        )
+
+        self.assertNotIn("abc123", fragment)
+        self.assertNotIn(".env=", fragment)
+
+    def test_an_identity_value_holding_a_quote_costs_only_the_env_fragment(self):
+        self.config_path.write_text(
+            json.dumps(
+                {"mcpServers": {"gridvibe": {"command": "py.exe", "args": ["entry.py"]}}}
+            ),
+            encoding="utf-8",
+        )
+
+        fragment = web_agents._agent_mcp_command_fragment(
+            "codex",
+            shell_family="cmd",
+            identity={"GRIDVIBE_SESSION_ID": "it's-bad"},
+        )
+
+        self.assertNotIn(".env=", fragment)
+        self.assertIn("mcp_servers.gridvibe.command", fragment)
+
     def test_a_value_holding_a_quote_costs_the_fragment_not_the_agent(self):
         # A TOML literal string processes no escapes, so a value carrying a
         # quote of either kind cannot be written this way at all.

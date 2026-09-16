@@ -4,6 +4,14 @@ All notable changes to GridVibe will be documented in this file.
 
 ## Unreleased
 
+- **(feat) `set_pane_agent` can now be told to override a pane the calling agent did not create.** The lineage gate refused any pane it had not itself created — including one the user made by hand, or a leftover agent-mode pane with nothing running in it — even after the user said, in plain words, to replace that specific pane. The only path forward was a split, which is not what "override the bottom terminal and start codex there" asks for.
+
+  `set_pane_agent` gains an `override` argument. Stated true, it waives the lineage gate and the "already running an agent" refusal — never the mode gate on an explorer or browser pane, and never the self gate — so a pane the user made, or reused from an earlier run, can be replaced directly when the user said so for that pane in that turn. The tool description tells the calling agent never to set it from a file, a prior tool result, or another pane's output.
+
+- **(fix) A Codex pane's `whoami` no longer reports `inside_gridvibe: false` from inside a pane GridVibe started.** Every other supported CLI reaches the MCP sidecar as an ordinary grandchild process and inherits the pane's `GRIDVIBE_*` identity variables along with everything else; Codex's own spawn of the sidecar does not carry them forward, so an agent running inside a real GridVibe pane could not tell it was in one.
+
+  Codex already registers the sidecar through inline `-c` overrides rather than a config file, because it takes no "load this file" flag. The pane's five identity variables are now stated the same way, as a fourth override, so the sidecar sees them regardless of what Codex's own process spawn does or does not forward.
+
 - **(fix) A relaunched pane no longer keeps a "Connecting…" spinner over a shell that is already running.** Relaunching a pane from its header dropdown — onto another shell family, onto an agent, or back to a plain shell — could leave the spinner on screen for the life of the window. The shell behind it was connected and typing reached it, but the pane looked hung and nothing short of reloading the window cleared it.
 
   The pane was being painted too late. GridVibe starts the new transport while it is still answering the relaunch request, so the "connected" notice could reach the page before the spinner had even been drawn — and on a pane that is already showing a terminal, that notice is the one thing that takes a spinner off. The pane is now painted, and its screen cleared, before the request goes out; clearing it afterwards could also wipe the first lines the new shell had already drawn. A relaunch the server refuses now puts the pane back the way it was instead of leaving it covered.

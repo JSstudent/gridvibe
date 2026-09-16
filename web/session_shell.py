@@ -286,6 +286,7 @@ def apply_pane_shell_change(
     session_id: str,
     payload: Dict[str, Any],
     effects: ShellTransitionEffects,
+    metadata_overrides: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Relaunch one terminal pane under a stated shell family and/or agent.
 
@@ -293,6 +294,13 @@ def apply_pane_shell_change(
     request did not state: only the process behind it is replaced, so the
     startup sequence replays under the new choice. Validation runs before any
     mutation, so a refusal leaves the pane exactly as it was found.
+
+    ``metadata_overrides`` are fields the *caller* owns rather than the payload
+    -- today only the agent depth an agent-requested relaunch hands down. They
+    are written inside this transaction, before the replacement shell is
+    started, because the spawn reads them: setting them afterwards would race
+    the connector that is already reading the pane. A refusal writes none of
+    them, exactly like a refusal writes none of the payload's own.
     """
     session = session_manager.get_session(session_id)
     if not session:
@@ -357,6 +365,8 @@ def apply_pane_shell_change(
     if not relaunch_requested:
         return session.to_dict()
 
+    if metadata_overrides:
+        updates.update(metadata_overrides)
     if updates:
         session_manager.update_session_metadata(session_id, **updates)
     logger.info(
@@ -373,3 +383,148 @@ def apply_pane_shell_change(
     effects.start_connector(session_id)
 
     return session_manager.get_session(session_id).to_dict()
+
+
+# ==================== The gated half: a relaunch asked for by an agent ========
+#
+# `apply_pane_shell_change` above is the pane header's own reset dropdown: the
+# person looking at the pane pressed it, so there is nobody to check. An agent
+# asking for the same relaunch is a different question, because a relaunch ends
+# whatever is running in the pane -- the first thing in the MCP surface that
+# destroys anything.
+#
+# Three gates, and all three must hold. Either of the first two alone leaves a
+# hole the other closes:
+#
+# * **Mode alone** would let an agent relaunch any plain terminal in the
+#   workspace, including one the user opened and is about to type into.
+# * **Lineage alone** would let an agent relaunch a pane it created, then handed
+#   to the user, who has been working in it for an hour.
+#
+# The residual risk is stated rather than designed away: a pane that passes all
+# three can still be sitting mid-command. The gates establish *who made it* and
+# *what kind of pane it is*, not *whether something is running in it*.
+# `web/agent_activity.py` reads working/idle from output cadence, which is a
+# liveness heuristic and not a fact about the foreground process, so consulting
+# it would trade a clear refusal for a guess.
+#
+# **`override` waives lineage and "already an agent", never self or kind.**
+# Practice surfaced a pane neither gate was written for: one the *user* made by
+# hand (so lineage refuses it) or reused from an earlier agent run (so it is
+# already flagged as an agent pane, even though nothing is running in it) --
+# exactly the pane a person means when they say "override the bottom terminal
+# and start codex there." An agent cannot decide this for itself: `override`
+# only does anything when the calling agent states it, and it should state it
+# only when the person it is talking to said so for *this* pane, in *this*
+# turn -- never because a file it read, or another pane's output, told it to.
+# It waives lineage and the "already running an agent" refusal and nothing
+# else: an explorer or browser pane is still never relaunched by a tool (that
+# is a mode switch, a different transaction entirely -- see
+# `web/session_modes.py`), and the caller can still never relaunch itself.
+
+#: Named so a refusal says which gate failed. An agent told only "refused"
+#: tries the same call again; an agent told "the lineage gate" offers a split.
+MODE_GATE = "mode"
+LINEAGE_GATE = "lineage"
+SELF_GATE = "self"
+
+
+def _refuse(gate: str, message: str) -> "ShellTransitionError":
+    return ShellTransitionError(f"[{gate} gate] {message}", 403)
+
+
+def apply_agent_pane_relaunch(
+    session_id: str,
+    payload: Dict[str, Any],
+    effects: ShellTransitionEffects,
+) -> Dict[str, Any]:
+    """Relaunch one pane into an agent, on behalf of a *calling agent's* pane.
+
+    Every gate is checked before anything is mutated, closed or restarted, so a
+    refusal leaves the pane exactly as it was found -- which is what the
+    whole-pane snapshot assertions in the tests pin.
+    """
+    caller_session_id = str(payload.get("requested_by_session_id") or "").strip()
+    if not caller_session_id:
+        raise ShellTransitionError(
+            "requested_by_session_id is required: a relaunch has to name the "
+            "pane asking for it.",
+            400,
+        )
+    override = bool(payload.get("override"))
+
+    session = session_manager.get_session(session_id)
+    if not session:
+        raise ShellTransitionError("Session not found", 404)
+
+    if session_id == caller_session_id:
+        raise _refuse(
+            SELF_GATE,
+            "This is the pane the request came from. Relaunching it would end "
+            "this agent in the middle of the call.",
+        )
+
+    if session_manager.get_session(caller_session_id) is None:
+        raise _refuse(
+            LINEAGE_GATE,
+            "The pane this request came from is no longer open, so GridVibe "
+            "cannot tell whether it created this one.",
+        )
+
+    startup_mode = str(getattr(session, "startup_mode", "") or "")
+    already_agent = startup_mode == "agent" and bool(_pane_agent_key(session))
+    if startup_mode not in ("terminal", "agent"):
+        raise _refuse(
+            MODE_GATE,
+            f"This pane is a {startup_mode or 'non-terminal'} pane. Only a "
+            "plain terminal pane is relaunched by a tool; split off a new "
+            "pane instead.",
+        )
+    if already_agent and not override:
+        raise _refuse(
+            MODE_GATE,
+            "This pane is already running an agent. Only a plain terminal "
+            "pane is relaunched by a tool; split off a new pane instead, "
+            "unless the user explicitly asked to override this pane.",
+        )
+
+    creator = str(getattr(session, "created_by_session_id", "") or "")
+    if not override:
+        if not creator:
+            raise _refuse(
+                LINEAGE_GATE,
+                "This pane was not created by an agent, so a tool does not "
+                "relaunch it. Split off a new pane instead, unless the user "
+                "explicitly asked to override this pane.",
+            )
+        if creator != caller_session_id:
+            raise _refuse(
+                LINEAGE_GATE,
+                "This pane was created by a different pane. An agent "
+                "relaunches only the panes it created itself, unless the "
+                "user explicitly asked to override this pane.",
+            )
+    elif not creator or creator != caller_session_id:
+        logger.info(
+            "Pane relaunch session_id=%s overriding lineage gate on behalf of "
+            "requested_by_session_id=%s (creator=%s)",
+            session_id,
+            caller_session_id,
+            creator or "-",
+        )
+
+    # Past the gates this is the ordinary relaunch, with the ordinary refusals:
+    # an unknown agent key, a binary that is not installed, a pane with no shell.
+    # The agent it is going to run inherits the caller's budget, so a chain of
+    # agents-turning-panes-into-agents still runs out.
+    relaunch = {
+        key: payload[key] for key in ("shell", "agent", "mcp", "distribution")
+        if key in payload
+    }
+    caller = session_manager.get_session(caller_session_id)
+    return apply_pane_shell_change(
+        session_id,
+        relaunch,
+        effects,
+        {"agent_depth": int(getattr(caller, "agent_depth", 0)) + 1},
+    )

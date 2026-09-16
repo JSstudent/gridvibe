@@ -174,6 +174,11 @@ _SESSION_SNAPSHOT_FIELDS = (
     # Runtime lineage: a restored agent pane comes back as deep as it
     # was, so the sidecar's spawn budget survives a restart.
     "agent_depth",
+    # `created_by_session_id` is deliberately NOT here. It names a live
+    # session, and after a restart that session no longer exists -- a creator
+    # id that survived would name a stranger. A restored workspace therefore
+    # carries none, so every pane in it refuses the relaunch gate that reads
+    # it (web/session_shell.py). The safe direction, chosen.
     "title",
     "distribution",
     "use_wsl",

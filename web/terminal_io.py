@@ -1216,10 +1216,16 @@ def _run_startup_sequence(connection: Dict[str, Any], session: Any):
     # host, not the one on this machine -- same flag, a path that resolves
     # where the line is actually typed.
     tunnel = connection.get("mcp_tunnel") or {}
+    session_id = str(getattr(session, "session_id", "") or "")
     startup_command = _compose_agent_startup_command(
         session,
         remote_config_path=str(tunnel.get("remote_path") or ""),
         remote_url=str(tunnel.get("url") or ""),
+        # Only the local, inline-TOML path (Codex) ever reads this -- see
+        # `_inline_toml_env_fragment`. Computed for every pane rather than
+        # gated on `pane_can_run_the_sidecar` here, so this call site does not
+        # have to duplicate that predicate to decide whether to bother.
+        identity=_pane_identity_for(session_id, session) if session_id else None,
     )
     if startup_command:
         if unreachable_directory:

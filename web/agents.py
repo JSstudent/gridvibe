@@ -16,7 +16,7 @@ import socket
 import subprocess
 import threading
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from web.config import _load_json_file, runtime_config
 from web.hostkeys import _apply_host_key_policy
@@ -229,13 +229,62 @@ def _toml_override_flag(key: str, value: str, shell_family: str) -> str:
     return f"-c {override}" if shell_family == "cmd" else f'-c "{override}"'
 
 
-def _inline_toml_mcp_fragment(config_path: str, shell_family: str) -> str:
+def _inline_toml_env_fragment(
+    identity: Optional[Mapping[str, str]], shell_family: str
+) -> str:
+    """State the pane's identity directly, instead of trusting inheritance.
+
+    Every other CLI reaches the sidecar as an ordinary child process and
+    inherits the pane's environment two levels down without anything stating
+    it. Codex's spawn of an MCP server does not carry the identity variables
+    GridVibe injects into the pane's own shell along with it, so a sidecar it
+    starts sees an empty ``GRIDVIBE_SESSION_ID`` and ``whoami`` reports
+    ``inside_gridvibe: false`` from inside a pane GridVibe plainly started.
+    Stating the same five variables as an inline TOML table closes that gap
+    without depending on what Codex's own process spawn does or does not
+    forward.
+
+    Silently empty exactly like the command/args fragment: a value that
+    cannot be written as a TOML literal string costs the identity block, not
+    the whole registration.
+
+    No space anywhere in the rendered table -- TOML does not require one
+    around ``=`` or after ``,`` in an inline table, and the ``cmd`` branch of
+    ``_toml_override_flag`` emits this bare, unquoted. A space there is not a
+    cosmetic choice: cmd's own word-splitting tears an unquoted argument apart
+    at it, so a spaced table reaches Codex as several unrelated tokens instead
+    of one override -- exactly the failure the command/args fragment above
+    avoids by never containing one.
+    """
+    if not identity:
+        return ""
+    pairs = [(str(key), str(value)) for key, value in identity.items() if value]
+    if not pairs:
+        return ""
+    if any("'" in value or '"' in value for _, value in pairs):
+        return ""
+    from web.mcp_launch import MCP_SERVER_NAME
+
+    table = ",".join(f"{key}='{value}'" for key, value in sorted(pairs))
+    return _toml_override_flag(
+        f"mcp_servers.{MCP_SERVER_NAME}.env", f"{{{table}}}", shell_family
+    )
+
+
+def _inline_toml_mcp_fragment(
+    config_path: str,
+    shell_family: str,
+    identity: Optional[Mapping[str, str]] = None,
+) -> str:
     """Register the sidecar through ``-c`` overrides instead of a file.
 
     Codex reads MCP servers from ``~/.codex/config.toml`` and takes no
     "load this file" flag, but every key in that file can be overridden on the
     launch line, and the value is parsed as TOML. So the same command and args
     the generated config holds are stated directly.
+
+    ``identity`` adds a fourth override, the pane's own identity, for the
+    reason ``_inline_toml_env_fragment`` states.
 
     A value containing a quote of either kind cannot be written as a TOML
     literal string, so it resolves to no fragment rather than to a broken
@@ -253,16 +302,18 @@ def _inline_toml_mcp_fragment(config_path: str, shell_family: str) -> str:
     if any("'" in value or '"' in value for value in [command, *args]):
         return ""
     rendered_args = ",".join(f"'{value}'" for value in args)
-    return " ".join(
-        (
-            _toml_override_flag(
-                f"mcp_servers.{MCP_SERVER_NAME}.command", f"'{command}'", shell_family
-            ),
-            _toml_override_flag(
-                f"mcp_servers.{MCP_SERVER_NAME}.args", f"[{rendered_args}]", shell_family
-            ),
-        )
-    )
+    fragments = [
+        _toml_override_flag(
+            f"mcp_servers.{MCP_SERVER_NAME}.command", f"'{command}'", shell_family
+        ),
+        _toml_override_flag(
+            f"mcp_servers.{MCP_SERVER_NAME}.args", f"[{rendered_args}]", shell_family
+        ),
+    ]
+    env_fragment = _inline_toml_env_fragment(identity, shell_family)
+    if env_fragment:
+        fragments.append(env_fragment)
+    return " ".join(fragments)
 
 
 def _remote_server_name() -> str:
@@ -278,6 +329,7 @@ def _agent_mcp_command_fragment(
     shell_family: str = "",
     *,
     remote_url: str = "",
+    identity: Optional[Mapping[str, str]] = None,
 ) -> str:
     """Return the composed MCP launch fragment for one agent, or "".
 
@@ -298,6 +350,11 @@ def _agent_mcp_command_fragment(
     Codex takes the URL directly instead -- inlining a file it cannot read
     would be pointless, and inlining *this* machine's interpreter into a line
     the remote host runs would be wrong.
+
+    ``identity`` is only ever used on the local, inline-TOML path: a remote
+    pane's tools arrive over its own SSH reverse tunnel, whose config the
+    remote-side sidecar already carries, and every file-based CLI reaches the
+    sidecar by ordinary process inheritance with nothing extra to state.
     """
     from web.mcp_launch import mcp_config_path
 
@@ -320,7 +377,7 @@ def _agent_mcp_command_fragment(
                 f"'{remote_url}'",
                 shell_family,
             )
-        return _inline_toml_mcp_fragment(resolved, shell_family)
+        return _inline_toml_mcp_fragment(resolved, shell_family, identity)
 
     template = _agent_mcp_flag(agent_key)
     if not template:
@@ -378,6 +435,8 @@ def _compose_agent_startup_command(
     session: Any,
     remote_config_path: str = "",
     remote_url: str = "",
+    *,
+    identity: Optional[Mapping[str, str]] = None,
 ) -> str:
     """Apply launch-only title settings and optional auto-mode flags.
 
@@ -388,6 +447,9 @@ def _compose_agent_startup_command(
     the startup sequence that opened it. They are passed rather than read
     here because they belong to one *connection*, not to the pane record: a
     relaunch gets a new port, a new token and a freshly written file.
+
+    ``identity`` is this pane's own five ``GRIDVIBE_*`` values, only reached
+    for a local pane -- see ``_inline_toml_env_fragment``.
     """
     base = str(getattr(session, "initial_command", "") or "").strip()
     if not base:
@@ -424,7 +486,9 @@ def _compose_agent_startup_command(
         # with no tunnel gets nothing rather than a path it cannot read: that
         # costs the tools, never the agent.
         if pane_can_run_the_sidecar(session):
-            fragment = _agent_mcp_command_fragment(agent_key, shell_family=shell_family)
+            fragment = _agent_mcp_command_fragment(
+                agent_key, shell_family=shell_family, identity=identity
+            )
         elif remote_config_path:
             fragment = _agent_mcp_command_fragment(
                 agent_key,

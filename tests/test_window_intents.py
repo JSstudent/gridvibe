@@ -26,6 +26,10 @@ from web.window_intents import (  # noqa: E402
     EXPIRED,
     OPENED,
     PENDING,
+    REFUSED,
+    SPLIT,
+    SPLIT_KIND,
+    WINDOW_KIND,
     WindowIntentStore,
     window_intents,
 )
@@ -198,6 +202,297 @@ class WindowIntentRouteTestCase(unittest.TestCase):
         self.assertFalse(hasattr(window_intents, "path"))
         window_intents.reset()
         self.assertEqual(self.client.get("/api/windows/intents").get_json()["count"], 0)
+
+
+class SplitIntentStoreTestCase(unittest.TestCase):
+    """The second kind, in the same store, under the same claim-once rule.
+
+    A split is an intent for the same reason a window is: the axis never
+    reaches the server. The page computes the rectangles and owns every
+    refusal, measured off the live terminal -- so a process that cannot measure
+    a pane leaves a request and a page that can performs it.
+    """
+
+    def setUp(self):
+        self.store = WindowIntentStore(ttl_seconds=15.0, claim_ttl_seconds=20.0)
+
+    def test_a_split_intent_carries_the_pane_the_axis_and_the_request(self):
+        intent = self.store.open_split(
+            "pane-1",
+            "horizontal",
+            group_id="g-1",
+            workspace_id="ws-1",
+            split_request={"kind": "agent", "agent": "claude"},
+            now=100.0,
+        )
+
+        self.assertEqual(intent["kind"], SPLIT_KIND)
+        self.assertEqual(intent["session_id"], "pane-1")
+        self.assertEqual(intent["axis"], "horizontal")
+        self.assertEqual(intent["split_request"]["agent"], "claude")
+        self.assertEqual(intent["state"], PENDING)
+
+    def test_a_window_intent_still_says_it_is_one(self):
+        """An older reader that ignores the kind gets the kind it expects."""
+        self.assertEqual(self.store.open("ws-1", now=100.0)["kind"], WINDOW_KIND)
+
+    def test_a_split_reports_split_or_refused_and_nothing_else(self):
+        for outcome in (SPLIT, REFUSED):
+            with self.subTest(outcome=outcome):
+                intent = self.store.open_split("pane-1", "vertical", now=100.0)
+                self.store.claim(intent["intent_id"], "window-a", now=100.1)
+
+                recorded, _payload = self.store.record_result(
+                    intent["intent_id"], outcome, "because", now=100.2
+                )
+
+                self.assertTrue(recorded)
+                self.assertEqual(
+                    self.store.read(intent["intent_id"], now=100.3)["state"], outcome
+                )
+
+    def test_a_page_cannot_report_a_windows_verb_on_a_split(self):
+        """Reporting `opened` on a pane would be reporting someone else's work."""
+        intent = self.store.open_split("pane-1", "vertical", now=100.0)
+
+        recorded, payload = self.store.record_result(
+            intent["intent_id"], OPENED, now=100.1
+        )
+
+        self.assertFalse(recorded)
+        self.assertIn("split", payload["error"])
+        self.assertEqual(self.store.read(intent["intent_id"], now=100.2)["state"], PENDING)
+
+    def test_a_page_cannot_report_a_splits_verb_on_a_window(self):
+        intent = self.store.open("ws-1", now=100.0)
+
+        recorded, payload = self.store.record_result(
+            intent["intent_id"], SPLIT, now=100.1
+        )
+
+        self.assertFalse(recorded)
+        self.assertIn("opened", payload["error"])
+
+    def test_a_settled_split_carries_the_pane_it_made_through_a_field_list(self):
+        intent = self.store.open_split("pane-1", "vertical", now=100.0)
+        self.store.claim(intent["intent_id"], "window-a", now=100.1)
+
+        self.store.record_result(
+            intent["intent_id"],
+            SPLIT,
+            "",
+            {
+                "session_id": "pane-2",
+                "title": "Terminal 2",
+                "index": 1,
+                "password": "hunter2",
+            },
+            now=100.2,
+        )
+
+        read = self.store.read(intent["intent_id"], now=100.3)
+        self.assertEqual(read["result"]["session_id"], "pane-2")
+        self.assertEqual(read["result"]["index"], 1)
+        # A field list, so a page cannot widen what a settled intent publishes.
+        self.assertNotIn("password", read["result"])
+
+    def test_exactly_one_of_two_pages_takes_a_split(self):
+        """Two open windows produce one new pane, as they produce one window."""
+        intent = self.store.open_split("pane-1", "vertical", now=100.0)
+
+        first_ok, _first = self.store.claim(intent["intent_id"], "window-a", now=100.1)
+        second_ok, second = self.store.claim(intent["intent_id"], "window-b", now=100.2)
+
+        self.assertTrue(first_ok)
+        self.assertFalse(second_ok)
+        self.assertIn("already took", second["error"])
+
+    def test_an_unclaimed_split_expires_like_any_other_intent(self):
+        intent = self.store.open_split("pane-1", "vertical", now=100.0)
+
+        self.assertEqual(
+            self.store.read(intent["intent_id"], now=115.1)["state"], EXPIRED
+        )
+
+    def test_both_kinds_share_one_pending_list_and_one_ceiling(self):
+        store = WindowIntentStore(ttl_seconds=1000.0, max_intents=4)
+        for index in range(5):
+            store.open(f"ws-{index}", now=100.0 + index)
+            store.open_split(f"pane-{index}", "vertical", now=100.0 + index)
+
+        pending = store.pending(now=200.0)
+        self.assertLessEqual(len(pending), 4)
+        self.assertTrue(all("kind" in intent for intent in pending))
+
+
+class SplitIntentRouteTestCase(unittest.TestCase):
+    """The route that records one, and everything it refuses before it does."""
+
+    def setUp(self):
+        api.app.config["TESTING"] = True
+        self.client = api.app.test_client()
+        api.session_manager.reset_sessions()
+        self.addCleanup(api.session_manager.reset_sessions)
+        window_intents.reset()
+        self.addCleanup(window_intents.reset)
+
+    def _pane(self, **overrides):
+        group = api.session_manager.create_group(
+            name="Local", connection_mode="wsl", layout="single", terminal_count=1
+        )
+        fields = {
+            "group_id": group.group_id,
+            "host": "cmd",
+            "directory": "C:/repo",
+            "mode": "wsl",
+            "startup_mode": "terminal",
+        }
+        fields.update(overrides)
+        session = api.session_manager.create_session(**fields)
+        return group, api.session_manager.get_session(session.session_id)
+
+    def test_an_intent_names_the_pane_the_axis_and_the_group(self):
+        group, pane = self._pane()
+
+        response = self.client.post(
+            f"/api/sessions/{pane.session_id}/split-intent",
+            json={"axis": "horizontal"},
+        )
+
+        self.assertEqual(response.status_code, 201)
+        payload = response.get_json()
+        self.assertEqual(payload["kind"], "split")
+        self.assertEqual(payload["session_id"], pane.session_id)
+        self.assertEqual(payload["axis"], "horizontal")
+        self.assertEqual(payload["group_id"], group.group_id)
+
+    def test_an_axis_that_is_not_one_of_the_two_is_refused_before_recording(self):
+        _group, pane = self._pane()
+
+        response = self.client.post(
+            f"/api/sessions/{pane.session_id}/split-intent", json={"axis": "diagonal"}
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(window_intents.pending(), [])
+
+    def test_an_unknown_agent_is_refused_now_rather_than_after_the_wait(self):
+        """A refusal here costs nothing; one after a claim costs the whole TTL."""
+        _group, pane = self._pane()
+
+        response = self.client.post(
+            f"/api/sessions/{pane.session_id}/split-intent",
+            json={"axis": "vertical", "kind": "agent", "agent": "not-an-agent"},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(window_intents.pending(), [])
+
+    def test_an_agent_pane_with_no_agent_is_refused(self):
+        _group, pane = self._pane()
+
+        response = self.client.post(
+            f"/api/sessions/{pane.session_id}/split-intent",
+            json={"axis": "vertical", "kind": "agent"},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("agent", response.get_json()["error"])
+
+    def test_a_browser_pane_is_refused_on_a_remote_source(self):
+        """GridVibe draws a browser pane, so it belongs to a local group."""
+        _group, pane = self._pane(mode="ssh", host="example.com", username="ubuntu")
+
+        response = self.client.post(
+            f"/api/sessions/{pane.session_id}/split-intent",
+            json={"axis": "vertical", "kind": "browser", "url": "http://localhost:3000"},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("this machine", response.get_json()["error"])
+
+    def test_a_pane_that_is_not_open_is_a_404(self):
+        response = self.client.post(
+            "/api/sessions/no-such-pane/split-intent", json={"axis": "vertical"}
+        )
+
+        self.assertEqual(response.status_code, 404)
+
+    def test_the_creator_stamp_is_read_from_the_registry_not_believed(self):
+        """A caller cannot claim a pane that is not open as its own lineage."""
+        _group, pane = self._pane()
+        _group2, caller = self._pane()
+
+        claimed = self.client.post(
+            f"/api/sessions/{pane.session_id}/split-intent",
+            json={"axis": "vertical", "origin_session_id": caller.session_id},
+        ).get_json()
+        invented = self.client.post(
+            f"/api/sessions/{pane.session_id}/split-intent",
+            json={"axis": "vertical", "origin_session_id": "ghost-pane"},
+        ).get_json()
+
+        self.assertEqual(
+            claimed["split_request"]["created_by_session_id"], caller.session_id
+        )
+        self.assertEqual(invented["split_request"]["created_by_session_id"], "")
+
+    def test_the_recorded_request_is_what_the_page_posts_back(self):
+        """Built here, so the page forwards a validated body rather than one
+        it composed."""
+        _group, pane = self._pane()
+
+        payload = self.client.post(
+            f"/api/sessions/{pane.session_id}/split-intent",
+            json={
+                "axis": "vertical",
+                "kind": "terminal",
+                "title": "Scratch",
+                "directory": "C:/repo/src",
+            },
+        ).get_json()
+
+        request_body = payload["split_request"]
+        self.assertEqual(request_body["axis"], "vertical")
+        self.assertEqual(request_body["kind"], "terminal")
+        self.assertEqual(request_body["title"], "Scratch")
+        self.assertEqual(request_body["directory"], "C:/repo/src")
+
+    def test_a_split_intent_appears_in_the_same_pending_list_as_a_window(self):
+        _group, pane = self._pane()
+        self.client.post("/api/windows/open", json={"workspace_id": "ws-1"})
+        self.client.post(
+            f"/api/sessions/{pane.session_id}/split-intent", json={"axis": "vertical"}
+        )
+
+        listed = self.client.get("/api/windows/intents").get_json()
+
+        self.assertEqual(listed["count"], 2)
+        self.assertEqual(
+            sorted(intent["kind"] for intent in listed["intents"]),
+            ["split", "window"],
+        )
+
+    def test_a_settled_split_reports_its_pane_through_the_result_route(self):
+        _group, pane = self._pane()
+        intent_id = self.client.post(
+            f"/api/sessions/{pane.session_id}/split-intent", json={"axis": "vertical"}
+        ).get_json()["intent_id"]
+        self.client.post(f"/api/windows/intents/{intent_id}/claim", json={})
+
+        reported = self.client.post(
+            f"/api/windows/intents/{intent_id}/result",
+            json={
+                "outcome": "split",
+                "detail": "",
+                "result": {"session_id": "pane-9", "index": 1},
+            },
+        )
+
+        self.assertEqual(reported.status_code, 200)
+        read = self.client.get(f"/api/windows/intents/{intent_id}").get_json()
+        self.assertEqual(read["state"], "split")
+        self.assertEqual(read["result"]["session_id"], "pane-9")
 
 
 if __name__ == "__main__":

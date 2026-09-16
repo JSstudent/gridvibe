@@ -42,7 +42,45 @@ function runtime(options = {}) {
         opens: options.opens !== false,
         visible: options.visible !== false
     };
+    const splitCalls = { owns: [], candidates: [], performed: [], reasons: [] };
+    const splitBridge = options.splitBridge === null ? null : {
+        owns(sessionId) {
+            splitCalls.owns.push(sessionId);
+            return (options.ownedSessions || ['pane-1']).includes(sessionId);
+        },
+        candidates(sessionId) {
+            splitCalls.candidates.push(sessionId);
+            return options.candidates === undefined
+                ? ['vertical', 'horizontal']
+                : options.candidates;
+        },
+        disabledReason(axis) {
+            splitCalls.reasons.push(axis);
+            return options.disabledReason
+                || 'Side-by-side split needs at least 8 columns in each terminal';
+        },
+        async perform(sessionId, axis, request) {
+            splitCalls.performed.push({ sessionId, axis, request });
+            if (options.performThrows) throw new Error('grid exploded');
+            if (options.performFails) {
+                return { ok: false, error: 'Split failed with status 400' };
+            }
+            return {
+                ok: true,
+                index: 2,
+                session: {
+                    session_id: 'pane-9',
+                    group_id: 'g-1',
+                    title: 'Terminal 3',
+                    startup_mode: 'agent',
+                    agent_selection: 'claude',
+                    password: 'hunter2'
+                }
+            };
+        }
+    };
     const poll = intentModule.create({
+        splitBridge,
         listIntents: async () => {
             calls.listed += 1;
             if (options.listThrows) throw new Error('list failed');
@@ -54,8 +92,8 @@ function runtime(options = {}) {
                 ? { ok: true, state: 'claimed', intent_id: intentId }
                 : { ok: false, state: 'claimed', error: 'Another window took it.' };
         },
-        reportResult: async (intentId, outcome, detail) => {
-            calls.results.push({ intentId, outcome, detail });
+        reportResult: async (intentId, outcome, detail, result) => {
+            calls.results.push({ intentId, outcome, detail, result });
         },
         openWorkspaceWindow: async (workspaceId, opts) => {
             calls.opens.push({ workspaceId, groupId: opts.groupId });
@@ -71,8 +109,19 @@ function runtime(options = {}) {
         claimant: 'window-a',
         onError: () => {}
     });
-    return { poll, calls, timers, state };
+    return { poll, calls, timers, state, splitCalls };
 }
+
+const splitIntent = (id, session = 'pane-1', axis = 'vertical', request = null) => ({
+    intent_id: id,
+    kind: 'split',
+    workspace_id: 'ws-1',
+    group_id: 'g-1',
+    session_id: session,
+    axis,
+    split_request: request || { axis, kind: 'agent', agent: 'claude' },
+    state: 'pending'
+});
 
 const intent = (id, workspace = 'ws-1', group = 'g-1') => ({
     intent_id: id, workspace_id: workspace, group_id: group, state: 'pending'
@@ -168,6 +217,121 @@ const out = {};
         intentModule.policy.claimed(null)
     ];
 
+    // ── splits ──
+
+    // A split intent for a pane this window holds is claimed and performed.
+    {
+        const { poll, calls, splitCalls } = runtime({ intents: [splitIntent('s-1')] });
+        await poll.tick();
+        out.splitHappy = {
+            claims: calls.claims.length,
+            performed: splitCalls.performed,
+            results: calls.results
+        };
+    }
+
+    // A pane this window does not hold is never claimed at all.
+    {
+        const { poll, calls, splitCalls } = runtime({
+            intents: [splitIntent('s-1', 'pane-elsewhere')]
+        });
+        await poll.tick();
+        out.splitNotOurs = {
+            claims: calls.claims.length,
+            performed: splitCalls.performed.length,
+            results: calls.results.length
+        };
+    }
+
+    // A page with no split bridge at all — the launcher — claims nothing.
+    {
+        const { poll, calls } = runtime({
+            intents: [splitIntent('s-1')],
+            splitBridge: null
+        });
+        await poll.tick();
+        out.splitNoBridge = { claims: calls.claims.length, results: calls.results.length };
+    }
+
+    // A pane too small on the asked axis is refused, and the other axis named.
+    {
+        const { poll, calls, splitCalls } = runtime({
+            intents: [splitIntent('s-1', 'pane-1', 'vertical')],
+            candidates: ['horizontal']
+        });
+        await poll.tick();
+        out.splitRefused = {
+            performed: splitCalls.performed.length,
+            results: calls.results
+        };
+    }
+
+    // Neither axis works: the refusal says so rather than naming one.
+    {
+        const { poll, calls } = runtime({
+            intents: [splitIntent('s-1')],
+            candidates: []
+        });
+        await poll.tick();
+        out.splitNoAxis = calls.results;
+    }
+
+    // A split the page attempted and could not finish is an honest refusal.
+    {
+        const { poll, calls } = runtime({
+            intents: [splitIntent('s-1')],
+            performFails: true
+        });
+        await poll.tick();
+        out.splitFailed = calls.results;
+    }
+
+    // A bridge that threw is reported, not swallowed into a false success.
+    {
+        const { poll, calls } = runtime({
+            intents: [splitIntent('s-1')],
+            performThrows: true
+        });
+        await poll.tick();
+        out.splitThrew = calls.results.map(item => item.outcome);
+    }
+
+    // A window intent and a split intent in one pass are both delivered.
+    {
+        const { poll, calls, splitCalls } = runtime({
+            intents: [intent('i-1'), splitIntent('s-1')]
+        });
+        await poll.tick();
+        out.bothKinds = {
+            opens: calls.opens.length,
+            performed: splitCalls.performed.length,
+            outcomes: calls.results.map(item => item.outcome)
+        };
+    }
+
+    // Two passes over the same split intent perform it once.
+    {
+        const { poll, splitCalls } = runtime({ intents: [splitIntent('s-1')] });
+        await poll.tick();
+        await poll.tick();
+        out.splitRepeated = splitCalls.performed.length;
+    }
+
+    // policy, on its own.
+    out.splitActionable = intentModule.policy.actionable(
+        [splitIntent('s-1'), splitIntent('s-2', 'pane-elsewhere'), intent('i-1')],
+        sessionId => sessionId === 'pane-1'
+    ).map(item => item.intent_id);
+    out.splitKinds = [
+        intentModule.policy.kind(splitIntent('s-1')),
+        intentModule.policy.kind(intent('i-1')),
+        intentModule.policy.kind({})
+    ];
+    out.refusalSentences = [
+        intentModule.policy.splitRefusal('vertical', ['horizontal'], 'Too narrow.'),
+        intentModule.policy.splitRefusal('vertical', [], 'Too narrow.')
+    ];
+
     console.log(JSON.stringify(out));
 })();
 """
@@ -240,6 +404,90 @@ class WindowIntentClientTestCase(unittest.TestCase):
 
     def test_a_claim_counts_only_when_the_server_said_claimed(self):
         self.assertEqual(self.out["claimedVerdicts"], [True, False, False, False])
+
+
+@unittest.skipIf(NODE is None, "Node.js is required for the window-intent suite")
+class SplitIntentClientTestCase(WindowIntentClientTestCase):
+    """The split half of the same poll, executed in Node.
+
+    A split is an intent because the axis never reaches the server: the page
+    computes the rectangles and owns every refusal, measured off the live
+    terminal. What is pinned here is who may claim one, and that a refusal is
+    an answer rather than a retry.
+    """
+
+    def test_a_split_for_a_pane_this_window_holds_is_performed_and_reported(self):
+        happy = self.out["splitHappy"]
+
+        self.assertEqual(happy["claims"], 1)
+        self.assertEqual(len(happy["performed"]), 1)
+        self.assertEqual(happy["performed"][0]["sessionId"], "pane-1")
+        self.assertEqual(happy["performed"][0]["axis"], "vertical")
+        # The body the server built is forwarded verbatim, not recomposed.
+        self.assertEqual(happy["performed"][0]["request"]["agent"], "claude")
+        self.assertEqual(happy["results"][0]["outcome"], "split")
+
+    def test_the_settled_split_reports_the_new_pane_through_a_field_list(self):
+        result = self.out["splitHappy"]["results"][0]["result"]
+
+        self.assertEqual(result["session_id"], "pane-9")
+        self.assertEqual(result["index"], 2)
+        self.assertEqual(result["agent_selection"], "claude")
+        self.assertNotIn("password", result)
+
+    def test_a_window_that_does_not_hold_the_pane_never_claims_it(self):
+        """The ownership gate, and the reason two windows do not fight."""
+        self.assertEqual(
+            self.out["splitNotOurs"], {"claims": 0, "performed": 0, "results": 0}
+        )
+
+    def test_a_page_with_no_panes_claims_no_splits(self):
+        """The launcher polls the same list and takes none of them."""
+        self.assertEqual(self.out["splitNoBridge"], {"claims": 0, "results": 0})
+
+    def test_a_pane_too_small_on_that_axis_is_refused_naming_the_other(self):
+        refused = self.out["splitRefused"]
+
+        # Never split the other way instead: the caller asked for one axis.
+        self.assertEqual(refused["performed"], 0)
+        self.assertEqual(refused["results"][0]["outcome"], "refused")
+        self.assertIn("stacked split would work", refused["results"][0]["detail"])
+
+    def test_a_pane_that_cannot_be_split_at_all_says_that_instead(self):
+        detail = self.out["splitNoAxis"][0]["detail"]
+
+        self.assertIn("Neither axis would work", detail)
+
+    def test_a_split_that_failed_in_the_page_is_reported_with_its_reason(self):
+        results = self.out["splitFailed"]
+
+        self.assertEqual(results[0]["outcome"], "refused")
+        self.assertIn("status 400", results[0]["detail"])
+
+    def test_a_bridge_that_threw_is_still_an_honest_refusal(self):
+        self.assertEqual(self.out["splitThrew"], ["refused"])
+
+    def test_both_kinds_are_delivered_in_one_pass(self):
+        both = self.out["bothKinds"]
+
+        self.assertEqual(both["opens"], 1)
+        self.assertEqual(both["performed"], 1)
+        self.assertEqual(sorted(both["outcomes"]), ["opened", "split"])
+
+    def test_a_split_intent_is_acted_on_once(self):
+        self.assertEqual(self.out["splitRepeated"], 1)
+
+    def test_actionable_takes_only_the_split_whose_pane_is_here(self):
+        self.assertEqual(self.out["splitActionable"], ["s-1", "i-1"])
+
+    def test_an_intent_with_no_kind_reads_as_a_window(self):
+        self.assertEqual(self.out["splitKinds"], ["split", "window", "window"])
+
+    def test_the_refusal_sentence_names_the_axis_that_would_have_worked(self):
+        with_other, without = self.out["refusalSentences"]
+
+        self.assertIn("stacked split would work", with_other)
+        self.assertIn("Neither axis would work", without)
 
 
 if __name__ == "__main__":

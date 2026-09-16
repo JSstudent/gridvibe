@@ -1,21 +1,29 @@
-"""The native-mode intent store: "somebody please open this window".
+"""The page-intent store: "somebody with a page please do this".
 
-Nothing outside a page can open a pywebview window, and the MCP sidecar is not
-a page. So it leaves an *intent* here, an open GridVibe page picks it up, and
-the page reports back what happened.
+Two things GridVibe cannot do from outside a page, and the same store answers
+both:
+
+* **Open a window.** Nothing outside a page can open a pywebview window, and
+  the MCP sidecar is not a page.
+* **Split a pane.** The split *axis* never reaches the server. The page
+  computes the new rectangles, and its refusals — the minimum columns and rows
+  below a terminal header, the narrow-viewport rule, the pane cap — are
+  measured off the live terminal. A process that cannot measure a pane cannot
+  place one, so it leaves an intent and the page that can measure performs the
+  split with the button's own handler.
 
 In-memory and TTL-bounded. No durable state, no file, nothing that survives a
 restart -- an intent nobody claimed within its TTL is not worth remembering.
 
 The claim endpoint is the whole point of the design: two open pages polling the
-same pending intent would otherwise both open the workspace, and the user would
-get two windows. Exactly one claimant wins.
+same pending intent would otherwise both act on it, and the user would get two
+windows or two panes. Exactly one claimant wins.
 """
 
 import threading
 import time
 import uuid
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 #: How long a page has to notice an intent. Short: the sidecar is holding a
 #: tool call open while it waits, and an unclaimed intent means no page is
@@ -35,8 +43,36 @@ OPENED = "opened"
 BLOCKED = "blocked"
 EXPIRED = "expired"
 
-#: What a page may report back. Anything else is refused.
-OUTCOMES = (OPENED, BLOCKED)
+#: A split's own two outcomes. `SPLIT` doubles as the kind name and the success
+#: outcome, in two different fields -- "what was asked for" and "what happened".
+SPLIT = "split"
+REFUSED = "refused"
+
+WINDOW_KIND = "window"
+SPLIT_KIND = SPLIT
+
+#: What a page may report back, per kind. Anything else is refused: a page that
+#: reported `opened` on a split would be reporting something it did not do.
+OUTCOMES_BY_KIND: Dict[str, Tuple[str, ...]] = {
+    WINDOW_KIND: (OPENED, BLOCKED),
+    SPLIT_KIND: (SPLIT, REFUSED),
+}
+
+#: Back-compat: the window kind's outcomes, which is what this name always
+#: meant. Read by nothing here; kept because it is the store's published set.
+OUTCOMES = OUTCOMES_BY_KIND[WINDOW_KIND]
+
+#: A settled split reports the pane it made. Bounded to a field list for the
+#: same reason every other published payload is: the store forwards a result,
+#: it does not become a second place a session is described.
+SPLIT_RESULT_FIELDS = (
+    "session_id",
+    "group_id",
+    "title",
+    "startup_mode",
+    "agent_selection",
+    "index",
+)
 
 
 class WindowIntentStore:
@@ -64,18 +100,62 @@ class WindowIntentStore:
         *,
         now: Optional[float] = None,
     ) -> Dict[str, Any]:
-        """Record one intent and return it."""
+        """Record one "open this workspace" intent and return it."""
+        return self._record(
+            {
+                "kind": WINDOW_KIND,
+                "workspace_id": str(workspace_id or "").strip(),
+                "group_id": str(group_id or "").strip(),
+            },
+            now=now,
+        )
+
+    def open_split(
+        self,
+        session_id: str,
+        axis: str,
+        *,
+        group_id: str = "",
+        workspace_id: str = "",
+        split_request: Optional[Mapping[str, Any]] = None,
+        now: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """Record one "split this pane" intent and return it.
+
+        ``split_request`` is the request body the claiming page posts back to
+        ``POST /api/sessions/<id>/split`` verbatim. It is built server-side at
+        the moment the intent is recorded — including the creator stamp — so a
+        page forwards a validated request rather than composing one.
+        """
+        return self._record(
+            {
+                "kind": SPLIT_KIND,
+                "workspace_id": str(workspace_id or "").strip(),
+                "group_id": str(group_id or "").strip(),
+                "session_id": str(session_id or "").strip(),
+                "axis": str(axis or "").strip().lower(),
+                "split_request": dict(split_request or {}),
+            },
+            now=now,
+        )
+
+    def _record(
+        self,
+        fields: Dict[str, Any],
+        *,
+        now: Optional[float] = None,
+    ) -> Dict[str, Any]:
         moment = time.monotonic() if now is None else float(now)
         intent_id = uuid.uuid4().hex[:16]
-        record = {
+        record: Dict[str, Any] = {
             "intent_id": intent_id,
-            "workspace_id": str(workspace_id or "").strip(),
-            "group_id": str(group_id or "").strip(),
             "state": PENDING,
             "created_at": moment,
             "expires_at": moment + self.ttl_seconds,
             "claimed_by": "",
             "detail": "",
+            "result": None,
+            **fields,
         }
         with self._lock:
             self._prune(moment)
@@ -114,22 +194,34 @@ class WindowIntentStore:
         intent_id: str,
         outcome: str,
         detail: str = "",
+        result: Optional[Mapping[str, Any]] = None,
         *,
         now: Optional[float] = None,
     ) -> Tuple[bool, Dict[str, Any]]:
-        """The claimant reports what happened."""
+        """The claimant reports what happened.
+
+        The allowed outcomes are the ones this intent's *kind* has: a page
+        reporting `opened` on a split would be reporting something else's work.
+        """
         moment = time.monotonic() if now is None else float(now)
         resolved = str(outcome or "").strip().lower()
-        if resolved not in OUTCOMES:
-            return False, {
-                "error": f"A window result must be one of: {', '.join(OUTCOMES)}.",
-            }
         with self._lock:
             record = self._intents.get(str(intent_id or ""))
             if record is None:
                 return False, {"error": "No such window request.", "state": EXPIRED}
+            allowed = OUTCOMES_BY_KIND.get(record.get("kind") or WINDOW_KIND, OUTCOMES)
+            if resolved not in allowed:
+                return False, {
+                    "error": f"A result must be one of: {', '.join(allowed)}.",
+                }
             record["state"] = resolved
             record["detail"] = str(detail or "")[:240]
+            if isinstance(result, Mapping):
+                record["result"] = {
+                    key: result.get(key)
+                    for key in SPLIT_RESULT_FIELDS
+                    if key in result
+                }
             # Keep a settled intent readable just long enough for the sidecar's
             # next poll to see it, rather than expiring it out from under them.
             record["expires_at"] = moment + self.claim_ttl_seconds
@@ -138,7 +230,7 @@ class WindowIntentStore:
     # ---------------- reads ----------------
 
     def pending(self, *, now: Optional[float] = None) -> List[Dict[str, Any]]:
-        """Unclaimed intents. Almost always empty."""
+        """Unclaimed intents, of every kind. Almost always empty."""
         moment = time.monotonic() if now is None else float(now)
         with self._lock:
             self._prune(moment)
@@ -172,14 +264,23 @@ class WindowIntentStore:
 
     @staticmethod
     def _public(record: Dict[str, Any], moment: float) -> Dict[str, Any]:
-        return {
+        kind = str(record.get("kind") or WINDOW_KIND)
+        payload = {
             "intent_id": record["intent_id"],
-            "workspace_id": record["workspace_id"],
-            "group_id": record["group_id"],
+            "kind": kind,
+            "workspace_id": record.get("workspace_id", ""),
+            "group_id": record.get("group_id", ""),
             "state": record["state"],
             "detail": record["detail"],
             "expires_in": max(0.0, round(record["expires_at"] - moment, 3)),
         }
+        if kind == SPLIT_KIND:
+            payload["session_id"] = record.get("session_id", "")
+            payload["axis"] = record.get("axis", "")
+            payload["split_request"] = dict(record.get("split_request") or {})
+        if record.get("result") is not None:
+            payload["result"] = dict(record["result"])
+        return payload
 
 
 #: The one store the routes read and write.

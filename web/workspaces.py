@@ -582,6 +582,20 @@ def capacity_refusal(required_panes: int, current_cap: int) -> str:
     )
 
 
+def _live_origin_session_id(origin_session_id: Any) -> str:
+    """The id of the pane this launch came from, when that pane is still open.
+
+    ``""`` for a launch from the launcher, from restore, or from a pane that
+    has since closed. Deliberately not a refusal: the connection half already
+    refuses a missing origin, and a launch that legitimately names no pane must
+    stamp no creator rather than an invented one.
+    """
+    requested = str(origin_session_id or "").strip()
+    if not requested:
+        return ""
+    return requested if _manager().get_session(requested) is not None else ""
+
+
 def resolve_origin_connection(origin_session_id: Any) -> Tuple[str, Dict[str, Any]]:
     """The connection a group launched from *inside* a pane has to open.
 
@@ -832,6 +846,19 @@ def launch_session_group(
             # the transport both see the host the group is actually opening on.
             sessions_config = [
                 {**config, **origin_connection} if isinstance(config, dict) else config
+                for config in sessions_config
+            ]
+        # *Which* pane asked, not just which machine it stands on. The origin
+        # was already read for the connection and then discarded; stamping it
+        # is what lets a later relaunch tell this agent's own panes from the
+        # ones a person made. Read from the live session rather than the body
+        # so a caller cannot claim a pane that is not open.
+        creator_session_id = _live_origin_session_id(data.get("origin_session_id"))
+        if creator_session_id:
+            sessions_config = [
+                {**config, "created_by_session_id": creator_session_id}
+                if isinstance(config, dict)
+                else config
                 for config in sessions_config
             ]
         layout = _normalize_layout(data.get("layout"), len(sessions_config))

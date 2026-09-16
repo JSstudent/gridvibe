@@ -15335,13 +15335,35 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn('data-terminal-split-h="${index}"', html)
         self.assertIn("splitTerminalPane(index, 'vertical')", html)
         self.assertIn("splitTerminalPane(index, 'horizontal')", html)
-        self.assertIn("async function splitTerminalPane(index, axis)", html)
+        # The axis is a parameter and never inferred. Asserted as the two
+        # leading parameters rather than the whole signature, which grew a
+        # third when a split gained a description of the pane it creates.
+        self.assertIn("async function splitTerminalPane(index, axis", html)
         # Each axis button enables independently from the per-axis candidates.
         self.assertIn("candidates.includes('vertical'),", html)
         self.assertIn("candidates.includes('horizontal'),", html)
         # The old single-axis auto-picker is gone.
         self.assertNotIn("function chooseSplitAxis", html)
         self.assertNotIn("grid?.classList.contains('layout-2-vertical')", html)
+
+    def test_terminals_page_exposes_the_split_bridge_the_intent_poll_reads(self):
+        """A split asked for from outside the browser is performed here.
+
+        The axis never reaches the server, so `window-intent.js` polls for
+        split intents and calls this page's own bridge -- which answers with
+        facts (which axes fit, and the button's own sentence for one that does
+        not) and runs `splitTerminalPane`, the handler the button runs.
+
+        The launcher has no bridge, and that absence *is* the ownership rule:
+        a page holding no panes claims no split.
+        """
+        html = self._page_html(self.client.get("/terminals"))
+        launcher = self._page_html(self.client.get("/"))
+        intent = self.client.get("/static/js/window-intent.js").get_data(as_text=True)
+
+        self.assertIn("window.GridVibeSplitBridge = splitBridge;", html)
+        self.assertIn("splitBridge: host.GridVibeSplitBridge || null", intent)
+        self.assertNotIn("window.GridVibeSplitBridge =", launcher)
 
     def test_terminals_page_explains_axis_specific_split_minimums(self):
         response = self.client.get("/terminals")
@@ -18065,7 +18087,10 @@ class ExtractedFrontendAssetsTestCase(unittest.TestCase):
         # pane created by a split.
         for function_name in (
             "function replacePaneWithTerminal(index, session) {",
-            "async function splitTerminalPane(index, axis) {",
+            # Named without its parameter list: the split gained a third
+            # parameter describing the pane it creates, and this test is about
+            # the room join inside it, not about the signature.
+            "async function splitTerminalPane(",
         ):
             with self.subTest(function=function_name):
                 body = terminals[terminals.index(function_name):]

@@ -96,6 +96,16 @@ class TerminalSession:
     # one. 0 for a pane a person launched. Runtime lineage, read by the
     # sidecar's own depth budget -- see gridvibe_mcp/identity.py.
     agent_depth: int = 0
+    # *Which* pane asked for this one, rather than how many generations stand
+    # behind it. `agent_depth` is a counter: two sibling agents at the same
+    # depth would each pass a depth-based gate on the other's panes, so the
+    # relaunch gate reads this instead. "" for a pane a person launched.
+    #
+    # Deliberately runtime-only and absent from `web/runtime_state.py`'s field
+    # list: live sessions are in memory, so after a restart this would name a
+    # session that no longer exists. A restored workspace therefore carries no
+    # creator ids at all and every pane in it refuses -- the safe direction.
+    created_by_session_id: str = ""
     title: Optional[str] = None
     mode: str = "ssh"
     distribution: Optional[str] = None
@@ -181,6 +191,7 @@ class TerminalSession:
             "agent_auto_mode": self.agent_auto_mode,
             "agent_mcp": self.agent_mcp,
             "agent_depth": self.agent_depth,
+            "created_by_session_id": self.created_by_session_id,
             "title": self.title,
             "mode": self.mode,
             "distribution": self.distribution,
@@ -966,6 +977,7 @@ class SessionManager:
             "agent_auto_mode": bool(config.get("agent_auto_mode")),
             "agent_mcp": bool(config.get("agent_mcp")),
             "agent_depth": _normalize_agent_depth(config.get("agent_depth")),
+            "created_by_session_id": str(config.get("created_by_session_id") or ""),
             "title": config.get("title"),
             "mode": mode,
             "distribution": config.get("distribution"),
@@ -1141,6 +1153,7 @@ class SessionManager:
             "agent_auto_mode",
             "agent_mcp",
             "agent_depth",
+            "created_by_session_id",
             "title",
             "distribution",
             "use_wsl",

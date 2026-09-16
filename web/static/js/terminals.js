@@ -6882,7 +6882,15 @@
         }
     }
 
-    async function splitTerminalPane(index, axis) {
+    /* `splitRequest` is the extra description of the new pane: what it is,
+       which agent it runs, whether that agent gets the GridVibe tools. Empty
+       for the header button, which produces exactly what it always did. It is
+       built and validated on the server when a split *intent* is recorded, so
+       this page forwards it rather than composing one.
+
+       Returns what happened, so the intent path can report it. The button path
+       ignores the return and reads the toast, as it always has. */
+    async function splitTerminalPane(index, axis, splitRequest = null) {
         const sourceSessionId = sessionIds[index];
         const sourceTerminal = terminals[index];
         const sourceCard = document.getElementById(`tc-${index}`);
@@ -6893,16 +6901,16 @@
         closeAllPaneActionMenus();
         closeAllPaneShellMenus();
         if (!sourceSessionId || !sourceTerminal || !sourceCard || !grid) {
-            return;
+            return { ok: false, error: 'That pane is not open in this window.' };
         }
         if (terminals.length >= MAX_SPLIT_TERMINALS) {
             updateAllSplitButtonStates();
-            return;
+            return { ok: false, error: getSplitDisabledReason(axis) };
         }
 
         const visualIndex = Array.from(grid.children).indexOf(sourceCard);
         if (visualIndex < 0) {
-            return;
+            return { ok: false, error: 'That pane is not on screen in this window.' };
         }
 
         const rects = ensureSplitSlotRects();
@@ -6910,7 +6918,7 @@
         const candidates = sourceRect ? getSplitCandidates(index, sourceRect) : [];
         if (!axis || !candidates.includes(axis)) {
             updateSplitButtonState(index);
-            return;
+            return { ok: false, error: getSplitDisabledReason(axis) };
         }
 
         splitButtons.forEach(button => { button.disabled = true; });
@@ -6920,6 +6928,14 @@
         const payload = { axis };
         if (isExplorerSession(sourceTerminal._session)) {
             payload.directory = getExplorerSelectedDirectory(index);
+        }
+        /* Stated last so a caller that named a directory keeps it: the
+           explorer default above is a fallback, not an override. */
+        if (splitRequest && typeof splitRequest === 'object') {
+            Object.assign(payload, splitRequest);
+            if (!payload.directory && isExplorerSession(sourceTerminal._session)) {
+                payload.directory = getExplorerSelectedDirectory(index);
+            }
         }
 
         try {
@@ -6982,13 +6998,66 @@
             await ensureAttachedTerminalsReady([index, newIndex]);
             emitTerminalResize(index, true);
             emitTerminalResize(newIndex, true);
+            return { ok: true, session, index: newIndex };
         } catch (error) {
             console.error('[GridVibe Sessions] splitTerminalPane failed:', error);
             setWorkspaceSaveMessage(`Split failed: ${error.message}`, 'error');
+            return { ok: false, error: error.message };
         } finally {
             updateAllSplitButtonStates();
         }
     }
+
+    /* ─────────────────────────────────────────────
+       Split bridge — the page half of a split intent
+    ─────────────────────────────────────────────
+       A process outside the browser can append a pane but cannot place one:
+       the axis never reaches the server, and every refusal is measured off the
+       live terminal. So `window-intent.js` polls for split intents and this is
+       what it calls — the same `splitTerminalPane` the header button runs,
+       under the same `getSplitCandidates`.
+
+       It reports *facts*, not sentences: which axes would work and what the
+       button's own tooltip says about the one that would not. The wording is
+       composed in `window-intent.js`, where it can be executed in Node. */
+    const splitBridge = {
+        /* Whether this window is the one holding that pane. A page that does
+           not hold it never claims the intent, which is how two open windows
+           on different groups do not fight over one split. */
+        owns(sessionId) {
+            return sessionIds.indexOf(String(sessionId || '')) >= 0;
+        },
+
+        /* The axes this pane could actually be halved on right now, or `null`
+           when the pane is not in this window at all. */
+        candidates(sessionId) {
+            const index = sessionIds.indexOf(String(sessionId || ''));
+            if (index < 0) return null;
+            const grid = document.getElementById('terminalsGrid');
+            const card = document.getElementById(`tc-${index}`);
+            const visualIndex = grid && card
+                ? Array.from(grid.children).indexOf(card)
+                : -1;
+            if (visualIndex < 0) return [];
+            const rect = ensureSplitSlotRects()[visualIndex];
+            return rect ? getSplitCandidates(index, rect) : [];
+        },
+
+        /* GridVibe's own sentence for why an axis is unavailable — the same
+           string the disabled split button carries in its tooltip. */
+        disabledReason(axis) {
+            return getSplitDisabledReason(axis);
+        },
+
+        async perform(sessionId, axis, splitRequest) {
+            const index = sessionIds.indexOf(String(sessionId || ''));
+            if (index < 0) {
+                return { ok: false, error: 'That pane is not open in this window.' };
+            }
+            return splitTerminalPane(index, axis, splitRequest || null);
+        }
+    };
+    window.GridVibeSplitBridge = splitBridge;
 
     /* ─────────────────────────────────────────────
        Clipboard helpers (copy / paste)
