@@ -235,7 +235,7 @@ The one configurable chord in GridVibe is voice push-to-talk, set in App Setting
 | 🔄 | Reset the view and replay recent output. On a terminal it opens a dropdown that also relaunches the pane in another shell and/or under another agent |
 | 📁 ⇄ 💻 | Swap between terminal and file explorer at the current directory |
 | 🌐 ⇄ 💻 | Swap a Local Repo pane between terminal and browser preview |
-| 🪟 | Split side-by-side or stacked. A terminal clones its connection where it *is*; an explorer or browser pane splits off a terminal rooted where it is browsing |
+| 🪟 | Split side-by-side or stacked into two equal halves, however the grid has been resized. A terminal clones its connection where it *is*; an explorer or browser pane splits off a terminal rooted where it is browsing |
 | 🧹 | Clear the display and purge the replay buffer |
 | 🎙️ | Start/stop voice input (when enabled) |
 | 🌙 ⇄ ☀️ | Toggle an explorer pane between dark and light |

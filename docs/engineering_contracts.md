@@ -1081,6 +1081,17 @@ unless the task explicitly changes this contract.
   foregrounds are retained in both themes, with contrasting backgrounds for
   white/yellow names on light surfaces and near-black OpenCode names. Runtime
   agent changes update both the title's brand key and its icon in place.
+- A split is two halves. `split-geometry.js` is the DOM-free, Node-tested rule
+  for where the cut lands and what the axis track weights become: the offset is
+  chosen by measured width, not by track count, so an odd span and a span whose
+  tracks carry unequal weights — what a pane inherits when it absorbs a closed
+  neighbour, and what older saved layouts come back as — still halve. The
+  rewrite preserves the split span's own weight total, so no other pane moves;
+  where another pane's edge falls inside the span, that divider wins and the cut
+  goes to the nearest line instead. Keep `terminals.js` a caller: it measures the
+  live grid and publishes one weight generation, and the split button and the
+  sidecar's `split_pane` intent must keep reaching it through the same handler.
+
 - `agent-dashboard.css` dresses one dialog on two pages and states no page's
   palette: no `color-scheme`, no `body` rule, no full-height frame. It reads the
   shared `--gv-dialog-*` and status tokens, so both legacy page palettes dress

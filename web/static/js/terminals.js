@@ -4044,20 +4044,68 @@
         return candidates;
     }
 
-    function splitSlotRect(rect, axis) {
+    function splitSlotSpan(requested, total) {
+        const middle = Math.floor(total / 2);
+        const value = Number.isInteger(requested) && requested > 0 ? requested : middle;
+        return Math.min(Math.max(1, value), Math.max(1, total - 1));
+    }
+
+    /* Which track line a split lands on, and what the axis weights have to
+       become for the two halves to be halves. `split-geometry.js` owns the
+       arithmetic — an odd span has no middle line, and a span whose tracks
+       carry unequal weights has a middle line that is not its middle — and it
+       is answered here, against the live grid, because the track sizes it
+       reasons about are the ones this window is painting.
+
+       Planned before the splice, off the rectangle list that is about to be
+       spliced: the weights must line up with the grid as it stands now. */
+    function planSplitSlotGeometry(rects, visualIndex, rect, axis) {
+        const vertical = axis === 'vertical';
+        const span = vertical ? rect.w : rect.h;
+        const fallback = { firstSpan: Math.floor(span / 2), weights: null };
+        const planner = window.GridVibeSplitGeometry;
+        const grid = document.getElementById('terminalsGrid');
+        if (!planner || !grid || !Array.isArray(rects)) {
+            return fallback;
+        }
+
+        const size = getSplitGridSize(rects);
+        initializeSplitTrackWeights(size.columns, size.rows);
+        const metrics = getResizableGridMetrics(grid, splitColumnWeights, splitRowWeights);
+        if (!metrics) {
+            return fallback;
+        }
+
+        const start = vertical ? rect.x : rect.y;
+        const intervals = rects
+            .filter((_other, index) => index !== visualIndex)
+            .map(other => (vertical
+                ? { start: other.x, span: other.w }
+                : { start: other.y, span: other.h }));
+        return planner.planSplit({
+            start,
+            span,
+            weights: vertical ? splitColumnWeights : splitRowWeights,
+            sizes: vertical ? metrics.columnSizes : metrics.rowSizes,
+            gap: vertical ? metrics.columnGap : metrics.rowGap,
+            foreignEdges: planner.foreignEdgeOffsets(intervals, start, span),
+        });
+    }
+
+    function splitSlotRect(rect, axis, firstSpan = 0) {
         /* A split produces two plain, independent leaves — no shared splitId or
            ancestor chain. Each new pane behaves like any other grid cell: it can
            be split again until it hits the minimum size, and closing it reflows
            its neighbours through the normal terminal-close path. */
         if (axis === 'vertical') {
-            const firstWidth = Math.floor(rect.w / 2);
+            const firstWidth = splitSlotSpan(firstSpan, rect.w);
             return [
                 makeSplitLeaf({ originSlot: rect.originSlot, x: rect.x, y: rect.y, w: firstWidth, h: rect.h }),
                 makeSplitLeaf({ originSlot: rect.originSlot, x: rect.x + firstWidth, y: rect.y, w: rect.w - firstWidth, h: rect.h }),
             ];
         }
 
-        const firstHeight = Math.floor(rect.h / 2);
+        const firstHeight = splitSlotSpan(firstSpan, rect.h);
         return [
             makeSplitLeaf({ originSlot: rect.originSlot, x: rect.x, y: rect.y, w: rect.w, h: firstHeight }),
             makeSplitLeaf({ originSlot: rect.originSlot, x: rect.x, y: rect.y + firstHeight, w: rect.w, h: rect.h - firstHeight }),
@@ -6963,7 +7011,17 @@
 
             const newCard = createSplitTerminalCard(sourceCard, session, index, newIndex);
             sourceCard.after(newCard);
-            const [firstRect, secondRect] = splitSlotRect(sourceRect, axis);
+            const plan = planSplitSlotGeometry(splitSlotRects, visualIndex, sourceRect, axis);
+            const [firstRect, secondRect] = splitSlotRect(sourceRect, axis, plan.firstSpan);
+            /* The rewrite keeps the span's own total, so publishing it moves
+               this pane's two halves onto the middle and no other pane at all. */
+            if (Array.isArray(plan.weights)) {
+                if (axis === 'vertical') {
+                    splitColumnWeights = plan.weights;
+                } else {
+                    splitRowWeights = plan.weights;
+                }
+            }
             splitSlotRects.splice(visualIndex, 1, firstRect, secondRect);
             applySplitSlotGeometry({ fit: false });
             attachSplitTerminalEvents(newIndex);
