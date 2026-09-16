@@ -3,6 +3,47 @@ Last updated: 2026-09-16
 
 ## Open Issues
 
+### Issue ID: ISSUE-2026-056
+- Title: An agent pane never says it is running with GridVibe tools
+- Priority: Low
+- Status: Open
+- Area: `web/static/js/agent-identity.js`, `web/static/js/terminals.js`, `web/static/js/dashboard-dialog.js`
+- Assignee: Unassigned
+- Tags: `terminal`, `session`, `mcp`, `dashboard`, `tests`
+- Reported: 2026-09-16
+
+Description:
+`agent_mcp` is a durable per-pane fact — the launcher checkbox writes it (`web/static/js/launcher.js:821`), saved presets and restored snapshots carry it forward, the relaunch route preserves it, `web/mcp_launch.py` decides from it whether the pane's agent may start the sidecar at all, and `/api/dashboard` publishes it in its fixed field list (`web/dashboard.py:81`). Every naming surface ignores it.
+
+The consequence is that two agent panes that behave very differently — one that can create workspaces, launch panes and split the grid through the `gridvibe` MCP server, and one that cannot — are painted identically. Both read `Claude`, in the same glyph, on the same header line. In a workspace where only some agents were given tools, the reader has no way to tell which pane to give a "split this pane" instruction to except by asking it, and no way to tell after a restore which panes came back with the flag set.
+
+Steps to reproduce:
+1. In the launcher, add two agent panes on the same local agent (e.g. Claude). Tick "Give this agent GridVibe tools" on the first row only.
+2. Launch the workspace.
+3. Read both pane headers, and open the agent dashboard (Alt+A) and read both rows.
+4. To see the flag at all, open one pane's header reset dropdown.
+
+Expected behavior:
+An agent pane running with GridVibe tools should state so where its agent is named — a short `MCP` tag beside the agent name in the pane header, and the same distinction available on the dashboard row — so the two panes above are distinguishable at a glance and after a restore.
+
+Actual behavior / logs:
+`web/static/js/agent-identity.js` does not reference `agent_mcp` anywhere. The three functions both surfaces name a pane through — `paneDisplayTitle`, `paneChatLine` and `paneTransportLabel` — read `title`, `startup_mode`, `agent_selection`, `custom_agent`, `activity.title`, `directory`, `mode`, `host`, `use_wsl`, `use_powershell` and `distribution`, and nothing else. So the header paint at `web/static/js/terminals.js:895` and the dashboard row at `web/static/js/dashboard-dialog.js:190` produce the same string for both panes by construction.
+
+The only surface that reads the flag is the per-pane reset dropdown, via `paneAgentMcp` (`web/static/js/terminal-shell.js:106`, consumed at `:353`) — one click deep, one pane at a time, and absent from the dashboard entirely.
+
+### Proposed solution:
+Add the reading to `web/static/js/agent-identity.js`, which is where the naming rule is held once precisely so both surfaces agree: a `paneAgentMcpTag(session)` (or an exported `MCP_TAG_LABEL` plus a predicate) returning the tag only for a pane that is an agent *and* has `agent_mcp` — mirroring `paneAgentMcp`'s own rule that the flag is meaningless without an agent, so a preset written before the pane was sent back to a plain shell does not paint a tag. Keep it a separate value rather than folding it into `paneDisplayTitle`'s return: the title is also what a user may have typed, and a tag concatenated into it would be indistinguishable from a name and would leak into the typed-title comparison in `paneChatLine`.
+
+Paint it in the pane header as a sibling span beside `terminal-name`/`terminal-host` (`web/static/js/terminals.js:5466`), refreshed in `syncPaneIdentityChrome` by the same skip-if-unchanged shape the name and host labels already use, so a relaunch that clears the flag removes the tag without rebuilding the header. Style it from the existing theme tokens in `terminals.css` alongside the host label; no new palette.
+
+For the dashboard row, note the deliberate decision recorded at `web/static/js/dashboard-dialog.js:195` — the transport chip was moved off the row into the hover because it cost the title more width than it was worth. A two-or-three-character `MCP` tag is a different trade from a `PowerShell` chip, but the dialog's width pressure is real: investigate whether it belongs on the row or in the row's hover line beside the transport label, and keep the repaint within `dashboardRowNeedsRepaint`'s unchanged-skip so a poll that changes nothing still repaints nothing.
+
+No persistence or migration work: `agent_mcp` is already stored, restored and published; a pane saved without it reads falsy and correctly shows no tag.
+
+Edge cases to cover: an SSH pane, where `pane_can_run_the_sidecar` (`web/mcp_launch.py:84`) is false — a pane moved to SSH must not keep wearing the tag even if the flag survived the move; a custom agent (`agent_selection === 'other'`) with the flag set; a pane whose agent has `mcp_supported` false, which the launcher never offers the checkbox for but a hand-edited preset could set.
+
+Tests: extend `tests/test_agent_identity.py` (Node) with the tag predicate — agent + flag, agent without flag, non-agent with a stale flag, SSH pane; extend `tests/test_dashboard_dialog.py` for the row's tag and for the repaint still being skipped when nothing changed; assert in `tests/test_dashboard.py` that `agent_mcp` stays in the published field list, since the frontend now depends on it.
+
 ### Issue ID: ISSUE-2026-055
 - Title: Restored pre-2026-07-24 split layouts can never be split side-by-side again
 - Priority: Medium
