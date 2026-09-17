@@ -11,6 +11,8 @@ exception.
 """
 
 import sys
+import threading
+import time
 import unittest
 from pathlib import Path
 
@@ -125,6 +127,98 @@ class WindowIntentStoreTestCase(unittest.TestCase):
 
         # A sidecar in a retry loop cannot grow the store without bound.
         self.assertLessEqual(len(store.pending(now=110.0)), 4)
+
+
+class WaitForSettledTestCase(unittest.TestCase):
+    """The in-process read, which exists so one caller need not poll.
+
+    ``web/mcp_http.py`` runs the sidecar's own wait loop *inside* a Flask
+    request handler, where every tick used to be a loopback GET back into this
+    same server. The store is in that process, so the loop can wait on it --
+    and what it gets back has to be what the route would have said, or the two
+    transports would answer differently.
+    """
+
+    def test_an_intent_that_has_already_settled_answers_at_once(self):
+        store = WindowIntentStore()
+        intent = store.open("ws1")
+        store.claim(intent["intent_id"], "page-1")
+        store.record_result(intent["intent_id"], OPENED)
+
+        started = time.monotonic()
+        record = store.wait_for_settled(intent["intent_id"], 30.0)
+
+        self.assertEqual(record["state"], OPENED)
+        self.assertLess(time.monotonic() - started, 5.0)
+
+    def test_a_settling_write_wakes_the_waiter(self):
+        store = WindowIntentStore()
+        intent = store.open("ws1")
+
+        def page():
+            time.sleep(0.2)
+            store.claim(intent["intent_id"], "page-1")
+            store.record_result(intent["intent_id"], BLOCKED, "A window refused.")
+
+        thread = threading.Thread(target=page, daemon=True)
+        started = time.monotonic()
+        thread.start()
+        record = store.wait_for_settled(intent["intent_id"], 30.0)
+        thread.join(5)
+
+        self.assertEqual(record["state"], BLOCKED)
+        self.assertEqual(record["detail"], "A window refused.")
+        self.assertLess(time.monotonic() - started, 10.0)
+
+    def test_an_unclaimed_intent_ends_at_its_own_expiry_not_the_timeout(self):
+        """Nothing further can happen to a pruned intent, so waiting out the
+        rest of the caller's deadline would hold a thread for no answer."""
+        store = WindowIntentStore(ttl_seconds=0.2, claim_ttl_seconds=20.0)
+        intent = store.open("ws1")
+
+        started = time.monotonic()
+        record = store.wait_for_settled(intent["intent_id"], 30.0)
+
+        self.assertEqual(record["state"], EXPIRED)
+        self.assertLess(time.monotonic() - started, 10.0)
+
+    def test_a_claim_extends_what_the_waiter_sleeps_against(self):
+        """The claim TTL is the claimant's, and the waiter honours it: a page
+        that claims just before the claim window shuts still gets its own."""
+        store = WindowIntentStore(ttl_seconds=0.3, claim_ttl_seconds=5.0)
+        intent = store.open("ws1")
+
+        def page():
+            time.sleep(0.1)
+            store.claim(intent["intent_id"], "page-1")
+            time.sleep(0.4)  # past the 0.3s a page had to claim it
+            store.record_result(intent["intent_id"], OPENED)
+
+        thread = threading.Thread(target=page, daemon=True)
+        thread.start()
+        record = store.wait_for_settled(intent["intent_id"], 30.0)
+        thread.join(5)
+
+        self.assertEqual(record["state"], OPENED)
+
+    def test_the_wait_is_bounded_by_the_timeout_it_was_given(self):
+        store = WindowIntentStore(ttl_seconds=30.0, claim_ttl_seconds=30.0)
+        intent = store.open("ws1")
+
+        started = time.monotonic()
+        record = store.wait_for_settled(intent["intent_id"], 0.2)
+
+        self.assertEqual(record["state"], PENDING)
+        self.assertLess(time.monotonic() - started, 10.0)
+
+    def test_an_id_the_store_never_had_is_expired_rather_than_a_wait(self):
+        store = WindowIntentStore()
+
+        started = time.monotonic()
+        record = store.wait_for_settled("not-an-intent", 30.0)
+
+        self.assertEqual(record["state"], EXPIRED)
+        self.assertLess(time.monotonic() - started, 5.0)
 
 
 class WindowIntentRouteTestCase(unittest.TestCase):

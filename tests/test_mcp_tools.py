@@ -29,6 +29,8 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 import tests  # noqa: E402,F401 - redirects durable state away from the real files
+from gridvibe_mcp import splits as splits_module  # noqa: E402
+from gridvibe_mcp import windows as windows_module  # noqa: E402
 from gridvibe_mcp.identity import read_identity  # noqa: E402
 from gridvibe_mcp.server import (  # noqa: E402
     CREATE_TOOLS,
@@ -50,6 +52,7 @@ from gridvibe_mcp.windows import (  # noqa: E402
     open_window,
 )
 from tests.test_mcp_client import StubOpener, client_for, http_error  # noqa: E402
+from web.window_intents import CLAIM_TTL_SECONDS, INTENT_TTL_SECONDS  # noqa: E402
 
 #: Every tool this phase deliberately does not build. Naming them is the point:
 #: an accidental re-addition has to fail a test that says why it is absent.
@@ -1163,6 +1166,95 @@ class SplitIntentPollTestCase(unittest.TestCase):
 
         self.assertEqual(result["status"], 404)
         self.assertIn("not found", result["error"])
+
+
+class _LatePage:
+    """A page that takes the whole of what the store allows it.
+
+    The store's worst case is not its 15s claim window: a page that claims at
+    14.9s is then entitled to the full 20s claim TTL before it has to report.
+    This stands in for that page, reading a clock rather than following a
+    script, so the wait is what decides the outcome.
+    """
+
+    def __init__(self, clock, claim_at, report_at):
+        self.clock = clock
+        self.claim_at = claim_at
+        self.report_at = report_at
+
+    def split_intent(self, session_id, body):
+        return {"intent_id": "s-1", "axis": body["axis"], "state": "pending"}
+
+    def open_window_intent(self, workspace_id, group_id=""):
+        return {"intent_id": "w-1", "state": "pending"}
+
+    def read_window_intent(self, intent_id):
+        now = self.clock()
+        if now >= self.report_at:
+            settled = SPLIT if intent_id == "s-1" else OPENED
+            return {
+                "intent_id": intent_id,
+                "state": settled,
+                "result": {"session_id": "pane-9"},
+            }
+        if now >= self.claim_at:
+            return {"intent_id": intent_id, "state": "claimed"}
+        return {"intent_id": intent_id, "state": "pending"}
+
+
+class IntentWaitTestCase(unittest.TestCase):
+    """How long the sidecar waits, against how long the store may take.
+
+    Both verbs end with a sentence about what did *not* happen -- the split's
+    says the panes and the workspace are untouched. That is only true if the
+    store gave up first. The sidecar cannot import `web/`, so the relation
+    between the two numbers is pinned here, in the one place that can see both.
+    """
+
+    def _clock(self):
+        ticks = {"now": 0.0}
+        return ticks, (lambda: ticks["now"]), (lambda seconds: ticks.__setitem__(
+            "now", ticks["now"] + seconds
+        ))
+
+    def test_both_waits_outlast_the_store_at_its_slowest(self):
+        worst_case = INTENT_TTL_SECONDS + CLAIM_TTL_SECONDS
+
+        for module in (splits_module, windows_module):
+            with self.subTest(module=module.__name__):
+                self.assertGreater(module.DEFAULT_WAIT_SECONDS, worst_case)
+
+    def test_a_page_that_claims_late_still_settles_inside_the_wait(self):
+        ticks, now, rest = self._clock()
+        page = _LatePage(now, claim_at=14.9, report_at=34.9)
+
+        result = split_pane(page, "pane-4", "vertical", sleep=rest, monotonic=now)
+
+        self.assertEqual(result["status"], SPLIT)
+        self.assertEqual(result["pane"]["session_id"], "pane-9")
+
+    def test_the_wait_that_was_too_short_would_have_reported_it_untouched(self):
+        """The regression itself: the page holds a valid claim and goes on to
+        make the pane, while the agent is told the workspace is untouched."""
+        ticks, now, rest = self._clock()
+        page = _LatePage(now, claim_at=14.9, report_at=34.9)
+
+        result = split_pane(
+            page, "pane-4", "vertical", wait_seconds=25.0, sleep=rest, monotonic=now
+        )
+
+        self.assertEqual(result["status"], SPLIT_NO_WINDOW)
+        self.assertIn("untouched", result["detail"])
+
+    def test_the_window_verb_waits_the_same_way(self):
+        ticks, now, rest = self._clock()
+        page = _LatePage(now, claim_at=14.9, report_at=34.9)
+
+        result = open_window(
+            page, "ws1", window_mode="native", sleep=rest, monotonic=now
+        )
+
+        self.assertEqual(result["status"], OPENED)
 
 
 class SetPaneAgentTestCase(unittest.TestCase):

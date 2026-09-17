@@ -1831,11 +1831,15 @@ def _establish_mcp_tunnel(
     """Give one remote agent pane a route home, if it asked for one.
 
     Only a pane that ticked MCP opens a port: an untouched checkbox mints no
-    token, asks sshd for nothing and writes nothing on the remote host.
+    token, asks sshd for nothing and writes nothing on the remote host. And
+    only a pane whose agent could be *handed* one -- the flag says the reader
+    wants tools, not that this CLI has a way to take them.
 
     Records the result on the *connection* rather than the session, because it
     belongs to this transport and dies with it -- a relaunched pane gets a new
-    port, a new token and a freshly written config.
+    port, a new token and a freshly written config. Nothing is recorded on a
+    connection that stopped being this pane's while the tunnel was opening:
+    the record would be read by nobody and torn down by nothing.
     """
     if not bool(getattr(session, "agent_mcp", False)):
         return
@@ -1844,9 +1848,30 @@ def _establish_mcp_tunnel(
 
     from urllib.parse import urlparse
 
+    from web.agents import _agent_supports_mcp
     from web.mcp_http import pane_tokens
     from web.mcp_launch import server_base_url
     from web.ssh_tunnel import establish
+    from web.ssh_tunnel import teardown as _teardown_mcp_tunnel
+
+    agent_key = str(getattr(session, "agent_selection", "") or "") or str(
+        getattr(session, "custom_agent", "") or ""
+    )
+    if not _agent_supports_mcp(agent_key):
+        # The last place this is asked, and the only one with a cost attached
+        # -- the flag is refused at every write. Five of the eight registered
+        # CLIs can register an MCP
+        # server only by mutating the user's own config, so their launch line
+        # carries nothing -- and a reverse forward, a minted token and a file
+        # written on the remote host would all be opened for an agent that has
+        # no way to call any of it.
+        logger.info(
+            "[%s] %s has no way to be handed an MCP server, so no tunnel was "
+            "opened for it",
+            session_id,
+            agent_key or "this pane's agent",
+        )
+        return
 
     group_id = str(getattr(session, "group_id", "") or "")
     workspace_id = DEFAULT_WORKSPACE_ID
@@ -1882,8 +1907,31 @@ def _establish_mcp_tunnel(
         )
         return
 
+    # Re-validated inside the lock for the same reason the resources insert on
+    # the connect path is: a close landing between `_connection_status` and
+    # this assignment has already run `_shutdown_connection`, which popped an
+    # `mcp_tunnel` that was not there yet. Writing the record afterwards would
+    # leave an sshd listener on the remote host for the life of the transport,
+    # a config file naming a live token, and an SFTP channel held by a record
+    # nobody will ever read again.
     with connection_lock:
-        connection["mcp_tunnel"] = record
+        stale = (
+            not _connection_is_current(session_id, connection)
+            or bool(connection.get("retired"))
+        )
+        if not stale:
+            connection["mcp_tunnel"] = record
+    if stale:
+        logger.info(
+            "[%s] Session was closed while the MCP tunnel was opening; "
+            "withdrawing it", session_id
+        )
+        try:
+            _teardown_mcp_tunnel(client, record)
+        except Exception:
+            logger.debug("[%s] MCP tunnel teardown failed", session_id, exc_info=True)
+        pane_tokens.revoke(session_id)
+        return
     logger.info(
         "[%s] MCP tunnel ready on remote port %s (config %s)",
         session_id,

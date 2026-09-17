@@ -39,7 +39,12 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional
 
 from sessions.manager import SessionStatus
-from web.agents import AGENT_REGISTRY, _agent_absent_reason, _normalize_agent_key
+from web.agents import (
+    AGENT_REGISTRY,
+    _agent_absent_reason,
+    _agent_supports_mcp,
+    _normalize_agent_key,
+)
 from web.app import session_manager
 from web.explorer import _is_browser_session, _is_explorer_session
 from web.pane_gates import (  # noqa: F401 - LINEAGE_GATE/SELF_GATE re-exported
@@ -366,9 +371,17 @@ def apply_pane_shell_change(
     if mcp_enabled is not None:
         # Stated last, so it wins over the value `_agent_updates` carried
         # forward -- and a pane with no agent cannot have MCP, because there is
-        # no CLI to register the sidecar with.
+        # no CLI to register the sidecar with. Nor can a pane whose CLI has no
+        # way to be handed one: `agent_mcp` is what paints the pane header's
+        # MCP tag and what opens a tunnel on an SSH pane, and neither should
+        # happen for a launch line that carries nothing. Dropped rather than
+        # refused, exactly as a stated `mcp` on a pane with no agent is.
         resolved_agent = agent_key if agent_key is not None else _pane_agent_key(session)
-        updates["agent_mcp"] = bool(mcp_enabled) and bool(resolved_agent)
+        updates["agent_mcp"] = (
+            bool(mcp_enabled)
+            and bool(resolved_agent)
+            and _agent_supports_mcp(resolved_agent)
+        )
 
     # An empty payload states no choice at all and retains the old no-op API
     # behaviour. Every menu row states at least `agent`, so a real selection

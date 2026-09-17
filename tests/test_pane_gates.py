@@ -184,6 +184,55 @@ class LineageGateTestCase(unittest.TestCase):
         info.assert_not_called()
 
 
+class StatedCallerTestCase(unittest.TestCase):
+    """The caller id is an input, not a proof -- pinned rather than commented.
+
+    On the stdio path `requested_by_session_id` traces back to
+    `GRIDVIBE_SESSION_ID` in the sidecar's own environment, inherited from the
+    agent CLI that the gates exist to constrain, and `list_panes` publishes
+    every live id. So the interesting question is not "can an agent state
+    another pane's id" -- it can -- but *what the gates then do*, which is
+    evaluate against the pane that was named. These two tests are that answer,
+    written down so the module's stated weakness cannot quietly become a
+    stated strength.
+    """
+
+    def test_a_stated_caller_moves_the_self_gate_onto_that_pane(self):
+        """An agent in pane-1 that names pane-5: pane-5 is what self protects,
+        and pane-1 -- its own -- is no longer the pane the request came from."""
+        borrowed = _request(caller="pane-5")
+
+        with patch.object(pane_gates, "session_manager", _Registry("pane-1", "pane-5")):
+            self.assertIsNone(
+                pane_gates.check_caller("pane-1", borrowed, RELAUNCH_WORDING)
+            )
+            with self.assertRaises(pane_gates.PaneGateRefusal) as raised:
+                pane_gates.check_caller("pane-5", borrowed, RELAUNCH_WORDING)
+
+        self.assertIn(f"[{pane_gates.SELF_GATE} gate]", raised.exception.message)
+
+    def test_a_stated_caller_inherits_that_panes_whole_lineage(self):
+        """Every pane pane-5 created, admitted with no `override` stated."""
+        made_by_pane_5 = _Pane(created_by_session_id="pane-5")
+
+        self.assertIsNone(
+            pane_gates.check_lineage(
+                made_by_pane_5, _request(caller="pane-5"), RELAUNCH_WORDING
+            )
+        )
+
+    def test_the_gates_still_bind_an_agent_that_states_its_own(self):
+        """What the gates do buy, in the same file: the ordinary caller reaches
+        neither its own pane nor one it did not create."""
+        pane_of_another = _Pane(created_by_session_id="pane-9")
+
+        with patch.object(pane_gates, "session_manager", _Registry("pane-1")):
+            with self.assertRaises(pane_gates.PaneGateRefusal):
+                pane_gates.check_caller("pane-1", _request(), RELAUNCH_WORDING)
+        with self.assertRaises(pane_gates.PaneGateRefusal):
+            pane_gates.check_lineage(pane_of_another, _request(), RELAUNCH_WORDING)
+
+
 class RefusalShapeTestCase(unittest.TestCase):
     def test_every_refusal_names_its_gate_the_same_way(self):
         self.assertEqual(

@@ -85,7 +85,12 @@ class WindowIntentStore:
         claim_ttl_seconds: float = CLAIM_TTL_SECONDS,
         max_intents: int = MAX_INTENTS,
     ) -> None:
-        self._lock = threading.Lock()
+        # A condition rather than a plain lock, so a reader in *this* process
+        # can wait for an intent to settle instead of asking over HTTP. It is
+        # still the one lock every access takes -- `with self._lock` is
+        # unchanged everywhere -- and the two writes that settle an intent
+        # wake whoever is waiting. See `wait_for_settled`.
+        self._lock = threading.Condition()
         self._intents: Dict[str, Dict[str, Any]] = {}
         self.ttl_seconds = float(ttl_seconds)
         self.claim_ttl_seconds = float(claim_ttl_seconds)
@@ -187,6 +192,9 @@ class WindowIntentStore:
             record["state"] = CLAIMED
             record["claimed_by"] = str(claimant or "")[:64]
             record["expires_at"] = moment + self.claim_ttl_seconds
+            # A claim is not a settlement, but it moves the deadline a waiter
+            # is sleeping against, so the waiter has to re-read it.
+            self._lock.notify_all()
             return True, self._public(record, moment)
 
     def record_result(
@@ -225,6 +233,7 @@ class WindowIntentStore:
             # Keep a settled intent readable just long enough for the sidecar's
             # next poll to see it, rather than expiring it out from under them.
             record["expires_at"] = moment + self.claim_ttl_seconds
+            self._lock.notify_all()
             return True, self._public(record, moment)
 
     # ---------------- reads ----------------
@@ -249,6 +258,47 @@ class WindowIntentStore:
             if record is None:
                 return {"intent_id": str(intent_id or ""), "state": EXPIRED, "detail": ""}
             return self._public(record, moment)
+
+    def wait_for_settled(
+        self,
+        intent_id: str,
+        timeout: float,
+    ) -> Dict[str, Any]:
+        """:meth:`read`, but for a caller that would otherwise poll it.
+
+        The stdio sidecar polls this store over HTTP every half second, which
+        costs GridVibe one cheap GET per tick and is fine: that loop runs in
+        the sidecar's own process. The *same* loop runs inside a Flask request
+        handler when a remote pane's agent calls `split_pane` or `open_window`
+        over `POST /mcp/<token>` (`web/mcp_http.py`), and there it was issuing
+        up to fifty loopback requests back into the server that was already
+        holding a worker thread for it -- re-entrancy that only worked because
+        `async_mode="threading"` gives every request a new thread.
+
+        The store is in the same process as that handler, so it can be waited
+        on directly. This blocks until the intent settles, goes, or the wait
+        runs out, and answers exactly what :meth:`read` would have answered at
+        that moment -- the caller cannot tell which way it was asked.
+
+        ``timeout`` is an upper bound, not the answer's schedule: the wait also
+        ends at the intent's own expiry, because a pruned intent reads
+        ``expired`` and there is nothing further to wait for.
+        """
+        resolved = str(intent_id or "")
+        with self._lock:
+            deadline = time.monotonic() + max(0.0, float(timeout))
+            while True:
+                moment = time.monotonic()
+                self._prune(moment)
+                record = self._intents.get(resolved)
+                if record is None:
+                    return {"intent_id": resolved, "state": EXPIRED, "detail": ""}
+                if record["state"] not in (PENDING, CLAIMED):
+                    return self._public(record, moment)
+                remaining = min(deadline, record["expires_at"]) - moment
+                if remaining <= 0:
+                    return self._public(record, moment)
+                self._lock.wait(remaining)
 
     def reset(self) -> None:
         with self._lock:

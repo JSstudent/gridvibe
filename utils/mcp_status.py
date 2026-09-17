@@ -46,6 +46,10 @@ SPAWN_TIMEOUT = 20.0
 #: failure here -- the sidecar starts fine without it and fails per call.
 PROBE_TIMEOUT = 3.0
 
+#: The route the probe asks for. Named here so it is one spelling, and so a
+#: test can assert the diagnostic asks for a route GridVibe actually publishes.
+PROBE_PATH = "/api/health"
+
 OK = "ok"
 BROKEN = "broken"
 NOTE = "note"
@@ -171,11 +175,19 @@ def check_handshake(server):
 
 
 def check_reachable(url):
-    """Probe the URL the sidecar was told to call. A note, never a failure."""
+    """Probe the URL the sidecar was told to call. A note, never a failure.
+
+    ``/api/health`` and not some other route: it is the one the sidecar's own
+    ``client.health()`` calls and the one ``open_window`` reads ``window_mode``
+    from, so a GridVibe that answers it is a GridVibe the tools can use. A
+    route that does not exist answers 404, which ``urlopen`` raises as an
+    ``HTTPError`` -- and this check would then report a running GridVibe as a
+    dead one, quietly, because a note never fails the run.
+    """
     if not url:
         return NOTE, "the config bakes in no --url"
     try:
-        with urllib.request.urlopen(f"{url}/api/agents", timeout=PROBE_TIMEOUT) as reply:
+        with urllib.request.urlopen(f"{url}{PROBE_PATH}", timeout=PROBE_TIMEOUT) as reply:
             if reply.status == 200:
                 return OK, f"GridVibe is answering at {url}"
             return NOTE, f"{url} answered {reply.status}"

@@ -10,11 +10,18 @@ cited from either.
 Nothing below was changed *when this was written*. Each finding names the file,
 what was true, why it matters, and what the fix would be.
 
-**Since then, the two High findings have been fixed** — [1](#1) and [2](#2),
-both on 2026-09-17, code and tests only. Each carries a **Fixed** note saying
-what changed and what pins it. Everything else stands exactly as written, and
-the review remains historical evidence rather than a contract: the rules the
-two fixes established live in the modules' own docstrings.
+**Since then, the two High findings and all six Medium ones have been fixed** —
+[1](#1) and [2](#2), then [3](#3) through [8](#8), all on 2026-09-17, code and
+tests only. Each carries a **Fixed** note saying what changed and what pins it.
+The nine Low findings and the Info one stand exactly as written, and the review
+remains historical evidence rather than a contract: the rules the eight fixes
+established live in the modules' own docstrings.
+
+Nothing outside code and tests was touched for the Medium round either — no
+README, no `CHANGELOG.md`, no `docs/engineering_contracts.md`, and not
+`gridvibe_mcp/README.md`, which [finding 20](#20) already describes as four
+tools out of date. Where a fix was a wording change ([3](#3)), the wording went
+into the module's own docstring.
 
 ## Scope
 
@@ -36,12 +43,12 @@ Tests read: `tests/test_mcp_tools.py`, `test_mcp_client.py`, `test_mcp_identity.
 | --- | --- | --- |
 | [1](#1) | High — **fixed** | The SSH reverse tunnel forwards GridVibe's whole HTTP API, not just `/mcp/<token>` |
 | [2](#2) | High — **fixed** | A pane token is never revoked when its pane closes |
-| [3](#3) | Medium | The lineage and self gates rest on a variable the constrained agent controls |
-| [4](#4) | Medium | `make mcp-status` probes a route GridVibe has never had |
-| [5](#5) | Medium | Over HTTP, `split_pane`/`open_window` hold a request thread for 25s and re-enter the server ~50 times |
-| [6](#6) | Medium | The sidecar can give up before the intent store does, and then claims nothing was touched |
-| [7](#7) | Medium | A close racing an SSH connect leaks a remote listener, a config file and an SFTP channel |
-| [8](#8) | Medium | An SSH pane whose agent has no MCP mechanism still opens a tunnel and mints a token |
+| [3](#3) | Medium — **fixed** | The lineage and self gates rest on a variable the constrained agent controls |
+| [4](#4) | Medium — **fixed** | `make mcp-status` probes a route GridVibe has never had |
+| [5](#5) | Medium — **fixed** | Over HTTP, `split_pane`/`open_window` hold a request thread for 25s and re-enter the server ~50 times |
+| [6](#6) | Medium — **fixed** | The sidecar can give up before the intent store does, and then claims nothing was touched |
+| [7](#7) | Medium — **fixed** | A close racing an SSH connect leaks a remote listener, a config file and an SFTP channel |
+| [8](#8) | Medium — **fixed** | An SSH pane whose agent has no MCP mechanism still opens a tunnel and mints a token |
 | [9](#9) | Low | `GridVibeClient.split()` is dead, and is the call `splits.py` exists to avoid |
 | [10](#10) | Low | `PaneTokenRegistry.token_for()` is dead |
 | [11](#11) | Low | `IDENTITY_VARIABLES` claims a single source of truth it is not |
@@ -137,7 +144,8 @@ gets through it. In `web/ssh_tunnel.py`:
   GridVibe closes the socket when it has answered.
 - **Bounded.** 16 KiB of head, 1 MiB of body, and a 30s read timeout on the
   request. The *reply* is deliberately not bounded by it — two tools wait on a
-  page for 25s (finding 5).
+  page for as long as the store may take (25s when this was written; 40s since
+  [finding 6](#6)).
 - **Refusals say nothing.** 404 for a method or path that is not this pane's
   (the same answer either way, so a caller learns neither which routes exist
   nor whether it guessed a live token), 400 for framing, 413 for an oversized
@@ -247,6 +255,10 @@ dead one; a close landing in the narrower window *before* the mint still leaves
 a token nothing revokes, and the registry ceiling is what bounds it. Finding
 7's re-check inside the lock is still the fix, and it is still open.
 
+**Since closed.** [Finding 7](#7) was fixed later the same day, and its re-check
+revokes the token minted in that narrower window too, so the registry ceiling is
+a backstop rather than the bound.
+
 ---
 
 <a id="3"></a>
@@ -286,6 +298,28 @@ the registry, not from the caller.
 and in the sidecar README's "Stated properties, not discoveries" section, beside
 the depth budget's — same shape, same honesty.
 
+**Fixed — 2026-09-17.** The wording, in `web/pane_gates.py`'s own docstring.
+It now says that the gates constrain an agent following its instructions and
+are not a security boundary; that both of them are evaluated against
+`requested_by_session_id`, which is an input rather than a proof, and which on
+the stdio path traces back to a variable the constrained CLI sets before the
+sidecar starts; that an agent stating another pane's id would be gated against
+*that* pane, self protecting it rather than its own; that the token path is not
+spoofable that way but is the minority path and nothing below assumes it; and
+that one level up a local agent pane has the user's own privileges and the
+ungated twins of all three routes on loopback. It closes on what the gates do
+buy, which is real. Same shape as `identity.depth_budget()`'s, which is what
+made this one readable as a boundary by comparison.
+
+`gridvibe_mcp/README.md` was left alone -- see the note at the top of this file.
+
+Pinned by `StatedCallerTestCase` in `tests/test_pane_gates.py`, which turns the
+caveat into behaviour rather than leaving it as a comment: a request stating
+another pane's id moves the self gate onto that pane (so the caller's own
+becomes reachable) and inherits that pane's whole lineage with no `override`
+stated, beside a third case asserting what still binds an agent that states its
+own id.
+
 ---
 
 <a id="4"></a>
@@ -315,6 +349,23 @@ and the URL that gets probed, but never the up case, so nothing pins it.
 **Fix.** Probe `/api/health`, which is the route the sidecar's own
 `client.health()` uses and the one `open_window` reads `window_mode` from. Add
 the missing test: a stub 200 reports `OK`.
+
+**Fixed — 2026-09-17.** `utils/mcp_status.py` probes `PROBE_PATH`, which is
+`/api/health` -- the route the sidecar's own `client.health()` calls and the
+one `open_window` reads `window_mode` from, so a server that answers it is a
+server the tools can use. Named as a constant so there is one spelling and a
+test can reach it. `check_reachable`'s docstring now says why the route has to
+be a real one: a 404 raises `HTTPError`, which is a `URLError`, which is the
+same branch as no server at all -- and this check being a `NOTE` is what let
+that read as normal.
+
+Pinned by three cases in `tests/test_mcp_status.py`, against a real loopback
+server publishing exactly one route: the up case reports `OK` (the case nothing
+covered, which is why this went unnoticed for so long), a server publishing a
+*different* route reports "nothing is listening" (the failure itself,
+reproduced rather than described), and `PROBE_PATH` is asserted to be in the
+real Flask app's URL map, so renaming the route breaks a test rather than the
+diagnostic.
 
 ---
 
@@ -350,6 +401,45 @@ variable replaces both the poll and the self-request. Failing that, record the
 threading-mode dependency as a contract so it cannot be tuned away by accident,
 and shorten the HTTP-path wait.
 
+**Fixed — 2026-09-17.** The first of the two suggested shapes: the poll waits
+on the store, and the self-request is gone rather than shortened.
+
+- **The store can be waited on.** `WindowIntentStore`'s lock is a
+  `threading.Condition` -- still the one lock every access already took, so
+  `with self._lock` is unchanged everywhere -- and the two writes that move an
+  intent (`claim`, `record_result`) notify it. `wait_for_settled()` blocks
+  until the intent settles, is pruned, or the caller's timeout runs out, and
+  answers exactly what `read()` would have answered at that moment, through the
+  same `_public` projection.
+- **The HTTP path uses it.** `web/mcp_http.py` hands `dispatch` a
+  `GridVibeClient` subclass whose only override is `read_window_intent`.
+  Subclassed rather than branched inside the tools, so `splits.py` and
+  `windows.py` are written once and neither of them knows which transport it is
+  serving; built lazily and once, because nothing under `web/` imports
+  `gridvibe_mcp` at module scope.
+- **The bound.** `INTENT_WAIT_SECONDS` is the store's own worst case
+  (`INTENT_TTL_SECONDS + CLAIM_TTL_SECONDS`), so one wait ends when the store's
+  answer is final rather than on a clock of its own. The sidecar's own deadline
+  (finding 6) is longer still and remains the outer bound.
+
+A remote `split_pane` now holds one worker thread and issues one loopback
+request -- the intent itself, as it always did -- instead of up to fifty
+re-entrant GETs each taking a second thread and each keeping the tunnel channel
+busy. The undeclared dependency on `async_mode="threading"` is removed rather
+than written down, and `mcp_http.py`'s docstring records what the shape was and
+why it is no longer load-bearing.
+
+Pinned by `InProcessIntentPollTestCase` in `tests/test_mcp_remote.py` -- the
+poll answers with `urllib`'s opener patched to raise, it answers field for field
+what `read()` does, it wakes on another thread's report rather than on a tick,
+an id the store never had is expired rather than a block, and the whole
+`split_pane` verb over this transport costs exactly one request -- and by
+`WaitForSettledTestCase` in `tests/test_window_intents.py` for the store's own
+six: an already-settled intent answers at once, a settling write wakes the
+waiter, an unclaimed intent ends at its own expiry rather than the caller's
+timeout, a claim extends what the waiter sleeps against, the timeout still
+bounds it, and an unknown id is expired rather than a wait.
+
 ---
 
 <a id="6"></a>
@@ -384,6 +474,26 @@ exactly why it would be found the hard way.
 say what is actually known — the request expired without a page reporting back,
 and it may still complete. The first is cheaper and keeps the stated invariant
 true.
+
+**Fixed — 2026-09-17.** The first of the two, in both `gridvibe_mcp/splits.py`
+and `gridvibe_mcp/windows.py`: `DEFAULT_WAIT_SECONDS` is 40.0, above the
+store's real worst case of 35s. The expiry is the store's answer again, so
+`NO_PAGE_HINT`'s "the panes and the workspace are untouched" is true whenever
+it is said. Both comments now state the sum and where it comes from -- 15s for
+a page to claim, then the claimant's own 20s to report -- rather than "the
+store's own TTL", which is the reading that made 25s look comfortable.
+
+The sidecar cannot import `web/`, so the relation is pinned rather than
+derived. `IntentWaitTestCase` in `tests/test_mcp_tools.py` asserts both
+constants exceed `INTENT_TTL_SECONDS + CLAIM_TTL_SECONDS`, and drives both
+verbs against a page that claims at 14.9s and reports at 34.9s: it settles
+inside the new wait, and -- with `wait_seconds=25.0` passed explicitly -- still
+reproduces the old answer, which told the agent the workspace was untouched
+while the page went on to make the pane.
+
+One residual, stated rather than designed away: a page that claims and then
+takes longer than the claim TTL to report is outside the store's own guarantee
+too (the store refuses its result), and the split can still have happened.
 
 ---
 
@@ -431,6 +541,26 @@ if stale:
     pane_tokens.revoke(session_id)
 ```
 
+**Fixed — 2026-09-17.** Exactly that shape. `_establish_mcp_tunnel` re-reads
+the connection inside the same `connection_lock` hold that stores the record,
+and treats both ways of having stopped being this pane's connection as stale:
+`_connection_is_current` says no, or `retired` is set. A stale one is torn down
+rather than recorded -- `ssh_tunnel.teardown` withdraws the listener, deletes
+the remote file and closes the SFTP channel, and the token is revoked -- and a
+teardown that raises does not cost the revoke.
+
+Pinned by `EstablishTunnelTestCase` in `tests/test_mcp_remote.py`, which lands
+the close *inside* `establish`, which is the window the race lives in: a pane
+still open gets the record and no teardown; a close landing midway records
+nothing, tears the record down once, and leaves the token unresolvable; a
+connection replaced by a reconnect is stale the same way; and a teardown that
+raises still revokes.
+
+This also closes the window [finding 2](#2) left open. Every path out of
+`_establish_mcp_tunnel` now either reaches a live connection or revokes, so a
+token minted just after a close is revoked on the same path that withdraws the
+tunnel, rather than standing until the registry ceiling evicts it.
+
 ---
 
 <a id="8"></a>
@@ -459,6 +589,36 @@ host and a widened surface, all for an agent that will never call it.
 `and` it into `agent_mcp` in `apply_pane_shell_change` so the flag cannot be set
 on a CLI that has no mechanism. That also makes the pane header's **MCP** tag
 honest on such a pane.
+
+**Fixed — 2026-09-17.** `_agent_supports_mcp` is asked at every write of
+`agent_mcp`, not only at the tunnel, so the flag cannot be set on a CLI with no
+mechanism by any route:
+
+- **`web/saved_sessions.py`** (`_normalize_terminal_entries`) -- the one
+  normalizer every launch body passes through: the launcher's own, an imported
+  preset's, and the one `launch_panes` composes. Imported locally, because
+  `web/agents.py` imports that module and the dependency can only run one way
+  at import time.
+- **`web/api.py`** (`_split_pane_overrides`) -- the other create route a tool
+  reaches.
+- **`web/session_shell.py`** (`apply_pane_shell_change`) -- the pane header's
+  dropdown and `set_pane_agent`'s gated twin. `and`-ed in beside the existing
+  "a pane with no agent cannot have MCP", and dropped silently for the same
+  reason that one is.
+- **`web/terminal_io.py`** (`_establish_mcp_tunnel`) -- the last place asked,
+  and the only one with a cost attached. Such a pane now opens no port, mints
+  no token and writes no file on the remote host, and the log says why.
+
+The pane header's **MCP** tag paints off `agent_mcp`, so it is honest on such a
+pane with no change to `agent-identity.js`.
+
+Pinned by `McpFlagGateTestCase` in `tests/test_mcp_launch.py` -- the five CLIs
+with no mechanism cannot carry the flag through a launch body, a split or a
+relaunch, a custom agent cannot carry it either, and the three that do have a
+mechanism still get it -- and by two cases in `EstablishTunnelTestCase`
+(`tests/test_mcp_remote.py`): each of the five asks the remote host for nothing
+(no `establish`, no SFTP, no record), and each of the three still gets its
+tunnel.
 
 ---
 

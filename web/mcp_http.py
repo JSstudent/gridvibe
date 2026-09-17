@@ -19,6 +19,18 @@ depending on which transport asked for it. Only ``__main__.py`` imports the
 asyncio MCP SDK, so importing the sidecar's *server* half here keeps that SDK
 out of the Flask process exactly as before.
 
+**One hop, not fifty.** ``dispatch`` runs *inside* the Flask request handler
+here, which the two intent-polling verbs used to pay for dearly: ``split_pane``
+and ``open_window`` wait up to 40s for a page, half a second at a time, and
+each tick was a loopback GET back into the server already holding a worker
+thread for the call. It worked only because ``async_mode="threading"`` hands
+every request a new thread -- a load-bearing property nothing stated, and one a
+worker cap or a different async mode would have turned into a deadlock against
+itself. The intent store is in this process, so the poll waits on it directly
+(:meth:`~web.window_intents.WindowIntentStore.wait_for_settled`) and answers
+exactly what the route would have answered. One thread, no re-entrancy, and the
+tools are still the sidecar's own.
+
 **Identity arrives by token, because inheritance cannot reach.** A local pane's
 sidecar learns which pane it is from five inherited environment variables. A
 remote agent inherits nothing from this machine, so GridVibe mints an opaque
@@ -38,6 +50,7 @@ this process's port (`web/ssh_tunnel.py`). A reader who does not tick the box
 opens no port and mints no token.
 """
 
+import functools
 import json
 import logging
 import secrets
@@ -45,7 +58,20 @@ import threading
 import time
 from typing import Any, Dict, Optional, Tuple
 
+from web.window_intents import (
+    CLAIM_TTL_SECONDS,
+    INTENT_TTL_SECONDS,
+    window_intents,
+)
+
 logger = logging.getLogger(__name__)
+
+#: How long one in-process intent read blocks before answering with whatever
+#: the store holds. The store's own worst case -- the window a page has to
+#: claim, plus the window a claimant then has to report -- so the wait ends
+#: when the store's answer is final rather than on a clock of its own. The
+#: sidecar's own deadline is longer still and remains the outer bound.
+INTENT_WAIT_SECONDS = INTENT_TTL_SECONDS + CLAIM_TTL_SECONDS
 
 #: The protocol revisions this endpoint implements. A client asking for
 #: something else is answered with the newest one here rather than refused --
@@ -183,6 +209,29 @@ class PaneTokenRegistry:
 pane_tokens = PaneTokenRegistry()
 
 
+@functools.lru_cache(maxsize=1)
+def _in_process_client_type():
+    """The sidecar's own client, with the intent poll answered from memory.
+
+    Subclassed rather than branched inside the tools, so the two verbs that
+    wait for a page are written once and neither of them knows which transport
+    it is serving. The override answers what ``GET /api/windows/intents/<id>``
+    answers -- it is the same store, read through the same ``_public`` -- it
+    just does not go outside the process to ask, and it blocks rather than
+    returning ``pending`` fifty times.
+
+    Built lazily and once: ``gridvibe_mcp`` is a sibling of GridVibe rather
+    than part of it, and nothing under ``web/`` imports it at module scope.
+    """
+    from gridvibe_mcp.client import GridVibeClient
+
+    class _InProcessClient(GridVibeClient):
+        def read_window_intent(self, intent_id: str) -> Dict[str, Any]:
+            return window_intents.wait_for_settled(intent_id, INTENT_WAIT_SECONDS)
+
+    return _InProcessClient
+
+
 def _identity_for(record: Dict[str, Any], base_url: str):
     """Build the same PaneIdentity the stdio path reads from the environment."""
     from gridvibe_mcp.identity import PaneIdentity
@@ -269,7 +318,6 @@ def handle_message(
         return _result(request_id, {"tools": tool_specs()})
 
     if method == "tools/call":
-        from gridvibe_mcp.client import GridVibeClient
         from gridvibe_mcp.server import dispatch
 
         params = message.get("params") or {}
@@ -277,7 +325,7 @@ def handle_message(
             return _error(request_id, _INVALID_REQUEST, "params must be an object.")
         name = str(params.get("name") or "")
         arguments = params.get("arguments") or {}
-        client = GridVibeClient(base_url)
+        client = _in_process_client_type()(base_url)
         try:
             payload = dispatch(
                 name,

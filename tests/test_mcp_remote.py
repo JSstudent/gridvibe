@@ -38,6 +38,7 @@ if str(PROJECT_ROOT) not in sys.path:
 import tests  # noqa: E402,F401 - redirects durable state away from the real files
 from web import agents as web_agents  # noqa: E402
 from web import mcp_http, ssh_tunnel  # noqa: E402
+from web.window_intents import OPENED, SPLIT, window_intents  # noqa: E402
 
 
 class _StandInGridVibe:
@@ -917,6 +918,269 @@ class PaneCloseRevokesItsTokenTestCase(unittest.TestCase):
         self.terminal._close_ssh_connection("local-pane")
 
         self.assertTrue(mcp_http.pane_tokens.resolve(other))
+
+
+class EstablishTunnelTestCase(unittest.TestCase):
+    """What opening the tunnel does, and the two cases where it must not.
+
+    It runs on the connect path after the pane is already CONNECTED and the
+    reader is already looking at a shell, which is what makes both of these
+    quiet: a tunnel opened for an agent that cannot call it, and a tunnel
+    recorded on a connection a close has already retired, are both invisible
+    from the pane. What is left behind is on the *remote* host -- an sshd
+    listener for the life of the transport, a file naming a live token -- plus
+    an SFTP channel held by a record nobody will read and a token nothing will
+    revoke.
+    """
+
+    def setUp(self):
+        from web import terminal_io
+
+        self.terminal = terminal_io
+        mcp_http.pane_tokens.clear()
+        self.addCleanup(mcp_http.pane_tokens.clear)
+        self.registry = {}
+        context = patch.object(terminal_io, "ssh_connections", self.registry)
+        context.start()
+        self.addCleanup(context.stop)
+        for name in ("session_manager", "_publish_ssh_terminal_output"):
+            context = patch.object(terminal_io, name)
+            setattr(self, name, context.start())
+            self.addCleanup(context.stop)
+        self.session_manager.groups = {}
+
+        self.record = {
+            "remote_port": 41234,
+            "remote_path": "/home/ubuntu/.gridvibe/mcp-pane-1.json",
+            "url": "http://127.0.0.1:41234/mcp/TOK",
+            "sftp": MagicMock(),
+        }
+        for name, kwargs in (("establish", {"return_value": self.record}),
+                             ("teardown", {})):
+            context = patch.object(ssh_tunnel, name, **kwargs)
+            setattr(self, name, context.start())
+            self.addCleanup(context.stop)
+        self.client = MagicMock()
+
+    def _session(self, agent="claude"):
+        return SimpleNamespace(
+            agent_mcp=True,
+            initial_command_mode="agent",
+            agent_selection=agent,
+            custom_agent="",
+            group_id="g1",
+            agent_depth=0,
+        )
+
+    def _open_pane(self, session_id="pane-1"):
+        connection = {"kind": "ssh", "client": self.client}
+        self.registry[session_id] = connection
+        return connection
+
+    def _minted_token(self):
+        return self.establish.call_args.kwargs["token"]
+
+    def test_a_pane_that_is_still_open_gets_the_record(self):
+        connection = self._open_pane()
+
+        self.terminal._establish_mcp_tunnel(
+            "pane-1", self._session(), connection, self.client
+        )
+
+        self.assertIs(connection["mcp_tunnel"], self.record)
+        self.assertTrue(mcp_http.pane_tokens.resolve(self._minted_token()))
+        self.teardown.assert_not_called()
+
+    def test_a_close_landing_while_it_opened_withdraws_it(self):
+        """The race: `_shutdown_connection` popped an `mcp_tunnel` that was not
+        there yet, so without this the record lands on a retired connection and
+        nothing ever tears it down."""
+        connection = self._open_pane()
+
+        def close_midway(*_args, **_kwargs):
+            self.registry.pop("pane-1", None)
+            connection["retired"] = True
+            return self.record
+
+        self.establish.side_effect = close_midway
+
+        self.terminal._establish_mcp_tunnel(
+            "pane-1", self._session(), connection, self.client
+        )
+
+        self.assertNotIn("mcp_tunnel", connection)
+        self.teardown.assert_called_once_with(self.client, self.record)
+        self.assertEqual(mcp_http.pane_tokens.resolve(self._minted_token()), {})
+
+    def test_a_connection_replaced_by_a_reconnect_is_stale_too(self):
+        """Retired is not the only way to stop being this pane's connection."""
+        connection = self._open_pane()
+
+        def replace_midway(*_args, **_kwargs):
+            self.registry["pane-1"] = {"kind": "ssh", "client": MagicMock()}
+            return self.record
+
+        self.establish.side_effect = replace_midway
+
+        self.terminal._establish_mcp_tunnel(
+            "pane-1", self._session(), connection, self.client
+        )
+
+        self.assertNotIn("mcp_tunnel", connection)
+        self.teardown.assert_called_once_with(self.client, self.record)
+
+    def test_a_teardown_that_fails_still_revokes_the_token(self):
+        connection = self._open_pane()
+        self.teardown.side_effect = OSError("the transport has already gone")
+
+        def close_midway(*_args, **_kwargs):
+            connection["retired"] = True
+            self.registry.pop("pane-1", None)
+            return self.record
+
+        self.establish.side_effect = close_midway
+
+        self.terminal._establish_mcp_tunnel(
+            "pane-1", self._session(), connection, self.client
+        )
+
+        self.assertEqual(mcp_http.pane_tokens.resolve(self._minted_token()), {})
+
+    def test_an_agent_with_no_mechanism_asks_the_remote_host_for_nothing(self):
+        """No port, no token, no file -- for five of the eight registered CLIs,
+        whose launch line carries nothing whatever this flag says."""
+        for agent in ("grok", "hermes", "opencode", "kilo", "kimi"):
+            with self.subTest(agent=agent):
+                connection = self._open_pane(f"pane-{agent}")
+
+                self.terminal._establish_mcp_tunnel(
+                    f"pane-{agent}", self._session(agent), connection, self.client
+                )
+
+                self.establish.assert_not_called()
+                self.assertNotIn("mcp_tunnel", connection)
+                self.client.open_sftp.assert_not_called()
+
+    def test_the_three_that_can_take_one_still_do(self):
+        for agent in ("claude", "copilot", "codex"):
+            with self.subTest(agent=agent):
+                self.establish.reset_mock()
+                connection = self._open_pane(f"pane-{agent}")
+
+                self.terminal._establish_mcp_tunnel(
+                    f"pane-{agent}", self._session(agent), connection, self.client
+                )
+
+                self.assertIs(connection["mcp_tunnel"], self.record)
+
+
+class InProcessIntentPollTestCase(unittest.TestCase):
+    """The intent poll, on the transport where the poll runs inside the server.
+
+    ``dispatch`` runs in the Flask request handler here, so ``split_pane`` and
+    ``open_window`` used to spend their whole wait issuing loopback GETs back
+    into the server that was already holding a thread for them -- one per half
+    second, each taking a second worker thread, for as long as the wait runs.
+    Nothing was broken by it, because threading mode hands every request its
+    own thread; that is the point. It was a dependency on a tuning knob that
+    nothing wrote down.
+
+    The store is in this process. These pin that the poll now waits on it.
+    """
+
+    def setUp(self):
+        window_intents.reset()
+        self.addCleanup(window_intents.reset)
+        self.client = mcp_http._in_process_client_type()("http://127.0.0.1:5050")
+
+    def test_the_poll_never_leaves_the_process(self):
+        intent = window_intents.open("ws1")
+        window_intents.claim(intent["intent_id"], "page-1")
+        window_intents.record_result(intent["intent_id"], OPENED)
+
+        with patch(
+            "urllib.request.OpenerDirector.open",
+            side_effect=AssertionError("the poll went back out over HTTP"),
+        ):
+            record = self.client.read_window_intent(intent["intent_id"])
+
+        self.assertEqual(record["state"], OPENED)
+
+    def test_it_answers_exactly_what_the_route_would_have(self):
+        """Same store, same projection: a tool cannot tell which way it asked."""
+        intent = window_intents.open_split("pane-4", "vertical", group_id="g1")
+        window_intents.claim(intent["intent_id"], "page-1")
+        window_intents.record_result(
+            intent["intent_id"], SPLIT, result={"session_id": "pane-9"}
+        )
+
+        waited = self.client.read_window_intent(intent["intent_id"])
+        read = window_intents.read(intent["intent_id"])
+
+        for field in ("intent_id", "kind", "state", "detail", "result", "axis"):
+            self.assertEqual(waited.get(field), read.get(field), field)
+
+    def test_an_id_the_store_never_had_reads_expired_rather_than_blocking(self):
+        started = time.monotonic()
+
+        record = self.client.read_window_intent("not-an-intent")
+
+        self.assertEqual(record["state"], "expired")
+        self.assertLess(time.monotonic() - started, 5.0)
+
+    def test_a_waiting_call_wakes_on_the_pages_report(self):
+        """Not on a tick: the page settles the intent from another thread and
+        the waiter returns with it, well inside the wait it was given."""
+        intent = window_intents.open_split("pane-4", "horizontal")
+        intent_id = intent["intent_id"]
+
+        def settle():
+            time.sleep(0.2)
+            window_intents.claim(intent_id, "page-1")
+            window_intents.record_result(
+                intent_id, SPLIT, result={"session_id": "pane-9"}
+            )
+
+        page = threading.Thread(target=settle, daemon=True)
+        started = time.monotonic()
+        page.start()
+        record = self.client.read_window_intent(intent_id)
+        page.join(5)
+
+        self.assertEqual(record["state"], SPLIT)
+        self.assertEqual(record["result"]["session_id"], "pane-9")
+        self.assertLess(time.monotonic() - started, mcp_http.INTENT_WAIT_SECONDS / 2)
+
+    def test_the_whole_split_verb_costs_one_request_rather_than_one_per_tick(self):
+        """The verb end to end on this transport: the intent is recorded over
+        HTTP, as it always was, and the wait that follows it asks for nothing."""
+        from gridvibe_mcp.splits import split_pane
+
+        recorded = window_intents.open_split("pane-4", "vertical")
+
+        def settle():
+            time.sleep(0.2)
+            window_intents.claim(recorded["intent_id"], "page-1")
+            window_intents.record_result(
+                recorded["intent_id"], SPLIT, result={"session_id": "pane-9"}
+            )
+
+        calls = []
+
+        def only_the_intent(method, path, body=None):
+            calls.append((method, path))
+            return dict(recorded)
+
+        page = threading.Thread(target=settle, daemon=True)
+        page.start()
+        with patch.object(self.client, "request", side_effect=only_the_intent):
+            result = split_pane(self.client, "pane-4", "vertical")
+        page.join(5)
+
+        self.assertEqual(result["status"], SPLIT)
+        self.assertEqual(result["pane"]["session_id"], "pane-9")
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][0], "POST")
 
 
 class RemoteLaunchLineTestCase(unittest.TestCase):

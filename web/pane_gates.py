@@ -26,6 +26,31 @@ designed away -- a pane that passes every gate can still be sitting mid-command,
 and liveness is a heuristic (`web/agent_activity.py`) rather than a fact about
 the foreground process.
 
+**These gates constrain an agent that follows its instructions. They are not a
+security boundary, and cannot be one.** Both of them are evaluated against
+`requested_by_session_id`, which is an input rather than a proof. On the stdio
+path it comes from `GRIDVIBE_SESSION_ID`, read out of the sidecar's own
+environment -- inherited from the agent CLI, which is the process being
+constrained and can set it to any value before the sidecar starts -- and
+`list_panes` publishes every live session id, so the values are not secret
+either. An agent that stated another pane's id would be gated against *that*
+pane: self would protect it rather than its own, and lineage would admit
+everything that pane created. (The token path is not spoofable this way: the
+caller comes out of the registry in `web/mcp_http.py`, not out of the caller.
+It is the minority path, and nothing below assumes it.)
+
+One level up, the same is true more plainly: a local agent pane runs with the
+user's own privileges and GridVibe's API on loopback, where
+`DELETE /api/sessions/<id>` and the ungated twins of all three of these
+transactions pass no gate at all. `identity.depth_budget()` states its
+equivalent weakness in the same words, and for the same reason.
+
+What the gates do buy is real and worth keeping: an agent following its
+instructions does not end, re-mode or type into a pane it did not make, and one
+that has been prompt-injected has to leave the tool surface and start
+constructing HTTP requests to get any further. That is a meaningfully higher
+bar. It is not "cannot".
+
 No Flask, no HTTP, and no error type of its own crossing a route boundary:
 `PaneGateRefusal` carries a message and the status the route should answer, and
 each transaction translates it into the error type its own route already maps.

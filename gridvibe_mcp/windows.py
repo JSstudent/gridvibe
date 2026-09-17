@@ -31,9 +31,13 @@ BLOCKED = "blocked"
 NO_WINDOW_AVAILABLE = "no_window_available"
 
 #: How long the sidecar waits for a page to claim an intent and report back.
-#: Comfortably longer than the store's own TTL so the expiry is the store's
-#: answer rather than a race between two clocks.
-DEFAULT_WAIT_SECONDS = 25.0
+#: Longer than the store's own worst case, which is not its 15s claim window
+#: but that plus the 20s a claimant then has to report: a page claiming at
+#: 14.9s is still entitled to answer at 34.9s. The wait has to outlast that,
+#: so the expiry is the store's answer rather than a race between two clocks.
+#: `web/` cannot be imported from here, so the two numbers are pinned against
+#: each other by `tests/test_mcp_tools.py` instead.
+DEFAULT_WAIT_SECONDS = 40.0
 DEFAULT_POLL_SECONDS = 0.5
 
 #: Said after both failing outcomes: the workspace exists either way, and that

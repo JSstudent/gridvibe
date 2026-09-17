@@ -34,6 +34,7 @@ from web.agents import (  # noqa: F401 - re-exported for backwards compatibility
     _agent_options,
     _agent_preflight_payload,
     _agent_status_label,
+    _agent_supports_mcp,
     _agent_target_label,
     _build_agent_preflight_request,
     _build_login_shell_detection_command,
@@ -3208,7 +3209,11 @@ def _split_pane_overrides(source, data: Dict[str, Any]) -> Dict[str, Any]:
             "agent_selection": agent_key,
             "custom_agent": "",
             "agent_auto_mode": bool(auto_mode),
-            "agent_mcp": bool(mcp),
+            # A CLI with no way to be handed the sidecar does not get the flag,
+            # however the caller asked: this route is one of the two a tool can
+            # reach, and the flag is what paints the header tag and opens a
+            # tunnel on an SSH pane.
+            "agent_mcp": bool(mcp) and _agent_supports_mcp(agent_key),
         }
     )
     return overrides

@@ -21,8 +21,10 @@ rather than asking a module what it would do:
 
 import json
 import sys
+import threading
 import unittest
 from contextlib import redirect_stdout
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from io import StringIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -37,6 +39,44 @@ from utils import mcp_status  # noqa: E402
 
 #: A stand-in whose only job is to not be a Python interpreter with the SDK.
 _NO_SDK = [sys.executable, "-c", "raise SystemExit(0)"]
+
+
+class _OneRouteHandler(BaseHTTPRequestHandler):
+    """A server that publishes exactly one route, like GridVibe's own.
+
+    The point is the 404: a probe aimed at a route the server does not have
+    is indistinguishable, from the outside, from a server that is not there.
+    """
+
+    route = "/api/health"
+
+    def do_GET(self):  # noqa: N802 - BaseHTTPRequestHandler's own spelling
+        if self.path != self.route:
+            self.send_error(404)
+            return
+        body = b'{"status": "ok", "window_mode": "browser"}'
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *_args):
+        pass
+
+
+def _serve_one_route(case, route):
+    """Run ``_OneRouteHandler`` on a free loopback port; return its base URL."""
+    handler = type("_Handler", (_OneRouteHandler,), {"route": route})
+    server = HTTPServer(("127.0.0.1", 0), handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    # Reverse order, so the loop is asked to stop and joined *before* its
+    # socket is closed under it.
+    case.addCleanup(server.server_close)
+    case.addCleanup(thread.join, 5)
+    case.addCleanup(server.shutdown)
+    return f"http://127.0.0.1:{server.server_address[1]}"
 
 
 class StatusChecksTestCase(unittest.TestCase):
@@ -162,6 +202,39 @@ class StatusChecksTestCase(unittest.TestCase):
 
         self.assertEqual(state, mcp_status.NOTE)
         self.assertIn("nothing is listening", detail)
+
+    def test_a_running_gridvibe_is_reported_as_answering(self):
+        """The up case, and the one nothing pinned.
+
+        A note never fails the run, so a probe aimed at a route GridVibe does
+        not publish reported every healthy server as a dead one -- quietly,
+        and in the one line of the diagnostic meant to say the server is fine.
+        """
+        url = _serve_one_route(self, mcp_status.PROBE_PATH)
+
+        state, detail = mcp_status.check_reachable(url)
+
+        self.assertEqual(state, mcp_status.OK)
+        self.assertIn(url, detail)
+
+    def test_a_route_gridvibe_does_not_publish_reads_as_a_dead_server(self):
+        """Why the probe has to name a real route: a 404 is an ``HTTPError``,
+        which is a ``URLError``, which is the same branch as no server."""
+        url = _serve_one_route(self, "/api/a-route-that-does-not-exist")
+
+        state, detail = mcp_status.check_reachable(url)
+
+        self.assertEqual(state, mcp_status.NOTE)
+        self.assertIn("nothing is listening", detail)
+
+    def test_the_probed_route_is_one_gridvibe_actually_publishes(self):
+        """The assertion the fix needs: the probe's path is in the real app's
+        URL map, so renaming the route breaks this rather than the report."""
+        from web import api
+
+        published = {rule.rule for rule in api.app.url_map.iter_rules()}
+
+        self.assertIn(mcp_status.PROBE_PATH, published)
 
     def test_the_url_probed_is_the_one_baked_into_the_args(self):
         self.assertEqual(

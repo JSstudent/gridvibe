@@ -609,5 +609,115 @@ class FlagCompositionTestCase(unittest.TestCase):
         self.assertEqual(options["other"]["mcp_flag"], "")
 
 
+class McpFlagGateTestCase(unittest.TestCase):
+    """Which panes may carry `agent_mcp` at all.
+
+    The launcher hides the checkbox for a CLI that has no way to be handed a
+    server, but the checkbox is not the only way in: `POST /api/sessions` takes
+    the flag from any caller, the sidecar's own `launch_panes` is one of them,
+    and the split and relaunch routes take it too. A flag on a CLI with no
+    mechanism buys nothing and costs something -- the pane header wears an MCP
+    tag for a launch line that carries nothing, and an SSH pane opens a reverse
+    forward, mints a token and writes a file on the remote host for an agent
+    that will never call any of it.
+
+    So it is refused at every write, by the one predicate that knows:
+    `_agent_supports_mcp`. Dropped rather than refused, exactly as a stated
+    `mcp` on a pane with no agent already is.
+    """
+
+    UNSUPPORTED = ("grok", "hermes", "opencode", "kilo", "kimi")
+
+    def _entries(self, agent, mcp=True):
+        return saved_sessions._normalize_terminal_entries(
+            [
+                {
+                    "startup_mode": "agent",
+                    "agent_selection": agent,
+                    "initial_command": agent,
+                    "agent_mcp": mcp,
+                }
+            ],
+            minimum_count=1,
+        )
+
+    def test_a_launch_body_cannot_ask_for_it_on_a_cli_with_no_mechanism(self):
+        for agent in self.UNSUPPORTED:
+            with self.subTest(agent=agent):
+                self.assertFalse(self._entries(agent)[0]["agent_mcp"])
+
+    def test_a_launch_body_still_gets_it_on_one_that_has_a_mechanism(self):
+        for agent in ("claude", "copilot", "codex"):
+            with self.subTest(agent=agent):
+                self.assertTrue(self._entries(agent)[0]["agent_mcp"])
+
+    def test_a_custom_agent_has_no_mechanism_either(self):
+        entries = saved_sessions._normalize_terminal_entries(
+            [
+                {
+                    "startup_mode": "agent",
+                    "agent_selection": "",
+                    "custom_agent": "my-own-cli",
+                    "agent_mcp": True,
+                }
+            ],
+            minimum_count=1,
+        )
+
+        self.assertFalse(entries[0]["agent_mcp"])
+
+    def test_a_split_cannot_ask_for_it_either(self):
+        """`launch_panes` and `split_pane` are the two a tool can reach."""
+        from web import api
+
+        source = SimpleNamespace(
+            mode="wsl", host="", username="", password="", port=22,
+            directory="", distribution="", use_wsl=False, use_powershell=True,
+        )
+
+        with patch.object(api, "_agent_absent_reason", return_value=""):
+            refused = api._split_pane_overrides(
+                source, {"kind": "agent", "agent": "grok", "mcp": True}
+            )
+            allowed = api._split_pane_overrides(
+                source, {"kind": "agent", "agent": "claude", "mcp": True}
+            )
+
+        self.assertFalse(refused["agent_mcp"])
+        self.assertTrue(allowed["agent_mcp"])
+
+    def test_a_relaunch_cannot_turn_it_on_for_one(self):
+        """The header dropdown's route and `set_pane_agent`'s gated twin."""
+        from web import session_shell
+
+        pane = SimpleNamespace(
+            session_id="pane-1", mode="wsl", startup_mode="agent",
+            agent_selection="claude", custom_agent="", agent_auto_mode=False,
+            agent_mcp=False, directory="", distribution="",
+            use_wsl=False, use_powershell=False,
+        )
+        pane.to_dict = lambda: {"session_id": "pane-1"}
+        written = {}
+
+        effects = SimpleNamespace(
+            close_connection=lambda *a, **k: None,
+            broadcast_status=lambda *a, **k: None,
+            start_connector=lambda *a, **k: None,
+        )
+        manager = MagicMock()
+        manager.get_session.return_value = pane
+        manager.update_session_metadata.side_effect = (
+            lambda _session_id, **updates: written.update(updates)
+        )
+
+        with patch.object(session_shell, "session_manager", manager),                 patch.object(session_shell, "_refuse_an_agent_that_is_not_installed"):
+            session_shell.apply_pane_shell_change(
+                "pane-1", {"agent": "grok", "mcp": True}, effects
+            )
+
+        self.assertIn("agent_mcp", written)
+        self.assertFalse(written["agent_mcp"])
+
+
 if __name__ == "__main__":
     unittest.main()
