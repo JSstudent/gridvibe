@@ -801,6 +801,21 @@ unless the task explicitly changes this contract.
   row; a second implementation server-side is what would let the two disagree.
   The transport tag reads `mode` plus the `use_wsl`/`use_powershell` precedence
   `paneShellKind()` already uses, so the tag and the relaunch menu agree.
+- **Whether a pane's agent has GridVibe tools is stated where the pane is
+  named**, by `paneAgentMcpTag()` in the same module, so the pane header and the
+  dashboard row cannot disagree about it. Its rule is `agent_mcp` **and** an
+  agent pane, mirroring `paneAgentMcp()` in `terminal-shell.js`: the flag
+  outlives the agent that justified it in presets and snapshots, and a plain
+  shell must not wear a chip for tools nothing is holding. The transport is not
+  part of the rule — a remote pane's tools arrive over the reverse forward on
+  its own SSH transport, so `pane_can_run_the_sidecar()` picks the *shape* of
+  the answer (local config file against tunnelled URL) and never whether there
+  is one. The tag is its own value and is never folded into `paneDisplayTitle()`
+  or `paneChatLine()`: a title is also what the reader typed, and a chip
+  concatenated into one would be indistinguishable from a name and would reach
+  the typed-title comparison as though somebody had chosen it. `agent_mcp`
+  therefore stays in `PANE_FIELDS` and in the repaint's structure key, so a
+  relaunch on or off the tools rebuilds the row and an unchanged poll does not.
 - The dashboard conversation line is `paneChatLine()` in `agent-identity.js`,
   not the dashboard's own ladder: the agent's usable OSC tab/window title, then
   a non-generic pane title, then `New session` plus where the pane is. GridVibe
@@ -1010,11 +1025,22 @@ unless the task explicitly changes this contract.
   trailing column and a separate reading: only the agents that speak the
   progress sequence have one, so it must never widen the dot's column.
 - The drawn row is therefore the dot, the agent's mark and name, the chat
-  title and `auto`; `auto` is the only chip left on it. What the pane runs on
-  is still `paneTransportLabel()`'s single word, and the dashboard states it
-  as the last line of the row's own hover rather than as a chip on the line --
-  it is looked up when something is wrong with a pane, not scanned down a
-  card, and the width belongs to the title.
+  title, `MCP` and `auto` — the two chips left on it, and both say what this
+  agent may *do*, which is what a reader choosing a row to instruct is deciding
+  between. What the pane runs *on* is still `paneTransportLabel()`'s single
+  word, and the dashboard states it as the last line of the row's own hover
+  rather than as a chip on the line: it is looked up when something is wrong
+  with a pane, not scanned down a card, and the width belongs to the title.
+  A chip may carry a hover of its own for a label the reader may not recognise;
+  one whose label is already the word carries none.
+- The docked sidebar's row drops the agent's *name* out of flow because its mark
+  already answers which agent it is, and it draws no `auto` chip — but it does
+  draw `MCP`, from `dashboardMcpTagHtml()`, the dialog's own builder handed in
+  through the runtime. Nothing else on that row says whether the agent can act
+  on GridVibe, which is what a reader picking a pane to instruct is deciding,
+  and picking one *while* working is what a docked panel is for. Every other
+  field on that row stays the dialog's answer asked for by name; a second copy
+  of any of them is how one pane comes to read two ways on two surfaces.
 - Dashboard layout must remain usable without horizontal overflow at narrow
   widths. A polling update that changes only a row's title, hover, status,
   progress, or idle age updates that row in place, each field on its own

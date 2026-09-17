@@ -720,6 +720,14 @@
         icon.hidden = !html;
     }
 
+    /* Whether this pane says it is running with GridVibe's own tools, and what
+       it says — agent-identity.js's rule, shared with the dashboard row for the
+       same reason the name is. Empty for every pane that is not, which is what
+       hides the chip rather than drawing a blank one. */
+    function paneMcpTag(session) {
+        return window.GridVibeAgentIdentity.paneAgentMcpTag(session);
+    }
+
     function getSessionApiPath(groupId = activeGroupId) {
         const params = new URLSearchParams({ workspace_id: currentWorkspaceId });
         if (groupId) {
@@ -878,10 +886,13 @@
        Claude session could sit under a "OpenAI Codex CLI" title until something
        else forced a rebuild.
 
-       The two header fields that read from the session record, and nothing
-       else: the reset control's affordance is decided by the transport rather
-       than by what is running in it, and syncing the shell controls here would
-       close a menu the user has open. */
+       The header fields that read from the session record, and nothing else:
+       the reset control's affordance is decided by the transport rather than by
+       what is running in it, and syncing the shell controls here would close a
+       menu the user has open. The GridVibe-tools chip is one of these fields
+       for exactly the reason the name is — a relaunch can take a pane off the
+       tools without moving it — so it is written here rather than only built,
+       and by the same skip-if-unchanged comparison. */
     function syncPaneIdentityChrome(index, session) {
         syncPaneAgentIcon(document.getElementById(`ticon-${index}`), session);
         const nameLabel = document.getElementById(`tname-${index}`);
@@ -900,6 +911,14 @@
         const host = String(session.host || '');
         if (hostLabel && hostLabel.textContent.trim() !== host) {
             hostLabel.textContent = host;
+        }
+        const mcpTag = document.getElementById(`tmcp-${index}`);
+        if (mcpTag) {
+            const tag = paneMcpTag(session);
+            if (mcpTag.textContent.trim() !== tag) {
+                mcpTag.textContent = tag;
+            }
+            mcpTag.hidden = !tag;
         }
     }
 
@@ -5456,6 +5475,7 @@
             // case where a saved-dark pane rendered light under global light).
             card.dataset.explorerTheme = resolvedTheme.theme;
         }
+        const mcpTag = paneMcpTag(session);
         const sessionColour = tabColourForGroup(activeGroupId);
         card.style.setProperty('--session-color', sessionColour);
         card.style.setProperty('--session-color-dim', hexToRgba(sessionColour, 0.45));
@@ -5469,6 +5489,15 @@
                         <span class="terminal-host" id="thost-${i}">
                             ${escHtml(session.host || '')}
                         </span>
+                        <!-- Built for every pane and shown by the sync above, so
+                             a relaunch on or off the tools needs no DOM surgery
+                             on the header it happens in. -->
+                        <span
+                            class="terminal-mcp-tag"
+                            id="tmcp-${i}"
+                            title="${escHtml(window.GridVibeAgentIdentity.MCP_TAG_TITLE)}"
+                            ${mcpTag ? '' : 'hidden'}
+                        >${escHtml(mcpTag)}</span>
                     </div>
                     <div class="terminal-meta">
                         <div class="terminal-status">

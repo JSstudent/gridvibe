@@ -1416,6 +1416,27 @@
         .terminal-agent-icon .dash-agent-glyph { width: 18px; height: 18px; }
         .terminal-host { color: var(--t-text-muted); font-size: .78rem; }
 
+        /* The GridVibe-tools chip. It never shrinks and never ellipsises: it is
+           three characters, and the two labels before it are the ones that give
+           up width on a narrow pane. Deliberately the same accent outline the
+           reset dropdown's own MCP button wears while it is checked, so the
+           header states what that menu would confirm. */
+        .terminal-mcp-tag {
+            display: inline-flex;
+            align-items: center;
+            flex: 0 0 auto;
+            padding: 0 5px;
+            border: 1px solid color-mix(in srgb, var(--t-accent) 55%, transparent);
+            border-radius: 5px;
+            color: var(--t-accent);
+            font-size: .6rem;
+            font-weight: 700;
+            letter-spacing: .06em;
+            line-height: 1.5;
+        }
+
+        .terminal-mcp-tag[hidden] { display: none; }
+
         .terminal-meta {
             display: flex;
             align-items: center;

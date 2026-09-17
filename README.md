@@ -131,7 +131,7 @@ See **every session in every workspace**, agents first. Open the dashboard dialo
 - **Widen it when you need more room** — drag the sidebar's inner edge from its default width up to twice that width. The chosen scale is saved with the workspace and adapts to the window size.
 - **Put it on the side you want** — **App Settings ▸ Agent Dashboard Side** docks the sidebar left or right, and every open window moves as soon as you save. The handle, its marks and the rows are the same either way.
 - **Three levels** — a workspace is a titled band, a session tab is a card inside it drawn in that tab's own colour, and each agent is one row inside the card.
-- **Every agent on one line** — the sidebar shows a leading status dot, the agent's mark and its chat title. The dialog also draws the agent's name and `auto` when it was launched with auto-approval.
+- **Every agent on one line** — a leading status dot, the agent's mark, its chat title, and `MCP` when the agent has GridVibe tools. The dialog also draws the agent's name and `auto` when it was launched with auto-approval.
 - **The state is the dot's colour** — green working, amber idle, red unreachable. Point at a dot for the words: how long it has been idle, or what went wrong.
 - **The rest is one hover away** — pointing at a row gives the full chat title, where the pane is, and what it runs on (`SSH`, `WSL`, `PowerShell`, `cmd`).
 - **A badge that means something** — the button counts the agents **working right now**, not how many you have open. No badge means every agent is sitting at a prompt.
@@ -176,6 +176,7 @@ Launched a pane in cmd and wanted PowerShell — or Codex in WSL? Click the pane
 - **Pick a shell** — a Local Repo terminal on Windows lists **Command Prompt**, **PowerShell**, **WSL**, and every detected distro. The pane restarts in place, same slot, same title, in the directory the old shell was sitting in.
 - **Pick an agent** — each shell row's chevron opens **Plain shell** plus every agent, so "this pane, but Codex in WSL" is one click. SSH panes and non-Windows hosts get that list flat.
 - **Give it GridVibe tools** — agents that support MCP carry an **MCP** button beside their row: the row starts the agent plainly, the button starts it with GridVibe's own tools. Works on SSH panes as well as local ones.
+- **The pane says which it is** — a pane running with GridVibe tools wears a small **MCP** tag in its header, and keeps it across a save and restore. Relaunching it plainly takes the tag off.
 - **Plain shell** drops a running agent and comes back to an ordinary prompt. Picking whatever is already checked relaunches it too.
 - **A missing agent never touches your pane** — GridVibe runs the same install check against that row's own target, and answers with a message (*OpenAI Codex CLI is missing in WSL Ubuntu.*) instead of relaunching.
 - **Auto mode and GridVibe tools follow the agent**, not the pane: relaunch the same agent under another shell and they stay on; move to a different agent and they start from its plain launch.

@@ -247,6 +247,28 @@
         return glyphs ? glyphs.agentGlyphMarkup(dashboardAgentKey(pane)) : '';
     }
 
+    /* Whether this pane's agent was handed GridVibe's own tools, as the chip
+       that says so. `agent-identity.js`'s rule and not a second reading of
+       `agent_mcp` here: the pane header states the same fact about the same
+       pane, and the flag is meaningless on a pane that is no longer running an
+       agent. Empty for every pane that has none, which draws nothing. */
+    function dashboardMcpTag(pane) {
+        const identity = dashboardIdentity();
+        return identity ? identity.paneAgentMcpTag(pane) : '';
+    }
+
+    function dashboardMcpTagTitle() {
+        const identity = dashboardIdentity();
+        return (identity && identity.MCP_TAG_TITLE) || '';
+    }
+
+    /* The whole chip, so the docked sidebar draws *this* one rather than
+       composing it out of three of this module's answers -- the same reason
+       every other field on its row is asked for by name here. */
+    function dashboardMcpTagHtml(pane) {
+        return dashboardTagHtml(dashboardMcpTag(pane), 'mcp', dashboardMcpTagTitle());
+    }
+
     /* Which conversation this row is, and the hover that carries what the line
        had to shorten. Both are `agent-identity.js`'s answer: the rule reads the
        same facts the pane header's naming rule does, and a second copy here is
@@ -374,10 +396,17 @@
         `;
     }
 
-    function dashboardTagHtml(label, modifier = '') {
-        return label
-            ? `<span class="dash-tag${modifier ? ` dash-tag-${escHtml(modifier)}` : ''}">${escHtml(label)}</span>`
-            : '';
+    /* `title` is optional and only ever the chip's own: a hover on a chip sits
+       inside the row's, the same way the state dot's does, so a marker the
+       reader may not recognise can answer on itself instead of spending row
+       width on prose. A chip whose label is already the word (`auto`,
+       `active`) is handed none. */
+    function dashboardTagHtml(label, modifier = '', title = '') {
+        if (!label) {
+            return '';
+        }
+        return `<span class="dash-tag${modifier ? ` dash-tag-${escHtml(modifier)}` : ''}"`
+            + `${title ? ` title="${escHtml(title)}"` : ''}>${escHtml(label)}</span>`;
     }
 
     /* One running pane, as one line — and the whole line, because the agent it
@@ -395,6 +424,15 @@
 
        `data-agent` therefore rides the row: it is what tints the mark, and the
        block it used to sit on is gone.
+
+       The two chips after the title are on the row and not in the hover, which
+       is the opposite of where the transport label went, and the difference is
+       the trade rather than the width. A shell name is a long word that is
+       looked up when something is wrong with the pane; `MCP` and `auto` are
+       three and four characters that say what this agent may *do* — which is
+       what the reader is choosing between when they pick a row to give an
+       instruction to, and an answer that costs a hover is an answer they will
+       not ask for on every row in the card.
 
        The session id rides the row because the window this row opens needs it:
        naming the workspace lands in the right window, and naming the group and
@@ -416,6 +454,7 @@
                 <span class="dash-agent-icon" aria-hidden="true">${dashboardAgentGlyphHtml(pane)}</span>
                 <span class="dash-agent-name">${escHtml(dashboardAgentName(pane))}</span>
                 <span class="dash-agent-line">${escHtml(dashboardPaneLine(pane))}</span>
+                ${dashboardMcpTagHtml(pane)}
                 ${pane?.agent_auto_mode ? dashboardTagHtml('auto', 'auto') : ''}
                 <span class="dash-agent-progress">${dashboardProgressHtml(pane)}</span>
             </button>
