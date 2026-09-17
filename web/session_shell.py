@@ -38,7 +38,7 @@ import os
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional
 
-from sessions.manager import SessionStatus
+from sessions.manager import SessionStatus, _normalize_agent_depth
 from web.agents import (
     AGENT_REGISTRY,
     _agent_absent_reason,
@@ -500,6 +500,20 @@ def apply_agent_pane_relaunch(
             )
 
         check_lineage(session, request, RELAUNCH_WORDING)
+
+        # Read again rather than carried down from `check_caller`: nothing held
+        # the caller open in between, and a caller that has gone is the same
+        # fact that gate already refuses on. Without this,
+        # `getattr(None, "agent_depth", 0) + 1` is 1, so a caller closing
+        # mid-call silently *resets* the chain's budget instead of ending it.
+        caller = session_manager.get_session(request.caller_session_id)
+        if caller is None:
+            raise refuse(
+                LINEAGE_GATE,
+                "The pane this request came from closed while its request was "
+                "being checked, so GridVibe cannot tell what depth budget the "
+                "replacement agent should inherit.",
+            )
     except PaneGateRefusal as exc:
         raise ShellTransitionError(exc.message, exc.status_code) from exc
 
@@ -511,10 +525,14 @@ def apply_agent_pane_relaunch(
         key: payload[key] for key in ("shell", "agent", "mcp", "distribution")
         if key in payload
     }
-    caller = session_manager.get_session(request.caller_session_id)
     return apply_pane_shell_change(
         session_id,
         relaunch,
         effects,
-        {"agent_depth": int(getattr(caller, "agent_depth", 0)) + 1},
+        # Bounded by the same normalizer every other write of this field uses
+        # (`create_session`, and the split route). `update_session_metadata` is
+        # a raw `setattr` over an allowlist and normalizes nothing, so without
+        # it this is the one write path that could persist a depth past
+        # `_MAX_AGENT_DEPTH` into `runtime_state.json`.
+        {"agent_depth": _normalize_agent_depth(int(getattr(caller, "agent_depth", 0)) + 1)},
     )

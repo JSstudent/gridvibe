@@ -36,6 +36,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import api
+from sessions.manager import _MAX_AGENT_DEPTH
 from web import agents as web_agents
 from web import config as web_config
 from web import runtime_state as web_runtime_state
@@ -957,6 +958,61 @@ class AgentRequestedRelaunchTestCase(ShellTransitionTestCase):
         self.assertEqual(
             api.session_manager.get_session(target.session_id).agent_depth, 2
         )
+
+    def test_the_inherited_depth_is_bounded_like_every_other_write_of_it(self):
+        """`update_session_metadata` is a raw setattr over an allowlist.
+
+        `create_session` and the split route both push the arithmetic through
+        `_normalize_agent_depth`; this path used to add one and write it, so it
+        was the only way a depth past `_MAX_AGENT_DEPTH` -- the ceiling that
+        exists so a snapshot cannot overflow the sidecar's own refusal
+        arithmetic -- could be persisted into `runtime_state.json`.
+        """
+        caller, target = self._agent_pair()
+        api.session_manager.update_session_metadata(
+            caller.session_id, agent_depth=_MAX_AGENT_DEPTH
+        )
+
+        response, _close, _start = self._relaunch(
+            target.session_id,
+            {"requested_by_session_id": caller.session_id, "agent": "claude"},
+        )
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertEqual(
+            api.session_manager.get_session(target.session_id).agent_depth,
+            _MAX_AGENT_DEPTH,
+        )
+
+    def test_a_caller_that_closes_mid_call_is_refused_not_read_as_depth_zero(self):
+        """The gate proved the caller was open; nothing held it there.
+
+        A caller gone by the time its budget is read used to be
+        `getattr(None, "agent_depth", 0) + 1`, which is 1 -- so a chain four
+        agents deep silently *restarted* its budget instead of ending. It is the
+        same fact `check_caller` already refuses on, so it refuses here too.
+        """
+        caller, target = self._agent_pair()
+        api.session_manager.update_session_metadata(caller.session_id, agent_depth=1)
+        before = _pane_state(target.session_id)
+        passes_then_closes = web_session_shell.check_lineage
+
+        def close_the_caller(session, request, wording):
+            passes_then_closes(session, request, wording)
+            api.session_manager.close_session(caller.session_id)
+            api.session_manager.clear_disconnected_sessions()
+
+        with patch.object(web_session_shell, "check_lineage", close_the_caller):
+            response, close_connection, start_task = self._relaunch(
+                target.session_id,
+                {"requested_by_session_id": caller.session_id, "agent": "claude"},
+            )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertIn("lineage gate", response.get_json()["error"])
+        self.assertEqual(_pane_state(target.session_id), before)
+        close_connection.assert_not_called()
+        start_task.assert_not_called()
 
     def test_a_relaunch_can_send_a_pane_it_made_back_to_a_plain_shell(self):
         """A stated empty agent is a choice, and the gates do not forbid it."""

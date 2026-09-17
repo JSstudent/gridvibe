@@ -193,11 +193,6 @@ class PaneTokenRegistry:
             self._tokens.pop(token, None)
             return True
 
-    def token_for(self, session_id: str) -> str:
-        """The token already minted for one pane, or ""."""
-        with self._lock:
-            return self._by_session.get(str(session_id or "").strip(), "")
-
     def clear(self) -> None:
         with self._lock:
             self._tokens.clear()

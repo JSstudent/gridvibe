@@ -4160,7 +4160,7 @@ def handle_voice_stop(data):
     logger.info("Voice stopped for session %s", session_id)
 
 
-@app.route('/mcp/<token>', methods=['POST'])
+@app.route('/mcp/<token>', methods=['POST', 'GET', 'DELETE'])
 def mcp_streamable_http(token: str):
     """MCP over streamable HTTP, for a pane whose shell is not on this machine.
 
@@ -4169,9 +4169,34 @@ def mcp_streamable_http(token: str):
     identity cannot arrive by environment inheritance across a machine
     boundary -- and is revoked when that pane closes.
 
+    **The POST half of streamable HTTP, deliberately.** The transport also
+    describes a `GET` SSE stream for server-initiated messages and a `DELETE`
+    that ends a session; neither is implemented, because nothing in the tool
+    surface is server-initiated and a pane's "session" is the pane. The three
+    CLIs that are handed a URL are content with request/response. `GET` and
+    `DELETE` are routed here so they answer a stated 405 naming what this
+    endpoint is, rather than Flask's bare method-not-allowed, which reads to a
+    client like a server that half-implements the spec by accident. A
+    *tunnelled* client never reaches it: `web/ssh_tunnel.py`'s filter forwards
+    this pane's own POST and answers everything else 404, deliberately saying
+    nothing. The 405 is for a client on this machine.
+
     Thin route, like every other: the protocol and the token registry live in
     `web/mcp_http.py`, and the tools are the sidecar's own `dispatch`.
     """
+    if request.method != 'POST':
+        return (
+            jsonify({
+                "error": (
+                    "This endpoint is the POST half of MCP streamable HTTP. "
+                    "GridVibe sends nothing a client has to stream, and a "
+                    "pane's session ends with the pane, so there is no SSE "
+                    "stream to open and no session to delete."
+                ),
+            }),
+            405,
+            {"Allow": "POST"},
+        )
     payload, status = mcp_http.handle_request(
         token,
         request.get_data() or b"",

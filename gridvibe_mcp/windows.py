@@ -15,8 +15,9 @@ pages open.
 
 Three honest outcomes, and the tool reports which: ``opened``, ``blocked``
 (a native page refused, or no browser would take the URL), and
-``no_window_available`` (the intent expired with no page to claim it). It never
-retries and it never pretends.
+``no_window_available`` (the intent expired with no page to claim it, or the
+wait ended with GridVibe unreadable -- a dropped poll is not a failed open, so
+it degrades and the deadline answers). It never retries and it never pretends.
 """
 
 import time
@@ -148,8 +149,20 @@ def _open_native(
     deadline = monotonic() + max(0.0, float(wait_seconds))
     state = "pending"
     detail = ""
+    read_error = ""
     while True:
-        record = client.read_window_intent(intent_id)
+        try:
+            record = client.read_window_intent(intent_id)
+            read_error = ""
+        except GridVibeError as exc:
+            # A failed *poll* is not a failed open. The intent is recorded and a
+            # page may be claiming it this second, so one dropped read must not
+            # become "the call failed" about a window that then appears. The
+            # read degrades and the deadline decides; the last failure is kept
+            # so the answer can say it never found out rather than that nothing
+            # happened.
+            record = {}
+            read_error = str(exc)
         state = str(record.get("state") or "").strip() or "pending"
         detail = str(record.get("detail") or "").strip()
         if state in {OPENED, BLOCKED, "expired"}:
@@ -167,6 +180,17 @@ def _open_native(
             "window_mode": "native",
             "intent_id": intent_id,
             "detail": (f"{detail} " if detail else "") + FALLBACK_HINT,
+        }
+    if read_error:
+        return {
+            "status": NO_WINDOW_AVAILABLE,
+            "window_mode": "native",
+            "intent_id": intent_id,
+            "detail": (
+                "GridVibe could not be reached while waiting for the window "
+                f"({read_error}), so whether a page opened one is not known "
+                f"here. {FALLBACK_HINT}"
+            ),
         }
     return {
         "status": NO_WINDOW_AVAILABLE,

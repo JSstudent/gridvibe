@@ -11,8 +11,18 @@ import os
 from dataclasses import dataclass
 from typing import Any, Dict, Mapping, Optional, Tuple
 
-#: Every variable GridVibe injects at a local pane's spawn. Named once here so
-#: the sidecar, the injector and the WSLENV forward list cannot drift.
+#: Every variable GridVibe injects at a local pane's spawn.
+#:
+#: The injector does not import this tuple and cannot: `web/mcp_launch.py` is
+#: on the other side of the boundary that keeps GridVibe out of the sidecar and
+#: the sidecar out of GridVibe, so it states the five names itself, and
+#: `read_identity` below states them a third time as the keys it reads. This is
+#: therefore the *published* list rather than the only one -- and the drift that
+#: would follow (a sixth variable written at the spawn that the sidecar reads as
+#: `""`, with no error anywhere) is pinned by test instead: the injector is
+#: asserted to write exactly these names, and WSLENV to forward exactly these,
+#: in `tests/test_mcp_launch.py`; that each is one the reader actually reads, in
+#: `tests/test_mcp_identity.py`.
 IDENTITY_VARIABLES = (
     "GRIDVIBE_URL",
     "GRIDVIBE_SESSION_ID",

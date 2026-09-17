@@ -349,7 +349,9 @@ class GridVibeClient:
         workspace-wide -- an agent asking "what is here" is asking about the
         panes around it, and those are in its own group. Every pane outside
         that group carries ``index: None`` and no rectangle, because array
-        position across groups means nothing.
+        position across groups means nothing. The ``layout`` block follows the
+        same rule: it is published only when at least one pane in this answer is
+        in the group it describes.
         """
         params = {}
         if workspace_id:
@@ -379,6 +381,7 @@ class GridVibeClient:
             for pane in panes:
                 pane["index"] = None
             return result
+        placed = 0
         for pane in panes:
             position = positions.get(str(pane.get("session_id") or ""))
             if position is None:
@@ -389,7 +392,16 @@ class GridVibeClient:
                 pane["index"] = None
                 continue
             pane.update(project(position, POSITION_FIELDS))
-        result["layout"] = project(layout, LAYOUT_FIELDS)
+            placed += 1
+        if placed:
+            # Only when the arrangement describes something in *this* answer. A
+            # workspace-wide read of a workspace that is not the caller's own
+            # still resolves the caller's group, and publishing that block would
+            # hand back "how this workspace's group is arranged" for a group
+            # that is not in it. `LAYOUT_FIELDS` names the group, so a careful
+            # reader could tell -- and a reader who reads the field name instead
+            # of the group id could not.
+            result["layout"] = project(layout, LAYOUT_FIELDS)
         return result
 
     def pane_layout(self, group_id: str) -> Dict[str, Any]:
@@ -499,14 +511,6 @@ class GridVibeClient:
 
     def launch(self, body: Mapping[str, Any]) -> Dict[str, Any]:
         payload = self.request("POST", "/api/sessions", body=dict(body))
-        return self._launch_result(payload)
-
-    def split(self, session_id: str, body: Mapping[str, Any]) -> Dict[str, Any]:
-        payload = self.request(
-            "POST",
-            f"/api/sessions/{urllib.parse.quote(session_id)}/split",
-            body=dict(body),
-        )
         return self._launch_result(payload)
 
     def split_intent(self, session_id: str, body: Mapping[str, Any]) -> Dict[str, Any]:

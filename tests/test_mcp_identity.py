@@ -77,8 +77,24 @@ class PaneIdentityTestCase(unittest.TestCase):
     def test_the_published_variable_list_is_the_whole_environment_contract(self):
         # One list, read by the sidecar, written by the injector and forwarded
         # across the WSL boundary. A sixth variable added to one of the three
-        # and not the others is the failure this pins.
+        # and not the others is the failure this pins. The injector's half and
+        # the WSLENV half are pinned in `tests/test_mcp_launch.py`, which is the
+        # only side that can import `web/`.
         self.assertEqual(set(IDENTITY_VARIABLES), set(INSIDE))
+
+    def test_every_published_variable_is_one_the_reader_actually_reads(self):
+        """Drift in the other direction: a name listed and never consumed.
+
+        Dropping any one of them has to change the identity, or the tuple is
+        advertising something the sidecar does not use.
+        """
+        whole = read_identity(INSIDE)
+
+        for name in IDENTITY_VARIABLES:
+            with self.subTest(variable=name):
+                without = {key: value for key, value in INSIDE.items() if key != name}
+
+                self.assertNotEqual(read_identity(without), whole)
 
 
 class DepthBudgetTestCase(unittest.TestCase):

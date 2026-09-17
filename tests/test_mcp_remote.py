@@ -210,6 +210,26 @@ class PaneTokenRegistryTestCase(unittest.TestCase):
         # than being answered with a token the registry no longer holds.
         self.assertNotIn(registry.mint(session_id="pane-0"), tokens)
 
+    def test_there_is_one_lookup_and_minting_again_is_it(self):
+        """A second, read-only accessor existed and nothing called it.
+
+        `mint` is already idempotent per pane, which is the need a `token_for`
+        would have served -- and a live credential wants one way in, not two
+        that have to agree.
+        """
+        token = self.registry.mint(session_id="pane-1")
+
+        self.assertEqual(self.registry.mint(session_id="pane-1"), token)
+        self.assertEqual(
+            sorted(
+                name
+                for name in dir(self.registry)
+                if not name.startswith("_")
+                and callable(getattr(self.registry, name))
+            ),
+            ["clear", "mint", "resolve", "revoke"],
+        )
+
     def test_a_pane_with_no_id_mints_nothing(self):
         self.assertEqual(self.registry.mint(session_id=""), "")
 
@@ -354,6 +374,31 @@ class HttpEndpointTestCase(unittest.TestCase):
         self.assertNotIn("error", body)
         self.assertTrue(body["result"]["isError"])
         self.assertIn("Nope.", body["result"]["content"][0]["text"])
+
+    def test_the_stream_half_of_the_transport_answers_a_stated_405(self):
+        """This endpoint is the POST half of streamable HTTP, deliberately.
+
+        The transport also describes a `GET` SSE stream and a `DELETE` that
+        ends a session; GridVibe sends nothing a client has to stream, and a
+        pane's session is the pane. Flask's bare method-not-allowed reads like a
+        server that half-implements the spec by accident, so the route answers
+        and says which half it is.
+        """
+        for method in ("get", "delete"):
+            with self.subTest(method=method):
+                response = getattr(self.client, method)(f"/mcp/{self.token}")
+
+                self.assertEqual(response.status_code, 405)
+                self.assertEqual(response.headers["Allow"], "POST")
+                self.assertIn("POST half", response.get_json()["error"])
+
+    def test_the_405_tells_a_caller_nothing_about_the_token(self):
+        """Answered before the registry is consulted, so it leaks no liveness."""
+        live = self.client.get(f"/mcp/{self.token}")
+        unknown = self.client.get("/mcp/made-up")
+
+        self.assertEqual(live.status_code, unknown.status_code)
+        self.assertEqual(live.get_json(), unknown.get_json())
 
     def test_a_malformed_body_is_a_parse_error(self):
         response = self.client.post(

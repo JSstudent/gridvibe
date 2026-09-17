@@ -412,14 +412,68 @@ def _claim_workspace_label(
         return commit(normalized)
 
 
-def create_labelled_workspace(label: Any, *, retain_when_empty: bool = False) -> Any:
-    """Create one live workspace, claiming its label in the same decision."""
-    return _claim_workspace_label(
-        label,
-        lambda claimed: _manager().create_workspace(
-            label=claimed, retain_when_empty=retain_when_empty
-        ),
+#: How many deliberately-empty workspaces may exist at once.
+#:
+#: The one create in the tool surface that nothing else bounded: `launch_panes`
+#: is capped by ``terminal.max_sessions`` and by the agent depth budget, and a
+#: split by the group cap, but a workspace cost nothing to make and — being
+#: marked ``retain_when_empty`` so cleanup can tell it from one emptied by a
+#: close — was never swept either. An agent in a retry loop therefore left
+#: permanent empty workspaces in memory and in the list every page renders.
+#: `WindowIntentStore.MAX_INTENTS` is the precedent and the same sentence.
+#:
+#: Counted rather than rate-limited, and counted over the *world* rather than
+#: over the caller, because the server cannot tell a tool from a button. The
+#: number is therefore high enough that a person never meets it: reaching it
+#: means sixteen workspaces are open with nothing in any of them.
+MAX_EMPTY_WORKSPACES = 16
+
+
+def _empty_retained_workspace_count(session_manager: Any) -> int:
+    """How many live workspaces are deliberately empty and still empty."""
+    occupied = {
+        str(getattr(group, "workspace_id", "") or "")
+        for group in session_manager.get_all_groups()
+    }
+    return sum(
+        1
+        for workspace in session_manager.get_all_workspaces()
+        if bool(getattr(workspace, "retain_when_empty", False))
+        and str(getattr(workspace, "workspace_id", "") or "") not in occupied
     )
+
+
+def create_labelled_workspace(label: Any, *, retain_when_empty: bool = False) -> Any:
+    """Create one live workspace, claiming its label in the same decision.
+
+    ``retain_when_empty`` is the deliberately-empty create — the launcher's
+    Workspace ▸ New Workspace and the sidecar's ``create_workspace`` — and is
+    the only one this ceiling applies to. A workspace created as a launch
+    destination is not counted or capped: it is about to hold a group.
+    """
+    def commit(claimed: str) -> Any:
+        session_manager = _manager()
+        if (
+            retain_when_empty
+            and _empty_retained_workspace_count(session_manager) >= MAX_EMPTY_WORKSPACES
+        ):
+            raise WorkspaceRequestError(
+                f"There are already {MAX_EMPTY_WORKSPACES} empty workspaces open. "
+                "Use one of those, or close one before creating another.",
+                status=409,
+                payload={"conflict": "empty_workspace_limit"},
+            )
+        return session_manager.create_workspace(
+            label=claimed, retain_when_empty=retain_when_empty
+        )
+
+    # Inside the claim rather than before it, so for a *named* create the count
+    # and the create are the one decision the label already is and two requests
+    # arriving together cannot both read 15 and both commit. An unlabelled
+    # create claims nothing and so holds nothing, and can overshoot by however
+    # many land at once -- a bounded overshoot of a bound. The tool path is not
+    # that case: the `create_workspace` tool refuses a workspace with no label.
+    return _claim_workspace_label(label, commit)
 
 
 def rename_workspace_label(workspace_id: Any, label: Any) -> Any:
@@ -633,9 +687,11 @@ def resolve_origin_connection(origin_session_id: Any) -> Tuple[str, Dict[str, An
         "port": session.port,
         "password": session.password,
         # The local shell family travels no further than the machine it names.
-        # A caller that stated one — the sidecar defaults every pane to
-        # PowerShell — would otherwise have it recorded on a remote pane and
-        # saved into the preset, describing a shell that host never runs.
+        # A caller that stated one would otherwise have it recorded on a remote
+        # pane and saved into the preset, describing a shell that host never
+        # runs. (The sidecar used to state PowerShell on every pane whether or
+        # not it was asked for, which is what made this the load-bearing line
+        # rather than the belt-and-braces one it is now.)
         "use_powershell": False,
         "use_wsl": False,
         "distribution": "",

@@ -10,18 +10,20 @@ cited from either.
 Nothing below was changed *when this was written*. Each finding names the file,
 what was true, why it matters, and what the fix would be.
 
-**Since then, the two High findings and all six Medium ones have been fixed** —
-[1](#1) and [2](#2), then [3](#3) through [8](#8), all on 2026-09-17, code and
-tests only. Each carries a **Fixed** note saying what changed and what pins it.
-The nine Low findings and the Info one stand exactly as written, and the review
-remains historical evidence rather than a contract: the rules the eight fixes
-established live in the modules' own docstrings.
+**Since then, every finding but the Info one has been fixed** — the two High
+([1](#1), [2](#2)), then all six Medium ([3](#3)–[8](#8)), then all eleven Low
+([9](#9)–[19](#19)), all on 2026-09-17. Each carries a **Fixed** note saying
+what changed and what pins it. [Finding 20](#20), the documentation drift,
+stands exactly as written and was deliberately not acted on.
 
-Nothing outside code and tests was touched for the Medium round either — no
-README, no `CHANGELOG.md`, no `docs/engineering_contracts.md`, and not
-`gridvibe_mcp/README.md`, which [finding 20](#20) already describes as four
-tools out of date. Where a fix was a wording change ([3](#3)), the wording went
-into the module's own docstring.
+Nothing outside code and tests was touched in any round — no README, no
+`CHANGELOG.md`, no `docs/engineering_contracts.md`, and not
+`gridvibe_mcp/README.md`, which finding 20 already describes as four tools out
+of date. Where a fix was a wording change ([3](#3), [13](#13), [16](#16), and
+half of [11](#11)), the wording went into the module's own docstring, comment or
+tool description. The review therefore remains historical evidence rather than a
+contract: every rule these nineteen fixes established lives in the code that
+keeps it, and in the tests named below.
 
 ## Scope
 
@@ -49,17 +51,17 @@ Tests read: `tests/test_mcp_tools.py`, `test_mcp_client.py`, `test_mcp_identity.
 | [6](#6) | Medium — **fixed** | The sidecar can give up before the intent store does, and then claims nothing was touched |
 | [7](#7) | Medium — **fixed** | A close racing an SSH connect leaks a remote listener, a config file and an SFTP channel |
 | [8](#8) | Medium — **fixed** | An SSH pane whose agent has no MCP mechanism still opens a tunnel and mints a token |
-| [9](#9) | Low | `GridVibeClient.split()` is dead, and is the call `splits.py` exists to avoid |
-| [10](#10) | Low | `PaneTokenRegistry.token_for()` is dead |
-| [11](#11) | Low | `IDENTITY_VARIABLES` claims a single source of truth it is not |
-| [12](#12) | Low | The gated relaunch is the one write path that skips the agent-depth cap |
-| [13](#13) | Low | The `layout` enum advertises values GridVibe silently rewrites below four panes |
-| [14](#14) | Low | A cross-workspace `list_panes` publishes the caller's own group's layout block |
-| [15](#15) | Low | `create_workspace` is unbounded, and what it creates is never pruned |
-| [16](#16) | Low | Every tool-launched terminal pane is a *stated* PowerShell pane |
-| [17](#17) | Low | One transient poll failure reports a split that may have happened as a failure |
-| [18](#18) | Low | The streamable-HTTP endpoint implements the POST half only |
-| [19](#19) | Low | `whoami` says an agent may not launch panes without saying it may still split one |
+| [9](#9) | Low — **fixed** | `GridVibeClient.split()` is dead, and is the call `splits.py` exists to avoid |
+| [10](#10) | Low — **fixed** | `PaneTokenRegistry.token_for()` is dead |
+| [11](#11) | Low — **fixed** | `IDENTITY_VARIABLES` claims a single source of truth it is not |
+| [12](#12) | Low — **fixed** | The gated relaunch is the one write path that skips the agent-depth cap |
+| [13](#13) | Low — **fixed** | The `layout` enum advertises values GridVibe silently rewrites below four panes |
+| [14](#14) | Low — **fixed** | A cross-workspace `list_panes` publishes the caller's own group's layout block |
+| [15](#15) | Low — **fixed** | `create_workspace` is unbounded, and what it creates is never pruned |
+| [16](#16) | Low — **fixed** | Every tool-launched terminal pane is a *stated* PowerShell pane |
+| [17](#17) | Low — **fixed** | One transient poll failure reports a split that may have happened as a failure |
+| [18](#18) | Low — **fixed** | The streamable-HTTP endpoint implements the POST half only |
+| [19](#19) | Low — **fixed** | `whoami` says an agent may not launch panes without saying it may still split one |
 | [20](#20) | Info | Documentation drift: the sidecar README, `CLAUDE.md`, and the contracts |
 
 ---
@@ -640,6 +642,14 @@ comment saying not to use it. The next tool that wants a pane will find it first
 
 **Fix.** Delete it.
 
+**Fixed — 2026-09-17.** Deleted. Splitting reaches GridVibe by exactly one
+route from here -- `split_intent()` and the wait -- and there is no longer a
+method one line above it that posts the thing the module exists to avoid.
+
+Pinned by `SplitRouteTestCase` in `tests/test_mcp_client.py`: the split a
+client actually makes goes to `/split-intent`, and `GridVibeClient` has no
+`split` to find.
+
 ---
 
 <a id="10"></a>
@@ -653,6 +663,15 @@ already idempotent per pane, which is the need `token_for()` would have served.
 **Fix.** Delete it, or keep it and give it the one caller it was written for.
 (`clear()` is different — it is used by `tests/test_mcp_remote.py` as a fixture
 reset and should stay.)
+
+**Fixed — 2026-09-17.** Deleted. `mint()` is idempotent per pane, which is the
+need a lookup would have served, and one way in beats two that have to agree
+about a live credential. `clear()` stayed, for the reason stated above.
+
+Pinned by `test_there_is_one_lookup_and_minting_again_is_it` in
+`tests/test_mcp_remote.py`, which asserts the second mint answers with the
+first's token *and* that the registry's whole public surface is the four
+methods that have callers -- so a second accessor cannot reappear unnoticed.
 
 ---
 
@@ -682,6 +701,25 @@ tested against.
 asserting `set(pane_identity_environment(session_id="x")) == set(IDENTITY_VARIABLES)` —
 or soften the comment to say it is the sidecar's own reading list and the
 injector is pinned to it by test.
+
+**Fixed — 2026-09-17.** Both halves of that, because either alone leaves half
+the claim. The comment now says what the tuple is: the *published* list, not
+the only one, with the injector and the reader stating the five names
+themselves because the boundary that keeps the asyncio SDK out of the Flask
+process is the same boundary that stops them importing it. And the assertions
+that make a published list worth publishing are there:
+
+- `PublishedIdentityListTestCase` in `tests/test_mcp_launch.py` -- the injector
+  writes exactly these names, and `apply_pane_identity` forwards exactly these
+  across WSLENV. Set equality, not `assertIn`: a sixth name written on one side
+  is the failure, and the old assertions could not see one.
+- The two spawn cases in the same file now assert the same equality against the
+  *real* Windows connector's environment, rather than that each name is present
+  somewhere in it.
+- `test_every_published_variable_is_one_the_reader_actually_reads` in
+  `tests/test_mcp_identity.py` -- drift the other way: dropping any one of the
+  five has to change the identity, or the tuple is advertising a variable the
+  sidecar does not consume.
 
 ---
 
@@ -716,6 +754,26 @@ extending it.
 that has gone as a refusal rather than as depth 0 — it is the same fact
 `check_caller` already refuses on.
 
+**Fixed — 2026-09-17.** Both, in `web/session_shell.py`.
+
+- **The cap.** The arithmetic goes through `_normalize_agent_depth`, so this
+  path writes what `create_session` and the split route write. It was the only
+  one that could put 65 into `runtime_state.json`, because
+  `update_session_metadata` is a raw `setattr` over an allowlist and normalizes
+  nothing.
+- **The caller.** Read inside the gate sequence rather than after it, and a
+  caller that has gone raises the lineage gate's own refusal. `getattr(None,
+  "agent_depth", 0) + 1` is 1, so a caller closing mid-call used to silently
+  *restart* the chain's budget instead of ending it -- the one arithmetic
+  result that is worse than refusing.
+
+Pinned by two cases in `AgentRequestedRelaunchTestCase`
+(`tests/test_session_shell.py`): a caller already at `_MAX_AGENT_DEPTH` hands
+down `_MAX_AGENT_DEPTH` rather than one past it, and a caller closed *between*
+the lineage gate and the depth read is refused with the pane asserted unmoved
+on a whole-pane snapshot -- the window the defect lives in, rather than a
+description of it.
+
 ---
 
 <a id="13"></a>
@@ -747,6 +805,17 @@ where the count has a choice, and `workspace_layout` is how to place panes
 exactly. Refusing client-side would be worse — the server is the owner of that
 table.
 
+**Fixed — 2026-09-17.** The description now states the whole table from the
+caller's side -- `vertical`/`horizontal` at two, those two plus `split` at
+three, `single` at one and `grid` at four or more whatever is asked, anything
+else at two or three rewritten to `vertical` -- and says the rewrite is silent,
+which is the part an agent would otherwise find by comparing what it asked for
+with `list_panes`. Nothing is refused CLI-side: the server owns the table, and
+the comment above `LAYOUTS` now says that is why.
+
+Pinned by `test_the_layout_description_says_where_the_name_is_honoured` in
+`tests/test_mcp_tools.py`, beside the existing assertion on the enum itself.
+
 ---
 
 <a id="14"></a>
@@ -769,6 +838,17 @@ arranged" is reading the wrong group's answer.
 position, which is the same condition that already decides whether positions
 were readable at all.
 
+**Fixed — 2026-09-17.** Exactly that: `panes()` counts the panes it placed and
+publishes `layout` only if there was one. The read itself is unchanged -- a
+workspace-wide `list_panes` still resolves the caller's own group, which is
+right when that is where the caller is -- but an answer in which nothing
+matched no longer carries a block describing a group that is not in it.
+
+Pinned by two cases in `PanePositionTestCase` (`tests/test_mcp_tools.py`): a
+named workspace holding none of the caller's panes comes back with every
+`index: None` and *no* block, and one stranger beside a pane that did match
+keeps the block, because it still describes something in the answer.
+
 ---
 
 <a id="15"></a>
@@ -788,6 +868,31 @@ empty workspaces in memory and in the workspace list every page renders.
 **Fix.** A ceiling, or a TTL on a workspace that is still empty and was created
 by a tool. The `WindowIntentStore`'s `MAX_INTENTS` is the precedent — "a sidecar
 in a retry loop cannot grow the store without bound" is the same sentence.
+
+**Fixed — 2026-09-17.** The ceiling, in `web/workspaces.py`:
+`MAX_EMPTY_WORKSPACES` is 16, and `create_labelled_workspace` refuses a
+deliberately-empty create past it with a `409` naming what to do instead.
+
+- **It counts emptiness, not creates.** Only workspaces that are both
+  `retain_when_empty` and still holding no group are counted, so filling one
+  makes room for another and a person with sixteen *used* workspaces never
+  meets it. A workspace created as a launch destination is neither counted nor
+  capped: it is about to hold a group.
+- **Over the world, not the caller**, because the server cannot tell a tool
+  from a button -- the launcher's Workspace ▸ New Workspace is the same route.
+  The number is therefore set where reaching it means something is wrong
+  either way: sixteen workspaces open with nothing in any of them.
+- **Inside the label claim**, so for a named create the count and the create
+  are the one decision the name already is (ISSUE-2026-042) and two requests
+  cannot both read 15. An unlabelled create claims nothing and can overshoot by
+  however many land together, which is a bounded overshoot of a bound; the tool
+  path is not that case, because `create_workspace` refuses a workspace with no
+  label.
+
+Pinned by three cases in `MultiWorkspaceStage3TestCase`
+(`tests/test_multi_workspace.py`): the seventeenth is refused with the conflict
+named and nothing mutated, launching into one of the sixteen makes room for
+another, and a launch that creates its own destination is never capped.
 
 ---
 
@@ -814,6 +919,23 @@ pane, and says so.
 default apply, exactly as `build_split_pane_request` already does for `kind`
 ("an omitted `kind` means 'do what the button does'").
 
+**Fixed — 2026-09-17.** Exactly that: `build_pane_request` reads `shell` with
+no default and writes `use_powershell`/`use_wsl` only when one was stated, so
+an omitted `shell` now means "do what GridVibe does" rather than a choice
+nobody made being saved into the preset. The schema's `shell` property says so
+too, since the enum alone reads as "pick one of these three".
+
+`resolve_origin_connection`'s comment in `web/workspaces.py` stated this defect
+as a fact it relied on ("the sidecar defaults every pane to PowerShell"); it
+now says what it is guarding against, and that it went from load-bearing to
+belt-and-braces.
+
+Pinned by `LaunchRequestTestCase` in `tests/test_mcp_tools.py`: an unstated
+shell sends neither key, for a terminal pane and an agent pane both; a stated
+PowerShell pane still says so; and the acceptance-scenario assertion that used
+to require `use_powershell` to be true was converted rather than kept -- it was
+pinning the defect.
+
 ---
 
 <a id="17"></a>
@@ -835,6 +957,28 @@ rather than raising through its caller."
 deadline produce `no_window_available`, which is the honest answer for "I never
 saw it settle".
 
+**Fixed — 2026-09-17.** Both poll loops swallow `GridVibeError` and keep
+waiting, so a dropped read no longer unwinds into `{"kind": "unreachable"}`
+about a pane that then appears. The deadline answers, as `pane_layout()`
+already does one file over.
+
+With one addition the fix needs. `no_window_available` is now reached two ways,
+and [finding 6](#6) had just made `NO_PAGE_HINT`'s "the panes and the workspace
+are untouched" a sentence that has to be true wherever it is said -- which it is
+not when the last read failed. So each module keeps the last failure and says
+the honest thing instead: the request was recorded, what happened is not known
+here, read the group before asking again. Same status, because "I never saw it
+settle" is what is known either way; different sentence, because only one of
+them knows nothing happened. `windows.py`'s answer is the same shape over
+`FALLBACK_HINT`, which was always safe.
+
+Pinned by `DroppedPollTestCase` in `tests/test_mcp_tools.py`: a split that
+settles after a dropped poll is still a split, a wait that *ends* unreadable
+never claims the panes are untouched and names `list_panes` instead, an expiry
+that was actually read still says untouched (the distinction is what was read,
+not that a read once failed), the same through `dispatch` where the typed error
+used to surface, and the window verb's equivalent.
+
 ---
 
 <a id="18"></a>
@@ -855,6 +999,29 @@ a CLI opens the stream first and reads a 405.
 POST half of streamable HTTP, and answer `GET`/`DELETE` with a deliberate 405
 rather than Flask's default.
 
+**Fixed — 2026-09-17,** the code half. `/mcp/<token>` accepts `GET` and
+`DELETE` and answers them 405 with `Allow: POST` and one sentence naming what
+the endpoint is and why the other half is absent: GridVibe sends nothing a
+client has to stream, and a pane's session is the pane. Flask's bare
+method-not-allowed reads to a client like a server that half-implements the
+spec by accident.
+
+The refusal is decided before the token is resolved, so it says nothing about
+whether a token is live -- and a *tunnelled* client never reaches it at all,
+because [finding 1](#1)'s filter forwards this pane's own POST and answers
+everything else 404. The 405 is for a client on this machine.
+
+`Origin`/`Accept` validation stays unimplemented and unclaimed: the DNS-rebind
+protection the spec asks for is the local bind plus that filter, and the
+cross-origin write guard already covers `DELETE`.
+
+The README half was **not** done -- it is [finding 20](#20)'s file, and the note
+at the top of this document says why nothing outside code and tests was touched.
+
+Pinned by two cases in `HttpEndpointTestCase` (`tests/test_mcp_remote.py`): the
+405 and its `Allow` header for both methods, and a live token answering
+identically to one that never existed.
+
 ---
 
 <a id="19"></a>
@@ -871,6 +1038,19 @@ An agent reading `whoami` alone concludes it can create nothing.
 
 **Fix.** One more field — `may_split_panes: true` alongside it, or a clause in
 the refusal saying a plain split is still available.
+
+**Fixed — 2026-09-17.** Both, because the field alone is easy to miss in a
+payload an agent is skimming for a refusal. `whoami` publishes
+`may_split_panes` always -- true at the limit too, since the budget bounds
+*agents* and only a split that starts one costs it -- and, when
+`may_launch_panes` is false, a `split_note` saying a plain split is still
+available. `depth_budget()`'s own sentence is unchanged: it is also what
+`launch_panes` and `split_pane` refuse with, and it is about the thing that was
+refused.
+
+Pinned by two cases in `WhoamiTestCase` (`tests/test_mcp_tools.py`): an agent at
+the limit is told both things in one answer, and one under it says it may do
+both with no note explaining a refusal that did not happen.
 
 ---
 

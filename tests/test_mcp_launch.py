@@ -249,9 +249,56 @@ class PaneIdentityEnvironmentTestCase(unittest.TestCase):
         # `wsl.exe` forwards only what WSLENV names; each caller writing its own
         # value would drop the other's.
         self.assertIn("PROMPT_COMMAND", forwarded)
-        for name in IDENTITY_VARIABLES:
-            with self.subTest(variable=name):
-                self.assertIn(name, forwarded)
+        # Exactly the published list, not merely a superset: a sixth GRIDVIBE_*
+        # forwarded here and absent from the tuple is drift the sidecar would
+        # never report, because it simply would not read it.
+        self.assertEqual(
+            {name for name in forwarded if name.startswith("GRIDVIBE_")},
+            set(IDENTITY_VARIABLES),
+        )
+
+    def test_the_spawn_carries_no_gridvibe_variable_the_list_omits(self):
+        """The real connector's environment, at the real spawn."""
+        environment = self._spawn_environment()
+
+        self.assertEqual(
+            {name for name in environment if name.startswith("GRIDVIBE_")},
+            set(IDENTITY_VARIABLES),
+        )
+
+
+class PublishedIdentityListTestCase(unittest.TestCase):
+    """`IDENTITY_VARIABLES` is the published list, pinned rather than shared.
+
+    Nothing imports it: the sidecar is a sibling of GridVibe, so
+    `pane_identity_environment` states the five names itself and `read_identity`
+    states them a third time. The tuple therefore only *claimed* to be the one
+    source of truth -- and a sixth variable added on the injector's side alone
+    would have been read as `""` by the sidecar forever, with no error
+    anywhere. These are the assertions that make the claim true.
+    """
+
+    def test_the_injector_writes_exactly_the_published_list(self):
+        injected = mcp_launch.pane_identity_environment(
+            session_id="pane-1",
+            group_id="group-1",
+            workspace_id="abc123def456",
+            agent_depth=1,
+            base_url="http://127.0.0.1:5050",
+        )
+
+        self.assertEqual(set(injected), set(IDENTITY_VARIABLES))
+
+    def test_the_wslenv_forward_list_is_the_same_list(self):
+        """`wsl.exe` forwards only what WSLENV names, so a name missing here is
+        a variable that exists on Windows and not one step across."""
+        identity = mcp_launch.pane_identity_environment(session_id="pane-1")
+
+        merged = mcp_launch.apply_pane_identity({}, identity, shell_kind="wsl")
+
+        self.assertEqual(
+            set(merged[WSLENV_VARIABLE].split(":")), set(IDENTITY_VARIABLES)
+        )
 
 
 class MergeWslenvTestCase(unittest.TestCase):

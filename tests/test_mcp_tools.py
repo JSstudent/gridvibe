@@ -22,6 +22,7 @@ of a code path:
 import json
 import sys
 import unittest
+import urllib.error
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -111,6 +112,28 @@ class ToolSurfaceTestCase(unittest.TestCase):
             LAYOUTS, ("single", "vertical", "horizontal", "split", "grid")
         )
         self.assertNotIn("stack", LAYOUTS)
+
+    def test_the_layout_description_says_where_the_name_is_honoured(self):
+        """The enum offers five values and no pane count accepts all five.
+
+        It used to describe only the case it does not cover -- `grid` forced at
+        four or more -- and stay silent on the two it does: a three-pane launch
+        asking for `grid` is rewritten to `vertical`, and so is the two-pane
+        default `build_launch_request` itself sends. Silently, because the
+        server owns that table; a reader has to be told rather than shown.
+        """
+        spec = next(
+            item for item in tool_specs() if item["name"] == "launch_panes"
+        )
+        description = spec["inputSchema"]["properties"]["layout"]["description"]
+
+        self.assertIn("two panes", description)
+        self.assertIn("three", description)
+        self.assertIn("'single'", description)
+        self.assertIn("'grid'", description)
+        # And that the rewrite is silent, which is the part an agent would
+        # otherwise discover by comparing what it asked for with list_panes.
+        self.assertIn("rewrites silently", description)
 
     def test_the_relaunch_tool_says_what_it_ends_and_what_gates_it(self):
         """A description that only said what it does would read as safe."""
@@ -279,9 +302,11 @@ class LaunchRequestTestCase(unittest.TestCase):
         self.assertEqual(first["agent_selection"], "claude")
         self.assertTrue(first["agent_mcp"])
         self.assertFalse(first["agent_auto_mode"])
-        # The pane family is per pane, not per group.
-        self.assertTrue(first["use_powershell"])
-        self.assertFalse(first["use_wsl"])
+        # The pane family is per pane, not per group -- and these panes named
+        # none, so the body states none. It used to state PowerShell, which was
+        # a choice nobody made being saved into the preset.
+        self.assertNotIn("use_powershell", first)
+        self.assertNotIn("use_wsl", first)
         # Stamped one level deeper, so the refusal compounds.
         self.assertEqual(first["agent_depth"], 1)
 
@@ -307,6 +332,24 @@ class LaunchRequestTestCase(unittest.TestCase):
 
         self.assertEqual(json.loads(opener.requests[0].data.decode("utf-8"))["layout"], "single")
 
+    def test_an_unstated_shell_is_left_to_gridvibe(self):
+        """An omitted `shell` is not a choice of PowerShell.
+
+        The two keys used to be written unconditionally off a default, so every
+        tool-launched pane arrived as a *stated* PowerShell pane and was saved
+        as one -- in a workspace whose other panes the user runs as cmd, with
+        nothing having asked. Same rule an omitted `kind` already followed on a
+        split: say nothing and GridVibe's own default applies.
+        """
+        _result, opener = self.launch({
+            "panes": [{"kind": "terminal"}, {"kind": "agent", "agent": "claude"}],
+        })
+
+        for session in json.loads(opener.requests[0].data.decode("utf-8"))["sessions"]:
+            with self.subTest(startup_mode=session["startup_mode"]):
+                self.assertNotIn("use_powershell", session)
+                self.assertNotIn("use_wsl", session)
+
     def test_a_shell_family_is_chosen_per_pane(self):
         _result, opener = self.launch({
             "panes": [
@@ -320,6 +363,16 @@ class LaunchRequestTestCase(unittest.TestCase):
             [(item["use_powershell"], item["use_wsl"]) for item in sessions],
             [(False, False), (False, True)],
         )
+
+    def test_a_stated_powershell_pane_still_says_so(self):
+        """Silence is the only thing that changed; a choice is still carried."""
+        _result, opener = self.launch(
+            {"panes": [{"kind": "terminal", "shell": "powershell"}]}
+        )
+
+        session = json.loads(opener.requests[0].data.decode("utf-8"))["sessions"][0]
+        self.assertTrue(session["use_powershell"])
+        self.assertFalse(session["use_wsl"])
 
     def test_a_launch_from_inside_a_pane_names_the_pane_it_came_from(self):
         """Where, not what -- GridVibe reads the connection, the agent cannot."""
@@ -469,6 +522,26 @@ class WhoamiTestCase(unittest.TestCase):
 
         self.assertFalse(result["may_launch_panes"])
         self.assertIn("2", result["launch_refusal"])
+        # ...and told, in the same answer, what it may still do. The budget
+        # bounds agents, so only a split that *starts* one costs it -- an agent
+        # reading `may_launch_panes: false` alone concluded it could create
+        # nothing, which is not what `split_pane` does at the limit.
+        self.assertTrue(result["may_split_panes"])
+        self.assertIn("plain split", result["split_note"])
+
+    def test_a_pane_under_the_limit_says_it_may_do_both(self):
+        result = dispatch(
+            "whoami",
+            {},
+            client=client_for(StubOpener([{"session_id": "pane-1"}])),
+            identity=read_identity(INSIDE_PANE),
+        )
+
+        self.assertTrue(result["may_launch_panes"])
+        self.assertTrue(result["may_split_panes"])
+        # No refusal to explain, so no note explaining one.
+        self.assertNotIn("split_note", result)
+        self.assertNotIn("launch_refusal", result)
 
 
 class WindowModeTestCase(unittest.TestCase):
@@ -671,6 +744,58 @@ class PanePositionTestCase(unittest.TestCase):
         self.assertIsNone(stranger["index"])
         self.assertNotIn("rect", stranger)
         self.assertNotIn("neighbours", stranger)
+
+    def test_a_workspace_that_is_not_the_callers_own_gets_no_layout_block(self):
+        """The arrangement read is the caller's group even here, so it is not
+        an answer *about this workspace* and is not published as one.
+
+        Naming a workspace and no group still resolves the caller's own group,
+        which is right when that is where the caller is and meaningless when it
+        is not: every pane listed comes back `index: None`, and the layout block
+        would have described a group that is not in the workspace being listed.
+        `LAYOUT_FIELDS` names the group, so a careful reader could have told --
+        and a reader who read `layout.layout` as "how this workspace's group is
+        arranged" could not.
+        """
+        opener = StubOpener([
+            {"sessions": [
+                {"session_id": "pane-7", "group_id": "group-2"},
+                {"session_id": "pane-8", "group_id": "group-2"},
+            ]},
+            _layout_payload(["pane-1"]),
+        ])
+
+        result = dispatch(
+            "list_panes",
+            {"workspace_id": "ws-9"},
+            client=client_for(opener),
+            identity=read_identity(INSIDE_PANE),
+        )
+
+        self.assertEqual(result["count"], 2)
+        self.assertEqual([pane["index"] for pane in result["panes"]], [None, None])
+        self.assertNotIn("layout", result)
+
+    def test_the_block_survives_a_stranger_beside_a_pane_that_did_match(self):
+        """One matched pane is enough: the block describes something here."""
+        opener = StubOpener([
+            {"sessions": [
+                {"session_id": "pane-1", "group_id": "group-1"},
+                {"session_id": "pane-9", "group_id": "group-2"},
+            ]},
+            _layout_payload(["pane-1"]),
+        ])
+
+        result = dispatch(
+            "list_panes",
+            {},
+            client=client_for(opener),
+            identity=read_identity(INSIDE_PANE),
+        )
+
+        self.assertEqual(result["layout"]["group_id"], "group-1")
+        self.assertEqual(result["panes"][0]["index"], 0)
+        self.assertIsNone(result["panes"][1]["index"])
 
     def test_an_agent_with_no_group_gets_panes_and_no_positions(self):
         opener = StubOpener([
@@ -1072,6 +1197,146 @@ class SplitPaneTestCase(unittest.TestCase):
 
         self.assertEqual(result["status"], SPLIT)
         self.assertEqual(recorded["session_id"], "pane-4")
+
+
+class _FlakyOpener(StubOpener):
+    """Answers from the queue, except on the numbered calls that drop.
+
+    A transport failure in the middle of a wait, which is the case neither poll
+    loop used to survive: `read_window_intent` raised, and the exception left
+    `split_pane` through `dispatch` as `{"kind": "unreachable"}`.
+    """
+
+    def __init__(self, answers=None, drop_on=()):
+        super().__init__(answers)
+        self.drop_on = set(drop_on)
+        self.calls = 0
+
+    def open(self, request, timeout=None):
+        self.calls += 1
+        if self.calls in self.drop_on:
+            self.requests.append(request)
+            raise urllib.error.URLError("connection reset by peer")
+        return super().open(request, timeout=timeout)
+
+
+class DroppedPollTestCase(unittest.TestCase):
+    """One unreadable poll is not an answer about the pane.
+
+    The intent is already recorded when the wait starts. A read that fails says
+    nothing about whether a page claimed it, so the loop keeps waiting and the
+    deadline answers -- the same decision `pane_layout()` takes one file over,
+    where a failed geometry read degrades instead of failing `list_panes`.
+    """
+
+    def test_a_split_that_settles_after_a_dropped_poll_is_still_a_split(self):
+        opener = _FlakyOpener(
+            [
+                {"intent_id": "s-1", "axis": "vertical", "state": "pending"},
+                {"intent_id": "s-1", "state": "split",
+                 "result": {"session_id": "pane-9"}},
+            ],
+            drop_on={2},
+        )
+
+        result = split_pane(
+            client_for(opener),
+            "pane-4",
+            "vertical",
+            sleep=lambda _seconds: None,
+            monotonic=lambda: 0.0,
+        )
+
+        self.assertEqual(result["status"], SPLIT)
+        self.assertEqual(result["pane"]["session_id"], "pane-9")
+
+    def test_a_wait_that_ends_unreadable_never_claims_the_panes_are_untouched(self):
+        """`NO_PAGE_HINT` states a fact, so it is only said when it is one."""
+        clock = iter([0.0, 0.0, 99.0])
+        opener = _FlakyOpener(
+            [{"intent_id": "s-1", "axis": "vertical", "state": "pending"}],
+            drop_on={2, 3},
+        )
+
+        result = split_pane(
+            client_for(opener),
+            "pane-4",
+            "vertical",
+            sleep=lambda _seconds: None,
+            monotonic=lambda: next(clock),
+        )
+
+        self.assertEqual(result["status"], SPLIT_NO_WINDOW)
+        self.assertNotIn("untouched", result["detail"])
+        self.assertIn("not known here", result["detail"])
+        self.assertIn("list_panes", result["detail"])
+
+    def test_an_expiry_that_was_read_still_says_untouched(self):
+        """The distinction is what was read, not that a read once failed."""
+        opener = _FlakyOpener(
+            [
+                {"intent_id": "s-1", "axis": "vertical", "state": "pending"},
+                {"intent_id": "s-1", "state": "expired"},
+            ],
+            drop_on={2},
+        )
+
+        result = split_pane(
+            client_for(opener),
+            "pane-4",
+            "vertical",
+            sleep=lambda _seconds: None,
+            monotonic=lambda: 0.0,
+        )
+
+        self.assertEqual(result["status"], SPLIT_NO_WINDOW)
+        self.assertIn("untouched", result["detail"])
+
+    def test_a_dropped_poll_never_reaches_the_agent_as_a_failed_call(self):
+        """Through `dispatch`, which is where the typed error used to surface."""
+        clock = iter([0.0, 0.0, 99.0])
+        opener = _FlakyOpener(
+            [{"intent_id": "s-1", "axis": "vertical", "state": "pending"}],
+            drop_on={2, 3},
+        )
+
+        result = dispatch(
+            "split_pane",
+            {"session_id": "pane-4"},
+            client=client_for(opener),
+            identity=read_identity(INSIDE_PANE),
+            pane_splitter=lambda client, session_id, axis, pane, **kwargs: split_pane(
+                client,
+                session_id,
+                axis,
+                pane,
+                sleep=lambda _seconds: None,
+                monotonic=lambda: next(clock),
+                **kwargs,
+            ),
+        )
+
+        self.assertEqual(result["status"], SPLIT_NO_WINDOW)
+        self.assertNotIn("error", result)
+
+    def test_a_window_wait_that_ends_unreadable_says_so_too(self):
+        clock = iter([0.0, 0.0, 99.0])
+        opener = _FlakyOpener(
+            [{"intent_id": "w-1", "state": "pending"}], drop_on={2, 3}
+        )
+
+        result = open_window(
+            client_for(opener),
+            "ws-1",
+            window_mode="native",
+            sleep=lambda _seconds: None,
+            monotonic=lambda: next(clock),
+        )
+
+        self.assertEqual(result["status"], NO_WINDOW_AVAILABLE)
+        self.assertIn("not known here", result["detail"])
+        # The workspace exists either way, which is the half that was always safe.
+        self.assertIn("launcher", result["detail"])
 
 
 class SplitIntentPollTestCase(unittest.TestCase):

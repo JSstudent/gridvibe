@@ -78,6 +78,28 @@ def client_for(opener):
     return GridVibeClient("http://127.0.0.1:5050", timeout=7.5, opener=opener)
 
 
+class SplitRouteTestCase(unittest.TestCase):
+    """There is one way to split a pane from here, and it is the intent.
+
+    The *axis* never reaches the server: the page computes the rectangles and
+    every refusal is measured off the live terminal. A process that posted
+    straight to `/split` would get a pane with no geometry and would have
+    consulted none of those rules -- which is the whole reason `splits.py`
+    exists, and why a `split()` method sitting one line above `split_intent()`
+    was worse than dead code: it is the call the next tool would find first.
+    """
+
+    def test_splitting_goes_through_the_intent_route(self):
+        opener = StubOpener([{"intent_id": "s-1", "state": "pending"}])
+
+        client_for(opener).split_intent("pane-1", {"axis": "vertical"})
+
+        self.assertTrue(opener.requests[0].full_url.endswith("/split-intent"))
+
+    def test_the_client_offers_no_way_to_post_a_bare_split(self):
+        self.assertFalse(hasattr(GridVibeClient, "split"))
+
+
 class AllowlistTestCase(unittest.TestCase):
     def test_a_password_never_reaches_a_result(self):
         # A pane payload as the server would send it, with the encrypted SSH

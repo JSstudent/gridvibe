@@ -90,8 +90,14 @@ PANE_MODES = ("terminal", "explorer", "browser")
 
 #: Every layout `_normalize_layout` accepts. `stack` was never one of them, and
 #: `vertical`/`horizontal` -- the only two it takes at two panes -- were
-#: missing, so a two-pane launch could not ask to be stacked. Above three panes
-#: the name is advisory: the normalizer forces `grid` whatever is asked.
+#: missing, so a two-pane launch could not ask to be stacked.
+#:
+#: The enum is the union across every pane count, and no count accepts all five:
+#: one pane is always `single`, two take `vertical`/`horizontal`, three add
+#: `split`, and four or more are always `grid`. Anything else at two or three is
+#: rewritten to `vertical` rather than refused -- the server owns that table, so
+#: refusing here would be the CLI second-guessing it -- which is why the
+#: description says where the name is honoured rather than only where it is not.
 LAYOUTS = ("single", "vertical", "horizontal", "split", "grid")
 
 SPLIT_AXES = ("vertical", "horizontal")
@@ -340,7 +346,15 @@ def tool_specs() -> List[Dict[str, Any]]:
                                     "type": "boolean",
                                     "description": "Give the launched agent these same GridVibe tools.",
                                 },
-                                "shell": {"type": "string", "enum": list(SHELL_KINDS)},
+                                "shell": {
+                                    "type": "string",
+                                    "enum": list(SHELL_KINDS),
+                                    "description": (
+                                        "Local shell family. Omit to take "
+                                        "GridVibe's own default rather than "
+                                        "stating one the user did not choose."
+                                    ),
+                                },
                                 "url": {"type": "string", "description": "For kind='browser'."},
                             },
                             "additionalProperties": False,
@@ -354,9 +368,13 @@ def tool_specs() -> List[Dict[str, Any]]:
                         "type": "string",
                         "enum": list(LAYOUTS),
                         "description": (
-                            "Advisory above three panes: GridVibe forces 'grid' "
-                            "at four or more whatever is asked. Pass "
-                            "workspace_layout to place panes exactly."
+                            "Honoured only where the pane count has a choice: "
+                            "'vertical' or 'horizontal' at two panes, those two "
+                            "plus 'split' at three. One pane is always 'single' "
+                            "and four or more are always 'grid'; anything else "
+                            "at two or three becomes 'vertical'. Nothing is "
+                            "refused for this -- GridVibe rewrites silently. "
+                            "Pass workspace_layout to place panes exactly."
                         ),
                     },
                     "workspace_layout": WORKSPACE_LAYOUT_SCHEMA,
@@ -622,9 +640,16 @@ def build_pane_request(pane: Mapping[str, Any], *, agent_depth: int) -> Dict[str
         )
         return request
 
-    shell = _choice(_text(pane, "shell"), SHELL_KINDS, "shell", "powershell")
-    request["use_powershell"] = shell == "powershell"
-    request["use_wsl"] = shell == "wsl"
+    # Only when the caller stated one, exactly as `build_split_pane_request`
+    # leaves an unstated `kind` out: an omitted `shell` means "do what GridVibe
+    # does", not "PowerShell". Writing the two keys unconditionally made every
+    # tool-launched pane a *stated* PowerShell pane -- saved as one, in a
+    # workspace whose other panes the user runs as cmd, with nothing having
+    # asked.
+    shell = _choice(_text(pane, "shell"), SHELL_KINDS, "shell", "")
+    if shell:
+        request["use_powershell"] = shell == "powershell"
+        request["use_wsl"] = shell == "wsl"
 
     if kind == "terminal":
         request.update(
@@ -902,8 +927,18 @@ def _run(
             )
         allowed, refusal = depth_budget(identity, max_agent_depth)
         payload["may_launch_panes"] = allowed
+        # Stated always, and true at the limit too: the budget bounds *agents*,
+        # so only a split that starts one costs it. Without this field an agent
+        # reading `may_launch_panes: false` on its own concludes it can create
+        # nothing, when a plain terminal, explorer or browser pane beside it is
+        # still available -- which is usually the thing to offer the user.
+        payload["may_split_panes"] = True
         if not allowed:
             payload["launch_refusal"] = refusal
+            payload["split_note"] = (
+                "A plain split is still available: split_pane costs this "
+                "budget only when the new pane runs an agent."
+            )
         if identity.session_id and identity.group_id:
             # Its own place in its own group, so "the terminal below this one"
             # is one call rather than a list_panes plus a search for oneself.

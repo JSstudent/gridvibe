@@ -18,7 +18,11 @@ Three honest outcomes, the same shape ``windows.py`` has:
 * ``refused`` -- GridVibe's own sentence, and the axis that *would* have worked
   if either does. Never a retry on the other axis: an agent that asked for a
   side-by-side split and silently got a stacked one has been lied to.
-* ``no_window_available`` -- the intent expired with no page to claim it.
+* ``no_window_available`` -- the intent expired with no page to claim it, or
+  the wait ended with GridVibe unreadable. Both are "I never saw it settle",
+  and they carry different sentences: only the first knows the panes are
+  untouched. A dropped poll is never a failed split -- the intent is recorded
+  either way, so the read degrades and the deadline answers.
 
 The last one is what browser mode always answers, because the intent poll runs
 in a native GridVibe window only: a browser tab must not pay for a poll on
@@ -30,7 +34,7 @@ this pane".
 import time
 from typing import Any, Callable, Dict, Mapping, Optional
 
-from gridvibe_mcp.client import GridVibeClient
+from gridvibe_mcp.client import GridVibeClient, GridVibeError
 
 SPLIT = "split"
 REFUSED = "refused"
@@ -54,6 +58,17 @@ NO_PAGE_HINT = (
     "No GridVibe window was open to perform the split. The panes and the "
     "workspace are untouched. Splitting needs an open GridVibe window "
     "(native mode); ask the person running GridVibe to open the workspace."
+)
+
+#: Said instead when the wait ended with the *poll* unreadable rather than the
+#: intent expired. The same status -- "I never saw it settle" is what is known
+#: either way -- but not the same sentence: a dropped read says nothing about
+#: whether a page claimed the intent, so this one claims nothing.
+UNREADABLE_HINT = (
+    "GridVibe could not be reached while waiting for the split to settle "
+    "({error}), so what happened is not known here: the request was recorded, "
+    "and a page may have performed it. Read the group with list_panes before "
+    "asking for the split again."
 )
 
 
@@ -92,8 +107,20 @@ def split_pane(
     state = "pending"
     detail = ""
     result: Dict[str, Any] = {}
+    read_error = ""
     while True:
-        record = client.read_window_intent(intent_id)
+        try:
+            record = client.read_window_intent(intent_id)
+            read_error = ""
+        except GridVibeError as exc:
+            # A failed *poll* is not a failed split. The intent is recorded, a
+            # page may be claiming it this second, and raising here would turn
+            # one dropped read into "the call failed" about a pane that then
+            # appears. So the read degrades and the deadline decides, exactly
+            # as `pane_layout()` degrades rather than failing `list_panes`.
+            # Remembered rather than only swallowed: see the hint below.
+            record = {}
+            read_error = str(exc)
         state = str(record.get("state") or "").strip() or "pending"
         detail = str(record.get("detail") or "").strip()
         if isinstance(record.get("result"), Mapping):
@@ -123,6 +150,15 @@ def split_pane(
             # which rule refused and, when the other axis would work, says so --
             # so the agent can offer that rather than calling again.
             "detail": detail or "GridVibe refused the split and gave no reason.",
+        }
+    if read_error:
+        # The deadline was reached without a readable answer, so "untouched" is
+        # not something this call knows. `NO_PAGE_HINT` states it as a fact, and
+        # it has to stay a fact wherever it is said.
+        return {
+            "status": NO_WINDOW_AVAILABLE,
+            "intent_id": intent_id,
+            "detail": UNREADABLE_HINT.format(error=read_error),
         }
     return {
         "status": NO_WINDOW_AVAILABLE,
