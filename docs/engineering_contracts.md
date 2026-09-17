@@ -20,6 +20,7 @@ Regression history and audit narratives do not belong in this reference.
 - [Presentation persistence](#presentation-persistence)
 - [Workspace lifecycle and windows](#workspace-lifecycle-and-windows)
 - [Agent dashboard](#agent-dashboard)
+- [Agent tools (MCP)](#agent-tools-mcp)
 - [Architecture and extraction boundaries](#architecture-and-extraction-boundaries)
 - [UI and styling](#ui-and-styling)
 - [Logging](#logging)
@@ -302,6 +303,10 @@ changing any field that survives restart; it owns the complete save/restore flow
   available to an SSH pane: its tools arrive over a reverse forward on the
   transport its shell already runs on, so `pane_can_run_the_sidecar()` picks
   the *shape* of the answer, never whether there is one.
+- Each of these transitions has a **gated twin** reached by a tool rather than
+  by the pane header — `agent-relaunch`, `agent-mode-switch`, `clear` — and the
+  rules those add are in [Agent tools (MCP)](#agent-tools-mcp). Everything in
+  this section holds for both halves; the gates run before any of it.
 - **A stated agent is preflighted before anything moves, and an absent binary
   refuses the relaunch.** The launcher has no pane yet, so it opens one as a
   plain terminal; the menu's pane is already running, so the honest outcome is
@@ -1047,6 +1052,115 @@ unless the task explicitly changes this contract.
   comparison; structural changes rebuild the tree while restoring scroll and
   focus. A failed read leaves the last good tree on screen behind a stated retry
   notice, and an action failure survives successful polls.
+
+## Agent tools (MCP)
+
+[`gridvibe_mcp/README.md`](../gridvibe_mcp/README.md) is the reference for this
+feature — the tool list, what each tool answers, which CLIs can be handed the
+sidecar, and the stated-weakness notes. Do not restate the tool surface here or
+in `README.md`; state the rules a change has to keep.
+
+- **The sidecar is a sibling, not a subsystem.** Nothing under `web/` or
+  `sessions/` imports `gridvibe_mcp` except `web/mcp_http.py`, and only the
+  SDK-free halves of it (`server`, `client`, `identity`), function-locally;
+  `gridvibe_mcp` imports nothing from GridVibe and reaches it over loopback HTTP.
+  Only `gridvibe_mcp/__main__.py` imports the MCP SDK, which is what keeps the
+  asyncio-native SDK out of the threading-mode Flask process.
+  The SDK stays optional: `make check` and a plain `pip install -r requirements.txt`
+  must both leave it uninstalled and the suite green.
+- **One dispatch, both transports.** stdio and `POST /mcp/<token>` both run
+  `gridvibe_mcp.server.dispatch` against a `GridVibeClient`. A tool must not
+  behave differently depending on which transport asked; a new tool is added
+  once, in `tool_specs()` and `_run()`, and reaches both.
+- **Every tool result is built from an explicit field list in `client.py`, never
+  a pass-through of `to_dict()`**, and `scrub()` drops any key that looks like a
+  secret at any depth regardless of the list. `list_saved_layouts` is the sharp
+  case: the route it reads answers with a *decrypted* SSH password by design.
+  Failures are typed and carry GridVibe's own sentence verbatim, unretried.
+- **Four tiers, and the destroy tier is absent from the build.** Read and create
+  only ever make something new; `set_pane_agent`/`set_pane_mode` replace what is
+  behind an existing pane; `clear_pane` erases what one has drawn. Closing a
+  pane, group or workspace, moving a group, and typing arbitrary input into a
+  terminal are not written, not registered and not flag-gated — a tool that does
+  not exist cannot be talked into running by a file an agent reads. `clear_pane`
+  is not `send_input`: the only thing reaching stdin is GridVibe's own clear
+  command, chosen by the window that knows the pane's shell family.
+- **Every tool-reachable pane transaction passes the shared gates in
+  `web/pane_gates.py` before anything is mutated, closed or restarted**, so a
+  refusal leaves a whole-pane snapshot unchanged — which is what the suites pin.
+  Self (never the calling pane) and lineage (only panes that pane created, and
+  only while it is still open) are shared; the third gate is each transaction's
+  own kind rule and lives in its own module, raised through the same `refuse()`
+  factory so every refusal names which gate failed. `PaneGateRefusal` carries the
+  status; each transaction translates it into the one exception its route maps.
+- **`override` is the user's word, never the tool's inference.** It waives
+  lineage and the "already running an agent" refusal; never self, and never the
+  kind gate's mode rule. It is forwarded because the calling agent stated it, is
+  logged with both pane ids, and the tool descriptions must keep saying that only
+  a person's words in that conversation justify it.
+- **Lineage is read from the live registry, never from the request body.**
+  `created_by_session_id` is stamped from the pane a launch or split actually
+  came from (`_live_session_id` / `_live_origin_session_id`), and is deliberately
+  absent from `runtime_state.json`: a creator id that survived a restart would
+  name a stranger, so every restored pane refuses the gate that reads it.
+- **The depth budget bounds agents launching agents, and only that.** A pane a
+  tool creates is stamped one deeper than the pane that *asked*; a split that
+  creates an agent costs budget, a split that creates a plain pane does not.
+  Depths are bounded by `_normalize_agent_depth` wherever they are written. The
+  gated relaunch route inherits the caller's budget for the same reason.
+- **A tool is never handed a silent normalization.** Where a page's own route may
+  normalize (the toggle only offers what a pane can be), the gated twin refuses
+  instead: browser mode on a remote pane, a `startup_mode` outside
+  `_AGENT_MODE_TARGETS`, a browser pane in a group opening on another host. Being
+  handed a plain terminal labelled a success is the one answer a tool must not get.
+- **A launch from inside a pane opens on that pane's machine.** The body names
+  `origin_session_id` and `workspaces.resolve_origin_connection` reads the host,
+  user, port and password off that live session in this process; none of it
+  reaches a response, a preset or a snapshot. An origin pane that has closed is a
+  refusal, never a fall back to this machine.
+- **Identity arrives by inheritance locally and by token remotely.** The five
+  `GRIDVIBE_*` variables are merged at the spawn call site in
+  `_connect_local_session`, *not* inside `_local_shell_integration` — that
+  function returns unchanged when `terminal.shell_integration` is off, which is a
+  kill switch for the prompt hook and says nothing about MCP. WSL panes extend
+  `WSLENV` through `merge_wslenv` so the two callers cannot overwrite each other.
+  A tunnelled pane's identity comes from `PaneTokenRegistry`, in memory only,
+  minted idempotently per pane and never written into a preset or a snapshot.
+- **`pane_can_run_the_sidecar()` picks the *shape* of the answer, never whether
+  there is one.** A local pane gets the generated config; a remote pane gets a
+  URL. The predicate is held there rather than at the launcher checkbox because a
+  saved preset, a restored snapshot and the relaunch route all carry `agent_mcp`
+  forward.
+- **The generated `.gridvibe_mcp.json` is per install and rewritten on every app
+  start**, gitignored, carrying no `env` block so one file serves every pane.
+  Composition is registry-driven: `_MCP_FLAG_TEMPLATE` admits one option token and
+  one placeholder so a registry typo cannot smuggle a second command onto the
+  launch line, `_toml_override_flag` owns the per-shell quoting Codex needs, and
+  anything that cannot be composed safely resolves to *no fragment* — costing the
+  pane its tools, never its agent. A test-mode process refuses the production path.
+- **The SSH reverse forward is opt-in per pane and costs the tools, never the
+  shell.** `sshd` binds the remote host's own loopback; the port lives only for
+  that connection; the remote config is written over SFTP at `0600` and named per
+  pane; teardown runs off the close path on its own thread because every step is a
+  round trip to a host that may be unreachable. The forward is a plain TCP forward
+  to GridVibe's HTTP port, so what it exposes to the remote host is the whole
+  loopback API and only `POST /mcp/<token>` is token-gated — a narrowing of the
+  local-bind guarantee that must be stated wherever it is described, not implied
+  away.
+- **Opening a window and splitting a pane are page work, recorded as intents.**
+  The split axis never reaches the server: the page computes the rectangles and
+  measures its own refusals off the live terminal. `web/window_intents.py` is in
+  memory, TTL-bounded and capped, and exactly one claimant wins so two open pages
+  deliver one window. Everything decidable without measuring a pane is decided
+  before the intent is recorded. A page reports only its own kind's outcomes, and
+  a refusal is relayed with the axis that would have worked — never a silent
+  retry on the other axis.
+- **Three honest outcomes per intent verb** (`opened`/`blocked`/`no_window_available`,
+  `split`/`refused`/`no_window_available`), never a retry and never a pretended
+  result. Browser mode answers `no_window_available` for a split because the
+  intent poll runs in a native window only; `open_window` has a browser fallback
+  because `webbrowser.open` is a real alternative and there is no equivalent for
+  "measure this pane".
 
 ## Architecture and extraction boundaries
 

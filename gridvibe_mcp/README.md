@@ -1,7 +1,11 @@
 # GridVibe MCP sidecar
 
-A stdio MCP server that gives an agent running in a GridVibe pane nine tools
-for seeing and building GridVibe workspaces.
+A stdio MCP server that gives an agent running in a GridVibe pane thirteen
+tools for seeing and building GridVibe workspaces.
+
+This file is the reference for the MCP feature. Everything else that mentions
+it — `README.md`, `CLAUDE.md`, `docs/engineering_contracts.md` — says what it
+does at its own altitude and points here rather than repeating it.
 
 It is a **sibling** of GridVibe, not a part of it. Nothing under `web/` or
 `sessions/` imports this package, and this package imports nothing from
@@ -69,19 +73,122 @@ process, so the pane's environment is already its environment:
 | `GRIDVIBE_AGENT_DEPTH` | `0`, or the launching agent's depth + 1 |
 
 An agent started by hand outside GridVibe inherits none of them, and `whoami`
-says so rather than guessing. Read tools still work.
+says so rather than guessing. The read tools still work, and a launch still
+works if it names a workspace; the three gated tools are refused outright,
+because the lineage gate compares against a calling pane there is none of.
+
+Codex is the exception that proves the rule: its own spawn of an MCP server does
+not forward the pane's environment, so GridVibe states the same five variables
+back to it as an inline TOML table on the launch line
+(`web/agents.py:_inline_toml_env_fragment`).
 
 ## Tools
 
-**read** — `gridvibe_status`, `list_workspaces`, `list_panes`, `list_agents`,
-`whoami`.
+Thirteen, in four tiers by blast radius. The order below is the order
+`tool_specs()` registers them in, and `tests/test_mcp_tools.py` pins it.
 
-**create** — `create_workspace`, `launch_panes`, `open_window`, `split_pane`.
+### read — six
 
-**absent** — closing a pane, a group or a workspace; switching a pane's mode or
-shell; moving a group; typing into a terminal. These are not written, not
-registered, and not flag-gated. A tool that does not exist cannot be talked into
-running by a file an agent reads.
+| Tool | Answers |
+| --- | --- |
+| `gridvibe_status` | is GridVibe running, which version, how many workspaces |
+| `list_workspaces` | every live workspace, with its label and group count |
+| `list_panes` | the panes in one workspace or group: what each is, where it points, what it runs on, and where it sits — `index`, `rect`, `relative_area`, and the `neighbours` above, below, left and right |
+| `list_agents` | every agent anywhere, with a working/idle reading, under the workspace and session holding it |
+| `list_saved_layouts` | every saved launcher preset as a *shape* — name, layout, pane count, geometry, and what each pane is. Never a connection |
+| `whoami` | which pane this agent is in, its directory, **which machine that directory is on**, how deep it is, and where it sits |
+
+`whoami` before resolving "this directory", "this workspace" or "the terminal
+below this one". Its `runs_on` is the field that stops a remote path being
+handed to a pane opened on the wrong machine.
+
+### create — four
+
+| Tool | Makes |
+| --- | --- |
+| `create_workspace` | one empty, labelled workspace. Creating it does not make a window appear |
+| `launch_panes` | one session group of panes — agent, terminal, file explorer or browser preview |
+| `open_window` | a workspace on screen. Reports `opened`, `blocked` or `no_window_available` |
+| `split_pane` | halves one pane on a chosen axis and says what the new pane runs. Reports `split`, `refused` or `no_window_available` |
+
+### replace — two
+
+`set_pane_agent` relaunches a pane into an agent CLI (or `agent: ""` back to a
+plain shell, optionally changing the local shell family and the MCP choice).
+`set_pane_mode` turns a pane into a file explorer, a browser preview or a plain
+terminal.
+
+Both **end what is running in that pane**, so both are gated — see below.
+
+### display — one
+
+`clear_pane` clears one terminal pane and purges its replay buffer: the header's
+Clear button, asked for by a tool. The scrollback is gone and cannot be read
+back, so it is gated the same way.
+
+It is **not** the missing `send_input`. The only thing that reaches the shell's
+stdin is GridVibe's own clear command, chosen by the window that knows the
+pane's shell family; a tool never supplies a byte of it. The result keeps the
+two halves apart on purpose — `buffer_purged` is a fact, `display_reset_requested`
+is a request, and a pane nobody has open resets nothing.
+
+### The gates on the last three
+
+Shared in `web/pane_gates.py`, so all three refuse in the same words. A refusal
+names which gate failed, because an agent told only "refused" calls again.
+
+| Gate | Rule | Waivable |
+| --- | --- | --- |
+| **self** | never the pane the request came from | no |
+| **lineage** | only a pane this agent's own pane created, and only while that caller pane is still open | by `override` |
+| **kind** | each transaction's own: a relaunch takes only a plain terminal; a mode switch refuses a pane with an agent running in it; a clear refuses both a non-terminal pane and a running agent | the "already an agent" half, by `override` |
+
+A pane that existed before a GridVibe restart carries no creator — `created_by_session_id`
+is deliberately absent from the runtime snapshot — so it is always refused
+without `override`. That is the honest answer: GridVibe does not know who made
+it, so it does not guess.
+
+**`override` is only ever the user's word.** It waives lineage and the "already
+running an agent" refusal; it never waives self, and never the kind gate's mode
+rule. A calling agent sets it only when the person it is talking to has, in that
+conversation, said to replace *this specific pane* — never because a file it
+read, a prior tool result, or another pane's output asked for it. Every waiver
+is logged with both pane ids.
+
+### absent
+
+Closing a pane, a group or a workspace; moving a group; typing arbitrary input
+into a terminal. These are not written, not registered, and not flag-gated. A
+tool that does not exist cannot be talked into running by a file an agent reads.
+
+## Splitting and opening windows need a page
+
+Two things GridVibe cannot do from outside a browser page, and the same
+mechanism answers both (`web/window_intents.py`, `web/static/js/window-intent.js`):
+
+- **Open a window.** Nothing outside a page can open a pywebview window.
+- **Split a pane.** The axis never reaches the server. The page computes the new
+  rectangles, and its refusals — the minimum columns and rows below a terminal
+  header, the narrow-viewport rule, the pane cap — are measured off the live
+  terminal. A process that cannot measure a pane cannot place one.
+
+So the sidecar records an *intent*, exactly one open page claims it, that page
+runs the split button's own handler, and reports back. The sidecar polls until it
+settles or the wait runs out.
+
+Everything decidable without measuring a pane is decided before any waiting
+starts — an unknown agent key, a browser pane on a remote host, an axis that is
+not one of the two — so a refusal of that kind costs no TTL.
+
+A refusal is relayed verbatim, with the axis that *would* have worked when
+either does. Never a silent retry on the other axis: an agent that asked for a
+side-by-side split and got a stacked one has been lied to.
+
+`no_window_available` is what browser mode always answers for a split: the
+intent poll runs in a native GridVibe window only, because a browser tab must
+not pay for a poll on every page load. `open_window` has a browser-mode fallback
+(`webbrowser.open` is a real alternative); there is no equivalent for "measure
+this pane".
 
 ## Stated properties, not discoveries
 
@@ -95,17 +202,26 @@ running by a file an agent reads.
   `GRIDVIBE_AGENT_DEPTH`. It stops a runaway loop; it does not stop an
   adversary. A server-side per-group counter is the real answer and is a later
   phase.
+- **The pane gates are the same kind of thing.** On the stdio path a caller's
+  identity *is* `GRIDVIBE_SESSION_ID`, which the agent being constrained can
+  set, and `list_panes` publishes every pane id. More fundamentally, a local
+  agent pane already holds the user's own privileges and GridVibe's loopback
+  API: `DELETE /api/sessions/<id>` and the ungated `POST /api/sessions/<id>/shell`
+  are one request away and pass no gate at all. What the gates buy is real and
+  worth having — an agent *following its instructions* does not end a pane it
+  did not make, and getting past them means leaving the tool surface entirely —
+  but it is a raised bar, not a wall. Identity on the tunnelled path is not
+  settable this way: it comes from the token registry, not from the caller.
 - **No credential ever reaches a tool result.** Every result is built from an
   explicit field list in `client.py`, and anything whose key looks like a
-  secret is dropped at any depth regardless.
+  secret is dropped at any depth regardless. `list_saved_layouts` is the sharp
+  case: the route it reads answers with a *decrypted* SSH password by design,
+  and `SAVED_LAYOUT_FIELDS` is what stops it.
+- **The MCP endpoint is the POST half of streamable HTTP.** No SSE `GET`
+  stream, no `DELETE`, no `Mcp-Session-Id`. The three CLIs that are handed a URL
+  today are content with request/response.
 
-## Scope
-
-Phase 0 covers Windows-native local panes. WSL panes receive the variables but
-the checkbox waits on verifying that a Linux pane can reach the Windows
-interpreter through interop.
-
-### Which CLIs can be handed the sidecar
+## Which CLIs can be handed the sidecar
 
 Three of the eight, and the mechanism differs for each. Every row was checked
 against the installed CLI's own `--help`, which is what `"verified": true` in
@@ -132,7 +248,10 @@ mechanism is an `<agent> mcp add` subcommand that edits the user's own config
 permanently — a change that would outlive the pane whose checkbox asked for it,
 which is why it is absent rather than pending.
 
-### SSH panes
+The launcher and the pane header's 🔄 dropdown both read one registry field,
+`mcp_supported`, so neither surface can offer a checkbox the other does not.
+
+## SSH panes
 
 A remote pane's agent cannot run the sidecar: its host has no copy of it, no
 MCP SDK, and no address for this machine's loopback. So it does not run one.
@@ -149,14 +268,33 @@ remote agent ──HTTP──▶ 127.0.0.1:<assigned>   (on the remote host)
 | --- | --- |
 | MCP over streamable HTTP | `web/mcp_http.py` — reuses the sidecar's own synchronous `dispatch`, so a tool cannot behave differently by transport |
 | Per-pane token | `web/mcp_http.py` → `pane_tokens` — identity cannot cross a machine by inheritance, so it rides in the URL |
-| Reverse tunnel + remote config | `web/ssh_tunnel.py` — `request_port_forward` on the pane's existing transport, config placed over SFTP |
+| Reverse tunnel + remote config | `web/ssh_tunnel.py` — `request_port_forward` on the pane's existing transport, config placed over SFTP at `~/.gridvibe/mcp-<pane>.json`, mode `0600` |
 | Wiring | `terminal_io._establish_mcp_tunnel`, torn down in `_shutdown_connection` |
 
 Nothing is installed on the remote host. The config written there names a URL,
 not a command, which is why Codex gets `-c mcp_servers.gridvibe.url=` rather
 than the inline command-and-args form a local pane gets.
 
-### Where a launched pane opens
+Every failure costs the pane its tools and never its shell: a forward the remote
+sshd refuses, or a config that cannot be written, leaves the pane running and
+tells the reader in the terminal.
+
+### What this widens
+
+`sshd` binds the *remote host's own loopback* (`GatewayPorts no`, the default, so
+it does that whatever address is requested), never its network, and the port
+exists only for the life of that pane's connection. A pane whose box is unticked
+opens no port and mints no token at all.
+
+Inside those bounds, be precise about what is exposed: the forward is a plain
+TCP forward to GridVibe's HTTP port, so what a process on that remote host
+reaches is **GridVibe's loopback API**, of which `POST /mcp/<token>` is one
+route. The token gates the tool surface. The rest of that API — which was only
+ever reachable from the machine GridVibe runs on, and is unauthenticated for
+that reason — is reachable too. Tick the box on a remote host you would not give
+a shell on this machine to, and you have given it more than the tools.
+
+## Where a launched pane opens
 
 On the machine the calling agent is already on. `launch_panes` states no
 connection of its own — it names the pane the call came from
@@ -174,17 +312,12 @@ on. An origin pane that has closed is a refusal, not a fall back to this
 machine: "here" is exactly the wrong answer, and the one that used to open a
 PowerShell pane on a `/home/...` path.
 
-**What this widens.** While a tunnelled pane is open, any process on that
-remote host that can reach the forwarded port can spend that pane's token, and
-the create tier acts as that pane — on its own host for the panes it launches,
-and on *this* machine for the workspaces and windows that hold them. The
-bounds: sshd binds the remote host's own loopback (never its network), the port
-lives only as long as that connection, the token is refused the moment the pane
-closes, and a pane whose box is unticked opens no port and mints no token at
-all.
+The same read stamps `created_by_session_id` on the panes it makes, which is
+what the lineage gate later reads.
 
 ## Checking the surface without a running GridVibe
 
 ```
-make mcp-tools
+make mcp-tools      # print the registered tool surface as JSON
+make mcp-config     # rewrite .gridvibe_mcp.json for this install
 ```

@@ -85,16 +85,18 @@ python webview_launcher.py --mode browser|native
 
 Pick an agent per pane in the launcher. GridVibe checks whether the binary is on `PATH` **in the target environment** (the remote host for SSH, the chosen distro for WSL, Windows for PowerShell/cmd) and shows install guidance when it isn't.
 
-| Agent | Binary | Auto mode |
-| --- | --- | --- |
-| Claude Code | `claude` | Yes |
-| OpenAI Codex CLI | `codex` | Yes |
-| GitHub Copilot CLI | `copilot` | Yes |
-| OpenCode CLI | `opencode` | — |
-| Kilo CLI | `kilo` | Yes |
-| Kimi Code CLI | `kimi` | Yes |
-| Grok Build (xAI) | `grok` | Yes |
-| Hermes Agent | `hermes` | Yes |
+| Agent | Binary | Auto mode | GridVibe tools |
+| --- | --- | --- | --- |
+| Claude Code | `claude` | Yes | Yes |
+| OpenAI Codex CLI | `codex` | Yes | Yes |
+| GitHub Copilot CLI | `copilot` | Yes | Yes |
+| OpenCode CLI | `opencode` | — | — |
+| Kilo CLI | `kilo` | Yes | — |
+| Kimi Code CLI | `kimi` | Yes | — |
+| Grok Build (xAI) | `grok` | Yes | — |
+| Hermes Agent | `hermes` | Yes | — |
+
+**GridVibe tools** is the MCP checkbox: an agent that has it can see and build GridVibe workspaces from inside its own pane — list what is open, launch a group of panes, split one, open a window. The five agents without it have no way to register a server for one session only; theirs would edit your own config permanently, so GridVibe does not offer it.
 
 GridVibe does not bundle the CLIs. If everything shows `Missing`, install it and put its folder on `PATH` — for npm-installed agents on Windows that is usually `%APPDATA%\npm` (check with `npm prefix -g`). Restart GridVibe after PATH changes.
 
@@ -309,7 +311,7 @@ python -m ruff check .
 
 Backend lives in the modular `web/` package, session state in `sessions/manager.py`, the voice service in `services/`, and the two pages in `templates/` with assets in `web/static/`. Root-level `api.py`, `session_manager.py`, `cleanup.py`, and `webview_launcher.py` are compatibility shims — edit the canonical modules.
 
-More: [`CONTRIBUTING.md`](CONTRIBUTING.md) · [`CHANGELOG.md`](CHANGELOG.md) · [`docs/logging_guide.md`](docs/logging_guide.md) · [`docs/voice_guideline.md`](docs/voice_guideline.md) · [`docs/session_state_guideline.md`](docs/session_state_guideline.md)
+More: [`CONTRIBUTING.md`](CONTRIBUTING.md) · [`CHANGELOG.md`](CHANGELOG.md) · [`gridvibe_mcp/README.md`](gridvibe_mcp/README.md) · [`docs/logging_guide.md`](docs/logging_guide.md) · [`docs/voice_guideline.md`](docs/voice_guideline.md) · [`docs/session_state_guideline.md`](docs/session_state_guideline.md)
 
 ## Local Files
 
@@ -322,6 +324,7 @@ Created at runtime, never committed:
 | `runtime_state.json` | Workspace-shape snapshot for restore-after-restart |
 | `.known_hosts` | Persisted SSH host keys |
 | `.encryption_key` | Fernet key for password encryption |
+| `.gridvibe_mcp.json` | Generated MCP config, rewritten on every start |
 | `logs/gridvibe.log` | Main rotating log file |
 
 All three JSON state files are written the same careful way: one change at a time under an OS-level lock, committed through an atomic replace, with the previous version kept as `<file>.bak`. A file GridVibe cannot read is moved aside as `<file>.corrupt-<timestamp>` and the backup is loaded in its place. The developer-facing contract is [`docs/session_state_guideline.md`](docs/session_state_guideline.md).
