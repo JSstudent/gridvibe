@@ -30,9 +30,12 @@ builds from the environment. The token dies with the pane.
 is opt-in per pane.** While a tunnelled pane is open, anything on that remote
 host that can reach the forwarded port can spend that pane's token, and the
 create-tier tools act on *this* machine. The bounds are: the token names one
-pane and is revoked when it closes, it is rejected once its pane is gone, and
-it is never written into a saved preset or a snapshot. A reader who does not
-tick the box opens no port and mints no token.
+pane and is revoked when that pane's connection is torn down
+(`web/terminal_io.py`), it is rejected once its pane is gone, it is never
+written into a saved preset or a snapshot, and the forwarded port reaches a
+filter that answers that pane's own ``POST /mcp/<token>`` and nothing else on
+this process's port (`web/ssh_tunnel.py`). A reader who does not tick the box
+opens no port and mints no token.
 """
 
 import json
@@ -57,6 +60,12 @@ SERVER_NAME = "gridvibe"
 #: between a process on the remote host and this pane's tools.
 _TOKEN_BYTES = 32
 
+#: A ceiling, so a close path that ever fails to revoke leaves a bounded leak
+#: rather than a permanent one. Far above any plausible count of tunnelled
+#: panes open at once (`terminal.max_sessions` tops out at 16 per group), so
+#: reaching it means revoking stopped happening -- which is why it is logged.
+MAX_PANE_TOKENS = 128
+
 #: JSON-RPC error codes, from the spec.
 _PARSE_ERROR = -32700
 _INVALID_REQUEST = -32600
@@ -70,12 +79,19 @@ class PaneTokenRegistry:
     In memory only, like the sessions it names: a token that outlived a
     restart would name a pane that no longer exists, and the pane it was
     minted for is gone in the same breath.
+
+    Bounded as well as in-memory. The revoke that matters is the one on the
+    pane's own close path (`web/terminal_io.py`, ``_close_ssh_connection``);
+    the ceiling here is what keeps a close that never ran -- a crashed
+    teardown, a path nobody thought of -- from turning into a registry that
+    only grows, holding tokens that still answer for panes that are gone.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, max_tokens: int = MAX_PANE_TOKENS) -> None:
         self._lock = threading.Lock()
         self._tokens: Dict[str, Dict[str, Any]] = {}
         self._by_session: Dict[str, str] = {}
+        self.max_tokens = max(1, int(max_tokens))
 
     def mint(
         self,
@@ -87,9 +103,10 @@ class PaneTokenRegistry:
     ) -> str:
         """Return this pane's token, minting one if it has none.
 
-        Idempotent per pane: a relaunch that re-registers the same pane keeps
-        the token already written into the remote config, so the file on the
-        remote host does not have to be rewritten to stay true.
+        Idempotent per pane: two mints for one pane answer with one token, so
+        a pane can never hold a second live token that nothing wrote into the
+        config naming it. A *relaunch* is not that case -- the close revokes
+        first, and the new transport's config is written afresh anyway.
         """
         resolved_session = str(session_id or "").strip()
         if not resolved_session:
@@ -105,6 +122,7 @@ class PaneTokenRegistry:
                         agent_depth=max(0, int(agent_depth or 0)),
                     )
                     return existing
+            self._evict_oldest_if_full()
             token = secrets.token_urlsafe(_TOKEN_BYTES)
             self._tokens[token] = {
                 "session_id": resolved_session,
@@ -115,6 +133,20 @@ class PaneTokenRegistry:
             }
             self._by_session[resolved_session] = token
             return token
+
+    def _evict_oldest_if_full(self) -> None:
+        """Make room for one more token. Caller holds the lock."""
+        while len(self._tokens) >= self.max_tokens:
+            oldest = min(self._tokens.items(), key=lambda item: item[1]["minted_at"])
+            self._tokens.pop(oldest[0], None)
+            self._by_session.pop(str(oldest[1].get("session_id") or ""), None)
+            logger.warning(
+                "MCP pane-token registry is full at %d; dropped the oldest "
+                "(pane %s). A pane that closed without revoking its token is "
+                "the only way this fills.",
+                self.max_tokens,
+                oldest[1].get("session_id"),
+            )
 
     def resolve(self, token: str) -> Dict[str, Any]:
         """Return the pane record behind one token, or ``{}``."""
@@ -146,7 +178,8 @@ class PaneTokenRegistry:
             self._by_session.clear()
 
 
-#: The one registry. Read by the endpoint, written by the SSH pane spawn.
+#: The one registry. Read by the endpoint, written by the SSH pane spawn and
+#: emptied of that pane's entry by the close that retires its connection.
 pane_tokens = PaneTokenRegistry()
 
 

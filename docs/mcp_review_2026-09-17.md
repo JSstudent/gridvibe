@@ -7,8 +7,14 @@ in [`docs/engineering_contracts.md`](engineering_contracts.md) or
 [`gridvibe_mcp/README.md`](../gridvibe_mcp/README.md), and this file is not
 cited from either.
 
-Nothing below was changed. Each finding names the file, what is true today,
-why it matters, and what the fix would be.
+Nothing below was changed *when this was written*. Each finding names the file,
+what was true, why it matters, and what the fix would be.
+
+**Since then, the two High findings have been fixed** — [1](#1) and [2](#2),
+both on 2026-09-17, code and tests only. Each carries a **Fixed** note saying
+what changed and what pins it. Everything else stands exactly as written, and
+the review remains historical evidence rather than a contract: the rules the
+two fixes established live in the modules' own docstrings.
 
 ## Scope
 
@@ -28,8 +34,8 @@ Tests read: `tests/test_mcp_tools.py`, `test_mcp_client.py`, `test_mcp_identity.
 
 | # | Severity | Finding |
 | --- | --- | --- |
-| [1](#1) | High | The SSH reverse tunnel forwards GridVibe's whole HTTP API, not just `/mcp/<token>` |
-| [2](#2) | High | A pane token is never revoked when its pane closes |
+| [1](#1) | High — **fixed** | The SSH reverse tunnel forwards GridVibe's whole HTTP API, not just `/mcp/<token>` |
+| [2](#2) | High — **fixed** | A pane token is never revoked when its pane closes |
 | [3](#3) | Medium | The lineage and self gates rest on a variable the constrained agent controls |
 | [4](#4) | Medium | `make mcp-status` probes a route GridVibe has never had |
 | [5](#5) | Medium | Over HTTP, `split_pane`/`open_window` hold a request thread for 25s and re-enter the server ~50 times |
@@ -108,6 +114,53 @@ Until it is fixed, say the true bound in all three places: the reverse forward
 exposes GridVibe's loopback HTTP API to processes on the remote host, and only
 the tool surface is token-gated.
 
+**Fixed — 2026-09-17.** The first of the two suggested shapes: the forwarded
+channel reaches a filter, and `local_port` is opened only for a request that
+gets through it. In `web/ssh_tunnel.py`:
+
+- **One request per forwarded connection, and only this pane's own.** The
+  channel is read as one HTTP request before any socket to GridVibe exists.
+  It must be `POST`, `HTTP/1.1` or `HTTP/1.0`, and its target must equal this
+  pane's `/mcp/<token>` exactly (`secrets.compare_digest`, on bytes). The
+  token is now a parameter of `open_reverse_tunnel`, so the listener is opened
+  *for* one path — a port opened for one pane can no longer spend another
+  pane's token, which was the route finding 2 named. `mcp_path()` is the one
+  spelling, and `tunnel_url()` builds the remote config from it, so the URL
+  written on the remote host cannot name something the port would refuse.
+- **Nothing rides behind the accepted request.** Exactly `Content-Length`
+  bytes are read; anything after them is read into a buffer nobody forwards.
+  `Transfer-Encoding`, a repeated `Content-Length` and obsolete line folding
+  are each refused rather than normalised — a filter that cannot say where the
+  body ends cannot say that nothing follows it. The forwarded head is rebuilt
+  from the parts that parsed, with hop-by-hop headers dropped, `Content-Length`
+  re-derived from the body actually read, and `Connection: close` stated, so
+  GridVibe closes the socket when it has answered.
+- **Bounded.** 16 KiB of head, 1 MiB of body, and a 30s read timeout on the
+  request. The *reply* is deliberately not bounded by it — two tools wait on a
+  page for 25s (finding 5).
+- **Refusals say nothing.** 404 for a method or path that is not this pane's
+  (the same answer either way, so a caller learns neither which routes exist
+  nor whether it guessed a live token), 400 for framing, 413 for an oversized
+  declared body, 502 when GridVibe itself cannot be reached. One sentence,
+  naming no route. The warning log prints only the target's first segment:
+  `/mcp/<token>` is a credential, and a legitimate client that got the verb
+  wrong would otherwise have written this pane's own token into the log.
+
+Two of the three docstrings that stated a narrower bound than the code had now
+state what the code does — `web/ssh_tunnel.py`'s header and
+`web/mcp_http.py`'s. `gridvibe_mcp/README.md` was left alone: its sentence is
+about the token and was never false, and the file is the one finding 20
+describes as four tools out of date.
+
+Pinned by `ForwardedRequestFilterTestCase` in `tests/test_mcp_remote.py`, which
+serves real channels into a stand-in for GridVibe's port and asserts on what
+arrives there: the pane's own tool call is forwarded and answered, while eight
+of the routes listed above — saved sessions, the destroy tier, the ungated
+shell twin, the intent claim — are refused *before a socket is opened*, as are
+another pane's token, the right path with the wrong verb, a smuggled second
+request, chunked framing, a double `Content-Length`, a folded header, an
+oversized body, a head that never ends, and a target that is not even text.
+
 ---
 
 <a id="2"></a>
@@ -155,6 +208,44 @@ torn down (`_shutdown_connection`, or the session-close path that owns the
 session id), and add a test that closes a pane and then asserts the token is
 refused. A TTL or a ceiling on the registry would make a missed revoke a bounded
 leak rather than a permanent one.
+
+**Fixed — 2026-09-17.** Both halves.
+
+- **The revoke.** `web/terminal_io.py` gained `_revoke_pane_mcp_token()`, and
+  `_close_ssh_connection()` calls it after `_shutdown_connection()` — the close
+  path that owns the session id, rather than `_shutdown_connection`, which does
+  not. Every close reaches it: the delete-session routes, the workspace close,
+  the close-all, the end of `_stream_ssh_output`, and the relaunch paths. A
+  close that names a *different* connection (`expected=`) still returns before
+  it, because that token belongs to the connection that replaced it. A
+  relaunch therefore mints afresh, which costs nothing: its config is rewritten
+  for the new port anyway, and `mint()`'s docstring no longer claims otherwise.
+- **The ceiling.** `PaneTokenRegistry` takes `max_tokens` (`MAX_PANE_TOKENS =
+  128`) and evicts the oldest entry rather than refusing a new one, so a live
+  pane can always mint and a revoke that never runs is a bounded leak. It logs
+  when it evicts, because reaching the ceiling means revoking stopped
+  happening.
+
+Pinned by `PaneCloseRevokesItsTokenTestCase` in `tests/test_mcp_remote.py`,
+which drives the *real* `_close_ssh_connection` against a registered tunnelled
+pane and then posts the token to the *real* `/mcp/<token>` route: 200 while the
+pane is open, 404 and "Unknown or expired" after the close. Plus the relaunch's
+new token, the `expected=` mismatch that must not disarm the live pane, a local
+pane's close that touches nothing, and a bounded-registry case beside the
+existing registry tests. The old
+`test_closing_a_pane_revokes_its_token`, which drove `revoke()` directly, is
+still there as the unit-level check it always was.
+
+Finding 1's filter closes the cross-pane route named above, so a leaked token
+is no longer reachable from another tunnelled pane's forwarded port.
+
+**Not fixed here:** [finding 7](#7)'s race still exists — a close landing
+between `_connection_status(CONNECTED)` and the `mcp_tunnel` assignment leaves
+the remote listener, the config file and the SFTP channel behind. A close
+landing *after* the mint now revokes that token, so the orphaned config names a
+dead one; a close landing in the narrower window *before* the mint still leaves
+a token nothing revokes, and the registry ceiling is what bounds it. Finding
+7's re-check inside the lock is still the fix, and it is still open.
 
 ---
 

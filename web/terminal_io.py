@@ -255,6 +255,22 @@ def _connection_gate(connection):
         return connection.setdefault('ownership_lock', threading.RLock())
 
 
+def _revoke_pane_mcp_token(session_id: str) -> bool:
+    """Drop one pane's MCP token. Returns whether there was one to drop.
+
+    Imported here rather than at module scope for the same reason
+    :func:`_establish_mcp_tunnel` does: the endpoint is only reachable by a
+    pane that asked for it, and this runs on every close of every pane.
+    """
+    try:
+        from web.mcp_http import pane_tokens
+
+        return pane_tokens.revoke(session_id)
+    except Exception:  # pragma: no cover - defensive; close paths never raise
+        logger.debug("[%s] MCP token revoke failed", session_id, exc_info=True)
+        return False
+
+
 def _close_ssh_connection(session_id: str, clear_buffer: bool = True, *, expected=None):
     """Retire the captured transport after its last publication completes."""
     with connection_lock:
@@ -274,6 +290,14 @@ def _close_ssh_connection(session_id: str, clear_buffer: bool = True, *, expecte
                 if clear_buffer:
                     session_output_buffers.pop(session_id, None)
         _shutdown_connection(connection)
+    # The token minted for this pane's tunnel dies with the transport that
+    # carried it, and this is the only place that ends it. Withdrawing the
+    # remote listener is not enough: `/mcp/<token>` is reachable from any
+    # process on *this* machine, and a config file teardown could not delete
+    # still names it in plain text on a shared remote host. A token left
+    # standing is a standing key to this machine's tools naming a pane that
+    # has gone. A relaunch mints a fresh one and writes a fresh config.
+    _revoke_pane_mcp_token(session_id)
     # A relaunch closes the connection with the pane still on screen, and the
     # replacement PTY is owed that pane's size -- so the remembered viewport
     # outlives the transport and is dropped only with the session itself.

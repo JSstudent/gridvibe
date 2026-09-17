@@ -22,7 +22,9 @@ never its agent, and never its shell.
 """
 
 import json
+import socket
 import sys
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -36,6 +38,119 @@ if str(PROJECT_ROOT) not in sys.path:
 import tests  # noqa: E402,F401 - redirects durable state away from the real files
 from web import agents as web_agents  # noqa: E402
 from web import mcp_http, ssh_tunnel  # noqa: E402
+
+
+class _StandInGridVibe:
+    """GridVibe's own port, as the filter's local half reaches it.
+
+    Records what actually arrives, which is where the assertions live: a
+    request recorded here is one that got past the filter. The drain after the
+    reply is how a pipelined second request would show up.
+    """
+
+    def __init__(self) -> None:
+        self._listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self._listener.bind(("127.0.0.1", 0))
+        self._listener.listen(8)
+        self.port = self._listener.getsockname()[1]
+        self.requests = []
+        threading.Thread(target=self._serve, daemon=True).start()
+
+    def _serve(self) -> None:
+        while True:
+            try:
+                connection, _address = self._listener.accept()
+            except OSError:
+                return
+            threading.Thread(
+                target=self._handle, args=(connection,), daemon=True
+            ).start()
+
+    def _handle(self, connection) -> None:
+        with connection:
+            buffer = bytearray()
+            while b"\r\n\r\n" not in buffer:
+                chunk = connection.recv(4096)
+                if not chunk:
+                    return
+                buffer.extend(chunk)
+            head, _marker, rest = bytes(buffer).partition(b"\r\n\r\n")
+            length = 0
+            for line in head.decode("latin-1").split("\r\n")[1:]:
+                name, _colon, value = line.partition(":")
+                if name.strip().lower() == "content-length":
+                    length = int(value.strip() or 0)
+            body = bytearray(rest)
+            while len(body) < length:
+                chunk = connection.recv(4096)
+                if not chunk:
+                    break
+                body.extend(chunk)
+            payload = b'{"ok": true}'
+            connection.sendall(
+                b"HTTP/1.1 200 OK\r\nContent-Length: "
+                + str(len(payload)).encode()
+                + b"\r\nConnection: close\r\n\r\n"
+                + payload
+            )
+            trailing = bytearray()
+            connection.settimeout(0.2)
+            try:
+                while True:
+                    chunk = connection.recv(4096)
+                    if not chunk:
+                        break
+                    trailing.extend(chunk)
+            except OSError:
+                pass
+            self.requests.append(
+                (head.decode("latin-1"), bytes(body), bytes(trailing))
+            )
+
+    def close(self) -> None:
+        try:
+            self._listener.close()
+        except OSError:
+            pass
+
+
+class _FakeChannel:
+    """One forwarded channel, holding what the remote host sent down it."""
+
+    def __init__(self, request: bytes = b"", *, endless: bytes = b""):
+        self._pending = bytearray(request)
+        self._endless = endless
+        self.sent = bytearray()
+        self.closed = False
+        self.timeouts = []
+
+    def settimeout(self, value):
+        self.timeouts.append(value)
+
+    def recv(self, size):
+        if self._pending:
+            chunk = bytes(self._pending[:size])
+            del self._pending[:size]
+            return chunk
+        # `endless` stands in for a caller that never finishes its head.
+        return self._endless[:size]
+
+    def sendall(self, data):
+        if self.closed:
+            raise OSError("channel closed")
+        self.sent.extend(data)
+
+    def close(self):
+        self.closed = True
+
+    @property
+    def reply(self) -> str:
+        return bytes(self.sent).decode("latin-1")
+
+    @property
+    def status(self) -> int:
+        parts = self.reply.split("\r\n", 1)[0].split(" ")
+        return int(parts[1]) if len(parts) > 2 and parts[1].isdigit() else 0
 
 
 class PaneTokenRegistryTestCase(unittest.TestCase):
@@ -76,6 +191,23 @@ class PaneTokenRegistryTestCase(unittest.TestCase):
         self.assertEqual(self.registry.resolve(token), {})
         # And revoking again is not an error, because teardown runs twice.
         self.assertFalse(self.registry.revoke("pane-1"))
+
+    def test_the_registry_is_bounded_so_a_missed_revoke_cannot_grow_it(self):
+        """The close path is what revokes; this is what a missed close costs.
+
+        A ceiling turns a revoke that never ran into a bounded leak rather
+        than a permanent one -- and drops the oldest rather than refusing the
+        newest, because a live pane must always be able to mint.
+        """
+        registry = mcp_http.PaneTokenRegistry(max_tokens=3)
+
+        tokens = [registry.mint(session_id=f"pane-{index}") for index in range(4)]
+
+        self.assertEqual(registry.resolve(tokens[0]), {})
+        self.assertTrue(all(registry.resolve(token) for token in tokens[1:]))
+        # The evicted pane is forgotten both ways, so it mints afresh rather
+        # than being answered with a token the registry no longer holds.
+        self.assertNotIn(registry.mint(session_id="pane-0"), tokens)
 
     def test_a_pane_with_no_id_mints_nothing(self):
         self.assertEqual(self.registry.mint(session_id=""), "")
@@ -302,7 +434,7 @@ class ReverseTunnelTestCase(unittest.TestCase):
         transport.request_port_forward.return_value = 41234
 
         port = ssh_tunnel.open_reverse_tunnel(
-            transport, local_host="127.0.0.1", local_port=5050
+            transport, local_host="127.0.0.1", local_port=5050, token="TOK"
         )
 
         self.assertEqual(port, 41234)
@@ -319,10 +451,44 @@ class ReverseTunnelTestCase(unittest.TestCase):
 
         self.assertEqual(
             ssh_tunnel.open_reverse_tunnel(
-                transport, local_host="127.0.0.1", local_port=5050
+                transport, local_host="127.0.0.1", local_port=5050, token="TOK"
             ),
             0,
         )
+
+    def test_a_listener_with_nothing_to_serve_is_never_opened(self):
+        """The token *is* the endpoint: with none, the port answers nothing."""
+        transport = MagicMock()
+
+        self.assertEqual(
+            ssh_tunnel.open_reverse_tunnel(
+                transport, local_host="127.0.0.1", local_port=5050, token=""
+            ),
+            0,
+        )
+        transport.request_port_forward.assert_not_called()
+
+    def test_establish_without_a_token_asks_the_remote_host_for_nothing(self):
+        client = MagicMock()
+
+        self.assertIsNone(
+            ssh_tunnel.establish(
+                client,
+                session_id="pane-1",
+                token="",
+                local_host="127.0.0.1",
+                local_port=5050,
+            )
+        )
+        client.get_transport.assert_not_called()
+        client.open_sftp.assert_not_called()
+
+    def test_the_url_written_remotely_is_the_path_the_filter_accepts(self):
+        """One spelling, so the config cannot name something the port refuses."""
+        self.assertTrue(
+            ssh_tunnel.tunnel_url(41234, "TOK").endswith(ssh_tunnel.mcp_path("TOK"))
+        )
+        self.assertEqual(ssh_tunnel.mcp_path(""), "")
 
     def test_the_handler_returns_at_once_instead_of_pumping_inline(self):
         """The regression that froze every remote pane.
@@ -339,13 +505,13 @@ class ReverseTunnelTestCase(unittest.TestCase):
         released = _threading.Event()
         pumped = _threading.Event()
 
-        def fake_serve(channel, host, port):
+        def fake_serve(channel, host, port, expected_path=""):
             pumped.set()
             # Stand in for a long-lived connection: if the handler waited on
             # this, it would never return.
             released.wait(5)
 
-        handler = ssh_tunnel._forward_handler("127.0.0.1", 5050)
+        handler = ssh_tunnel._forward_handler("127.0.0.1", 5050, "/mcp/TOK")
         with patch.object(ssh_tunnel, "_serve_forwarded_channel", fake_serve):
             before = _threading.active_count()
             handler(MagicMock(), ("10.0.0.1", 5), ("127.0.0.1", 41234))
@@ -413,6 +579,344 @@ class ReverseTunnelTestCase(unittest.TestCase):
 
     def test_teardown_of_nothing_is_a_no_op(self):
         ssh_tunnel.teardown(MagicMock(), None)
+
+
+class ForwardedRequestFilterTestCase(unittest.TestCase):
+    """What a forwarded connection may reach on this machine.
+
+    sshd hands back a raw TCP channel, and the address on this end is
+    GridVibe's *whole* loopback HTTP API: saved sessions whose SSH password
+    decrypts on the way out, the destroy tier the tool surface deliberately
+    does not contain, the ungated twins of every gated tool route, the window
+    intents another pane is waiting on. Their only guard has ever been "you
+    have to be on this machine", and a byte pump would have handed all of it
+    to the remote host with the token guarding exactly one route on it.
+
+    So the channel reaches a filter. These are the things it must not let
+    through, and the thing it must.
+    """
+
+    TOKEN = "tok-abcdef"
+
+    OTHER_ROUTES = (
+        "GET /api/saved-sessions/abc HTTP/1.1",
+        "GET /api/sessions HTTP/1.1",
+        "DELETE /api/sessions/abc HTTP/1.1",
+        "DELETE /api/workspaces/default HTTP/1.1",
+        "POST /api/app-config HTTP/1.1",
+        "POST /api/sessions/abc/shell HTTP/1.1",
+        "POST /api/windows/intents/abc/claim HTTP/1.1",
+        "GET /api/health HTTP/1.1",
+    )
+
+    def setUp(self):
+        self.gridvibe = _StandInGridVibe()
+        self.addCleanup(self.gridvibe.close)
+        self.path = ssh_tunnel.mcp_path(self.TOKEN)
+
+    def serve(self, request: bytes, **kwargs) -> _FakeChannel:
+        channel = _FakeChannel(request, **kwargs)
+        ssh_tunnel._serve_forwarded_channel(
+            channel, "127.0.0.1", self.gridvibe.port, self.path
+        )
+        return channel
+
+    def request(self, line: str, headers=(), body: bytes = b"") -> bytes:
+        lines = [line, "Host: 127.0.0.1:41234", *headers]
+        if body:
+            lines.append(f"Content-Length: {len(body)}")
+        return ("\r\n".join(lines) + "\r\n\r\n").encode("latin-1") + body
+
+    def test_the_panes_own_tool_call_reaches_gridvibe_and_is_answered(self):
+        body = b'{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+
+        channel = self.serve(
+            self.request(
+                f"POST {self.path} HTTP/1.1",
+                ["Content-Type: application/json", "Accept: application/json"],
+                body,
+            )
+        )
+
+        head, forwarded, _trailing = self.gridvibe.requests[0]
+        self.assertTrue(head.startswith(f"POST {self.path} HTTP/1.1"))
+        self.assertEqual(forwarded, body)
+        # The caller's own headers travel; the filter rewrites only the two
+        # that describe the hop.
+        self.assertIn("Content-Type: application/json", head)
+        self.assertIn("Accept: application/json", head)
+        self.assertIn(f"Content-Length: {len(body)}", head)
+        self.assertIn("Connection: close", head)
+        self.assertIn('{"ok": true}', channel.reply)
+        self.assertTrue(channel.closed)
+
+    def test_every_other_route_on_the_port_is_refused_before_a_socket_opens(self):
+        for line in self.OTHER_ROUTES:
+            with self.subTest(request=line):
+                channel = self.serve(self.request(line))
+
+                self.assertEqual(channel.status, 404)
+                # Not "reached GridVibe and was rejected" -- never reached it.
+                self.assertEqual(self.gridvibe.requests, [])
+                # And the refusal names no route and confirms no token, so a
+                # caller on the remote host learns nothing by guessing.
+                self.assertNotIn("/api", channel.reply)
+                self.assertNotIn(self.TOKEN, channel.reply)
+
+    def test_another_panes_token_is_refused_on_this_panes_port(self):
+        """One forwarded port is one pane's endpoint, not the MCP endpoint."""
+        channel = self.serve(
+            self.request(f"POST {ssh_tunnel.mcp_path('tok-other')} HTTP/1.1")
+        )
+
+        self.assertEqual(channel.status, 404)
+        self.assertEqual(self.gridvibe.requests, [])
+
+    def test_the_right_path_with_another_method_is_refused_the_same_way(self):
+        channel = self.serve(self.request(f"GET {self.path} HTTP/1.1"))
+
+        self.assertEqual(channel.status, 404)
+        self.assertEqual(self.gridvibe.requests, [])
+
+    def test_a_path_that_is_not_even_text_is_refused_rather_than_raised(self):
+        """Refusing is the answer to every malformed request, not an exception."""
+        channel = _FakeChannel(
+            b"POST /mcp/\xff\xfe HTTP/1.1\r\nHost: x\r\n\r\n"
+        )
+        ssh_tunnel._serve_forwarded_channel(
+            channel, "127.0.0.1", self.gridvibe.port, self.path
+        )
+
+        self.assertEqual(channel.status, 404)
+        self.assertEqual(self.gridvibe.requests, [])
+
+    def test_a_refusal_is_logged_without_writing_the_token_into_the_log(self):
+        """``/mcp/<token>`` is a credential; a wrong verb must not spend it."""
+        with self.assertLogs("web.ssh_tunnel", level="WARNING") as logged:
+            self.serve(self.request(f"GET {self.path} HTTP/1.1"))
+
+        message = "\n".join(logged.output)
+        self.assertIn("GET", message)
+        self.assertIn("/mcp/...", message)
+        self.assertNotIn(self.TOKEN, message)
+
+    def test_a_request_pipelined_behind_a_valid_one_never_reaches_gridvibe(self):
+        """The second half of the one-request rule.
+
+        A caller that can make one legitimate tool call must not be able to
+        append a destroy-tier request to it and have the filter forward both.
+        """
+        body = b'{"jsonrpc":"2.0","id":1,"method":"ping"}'
+        smuggled = b"DELETE /api/sessions HTTP/1.1\r\nHost: x\r\n\r\n"
+
+        self.serve(
+            self.request(f"POST {self.path} HTTP/1.1", body=body) + smuggled
+        )
+
+        self.assertEqual(len(self.gridvibe.requests), 1)
+        head, forwarded, trailing = self.gridvibe.requests[0]
+        self.assertEqual(forwarded, body)
+        # Nothing followed the request down the socket -- the bytes were read
+        # into a buffer nobody forwards, not held for a second exchange.
+        self.assertEqual(trailing, b"")
+        self.assertNotIn("DELETE", head)
+
+    def test_a_chunked_body_is_refused_rather_than_streamed(self):
+        """A filter that cannot say where the body ends cannot say what follows."""
+        channel = self.serve(
+            self.request(
+                f"POST {self.path} HTTP/1.1",
+                ["Transfer-Encoding: chunked"],
+            )
+            + b"4\r\nping\r\n0\r\n\r\n"
+        )
+
+        self.assertEqual(channel.status, 400)
+        self.assertEqual(self.gridvibe.requests, [])
+
+    def test_two_content_lengths_are_refused(self):
+        channel = self.serve(
+            (
+                f"POST {self.path} HTTP/1.1\r\n"
+                "Host: 127.0.0.1:41234\r\n"
+                "Content-Length: 4\r\n"
+                "Content-Length: 40\r\n\r\n"
+            ).encode("latin-1")
+            + b"pingGET /api/sessions HTTP/1.1\r\nHost: x\r\n\r\n"
+        )
+
+        self.assertEqual(channel.status, 400)
+        self.assertEqual(self.gridvibe.requests, [])
+
+    def test_an_obsolete_folded_header_is_refused_rather_than_rejoined(self):
+        channel = self.serve(
+            (
+                f"POST {self.path} HTTP/1.1\r\n"
+                "Host: 127.0.0.1:41234\r\n"
+                "X-Thing: one\r\n"
+                "\ttwo\r\n\r\n"
+            ).encode("latin-1")
+        )
+
+        self.assertEqual(channel.status, 400)
+        self.assertEqual(self.gridvibe.requests, [])
+
+    def test_a_body_beyond_the_ceiling_is_refused_before_it_is_read(self):
+        channel = self.serve(
+            (
+                f"POST {self.path} HTTP/1.1\r\n"
+                "Host: 127.0.0.1:41234\r\n"
+                f"Content-Length: {ssh_tunnel.MAX_BODY_BYTES + 1}\r\n\r\n"
+            ).encode("latin-1")
+        )
+
+        self.assertEqual(channel.status, 413)
+        self.assertEqual(self.gridvibe.requests, [])
+
+    def test_a_head_that_never_ends_is_dropped_at_the_ceiling(self):
+        """Finishing at all is the assertion: the read is bounded."""
+        channel = self.serve(
+            f"POST {self.path} HTTP/1.1\r\n".encode("latin-1"),
+            endless=b"X-Pad: " + b"0" * 4096 + b"\r\n",
+        )
+
+        self.assertEqual(channel.status, 400)
+        self.assertEqual(self.gridvibe.requests, [])
+
+    def test_the_request_read_is_bounded_by_a_timeout(self):
+        """A channel that opens and says nothing must not hold a thread."""
+        channel = self.serve(self.request(f"POST {self.path} HTTP/1.1"))
+
+        self.assertEqual(channel.timeouts[0], ssh_tunnel.REQUEST_READ_TIMEOUT)
+        # ...and the reply is not bounded by it: two tools wait 25s on a page.
+        self.assertIn(None, channel.timeouts)
+
+    def test_a_gridvibe_that_cannot_be_reached_is_answered_not_dropped(self):
+        closed = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        closed.bind(("127.0.0.1", 0))
+        dead_port = closed.getsockname()[1]
+        closed.close()
+
+        channel = _FakeChannel(self.request(f"POST {self.path} HTTP/1.1"))
+        ssh_tunnel._serve_forwarded_channel(
+            channel, "127.0.0.1", dead_port, self.path
+        )
+
+        self.assertEqual(channel.status, 502)
+        self.assertTrue(channel.closed)
+
+    def test_a_port_opened_with_no_path_serves_nothing(self):
+        channel = _FakeChannel(self.request(f"POST {self.path} HTTP/1.1"))
+        ssh_tunnel._serve_forwarded_channel(channel, "127.0.0.1", self.gridvibe.port, "")
+
+        self.assertEqual(channel.status, 404)
+        self.assertEqual(self.gridvibe.requests, [])
+
+
+class PaneCloseRevokesItsTokenTestCase(unittest.TestCase):
+    """The stated bound, driven through the close path that has to keep it.
+
+    Withdrawing the remote listener is not enough to end a token's life. The
+    same ``/mcp/<token>`` is reachable from any process on *this* machine, and
+    a config file left on a shared remote host names it in plain text. A token
+    that outlives its pane is a standing key to this machine's tools naming a
+    pane that is gone -- one that still creates workspaces and still splits.
+    """
+
+    def setUp(self):
+        from web import api, terminal_io
+
+        self.terminal = terminal_io
+        api.app.config["TESTING"] = True
+        self.http = api.app.test_client()
+        mcp_http.pane_tokens.clear()
+        self.addCleanup(mcp_http.pane_tokens.clear)
+        self.registry = {}
+        for name, value in (
+            ("ssh_connections", self.registry),
+            ("session_output_buffers", {}),
+            ("session_terminal_sizes", {}),
+        ):
+            context = patch.object(terminal_io, name, value)
+            context.start()
+            self.addCleanup(context.stop)
+        for name in (
+            "session_manager",
+            "_broadcast_session_status",
+            "_evict_pooled_ssh_client",
+        ):
+            context = patch.object(terminal_io, name)
+            setattr(self, name, context.start())
+            self.addCleanup(context.stop)
+
+    def _tunnelled_pane(self, session_id: str = "pane-1") -> str:
+        """One open pane with a tunnel and the token its config names."""
+        token = mcp_http.pane_tokens.mint(
+            session_id=session_id, group_id="g1", workspace_id="ws1"
+        )
+        self.registry[session_id] = {
+            "kind": "ssh",
+            "client": MagicMock(),
+            "channel": MagicMock(),
+            "mcp_tunnel": {"remote_port": 41234, "remote_path": "", "sftp": None},
+        }
+        return token
+
+    def _call(self, token: str):
+        return self.http.post(
+            f"/mcp/{token}",
+            data=json.dumps({"jsonrpc": "2.0", "id": 1, "method": "ping"}),
+            content_type="application/json",
+        )
+
+    def test_closing_a_pane_revokes_the_token_its_tunnel_carried(self):
+        token = self._tunnelled_pane()
+        self.assertTrue(mcp_http.pane_tokens.resolve(token))
+
+        self.terminal._close_ssh_connection("pane-1")
+
+        self.assertEqual(mcp_http.pane_tokens.resolve(token), {})
+
+    def test_the_endpoint_refuses_it_afterwards_like_a_token_that_never_was(self):
+        token = self._tunnelled_pane()
+        self.assertEqual(self._call(token).status_code, 200)
+
+        self.terminal._close_ssh_connection("pane-1")
+
+        refused = self._call(token)
+        self.assertEqual(refused.status_code, 404)
+        self.assertIn("Unknown or expired", refused.get_json()["error"])
+
+    def test_a_relaunch_comes_back_with_a_new_token(self):
+        """The one close that is followed by a reconnect: the remote config is
+        rewritten for the new port anyway, so the old token has no reason to
+        outlive the transport that carried it."""
+        first = self._tunnelled_pane()
+
+        self.terminal._close_ssh_connection("pane-1")
+        second = mcp_http.pane_tokens.mint(session_id="pane-1")
+
+        self.assertNotEqual(first, second)
+        self.assertEqual(mcp_http.pane_tokens.resolve(first), {})
+        self.assertTrue(mcp_http.pane_tokens.resolve(second))
+
+    def test_a_close_that_names_another_connection_leaves_the_token_alone(self):
+        """A retired attempt closing late must not disarm the live pane."""
+        token = self._tunnelled_pane()
+
+        self.terminal._close_ssh_connection(
+            "pane-1", expected={"kind": "ssh", "client": MagicMock()}
+        )
+
+        self.assertTrue(mcp_http.pane_tokens.resolve(token))
+
+    def test_closing_a_pane_that_never_tunnelled_is_a_no_op(self):
+        other = self._tunnelled_pane("pane-1")
+        self.registry["local-pane"] = {"kind": "local", "master_fd": None}
+
+        self.terminal._close_ssh_connection("local-pane")
+
+        self.assertTrue(mcp_http.pane_tokens.resolve(other))
 
 
 class RemoteLaunchLineTestCase(unittest.TestCase):
