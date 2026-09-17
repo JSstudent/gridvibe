@@ -16,8 +16,14 @@ from typing import Any, Dict, Optional, Tuple
 from flask import jsonify, render_template, request, send_file, send_from_directory
 from flask_socketio import emit, join_room, leave_room
 
+from gridvibe_mcp.identity import DEFAULT_MAX_AGENT_DEPTH
 from gridvibe_version import __version__
-from sessions.manager import SessionManager, SessionStatus  # noqa: F401 - re-exported
+from sessions.manager import (  # noqa: F401 - re-exported for backwards compatibility
+    SessionManager,
+    SessionStatus,
+    _normalize_agent_depth,
+)
+from web import mcp_http
 from web.agents import (  # noqa: F401 - re-exported for backwards compatibility
     AGENT_REGISTRY,
     AGENT_REGISTRY_PATH,
@@ -28,6 +34,7 @@ from web.agents import (  # noqa: F401 - re-exported for backwards compatibility
     _agent_options,
     _agent_preflight_payload,
     _agent_status_label,
+    _agent_supports_mcp,
     _agent_target_label,
     _build_agent_preflight_request,
     _build_login_shell_detection_command,
@@ -67,7 +74,9 @@ from web.app import (  # noqa: F401 - re-exported for backwards compatibility
     app,
     apply_resolved_server_origins,
     session_manager,
+    set_window_mode,
     socketio,
+    window_mode,
 )
 from web.config import (  # noqa: F401 - compatibility re-exports
     AUTOSAVE_INTERVAL_MINUTES_MAX,
@@ -180,6 +189,13 @@ from web.lifecycle import (
     prepare_lifecycle_action,
     prepare_workspace_save,
 )
+from web.mcp_launch import (  # noqa: F401 - mcp_config_path re-exported for tests
+    mcp_config_path,
+    server_base_url,
+    set_server_address,
+    write_mcp_config,
+)
+from web.pane_geometry import compose_group_geometry
 from web.paths import BASE_DIR, install_kind
 from web.runtime_state import (  # noqa: F401 - re-exported for backwards compatibility
     RuntimeStatePersistenceError,
@@ -239,10 +255,16 @@ from web.selfupdate import (  # noqa: F401 - perform_self_update re-exported for
     perform_app_update,
     perform_self_update,
 )
+from web.session_clear import (  # noqa: F401 - re-exported for backwards compatibility
+    ClearEffects,
+    ClearTransitionError,
+    apply_agent_pane_clear,
+)
 from web.session_modes import (  # noqa: F401 - re-exported for backwards compatibility
     ModeTransitionEffects,
     ModeTransitionError,
     _refresh_pane_cwd,
+    apply_agent_pane_mode_change,
     apply_pane_mode_change,
 )
 from web.session_presentation import (
@@ -254,6 +276,7 @@ from web.session_presentation import (
 from web.session_shell import (  # noqa: F401 - re-exported for backwards compatibility
     ShellTransitionEffects,
     ShellTransitionError,
+    apply_agent_pane_relaunch,
     apply_pane_shell_change,
 )
 from web.terminal_io import (  # noqa: F401 - re-exported for backwards compatibility
@@ -267,6 +290,7 @@ from web.terminal_io import (  # noqa: F401 - re-exported for backwards compatib
     _agent_from_terminal_command,
     _broadcast_session_groups_updated,
     _broadcast_session_status,
+    _broadcast_terminal_cleared,
     _build_local_command,
     _cache_terminal_output,
     _clear_client_joined_sessions,
@@ -349,6 +373,7 @@ from web.voice import (  # noqa: F401 - re-exported for backwards compatibility
     release_voice_session,
     resolve_voice_session_engine,
 )
+from web.window_intents import window_intents
 from web.workspaces import (
     DEFAULT_WORKSPACE_ID,
     WorkspaceRequestError,
@@ -791,11 +816,18 @@ def docs_images(filename: str):
 
 @app.route('/api/health', methods=['GET'])
 def health_check():
-    """Health check endpoint."""
+    """Health check endpoint.
+
+    ``window_mode`` is here because it is the one thing a process outside the
+    browser cannot work out for itself: whether asking for a workspace window
+    means leaving an intent for a native page to claim, or simply handing a URL
+    to the OS default browser.
+    """
     return jsonify({
         "status": "healthy",
         "service": "GridVibe",
-        "version": __version__
+        "version": __version__,
+        "window_mode": window_mode(),
     })
 
 
@@ -2097,6 +2129,76 @@ def create_workspace():
     return jsonify(public_workspace_payload(workspace, 0)), 201
 
 
+# ==================== Window intents (native mode) ====================
+#
+# Creating a workspace over HTTP creates a record; it does not make anything
+# appear on screen, and nothing outside a page can open a pywebview window. So
+# a local process that wants one leaves an intent here and an open GridVibe
+# page claims it. Thin routes over `web/window_intents.py`, which owns the TTL
+# and the claim-once rule.
+
+
+@app.route('/api/windows/open', methods=['POST'])
+def open_window_intent():
+    """Store one "please open this workspace" intent and return it."""
+    data = request.get_json(silent=True) or {}
+    workspace_id = str(data.get("workspace_id") or "").strip()
+    if not workspace_id:
+        return jsonify({"error": "workspace_id is required"}), 400
+    intent = window_intents.open(workspace_id, data.get("group_id") or "")
+    logger.info(
+        "Window intent %s recorded workspace=%s group=%s mode=%s",
+        intent["intent_id"],
+        intent["workspace_id"],
+        intent["group_id"] or "-",
+        window_mode(),
+    )
+    return jsonify(intent), 201
+
+
+@app.route('/api/windows/intents', methods=['GET'])
+def list_window_intents():
+    """Pending, unclaimed intents. Almost always an empty list."""
+    intents = window_intents.pending()
+    return jsonify({"intents": intents, "count": len(intents)})
+
+
+@app.route('/api/windows/intents/<intent_id>', methods=['GET'])
+def read_window_intent(intent_id: str):
+    """The sidecar's poll target."""
+    return jsonify(window_intents.read(intent_id))
+
+
+@app.route('/api/windows/intents/<intent_id>/claim', methods=['POST'])
+def claim_window_intent(intent_id: str):
+    """Claim one pending intent. Succeeds for exactly one caller.
+
+    This is what stops two open pages from delivering the same request twice
+    and leaving the user with two windows.
+    """
+    data = request.get_json(silent=True) or {}
+    claimed, payload = window_intents.claim(intent_id, data.get("claimant") or "")
+    return jsonify(payload), (200 if claimed else 409)
+
+
+@app.route('/api/windows/intents/<intent_id>/result', methods=['POST'])
+def record_window_intent_result(intent_id: str):
+    """The claimant reports what happened.
+
+    `opened` or `blocked` for a window; `split` or `refused` for a split. The
+    store checks the outcome against the intent's own kind, so a page cannot
+    report a window's verb on a pane.
+    """
+    data = request.get_json(silent=True) or {}
+    recorded, payload = window_intents.record_result(
+        intent_id,
+        data.get("outcome") or "",
+        data.get("detail") or "",
+        data.get("result") if isinstance(data.get("result"), dict) else None,
+    )
+    return jsonify(payload), (200 if recorded else 400)
+
+
 @app.route('/api/workspaces/validate-label', methods=['POST'])
 def validate_workspace_label():
     """Check whether a new-workspace label is available without creating it.
@@ -2921,13 +3023,298 @@ def get_session(session_id: str):
     return jsonify(session.to_dict())
 
 
+@app.route('/api/panes/layout', methods=['GET'])
+def get_pane_layout():
+    """How one session group's panes are arranged, and which pane is next to which.
+
+    The one read behind an agent describing the workspace it is sitting in.
+    Position is only meaningful inside a group -- array order across a whole
+    workspace means nothing -- so this route takes a group and nothing else.
+
+    Thin: `web/pane_geometry.py` owns the preset table and the adjacency rules,
+    and it is pure, so the composer it exposes is what the tests drive. Here it
+    is handed the group's own pane order and the geometry record the page wrote,
+    if it wrote one.
+    """
+    group_id = str(request.args.get("group_id") or "").strip()
+    if not group_id:
+        return jsonify({"error": "group_id is required"}), 400
+
+    group = session_manager.get_group(group_id)
+    if not group:
+        return jsonify({"error": "Session group not found"}), 404
+
+    sessions = session_manager.get_group_sessions(group_id)
+    payload = compose_group_geometry(
+        [session.session_id for session in sessions],
+        group.layout,
+        group.workspace_layout,
+    )
+    payload["group_id"] = group.group_id
+    payload["workspace_id"] = group.workspace_id
+    return jsonify(payload)
+
+
+# ==================== Split: what the new pane is ====================
+#
+# A split used to produce exactly one thing: a plain terminal cloning the
+# source pane's shell family and directory. It now says what to create, so an
+# agent pane is made directly rather than made-and-then-relaunched -- which is
+# what keeps a relaunch verb off the tool that creates panes.
+#
+# The axis is deliberately absent from this list. It never reaches the server
+# (the page computes the rectangles), and a route that accepted it would be
+# claiming to place a pane it cannot measure.
+
+#: What a split may create. `terminal` is the historical behaviour and the
+#: default, so a caller that states nothing gets exactly what it always got.
+SPLIT_PANE_KINDS = ("terminal", "agent", "explorer", "browser")
+
+
+class SplitRequestError(ValueError):
+    """One split refused before anything is appended."""
+
+
+def _split_pane_overrides(source, data: Dict[str, Any]) -> Dict[str, Any]:
+    """Read the requested new-pane description, or refuse.
+
+    Returns the fields to override on the append. Every refusal happens here,
+    before the group is touched, so a refused split leaves the group exactly as
+    it was found.
+    """
+    if data.get("kind") is None:
+        return {}
+    kind = str(data.get("kind") or "").strip().lower()
+    if kind not in SPLIT_PANE_KINDS:
+        raise SplitRequestError(
+            f"kind must be one of: {', '.join(SPLIT_PANE_KINDS)}"
+        )
+
+    title = str(data.get("title") or "").strip()
+    overrides: Dict[str, Any] = {}
+    if title:
+        overrides["title"] = title
+
+    if kind == "terminal":
+        overrides.update(
+            {
+                "startup_mode": "terminal",
+                "initial_command_mode": "command",
+                "initial_command": None,
+                "agent_selection": "",
+                "custom_agent": "",
+                "agent_auto_mode": False,
+                "agent_mcp": False,
+            }
+        )
+        return overrides
+
+    local_pane = str(getattr(source, "mode", "") or "") == "wsl"
+
+    if kind == "explorer":
+        overrides.update(
+            {
+                "startup_mode": "explorer",
+                "initial_command_mode": "explorer",
+                "initial_command": "",
+                "agent_selection": "",
+                "custom_agent": "",
+                "agent_auto_mode": False,
+                "agent_mcp": False,
+            }
+        )
+        if local_pane:
+            # The same chrome a launched Local Repo explorer wears. Without it
+            # the pane keeps whichever shell name the clone resolved and reads
+            # as a terminal in every list that shows the host.
+            overrides.update(
+                {
+                    "host": "File Explorer",
+                    "use_wsl": False,
+                    "use_powershell": False,
+                    "distribution": "",
+                    "username": "",
+                }
+            )
+        return overrides
+
+    if kind == "browser":
+        if not local_pane:
+            raise SplitRequestError(
+                "A browser pane belongs to a session group on this machine, "
+                f"and this pane runs on {getattr(source, 'host', '') or 'another host'}."
+            )
+        url = _normalize_browser_url(data.get("url") or DEFAULT_BROWSER_URL)
+        overrides.update(
+            {
+                "startup_mode": "browser",
+                "initial_command_mode": "browser",
+                "initial_command": url,
+                "browser_tabs": [url],
+                "browser_active_tab": 0,
+                "agent_selection": "",
+                "custom_agent": "",
+                "agent_auto_mode": False,
+                "agent_mcp": False,
+                "host": "Browser",
+                "use_wsl": False,
+                "use_powershell": False,
+                "distribution": "",
+                "username": "",
+                "password": None,
+                "port": 22,
+                "explorer_root_directory": None,
+                "explorer_root_configured": False,
+            }
+        )
+        return overrides
+
+    agent_key = _normalize_agent_key(data.get("agent"))
+    if not agent_key:
+        raise SplitRequestError("An agent pane needs an 'agent', e.g. 'claude'.")
+    if agent_key not in AGENT_REGISTRY:
+        raise SplitRequestError("agent must be a known agent CLI")
+    # Asked about the machine the new pane will actually start on, exactly as
+    # the pane menu asks before a relaunch. Refusing costs nothing here: the
+    # group in front of the reader is untouched, and a pane wearing an agent's
+    # name over a plain shell is the outcome this prevents.
+    absent = _agent_absent_reason(
+        agent_key,
+        str(getattr(source, "mode", "") or ""),
+        {
+            "host": str(getattr(source, "host", "") or ""),
+            "username": str(getattr(source, "username", "") or ""),
+            "password": getattr(source, "password", "") or "",
+            "port": getattr(source, "port", 22),
+            "directory": str(getattr(source, "directory", "") or ""),
+            "distribution": str(getattr(source, "distribution", "") or ""),
+            "use_wsl": bool(getattr(source, "use_wsl", False)),
+            "use_powershell": bool(getattr(source, "use_powershell", False)),
+        },
+    )
+    if absent:
+        raise SplitRequestError(f"{absent} No pane was added.")
+
+    auto_mode = data.get("auto_mode")
+    mcp = data.get("mcp")
+    if auto_mode is not None and not isinstance(auto_mode, bool):
+        raise SplitRequestError("auto_mode must be true or false")
+    if mcp is not None and not isinstance(mcp, bool):
+        raise SplitRequestError("mcp must be true or false")
+    overrides.update(
+        {
+            "startup_mode": "agent",
+            "initial_command_mode": "agent",
+            "initial_command": agent_key,
+            "agent_selection": agent_key,
+            "custom_agent": "",
+            "agent_auto_mode": bool(auto_mode),
+            # A CLI with no way to be handed the sidecar does not get the flag,
+            # however the caller asked: this route is one of the two a tool can
+            # reach, and the flag is what paints the header tag and opens a
+            # tunnel on an SSH pane.
+            "agent_mcp": bool(mcp) and _agent_supports_mcp(agent_key),
+        }
+    )
+    return overrides
+
+
+def _live_session_id(value: Any) -> str:
+    """The named session id when it names a pane that is open, else ``""``.
+
+    Used for the creator stamp a split carries, so a later relaunch can tell an
+    agent's own panes from the ones a person made. Read against the live
+    registry rather than believed: an id naming nothing open stamps nothing,
+    which refuses rather than misattributes.
+    """
+    requested = str(value or "").strip()
+    if not requested:
+        return ""
+    return requested if session_manager.get_session(requested) is not None else ""
+
+
+#: The two axes a split button offers. The server never computes a rectangle
+#: from either -- it records which one was asked for, and the page that can
+#: measure the pane performs the split.
+SPLIT_AXES = ("vertical", "horizontal")
+
+
+@app.route('/api/sessions/<session_id>/split-intent', methods=['POST'])
+def open_split_intent(session_id: str):
+    """Record one "please split this pane" intent for an open page to perform.
+
+    The split axis is a page decision: the rectangles, the minimum columns and
+    rows below a terminal header, and the narrow-viewport refusal are all
+    measured off the live terminal. So a caller outside the browser records
+    what it wants here, and the page that owns the pane runs the split button's
+    own handler.
+
+    Everything that *can* be decided here is decided here, before the intent is
+    recorded: the pane must exist, the axis must be one of the two, and the new
+    pane's description must be one the split route would accept. A refusal at
+    this point costs the caller nothing; a refusal discovered after a claim
+    would cost it the whole TTL.
+    """
+    source = session_manager.get_session(session_id)
+    if not source:
+        return jsonify({"error": "Session not found"}), 404
+    group = session_manager.get_group(source.group_id)
+    if not group:
+        return jsonify({"error": "Session group not found"}), 404
+
+    data = request.get_json(silent=True) or {}
+    axis = str(data.get("axis") or "").strip().lower()
+    if axis not in SPLIT_AXES:
+        return jsonify({"error": f"axis must be one of: {', '.join(SPLIT_AXES)}"}), 400
+
+    try:
+        _split_pane_overrides(source, data)
+    except SplitRequestError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+    # The body the claiming page posts back, built here rather than by the page:
+    # the creator stamp is read off the live registry in this process, so a
+    # relaunch gate later cannot be handed a lineage the caller invented.
+    split_request = {
+        key: data[key]
+        for key in ("kind", "agent", "auto_mode", "mcp", "title", "url", "directory")
+        if key in data
+    }
+    split_request["axis"] = axis
+    split_request["created_by_session_id"] = _live_session_id(
+        data.get("origin_session_id")
+    )
+
+    intent = window_intents.open_split(
+        session_id,
+        axis,
+        group_id=group.group_id,
+        workspace_id=group.workspace_id,
+        split_request=split_request,
+    )
+    logger.info(
+        "Split intent %s recorded session=%s axis=%s kind=%s mode=%s",
+        intent["intent_id"],
+        session_id,
+        axis,
+        str(data.get("kind") or "terminal"),
+        window_mode(),
+    )
+    return jsonify(intent), 201
+
+
 @app.route('/api/sessions/<session_id>/split', methods=['POST'])
 def split_session(session_id: str):
-    """Append one cloned terminal session to the source session's group.
+    """Append one session to the source session's group, and say what it is.
 
-    A terminal pane clones itself. An explorer or browser pane instead splits
-    into a plain terminal rooted at the directory it is currently showing, for
-    both SSH and Local Repo panes — the pane kind is deliberately not cloned.
+    With no `kind` stated this is exactly what it always was: a terminal pane
+    clones itself, and an explorer or browser pane splits into a plain terminal
+    rooted at the directory it is currently showing, for both SSH and Local
+    Repo panes — the pane kind is deliberately not cloned.
+
+    A stated `kind` chooses the new pane instead, so an agent pane is created
+    directly rather than created and then relaunched. Every refusal is decided
+    in `_split_pane_overrides` before the group is touched.
     """
     source = session_manager.get_session(session_id)
     if not source:
@@ -2947,6 +3334,8 @@ def split_session(session_id: str):
             "error": capacity_refusal(len(group_sessions) + 1, max_sessions)
         }), 400
 
+    request_data = request.get_json(silent=True) or {}
+
     host = source.host
     # A terminal pane clones where it *is*, not where it started: splitting a
     # navigated shell used to hand the new pane the launch directory. An
@@ -2960,11 +3349,10 @@ def split_session(session_id: str):
     startup_mode = source.startup_mode
 
     if _is_explorer_session(source) or _is_browser_session(source):
-        data = request.get_json(silent=True) or {}
         try:
             directory, root_directory = _resolve_pane_terminal_directory(
                 source,
-                data.get("directory", ""),
+                request_data.get("directory", ""),
             )
         except ValueError as exc:
             return jsonify({"error": str(exc)}), 400
@@ -2980,29 +3368,58 @@ def split_session(session_id: str):
                 distribution=source.distribution,
             )
 
+    try:
+        overrides = _split_pane_overrides(source, request_data)
+    except SplitRequestError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+    if overrides.get("startup_mode") == "explorer":
+        # An explorer pane is confined to where the split is rooted, and that
+        # boundary is chosen by the caller rather than derived from where a
+        # terminal happened to be standing.
+        root_directory = root_directory or directory
+
     title = f"Terminal {len(group_sessions) + 1}"
-    new_session = session_manager.append_session_to_group(
-        group_id=group.group_id,
-        host=host,
-        directory=directory,
-        username=source.username,
-        port=source.port,
-        password=source.password,
-        initial_command=None,
-        initial_command_mode="command",
-        agent_selection="",
-        custom_agent="",
-        title=title,
-        mode=source.mode,
-        distribution=source.distribution,
-        use_wsl=source.use_wsl,
-        use_powershell=source.use_powershell,
-        startup_mode=startup_mode,
-        explorer_root_directory=root_directory,
+    fields = {
+        "host": host,
+        "directory": directory,
+        "username": source.username,
+        "port": source.port,
+        "password": source.password,
+        "initial_command": None,
+        "initial_command_mode": "command",
+        "agent_selection": "",
+        "custom_agent": "",
+        "title": title,
+        "mode": source.mode,
+        "distribution": source.distribution,
+        "use_wsl": source.use_wsl,
+        "use_powershell": source.use_powershell,
+        "startup_mode": startup_mode,
+        "explorer_root_directory": root_directory,
         # Stated rather than derived: the clone carries a root only when the
         # source's was configured, so the new pane inherits that pin even
         # though a terminal pane's own root would read as a derived one.
-        explorer_root_configured=bool(root_directory),
+        "explorer_root_configured": bool(root_directory),
+        "created_by_session_id": _live_session_id(
+            request_data.get("created_by_session_id")
+        ),
+    }
+    fields.update(overrides)
+    # One level deeper than the pane that *asked*, which is not necessarily the
+    # pane being halved: an agent can split a pane beside its own. A split
+    # nobody claimed is a split a person made with the button, and an
+    # unattributed pane starts a fresh budget rather than inheriting one --
+    # just as it is refused by the relaunch gate that reads the same stamp.
+    creator = session_manager.get_session(fields["created_by_session_id"] or "")
+    fields["agent_depth"] = (
+        _normalize_agent_depth(int(getattr(creator, "agent_depth", 0)) + 1)
+        if creator is not None
+        else 0
+    )
+    new_session = session_manager.append_session_to_group(
+        group_id=group.group_id,
+        **fields,
     )
     if not new_session:
         return jsonify({"error": "Session group not found"}), 404
@@ -3078,6 +3495,34 @@ def change_session_shell(session_id: str):
     return jsonify(payload)
 
 
+@app.route('/api/sessions/<session_id>/agent-relaunch', methods=['POST'])
+def relaunch_session_as_agent(session_id: str):
+    """Relaunch one pane into an agent, on behalf of the pane that asked.
+
+    The gated twin of `POST /api/sessions/<id>/shell`. That route is the pane
+    header's own reset dropdown, pressed by the person looking at the pane;
+    this one is reached by a tool, so it names the pane asking and passes three
+    gates first -- mode, lineage and not-self, all in `web/session_shell.py`.
+
+    HTTP adaptation only, and the same three effects the shell route resolves.
+    """
+    try:
+        payload = apply_agent_pane_relaunch(
+            session_id,
+            request.get_json(silent=True) or {},
+            ShellTransitionEffects(
+                close_connection=_close_ssh_connection,
+                broadcast_status=_broadcast_session_status,
+                start_connector=lambda pane_session_id: socketio.start_background_task(
+                    _connect_session, pane_session_id
+                ),
+            ),
+        )
+    except ShellTransitionError as exc:
+        return jsonify({"error": exc.message}), exc.status_code
+    return jsonify(payload)
+
+
 @app.route('/api/sessions/<session_id>/mode', methods=['POST'])
 def change_session_mode(session_id: str):
     """Switch one pane between terminal, file explorer, and browser modes.
@@ -3101,6 +3546,60 @@ def change_session_mode(session_id: str):
             ),
         )
     except ModeTransitionError as exc:
+        return jsonify({"error": exc.message}), exc.status_code
+    return jsonify(payload)
+
+
+@app.route('/api/sessions/<session_id>/agent-mode-switch', methods=['POST'])
+def switch_session_mode_for_agent(session_id: str):
+    """Switch one pane's mode, on behalf of the pane that asked.
+
+    The gated twin of `POST /api/sessions/<id>/mode`. That route is the pane
+    header's own mode toggle, pressed by the person looking at the pane; this
+    one is reached by a tool, so it names the pane asking and passes the self,
+    lineage and agent gates first -- all in `web/session_modes.py`, over
+    `web/pane_gates.py`.
+
+    HTTP adaptation only, and the same three effects the mode route resolves.
+    """
+    try:
+        payload = apply_agent_pane_mode_change(
+            session_id,
+            request.get_json(silent=True) or {},
+            ModeTransitionEffects(
+                close_connection=_close_ssh_connection,
+                broadcast_status=_broadcast_session_status,
+                start_connector=lambda pane_session_id: socketio.start_background_task(
+                    _connect_session, pane_session_id
+                ),
+            ),
+        )
+    except ModeTransitionError as exc:
+        return jsonify({"error": exc.message}), exc.status_code
+    return jsonify(payload)
+
+
+@app.route('/api/sessions/<session_id>/clear', methods=['POST'])
+def clear_session_for_agent(session_id: str):
+    """Clear one pane, on behalf of the pane that asked.
+
+    The gated twin of the header's Clear button, which is not a route at all --
+    it is an xterm reset plus the `clear_terminal_buffer` socket event. A tool
+    has no xterm, so this purges the buffer and asks every window showing the
+    pane to run the button's own handler.
+
+    HTTP adaptation only: the transaction lives in `web/session_clear.py`.
+    """
+    try:
+        payload = apply_agent_pane_clear(
+            session_id,
+            request.get_json(silent=True) or {},
+            ClearEffects(
+                purge_buffer=_clear_terminal_output_buffer,
+                broadcast_cleared=_broadcast_terminal_cleared,
+            ),
+        )
+    except ClearTransitionError as exc:
         return jsonify({"error": exc.message}), exc.status_code
     return jsonify(payload)
 
@@ -3661,6 +4160,55 @@ def handle_voice_stop(data):
     logger.info("Voice stopped for session %s", session_id)
 
 
+@app.route('/mcp/<token>', methods=['POST', 'GET', 'DELETE'])
+def mcp_streamable_http(token: str):
+    """MCP over streamable HTTP, for a pane whose shell is not on this machine.
+
+    The stdio sidecar cannot exist on a remote host, so a tunnelled pane's
+    agent is handed this URL instead of a command. The token names the pane --
+    identity cannot arrive by environment inheritance across a machine
+    boundary -- and is revoked when that pane closes.
+
+    **The POST half of streamable HTTP, deliberately.** The transport also
+    describes a `GET` SSE stream for server-initiated messages and a `DELETE`
+    that ends a session; neither is implemented, because nothing in the tool
+    surface is server-initiated and a pane's "session" is the pane. The three
+    CLIs that are handed a URL are content with request/response. `GET` and
+    `DELETE` are routed here so they answer a stated 405 naming what this
+    endpoint is, rather than Flask's bare method-not-allowed, which reads to a
+    client like a server that half-implements the spec by accident. A
+    *tunnelled* client never reaches it: `web/ssh_tunnel.py`'s filter forwards
+    this pane's own POST and answers everything else 404, deliberately saying
+    nothing. The 405 is for a client on this machine.
+
+    Thin route, like every other: the protocol and the token registry live in
+    `web/mcp_http.py`, and the tools are the sidecar's own `dispatch`.
+    """
+    if request.method != 'POST':
+        return (
+            jsonify({
+                "error": (
+                    "This endpoint is the POST half of MCP streamable HTTP. "
+                    "GridVibe sends nothing a client has to stream, and a "
+                    "pane's session ends with the pane, so there is no SSE "
+                    "stream to open and no session to delete."
+                ),
+            }),
+            405,
+            {"Allow": "POST"},
+        )
+    payload, status = mcp_http.handle_request(
+        token,
+        request.get_data() or b"",
+        base_url=server_base_url(),
+        max_agent_depth=DEFAULT_MAX_AGENT_DEPTH,
+    )
+    if payload is None:
+        # A notification earns an acknowledgement, not an empty JSON body.
+        return "", status
+    return jsonify(payload), status
+
+
 # ==================== Main Entry Point ====================
 
 def run_server(
@@ -3681,6 +4229,12 @@ def run_server(
     # the resolved bind address known, and authorising the wrong one silently
     # kills every terminal's transport (audit F1).
     apply_resolved_server_origins(host, port)
+    # The generated MCP config names this interpreter and this port, and both
+    # are per-install -- so it is rewritten on every start rather than
+    # committed, and a moved install, a changed port or a rebuilt venv
+    # self-heals with no user action.
+    set_server_address(host, port)
+    write_mcp_config(host, port)
     start_workspace_autosave()
     socketio.run(
         app,

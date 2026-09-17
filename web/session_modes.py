@@ -19,6 +19,7 @@ backends and workspace orchestration are separate transactions in their own
 canonical modules, and this module calls into them exactly as the route did.
 """
 
+import logging
 import os
 from dataclasses import dataclass
 from typing import Any, Callable, Dict
@@ -41,6 +42,15 @@ from web.explorer import (
     _sftp_request_error_types,
     _SftpExplorerBackend,
 )
+from web.pane_gates import (
+    MODE_GATE,
+    GateWording,
+    PaneGateRefusal,
+    check_caller,
+    check_lineage,
+    read_agent_request,
+    refuse,
+)
 from web.saved_sessions import _normalize_startup_mode
 from web.session_presentation import DEFAULT_BROWSER_URL, _normalize_browser_url
 from web.terminal_io import (
@@ -48,6 +58,8 @@ from web.terminal_io import (
     _local_shell_display_name,
     effective_directory,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class ModeTransitionError(Exception):
@@ -354,3 +366,120 @@ def apply_pane_mode_change(
     effects.broadcast_status(session_id)
     effects.start_connector(session_id)
     return session_manager.get_session(session_id).to_dict()
+
+
+# ==================== The gated half: a mode switch asked for by an agent =====
+#
+# `apply_pane_mode_change` above is the pane header's own mode toggle: the
+# person looking at the pane pressed it, so there is nobody to check. A tool
+# asking for the same switch is a different question, because switching a pane
+# out of terminal mode *ends the shell behind it* -- the same blast radius the
+# gated relaunch in `web/session_shell.py` has, and the same three gates.
+#
+# Self and lineage are `web/pane_gates.py`'s, shared with the relaunch and the
+# clear. The third is this transaction's own, and it is looser than the
+# relaunch's for a reason: an explorer or browser pane is exactly what this
+# transaction exists to move, so only a pane with an *agent running in it* is
+# refused -- switching that pane's mode would end the agent, which is the thing
+# a person has to ask for by name.
+#
+# `override` waives lineage and the agent refusal, never self. A pane the user
+# made by hand, or one running an agent nobody is using any more, is exactly
+# what "override the bottom pane and make it a file explorer" means; the
+# calling agent states it only on a person's own words, in this conversation,
+# about this pane.
+
+#: How this transaction names itself inside a shared refusal.
+MODE_SWITCH_WORDING = GateWording(
+    request_noun="a mode switch",
+    self_reason=(
+        "Switching its mode would end this agent in the middle of the call."
+    ),
+    act="switch its mode",
+    acts="switches the mode of",
+)
+
+#: What the caller may state. Everything else the ungated route accepts is the
+#: page's own business: `active_tab` belongs to a live tab strip nothing outside
+#: the browser can see, and a whole browser tab list is presentation state with
+#: its own ordered, revisioned transaction.
+_AGENT_MODE_FIELDS = ("startup_mode", "directory", "url", "refresh_cwd")
+
+#: The three a tool may ask for, stated here rather than inferred from
+#: `_normalize_startup_mode()`. That normalizer answers "terminal" for anything
+#: it cannot honour, which is the right answer for the page -- the toggle only
+#: offers what the pane can be -- and the wrong one for a tool, which would be
+#: told a browser pane was opened and handed back a plain shell.
+_AGENT_MODE_TARGETS = ("terminal", "explorer", "browser")
+
+
+def apply_agent_pane_mode_change(
+    session_id: str,
+    payload: Dict[str, Any],
+    effects: "ModeTransitionEffects",
+) -> Dict[str, Any]:
+    """Switch one pane's mode on behalf of a *calling agent's* pane.
+
+    Every gate is checked before anything is mutated, closed or restarted, so a
+    refusal leaves the pane exactly as it was found. Past the gates this is the
+    ordinary transition, with the ordinary refusals -- a pane with no shell to
+    replace, a browser pane asked for on a remote host, a directory that does
+    not exist.
+    """
+    # One translation point for the whole gate sequence: every refusal below
+    # is a `PaneGateRefusal` carrying the status the route should answer, and
+    # this is where it becomes the one exception `web/api.py` maps.
+    try:
+        request = read_agent_request(payload, MODE_SWITCH_WORDING)
+
+        requested_mode = str(payload.get("startup_mode") or "").strip().lower()
+        if requested_mode not in _AGENT_MODE_TARGETS:
+            raise PaneGateRefusal(
+                "startup_mode must be "
+                + ", ".join(f"'{mode}'" for mode in _AGENT_MODE_TARGETS),
+                400,
+            )
+
+        session = session_manager.get_session(session_id)
+        if not session:
+            raise PaneGateRefusal("Session not found", 404)
+
+        check_caller(session_id, request, MODE_SWITCH_WORDING)
+
+        if (
+            str(getattr(session, "startup_mode", "") or "") == "agent"
+            and not request.override
+        ):
+            raise refuse(
+                MODE_GATE,
+                "This pane is running an agent, and switching its mode would "
+                "end it. Split off a new pane instead, unless the user "
+                "explicitly asked to override this pane.",
+            )
+
+        check_lineage(session, request, MODE_SWITCH_WORDING)
+
+        if requested_mode == "browser" and getattr(session, "mode", "") != "wsl":
+            # Refused rather than quietly normalized. The page's toggle does
+            # not appear on a remote pane at all, so the ungated route never
+            # has to say this; a tool can ask, and being handed a plain
+            # terminal labelled a success is the one answer it must not get.
+            raise PaneGateRefusal(
+                "Browser mode is only available for Local Repo sessions. "
+                "GridVibe draws the preview on its own machine, and this "
+                "pane's shell does not run there, so nothing was changed.",
+                400,
+            )
+    except PaneGateRefusal as exc:
+        raise ModeTransitionError(exc.message, exc.status_code) from exc
+
+    change = {key: payload[key] for key in _AGENT_MODE_FIELDS if key in payload}
+    logger.info(
+        "Agent-requested pane mode switch session_id=%s startup_mode=%s "
+        "requested_by_session_id=%s override=%s",
+        session_id,
+        str(change.get("startup_mode") or "-"),
+        request.caller_session_id,
+        request.override,
+    )
+    return apply_pane_mode_change(session_id, change, effects)

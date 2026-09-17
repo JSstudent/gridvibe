@@ -101,6 +101,7 @@ def _default_terminal_entries():
             "agent_selection": "",
             "custom_agent": "",
             "agent_auto_mode": False,
+            "agent_mcp": False,
             "explorer_tree_open": False,
             "explorer_git_open": False,
             "explorer_git_follow_browsing": False,
@@ -204,6 +205,10 @@ def _normalize_terminal_entries(
     bound.  Existing extra entries therefore remain readable and survive an
     unrelated preset write after that preference is lowered.
     """
+    # Local: `web/agents.py` imports this module, so the dependency can only
+    # run the other way at call time.
+    from web.agents import _agent_supports_mcp
+
     normalized = []
     entries = entries if isinstance(entries, list) else []
     requested_count = runtime_config.max_sessions if minimum_count is None else minimum_count
@@ -221,6 +226,8 @@ def _normalize_terminal_entries(
         startup_mode = _normalize_startup_mode(raw_startup_mode, connection_mode)
         open_tabs = _normalize_explorer_open_tabs(entry.get("explorer_open_tabs"))
         initial_command = str(entry.get("initial_command") or "")
+        agent_selection = str(entry.get("agent_selection") or "")
+        custom_agent = str(entry.get("custom_agent") or "")
         # Browser tabs only exist for browser panes; the active tab's URL is
         # mirrored into `initial_command` so the single-URL readers (pane
         # launch, `_normalize_browser_url`, the session model) stay authoritative.
@@ -247,9 +254,21 @@ def _normalize_terminal_entries(
                 "initial_command": initial_command,
                 "initial_command_mode": startup_mode if startup_mode in {"agent", "explorer", "browser"} else "command",
                 "startup_mode": startup_mode,
-                "agent_selection": str(entry.get("agent_selection") or ""),
-                "custom_agent": str(entry.get("custom_agent") or ""),
+                "agent_selection": agent_selection,
+                "custom_agent": custom_agent,
                 "agent_auto_mode": startup_mode == "agent" and bool(entry.get("agent_auto_mode")),
+                # The flag says the reader wants GridVibe tools in this pane;
+                # whether the CLI has any way to be handed them is the
+                # registry's answer, and it is asked here because this is the
+                # one normalizer every launch body passes through -- the
+                # launcher's own, an imported preset's, and the one a tool
+                # composes. `web/agents.py` imports this module, so the import
+                # is local rather than at the top.
+                "agent_mcp": (
+                    startup_mode == "agent"
+                    and bool(entry.get("agent_mcp"))
+                    and _agent_supports_mcp(agent_selection or custom_agent)
+                ),
                 "explorer_tree_open": bool(entry.get("explorer_tree_open")),
                 "explorer_git_open": bool(entry.get("explorer_git_open")),
                 "explorer_git_follow_browsing": bool(
@@ -518,6 +537,7 @@ def _merge_workspace_session_config(
             saved_terminal["agent_selection"] = agent_selection
             saved_terminal["custom_agent"] = custom_agent
             saved_terminal["agent_auto_mode"] = workspace_terminal["agent_auto_mode"]
+            saved_terminal["agent_mcp"] = workspace_terminal["agent_mcp"]
             saved_terminal["initial_command"] = initial_command
         elif (
             base["terminals"][index]["initial_command_mode"] == "agent"
@@ -527,6 +547,7 @@ def _merge_workspace_session_config(
             saved_terminal["agent_selection"] = ""
             saved_terminal["custom_agent"] = ""
             saved_terminal["agent_auto_mode"] = False
+            saved_terminal["agent_mcp"] = False
             saved_terminal["initial_command"] = ""
 
         saved_terminal["explorer_tree_open"] = (

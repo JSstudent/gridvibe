@@ -395,6 +395,11 @@ class ApiRoutesTestCase(unittest.TestCase):
                 "status": "healthy",
                 "service": "GridVibe",
                 "version": __version__,
+                # The one thing a local process outside the browser cannot work
+                # out for itself: whether asking for a workspace window means
+                # leaving an intent for a native page to claim, or handing a
+                # URL to the OS default browser.
+                "window_mode": "browser",
             },
         )
 
@@ -1678,12 +1683,14 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("!isBrowserSession(session)", html)
         self.assertIn("`/api/sessions/${encodeURIComponent(sessionId)}/shell`", html)
         self.assertIn("fetch('/api/wsl-distros')", html)
-        # Every actionable row carries both dimensions, so nothing on this side
-        # can name a shell family without saying what to start under it.
+        # Every actionable row carries all three dimensions, so nothing on this
+        # side can name a shell family without saying what to start under it,
+        # or start an agent without saying whether it gets GridVibe tools.
         self.assertIn('data-pane-shell-launch="1"', html)
         self.assertIn('data-pane-shell-kind="${escHtml(shellKind)}"', html)
         self.assertIn('data-pane-shell-distro="${escHtml(distribution)}"', html)
         self.assertIn('data-pane-shell-agent="${escHtml(agentKey)}"', html)
+        self.assertIn("data-pane-shell-mcp=\"${mcp ? '1' : '0'}\"", html)
         # Non-switchable panes keep the plain one-click reset.
         reset_start = html.index("function handlePaneResetButton(index)")
         reset_body = html[reset_start:html.index("function syncPaneShellControls(index, session)")]
@@ -1714,6 +1721,12 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn(".pane-shell-menu-expand.is-expanded svg { transform: rotate(90deg); }", html)
         # "Plain shell" is a stated choice of no agent, not a silence.
         self.assertIn("label: 'Plain shell',", html)
+        # An MCP-capable agent's tools button uses that same two-control row.
+        # Inline, so the panel never opens sideways out of the window; and
+        # right-anchored with a ceiling, so it grows away from that edge.
+        self.assertIn("class=\"pane-shell-menu-mcp${isLive && activeMcp ? ' is-active' : ''}\"", html)
+        self.assertIn(".pane-shell-menu-mcp.is-active {", html)
+        self.assertIn("max-width: min(320px, calc(100vw - 16px));", html)
 
     def test_terminals_page_agent_options_carry_registry_display_names(self):
         """The menu names an agent in prose; the launcher keeps naming binaries."""
@@ -4333,6 +4346,29 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("socket.emit('clear_terminal_buffer', { session_id: sessionId });", clear_body)
         self.assertIn("socket.emit('terminal_input', { session_id: sessionId, data: clearCommand });", clear_body)
 
+    def test_terminals_page_runs_the_clear_button_for_a_clear_asked_elsewhere(self):
+        """The MCP's `clear_pane` purges the buffer and broadcasts the rest.
+
+        The page half has to be the button's *own* handler, or the two paths
+        drift and the shell's clear command grows a second owner. A pane in a
+        cached group cannot run it -- `clearTerminalDisplay` addresses a live
+        grid slot, and a cached group's index names a different pane -- so that
+        branch resets the terminal it actually holds instead.
+        """
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = self._page_html(response)
+        start = html.index("socket.on('terminal_cleared'")
+        end = html.index("socket.on('app_config_updated'", start)
+        body = html[start:end]
+        self.assertIn("resolveSessionTarget(session_id)", body)
+        self.assertIn("clearTerminalDisplay(target.index)", body)
+        # The cached-group branch, and the guard that keeps the button's
+        # handler off a slot it does not own.
+        self.assertIn("if (target.active)", body)
+        self.assertIn("term.reset();", body)
+
     def test_terminals_page_recovery_controls_both_reset_mouse_reporting(self):
         """ISSUE-2026-038 — a TUI that died without unwinding leaves its mouse
         reporting armed and the shell types the reports at its own prompt. Both
@@ -5011,6 +5047,90 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("TF_LOGIN_SHELL", client.exec_command.call_args.args[0])
         self.assertIn("-ilc", client.exec_command.call_args.args[0])
 
+    def test_detect_windows_command_probes_cmd_through_cmd_exe_not_powershell(self):
+        """A cmd pane's agent is checked in cmd, not stood in for by PowerShell.
+
+        A CLI reachable from an interactive cmd session -- through an AutoRun
+        registry hook, a batch-file PATH shim, anything that never touched a
+        PowerShell $PROFILE -- was reported absent because detection always
+        shelled out to `powershell.exe -NoProfile` regardless of which shell
+        the pane actually runs. The pane then silently opened as a plain
+        terminal instead of the agent the reader selected.
+        """
+        completed = SimpleNamespace(returncode=0, stdout="C:\\tools\\claude.cmd\n", stderr="")
+
+        with patch.object(api.os, "name", "nt"), patch.object(
+            web_agents.subprocess, "run", return_value=completed
+        ) as run_mock:
+            detected = api._detect_windows_command("claude", "cmd")
+
+        self.assertTrue(detected["found"])
+        self.assertEqual(detected["path"], "C:\\tools\\claude.cmd")
+        command = run_mock.call_args.args[0]
+        self.assertEqual(command, ["cmd.exe", "/c", "where", "claude"])
+        # No /D: an interactive cmd session runs AutoRun, and so must this.
+        self.assertNotIn("/D", command)
+
+    def test_detect_windows_command_reports_cmd_absence_from_cmd_itself(self):
+        completed = SimpleNamespace(
+            returncode=1, stdout="", stderr="INFO: Could not find files for the given pattern(s).\n"
+        )
+
+        with patch.object(api.os, "name", "nt"), patch.object(
+            web_agents.subprocess, "run", return_value=completed
+        ):
+            detected = api._detect_windows_command("claude", "cmd")
+
+        self.assertFalse(detected["found"])
+        self.assertEqual(detected["path"], "")
+
+    def test_detect_windows_command_defaults_to_powershell(self):
+        # The default parameter, and every existing PowerShell-pane caller,
+        # keep behaving exactly as before.
+        completed = SimpleNamespace(returncode=0, stdout="C:\\tools\\claude.ps1\n", stderr="")
+
+        with patch.object(api.os, "name", "nt"), patch.object(
+            web_agents.subprocess, "run", return_value=completed
+        ) as run_mock:
+            detected = api._detect_windows_command("claude")
+
+        self.assertTrue(detected["found"])
+        self.assertEqual(run_mock.call_args.args[0][0], "powershell.exe")
+
+    def test_detect_agent_binary_reads_the_targets_own_shell_kind(self):
+        """The dispatcher forwards shell_kind rather than a fixed default."""
+        with patch.object(web_agents, "_detect_windows_command") as detect_windows:
+            detect_windows.return_value = {"found": True, "path": "x"}
+            api._detect_agent_binary(
+                {"environment_key": "windows_native", "shell_kind": "cmd"}, "claude"
+            )
+
+        detect_windows.assert_called_once_with("claude", "cmd")
+
+    def test_agent_preflight_uses_cmd_detection_for_a_cmd_launch(self):
+        """End to end: a Local Repo launch drafted for cmd is checked in cmd.
+
+        `_resolve_agent_target` already resolved `shell_kind` correctly from
+        `use_powershell`/`use_wsl`; the bug was one call downstream, where the
+        probe ignored it. This pins the whole chain from a launcher payload to
+        the subprocess actually spawned.
+        """
+        session_config = {"use_wsl": False, "use_powershell": False, "distribution": ""}
+        completed = SimpleNamespace(returncode=0, stdout="C:\\tools\\claude.cmd\n", stderr="")
+
+        with patch.object(api.os, "name", "nt"), patch.object(
+            web_agents.subprocess, "run", return_value=completed
+        ) as run_mock:
+            with api._agent_detection_cache_lock:
+                api._agent_detection_cache.clear()
+            preflight = web_agents._agent_preflight_payload(
+                "claude",
+                web_agents._build_agent_preflight_request("claude", "wsl", session_config),
+            )
+
+        self.assertEqual(preflight["target"]["shell_kind"], "cmd")
+        self.assertEqual(run_mock.call_args.args[0][0], "cmd.exe")
+
     def test_resolve_agent_target_passes_blank_distribution_when_wsl_distro_is_unspecified(self):
         payload = {
             "connection_mode": "wsl",
@@ -5144,6 +5264,76 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(session.startup_mode, "agent")
         self.assertEqual(session.agent_selection, "claude")
         self.assertEqual(session.initial_command, "claude")
+
+    def test_create_sessions_carries_mcp_onto_an_ssh_pane(self):
+        """A remote pane keeps the choice; its tunnel is what answers it.
+
+        The flag used to be cleared here, when the sidecar could only ever be
+        a local child process. A remote pane now reaches GridVibe through the
+        SSH reverse tunnel opened at connect time, so the launch records what
+        the reader asked for and `_connect_ssh_session` decides whether it
+        could be honoured.
+        """
+        sessions_payload = {
+            "connection_mode": "ssh",
+            "layout": "single",
+            "sessions": [
+                {
+                    "host": "example.com",
+                    "username": "ubuntu",
+                    "port": 22,
+                    "title": "Claude",
+                    "directory": "/home/ubuntu/project",
+                    "initial_command": "claude",
+                    "startup_mode": "agent",
+                    "initial_command_mode": "agent",
+                    "agent_selection": "claude",
+                    "agent_mcp": True,
+                }
+            ],
+        }
+
+        with patch.object(
+            web_agents,
+            "_agent_preflight_payload",
+            return_value={"status": "installed", "message": "Claude Code is available."},
+        ), patch.object(api.socketio, "start_background_task"):
+            response = self.client.post("/api/sessions", json=sessions_payload)
+
+        self.assertEqual(response.status_code, 201)
+        session = api.session_manager.get_all_sessions()[0]
+        self.assertTrue(session.agent_mcp)
+
+    def test_create_sessions_keeps_mcp_for_a_local_repo_launch(self):
+        # The positive case behind the same gate: nothing here should cost a
+        # Local Repo pane -- the one connection mode the sidecar can reach --
+        # the flag it actually asked for.
+        sessions_payload = {
+            "connection_mode": "wsl",
+            "layout": "single",
+            "sessions": [
+                {
+                    "title": "Claude",
+                    "directory": "C:/repo",
+                    "initial_command": "claude",
+                    "startup_mode": "agent",
+                    "initial_command_mode": "agent",
+                    "agent_selection": "claude",
+                    "agent_mcp": True,
+                }
+            ],
+        }
+
+        with patch.object(
+            web_agents,
+            "_agent_preflight_payload",
+            return_value={"status": "installed", "message": "Claude Code is available."},
+        ), patch.object(api.socketio, "start_background_task"):
+            response = self.client.post("/api/sessions", json=sessions_payload)
+
+        self.assertEqual(response.status_code, 201)
+        session = api.session_manager.get_all_sessions()[0]
+        self.assertTrue(session.agent_mcp)
 
     def test_agent_preflight_endpoint_rejects_unknown_agent(self):
         response = self.client.post("/api/agent-preflight", json={"agent": "unknown"})
@@ -15168,13 +15358,35 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn('data-terminal-split-h="${index}"', html)
         self.assertIn("splitTerminalPane(index, 'vertical')", html)
         self.assertIn("splitTerminalPane(index, 'horizontal')", html)
-        self.assertIn("async function splitTerminalPane(index, axis)", html)
+        # The axis is a parameter and never inferred. Asserted as the two
+        # leading parameters rather than the whole signature, which grew a
+        # third when a split gained a description of the pane it creates.
+        self.assertIn("async function splitTerminalPane(index, axis", html)
         # Each axis button enables independently from the per-axis candidates.
         self.assertIn("candidates.includes('vertical'),", html)
         self.assertIn("candidates.includes('horizontal'),", html)
         # The old single-axis auto-picker is gone.
         self.assertNotIn("function chooseSplitAxis", html)
         self.assertNotIn("grid?.classList.contains('layout-2-vertical')", html)
+
+    def test_terminals_page_exposes_the_split_bridge_the_intent_poll_reads(self):
+        """A split asked for from outside the browser is performed here.
+
+        The axis never reaches the server, so `window-intent.js` polls for
+        split intents and calls this page's own bridge -- which answers with
+        facts (which axes fit, and the button's own sentence for one that does
+        not) and runs `splitTerminalPane`, the handler the button runs.
+
+        The launcher has no bridge, and that absence *is* the ownership rule:
+        a page holding no panes claims no split.
+        """
+        html = self._page_html(self.client.get("/terminals"))
+        launcher = self._page_html(self.client.get("/"))
+        intent = self.client.get("/static/js/window-intent.js").get_data(as_text=True)
+
+        self.assertIn("window.GridVibeSplitBridge = splitBridge;", html)
+        self.assertIn("splitBridge: host.GridVibeSplitBridge || null", intent)
+        self.assertNotIn("window.GridVibeSplitBridge =", launcher)
 
     def test_terminals_page_explains_axis_specific_split_minimums(self):
         response = self.client.get("/terminals")
@@ -17898,7 +18110,10 @@ class ExtractedFrontendAssetsTestCase(unittest.TestCase):
         # pane created by a split.
         for function_name in (
             "function replacePaneWithTerminal(index, session) {",
-            "async function splitTerminalPane(index, axis) {",
+            # Named without its parameter list: the split gained a third
+            # parameter describing the pane it creates, and this test is about
+            # the room join inside it, not about the signature.
+            "async function splitTerminalPane(",
         ):
             with self.subTest(function=function_name):
                 body = terminals[terminals.index(function_name):]
@@ -22164,6 +22379,82 @@ class SettingsLauncherConfigTestCase(unittest.TestCase):
         self.assertIn("explorer_md_font", web_runtime_state._SESSION_SNAPSHOT_FIELDS)
         self.assertIn("explorer_source_font", web_runtime_state._SESSION_SNAPSHOT_FIELDS)
         self.assertIn("explorer_theme", web_runtime_state._SESSION_SNAPSHOT_FIELDS)
+
+    def test_launcher_wires_the_mcp_toggle(self):
+        """The MCP checkbox mirrors Auto mode in every place Auto mode is.
+
+        Including the one that makes it optional: an agent that cannot be
+        handed the sidecar at launch has no checkbox at all, which is how a CLI
+        whose only MCP mechanism edits the user's own config needs no code.
+        """
+        html = self.client.get("/").get_data(as_text=True)
+        self.assertIn("mcp_supported", html)
+        self.assertIn("mcp_description", html)
+
+        launcher_js = self._static("js/launcher.js")
+        # `mcp_supported`, never `mcp_flag`: Codex supports MCP and publishes
+        # no flag string, so flag truthiness would hide a working checkbox.
+        self.assertIn("function agentMcpSupported(agentValue)", launcher_js)
+        self.assertNotIn("function agentMcpFlag(", launcher_js)
+        self.assertIn("function agentMcpDescription(agentValue)", launcher_js)
+        self.assertIn(
+            "function syncTerminalAgentMcpState(row, commandMode, selectedAgent)",
+            launcher_js,
+        )
+        self.assertIn("t-agent-mcp", launcher_js)
+        self.assertIn("t-agent-mcp-field", launcher_js)
+        collect = launcher_js[
+            launcher_js.index("function collectTerminalDrafts()"):
+            launcher_js.index("function renderCountOptions()")
+        ]
+        self.assertIn("agent_mcp:", collect)
+        # A remote pane is offered the checkbox too now: its tools arrive over
+        # the SSH reverse tunnel rather than from a local sidecar, so the
+        # connection mode is no longer part of the question.
+        self.assertNotIn("agentMcpAvailableHere", launcher_js)
+
+        shared_js = self._static("js/shared.js")
+        self.assertIn("agent_mcp: resolvedStartupMode === 'agent'", shared_js)
+
+    def test_agent_options_expose_registry_mcp_flags(self):
+        options = {option["value"]: option for option in web_agents._agent_options()}
+
+        self.assertEqual(options["claude"]["mcp_flag"], "--mcp-config {config}")
+        self.assertEqual(
+            options["copilot"]["mcp_flag"], "--additional-mcp-config @{config}"
+        )
+        self.assertTrue(options["claude"]["mcp_description"])
+        # Codex supports MCP and publishes no flag *string*: it takes no config
+        # file, so its servers are composed as `-c` overrides at launch. Which
+        # is why the checkbox asks `mcp_supported`, never `mcp_flag`.
+        self.assertEqual(options["codex"]["mcp_flag"], "")
+        self.assertTrue(options["codex"]["mcp_supported"])
+
+        for key in ("claude", "copilot", "codex"):
+            with self.subTest(supported=key):
+                self.assertTrue(options[key]["mcp_supported"])
+                self.assertTrue(options[key]["mcp_description"])
+
+        # The rest can only register a server by editing the user's own config
+        # (an `<agent> mcp add` subcommand), which would outlive the pane that
+        # asked. No launch-time mechanism, so no checkbox.
+        for key in ("kimi", "kilo", "grok", "hermes", "opencode", "other"):
+            with self.subTest(agent=key):
+                self.assertEqual(options[key]["mcp_flag"], "")
+                self.assertFalse(options[key]["mcp_supported"])
+
+    def test_a_pane_that_did_not_ask_for_mcp_changes_in_no_way(self):
+        session = SimpleNamespace(
+            initial_command="claude",
+            initial_command_mode="agent",
+            agent_selection="claude",
+            agent_auto_mode=False,
+            agent_mcp=False,
+        )
+
+        self.assertEqual(
+            web_agents._compose_agent_startup_command(session), "claude"
+        )
 
     def test_launcher_wires_the_auto_mode_toggle(self):
         html = self.client.get("/").get_data(as_text=True)

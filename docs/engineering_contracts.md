@@ -20,6 +20,7 @@ Regression history and audit narratives do not belong in this reference.
 - [Presentation persistence](#presentation-persistence)
 - [Workspace lifecycle and windows](#workspace-lifecycle-and-windows)
 - [Agent dashboard](#agent-dashboard)
+- [Agent tools (MCP)](#agent-tools-mcp)
 - [Architecture and extraction boundaries](#architecture-and-extraction-boundaries)
 - [UI and styling](#ui-and-styling)
 - [Logging](#logging)
@@ -288,11 +289,24 @@ changing any field that survives restart; it owns the complete save/restore flow
   Validate every fallible input and resolve directories before presentation
   cleanup, metadata mutation, teardown, or restart. Refusal leaves the whole pane,
   status, and connection unchanged. Routes supply late-resolved side effects.
-- Shell family and agent are independent tri-state payload dimensions: omitted
-  leaves that dimension alone; explicit `agent: ""` alone clears an agent. An
-  arbitrary startup command is not an agent. Only a shell-family change retargets
-  the directory; agent-only relaunch preserves the observed cwd. Reselecting the
-  current choice is a no-op on both sides.
+- Shell family, agent and MCP are independent tri-state payload dimensions:
+  omitted leaves that dimension alone; explicit `agent: ""` alone clears an
+  agent. An arbitrary startup command is not an agent. Only a shell-family
+  change retargets the directory; agent-only relaunch preserves the observed
+  cwd. Reselecting the current choice is a no-op on both sides.
+- **MCP is resolved last and cannot outlive its agent.** An unstated `mcp`
+  follows the agent, which is the rule auto mode already has: carried forward
+  when the agent is unchanged, dropped when it changes, because a mechanism
+  registered for one CLI says nothing about the next. A stated `mcp` wins over
+  that carry-forward, and is still `and`-ed with the resolved agent — a pane
+  with no agent has no CLI to register the sidecar with. Both directions are
+  available to an SSH pane: its tools arrive over a reverse forward on the
+  transport its shell already runs on, so `pane_can_run_the_sidecar()` picks
+  the *shape* of the answer, never whether there is one.
+- Each of these transitions has a **gated twin** reached by a tool rather than
+  by the pane header — `agent-relaunch`, `agent-mode-switch`, `clear` — and the
+  rules those add are in [Agent tools (MCP)](#agent-tools-mcp). Everything in
+  this section holds for both halves; the gates run before any of it.
 - **A stated agent is preflighted before anything moves, and an absent binary
   refuses the relaunch.** The launcher has no pane yet, so it opens one as a
   plain terminal; the menu's pane is already running, so the honest outcome is
@@ -305,11 +319,37 @@ changing any field that survives restart; it owns the complete save/restore flow
   run, so the relaunch proceeds and the reader gets the shell's own error. A
   stated `""` and an unstated agent probe nothing. The refusal message is the
   toast, so it names the agent, the target, and that the pane was left alone.
-- Header shell rows state both family and agent; pressing a family row is its
-  plain-shell relaunch. A separate adjacent chevron lazily expands agents. Windows
-  Local Repo panes have families; SSH/POSIX panes get the flat agent list without
-  a local-family choice. Use registry-backed `AGENT_OPTIONS` minus `other`.
+- Header rows state every dimension; pressing a family row is its plain-shell
+  relaunch. A separate adjacent chevron lazily expands agents. Windows Local
+  Repo panes have families; SSH/POSIX panes get the flat agent list without a
+  local-family choice. Use registry-backed `AGENT_OPTIONS` minus `other`.
   Expansion is temporary UI state, never persisted.
+- An agent row whose option publishes `mcp_supported` carries a second target
+  in that same adjacent slot: the row starts it plainly, the button starts it
+  with GridVibe tools, and exactly one of the pair wears the check. So a plain
+  row is the documented way *back off* the tools, which is why every row states
+  `mcp` rather than leaving it silent. The control is inline — the panel is
+  anchored to the pane's own right edge and capped, so it grows away from the
+  window edge and nothing opens sideways off a right-hand pane. An agent that
+  publishes no mechanism gets no button, exactly as a pane with no shell family
+  gets no chevron; the two surfaces read the one registry field, never a
+  second rule client-side.
+- **A pane is painted for a relaunch before the relaunch is requested, and no
+  pane is left behind an overlay nothing removes.** The route starts the new
+  transport while it is still writing its response — a local shell is marked
+  connected inside that same request — so the connected `session_status` can
+  reach the page first, and on an already-attached pane that event is the only
+  thing that takes the overlay off. `relaunchSessionShell()` therefore raises
+  the "Connecting…" overlay, and resets the pane's xterm, before its POST: a
+  reset that waited would clear what the new shell had already drawn, and an
+  overlay that waited would outlive the window. A request that then fails
+  repaints the pane from its own session record (`syncPanePlaceholder()`)
+  rather than leaving a spinner over a shell that is still running, under the
+  same slot-ownership re-check as everything else done after an await. On the
+  receiving side the status event is not the only remover: every group load and
+  status refresh takes the overlay off a connected pane that is already
+  attached, which is also what heals a pane that connected while its group was
+  not the visible one.
 - **Every terminal/agent→Files switch derives a fresh root from where the pane
   is standing:** the Git worktree containing its working directory, else that
   directory itself (`_resolve_explorer_open_root()`, which takes those two
@@ -766,6 +806,21 @@ unless the task explicitly changes this contract.
   row; a second implementation server-side is what would let the two disagree.
   The transport tag reads `mode` plus the `use_wsl`/`use_powershell` precedence
   `paneShellKind()` already uses, so the tag and the relaunch menu agree.
+- **Whether a pane's agent has GridVibe tools is stated where the pane is
+  named**, by `paneAgentMcpTag()` in the same module, so the pane header and the
+  dashboard row cannot disagree about it. Its rule is `agent_mcp` **and** an
+  agent pane, mirroring `paneAgentMcp()` in `terminal-shell.js`: the flag
+  outlives the agent that justified it in presets and snapshots, and a plain
+  shell must not wear a chip for tools nothing is holding. The transport is not
+  part of the rule — a remote pane's tools arrive over the reverse forward on
+  its own SSH transport, so `pane_can_run_the_sidecar()` picks the *shape* of
+  the answer (local config file against tunnelled URL) and never whether there
+  is one. The tag is its own value and is never folded into `paneDisplayTitle()`
+  or `paneChatLine()`: a title is also what the reader typed, and a chip
+  concatenated into one would be indistinguishable from a name and would reach
+  the typed-title comparison as though somebody had chosen it. `agent_mcp`
+  therefore stays in `PANE_FIELDS` and in the repaint's structure key, so a
+  relaunch on or off the tools rebuilds the row and an unchanged poll does not.
 - The dashboard conversation line is `paneChatLine()` in `agent-identity.js`,
   not the dashboard's own ladder: the agent's usable OSC tab/window title, then
   a non-generic pane title, then `New session` plus where the pane is. GridVibe
@@ -975,17 +1030,186 @@ unless the task explicitly changes this contract.
   trailing column and a separate reading: only the agents that speak the
   progress sequence have one, so it must never widen the dot's column.
 - The drawn row is therefore the dot, the agent's mark and name, the chat
-  title and `auto`; `auto` is the only chip left on it. What the pane runs on
-  is still `paneTransportLabel()`'s single word, and the dashboard states it
-  as the last line of the row's own hover rather than as a chip on the line --
-  it is looked up when something is wrong with a pane, not scanned down a
-  card, and the width belongs to the title.
+  title, `MCP` and `auto` — the two chips left on it, and both say what this
+  agent may *do*, which is what a reader choosing a row to instruct is deciding
+  between. What the pane runs *on* is still `paneTransportLabel()`'s single
+  word, and the dashboard states it as the last line of the row's own hover
+  rather than as a chip on the line: it is looked up when something is wrong
+  with a pane, not scanned down a card, and the width belongs to the title.
+  A chip may carry a hover of its own for a label the reader may not recognise;
+  one whose label is already the word carries none.
+- The docked sidebar's row drops the agent's *name* out of flow because its mark
+  already answers which agent it is, and it draws no `auto` chip — but it does
+  draw `MCP`, from `dashboardMcpTagHtml()`, the dialog's own builder handed in
+  through the runtime. Nothing else on that row says whether the agent can act
+  on GridVibe, which is what a reader picking a pane to instruct is deciding,
+  and picking one *while* working is what a docked panel is for. Every other
+  field on that row stays the dialog's answer asked for by name; a second copy
+  of any of them is how one pane comes to read two ways on two surfaces.
 - Dashboard layout must remain usable without horizontal overflow at narrow
   widths. A polling update that changes only a row's title, hover, status,
   progress, or idle age updates that row in place, each field on its own
   comparison; structural changes rebuild the tree while restoring scroll and
   focus. A failed read leaves the last good tree on screen behind a stated retry
   notice, and an action failure survives successful polls.
+
+## Agent tools (MCP)
+
+[`gridvibe_mcp/README.md`](../gridvibe_mcp/README.md) is the reference for this
+feature — the tool list, what each tool answers, which CLIs can be handed the
+sidecar, and the stated-weakness notes. Do not restate the tool surface here or
+in `README.md`; state the rules a change has to keep.
+
+- **The sidecar is a sibling, not a subsystem.** Nothing under `web/` or
+  `sessions/` imports `gridvibe_mcp` except `web/mcp_http.py`, and only the
+  SDK-free halves of it (`server`, `client`, `identity`), function-locally;
+  `gridvibe_mcp` imports nothing from GridVibe and reaches it over loopback HTTP.
+  Only `gridvibe_mcp/__main__.py` imports the MCP SDK, which is what keeps the
+  asyncio-native SDK out of the threading-mode Flask process.
+  The SDK stays optional: `make check` and a plain `pip install -r requirements.txt`
+  must both leave it uninstalled and the suite green.
+- **One dispatch, both transports.** stdio and `POST /mcp/<token>` both run
+  `gridvibe_mcp.server.dispatch` against a `GridVibeClient`. A tool must not
+  behave differently depending on which transport asked; a new tool is added
+  once, in `tool_specs()` and `_run()`, and reaches both. The endpoint is the POST
+  half of streamable HTTP deliberately: `GET` and `DELETE` answer `405` with
+  `Allow: POST` and a sentence naming what is absent and why, decided before the
+  token is resolved so the refusal says nothing about whether one is live.
+- **Every tool result is built from an explicit field list in `client.py`, never
+  a pass-through of `to_dict()`**, and `scrub()` drops any key that looks like a
+  secret at any depth regardless of the list. `list_saved_layouts` is the sharp
+  case: the route it reads answers with a *decrypted* SSH password by design.
+  Failures are typed and carry GridVibe's own sentence verbatim, unretried.
+- **Four tiers, and the destroy tier is absent from the build.** Read and create
+  only ever make something new; `set_pane_agent`/`set_pane_mode` replace what is
+  behind an existing pane; `clear_pane` erases what one has drawn. Closing a
+  pane, group or workspace, moving a group, and typing arbitrary input into a
+  terminal are not written, not registered and not flag-gated — a tool that does
+  not exist cannot be talked into running by a file an agent reads. `clear_pane`
+  is not `send_input`: the only thing reaching stdin is GridVibe's own clear
+  command, chosen by the window that knows the pane's shell family.
+- **Every create verb is bounded by something.** `launch_panes` by
+  `terminal.max_sessions` and the depth budget, `split_pane` by the group cap, and
+  `create_workspace` by `MAX_EMPTY_WORKSPACES` — counted over workspaces that are
+  both `retain_when_empty` and still holding no group, so filling one makes room
+  for another, and decided inside the label claim so two requests cannot both read
+  fifteen. The count is over the world rather than the caller, because the route
+  cannot tell a tool from the launcher's **New Workspace** button.
+- **Every tool-reachable pane transaction passes the shared gates in
+  `web/pane_gates.py` before anything is mutated, closed or restarted**, so a
+  refusal leaves a whole-pane snapshot unchanged — which is what the suites pin.
+  Self (never the calling pane) and lineage (only panes that pane created, and
+  only while it is still open) are shared; the third gate is each transaction's
+  own kind rule and lives in its own module, raised through the same `refuse()`
+  factory so every refusal names which gate failed. `PaneGateRefusal` carries the
+  status; each transaction translates it into the one exception its route maps.
+- **`override` is the user's word, never the tool's inference.** It waives
+  lineage and the "already running an agent" refusal; never self, and never the
+  kind gate's mode rule. It is forwarded because the calling agent stated it, is
+  logged with both pane ids, and the tool descriptions must keep saying that only
+  a person's words in that conversation justify it.
+- **Lineage is read from the live registry, never from the request body.**
+  `created_by_session_id` is stamped from the pane a launch or split actually
+  came from (`_live_session_id` / `_live_origin_session_id`), and is deliberately
+  absent from `runtime_state.json`: a creator id that survived a restart would
+  name a stranger, so every restored pane refuses the gate that reads it.
+- **The depth budget bounds agents launching agents, and only that.** A pane a
+  tool creates is stamped one deeper than the pane that *asked*; a split that
+  creates an agent costs budget, a split that creates a plain pane does not.
+  Depths are bounded by `_normalize_agent_depth` wherever they are written — the
+  gated relaunch included, which is the one path whose raw `setattr` through
+  `update_session_metadata` normalizes nothing of its own. That route reads the
+  caller *inside* the gate sequence, so a caller that closed mid-call raises the
+  lineage refusal rather than restarting the chain's budget at 1.
+- **A tool is never handed a silent normalization.** Where a page's own route may
+  normalize (the toggle only offers what a pane can be), the gated twin refuses
+  instead: browser mode on a remote pane, a `startup_mode` outside
+  `_AGENT_MODE_TARGETS`, a browser pane in a group opening on another host. Being
+  handed a plain terminal labelled a success is the one answer a tool must not get.
+- **A launch from inside a pane opens on that pane's machine.** The body names
+  `origin_session_id` and `workspaces.resolve_origin_connection` reads the host,
+  user, port and password off that live session in this process; none of it
+  reaches a response, a preset or a snapshot. An origin pane that has closed is a
+  refusal, never a fall back to this machine.
+- **Identity arrives by inheritance locally and by token remotely.** The five
+  `GRIDVIBE_*` variables are merged at the spawn call site in
+  `_connect_local_session`, *not* inside `_local_shell_integration` — that
+  function returns unchanged when `terminal.shell_integration` is off, which is a
+  kill switch for the prompt hook and says nothing about MCP. WSL panes extend
+  `WSLENV` through `merge_wslenv` so the two callers cannot overwrite each other.
+  A tunnelled pane's identity comes from `PaneTokenRegistry`, in memory only,
+  minted idempotently per pane and never written into a preset or a snapshot. It
+  is revoked on the pane's own close path — the one that knows the session id,
+  not `_shutdown_connection`, which does not — including the close that lands
+  *inside* `_establish_mcp_tunnel`, where a stale connection is torn down rather
+  than recorded and a raising teardown still costs the token. The registry is
+  bounded (`MAX_PANE_TOKENS`, oldest evicted, logged) so a revoke that never runs
+  is a bounded leak rather than a permanent one.
+- **`agent_mcp` is only ever set on a CLI that publishes a mechanism.**
+  `_agent_supports_mcp` is asked at every write of the flag, not only where it is
+  spent: the one launch normalizer in `web/saved_sessions.py`, the split
+  overrides in `web/api.py`, `apply_pane_shell_change` in `web/session_shell.py`,
+  and `_establish_mcp_tunnel` last, which is the only one with a cost attached —
+  such a pane opens no port, mints no token and writes no remote file. The pane
+  header's **MCP** tag paints off the flag, so the tag is honest for free.
+- **`pane_can_run_the_sidecar()` picks the *shape* of the answer, never whether
+  there is one.** A local pane gets the generated config; a remote pane gets a
+  URL. The predicate is held there rather than at the launcher checkbox because a
+  saved preset, a restored snapshot and the relaunch route all carry `agent_mcp`
+  forward.
+- **The generated `.gridvibe_mcp.json` is per install and rewritten on every app
+  start**, gitignored, carrying no `env` block so one file serves every pane.
+  Composition is registry-driven: `_MCP_FLAG_TEMPLATE` admits one option token and
+  one placeholder so a registry typo cannot smuggle a second command onto the
+  launch line, `_toml_override_flag` owns the per-shell quoting Codex needs, and
+  anything that cannot be composed safely resolves to *no fragment* — costing the
+  pane its tools, never its agent. A test-mode process refuses the production path.
+- **The SSH reverse forward is opt-in per pane and costs the tools, never the
+  shell.** `sshd` binds the remote host's own loopback; the port lives only for
+  that connection; the remote config is written over SFTP at `0600` and named per
+  pane; teardown runs off the close path on its own thread because every step is a
+  round trip to a host that may be unreachable.
+- **The forwarded channel reaches a filter, never GridVibe's port.** On this end
+  of a reverse forward sits the whole unauthenticated loopback API, whose only
+  guard has ever been "you have to be on this machine", so a socket to GridVibe
+  is opened only for a request that survives `web/ssh_tunnel.py`'s filter: one
+  request per connection, `POST`, and a target equal to *this pane's own*
+  `/mcp/<token>` under `secrets.compare_digest`. The token is a parameter of
+  `open_reverse_tunnel`, so a port opened for one pane cannot spend another's,
+  and `mcp_path()` is the one spelling `tunnel_url()` also builds the remote
+  config from. Framing that cannot prove where the body ends is refused rather
+  than normalized, the head and body are bounded, and refusals name nothing — the
+  same `404` for a wrong method and a wrong token, and only the target's first
+  segment in the log, because the path is a credential. The still-true narrowing
+  is what it now is: a remote process reaches this pane's tool surface, acting on
+  this machine, and nothing else on the API.
+- **Opening a window and splitting a pane are page work, recorded as intents.**
+  The split axis never reaches the server: the page computes the rectangles and
+  measures its own refusals off the live terminal. `web/window_intents.py` is in
+  memory, TTL-bounded and capped, and exactly one claimant wins so two open pages
+  deliver one window. Everything decidable without measuring a pane is decided
+  before the intent is recorded. A page reports only its own kind's outcomes, and
+  a refusal is relayed with the axis that would have worked — never a silent
+  retry on the other axis.
+- **The sidecar's wait must exceed the store's worst case, and the relation is
+  pinned rather than derived.** `DEFAULT_WAIT_SECONDS` in `splits.py` and
+  `windows.py` is above `INTENT_TTL_SECONDS + CLAIM_TTL_SECONDS`, so an expiry the
+  sidecar reports is an expiry the store reached — which is what makes
+  "the panes and the workspace are untouched" true wherever it is said. The
+  sidecar cannot import `web/`, so a test asserts the inequality. The HTTP path
+  waits on the store's own condition variable (`wait_for_settled`, reached by
+  overriding `read_window_intent` on a `GridVibeClient` subclass) rather than
+  re-entering the server, so neither tool module knows which transport it serves.
+- **A failed poll is not a failed verb.** Both loops swallow `GridVibeError` and
+  keep waiting to the deadline; a wait that *ends* never having read the store
+  answers `no_window_available` with the sentence that says so and names
+  `list_panes`, never the one claiming nothing happened.
+- **Three honest outcomes per intent verb** (`opened`/`blocked`/`no_window_available`,
+  `split`/`refused`/`no_window_available`), never a retry and never a pretended
+  result. Browser mode answers `no_window_available` for a split because the
+  intent poll runs in a native window only; `open_window` has a browser fallback
+  because `webbrowser.open` is a real alternative and there is no equivalent for
+  "measure this pane".
 
 ## Architecture and extraction boundaries
 
@@ -1046,6 +1270,17 @@ unless the task explicitly changes this contract.
   foregrounds are retained in both themes, with contrasting backgrounds for
   white/yellow names on light surfaces and near-black OpenCode names. Runtime
   agent changes update both the title's brand key and its icon in place.
+- A split is two halves. `split-geometry.js` is the DOM-free, Node-tested rule
+  for where the cut lands and what the axis track weights become: the offset is
+  chosen by measured width, not by track count, so an odd span and a span whose
+  tracks carry unequal weights — what a pane inherits when it absorbs a closed
+  neighbour, and what older saved layouts come back as — still halve. The
+  rewrite preserves the split span's own weight total, so no other pane moves;
+  where another pane's edge falls inside the span, that divider wins and the cut
+  goes to the nearest line instead. Keep `terminals.js` a caller: it measures the
+  live grid and publishes one weight generation, and the split button and the
+  sidecar's `split_pane` intent must keep reaching it through the same handler.
+
 - `agent-dashboard.css` dresses one dialog on two pages and states no page's
   palette: no `color-scheme`, no `body` rule, no full-height frame. It reads the
   shared `--gv-dialog-*` and status tokens, so both legacy page palettes dress

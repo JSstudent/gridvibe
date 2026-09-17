@@ -36,6 +36,20 @@ logger = logging.getLogger(__name__)
 # never retarget or restart a running terminal.
 _UNCHANGED = object()
 
+#: A pane cannot be more generations deep than any sane budget allows; the
+#: ceiling is here so a hand-written snapshot cannot state a depth that
+#: overflows the sidecar's own refusal arithmetic.
+_MAX_AGENT_DEPTH = 64
+
+
+def _normalize_agent_depth(value: Any) -> int:
+    """Return a bounded, non-negative agent-launch depth."""
+    try:
+        depth = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, min(_MAX_AGENT_DEPTH, depth))
+
 
 class SessionStatus(Enum):
     """Status of a terminal session."""
@@ -75,6 +89,23 @@ class TerminalSession:
     agent_selection: str = ""
     custom_agent: str = ""
     agent_auto_mode: bool = False
+    # Whether this pane's agent CLI is started with the GridVibe MCP
+    # sidecar registered. A launch option, never a live toggle.
+    agent_mcp: bool = False
+    # How many generations of agent-launched panes stand behind this
+    # one. 0 for a pane a person launched. Runtime lineage, read by the
+    # sidecar's own depth budget -- see gridvibe_mcp/identity.py.
+    agent_depth: int = 0
+    # *Which* pane asked for this one, rather than how many generations stand
+    # behind it. `agent_depth` is a counter: two sibling agents at the same
+    # depth would each pass a depth-based gate on the other's panes, so the
+    # relaunch gate reads this instead. "" for a pane a person launched.
+    #
+    # Deliberately runtime-only and absent from `web/runtime_state.py`'s field
+    # list: live sessions are in memory, so after a restart this would name a
+    # session that no longer exists. A restored workspace therefore carries no
+    # creator ids at all and every pane in it refuses -- the safe direction.
+    created_by_session_id: str = ""
     title: Optional[str] = None
     mode: str = "ssh"
     distribution: Optional[str] = None
@@ -158,6 +189,9 @@ class TerminalSession:
             "agent_selection": self.agent_selection,
             "custom_agent": self.custom_agent,
             "agent_auto_mode": self.agent_auto_mode,
+            "agent_mcp": self.agent_mcp,
+            "agent_depth": self.agent_depth,
+            "created_by_session_id": self.created_by_session_id,
             "title": self.title,
             "mode": self.mode,
             "distribution": self.distribution,
@@ -941,6 +975,9 @@ class SessionManager:
             "agent_selection": str(config.get("agent_selection") or ""),
             "custom_agent": str(config.get("custom_agent") or ""),
             "agent_auto_mode": bool(config.get("agent_auto_mode")),
+            "agent_mcp": bool(config.get("agent_mcp")),
+            "agent_depth": _normalize_agent_depth(config.get("agent_depth")),
+            "created_by_session_id": str(config.get("created_by_session_id") or ""),
             "title": config.get("title"),
             "mode": mode,
             "distribution": config.get("distribution"),
@@ -1114,6 +1151,9 @@ class SessionManager:
             "agent_selection",
             "custom_agent",
             "agent_auto_mode",
+            "agent_mcp",
+            "agent_depth",
+            "created_by_session_id",
             "title",
             "distribution",
             "use_wsl",

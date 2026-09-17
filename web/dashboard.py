@@ -77,6 +77,8 @@ PANE_FIELDS = (
     "agent_selection",
     "custom_agent",
     "agent_auto_mode",
+    # Whether this pane's agent has the GridVibe tools.
+    "agent_mcp",
     # What the agent is running *on*. Three fields rather than one word,
     # because the word is a naming decision and naming is the client's:
     # ``mode`` separates a remote pane from a local one, and the other two are

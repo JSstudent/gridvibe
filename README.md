@@ -85,18 +85,64 @@ python webview_launcher.py --mode browser|native
 
 Pick an agent per pane in the launcher. GridVibe checks whether the binary is on `PATH` **in the target environment** (the remote host for SSH, the chosen distro for WSL, Windows for PowerShell/cmd) and shows install guidance when it isn't.
 
-| Agent | Binary | Auto mode |
-| --- | --- | --- |
-| Claude Code | `claude` | Yes |
-| OpenAI Codex CLI | `codex` | Yes |
-| GitHub Copilot CLI | `copilot` | Yes |
-| OpenCode CLI | `opencode` | — |
-| Kilo CLI | `kilo` | Yes |
-| Kimi Code CLI | `kimi` | Yes |
-| Grok Build (xAI) | `grok` | Yes |
-| Hermes Agent | `hermes` | Yes |
+| Agent | Binary | Auto mode | GridVibe tools |
+| --- | --- | --- | --- |
+| Claude Code | `claude` | Yes | Yes |
+| OpenAI Codex CLI | `codex` | Yes | Yes |
+| GitHub Copilot CLI | `copilot` | Yes | Yes |
+| OpenCode CLI | `opencode` | — | — |
+| Kilo CLI | `kilo` | Yes | — |
+| Kimi Code CLI | `kimi` | Yes | — |
+| Grok Build (xAI) | `grok` | Yes | — |
+| Hermes Agent | `hermes` | Yes | — |
+
+**GridVibe tools** is the MCP checkbox — [the section below](#gridvibe-tools-mcp) is what it gives the agent. The five agents without it have no way to register a server for one session only; theirs would edit your own config permanently, so GridVibe does not offer it.
 
 GridVibe does not bundle the CLIs. If everything shows `Missing`, install it and put its folder on `PATH` — for npm-installed agents on Windows that is usually `%APPDATA%\npm` (check with `npm prefix -g`). Restart GridVibe after PATH changes.
+
+## GridVibe Tools (MCP)
+
+Give an agent the **MCP** checkbox and it can see and build GridVibe workspaces from inside its own pane — so you stop describing your grid to it and start asking for the grid you want. Tick **MCP** beside the agent in the launcher, or press the **MCP** button on a row in a pane's 🔄 dropdown. Claude Code, Codex, and Copilot support it.
+
+**Install it first.** The tools ship with GridVibe; the package they need does not, so a normal install leaves them out.
+
+```bash
+make mcp-deps                                            # into GridVibe's own interpreter
+python -m pip install --upgrade -r requirements-mcp.txt  # the same thing, without make
+
+make mcp-status   # run this when an agent reports the server will not start
+```
+
+Until it is installed the checkbox still appears and the agent simply finds no tools. `make mcp-status` walks the whole chain from the outside — the generated config, the interpreter, the entry point, the handshake — and names the link that is broken.
+
+### The thirteen tools
+
+| Tier | Tools | What the agent can do |
+| --- | --- | --- |
+| **Read** | `gridvibe_status` `list_workspaces` `list_panes` `list_agents` `list_saved_layouts` `whoami` | See every workspace, every pane and where it sits in the grid, every agent and whether it is working, every saved preset, and which pane it is itself in |
+| **Create** | `create_workspace` `launch_panes` `open_window` `split_pane` | Make a workspace, launch a group of panes into it, put it on screen, and split any pane side-by-side or stacked |
+| **Replace** | `set_pane_agent` `set_pane_mode` | Relaunch a pane under a different agent or back to a plain shell, or turn it into a file explorer or a browser preview |
+| **Clear** | `clear_pane` | Clear one terminal pane and its replay buffer, exactly as the 🧹 button does |
+
+- **Nothing closes and nothing types.** There is no tool for closing a pane, a tab, or a workspace, and none for sending keystrokes to a terminal. They are absent from the build, not switched off.
+- **An agent only touches panes it made.** The three tools that replace or clear a pane refuse the agent's own pane always, and refuse any pane it did not create — including every pane from before a restart — unless you tell it in that conversation to replace that particular one.
+- **Agents launching agents is bounded.** A pane an agent creates counts one generation deeper than the pane that asked for it, and the chain stops after two.
+- **New panes open where the asking agent is.** A tool called from an SSH pane opens its panes on that same host over the same connection, and refuses rather than quietly falling back to this machine.
+- **SSH panes get the tools too**, with nothing installed on the remote host. The pane reaches GridVibe back down its own connection, on a port that exists only while the pane does, is reachable only from that host, and answers only that pane's own requests.
+- **No credential ever reaches an agent.** Saved presets come back as shapes — layout, pane count, what each pane is — never as a connection.
+- **Splitting a pane needs a window open.** Only a real GridVibe page can measure a pane, so a split in browser mode is refused as *no window available* rather than guessed at. Opening a workspace works in either mode.
+
+### In use
+
+Ask, in the pane you are already sitting in:
+
+> *Split this pane stacked, run the dev server below me, and put a browser preview beside it on `http://localhost:3000`.*
+
+> *Make me a workspace called Migration with four Codex panes — one per service, each in that service's folder — and open it.*
+
+The agent reads where it is and what it is running on, makes the panes, and tells you what it made. Ask for something outside its fence and it names the reason rather than doing something near enough: *that pane was not created by me.*
+
+The full reference — every tool's arguments, the gates, the SSH tunnel, and the stated weaknesses — is [`gridvibe_mcp/README.md`](gridvibe_mcp/README.md).
 
 ## Voice Input
 
@@ -131,7 +177,7 @@ See **every session in every workspace**, agents first. Open the dashboard dialo
 - **Widen it when you need more room** — drag the sidebar's inner edge from its default width up to twice that width. The chosen scale is saved with the workspace and adapts to the window size.
 - **Put it on the side you want** — **App Settings ▸ Agent Dashboard Side** docks the sidebar left or right, and every open window moves as soon as you save. The handle, its marks and the rows are the same either way.
 - **Three levels** — a workspace is a titled band, a session tab is a card inside it drawn in that tab's own colour, and each agent is one row inside the card.
-- **Every agent on one line** — the sidebar shows a leading status dot, the agent's mark and its chat title. The dialog also draws the agent's name and `auto` when it was launched with auto-approval.
+- **Every agent on one line** — a leading status dot, the agent's mark, its chat title, and `MCP` when the agent has GridVibe tools. The dialog also draws the agent's name and `auto` when it was launched with auto-approval.
 - **The state is the dot's colour** — green working, amber idle, red unreachable. Point at a dot for the words: how long it has been idle, or what went wrong.
 - **The rest is one hover away** — pointing at a row gives the full chat title, where the pane is, and what it runs on (`SSH`, `WSL`, `PowerShell`, `cmd`).
 - **A badge that means something** — the button counts the agents **working right now**, not how many you have open. No badge means every agent is sitting at a prompt.
@@ -175,9 +221,11 @@ Launched a pane in cmd and wanted PowerShell — or Codex in WSL? Click the pane
 
 - **Pick a shell** — a Local Repo terminal on Windows lists **Command Prompt**, **PowerShell**, **WSL**, and every detected distro. The pane restarts in place, same slot, same title, in the directory the old shell was sitting in.
 - **Pick an agent** — each shell row's chevron opens **Plain shell** plus every agent, so "this pane, but Codex in WSL" is one click. SSH panes and non-Windows hosts get that list flat.
+- **Give it GridVibe tools** — agents that support MCP carry an **MCP** button beside their row: the row starts the agent plainly, the button starts it with GridVibe's own tools. Works on SSH panes as well as local ones.
+- **The pane says which it is** — a pane running with GridVibe tools wears a small **MCP** tag in its header, and keeps it across a save and restore. Relaunching it plainly takes the tag off.
 - **Plain shell** drops a running agent and comes back to an ordinary prompt. Picking whatever is already checked relaunches it too.
 - **A missing agent never touches your pane** — GridVibe runs the same install check against that row's own target, and answers with a message (*OpenAI Codex CLI is missing in WSL Ubuntu.*) instead of relaunching.
-- **Auto mode follows the agent**, not the pane: relaunch the same agent under another shell and it stays on.
+- **Auto mode and GridVibe tools follow the agent**, not the pane: relaunch the same agent under another shell and they stay on; move to a different agent and they start from its plain launch.
 
 ## Browser Preview
 
@@ -234,7 +282,7 @@ The one configurable chord in GridVibe is voice push-to-talk, set in App Setting
 | 🔄 | Reset the view and replay recent output. On a terminal it opens a dropdown that also relaunches the pane in another shell and/or under another agent |
 | 📁 ⇄ 💻 | Swap between terminal and file explorer at the current directory |
 | 🌐 ⇄ 💻 | Swap a Local Repo pane between terminal and browser preview |
-| 🪟 | Split side-by-side or stacked. A terminal clones its connection where it *is*; an explorer or browser pane splits off a terminal rooted where it is browsing |
+| 🪟 | Split side-by-side or stacked into two equal halves, however the grid has been resized. A terminal clones its connection where it *is*; an explorer or browser pane splits off a terminal rooted where it is browsing |
 | 🧹 | Clear the display and purge the replay buffer |
 | 🎙️ | Start/stop voice input (when enabled) |
 | 🌙 ⇄ ☀️ | Toggle an explorer pane between dark and light |
@@ -291,6 +339,7 @@ GridVibe is a local tool, not a public web service: it binds to `127.0.0.1` by d
 - Socket.IO CORS defaults to same-origin, following the address the server actually resolved plus the host each request was addressed to; state-changing cross-origin requests are rejected on the same rule. Set `security.cors_origins` only if you serve GridVibe from another origin.
 - SSH host keys persist to `.known_hosts`; `ssh.host_key_policy` can be `auto-add` (default), `known-hosts`, or `strict`. All modes reject changed keys, and an unreadable trust file refuses the connection rather than being overwritten.
 - Saved SSH passwords are Fernet-encrypted; the key lives in `.encryption_key`.
+- An SSH pane given GridVibe tools opens a port on the remote host's own loopback, for as long as that pane stays connected. It carries a per-pane token, accepts nothing but that pane's own tool calls, and is withdrawn when the pane closes. A pane without the checkbox opens nothing.
 
 See [`SECURITY.md`](SECURITY.md) for reporting and scope.
 
@@ -307,7 +356,7 @@ python -m ruff check .
 
 Backend lives in the modular `web/` package, session state in `sessions/manager.py`, the voice service in `services/`, and the two pages in `templates/` with assets in `web/static/`. Root-level `api.py`, `session_manager.py`, `cleanup.py`, and `webview_launcher.py` are compatibility shims — edit the canonical modules.
 
-More: [`CONTRIBUTING.md`](CONTRIBUTING.md) · [`CHANGELOG.md`](CHANGELOG.md) · [`docs/logging_guide.md`](docs/logging_guide.md) · [`docs/voice_guideline.md`](docs/voice_guideline.md) · [`docs/session_state_guideline.md`](docs/session_state_guideline.md)
+More: [`CONTRIBUTING.md`](CONTRIBUTING.md) · [`CHANGELOG.md`](CHANGELOG.md) · [`gridvibe_mcp/README.md`](gridvibe_mcp/README.md) · [`docs/logging_guide.md`](docs/logging_guide.md) · [`docs/voice_guideline.md`](docs/voice_guideline.md) · [`docs/session_state_guideline.md`](docs/session_state_guideline.md)
 
 ## Local Files
 
@@ -320,6 +369,7 @@ Created at runtime, never committed:
 | `runtime_state.json` | Workspace-shape snapshot for restore-after-restart |
 | `.known_hosts` | Persisted SSH host keys |
 | `.encryption_key` | Fernet key for password encryption |
+| `.gridvibe_mcp.json` | Generated MCP config, rewritten on every start |
 | `logs/gridvibe.log` | Main rotating log file |
 
 All three JSON state files are written the same careful way: one change at a time under an OS-level lock, committed through an atomic replace, with the previous version kept as `<file>.bak`. A file GridVibe cannot read is moved aside as `<file>.corrupt-<timestamp>` and the backup is loaded in its place. The developer-facing contract is [`docs/session_state_guideline.md`](docs/session_state_guideline.md).

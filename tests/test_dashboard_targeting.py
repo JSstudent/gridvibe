@@ -464,7 +464,13 @@ function report(value) { process.stdout.write(JSON.stringify(value)); }
 
 PANE_IDENTITY_SOURCE = "\n".join(
     _js_function_source(TERMINALS_JS, name)
-    for name in ("paneDisplayTitle", "paneAgentIconHtml", "syncPaneAgentIcon", "syncPaneIdentityChrome")
+    for name in (
+        "paneDisplayTitle",
+        "paneAgentIconHtml",
+        "syncPaneAgentIcon",
+        "paneMcpTag",
+        "syncPaneIdentityChrome",
+    )
 )
 
 
@@ -572,6 +578,61 @@ class PaneIdentityChromeTestCase(NodeHarnessTestCase):
             """
         )
         self.assertEqual(result, {"nameWrites": 0, "hostWrites": 0})
+
+    def test_the_gridvibe_tools_chip_follows_a_relaunch_without_a_rebuild(self):
+        """A pane can be taken on and off the tools where it stands.
+
+        The header dropdown relaunches a pane onto an agent with GridVibe tools
+        and back off them again, and the pane never moves -- so the chip is
+        written by the same sync the name is, and a pane that came back as a
+        plain shell must drop it however the flag was left in the record.
+        """
+        result = self._run(
+            """
+            makeField('tname-0', 'Claude Code');
+            makeField('thost-0', 'PowerShell');
+            const chip = makeField('tmcp-0', '');
+            chip.hidden = true;
+            const captures = [];
+            for (const session of [
+                { startup_mode: 'agent', agent_selection: 'claude', agent_mcp: true },
+                { startup_mode: 'agent', agent_selection: 'claude', agent_mcp: false },
+                { startup_mode: 'terminal', agent_selection: 'claude', agent_mcp: true },
+                { mode: 'ssh', startup_mode: 'agent', agent_selection: 'claude', agent_mcp: true }
+            ]) {
+                syncPaneIdentityChrome(0, Object.assign({ title: 'Terminal 1', host: '' }, session));
+                captures.push({ text: chip.textContent, hidden: chip.hidden });
+            }
+            report(captures);
+            """
+        )
+        self.assertEqual(result, [
+            {"text": "MCP", "hidden": False},
+            {"text": "", "hidden": True},
+            {"text": "", "hidden": True},
+            # A remote pane's tools ride its own transport home, so it wears the
+            # chip exactly as a local pane does.
+            {"text": "MCP", "hidden": False},
+        ])
+
+    def test_an_unchanged_chip_is_not_rewritten_either(self):
+        result = self._run(
+            """
+            makeField('tname-0', 'Claude Code');
+            makeField('thost-0', '');
+            const chip = makeField('tmcp-0', 'MCP');
+            chip.hidden = false;
+            const session = {
+                title: 'Terminal 1', host: '', startup_mode: 'agent',
+                agent_selection: 'claude', custom_agent: '', agent_mcp: true
+            };
+            const before = chip.writes;
+            syncPaneIdentityChrome(0, session);
+            syncPaneIdentityChrome(0, session);
+            report({ writes: chip.writes - before, text: chip.textContent });
+            """
+        )
+        self.assertEqual(result, {"writes": 0, "text": "MCP"})
 
     def test_a_pane_with_no_header_yet_is_left_alone(self):
         result = self._run(

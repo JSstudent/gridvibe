@@ -58,6 +58,9 @@ gridvibe.log
 config*.json
 !default_config.json
 .voice-deps-declined
+# Generated on every app start: it names this install's interpreter and the
+# port GridVibe actually bound, so committing it would publish absolute paths.
+.gridvibe_mcp.json
 
 # Local environment and credentials
 .env

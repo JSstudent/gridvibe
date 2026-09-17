@@ -602,8 +602,10 @@ class MissingStartupDirectoryTestCase(unittest.TestCase):
             lambda _connection, data: typed.append(data),
         ), patch.object(
             web_terminal_io,
+            # The tunnel's remote path and URL travel as keywords now; this
+            # harness has no tunnel, so it takes them and ignores them.
             "_compose_agent_startup_command",
-            lambda _session: startup_command,
+            lambda _session, **_tunnel: startup_command,
         ), patch.object(
             web_terminal_io,
             "_publish_ssh_terminal_output",

@@ -31,6 +31,7 @@ from web.api import (
     resolve_server_settings,
     run_server,
     session_manager,
+    set_window_mode,
 )
 from web.config import runtime_config
 from web.lifecycle import LIFECYCLE_MAX_WINDOW_ID_LENGTH, lifecycle_coordinator
@@ -2194,6 +2195,12 @@ def main():
         )
         _exit_after_startup_failure(1)
         return
+
+    # From here on this process can open real windows, which is the one thing a
+    # local process outside the browser cannot work out for itself. Set after
+    # the pywebview fallback has been decided, so an `auto` run that fell back
+    # to the browser keeps saying "browser".
+    set_window_mode("native")
 
     open_windows = set()
 

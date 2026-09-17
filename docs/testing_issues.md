@@ -1,11 +1,257 @@
 # GridVibe Testing Issues
-Last updated: 2026-09-13
+Last updated: 2026-09-17
 
 ## Open Issues
 
-None.
+### Issue ID: ISSUE-2026-055
+- Title: Restored pre-2026-07-24 split layouts can never be split side-by-side again
+- Priority: Medium
+- Status: Open
+- Area: `web/static/js/terminals.js`, `web/session_presentation.py`
+- Assignee: Unassigned
+- Tags: `terminal`, `session`, `layout`, `persistence`, `tests`
+- Reported: 2026-09-16
+
+Description:
+A saved workspace keeps the grid coordinates it was saved with, and nothing rescales them on restore. Layouts saved before `SPLIT_CELL_UNIT` was introduced (commit `adbabfa`, 2026-07-24) were laid out at **2 grid units per base cell** instead of today's 8, so one vertical split already takes a pane to `w: 1` — the floor of the integer grid. Such a pane can never be split side by side again, in that session or any session restored from it, no matter how wide the window is. The refusal is permanent and invisible: the layout renders normally and the pane can still be stacked, so the reader sees one greyed-out button with a tooltip that names a rule the pane is not actually breaking.
+
+Live example from a restored workspace (`saved-session-session-20260628-205544`, saved 2026-06-28):
+
+```
+grid: columns 6, rows 4
+pane acd1ae0d  rect {x:1, y:1, w:5, h:4}   relative_area 0.5788
+pane 99cc5cba  rect {x:6, y:1, w:1, h:2}   relative_area 0.2106
+pane 800b371e  rect {x:6, y:3, w:1, h:2}   relative_area 0.2106
+```
+
+The two right-hand panes hold 42% of the window width between them — far more than the 8-column character floor needs — yet neither can be split side by side. A 6×4 bounding box is exactly `getGridMetrics(6)` (3 columns × 2 rows, `web/static/js/shared.js:302`) at the **old** unit of 2; the same six-pane base built today is 24×16, where the same cell would still have three halvings left.
+
+Steps to reproduce:
+1. Restore any workspace saved before 2026-07-24 whose layout was split at least once (or synthesize one: save a six-pane split workspace, then divide every `x`/`y`/`w`/`h` in its stored `split_slot_rects` by 4 so the bounding box becomes 6×4, and split the right-hand cell vertically once).
+2. Open the workspace so the saved layout is restored, and confirm a pane reports `w: 1` via `GET /api/dashboard` or the `list_panes` MCP tool.
+3. Widen or maximise the GridVibe window so the pane is plainly wide enough to halve.
+4. Hover the side-by-side split button on that pane.
+
+Expected behavior:
+A restored layout should carry the same splitting headroom as one built today, so a pane that is physically wide enough to halve can be split side by side. Where a split genuinely cannot happen, the disabled tooltip should name the rule that actually refused.
+
+Actual behavior / logs:
+`getSplitCandidates()` (`web/static/js/terminals.js:4038`) tests the integer grid before it measures anything:
+
+```js
+if (rect.w >= 2 && vertical.cols >= MIN_SPLIT_COLS && vertical.rows >= MIN_SPLIT_ROWS) {
+    candidates.push('vertical');
+}
+```
+
+With `rect.w === 1` the axis is dropped before `estimatePaneCharacters()` is consulted, so the character floor never gets a say. `getSplitDisabledReason('vertical')` (`:4422`) takes only the axis and returns a fixed sentence:
+
+> Side-by-side split needs at least 8 columns in each terminal
+
+That names `MIN_SPLIT_COLS`, which is not the rule that refused — the pane has roughly five times that many columns. The same sentence is returned by `splitTerminalPane()` at `:6969`, so it is also what the MCP `split_pane` tool relays as "GridVibe's own reason" (`gridvibe_mcp/splits.py`), giving an agent a false explanation of a permanent refusal.
+
+Nothing rescales a restored rect. `applyWorkspaceLayoutSnapshot()` (`:3975`) maps stored `x`/`y`/`w`/`h` straight through; `normalizeSplitRectMetadata()` (`:3770`) only attaches split-ancestry fields and does not touch the coordinates; the close-reflow restore at `:7851` clones them as-is. Server side, `_normalize_workspace_layout()` (`web/session_presentation.py:640`) only bounds-checks against `MAX_STORED_SESSION_PANES * 8` (= 512 grid lines) and accepts `w: 1` as valid — it never migrates a record.
+
+`split-geometry.js` already names this class of layout in its header ("spans reach odd widths … through layouts saved before the base cell had room to halve") and compensates for odd spans of 3 or more, but `planSplit()` returns its fallback for any span below 2, so a span of exactly 1 is outside what it can rescue.
+
+### Proposed solution:
+Rescale a coarse snapshot once, on restore, in `applyWorkspaceLayoutSnapshot()` (`web/static/js/terminals.js:3966`):
+
+- Infer the snapshot's base-cell unit from its own bounding box and `original_split_slot_count`, using `getBaseLayoutSlots()`/`getGridMetrics()` — `unit_old = gridColumns / base.columns`, cross-checked against `gridRows / base.rows`.
+- When `unit_old < SPLIT_CELL_UNIT`, multiply every rect by `k = SPLIT_CELL_UNIT / unit_old`: `x' = (x - 1) * k + 1`, `w' = w * k` (same on the other axis). Expand each track weight into `k` tracks of `weight / k` so the rendered proportions are preserved exactly and no divider appears to move.
+- Leave the record untouched when the unit cannot be inferred cleanly (bounding box not divisible by the base dimensions, `original_split_slot_count` missing or inconsistent) rather than guessing — a wrong factor silently reproportions the window.
+- Clamp so `max(x + w - 1) * k` stays within the persisted ceiling of `MAX_STORED_SESSION_PANES * 8` (512). `_normalize_workspace_layout()` rejects a geometry record all-or-nothing, so overshooting the bound would drop the whole layout on the next save rather than degrade it. A six-pane base at unit 8 is 24×16, so real layouts have ample headroom; the clamp is for hand-edited or malformed records.
+- Verify the rescale runs before any capture path (`cloneSplitSlotRects` at `:1230`, the save at `:2253`) so a session never persists a mix of resolutions, and confirm `originalSplitSlotCount` survives it. The close-reflow restore at `:7851` and the group cache at `:1288` clone live rects and should need no change.
+- Note in the change that this is a one-way migration: the rewritten coordinates are finer, not structurally different, so an older GridVibe reading the newer save still renders it.
+
+Separately, make the refusal honest. `getSplitCandidates()` (`:4030`) already evaluates the grid-resolution condition and the character-size condition independently — have it report *which* one failed per axis, and thread that through `applySplitButtonState()` (`:4462`) and the `splitTerminalPane()` refusal (`:6969`) so the tooltip and the MCP `split_pane` detail distinguish "this pane has no grid room left to halve" from "this pane is too small on screen". This is worth doing even after the rescale, since a pane can still bottom out after three splits at the current unit.
+
+Tests (extend `tests/test_split_geometry.py`, or a sibling Node test for the restore path):
+- A unit-2 six-pane snapshot rescales to a 24×16 box, and every pane's rendered fraction is unchanged (per-span weight sums preserved).
+- A restored `w: 1` rect becomes `w: 8`, and `getSplitCandidates()` then offers `vertical`.
+- A snapshot already at unit 8 passes through byte-identically (the rescale is idempotent).
+- A snapshot whose box would exceed 512 after scaling, and one whose box is not divisible by its base dimensions, are both left untouched rather than clamped into a different layout.
+- The disabled-button tooltip and the `splitTerminalPane()` refusal name the grid-resolution rule for a `w: 1` pane and the character rule for a genuinely tiny one.
+
+### Issue ID: ISSUE-2026-054
+- Title: Closing a split pane types xterm's query answers into the surviving agent's prompt
+- Priority: High
+- Status: Open
+- Area: `web/api.py`, `web/static/js/terminals.js`
+- Assignee: Unassigned
+- Tags: `terminal`, `agent`, `socketio`, `replay`, `tests`
+- Reported: 2026-09-15
+
+Description:
+Splitting a pane that is running a Codex agent works. Closing the pane that split off does not: the surviving Codex pane's composer fills with escape-sequence text the reader never typed, appended to whatever they had already written, and the line has to be cleared by hand before it can be sent. `docs/images/kvake.png` shows it — a half-typed `ive cloned the diagra` followed by `[?2026;0$y[?12;1$y]4;0;rgb:2e2e/3434/3636\` and fifteen more `]4;n;rgb:…` runs, one per palette index.
+
+Those strings are not program output. They are xterm's own **answers**: `CSI ? 2026 ; 0 $ y` and `CSI ? 12 ; 1 $ y` are DECRPM replies to a DECRQM query, and `OSC 4 ; n ; rgb:…` are palette reports answering `OSC 4 ; n ; ?`. xterm.js emits every one of them through `triggerDataEvent`, the same callback a keystroke takes, so `term.onData` → `forwardTerminalInput()` → `terminal_input` (`web/static/js/terminals.js:5876`, `:5860-5869`) delivers them to Codex's stdin. Codex is sitting at its prompt rather than in a query-reading state, so it takes them for typed text.
+
+What makes xterm answer at all is the rolling replay buffer being fed back through a freshly built terminal, carrying the queries the TUI wrote when it first probed the terminal.
+
+Steps to reproduce:
+1. Launch a workspace with a local pane running the `codex` agent and let it reach its prompt.
+2. Split that pane (either axis). The split is clean — the agent keeps drawing and nothing is typed at it.
+3. Type a few characters into the Codex composer without sending them.
+4. Close the pane that split off with its `×` button.
+5. The Codex pane reloads and the composer now reads what was typed followed by `[?2026;0$y[?12;1$y]4;0;rgb:…` through `]4;15;rgb:…`.
+
+Expected behavior:
+Re-joining a session and replaying its buffer paints the pane and sends the shell behind it nothing. Closing one pane never puts characters into another pane's prompt.
+
+Actual behavior / logs:
+Two halves, both confirmed by inspection.
+
+**The trigger — closing one pane leaves and re-joins every other pane.** `closeTerminalPane()` ends a non-last close with `await initialLoad()` (`web/static/js/terminals.js:6872`). The session count has changed, so `usingCurrentView` is false (`:7634-7640`) and no cached view matches, so `buildGrid()` runs; it opens with `teardownCurrentGrid()` (`:5298-5300`), which emits `leave_session` for every surviving pane (`:5133-5138`), and `initialLoad()` then emits `join_session` for each session in the rebuilt group (`:7747-7753`). Splitting takes no such path: `splitTerminalPane()` inserts the new pane in place and joins only the new session (`:6955-6957`), which is exactly why the split itself is clean and the close is not.
+
+**The defect — the replay scrubber does not cover the two sequence families involved.** `handle_join_session()` replays the rolling buffer to any socket not already in the room, stripping known query traffic first (`web/api.py:3441-3447`). `_TERMINAL_QUERY_RE` (`web/api.py:3393-3400`) covers Device Attributes, `CSI 5n`/`CSI 6n`, and the `OSC 10/11/12` colour queries — and nothing else. Checked against what the vendored build actually answers (every `triggerDataEvent` call site in `web/static/vendor/xterm.min.js`), these query forms survive the scrub and are answered on replay:
+
+- `OSC 4 ; n ; ? BEL|ST` — the palette query. xterm answers `OSC <i> ; rgb:…` from one shared branch, so the same build already trusted to answer `OSC 10/11/12` answers `OSC 4` too. This is the `]4;n;rgb:…` flood in the screenshot.
+- `CSI ? Pd $ p` / `CSI Pd $ p` — DECRQM. xterm answers `CSI [?]Pd ; Pv $ y`. This is `[?2026;0$y` and `[?12;1$y`.
+- `CSI ? 6 n` — DECXCPR. The existing branch is `\x1b\[[56]n`, which the `?` defeats; xterm answers `CSI ? r ; c R`.
+- `CSI 14 t` / `CSI 16 t` / `CSI 18 t` — xterm answers `CSI 4;h;w t`, `CSI 6;h;w t`, `CSI 8;rows;cols t`.
+- `DCS $ q … ST` (DECRQSS) and `DCS + q … ST` (XTGETTCAP) — xterm answers `ESC … ESC \`.
+
+The screenshot shows the first two because those are what Codex probes; the rest are the same defect waiting for a different TUI.
+
+Why it is intermittent: the rolling buffer is bounded at 50 000 characters (`web/terminal_io.py:90`), so a query only comes back if it is still inside that window when the rejoin happens. **Hypothesis, and the only part of this report not confirmed by inspection:** the split resizes the source pane, Codex re-probes on the resize, and that puts a fresh copy of the queries near the tail of the buffer moments before the close replays it. That would explain why split-then-close reproduces it while a **Reset view** on a long-idle Codex pane may not. Worth confirming from a capture of the pane's own output before touching anything.
+
+This is not split-specific. The same replay reaches the same panes from two other paths: **Reset view** leaves and rejoins deliberately (`refreshTerminalDisplay()` → `GridVibeTerminalModes.rejoinAndResetAfterReplay()`, `web/static/js/terminals.js:4917`), and a session-tab switch whose cached view no longer matches rebuilds the grid the same way.
+
+### Proposed solution:
+Widen `_TERMINAL_QUERY_RE` in `web/api.py` to cover the five families above, keeping it a single pre-compiled alternation applied once to the joined replay string. The buffer is joined before the substitution (`web/api.py:3441`), so a query straddling two cached chunks is already matched; no chunk-level work is needed.
+
+One precision decides the shape of the `OSC 4` branch: only the **query** form may be stripped. `OSC 4 ; n ; <colour> ST` carrying a real colour is how an application *sets* a palette entry, and it is indistinguishable in shape from the reply, so a branch written to catch replies would silently change how a themed TUI renders after a rejoin. Anchor the new branch on the literal `?` payload. DECRQM, DECXCPR, the three `t` reports and the two DCS queries carry no such ambiguity — their reply forms are never written by an application — but stripping the query alone is still sufficient there and is the smaller change, so do that uniformly.
+
+Then correct the contract: `docs/engineering_contracts.md:153` still opens "Replay buffers stay verbatim", which `_TERMINAL_QUERY_RE` already contradicts. Replace that sentence with the rule the code is actually keeping — the live stream stays verbatim so a live query gets its live answer, and the replay drops query sequences, because an answer to a replayed query has nobody waiting for it and lands on whatever now owns the shell's stdin.
+
+Narrowing the trigger is a separate, larger change and is deliberately **not** part of this fix: `closeTerminalPane()` rebuilding the whole grid to drop one pane is also what re-joins the survivors, but the two other rejoin paths above exist regardless, so the scrubber is the correct owner.
+
+Edge cases: the live path must stay untouched — `_cache_terminal_output()` keeps raw bytes and only the joined-once replay is filtered, which the current code already gets right, and a second client joining while a pane has a genuine query in flight must still see that query answered live. **Clear** purges the server buffer, so it removes the exposure rather than interacting with it. A session already in `client_joined_sessions` replays nothing (`web/api.py:3432`), so the fix changes nothing for a pane that is merely re-rendered without a leave.
+
+Tests: extend `tests/test_api.py:14715` (`test_join_session_replays_sanitized_buffered_output_to_new_client`), which already asserts the DA and `OSC 10/11` queries are stripped, with the `OSC 4` query, both DECRQM forms, `CSI ?6n`, the three `t` reports and the two DCS queries — and, in the same suite, one case asserting an `OSC 4 ; 1 ; rgb:…` **set** survives the scrub unmodified. On the client side, a case over the close path asserting a non-last close leaves and re-joins each surviving session pins the trigger, so a later change to `closeTerminalPane()` cannot quietly remove the exposure this fix is written against.
 
 ## Closed Issues
+
+### Issue ID: ISSUE-2026-056
+- Title: An agent pane never says it is running with GridVibe tools
+- Priority: Low
+- Status: Closed
+- Area: `web/static/js/agent-identity.js`, `web/static/js/terminals.js`, `web/static/js/dashboard-dialog.js`, `web/static/js/dashboard-sidebar.js`
+- Assignee: Unassigned
+- Tags: `terminal`, `session`, `mcp`, `dashboard`, `tests`
+- Reported: 2026-09-16
+- Closed: 2026-09-17
+
+Description:
+`agent_mcp` is a durable per-pane fact — the launcher checkbox writes it (`web/static/js/launcher.js:821`), saved presets and restored snapshots carry it forward, the relaunch route preserves it, `web/mcp_launch.py` decides from it whether the pane's agent may start the sidecar at all, and `/api/dashboard` publishes it in its fixed field list (`web/dashboard.py:81`). Every naming surface ignores it.
+
+The consequence is that two agent panes that behave very differently — one that can create workspaces, launch panes and split the grid through the `gridvibe` MCP server, and one that cannot — are painted identically. Both read `Claude`, in the same glyph, on the same header line. In a workspace where only some agents were given tools, the reader has no way to tell which pane to give a "split this pane" instruction to except by asking it, and no way to tell after a restore which panes came back with the flag set.
+
+Steps to reproduce:
+1. In the launcher, add two agent panes on the same local agent (e.g. Claude). Tick "Give this agent GridVibe tools" on the first row only.
+2. Launch the workspace.
+3. Read both pane headers, and open the agent dashboard (Alt+A) and read both rows.
+4. To see the flag at all, open one pane's header reset dropdown.
+
+Expected behavior:
+An agent pane running with GridVibe tools should state so where its agent is named — a short `MCP` tag beside the agent name in the pane header, and the same distinction available on the dashboard row — so the two panes above are distinguishable at a glance and after a restore.
+
+Actual behavior / logs:
+`web/static/js/agent-identity.js` does not reference `agent_mcp` anywhere. The three functions both surfaces name a pane through — `paneDisplayTitle`, `paneChatLine` and `paneTransportLabel` — read `title`, `startup_mode`, `agent_selection`, `custom_agent`, `activity.title`, `directory`, `mode`, `host`, `use_wsl`, `use_powershell` and `distribution`, and nothing else. So the header paint at `web/static/js/terminals.js:895` and the dashboard row at `web/static/js/dashboard-dialog.js:190` produce the same string for both panes by construction.
+
+The only surface that reads the flag is the per-pane reset dropdown, via `paneAgentMcp` (`web/static/js/terminal-shell.js:106`, consumed at `:353`) — one click deep, one pane at a time, and absent from the dashboard entirely.
+
+### Proposed solution:
+Add the reading to `web/static/js/agent-identity.js`, which is where the naming rule is held once precisely so both surfaces agree: a `paneAgentMcpTag(session)` (or an exported `MCP_TAG_LABEL` plus a predicate) returning the tag only for a pane that is an agent *and* has `agent_mcp` — mirroring `paneAgentMcp`'s own rule that the flag is meaningless without an agent, so a preset written before the pane was sent back to a plain shell does not paint a tag. Keep it a separate value rather than folding it into `paneDisplayTitle`'s return: the title is also what a user may have typed, and a tag concatenated into it would be indistinguishable from a name and would leak into the typed-title comparison in `paneChatLine`.
+
+Paint it in the pane header as a sibling span beside `terminal-name`/`terminal-host` (`web/static/js/terminals.js:5466`), refreshed in `syncPaneIdentityChrome` by the same skip-if-unchanged shape the name and host labels already use, so a relaunch that clears the flag removes the tag without rebuilding the header. Style it from the existing theme tokens in `terminals.css` alongside the host label; no new palette.
+
+For the dashboard row, note the deliberate decision recorded at `web/static/js/dashboard-dialog.js:195` — the transport chip was moved off the row into the hover because it cost the title more width than it was worth. A two-or-three-character `MCP` tag is a different trade from a `PowerShell` chip, but the dialog's width pressure is real: investigate whether it belongs on the row or in the row's hover line beside the transport label, and keep the repaint within `dashboardRowNeedsRepaint`'s unchanged-skip so a poll that changes nothing still repaints nothing.
+
+No persistence or migration work: `agent_mcp` is already stored, restored and published; a pane saved without it reads falsy and correctly shows no tag.
+
+Edge cases to cover: an SSH pane, where `pane_can_run_the_sidecar` (`web/mcp_launch.py:84`) is false — a pane moved to SSH must not keep wearing the tag even if the flag survived the move; a custom agent (`agent_selection === 'other'`) with the flag set; a pane whose agent has `mcp_supported` false, which the launcher never offers the checkbox for but a hand-edited preset could set.
+
+Tests: extend `tests/test_agent_identity.py` (Node) with the tag predicate — agent + flag, agent without flag, non-agent with a stale flag, SSH pane; extend `tests/test_dashboard_dialog.py` for the row's tag and for the repaint still being skipped when nothing changed; assert in `tests/test_dashboard.py` that `agent_mcp` stays in the published field list, since the frontend now depends on it.
+
+Resolution:
+As proposed, with one correction to the report. `paneAgentMcpTag(session)` in `agent-identity.js` is the whole rule: `MCP` for a pane that is an agent *and* carries `agent_mcp`, `''` for every other pane, and `MCP_TAG_LABEL`/`MCP_TAG_TITLE` are exported beside it so neither surface spells the chip itself. It is a separate value and is never folded into `paneDisplayTitle`, for the reason the report gives.
+
+**The SSH edge case is the opposite of what the report states, and following it would have shipped a lie about the pane.** The report reads `pane_can_run_the_sidecar()` as the whole rule, but `a7e6e52` (2026-09-15, the day before the report) gave SSH panes tools over a reverse forward on their own transport: `_compose_agent_startup_command` takes the local-config branch for a local pane and the tunnelled-URL branch for a remote one, and the relaunch dropdown offers the MCP button on an SSH pane for exactly that reason. So that predicate now picks the *shape* of the answer, not whether there is one, and the transport has no part in the tag: an SSH agent with the flag really is running with GridVibe tools. The tests pin this in both directions.
+
+The pane header carries a `terminal-mcp-tag` span built for every pane and shown by `syncPaneIdentityChrome`, so a relaunch on or off the tools needs no DOM surgery in the header it happens in, and an unchanged reading writes nothing — the same shape the name and host labels use. It is styled from `--t-accent` in `terminals.css`, deliberately the outline the reset dropdown's own MCP button wears while it is checked, so the header states what that menu would confirm.
+
+On the dashboard, the chip is **on the row** rather than in the hover — the question the report asked to investigate. The transport label was moved into the hover because a shell name is a long word looked up when something is wrong with a pane; `MCP` is three characters saying what the agent may *do*, which is what a reader choosing a row to instruct is deciding between, and an answer that costs a hover is one they will not ask for on every row in a card. It sits beside `auto`, takes the accent rather than the warning hue (two tinted chips of equal loudness would flatten the one about acting without asking), and carries the sentence on its own hover, the way the state dot does. `dashboardTagHtml` gained an optional title for that; the chips whose label is already the word pass none. `agent_mcp` was already inside the repaint's structure key, so a relaunch rebuilds the row and an unchanged poll still repaints nothing.
+
+The **docked dashboard sidebar draws it too**. That row deliberately drops the agent's name out of flow and draws no `auto` chip, so it was first left without this one as well — but the chip is not the same kind of fact as either. The name is answered by the mark beside it, and nothing else on the row says whether that agent can act on GridVibe, which is exactly what a reader picking a pane to instruct is deciding — and picking one *while* working is what a docked panel is for. It comes from `dashboardMcpTagHtml()`, the dialog's own builder handed in through the sidebar's runtime, so both rows emit the same chip rather than composing one twice; the column's stylesheet sets it tighter to keep the width it costs off the chat title.
+
+No persistence or migration work, as the report says.
+
+Contract: `docs/engineering_contracts.md` (Agent dashboard) gained a bullet stating the tag's owner, its agent-and-flag rule, that the transport is not part of it, and that it is never folded into a title; the drawn-row bullet now names both chips and the hover rule for a label a reader may not recognise, and a further bullet records that the docked sidebar draws `MCP` and not `auto`, and why.
+
+Cover: `tests/test_agent_identity.py` — the shipped rule executed in Node: agent with the flag, agent without, a stale flag on a terminal and on an explorer pane, a remote and a local pane both wearing it, a custom and an unlisted agent, a null pane, and the assertion that the tag reaches neither `paneDisplayTitle` nor `paneChatLine`. `tests/test_dashboard_dialog.py` — the chip through the real dialog: one of two identically named rows wears it, the chip's own hover, a remote row wearing it, a pane with both chips wearing them in one order, a stale flag on a non-agent painting nothing, and a relaunch onto the tools rebuilding the tree while an idle tick leaves a reader's mark on it untouched. `tests/test_dashboard_targeting.py` (`PaneIdentityChromeTestCase`) — the header chip driven through `syncPaneIdentityChrome` across four relaunches, and an unchanged reading writing nothing. `tests/test_dashboard_sidebar.py` — the same chip on the docked row, driven through the panel's own refresh against the real dialog builders: a pane with the tools and a sibling without, a remote pane wearing it, a stale flag on a non-agent painting nothing, the column order unchanged, and the parity case asserting the row's chip *is* `dashboardMcpTagHtml()`'s output for that pane. `tests/test_dashboard.py` — `agent_mcp` in `PANE_FIELDS` and both values reaching the composed pane, since the frontend now depends on it.
+
+### Issue ID: ISSUE-2026-053
+- Title: Relaunched terminal pane keeps a permanent "Connecting…" overlay
+- Priority: Medium
+- Status: Closed
+- Area: `web/static/js/terminal-shell.js`, `web/static/js/terminals.js`
+- Assignee: Unassigned
+- Tags: `terminal`, `session`, `socketio`, `tests`
+- Reported: 2026-09-14
+- Closed: 2026-09-15
+
+Description:
+Relaunching a live terminal pane from the pane header reset dropdown — onto another shell family, onto an agent, or back to a plain shell — can leave that pane's "Connecting…" spinner on screen permanently. The shell behind it is running and connected, and its output is written into the xterm underneath, but the overlay covers the pane and nothing afterwards removes it: not the next status event, not switching session tabs, not a group reload. The reader's only recovery is reloading the whole window, and until they do the pane looks hung.
+
+Steps to reproduce:
+1. Launch a workspace holding a local PowerShell pane.
+2. Open that pane's header reset dropdown and relaunch it onto an agent (for example `claude`), then open it again and relaunch back to a plain PowerShell.
+3. Observe the spinner and "Connecting…" caption stay over the pane, while `GET /api/sessions?workspace_id=<id>&group_id=<id>` reports `"status": "connected"` for that `session_id` and typing into the pane still reaches the shell.
+
+Expected behavior:
+A relaunched pane wears the "Connecting…" overlay only until its new transport reports connected, and any later group load or refresh clears an overlay that a connected, already-attached pane is still wearing.
+
+Actual behavior / logs:
+The overlay is created after the one event that would have removed it. `apply_pane_shell_change()` broadcasts the pending status and starts the connector (`web/session_shell.py:372-373`) before the route writes its response, and a local shell is marked `CONNECTED` immediately after the spawn (`web/terminal_io.py:1997`). A relaunch of a local PowerShell pane logs the connector starting before the response is written:
+
+```
+20:01:43,845  web.session_shell  Pane relaunch session_id=5d66f259 shell=powershell agent=none
+20:01:44,048  web.terminal_io    [5d66f259] _connect_session started
+20:01:44,049  werkzeug           "POST /api/sessions/5d66f259/shell HTTP/1.1" 200 -
+20:01:44,049  web.terminal_io    [5d66f259] Starting local shell ...
+```
+
+`relaunchSessionShell()` calls `showPlaceholderConnecting(index)` only after awaiting that response (`web/static/js/terminal-shell.js:521`), so the connected `session_status` event reaches the page before the overlay exists. That the event wins the race is inferred from this log ordering rather than observed in the client, and is the one investigation target here; the rest is confirmed by inspection.
+
+What makes the state permanent is confirmed: for an already-attached pane the overlay is removed in exactly one place, the connected branch of the `session_status` handler (`web/static/js/terminals.js:8517`), and no reload path re-runs it. `attachTerminal()` drops the overlay only for a pane that is not yet attached (`web/static/js/terminals.js:7528`), and neither the `initialLoad` connected branch (`web/static/js/terminals.js:7693`) nor the `refresh` one (`web/static/js/terminals.js:8238`) handles a connected pane that is already attached.
+
+The same end state is reachable without the race: when the connected event lands while the pane's group is not the visible one, the handler returns at `if (!target.active)` (`web/static/js/terminals.js:8493`) without removing the overlay, and returning to that tab does not clear it either.
+
+Observed on `session_id=5d66f259` in a live workspace: `/api/sessions` reported `status: connected`, `startup_mode: terminal`, and the pane still showed the spinner.
+
+### Proposed solution:
+In `web/static/js/terminal-shell.js`, move `showPlaceholderConnecting(index)` — and the `pane?.term?.reset?.()` beside it — ahead of the `fetch` in `relaunchSessionShell()`, after the relaunchable guards and the `_pendingShellSwitchPanes` claim, which is the ordering `retrySessionConnection()` in `web/static/js/terminals.js` already uses. The connected event then always lands on an overlay that exists. This also closes a second exposure in the current order: resetting the xterm after the await can discard output the new shell has already emitted. The failure path keeps showing `showPlaceholderError()`.
+
+In `web/static/js/terminals.js`, give the `initialLoad` (`:7693`) and `refresh` (`:8238`) pane loops a connected-and-already-attached branch that removes `ph-<index>`, mirroring the `session_status` handler at `:8517`, so a stale overlay heals on the next group load instead of lasting the life of the window. That branch is also what makes the not-visible-group path above recoverable.
+
+No persistence or migration implications: the overlay is view-only DOM and no session field changes.
+
+Edge cases: a relaunch refused before the POST (pane not relaunchable, shell switch unsupported) must not leave an overlay behind; a pane that genuinely stays pending must keep the spinner; and a pane whose slot changed hands between the request and its answer must not have an overlay written onto its replacement — the existing `terminals.indexOf(pane)` ownership re-check should still gate everything done after the await.
+
+Tests: extend `tests/test_terminal_shell_menu.py`, which already stubs `showPlaceholderConnecting` (line 83), with a case asserting the placeholder is shown before the relaunch request is issued, and one driving a connected `session_status` at an attached pane to assert the overlay is gone. A case over the `refresh` loop covers the reload half, including the pane that connected while its group was not visible.
+
+Resolution:
+Both halves, as proposed. `relaunchSessionShell()` now raises the overlay — and resets the pane's xterm — after the relaunchable guards and the `_pendingShellSwitchPanes` claim and *before* the POST, so the connected `session_status` always lands on an overlay that exists; the ordering `retrySessionConnection()` already used. That created one exposure the report did not have: a request the route then refuses had painted a pane whose old shell is still running, so the catch repaints it from its own session record through the new `syncPanePlaceholder()` in `terminals.js` (connected wears none, error and retryable disconnect wear their own, a pane still coming up keeps its spinner) under the same `terminals.indexOf(pane)` ownership re-check as the success path. A toast, not an error overlay: the pane's shell is alive underneath and must not be covered.
+
+The reload half is the two-line branch the report asked for, in the `initialLoad` and `refreshStatuses` pane loops: a connected pane that is *already* attached has its `ph-<index>` removed, mirroring the `session_status` handler. That is what heals a pane which connected while its group was not the visible one, since returning to that tab is a load.
+
+The hypothesis about the trigger was not needed: the ordering is decided by the log sequence in the report (connector started, then the response written) and the fix removes the race rather than reasoning about who wins it.
+
+Contract: `docs/engineering_contracts.md` gained a Pane-transitions bullet stating the paint-before-request rule, the failed-request repaint and the two additional removers, so a later change cannot reintroduce a raise-after-await as a tidy-up.
+
+Cover: `tests/test_terminal_shell_menu.py` (`RelaunchedPaneOverlayTestCase`) — the real module, pressed through its own menu handler: the pane is reset and painted before the request is issued, a refused relaunch repaints from the record and reports once, a relaunch refused before the POST paints nothing at all, and a pane whose slot changed hands mid-request is not repainted. `tests/test_pane_connecting_overlay.py` — the shipped `initialLoad()`, `refreshStatuses()`, `attachTerminal()` and the placeholder helpers executed in Node against a stub page holding real placeholder DOM: each load path heals a stale overlay without rebuilding the pane, a pane still coming up keeps its spinner, error and disconnected panes still get their own, the unattached pane is still attached by the branch beside it, explorer panes are untouched, and `syncPanePlaceholder()` is driven over all four statuses. Neutering either healing branch fails exactly the two cases that assert it.
 
 ### Issue ID: ISSUE-2026-052
 - Title: Saving a session fails for two minutes after a workspace window is reopened

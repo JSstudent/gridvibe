@@ -1416,6 +1416,27 @@
         .terminal-agent-icon .dash-agent-glyph { width: 18px; height: 18px; }
         .terminal-host { color: var(--t-text-muted); font-size: .78rem; }
 
+        /* The GridVibe-tools chip. It never shrinks and never ellipsises: it is
+           three characters, and the two labels before it are the ones that give
+           up width on a narrow pane. Deliberately the same accent outline the
+           reset dropdown's own MCP button wears while it is checked, so the
+           header states what that menu would confirm. */
+        .terminal-mcp-tag {
+            display: inline-flex;
+            align-items: center;
+            flex: 0 0 auto;
+            padding: 0 5px;
+            border: 1px solid color-mix(in srgb, var(--t-accent) 55%, transparent);
+            border-radius: 5px;
+            color: var(--t-accent);
+            font-size: .6rem;
+            font-weight: 700;
+            letter-spacing: .06em;
+            line-height: 1.5;
+        }
+
+        .terminal-mcp-tag[hidden] { display: none; }
+
         .terminal-meta {
             display: flex;
             align-items: center;
@@ -1507,6 +1528,12 @@
             right: 0;
             z-index: 60;
             min-width: 204px;
+            /* Anchored to the pane's own right edge, so the panel grows
+               leftwards and a pane docked against the window never pushes it
+               off-screen. The ceiling keeps a long agent name (and the MCP
+               button beside it) from growing the panel across its neighbours
+               instead; the label ellipsises rather than widening the row. */
+            max-width: min(320px, calc(100vw - 16px));
             max-height: min(60vh, 360px);
             overflow-y: auto;
             scrollbar-gutter: stable;
@@ -1549,10 +1576,11 @@
 
         .pane-shell-menu-item.is-active { color: var(--t-accent); }
 
-        /* A shell family and its agent list are two decisions, so the row
-           carries two controls: the row itself relaunches that family plainly,
-           and the chevron beside it opens the family's agents. A button inside
-           a button is not a control, hence the wrapper. */
+        /* One row, two decisions — twice over: a shell family row relaunches
+           that family plainly while the chevron beside it opens the family's
+           agents, and an MCP-capable agent's row starts it plainly while the
+           badge beside it starts it with GridVibe tools. A button inside a
+           button is not a control, hence the wrapper. */
         .pane-shell-menu-row {
             display: flex;
             align-items: stretch;
@@ -1599,6 +1627,36 @@
             border-left: 1px solid var(--t-border);
         }
 
+        /* The second target on an agent row. Seated inline, in the same slot a
+           family row keeps its chevron in, because a sideways flyout is what
+           would leave the window on a pane docked against its right edge. */
+        .pane-shell-menu-mcp {
+            display: inline-flex;
+            align-items: center;
+            flex: 0 0 auto;
+            padding: 0 7px;
+            border: 1px solid var(--t-border);
+            border-radius: 6px;
+            background: transparent;
+            color: var(--t-text-muted);
+            font-size: .62rem;
+            font-weight: 700;
+            letter-spacing: .06em;
+            cursor: pointer;
+            transition: background .18s, border-color .18s, color .18s;
+        }
+
+        .pane-shell-menu-mcp:hover {
+            background: var(--t-btn-hover-bg);
+            border-color: var(--session-color, var(--t-accent));
+            color: var(--t-text);
+        }
+
+        .pane-shell-menu-mcp.is-active {
+            border-color: var(--t-accent);
+            color: var(--t-accent);
+        }
+
         .pane-shell-menu-mark {
             display: inline-flex;
             align-items: center;
@@ -1610,9 +1668,16 @@
 
         .pane-shell-menu-mark svg { width: 14px; height: 14px; }
 
-        .pane-shell-menu-label { flex: 1 1 auto; }
+        .pane-shell-menu-label {
+            flex: 1 1 auto;
+            min-width: 0;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
 
         .pane-shell-menu-hint {
+            flex: 0 0 auto;
             color: var(--t-text-muted);
             font-size: .68rem;
             font-weight: 500;

@@ -720,6 +720,14 @@
         icon.hidden = !html;
     }
 
+    /* Whether this pane says it is running with GridVibe's own tools, and what
+       it says — agent-identity.js's rule, shared with the dashboard row for the
+       same reason the name is. Empty for every pane that is not, which is what
+       hides the chip rather than drawing a blank one. */
+    function paneMcpTag(session) {
+        return window.GridVibeAgentIdentity.paneAgentMcpTag(session);
+    }
+
     function getSessionApiPath(groupId = activeGroupId) {
         const params = new URLSearchParams({ workspace_id: currentWorkspaceId });
         if (groupId) {
@@ -878,10 +886,13 @@
        Claude session could sit under a "OpenAI Codex CLI" title until something
        else forced a rebuild.
 
-       The two header fields that read from the session record, and nothing
-       else: the reset control's affordance is decided by the transport rather
-       than by what is running in it, and syncing the shell controls here would
-       close a menu the user has open. */
+       The header fields that read from the session record, and nothing else:
+       the reset control's affordance is decided by the transport rather than by
+       what is running in it, and syncing the shell controls here would close a
+       menu the user has open. The GridVibe-tools chip is one of these fields
+       for exactly the reason the name is — a relaunch can take a pane off the
+       tools without moving it — so it is written here rather than only built,
+       and by the same skip-if-unchanged comparison. */
     function syncPaneIdentityChrome(index, session) {
         syncPaneAgentIcon(document.getElementById(`ticon-${index}`), session);
         const nameLabel = document.getElementById(`tname-${index}`);
@@ -900,6 +911,14 @@
         const host = String(session.host || '');
         if (hostLabel && hostLabel.textContent.trim() !== host) {
             hostLabel.textContent = host;
+        }
+        const mcpTag = document.getElementById(`tmcp-${index}`);
+        if (mcpTag) {
+            const tag = paneMcpTag(session);
+            if (mcpTag.textContent.trim() !== tag) {
+                mcpTag.textContent = tag;
+            }
+            mcpTag.hidden = !tag;
         }
     }
 
@@ -2655,6 +2674,7 @@
             agent_selection: commandMode === 'agent' ? (session.agent_selection || '') : '',
             custom_agent: commandMode === 'agent' ? (session.custom_agent || '') : '',
             agent_auto_mode: commandMode === 'agent' ? Boolean(session.agent_auto_mode) : false,
+            agent_mcp: commandMode === 'agent' ? Boolean(session.agent_mcp) : false,
             explorer_tree_open: startupMode === 'explorer' ? Boolean(terminal?._explorerTreeSidebarOpen) : false,
             explorer_git_open: startupMode === 'explorer' ? Boolean(terminal?._explorerGitSidebarOpen) : false,
             explorer_git_follow_browsing: startupMode === 'explorer'
@@ -4043,20 +4063,68 @@
         return candidates;
     }
 
-    function splitSlotRect(rect, axis) {
+    function splitSlotSpan(requested, total) {
+        const middle = Math.floor(total / 2);
+        const value = Number.isInteger(requested) && requested > 0 ? requested : middle;
+        return Math.min(Math.max(1, value), Math.max(1, total - 1));
+    }
+
+    /* Which track line a split lands on, and what the axis weights have to
+       become for the two halves to be halves. `split-geometry.js` owns the
+       arithmetic — an odd span has no middle line, and a span whose tracks
+       carry unequal weights has a middle line that is not its middle — and it
+       is answered here, against the live grid, because the track sizes it
+       reasons about are the ones this window is painting.
+
+       Planned before the splice, off the rectangle list that is about to be
+       spliced: the weights must line up with the grid as it stands now. */
+    function planSplitSlotGeometry(rects, visualIndex, rect, axis) {
+        const vertical = axis === 'vertical';
+        const span = vertical ? rect.w : rect.h;
+        const fallback = { firstSpan: Math.floor(span / 2), weights: null };
+        const planner = window.GridVibeSplitGeometry;
+        const grid = document.getElementById('terminalsGrid');
+        if (!planner || !grid || !Array.isArray(rects)) {
+            return fallback;
+        }
+
+        const size = getSplitGridSize(rects);
+        initializeSplitTrackWeights(size.columns, size.rows);
+        const metrics = getResizableGridMetrics(grid, splitColumnWeights, splitRowWeights);
+        if (!metrics) {
+            return fallback;
+        }
+
+        const start = vertical ? rect.x : rect.y;
+        const intervals = rects
+            .filter((_other, index) => index !== visualIndex)
+            .map(other => (vertical
+                ? { start: other.x, span: other.w }
+                : { start: other.y, span: other.h }));
+        return planner.planSplit({
+            start,
+            span,
+            weights: vertical ? splitColumnWeights : splitRowWeights,
+            sizes: vertical ? metrics.columnSizes : metrics.rowSizes,
+            gap: vertical ? metrics.columnGap : metrics.rowGap,
+            foreignEdges: planner.foreignEdgeOffsets(intervals, start, span),
+        });
+    }
+
+    function splitSlotRect(rect, axis, firstSpan = 0) {
         /* A split produces two plain, independent leaves — no shared splitId or
            ancestor chain. Each new pane behaves like any other grid cell: it can
            be split again until it hits the minimum size, and closing it reflows
            its neighbours through the normal terminal-close path. */
         if (axis === 'vertical') {
-            const firstWidth = Math.floor(rect.w / 2);
+            const firstWidth = splitSlotSpan(firstSpan, rect.w);
             return [
                 makeSplitLeaf({ originSlot: rect.originSlot, x: rect.x, y: rect.y, w: firstWidth, h: rect.h }),
                 makeSplitLeaf({ originSlot: rect.originSlot, x: rect.x + firstWidth, y: rect.y, w: rect.w - firstWidth, h: rect.h }),
             ];
         }
 
-        const firstHeight = Math.floor(rect.h / 2);
+        const firstHeight = splitSlotSpan(firstSpan, rect.h);
         return [
             makeSplitLeaf({ originSlot: rect.originSlot, x: rect.x, y: rect.y, w: rect.w, h: firstHeight }),
             makeSplitLeaf({ originSlot: rect.originSlot, x: rect.x, y: rect.y + firstHeight, w: rect.w, h: rect.h - firstHeight }),
@@ -5407,6 +5475,7 @@
             // case where a saved-dark pane rendered light under global light).
             card.dataset.explorerTheme = resolvedTheme.theme;
         }
+        const mcpTag = paneMcpTag(session);
         const sessionColour = tabColourForGroup(activeGroupId);
         card.style.setProperty('--session-color', sessionColour);
         card.style.setProperty('--session-color-dim', hexToRgba(sessionColour, 0.45));
@@ -5420,6 +5489,15 @@
                         <span class="terminal-host" id="thost-${i}">
                             ${escHtml(session.host || '')}
                         </span>
+                        <!-- Built for every pane and shown by the sync above, so
+                             a relaunch on or off the tools needs no DOM surgery
+                             on the header it happens in. -->
+                        <span
+                            class="terminal-mcp-tag"
+                            id="tmcp-${i}"
+                            title="${escHtml(window.GridVibeAgentIdentity.MCP_TAG_TITLE)}"
+                            ${mcpTag ? '' : 'hidden'}
+                        >${escHtml(mcpTag)}</span>
                     </div>
                     <div class="terminal-meta">
                         <div class="terminal-status">
@@ -6881,7 +6959,15 @@
         }
     }
 
-    async function splitTerminalPane(index, axis) {
+    /* `splitRequest` is the extra description of the new pane: what it is,
+       which agent it runs, whether that agent gets the GridVibe tools. Empty
+       for the header button, which produces exactly what it always did. It is
+       built and validated on the server when a split *intent* is recorded, so
+       this page forwards it rather than composing one.
+
+       Returns what happened, so the intent path can report it. The button path
+       ignores the return and reads the toast, as it always has. */
+    async function splitTerminalPane(index, axis, splitRequest = null) {
         const sourceSessionId = sessionIds[index];
         const sourceTerminal = terminals[index];
         const sourceCard = document.getElementById(`tc-${index}`);
@@ -6892,16 +6978,16 @@
         closeAllPaneActionMenus();
         closeAllPaneShellMenus();
         if (!sourceSessionId || !sourceTerminal || !sourceCard || !grid) {
-            return;
+            return { ok: false, error: 'That pane is not open in this window.' };
         }
         if (terminals.length >= MAX_SPLIT_TERMINALS) {
             updateAllSplitButtonStates();
-            return;
+            return { ok: false, error: getSplitDisabledReason(axis) };
         }
 
         const visualIndex = Array.from(grid.children).indexOf(sourceCard);
         if (visualIndex < 0) {
-            return;
+            return { ok: false, error: 'That pane is not on screen in this window.' };
         }
 
         const rects = ensureSplitSlotRects();
@@ -6909,7 +6995,7 @@
         const candidates = sourceRect ? getSplitCandidates(index, sourceRect) : [];
         if (!axis || !candidates.includes(axis)) {
             updateSplitButtonState(index);
-            return;
+            return { ok: false, error: getSplitDisabledReason(axis) };
         }
 
         splitButtons.forEach(button => { button.disabled = true; });
@@ -6919,6 +7005,14 @@
         const payload = { axis };
         if (isExplorerSession(sourceTerminal._session)) {
             payload.directory = getExplorerSelectedDirectory(index);
+        }
+        /* Stated last so a caller that named a directory keeps it: the
+           explorer default above is a fallback, not an override. */
+        if (splitRequest && typeof splitRequest === 'object') {
+            Object.assign(payload, splitRequest);
+            if (!payload.directory && isExplorerSession(sourceTerminal._session)) {
+                payload.directory = getExplorerSelectedDirectory(index);
+            }
         }
 
         try {
@@ -6946,7 +7040,17 @@
 
             const newCard = createSplitTerminalCard(sourceCard, session, index, newIndex);
             sourceCard.after(newCard);
-            const [firstRect, secondRect] = splitSlotRect(sourceRect, axis);
+            const plan = planSplitSlotGeometry(splitSlotRects, visualIndex, sourceRect, axis);
+            const [firstRect, secondRect] = splitSlotRect(sourceRect, axis, plan.firstSpan);
+            /* The rewrite keeps the span's own total, so publishing it moves
+               this pane's two halves onto the middle and no other pane at all. */
+            if (Array.isArray(plan.weights)) {
+                if (axis === 'vertical') {
+                    splitColumnWeights = plan.weights;
+                } else {
+                    splitRowWeights = plan.weights;
+                }
+            }
             splitSlotRects.splice(visualIndex, 1, firstRect, secondRect);
             applySplitSlotGeometry({ fit: false });
             attachSplitTerminalEvents(newIndex);
@@ -6981,13 +7085,66 @@
             await ensureAttachedTerminalsReady([index, newIndex]);
             emitTerminalResize(index, true);
             emitTerminalResize(newIndex, true);
+            return { ok: true, session, index: newIndex };
         } catch (error) {
             console.error('[GridVibe Sessions] splitTerminalPane failed:', error);
             setWorkspaceSaveMessage(`Split failed: ${error.message}`, 'error');
+            return { ok: false, error: error.message };
         } finally {
             updateAllSplitButtonStates();
         }
     }
+
+    /* ─────────────────────────────────────────────
+       Split bridge — the page half of a split intent
+    ─────────────────────────────────────────────
+       A process outside the browser can append a pane but cannot place one:
+       the axis never reaches the server, and every refusal is measured off the
+       live terminal. So `window-intent.js` polls for split intents and this is
+       what it calls — the same `splitTerminalPane` the header button runs,
+       under the same `getSplitCandidates`.
+
+       It reports *facts*, not sentences: which axes would work and what the
+       button's own tooltip says about the one that would not. The wording is
+       composed in `window-intent.js`, where it can be executed in Node. */
+    const splitBridge = {
+        /* Whether this window is the one holding that pane. A page that does
+           not hold it never claims the intent, which is how two open windows
+           on different groups do not fight over one split. */
+        owns(sessionId) {
+            return sessionIds.indexOf(String(sessionId || '')) >= 0;
+        },
+
+        /* The axes this pane could actually be halved on right now, or `null`
+           when the pane is not in this window at all. */
+        candidates(sessionId) {
+            const index = sessionIds.indexOf(String(sessionId || ''));
+            if (index < 0) return null;
+            const grid = document.getElementById('terminalsGrid');
+            const card = document.getElementById(`tc-${index}`);
+            const visualIndex = grid && card
+                ? Array.from(grid.children).indexOf(card)
+                : -1;
+            if (visualIndex < 0) return [];
+            const rect = ensureSplitSlotRects()[visualIndex];
+            return rect ? getSplitCandidates(index, rect) : [];
+        },
+
+        /* GridVibe's own sentence for why an axis is unavailable — the same
+           string the disabled split button carries in its tooltip. */
+        disabledReason(axis) {
+            return getSplitDisabledReason(axis);
+        },
+
+        async perform(sessionId, axis, splitRequest) {
+            const index = sessionIds.indexOf(String(sessionId || ''));
+            if (index < 0) {
+                return { ok: false, error: 'That pane is not open in this window.' };
+            }
+            return splitTerminalPane(index, axis, splitRequest || null);
+        }
+    };
+    window.GridVibeSplitBridge = splitBridge;
 
     /* ─────────────────────────────────────────────
        Clipboard helpers (copy / paste)
@@ -7692,6 +7849,14 @@
                 } else if (session.status === 'connected') {
                     if (!terminals[i]._attached) {
                         attachTerminal(i);
+                    } else {
+                        /* Attaching takes the overlay off the pane it attaches;
+                           an already-attached one can still be wearing a
+                           "Connecting…" overlay the status event never removed —
+                           it connected while this group was not the visible one,
+                           or its relaunch raised the spinner behind the event
+                           (ISSUE-2026-053). This load is where that heals. */
+                        document.getElementById(`ph-${i}`)?.remove();
                     }
                     attachedIndices.push(i);
                 } else if (session.status === 'error') {
@@ -7874,6 +8039,24 @@
         ph.innerHTML = `
             <div class="spinner"></div>
             <span style="font-size:.78rem">Connecting…</span>`;
+    }
+
+    /* Repaint one pane's overlay from the status its own session record
+       reports: a connected pane wears none, an error or a retryable
+       disconnect wears its own, and a pane still coming up keeps the spinner
+       it has. The relaunch path calls it when its request failed, so a
+       "Connecting…" overlay raised for a transport that was never replaced
+       does not end up covering the shell that is still running. */
+    function syncPanePlaceholder(index) {
+        const session = terminals[index]?._session;
+        if (!session) return;
+        if (session.status === 'connected') {
+            document.getElementById(`ph-${index}`)?.remove();
+        } else if (session.status === 'error') {
+            showPlaceholderError(index, session.error_message || 'Connection failed');
+        } else if (isRetryableDisconnect(session)) {
+            showPlaceholderDisconnected(index);
+        }
     }
 
     async function retrySessionConnection(index) {
@@ -8237,6 +8420,10 @@
                 } else if (session.status === 'connected' && !terminals[i]?._attached) {
                     attachTerminal(i);
                     redrawAttachedTerminals([i], { forceResize: true });
+                } else if (session.status === 'connected') {
+                    /* Already attached: heal a "Connecting…" overlay that the
+                       connected status event never took off (ISSUE-2026-053). */
+                    document.getElementById(`ph-${i}`)?.remove();
                 } else if (session.status === 'error' && !terminals[i]?._attached) {
                     showPlaceholderError(i, session.error_message || 'Connection failed');
                 } else if (isRetryableDisconnect(session)) {
@@ -8535,6 +8722,31 @@
             } else if (isRetryableDisconnect(session)) {
                 showPlaceholderDisconnected(index);
             }
+        });
+
+        /* A clear asked for from outside this window — the MCP's `clear_pane`.
+           The server has already purged the replay buffer; this is the half no
+           process outside a page can do, and it is the Clear button's own
+           handler so the two paths cannot drift and the shell's clear command
+           keeps its single owner here.
+
+           Only for a pane in the group on screen: `clearTerminalDisplay` takes
+           a live grid slot, and a cached group's index names a different pane
+           entirely. A cached pane is reset in place instead — its xterm is the
+           only thing that would still be holding the old scrollback when the
+           reader comes back to it. */
+        socket.on('terminal_cleared', ({ session_id }) => {
+            const target = resolveSessionTarget(session_id);
+            if (!target) return;
+            if (target.active) {
+                clearTerminalDisplay(target.index);
+                return;
+            }
+            const term = target.terminal?.term;
+            if (!term) return;
+            target.terminal._pendingOutput = '';
+            term.reset();
+            term.clear();
         });
 
         socket.on('app_config_updated', (message) => {

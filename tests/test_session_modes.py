@@ -85,6 +85,13 @@ def _module_source(filename):
         return handle.read()
 
 
+def _page_script(filename):
+    """Read one shipped page script, for the push half of a transition."""
+    path = os.path.join(_WEB_DIR, "static", "js", filename)
+    with io.open(path, encoding="utf-8") as handle:
+        return handle.read()
+
+
 def _pane_state(session_id):
     """Snapshot the pane fields a mode transition can move."""
     session = api.session_manager.get_session(session_id)
@@ -529,6 +536,444 @@ class ModeTransitionBoundaryTestCase(ModeTransitionTestCase):
         }
         self.assertIn("apply_pane_mode_change", called)
         self.assertIn("jsonify", called)
+
+
+class AgentRequestedModeSwitchTestCase(ModeTransitionTestCase):
+    """The gated twin: the same switch, asked for by an agent's own pane.
+
+    `POST /api/sessions/<id>/mode` is the pane header's own toggle -- pressed
+    by the person looking at the pane, so there is nobody to check. `POST
+    /api/sessions/<id>/agent-mode-switch` is what a tool reaches, and switching
+    a pane out of terminal mode *ends the shell behind it*. Three gates, and
+    all three must hold. Every refusal is asserted on the whole pane, so a
+    mutation that leaked ahead of a gate shows up here rather than in
+    production.
+    """
+
+    def _agent_pair(self, **overrides):
+        """A caller pane and a pane it created, in one group."""
+        caller, _repo = self._local_pane(repo_name="agent-repo")
+        api.session_manager.update_session_metadata(
+            caller.session_id,
+            startup_mode="agent",
+            initial_command_mode="agent",
+            agent_selection="claude",
+            initial_command="claude",
+        )
+        target_dir = Path(self.temp_dir.name) / overrides.pop("repo_name", "target")
+        target_dir.mkdir(exist_ok=True)
+        fields = {
+            "group_id": caller.group_id,
+            "host": "cmd",
+            "directory": str(target_dir),
+            "mode": "wsl",
+            "startup_mode": "terminal",
+            "created_by_session_id": caller.session_id,
+        }
+        fields.update(overrides)
+        target = api.session_manager.create_session(**fields)
+        api.session_manager.update_session_status(
+            target.session_id, api.SessionStatus.CONNECTED
+        )
+        return (
+            api.session_manager.get_session(caller.session_id),
+            api.session_manager.get_session(target.session_id),
+        )
+
+    def _switch(self, session_id, body):
+        """POST one agent-requested mode switch with every effect observable."""
+        with patch.object(
+            web_terminal_io, "_resolve_live_terminal_cwd", return_value=None
+        ), patch.object(api, "_close_ssh_connection") as close_connection, patch.object(
+            api.socketio, "start_background_task"
+        ) as start_task:
+            response = self.client.post(
+                f"/api/sessions/{session_id}/agent-mode-switch", json=body
+            )
+        return response, close_connection, start_task
+
+    # ---------------- the pane that passes ----------------
+
+    def test_a_pane_this_agent_created_becomes_a_file_explorer(self):
+        caller, target = self._agent_pair()
+
+        response, close_connection, _start = self._switch(
+            target.session_id,
+            {
+                "requested_by_session_id": caller.session_id,
+                "startup_mode": "explorer",
+                "refresh_cwd": True,
+            },
+        )
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        close_connection.assert_called_once_with(target.session_id, clear_buffer=True)
+        updated = api.session_manager.get_session(target.session_id)
+        self.assertEqual(updated.startup_mode, "explorer")
+
+    def test_an_explorer_pane_this_agent_created_goes_back_to_a_terminal(self):
+        """The direction the relaunch tool refuses outright is this one's job."""
+        caller, target = self._agent_pair(
+            startup_mode="explorer",
+            initial_command_mode="explorer",
+            initial_command="",
+        )
+
+        response, _close, start_task = self._switch(
+            target.session_id,
+            {
+                "requested_by_session_id": caller.session_id,
+                "startup_mode": "terminal",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        start_task.assert_called_once_with(api._connect_session, target.session_id)
+        self.assertEqual(
+            api.session_manager.get_session(target.session_id).startup_mode, "terminal"
+        )
+
+    def test_a_pane_this_agent_created_becomes_a_browser_on_the_stated_url(self):
+        caller, target = self._agent_pair()
+
+        response, _close, _start = self._switch(
+            target.session_id,
+            {
+                "requested_by_session_id": caller.session_id,
+                "startup_mode": "browser",
+                "url": "http://localhost:5050",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        updated = api.session_manager.get_session(target.session_id)
+        self.assertEqual(updated.startup_mode, "browser")
+        self.assertIn("5050", json.dumps(updated.browser_tabs))
+
+    # ---------------- the three gates ----------------
+
+    def test_a_pane_the_user_created_is_refused_naming_the_lineage_gate(self):
+        caller, _target = self._agent_pair()
+        handmade, _repo = self._local_pane(repo_name="handmade")
+        before = _pane_state(handmade.session_id)
+
+        response, close_connection, start_task = self._switch(
+            handmade.session_id,
+            {
+                "requested_by_session_id": caller.session_id,
+                "startup_mode": "explorer",
+            },
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertIn("lineage gate", response.get_json()["error"])
+        self.assertEqual(_pane_state(handmade.session_id), before)
+        close_connection.assert_not_called()
+        start_task.assert_not_called()
+
+    def test_another_agents_pane_is_refused_naming_the_lineage_gate(self):
+        caller, target = self._agent_pair()
+        sibling, _repo = self._local_pane(repo_name="sibling")
+        before = _pane_state(target.session_id)
+
+        response, _close, _start = self._switch(
+            target.session_id,
+            {
+                "requested_by_session_id": sibling.session_id,
+                "startup_mode": "explorer",
+            },
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertIn("lineage gate", response.get_json()["error"])
+        self.assertEqual(_pane_state(target.session_id), before)
+
+    def test_a_pane_running_an_agent_is_refused_naming_the_mode_gate(self):
+        """Even one this agent created: switching its mode would end it."""
+        caller, target = self._agent_pair(
+            startup_mode="agent",
+            initial_command_mode="agent",
+            agent_selection="codex",
+            initial_command="codex",
+        )
+        before = _pane_state(target.session_id)
+
+        response, close_connection, start_task = self._switch(
+            target.session_id,
+            {
+                "requested_by_session_id": caller.session_id,
+                "startup_mode": "explorer",
+            },
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertIn("mode gate", response.get_json()["error"])
+        self.assertEqual(_pane_state(target.session_id), before)
+        close_connection.assert_not_called()
+        start_task.assert_not_called()
+
+    def test_the_callers_own_pane_is_refused_before_any_mutation(self):
+        """An agent does not re-mode itself out of existence mid-tool-call."""
+        caller, _target = self._agent_pair()
+        before = _pane_state(caller.session_id)
+
+        response, close_connection, start_task = self._switch(
+            caller.session_id,
+            {
+                "requested_by_session_id": caller.session_id,
+                "startup_mode": "explorer",
+            },
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertIn("self gate", response.get_json()["error"])
+        self.assertEqual(_pane_state(caller.session_id), before)
+        close_connection.assert_not_called()
+        start_task.assert_not_called()
+
+    def test_a_request_that_names_no_caller_is_refused(self):
+        _caller, target = self._agent_pair()
+        before = _pane_state(target.session_id)
+
+        response, _close, _start = self._switch(
+            target.session_id, {"startup_mode": "explorer"}
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("requested_by_session_id", response.get_json()["error"])
+        self.assertEqual(_pane_state(target.session_id), before)
+
+    def test_a_caller_pane_that_has_closed_is_refused(self):
+        """The creator id names a live pane, or it names nothing."""
+        caller, target = self._agent_pair()
+        api.session_manager.close_session(caller.session_id)
+        api.session_manager.clear_disconnected_sessions()
+        before = _pane_state(target.session_id)
+
+        response, _close, _start = self._switch(
+            target.session_id,
+            {
+                "requested_by_session_id": caller.session_id,
+                "startup_mode": "explorer",
+            },
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertIn("lineage gate", response.get_json()["error"])
+        self.assertEqual(_pane_state(target.session_id), before)
+
+    def test_an_unknown_session_is_a_404_before_any_gate(self):
+        caller, _target = self._agent_pair()
+
+        response, close_connection, start_task = self._switch(
+            "no-such-session",
+            {
+                "requested_by_session_id": caller.session_id,
+                "startup_mode": "explorer",
+            },
+        )
+
+        self.assertEqual(response.status_code, 404)
+        close_connection.assert_not_called()
+        start_task.assert_not_called()
+
+    # ---------------- override: waives lineage and the agent refusal ----------
+
+    def test_override_switches_a_pane_the_user_created(self):
+        caller, _target = self._agent_pair()
+        handmade, _repo = self._local_pane(repo_name="handmade")
+
+        response, close_connection, _start = self._switch(
+            handmade.session_id,
+            {
+                "requested_by_session_id": caller.session_id,
+                "startup_mode": "explorer",
+                "override": True,
+            },
+        )
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        close_connection.assert_called_once_with(handmade.session_id, clear_buffer=True)
+        self.assertEqual(
+            api.session_manager.get_session(handmade.session_id).startup_mode,
+            "explorer",
+        )
+
+    def test_override_switches_a_pane_running_an_agent(self):
+        caller, target = self._agent_pair(
+            startup_mode="agent",
+            initial_command_mode="agent",
+            agent_selection="codex",
+            initial_command="codex",
+        )
+
+        response, _close, _start = self._switch(
+            target.session_id,
+            {
+                "requested_by_session_id": caller.session_id,
+                "startup_mode": "explorer",
+                "override": True,
+            },
+        )
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertEqual(
+            api.session_manager.get_session(target.session_id).startup_mode, "explorer"
+        )
+
+    def test_override_never_waives_the_self_gate(self):
+        caller, _target = self._agent_pair()
+        before = _pane_state(caller.session_id)
+
+        response, _close, _start = self._switch(
+            caller.session_id,
+            {
+                "requested_by_session_id": caller.session_id,
+                "startup_mode": "explorer",
+                "override": True,
+            },
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertIn("self gate", response.get_json()["error"])
+        self.assertEqual(_pane_state(caller.session_id), before)
+
+    def test_a_false_override_changes_nothing(self):
+        caller, _target = self._agent_pair()
+        handmade, _repo = self._local_pane(repo_name="handmade")
+        before = _pane_state(handmade.session_id)
+
+        response, _close, _start = self._switch(
+            handmade.session_id,
+            {
+                "requested_by_session_id": caller.session_id,
+                "startup_mode": "explorer",
+                "override": False,
+            },
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertIn("lineage gate", response.get_json()["error"])
+        self.assertEqual(_pane_state(handmade.session_id), before)
+
+    # ---------------- the ordinary refusals still apply ----------------
+
+    def test_the_ordinary_transition_refusals_survive_the_gates(self):
+        """Past the gates this is the same transaction, with the same rules.
+
+        A browser pane is a Local Repo verb: GridVibe draws the preview on its
+        own machine, so an SSH pane cannot have one however it was asked for.
+        """
+        caller, _target = self._agent_pair()
+        remote = self._ssh_pane(created_by_session_id=caller.session_id)
+        api.session_manager.update_session_metadata(
+            remote.session_id, group_id=caller.group_id
+        )
+        before = _pane_state(remote.session_id)
+
+        response, _close, _start = self._switch(
+            remote.session_id,
+            {
+                "requested_by_session_id": caller.session_id,
+                "startup_mode": "browser",
+                "url": "http://localhost:5050",
+            },
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("Local Repo", response.get_json()["error"])
+        self.assertEqual(_pane_state(remote.session_id), before)
+
+    def test_a_mode_the_route_cannot_honour_is_refused_not_normalized(self):
+        """`_normalize_startup_mode()` answers "terminal" for anything it
+        cannot honour, which is right for the toggle -- it only offers what the
+        pane can be -- and wrong for a tool, which would be told a browser pane
+        was opened and handed back a plain shell."""
+        caller, target = self._agent_pair()
+        before = _pane_state(target.session_id)
+
+        response, close_connection, start_task = self._switch(
+            target.session_id,
+            {
+                "requested_by_session_id": caller.session_id,
+                "startup_mode": "agent",
+            },
+        )
+
+        self.assertEqual(response.status_code, 400)
+        error = response.get_json()["error"]
+        for named in ("terminal", "explorer", "browser"):
+            self.assertIn(named, error)
+        self.assertEqual(_pane_state(target.session_id), before)
+        close_connection.assert_not_called()
+        start_task.assert_not_called()
+
+    def test_a_switch_this_window_did_not_ask_for_rebuilds_the_grid(self):
+        """The link that makes a mode switch from outside the browser visible.
+
+        Nothing in this transaction tells a page to redraw. What does is the
+        room-scoped `session_status` every branch already broadcasts: the pane
+        instance on screen no longer matches the kind the session says it is,
+        and that mismatch is what triggers the rebuild. The
+        `pendingModeSwitchSessionIds` guard is the other half -- a page that
+        asked for the switch itself replaces the pane in place instead, so the
+        rebuild is only ever for a switch somebody else made.
+        """
+        script = _page_script("terminals.js")
+        handler = script[script.index("socket.on('session_status'"):]
+        handler = handler[: handler.index("socket.on('terminal_cleared'")]
+
+        self.assertIn("isExplorerPaneInstance(terminal) !== isExplorerSession(session)", handler)
+        self.assertIn("isBrowserPaneInstance(terminal) !== isBrowserSession(session)", handler)
+        self.assertIn("if (pendingModeSwitchSessionIds.has(session.session_id)) {", handler)
+        self.assertIn("initialLoad();", handler)
+
+    # ---------------- the boundary ----------------
+
+    def test_the_gated_service_is_not_a_flask_handler(self):
+        """Called directly, with no request context, exactly like its twin."""
+        caller, target = self._agent_pair()
+        effects = web_session_modes.ModeTransitionEffects(
+            close_connection=MagicMock(),
+            broadcast_status=MagicMock(),
+            start_connector=MagicMock(),
+        )
+
+        with patch.object(
+            web_terminal_io, "_resolve_live_terminal_cwd", return_value=None
+        ):
+            payload = web_session_modes.apply_agent_pane_mode_change(
+                target.session_id,
+                {
+                    "requested_by_session_id": caller.session_id,
+                    "startup_mode": "explorer",
+                },
+                effects,
+            )
+
+        self.assertEqual(payload["startup_mode"], "explorer")
+        effects.close_connection.assert_called_once()
+
+    def test_the_gated_route_maps_the_services_own_status(self):
+        handler = next(
+            node
+            for node in ast.parse(_module_source("api.py")).body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "switch_session_mode_for_agent"
+        )
+        called = {
+            node.func.id
+            for node in ast.walk(handler)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        }
+
+        self.assertIn("apply_agent_pane_mode_change", called)
+        self.assertIn("jsonify", called)
+        # The service's own status, never a fixed 400.
+        self.assertIn(
+            "exc.status_code",
+            ast.unparse(handler),
+        )
 
 
 class RefreshPaneCwdMoveTestCase(ModeTransitionTestCase):

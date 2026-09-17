@@ -2281,6 +2281,54 @@ class MultiWorkspaceStage3TestCase(WorkspaceSocketClientMixin, unittest.TestCase
 
         self.assertIsNotNone(api.session_manager.get_workspace(workspace_id))
 
+    def test_deliberately_empty_workspaces_have_a_ceiling(self):
+        """The one create with no bound of its own.
+
+        `launch_panes` is capped by `terminal.max_sessions` and by the agent
+        depth budget, and a split by the group cap. A workspace cost nothing and
+        -- being marked `retain_when_empty` so cleanup can tell it from one
+        emptied by a close -- was never swept either, so a tool in a retry loop
+        left permanent empty workspaces in the list every page renders.
+        """
+        for index in range(web_workspaces.MAX_EMPTY_WORKSPACES):
+            created = self.client.post("/api/workspaces", json={"label": f"WS {index}"})
+            self.assertEqual(created.status_code, 201, created.get_json())
+        before = len(api.session_manager.get_all_workspaces())
+
+        refused = self.client.post("/api/workspaces", json={"label": "One too many"})
+
+        self.assertEqual(refused.status_code, 409)
+        payload = refused.get_json()
+        self.assertEqual(payload["conflict"], "empty_workspace_limit")
+        self.assertIn(str(web_workspaces.MAX_EMPTY_WORKSPACES), payload["error"])
+        # A refusal mutates nothing, and the name it refused stays free.
+        self.assertEqual(len(api.session_manager.get_all_workspaces()), before)
+
+    def test_the_ceiling_counts_only_workspaces_that_are_still_empty(self):
+        """Filling one makes room: the bound is on emptiness, not on creates."""
+        ids = []
+        for index in range(web_workspaces.MAX_EMPTY_WORKSPACES):
+            created = self.client.post("/api/workspaces", json={"label": f"WS {index}"})
+            ids.append(created.get_json()["workspace_id"])
+        self.assertEqual(
+            self.client.post("/api/workspaces", json={"label": "Blocked"}).status_code,
+            409,
+        )
+
+        self.assertEqual(self._launch(workspace_id=ids[0]).status_code, 201)
+
+        allowed = self.client.post("/api/workspaces", json={"label": "Now fine"})
+        self.assertEqual(allowed.status_code, 201, allowed.get_json())
+
+    def test_a_launch_destination_is_never_capped_by_it(self):
+        """A workspace created to hold a group is about to hold one."""
+        for index in range(web_workspaces.MAX_EMPTY_WORKSPACES):
+            self.client.post("/api/workspaces", json={"label": f"WS {index}"})
+
+        launched = self._launch(new_workspace=True, workspace_label="Launched")
+
+        self.assertEqual(launched.status_code, 201, launched.get_json())
+
     def test_first_group_clears_retention_and_normal_pruning_resumes(self):
         workspace_id = self.client.post("/api/workspaces", json={}).get_json()["workspace_id"]
         launch = self._launch(workspace_id=workspace_id)

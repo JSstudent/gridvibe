@@ -505,6 +505,16 @@
     color: var(--gv-warning);
 }
 
+/* GridVibe's own tools are a capability rather than a permission, so the marker
+   takes the accent and leaves the warning hue to `auto` above -- two tinted
+   chips of equal loudness on one row would flatten the one that is about what
+   an agent may do *without asking*. */
+.dash-tag-mcp {
+    border-color: transparent;
+    background: var(--gv-accent-soft);
+    color: var(--gv-accent);
+}
+
 .dash-tag-active {
     border-color: transparent;
     background: var(--gv-accent);

@@ -46,6 +46,7 @@ from web.explorer import (
     _is_explorer_session,
 )
 from web.hostkeys import _apply_host_key_policy
+from web.mcp_launch import apply_pane_identity, pane_identity_environment
 from web.terminal_cwd import (
     CWD_EVENT_DIRECTORY,
     CWD_EVENT_SHELL_PID,
@@ -156,6 +157,21 @@ def _broadcast_session_status(session_id: str):
         socketio.emit('session_status', payload, room=session_id)
 
 
+def _broadcast_terminal_cleared(session_id: str):
+    """Tell every window showing this pane to run the Clear button's reset.
+
+    Room-scoped like `_broadcast_session_status`, and for the same reason: only
+    the clients that joined this pane have anything to do with it.
+
+    The server has already purged the replay buffer by the time this goes out.
+    What the page adds is the half no process outside it can do -- resetting the
+    live xterm and unwinding the mouse reporting a crashed TUI left armed -- so
+    the event carries no instructions, only the pane it applies to. What
+    "cleared" means stays on the page, in the one handler the button runs.
+    """
+    socketio.emit('terminal_cleared', {'session_id': session_id}, room=session_id)
+
+
 def _broadcast_session_groups_updated(
     reason: str = "",
     group_id: str = "",
@@ -239,6 +255,22 @@ def _connection_gate(connection):
         return connection.setdefault('ownership_lock', threading.RLock())
 
 
+def _revoke_pane_mcp_token(session_id: str) -> bool:
+    """Drop one pane's MCP token. Returns whether there was one to drop.
+
+    Imported here rather than at module scope for the same reason
+    :func:`_establish_mcp_tunnel` does: the endpoint is only reachable by a
+    pane that asked for it, and this runs on every close of every pane.
+    """
+    try:
+        from web.mcp_http import pane_tokens
+
+        return pane_tokens.revoke(session_id)
+    except Exception:  # pragma: no cover - defensive; close paths never raise
+        logger.debug("[%s] MCP token revoke failed", session_id, exc_info=True)
+        return False
+
+
 def _close_ssh_connection(session_id: str, clear_buffer: bool = True, *, expected=None):
     """Retire the captured transport after its last publication completes."""
     with connection_lock:
@@ -258,6 +290,14 @@ def _close_ssh_connection(session_id: str, clear_buffer: bool = True, *, expecte
                 if clear_buffer:
                     session_output_buffers.pop(session_id, None)
         _shutdown_connection(connection)
+    # The token minted for this pane's tunnel dies with the transport that
+    # carried it, and this is the only place that ends it. Withdrawing the
+    # remote listener is not enough: `/mcp/<token>` is reachable from any
+    # process on *this* machine, and a config file teardown could not delete
+    # still names it in plain text on a shared remote host. A token left
+    # standing is a standing key to this machine's tools naming a pane that
+    # has gone. A relaunch mints a fresh one and writes a fresh config.
+    _revoke_pane_mcp_token(session_id)
     # A relaunch closes the connection with the pane still on screen, and the
     # replacement PTY is owed that pane's size -- so the remembered viewport
     # outlives the transport and is dropped only with the session itself.
@@ -279,6 +319,18 @@ def _shutdown_connection(connection: Optional[Dict[str, Any]]):
     master_fd = connection.get("master_fd")
     stdin_handle = connection.get("stdin")
     stdout_handle = connection.get("stdout")
+
+    # Before the client closes, while its transport can still carry the
+    # cancel and the SFTP delete: a tunnel left behind is a remote listener
+    # naming a pane that has gone, and a config file naming a dead port.
+    tunnel = connection.pop("mcp_tunnel", None)
+    if tunnel is not None:
+        from web.ssh_tunnel import teardown as _teardown_mcp_tunnel
+
+        try:
+            _teardown_mcp_tunnel(client, tunnel)
+        except Exception:
+            logger.debug("MCP tunnel teardown failed", exc_info=True)
 
     try:
         if channel is not None:
@@ -1199,7 +1251,21 @@ def _run_startup_sequence(connection: Dict[str, Any], session: Any):
         marker_command = _arm_ssh_startup_scrub(connection, ssh_startup_commands)
         _send_connection_input(connection, f"{marker_command}{newline}")
 
-    startup_command = _compose_agent_startup_command(session)
+    # A tunnelled remote pane names the config that was just written on *its*
+    # host, not the one on this machine -- same flag, a path that resolves
+    # where the line is actually typed.
+    tunnel = connection.get("mcp_tunnel") or {}
+    session_id = str(getattr(session, "session_id", "") or "")
+    startup_command = _compose_agent_startup_command(
+        session,
+        remote_config_path=str(tunnel.get("remote_path") or ""),
+        remote_url=str(tunnel.get("url") or ""),
+        # Only the local, inline-TOML path (Codex) ever reads this -- see
+        # `_inline_toml_env_fragment`. Computed for every pane rather than
+        # gated on `pane_can_run_the_sidecar` here, so this call site does not
+        # have to duplicate that predicate to decide whether to bother.
+        identity=_pane_identity_for(session_id, session) if session_id else None,
+    )
     if startup_command:
         if unreachable_directory:
             # The `cd` above could not land, so this shell is standing
@@ -1756,6 +1822,124 @@ def _resolve_wsl_distribution(session: Any) -> str:
     return str(getattr(session, "distribution", "") or "").strip()
 
 
+def _establish_mcp_tunnel(
+    session_id: str,
+    session: Any,
+    connection: Dict[str, Any],
+    client: Any,
+) -> None:
+    """Give one remote agent pane a route home, if it asked for one.
+
+    Only a pane that ticked MCP opens a port: an untouched checkbox mints no
+    token, asks sshd for nothing and writes nothing on the remote host. And
+    only a pane whose agent could be *handed* one -- the flag says the reader
+    wants tools, not that this CLI has a way to take them.
+
+    Records the result on the *connection* rather than the session, because it
+    belongs to this transport and dies with it -- a relaunched pane gets a new
+    port, a new token and a freshly written config. Nothing is recorded on a
+    connection that stopped being this pane's while the tunnel was opening:
+    the record would be read by nobody and torn down by nothing.
+    """
+    if not bool(getattr(session, "agent_mcp", False)):
+        return
+    if str(getattr(session, "initial_command_mode", "") or "") != "agent":
+        return
+
+    from urllib.parse import urlparse
+
+    from web.agents import _agent_supports_mcp
+    from web.mcp_http import pane_tokens
+    from web.mcp_launch import server_base_url
+    from web.ssh_tunnel import establish
+    from web.ssh_tunnel import teardown as _teardown_mcp_tunnel
+
+    agent_key = str(getattr(session, "agent_selection", "") or "") or str(
+        getattr(session, "custom_agent", "") or ""
+    )
+    if not _agent_supports_mcp(agent_key):
+        # The last place this is asked, and the only one with a cost attached
+        # -- the flag is refused at every write. Five of the eight registered
+        # CLIs can register an MCP
+        # server only by mutating the user's own config, so their launch line
+        # carries nothing -- and a reverse forward, a minted token and a file
+        # written on the remote host would all be opened for an agent that has
+        # no way to call any of it.
+        logger.info(
+            "[%s] %s has no way to be handed an MCP server, so no tunnel was "
+            "opened for it",
+            session_id,
+            agent_key or "this pane's agent",
+        )
+        return
+
+    group_id = str(getattr(session, "group_id", "") or "")
+    workspace_id = DEFAULT_WORKSPACE_ID
+    group = session_manager.groups.get(group_id) if group_id else None
+    if group is not None:
+        workspace_id = normalize_workspace_id(getattr(group, "workspace_id", None))
+
+    token = pane_tokens.mint(
+        session_id=session_id,
+        group_id=group_id,
+        workspace_id=workspace_id,
+        agent_depth=getattr(session, "agent_depth", 0),
+    )
+    if not token:
+        return
+
+    parsed = urlparse(server_base_url())
+    record = establish(
+        client,
+        session_id=session_id,
+        token=token,
+        local_host=parsed.hostname or "127.0.0.1",
+        local_port=int(parsed.port or 5050),
+    )
+    if record is None:
+        # Nothing to spend the token on, so it is not left standing.
+        pane_tokens.revoke(session_id)
+        _publish_ssh_terminal_output(
+            session_id,
+            "\r\n\x1b[33mGridVibe: could not open the tools channel to this "
+            "host, so the agent starts without GridVibe tools.\x1b[0m\r\n",
+            connection,
+        )
+        return
+
+    # Re-validated inside the lock for the same reason the resources insert on
+    # the connect path is: a close landing between `_connection_status` and
+    # this assignment has already run `_shutdown_connection`, which popped an
+    # `mcp_tunnel` that was not there yet. Writing the record afterwards would
+    # leave an sshd listener on the remote host for the life of the transport,
+    # a config file naming a live token, and an SFTP channel held by a record
+    # nobody will ever read again.
+    with connection_lock:
+        stale = (
+            not _connection_is_current(session_id, connection)
+            or bool(connection.get("retired"))
+        )
+        if not stale:
+            connection["mcp_tunnel"] = record
+    if stale:
+        logger.info(
+            "[%s] Session was closed while the MCP tunnel was opening; "
+            "withdrawing it", session_id
+        )
+        try:
+            _teardown_mcp_tunnel(client, record)
+        except Exception:
+            logger.debug("[%s] MCP tunnel teardown failed", session_id, exc_info=True)
+        pane_tokens.revoke(session_id)
+        return
+    logger.info(
+        "[%s] MCP tunnel ready on remote port %s (config %s)",
+        session_id,
+        record.get("remote_port"),
+        record.get("remote_path"),
+    )
+
+
 def _connect_ssh_session(session_id: str, session: Any):
     """Establish an SSH connection for a single terminal session."""
     connection = _begin_connection(session_id)
@@ -1839,6 +2023,12 @@ def _connect_ssh_session(session_id: str, session: Any):
 
         _connection_status(session_id, connection, SessionStatus.CONNECTED)
 
+        # Before the startup sequence, because that is what types the agent's
+        # launch line and the line has to name the config this places. A
+        # failure here costs the pane its tools and nothing else -- the shell
+        # is already open and is never torn down for it.
+        _establish_mcp_tunnel(session_id, session, connection, client)
+
         _run_startup_sequence(connection, session)
         _stream_ssh_output(session_id, connection)
     except (paramiko.SSHException, OSError, socket.error) as e:
@@ -1856,6 +2046,26 @@ def _connect_ssh_session(session_id: str, session: Any):
                 client.close()
             except Exception:
                 pass
+
+
+def _pane_identity_for(session_id: str, session: Any) -> Dict[str, str]:
+    """Read the five identity facts a local pane carries into its children.
+
+    The workspace id lives on the pane's *group*, not the pane, so it is read
+    here rather than guessed; a pane whose group has gone gets the default
+    workspace, which is what every other reader of a groupless pane assumes.
+    """
+    group_id = str(getattr(session, "group_id", "") or "")
+    workspace_id = DEFAULT_WORKSPACE_ID
+    group = session_manager.groups.get(group_id) if group_id else None
+    if group is not None:
+        workspace_id = normalize_workspace_id(getattr(group, "workspace_id", None))
+    return pane_identity_environment(
+        session_id=session_id,
+        group_id=group_id,
+        workspace_id=workspace_id,
+        agent_depth=getattr(session, "agent_depth", 0),
+    )
 
 
 def _connect_local_session(session_id: str, session: Any):
@@ -1891,8 +2101,19 @@ def _connect_local_session(session_id: str, session: Any):
             startup_directory=wsl_startup_directory,
         )
         launch_cwd = _resolve_local_launch_cwd(startup_directory, shell_kind)
+        # Pane identity goes in *here*, at the call site, and not inside
+        # `_local_shell_integration`: that function returns unchanged when
+        # `terminal.shell_integration` is off, and that setting is a kill
+        # switch for the prompt hook -- nothing to do with MCP. A user who
+        # turns it off would otherwise get panes whose agents cannot tell what
+        # workspace they are in, with no error anywhere.
+        shell_environment = apply_pane_identity(
+            dict(os.environ),
+            _pane_identity_for(session_id, session),
+            shell_kind=shell_kind,
+        )
         command, shell_environment = _local_shell_integration(
-            shell_kind, command, dict(os.environ)
+            shell_kind, command, shell_environment
         )
         logger.info(f"[{session_id}] local command: {command}")
 

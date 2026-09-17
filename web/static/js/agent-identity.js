@@ -56,6 +56,30 @@
    reason the naming rule is: it is a *naming* decision over facts the server
    states, and the server states them precisely so it does not have to make it.
 
+   And the third, which is not a name at all but has to sit where the names are:
+   whether the pane's agent was handed GridVibe's own tools. Two agent panes on
+   one CLI, one of which can create workspaces, launch panes and split the grid
+   and one of which cannot, were painted identically on both surfaces — the flag
+   was readable only one click deep, in one pane's reset dropdown, and after a
+   restore there was no way to tell which panes had come back with it.
+   `paneAgentMcpTag` is that reading, and three things about it are deliberate:
+
+     · **It is its own value, never folded into `paneDisplayTitle`.** The title
+       is also whatever the reader typed, so a tag concatenated into it would be
+       indistinguishable from a name — and would then be compared against the
+       agent's *announced* title in `paneChatLine` as though somebody had chosen
+       it.
+     · **The flag is meaningless without an agent**, exactly as in
+       terminal-shell.js's `paneAgentMcp`, which this mirrors the way
+       `agentKeyForSession` mirrors `paneAgentKey`. A preset written before the
+       pane was sent back to a plain shell still carries `agent_mcp`, and a
+       plain shell must not wear a tag for tools nothing is holding.
+     · **Transport is not part of it.** A remote pane's tools reach it over a
+       reverse forward on the SSH transport its own shell is already running on
+       (`web/ssh_tunnel.py`), so an SSH pane wears the tag exactly as a local
+       one does. `pane_can_run_the_sidecar` picks the *shape* of the answer — a
+       local config file against a tunnelled URL — and not whether there is one.
+
    DOM-free and require()-able from Node so the rule is executed by tests
    rather than asserted as source text. */
 (function (root, factory) {
@@ -142,6 +166,13 @@
     const TRANSPORT_LABEL_WSL = 'WSL';
     const TRANSPORT_LABEL_POWERSHELL = 'PowerShell';
     const TRANSPORT_LABEL_CMD = 'cmd';
+
+    /* What a pane running with GridVibe's own tools wears, and what that tag
+       says when it is asked. Three characters because it goes beside a name on
+       a line that is already ellipsising one; the sentence is the hover, which
+       is where a reader who does not know the acronym looks. */
+    const MCP_TAG_LABEL = 'MCP';
+    const MCP_TAG_TITLE = 'This agent is running with GridVibe tools (MCP)';
 
     function text(value) {
         return String(value === null || value === undefined ? '' : value).trim();
@@ -382,6 +413,17 @@
         return session.use_powershell ? TRANSPORT_LABEL_POWERSHELL : TRANSPORT_LABEL_CMD;
     }
 
+    /* Whether this pane says it has GridVibe's tools, as the tag that says it —
+       `''` for every pane that does not, so the caller draws nothing rather
+       than an empty chip. See the module header for why the rule is an agent
+       *and* the flag, and why the transport has no part in it. */
+    function paneAgentMcpTag(session) {
+        if (!agentKeyForSession(session) || !session.agent_mcp) {
+            return '';
+        }
+        return MCP_TAG_LABEL;
+    }
+
     return {
         GENERIC_PANE_TITLE_PATTERN,
         PANE_KIND_AGENT,
@@ -394,6 +436,8 @@
         TRANSPORT_LABEL_WSL,
         TRANSPORT_LABEL_POWERSHELL,
         TRANSPORT_LABEL_CMD,
+        MCP_TAG_LABEL,
+        MCP_TAG_TITLE,
         isGenericPaneTitle,
         agentKeyForSession,
         paneKindForSession,
@@ -406,6 +450,7 @@
         paneLocationLabel,
         paneChatLine,
         paneChatTooltip,
-        paneTransportLabel
+        paneTransportLabel,
+        paneAgentMcpTag
     };
 }));

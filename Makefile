@@ -2,7 +2,7 @@
 SHELL := /bin/bash
 MAKEFLAGS += --no-print-directory
 
-.PHONY: help venv dev-deps deps-update deps-update-dev deps-bump deps-bump-check check lint fix test test-clean run clean clear-logs cleanup
+.PHONY: help venv dev-deps deps-update deps-update-dev deps-bump deps-bump-check check lint fix test test-clean run clean clear-logs cleanup mcp-deps mcp-status mcp-tools mcp-config
 
 VENV_DIR ?= .venv
 ifeq ($(OS),Windows_NT)
@@ -72,6 +72,19 @@ test: dev-deps ## Run the unit test suite.
 
 run: ## Start the application.
 	@$(PYTHON) main.py
+
+mcp-deps: dev-deps ## Install the MCP sidecar SDK into .venv (needed before any agent pane can use GridVibe tools).
+	@$(PYTHON) -m pip install --upgrade -r requirements-mcp.txt
+	@$(MAKE) mcp-status
+
+mcp-status: ## Report whether the MCP sidecar can actually start, and what GridVibe last told agents to run.
+	@$(PYTHON) utils/mcp_status.py
+
+mcp-tools: ## Print the sidecar's tool surface as JSON (no running GridVibe needed).
+	@$(PYTHON) gridvibe_mcp/__main__.py --print-tools
+
+mcp-config: ## Rewrite .gridvibe_mcp.json for this install without starting GridVibe.
+	@$(PYTHON) -c "from web.mcp_launch import write_mcp_config; print(write_mcp_config() or 'could not write the config')"
 
 clean: ## Remove Python cache directories and .pyc files.
 	@$(PYTHON) -c "from pathlib import Path; import shutil; [shutil.rmtree(path, ignore_errors=True) for pattern in ('__pycache__', '.pytest_cache', '.ruff_cache') for path in Path('.').rglob(pattern) if path.is_dir()]; [path.unlink() for path in Path('.').rglob('*.pyc') if path.is_file()]"

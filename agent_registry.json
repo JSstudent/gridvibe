@@ -72,6 +72,11 @@
     "auto_mode": {
       "flag": "--allow-all-tools",
       "description": "Launches with all tool executions approved automatically."
+    },
+    "mcp": {
+      "flag": "--additional-mcp-config @{config}",
+      "description": "Gives this agent tools to see and build GridVibe workspaces.",
+      "verified": true
     }
   },
   "codex": {
@@ -147,6 +152,11 @@
     "auto_mode": {
       "flag": "--sandbox workspace-write --ask-for-approval on-request",
       "description": "Launches in the sandboxed Auto preset: edits and commands run in the workspace automatically, only prompting for potentially unsafe actions."
+    },
+    "mcp": {
+      "style": "inline_toml",
+      "description": "Gives this agent tools to see and build GridVibe workspaces.",
+      "verified": true
     }
   },
   "opencode": {
@@ -355,6 +365,11 @@
     "auto_mode": {
       "flag": "--permission-mode auto",
       "description": "Launches in the auto permission mode: routine edits and commands run without prompting."
+    },
+    "mcp": {
+      "flag": "--mcp-config {config}",
+      "description": "Gives this agent tools to see and build GridVibe workspaces.",
+      "verified": true
     }
   },
   "kimi": {
@@ -549,4 +564,3 @@
     }
   }
 }
-

@@ -19,6 +19,14 @@
          a column: it stays in the row's accessible name, out of flow, where a
          reader who is hearing the row still gets it and the title gets the
          width.
+     · **The `MCP` chip is the exception, and for the opposite reason.** It
+         survives the same width squeeze the name did not, because nothing else
+         on the row answers it: the mark says *which* agent this is, and no part
+         of a row says whether that agent can create workspaces, launch panes
+         and split the grid. Choosing which pane to instruct is the thing a
+         panel kept up *while* the reader works is for, so the three characters
+         that decide it are worth the width here even though a whole word for
+         the shell is not.
      · **It does not close when you leave.** The dialog dismisses itself on the
        reader going elsewhere, because a modal surface left standing over a
        window nobody is looking at is stale. This is chrome: it is *part* of the
@@ -125,6 +133,10 @@
             agentName: pane => (
                 typeof root.dashboardAgentName === 'function'
                     ? root.dashboardAgentName(pane) : ''
+            ),
+            mcp: pane => (
+                typeof root.dashboardMcpTagHtml === 'function'
+                    ? root.dashboardMcpTagHtml(pane) : ''
             ),
             workspaceLabel: (workspace, index) => (
                 typeof root.dashboardWorkspaceLabel === 'function'
@@ -256,12 +268,21 @@
        dialog's own, so `agent-dashboard.css` dresses both and this feature's
        stylesheet states only what a column changes. */
 
-    /* One pane, one line: the dot, the agent's mark, and what the pane
-       announced. `dash-agent-who` and not `dash-agent-name` is the whole
-       difference from the dialog's row, and it is a deliberate class of its
-       own: the name is out of flow here, the way `dash-state-word` is, so a
-       stylesheet cannot accidentally draw it back into the line and a reader
-       hearing the row still learns which agent it is. */
+    /* One pane, one line: the dot, the agent's mark, what the pane announced,
+       and whether that agent has GridVibe's own tools. `dash-agent-who` and not
+       `dash-agent-name` is the whole difference from the dialog's row, and it
+       is a deliberate class of its own: the name is out of flow here, the way
+       `dash-state-word` is, so a stylesheet cannot accidentally draw it back
+       into the line and a reader hearing the row still learns which agent it
+       is.
+
+       The `MCP` chip is drawn, and it is the one thing this row keeps that the
+       name gave up, because it is not the same kind of fact. The name is
+       answered by the mark beside it; nothing else on the row says whether this
+       agent can create workspaces, launch panes and split the grid. That is
+       what a reader is choosing between when they pick a pane to instruct, and
+       a panel meant to be up *while* they work is exactly where that choice is
+       made. Three characters, from the dialog's own builder. */
     function agentRowHtml(pane, render) {
         const esc = render.esc;
         return `
@@ -280,6 +301,7 @@
                 <span class="dash-agent-icon" aria-hidden="true">${render.glyph(pane)}</span>
                 <span class="dash-agent-who">${esc(render.agentName(pane))}</span>
                 <span class="dash-agent-line">${esc(render.line(pane))}</span>
+                ${render.mcp(pane)}
                 <span class="dash-agent-progress">${render.progress(pane)}</span>
             </button>
         `;

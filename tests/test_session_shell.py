@@ -16,6 +16,9 @@ second dimension added, and what the boundary itself has to hold:
   agent-only relaunch both send), and an unstated `agent` leaves its agent
   alone (that is what every request looked like before this dimension existed).
   A stated `""` agent is a *choice* of no agent, and only that clears one.
+  `mcp` is the third of them, and behaves the same way: unstated leaves the
+  pane's MCP setting alone, which for an agent change means it follows the
+  agent -- the rule auto mode already has.
 - **A refusal is atomic.** Each one is asserted on the response *and* on the
   whole pane, so a mutation that leaked ahead of a validation shows up here.
 - **The service is not a Flask handler**, and the route maps the error's own
@@ -33,6 +36,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import api
+from sessions.manager import _MAX_AGENT_DEPTH
 from web import agents as web_agents
 from web import config as web_config
 from web import runtime_state as web_runtime_state
@@ -55,6 +59,7 @@ _PANE_FIELDS = (
     "agent_selection",
     "custom_agent",
     "agent_auto_mode",
+    "agent_mcp",
     "status",
 )
 
@@ -736,6 +741,841 @@ class ShellTransitionBoundaryTestCase(ShellTransitionTestCase):
         }
         self.assertIn("apply_pane_shell_change", called)
         self.assertIn("jsonify", called)
+
+
+class PaneMcpRelaunchTestCase(ShellTransitionTestCase):
+    """The third tri-state on the same route."""
+
+    def _agent_pane(self, **overrides):
+        session, _repo = self._local_pane(
+            startup_mode="agent",
+            initial_command_mode="agent",
+            agent_selection="claude",
+            initial_command="claude",
+            **overrides,
+        )
+        return session
+
+    def test_an_unstated_mcp_leaves_the_pane_alone(self):
+        session = self._agent_pane(agent_mcp=True)
+        before = _pane_state(session.session_id)
+
+        response, _close, _start = self._post_shell(
+            session.session_id, {"agent": "claude"}
+        )
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertTrue(api.session_manager.get_session(session.session_id).agent_mcp)
+        self.assertEqual(_pane_state(session.session_id)["agent_mcp"], before["agent_mcp"])
+
+    def test_a_stated_mcp_is_applied_even_when_the_agent_does_not_change(self):
+        session = self._agent_pane(agent_mcp=True)
+
+        response, _close, start_task = self._post_shell(
+            session.session_id, {"agent": "claude", "mcp": False}
+        )
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertFalse(api.session_manager.get_session(session.session_id).agent_mcp)
+        # A stated dimension is also the relaunch instruction.
+        start_task.assert_called_once()
+
+    def test_mcp_follows_the_agent_it_was_chosen_for(self):
+        """A flag registered for one CLI says nothing about the next one."""
+        session = self._agent_pane(agent_mcp=True)
+
+        self._post_shell(session.session_id, {"agent": "codex"})
+
+        self.assertFalse(api.session_manager.get_session(session.session_id).agent_mcp)
+
+    def test_a_pane_sent_back_to_a_plain_shell_keeps_no_mcp(self):
+        session = self._agent_pane(agent_mcp=True)
+
+        self._post_shell(session.session_id, {"agent": ""})
+
+        updated = api.session_manager.get_session(session.session_id)
+        self.assertEqual(updated.startup_mode, "terminal")
+        self.assertFalse(updated.agent_mcp)
+
+    def test_a_non_boolean_mcp_is_refused_without_moving_the_pane(self):
+        session = self._agent_pane(agent_mcp=True)
+        before = _pane_state(session.session_id)
+
+        response, close_connection, start_task = self._post_shell(
+            session.session_id, {"agent": "claude", "mcp": "yes"}
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(_pane_state(session.session_id), before)
+        close_connection.assert_not_called()
+        start_task.assert_not_called()
+
+    def test_an_ssh_pane_may_now_be_given_mcp(self):
+        """A remote pane's tools arrive over its own SSH reverse tunnel.
+
+        This route refused it outright while the sidecar could only be a local
+        child process. The pane now records the choice and its next connection
+        decides whether the tunnel could be opened.
+        """
+        session = self._ssh_pane(
+            startup_mode="agent",
+            initial_command_mode="agent",
+            agent_selection="claude",
+            initial_command="claude",
+        )
+
+        response, _close, start_task = self._post_shell(
+            session.session_id, {"agent": "claude", "mcp": True}
+        )
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertTrue(api.session_manager.get_session(session.session_id).agent_mcp)
+        start_task.assert_called_once()
+
+    def test_an_ssh_pane_may_still_state_mcp_false(self):
+        """Only the impossible direction is refused.
+
+        A remote pane carrying a stale `agent_mcp` from a preset written before
+        the rule existed must still be able to clear it.
+        """
+        session = self._ssh_pane(
+            startup_mode="agent",
+            initial_command_mode="agent",
+            agent_selection="claude",
+            initial_command="claude",
+            agent_mcp=True,
+        )
+
+        response, _close, _start = self._post_shell(
+            session.session_id, {"agent": "claude", "mcp": False}
+        )
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertFalse(api.session_manager.get_session(session.session_id).agent_mcp)
+
+
+class AgentRequestedRelaunchTestCase(ShellTransitionTestCase):
+    """The gated twin: the same relaunch, asked for by an agent's own pane.
+
+    `POST /api/sessions/<id>/shell` is the pane header's reset dropdown --
+    pressed by the person looking at the pane, so there is nobody to check.
+    `POST /api/sessions/<id>/agent-relaunch` is what a tool reaches, and a
+    relaunch *ends whatever is running in the pane*. Three gates, and all three
+    must hold. Every refusal is asserted on the whole pane, so a mutation that
+    leaked ahead of a gate shows up here rather than in production.
+    """
+
+    def _agent_pair(self, **overrides):
+        """A caller pane and a pane it created, in one group."""
+        caller, repo = self._local_pane(repo_name="agent-repo")
+        api.session_manager.update_session_metadata(
+            caller.session_id,
+            startup_mode="agent",
+            initial_command_mode="agent",
+            agent_selection="claude",
+            initial_command="claude",
+            agent_depth=0,
+        )
+        fields = {
+            "group_id": caller.group_id,
+            "host": "cmd",
+            "directory": str(repo),
+            "mode": "wsl",
+            "startup_mode": "terminal",
+            "created_by_session_id": caller.session_id,
+        }
+        fields.update(overrides)
+        target = api.session_manager.create_session(**fields)
+        api.session_manager.update_session_status(
+            target.session_id, api.SessionStatus.CONNECTED
+        )
+        return (
+            api.session_manager.get_session(caller.session_id),
+            api.session_manager.get_session(target.session_id),
+        )
+
+    def _relaunch(self, session_id, body, detection=None):
+        """POST one agent-requested relaunch with every side effect observable."""
+        found = dict(detection or {"found": True, "path": "/usr/bin/agent"})
+
+        def _detect(target, binary):
+            registry_binaries = {
+                str((spec or {}).get("binary") or key)
+                for key, spec in web_agents.AGENT_REGISTRY.items()
+            }
+            if binary not in registry_binaries:
+                return {"found": True, "path": f"/usr/bin/{binary}"}
+            return dict(found)
+
+        with patch.object(api.os, "name", "nt"), patch.object(
+            web_terminal_io, "_resolve_live_terminal_cwd", return_value=None
+        ), patch.object(
+            web_agents, "_detect_agent_binary_cached", side_effect=_detect
+        ), patch.object(
+            api, "_close_ssh_connection"
+        ) as close_connection, patch.object(
+            api.socketio, "start_background_task"
+        ) as start_task:
+            response = self.client.post(
+                f"/api/sessions/{session_id}/agent-relaunch", json=body
+            )
+        return response, close_connection, start_task
+
+    # ---------------- the pane that passes ----------------
+
+    def test_a_pane_this_agent_created_is_relaunched_into_an_agent(self):
+        caller, target = self._agent_pair()
+
+        response, close_connection, start_task = self._relaunch(
+            target.session_id,
+            {"requested_by_session_id": caller.session_id, "agent": "codex", "mcp": True},
+        )
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        close_connection.assert_called_once_with(target.session_id, clear_buffer=True)
+        start_task.assert_called_once_with(api._connect_session, target.session_id)
+        updated = api.session_manager.get_session(target.session_id)
+        self.assertEqual(updated.startup_mode, "agent")
+        self.assertEqual(updated.agent_selection, "codex")
+        self.assertTrue(updated.agent_mcp)
+
+    def test_the_relaunched_pane_inherits_the_callers_depth_budget(self):
+        """An agent that turns a pane into an agent hands down a budget.
+
+        Written inside the same transaction, before the replacement shell is
+        started: the spawn reads `agent_depth` to build the pane's environment,
+        so a depth set afterwards would race the connector.
+        """
+        caller, target = self._agent_pair()
+        api.session_manager.update_session_metadata(caller.session_id, agent_depth=1)
+
+        response, _close, _start = self._relaunch(
+            target.session_id,
+            {"requested_by_session_id": caller.session_id, "agent": "claude"},
+        )
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertEqual(
+            api.session_manager.get_session(target.session_id).agent_depth, 2
+        )
+
+    def test_the_inherited_depth_is_bounded_like_every_other_write_of_it(self):
+        """`update_session_metadata` is a raw setattr over an allowlist.
+
+        `create_session` and the split route both push the arithmetic through
+        `_normalize_agent_depth`; this path used to add one and write it, so it
+        was the only way a depth past `_MAX_AGENT_DEPTH` -- the ceiling that
+        exists so a snapshot cannot overflow the sidecar's own refusal
+        arithmetic -- could be persisted into `runtime_state.json`.
+        """
+        caller, target = self._agent_pair()
+        api.session_manager.update_session_metadata(
+            caller.session_id, agent_depth=_MAX_AGENT_DEPTH
+        )
+
+        response, _close, _start = self._relaunch(
+            target.session_id,
+            {"requested_by_session_id": caller.session_id, "agent": "claude"},
+        )
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertEqual(
+            api.session_manager.get_session(target.session_id).agent_depth,
+            _MAX_AGENT_DEPTH,
+        )
+
+    def test_a_caller_that_closes_mid_call_is_refused_not_read_as_depth_zero(self):
+        """The gate proved the caller was open; nothing held it there.
+
+        A caller gone by the time its budget is read used to be
+        `getattr(None, "agent_depth", 0) + 1`, which is 1 -- so a chain four
+        agents deep silently *restarted* its budget instead of ending. It is the
+        same fact `check_caller` already refuses on, so it refuses here too.
+        """
+        caller, target = self._agent_pair()
+        api.session_manager.update_session_metadata(caller.session_id, agent_depth=1)
+        before = _pane_state(target.session_id)
+        passes_then_closes = web_session_shell.check_lineage
+
+        def close_the_caller(session, request, wording):
+            passes_then_closes(session, request, wording)
+            api.session_manager.close_session(caller.session_id)
+            api.session_manager.clear_disconnected_sessions()
+
+        with patch.object(web_session_shell, "check_lineage", close_the_caller):
+            response, close_connection, start_task = self._relaunch(
+                target.session_id,
+                {"requested_by_session_id": caller.session_id, "agent": "claude"},
+            )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertIn("lineage gate", response.get_json()["error"])
+        self.assertEqual(_pane_state(target.session_id), before)
+        close_connection.assert_not_called()
+        start_task.assert_not_called()
+
+    def test_a_relaunch_can_send_a_pane_it_made_back_to_a_plain_shell(self):
+        """A stated empty agent is a choice, and the gates do not forbid it."""
+        caller, target = self._agent_pair()
+        self._relaunch(
+            target.session_id,
+            {"requested_by_session_id": caller.session_id, "agent": "claude"},
+        )
+
+        response, _close, _start = self._relaunch(
+            target.session_id,
+            {"requested_by_session_id": caller.session_id, "agent": ""},
+        )
+
+        # The pane became an agent pane in between, so the mode gate now sees
+        # an agent pane -- and refuses, which is the rule, not an exception.
+        self.assertEqual(response.status_code, 403)
+        self.assertIn("mode gate", response.get_json()["error"])
+
+    # ---------------- the three gates ----------------
+
+    def test_a_pane_the_user_created_is_refused_naming_the_lineage_gate(self):
+        caller, _target = self._agent_pair()
+        handmade, _repo = self._local_pane(repo_name="handmade")
+        before = _pane_state(handmade.session_id)
+
+        response, close_connection, start_task = self._relaunch(
+            handmade.session_id,
+            {"requested_by_session_id": caller.session_id, "agent": "claude"},
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertIn("lineage gate", response.get_json()["error"])
+        self.assertEqual(_pane_state(handmade.session_id), before)
+        close_connection.assert_not_called()
+        start_task.assert_not_called()
+
+    def test_another_agents_pane_is_refused_even_at_the_same_depth(self):
+        """The gate is the creator id, not the depth.
+
+        Two sibling agents one level down would each pass a depth-based gate on
+        the other's panes, which is exactly why `agent_depth` is not the gate.
+        """
+        caller, target = self._agent_pair()
+        sibling, _repo = self._local_pane(repo_name="sibling")
+        api.session_manager.update_session_metadata(
+            sibling.session_id, agent_depth=caller.agent_depth
+        )
+        before = _pane_state(target.session_id)
+
+        response, _close, _start = self._relaunch(
+            target.session_id,
+            {"requested_by_session_id": sibling.session_id, "agent": "claude"},
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertIn("lineage gate", response.get_json()["error"])
+        self.assertEqual(_pane_state(target.session_id), before)
+
+    def test_an_explorer_pane_is_refused_naming_the_mode_gate(self):
+        """Never converted to a terminal first and relaunched after."""
+        caller, target = self._agent_pair(
+            startup_mode="explorer",
+            initial_command_mode="explorer",
+            initial_command="",
+        )
+        before = _pane_state(target.session_id)
+
+        response, _close, _start = self._relaunch(
+            target.session_id,
+            {"requested_by_session_id": caller.session_id, "agent": "claude"},
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertIn("mode gate", response.get_json()["error"])
+        self.assertEqual(_pane_state(target.session_id), before)
+
+    def test_a_pane_already_running_an_agent_is_refused_by_the_mode_gate(self):
+        """Even one this agent created: a running agent is work in progress."""
+        caller, target = self._agent_pair(
+            startup_mode="agent",
+            initial_command_mode="agent",
+            agent_selection="claude",
+            initial_command="claude",
+        )
+        before = _pane_state(target.session_id)
+
+        response, _close, _start = self._relaunch(
+            target.session_id,
+            {"requested_by_session_id": caller.session_id, "agent": "codex"},
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertIn("mode gate", response.get_json()["error"])
+        self.assertEqual(_pane_state(target.session_id), before)
+
+    # ---------------- override: waives lineage and "already an agent" ----------------
+
+    def test_override_relaunches_a_pane_the_user_created(self):
+        """The explicit-instruction escape hatch, for lineage only."""
+        caller, _target = self._agent_pair()
+        handmade, _repo = self._local_pane(repo_name="handmade")
+
+        response, close_connection, start_task = self._relaunch(
+            handmade.session_id,
+            {
+                "requested_by_session_id": caller.session_id,
+                "agent": "codex",
+                "override": True,
+            },
+        )
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        close_connection.assert_called_once_with(handmade.session_id, clear_buffer=True)
+        start_task.assert_called_once_with(api._connect_session, handmade.session_id)
+        self.assertEqual(
+            api.session_manager.get_session(handmade.session_id).agent_selection,
+            "codex",
+        )
+
+    def test_override_relaunches_a_pane_already_running_an_agent(self):
+        caller, target = self._agent_pair(
+            startup_mode="agent",
+            initial_command_mode="agent",
+            agent_selection="claude",
+            initial_command="claude",
+        )
+
+        response, _close, _start = self._relaunch(
+            target.session_id,
+            {
+                "requested_by_session_id": caller.session_id,
+                "agent": "codex",
+                "override": True,
+            },
+        )
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertEqual(
+            api.session_manager.get_session(target.session_id).agent_selection,
+            "codex",
+        )
+
+    def test_override_relaunches_another_agents_pane(self):
+        caller, target = self._agent_pair()
+        sibling, _repo = self._local_pane(repo_name="sibling")
+        api.session_manager.update_session_metadata(
+            sibling.session_id, agent_depth=caller.agent_depth
+        )
+
+        response, _close, _start = self._relaunch(
+            target.session_id,
+            {
+                "requested_by_session_id": sibling.session_id,
+                "agent": "codex",
+                "override": True,
+            },
+        )
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+
+    def test_override_never_waives_the_mode_gate_on_an_explorer_pane(self):
+        """Mode-switching an existing pane is a different transaction entirely."""
+        caller, target = self._agent_pair(
+            startup_mode="explorer", initial_command_mode="explorer", initial_command=""
+        )
+        before = _pane_state(target.session_id)
+
+        response, _close, _start = self._relaunch(
+            target.session_id,
+            {
+                "requested_by_session_id": caller.session_id,
+                "agent": "claude",
+                "override": True,
+            },
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertIn("mode gate", response.get_json()["error"])
+        self.assertEqual(_pane_state(target.session_id), before)
+
+    def test_override_never_waives_the_self_gate(self):
+        """An agent does not end itself mid-tool-call, override or not."""
+        caller, _target = self._agent_pair()
+        before = _pane_state(caller.session_id)
+
+        response, close_connection, start_task = self._relaunch(
+            caller.session_id,
+            {
+                "requested_by_session_id": caller.session_id,
+                "agent": "codex",
+                "override": True,
+            },
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertIn("self gate", response.get_json()["error"])
+        self.assertEqual(_pane_state(caller.session_id), before)
+        close_connection.assert_not_called()
+        start_task.assert_not_called()
+
+    def test_a_false_override_changes_nothing(self):
+        """The default: stating the key as false is the same as not stating it."""
+        caller, _target = self._agent_pair()
+        handmade, _repo = self._local_pane(repo_name="handmade")
+        before = _pane_state(handmade.session_id)
+
+        response, _close, _start = self._relaunch(
+            handmade.session_id,
+            {
+                "requested_by_session_id": caller.session_id,
+                "agent": "codex",
+                "override": False,
+            },
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertIn("lineage gate", response.get_json()["error"])
+        self.assertEqual(_pane_state(handmade.session_id), before)
+
+    def test_the_callers_own_pane_is_refused_before_any_mutation(self):
+        """An agent does not end itself mid-tool-call."""
+        caller, _target = self._agent_pair()
+        before = _pane_state(caller.session_id)
+
+        response, close_connection, start_task = self._relaunch(
+            caller.session_id,
+            {"requested_by_session_id": caller.session_id, "agent": "codex"},
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertIn("self gate", response.get_json()["error"])
+        self.assertEqual(_pane_state(caller.session_id), before)
+        close_connection.assert_not_called()
+        start_task.assert_not_called()
+
+    def test_a_request_that_names_no_caller_is_refused(self):
+        _caller, target = self._agent_pair()
+        before = _pane_state(target.session_id)
+
+        response, _close, _start = self._relaunch(target.session_id, {"agent": "claude"})
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("requested_by_session_id", response.get_json()["error"])
+        self.assertEqual(_pane_state(target.session_id), before)
+
+    def test_a_caller_pane_that_has_closed_is_refused(self):
+        """The creator id names a live pane, or it names nothing."""
+        caller, target = self._agent_pair()
+        api.session_manager.close_session(caller.session_id)
+        api.session_manager.clear_disconnected_sessions()
+        before = _pane_state(target.session_id)
+
+        response, _close, _start = self._relaunch(
+            target.session_id,
+            {"requested_by_session_id": caller.session_id, "agent": "claude"},
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertIn("lineage gate", response.get_json()["error"])
+        self.assertEqual(_pane_state(target.session_id), before)
+
+    def test_a_missing_pane_is_a_404_not_a_gate(self):
+        caller, _target = self._agent_pair()
+
+        response, _close, _start = self._relaunch(
+            "no-such-pane",
+            {"requested_by_session_id": caller.session_id, "agent": "claude"},
+        )
+
+        self.assertEqual(response.status_code, 404)
+
+    def test_an_agent_whose_binary_is_absent_is_refused_past_the_gates(self):
+        """The ordinary preflight still runs, and still leaves the pane alone."""
+        caller, target = self._agent_pair()
+        before = _pane_state(target.session_id)
+
+        response, close_connection, _start = self._relaunch(
+            target.session_id,
+            {"requested_by_session_id": caller.session_id, "agent": "claude"},
+            detection={"found": False},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("left as it is", response.get_json()["error"])
+        self.assertEqual(_pane_state(target.session_id), before)
+        close_connection.assert_not_called()
+
+    # ---------------- lineage does not survive a restart ----------------
+
+    def test_a_creator_id_is_not_snapshot_state(self):
+        """After a restart no pane has a creator, so every pane refuses.
+
+        The field names a live session, and a restored one names a stranger.
+        Asserted against the snapshot's own field list rather than by
+        round-tripping a restart, because the omission *is* the contract.
+        """
+        self.assertNotIn(
+            "created_by_session_id", web_runtime_state._SESSION_SNAPSHOT_FIELDS
+        )
+
+    def test_a_restored_pane_carries_no_creator_and_is_refused(self):
+        caller, target = self._agent_pair()
+        # What a restore rebuilds a pane from: the snapshot fields and nothing
+        # else, so the creator is simply not in the config.
+        restored = api.session_manager.create_session(
+            group_id=caller.group_id,
+            host="cmd",
+            directory=target.directory,
+            mode="wsl",
+            startup_mode="terminal",
+        )
+        api.session_manager.update_session_status(
+            restored.session_id, api.SessionStatus.CONNECTED
+        )
+        before = _pane_state(restored.session_id)
+
+        response, _close, _start = self._relaunch(
+            restored.session_id,
+            {"requested_by_session_id": caller.session_id, "agent": "claude"},
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertIn("lineage gate", response.get_json()["error"])
+        self.assertEqual(_pane_state(restored.session_id), before)
+
+    # ---------------- the boundary ----------------
+
+    def test_the_gated_route_is_not_the_header_dropdowns_route(self):
+        """A page pressing its own reset dropdown states no caller and passes.
+
+        The two routes are deliberately separate: adding the gates to the shell
+        route would refuse the button, and letting a tool reach the shell route
+        would mean the gates were advice.
+        """
+        _caller, target = self._agent_pair()
+
+        response, _close, start_task = self._post_shell(
+            target.session_id, {"agent": "claude"}
+        )
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        start_task.assert_called_once()
+
+
+class SplitSaysWhatToCreateTestCase(ShellTransitionTestCase):
+    """A split used to produce exactly one thing; now it says what.
+
+    An agent pane created directly rather than created-and-then-relaunched is
+    what keeps the destroy tier small: the verb that configures a pane it just
+    made needs no gates, because there was nothing there to interrupt.
+    """
+
+    def _pane(self, **overrides):
+        group = api.session_manager.create_group(
+            name="Local", connection_mode="wsl", layout="single", terminal_count=1
+        )
+        fields = {
+            "group_id": group.group_id,
+            "host": "cmd",
+            "directory": str(Path(self.temp_dir.name)),
+            "mode": "wsl",
+            "startup_mode": "terminal",
+        }
+        fields.update(overrides)
+        session = api.session_manager.create_session(**fields)
+        api.session_manager.update_session_status(
+            session.session_id, api.SessionStatus.CONNECTED
+        )
+        return group, api.session_manager.get_session(session.session_id)
+
+    def _split(self, session_id, body, detection=None):
+        found = dict(detection or {"found": True, "path": "/usr/bin/agent"})
+
+        def _detect(target, binary):
+            registry_binaries = {
+                str((spec or {}).get("binary") or key)
+                for key, spec in web_agents.AGENT_REGISTRY.items()
+            }
+            if binary not in registry_binaries:
+                return {"found": True, "path": f"/usr/bin/{binary}"}
+            return dict(found)
+
+        with patch.object(
+            web_terminal_io, "_resolve_live_terminal_cwd", return_value=None
+        ), patch.object(
+            web_agents, "_detect_agent_binary_cached", side_effect=_detect
+        ), patch.object(api.socketio, "start_background_task"):
+            return self.client.post(f"/api/sessions/{session_id}/split", json=body)
+
+    def test_a_split_with_no_kind_still_clones_the_source(self):
+        """The header button's own request, unchanged."""
+        _group, pane = self._pane()
+
+        response = self._split(pane.session_id, {"axis": "vertical"})
+
+        self.assertEqual(response.status_code, 201, response.get_json())
+        created = response.get_json()["session"]
+        self.assertEqual(created["startup_mode"], "terminal")
+        self.assertEqual(created["agent_selection"], "")
+
+    def test_a_split_can_create_an_agent_pane_outright(self):
+        _group, pane = self._pane()
+
+        response = self._split(
+            pane.session_id,
+            {"axis": "vertical", "kind": "agent", "agent": "claude", "mcp": True},
+        )
+
+        self.assertEqual(response.status_code, 201, response.get_json())
+        created = response.get_json()["session"]
+        self.assertEqual(created["startup_mode"], "agent")
+        self.assertEqual(created["initial_command_mode"], "agent")
+        self.assertEqual(created["agent_selection"], "claude")
+        self.assertTrue(created["agent_mcp"])
+        self.assertFalse(created["agent_auto_mode"])
+
+    def test_a_split_can_create_an_explorer_pane_rooted_where_it_lands(self):
+        _group, pane = self._pane()
+
+        response = self._split(
+            pane.session_id, {"axis": "horizontal", "kind": "explorer"}
+        )
+
+        self.assertEqual(response.status_code, 201, response.get_json())
+        created = response.get_json()["session"]
+        self.assertEqual(created["startup_mode"], "explorer")
+        self.assertEqual(created["host"], "File Explorer")
+        self.assertTrue(created["explorer_root_configured"])
+        self.assertTrue(created["explorer_root_directory"])
+
+    def test_a_split_can_create_a_browser_pane_on_a_local_source(self):
+        _group, pane = self._pane()
+
+        response = self._split(
+            pane.session_id,
+            {"axis": "vertical", "kind": "browser", "url": "http://localhost:3000"},
+        )
+
+        self.assertEqual(response.status_code, 201, response.get_json())
+        created = response.get_json()["session"]
+        self.assertEqual(created["startup_mode"], "browser")
+        self.assertEqual(created["host"], "Browser")
+        self.assertEqual(created["browser_tabs"], ["http://localhost:3000"])
+
+    def test_a_browser_pane_is_refused_on_a_remote_source_and_adds_nothing(self):
+        group = api.session_manager.create_group(
+            name="SSH", connection_mode="ssh", layout="single", terminal_count=1
+        )
+        pane = api.session_manager.create_session(
+            group_id=group.group_id,
+            host="example.com",
+            directory="/srv/app",
+            mode="ssh",
+            username="ubuntu",
+            startup_mode="terminal",
+        )
+
+        response = self._split(
+            pane.session_id,
+            {"axis": "vertical", "kind": "browser", "url": "http://localhost:3000"},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(len(api.session_manager.get_group_sessions(group.group_id)), 1)
+
+    def test_an_agent_whose_binary_is_absent_adds_no_pane_at_all(self):
+        """Refusing costs nothing here, and a pane wearing an agent's name over
+        a plain shell is what it prevents."""
+        group, pane = self._pane()
+
+        response = self._split(
+            pane.session_id,
+            {"axis": "vertical", "kind": "agent", "agent": "claude"},
+            detection={"found": False},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("No pane was added", response.get_json()["error"])
+        self.assertEqual(len(api.session_manager.get_group_sessions(group.group_id)), 1)
+
+    def test_an_unknown_kind_adds_no_pane(self):
+        group, pane = self._pane()
+
+        response = self._split(pane.session_id, {"axis": "vertical", "kind": "database"})
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(len(api.session_manager.get_group_sessions(group.group_id)), 1)
+
+    # ---------------- the lineage stamp ----------------
+
+    def test_a_split_a_person_made_records_no_creator(self):
+        """The header button states none, so the new pane belongs to nobody --
+        and the relaunch gate refuses it, which is the safe direction."""
+        _group, pane = self._pane()
+
+        created = self._split(pane.session_id, {"axis": "vertical"}).get_json()["session"]
+
+        self.assertEqual(created["created_by_session_id"], "")
+        self.assertEqual(created["agent_depth"], 0)
+
+    def test_a_split_an_agent_asked_for_records_that_agent_and_one_more_level(self):
+        group, caller = self._pane()
+        api.session_manager.update_session_metadata(caller.session_id, agent_depth=1)
+
+        created = self._split(
+            caller.session_id,
+            {"axis": "vertical", "created_by_session_id": caller.session_id},
+        ).get_json()["session"]
+
+        self.assertEqual(created["created_by_session_id"], caller.session_id)
+        self.assertEqual(created["agent_depth"], 2)
+        self.assertEqual(len(api.session_manager.get_group_sessions(group.group_id)), 2)
+
+    def test_a_creator_that_names_nothing_open_stamps_nothing(self):
+        """Read against the live registry rather than believed."""
+        _group, pane = self._pane()
+
+        created = self._split(
+            pane.session_id,
+            {"axis": "vertical", "created_by_session_id": "ghost-pane"},
+        ).get_json()["session"]
+
+        self.assertEqual(created["created_by_session_id"], "")
+
+    def test_a_launch_from_inside_a_pane_stamps_that_pane_on_every_new_one(self):
+        """The other half of the stamp: `origin_session_id` used to be read for
+        the connection and then discarded."""
+        _group, caller = self._pane()
+
+        with patch.object(api.socketio, "start_background_task"):
+            response = self.client.post(
+                "/api/sessions",
+                json={
+                    "connection_mode": "wsl",
+                    "origin_session_id": caller.session_id,
+                    "sessions": [
+                        {"directory": str(Path(self.temp_dir.name)), "startup_mode": "terminal"},
+                        {"directory": str(Path(self.temp_dir.name)), "startup_mode": "terminal"},
+                    ],
+                },
+            )
+
+        self.assertEqual(response.status_code, 201, response.get_json())
+        for session in response.get_json()["sessions"]:
+            self.assertEqual(session["created_by_session_id"], caller.session_id)
+
+    def test_a_launch_from_the_launcher_stamps_no_creator(self):
+        with patch.object(api.socketio, "start_background_task"):
+            response = self.client.post(
+                "/api/sessions",
+                json={
+                    "connection_mode": "wsl",
+                    "sessions": [
+                        {"directory": str(Path(self.temp_dir.name)), "startup_mode": "terminal"}
+                    ],
+                },
+            )
+
+        self.assertEqual(response.status_code, 201, response.get_json())
+        self.assertEqual(
+            response.get_json()["sessions"][0]["created_by_session_id"], ""
+        )
 
 
 if __name__ == "__main__":

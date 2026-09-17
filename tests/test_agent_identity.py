@@ -19,6 +19,10 @@ here is the part that is easy to get subtly wrong:
 - **An agent with no registry entry still gets a name** — its own key, or the
   first word of a custom command — because a blank name on a running agent is
   the one answer that helps nobody.
+- **A pane running with GridVibe tools says so**, in a tag that is its own value
+  and never part of the title. Two agent panes on one CLI, one of which can
+  create workspaces and split the grid and one of which cannot, were painted
+  identically on both surfaces before this existed.
 """
 
 import json
@@ -269,6 +273,116 @@ class AgentIdentityTestCase(unittest.TestCase):
     def test_a_remote_pane_is_remote_whatever_shell_flags_it_carries(self):
         self.assertEqual(
             self._labels("[{ mode: 'SSH', use_powershell: true }]"), ["SSH"]
+        )
+
+    # ── Whether the pane has GridVibe's own tools ──
+    # The one fact both surfaces held no reading of at all: the flag was
+    # visible only inside one pane's reset dropdown, so two panes that differ
+    # by whether their agent can launch panes and split the grid were painted
+    # identically, and a restore said nothing about which came back with it.
+
+    def _mcp_tags(self, cases: str):
+        return self._run_node(
+            "report(%s.map(overrides => identity.paneAgentMcpTag(pane(overrides))));"
+            % cases
+        )
+
+    def test_an_agent_pane_with_the_flag_wears_the_tag(self):
+        self.assertEqual(
+            self._mcp_tags(
+                "[{ startup_mode: 'agent', agent_selection: 'claude', agent_mcp: true }]"
+            ),
+            ["MCP"],
+        )
+
+    def test_the_flag_means_nothing_without_an_agent_to_hold_the_tools(self):
+        """`agent_mcp` outlives the agent that justified it.
+
+        A saved preset written while the pane ran Claude still carries the flag
+        after the pane is relaunched as a plain shell, and `startup_mode` is the
+        only thing that says what is running now -- the same rule
+        terminal-shell.js's `paneAgentMcp` applies to the menu's own check.
+        """
+        self.assertEqual(
+            self._mcp_tags(
+                """[
+                    { startup_mode: 'agent', agent_selection: 'claude', agent_mcp: false },
+                    { startup_mode: 'terminal', agent_selection: 'claude', agent_mcp: true },
+                    { startup_mode: 'explorer', agent_mcp: true },
+                    { startup_mode: 'agent', agent_selection: 'claude' }
+                ]"""
+            ),
+            ["", "", "", ""],
+        )
+
+    def test_a_remote_pane_wears_it_exactly_as_a_local_one_does(self):
+        """The transport picks the shape of the answer, not whether there is one.
+
+        A remote pane's tools reach it over a reverse forward on the SSH
+        transport its own shell is already running on (`web/ssh_tunnel.py`), so
+        an SSH agent with the flag really is running with GridVibe tools and a
+        rule that dropped the tag there would be lying about the pane.
+        """
+        self.assertEqual(
+            self._mcp_tags(
+                """[
+                    { mode: 'ssh', host: '10.0.0.5', startup_mode: 'agent',
+                      agent_selection: 'claude', agent_mcp: true },
+                    { mode: 'wsl', use_powershell: true, startup_mode: 'agent',
+                      agent_selection: 'claude', agent_mcp: true }
+                ]"""
+            ),
+            ["MCP", "MCP"],
+        )
+
+    def test_a_custom_agent_and_an_unlisted_one_are_agents_too(self):
+        # The launcher offers the checkbox off the registry's `mcp_supported`,
+        # but a hand-edited preset reaches the same field -- and a pane that is
+        # running *something* named as an agent is an agent here.
+        self.assertEqual(
+            self._mcp_tags(
+                """[
+                    { startup_mode: 'agent', agent_selection: 'other',
+                      custom_agent: 'my-agent --resume', agent_mcp: true },
+                    { startup_mode: 'agent', agent_selection: 'aider', agent_mcp: true }
+                ]"""
+            ),
+            ["MCP", "MCP"],
+        )
+
+    def test_the_tag_is_its_own_value_and_never_part_of_the_name(self):
+        """Folding it into the title would make it indistinguishable from one.
+
+        A title is also whatever the reader typed, and `paneChatLine` compares
+        the typed title against what the agent announced -- so a tag inside it
+        would be carried into that comparison as though somebody had chosen it.
+        """
+        result = self._run_node(
+            """
+            const tooled = pane({
+                mode: 'wsl', directory: 'C:\\\\repo', startup_mode: 'agent',
+                agent_selection: 'claude', agent_mcp: true
+            });
+            report({
+                title: identity.paneDisplayTitle(tooled, 0, AGENT_OPTIONS),
+                line: identity.paneChatLine(tooled, 0, AGENT_OPTIONS),
+                tag: identity.paneAgentMcpTag(tooled),
+                label: identity.MCP_TAG_LABEL,
+                titled: identity.MCP_TAG_TITLE
+            });
+            """
+        )
+        self.assertEqual(result["title"], "Claude Code")
+        self.assertEqual(result["line"], "New session · repo")
+        self.assertEqual(result["tag"], "MCP")
+        self.assertEqual(result["label"], "MCP")
+        # The hover both surfaces carry: three characters on the line, the
+        # sentence one hover away.
+        self.assertIn("GridVibe tools", result["titled"])
+
+    def test_a_pane_with_nothing_stated_wears_nothing(self):
+        self.assertEqual(
+            self._run_node("report(identity.paneAgentMcpTag(null));"), ""
         )
 
 

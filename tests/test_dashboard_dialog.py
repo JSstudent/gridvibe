@@ -415,10 +415,18 @@ function parseRows() {
            its siblings. */
         const hover = attributes['title'] || '';
         const transport = hover.includes('\n') ? hover.split('\n').pop() : '';
+        const tagHovers = [];
         const tags = [];
-        const tagPattern = /<span class="dash-tag[^"]*">([\s\S]*?)<\/span>/g;
+        /* A chip may carry a hover of its own -- `MCP` is three characters the
+           reader may not recognise -- so the attributes after the class are
+           read past rather than required to be absent. */
+        const tagPattern = /<span class="dash-tag[^"]*"([^>]*)>([\s\S]*?)<\/span>/g;
         let tag;
-        while ((tag = tagPattern.exec(inner)) !== null) { tags.push(tag[1].trim()); }
+        while ((tag = tagPattern.exec(inner)) !== null) {
+            tags.push(tag[2].trim());
+            const tagHover = /\btitle="([^"]*)"/.exec(tag[1]);
+            tagHovers.push(tagHover ? tagHover[1] : '');
+        }
         rows.push({
             kind: attributes['data-dashboard-action'] || '',
             key: attributes['data-dashboard-key'] || '',
@@ -432,6 +440,7 @@ function parseRows() {
             name: /<span class="dash-agent-name">([\s\S]*?)<\/span>/.exec(inner)?.[1].trim() || '',
             transport: transport.trim(),
             tags,
+            tagHovers,
             state: state ? state[1] : '',
             stateHover: stateHover ? stateHover[1].trim() : '',
             word: word ? word[1].trim() : '',
@@ -476,6 +485,7 @@ function pane(overrides) {
         agent_selection: 'claude',
         custom_agent: '',
         agent_auto_mode: false,
+        agent_mcp: false,
         use_wsl: false,
         use_powershell: false,
         distribution: '',
@@ -1015,9 +1025,9 @@ class DashboardDialogStructureTestCase(DashboardDialogTestCase):
         )
 
     def test_auto_approval_is_marked_on_the_pane_that_has_it(self):
-        """It is a per-pane property, and the only chip the row still draws:
-        two panes of one agent need not have been launched alike, so `auto` is
-        on the row that has it and on neither of its siblings."""
+        """It is a per-pane property: two panes of one agent need not have been
+        launched alike, so `auto` is on the row that has it and on neither of
+        its siblings. The transport chip that used to sit beside it is gone."""
         result = self._run_node(
             """
             fetchAnswer = snapshot([group([
@@ -1042,6 +1052,81 @@ class DashboardDialogStructureTestCase(DashboardDialogTestCase):
         # only ever the markers that differ between two panes of one agent.
         self.assertNotIn("dash-tag-transport", result["html"])
         self.assertEqual(result["rows"], 2)
+
+    def test_the_pane_running_with_gridvibe_tools_is_the_one_that_says_so(self):
+        """The distinction the dashboard had no reading of at all.
+
+        Two agent panes on one CLI, one of which can create workspaces, launch
+        panes and split the grid through the `gridvibe` MCP server and one of
+        which cannot, read identically here -- so choosing which row to give a
+        "split this pane" instruction to meant going and asking the agent.
+        """
+        result = self._run_node(
+            """
+            fetchAnswer = snapshot([group([
+                pane({ agent_mcp: true }),
+                pane({ session_id: 's2', index: 1 })
+            ])]);
+            showDashboard();
+            await settle();
+            report({
+                tooled: rowFor('pane:s1').tags,
+                hovers: rowFor('pane:s1').tagHovers,
+                plain: rowFor('pane:s2').tags,
+                names: parseAgentRows().map(entry => entry.name)
+            });
+            """
+        )
+        self.assertEqual(result["tooled"], ["MCP"])
+        self.assertEqual(result["plain"], [])
+        # Three characters on the row, the sentence on the chip's own hover --
+        # which sits inside the row's, the way the state dot's does.
+        self.assertEqual(len(result["hovers"]), 1)
+        self.assertIn("GridVibe tools", result["hovers"][0])
+        # Both rows still name the same agent: the tag is what tells them apart.
+        self.assertEqual(result["names"], ["Claude Code", "Claude Code"])
+
+    def test_a_remote_pane_with_the_tools_wears_the_tag_too(self):
+        """A remote pane's tools reach it over a reverse forward on its own SSH
+        transport, so dropping the tag there would be a lie about the pane."""
+        result = self._run_node(
+            """
+            fetchAnswer = snapshot([group([
+                pane({ mode: 'ssh', agent_mcp: true }),
+                pane({
+                    session_id: 's2', index: 1, mode: 'wsl', use_powershell: true,
+                    host: 'PowerShell', agent_mcp: true, agent_auto_mode: true
+                })
+            ])]);
+            showDashboard();
+            await settle();
+            report({
+                remote: rowFor('pane:s1').tags,
+                local: rowFor('pane:s2').tags,
+                transports: parseAgentRows().map(entry => entry.transport)
+            });
+            """
+        )
+        self.assertEqual(result["remote"], ["MCP"])
+        # And a pane with both wears both, in one order.
+        self.assertEqual(result["local"], ["MCP", "auto"])
+        self.assertEqual(result["transports"], ["SSH", "PowerShell"])
+
+    def test_the_flag_says_nothing_about_a_pane_that_is_no_longer_an_agent(self):
+        """`agent_mcp` outlives the agent that justified it, and the row is not
+        an agent row for a pane that stopped being one -- but a stale flag must
+        not paint a tag wherever such a pane is still listed."""
+        result = self._run_node(
+            """
+            fetchAnswer = snapshot([group([
+                pane({ startup_mode: 'terminal', agent_selection: '', agent_mcp: true })
+            ])]);
+            showDashboard();
+            await settle();
+            report(rowFor('pane:s1').tags);
+            """
+        )
+        self.assertEqual(result, [])
 
     def test_a_session_card_wears_its_own_tab_colour(self):
         """The card is a session, and a session already has a colour: the tab
@@ -2245,6 +2330,34 @@ class DashboardDialogRepaintTestCase(DashboardDialogTestCase):
         self.assertTrue(result["unchanged"])
         self.assertFalse(result["afterChange"])
         self.assertEqual(result["line"], "now doing something else")
+
+    def test_a_pane_relaunched_onto_the_tools_repaints_and_an_idle_tick_does_not(self):
+        """The tag is structure, not a reading: it changes only when the pane is
+        relaunched, so it rides the same key the agent and the shell do and a
+        poll that says the same thing still repaints nothing."""
+        result = self._run_node(
+            """
+            fetchAnswer = snapshot([group([pane({ agent_mcp: true })])]);
+            showDashboard();
+            await settle();
+            const tagged = rowFor('pane:s1').tags;
+            body().innerHTML += '<!--the reader was here-->';
+            await refreshAgentDashboard();
+            const unchanged = body().innerHTML.includes('the reader was here');
+            fetchAnswer = snapshot([group([pane({ agent_mcp: false })])]);
+            await refreshAgentDashboard();
+            report({
+                tagged,
+                unchanged,
+                afterRelaunch: body().innerHTML.includes('the reader was here'),
+                plain: rowFor('pane:s1').tags
+            });
+            """
+        )
+        self.assertEqual(result["tagged"], ["MCP"])
+        self.assertTrue(result["unchanged"])
+        self.assertFalse(result["afterRelaunch"])
+        self.assertEqual(result["plain"], [])
 
     def test_a_reading_that_changed_keeps_the_caret_and_the_scroll(self):
         result = self._run_node(

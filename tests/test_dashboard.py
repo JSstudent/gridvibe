@@ -105,6 +105,7 @@ def session(session_id, group_id, **overrides):
         "agent_selection": "claude",
         "custom_agent": "",
         "agent_auto_mode": False,
+        "agent_mcp": False,
         "use_wsl": False,
         "use_powershell": False,
         "distribution": "",
@@ -177,6 +178,26 @@ class DashboardComposerTestCase(unittest.TestCase):
         self.assertTrue(pane["use_wsl"])
         self.assertFalse(pane["use_powershell"])
         self.assertEqual(pane["distribution"], "Ubuntu")
+
+    def test_a_pane_publishes_whether_its_agent_has_gridvibe_tools(self):
+        """The page tags a row from it, so the field is load-bearing now.
+
+        `agent_mcp` is durable -- the launcher checkbox writes it, presets and
+        restored snapshots carry it, the relaunch route preserves it -- and
+        `agent-identity.js` is what turns it into the `MCP` chip the pane header
+        and the dashboard row both wear. Dropping it from the list would take
+        that chip off every row with nothing failing here.
+        """
+        panes = self._compose(
+            sessions_by_group={
+                "g1": [
+                    session("s1", "g1", agent_mcp=True),
+                    session("s2", "g1", agent_mcp=False),
+                ]
+            }
+        )["workspaces"][0]["groups"][0]["panes"]
+        self.assertIn("agent_mcp", PANE_FIELDS)
+        self.assertEqual([pane["agent_mcp"] for pane in panes], [True, False])
 
     def test_the_observed_directory_wins_over_the_launch_one(self):
         panes = self._compose(

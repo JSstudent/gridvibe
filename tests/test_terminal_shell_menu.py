@@ -5,18 +5,29 @@ so it is exercised by *running* it: the real module is loaded in Node behind a
 stub page, the menu is opened, its markup is parsed back into rows, and rows are
 pressed through the delegated handler the page wires up.
 
-What is pinned here is the shape of the two dimensions the menu offers:
+What is pinned here is the shape of the three dimensions the menu offers:
 
 - a shell family and its agent list are separate decisions, so the chevron is a
   control *beside* the row rather than a second meaning for it, and pressing it
   reveals that family's agents and nobody else's;
-- every actionable row states both dimensions, so "Plain shell" is a stated
-  choice of no agent rather than a silence, and no row can name a shell family
-  without saying what to start under it;
+- every actionable row states every dimension, so "Plain shell" is a stated
+  choice of no agent rather than a silence, no row can name a shell family
+  without saying what to start under it, and a plain agent row is the way back
+  off GridVibe tools;
 - a pane with no shell family to hang chevrons on -- an SSH pane, or a local
-  pane on a POSIX host -- gets the agent list flat and names no shell at all.
+  pane on a POSIX host -- gets the agent list flat and names no shell at all;
+- an agent whose CLI can take the sidecar carries a second target on its own
+  row -- the MCP button -- which an SSH pane has as much as a local one, and
+  which is inline rather than a flyout so a pane against the window's right
+  edge cannot open it off-screen.
 
-The route's own half of the contract lives in `tests/test_session_shell.py`.
+and when the pane is painted for the relaunch it asked for: before the request
+rather than after it, because the connected broadcast that removes the overlay
+can arrive while the route is still writing its response.
+
+The route's own half of the contract lives in `tests/test_session_shell.py`,
+and the page's half -- a group load healing an overlay nobody removed -- in
+`tests/test_pane_connecting_overlay.py`.
 """
 
 import json
@@ -42,10 +53,15 @@ NODE = shutil.which("node")
 # hold that element, hand back the buttons the module looks up by id, and answer
 # the two `document` queries the module makes.
 HARNESS_STUBS = r"""
+/* Both kinds the registry really holds: CLIs that publish an MCP mechanism and
+   one that publishes none, so "no mechanism, no button" is exercised rather
+   than assumed. `other` is the launcher's free-text entry, which this menu
+   drops for want of an input field. */
 var AGENT_OPTIONS = [
-    { value: 'claude', label: 'claude', display_name: 'Claude Code' },
-    { value: 'codex', label: 'codex', display_name: 'OpenAI Codex CLI' },
-    { value: 'other', label: 'other', display_name: 'other' }
+    { value: 'claude', label: 'claude', display_name: 'Claude Code', mcp_supported: true },
+    { value: 'codex', label: 'codex', display_name: 'OpenAI Codex CLI', mcp_supported: true },
+    { value: 'kilo', label: 'kilo', display_name: 'Kilo CLI', mcp_supported: false },
+    { value: 'other', label: 'other', display_name: 'other', mcp_supported: false }
 ];
 var LOCAL_SHELL_MODES_AVAILABLE = true;
 var terminals = [];
@@ -78,9 +94,21 @@ function paneDisplayTitle(session, index) {
     return window.GridVibeAgentIdentity.paneDisplayTitle(session, index, AGENT_OPTIONS);
 }
 
-const calls = { reset: [], connecting: [], toasts: [], requests: [] };
+/* `order` is what the overlay cases read: a relaunch has to paint the pane
+   before it asks for one, because the new transport can report connected while
+   the route is still writing its response. */
+const calls = { reset: [], connecting: [], toasts: [], requests: [], synced: [], order: [] };
 function refreshTerminalDisplay(index) { calls.reset.push(index); }
-function showPlaceholderConnecting(index) { calls.connecting.push(index); }
+function showPlaceholderConnecting(index) {
+    calls.connecting.push(index);
+    calls.order.push('connecting');
+}
+/* terminals.js's repaint-from-the-session-record helper, which the relaunch
+   calls to take its own spinner back off a request that failed. */
+function syncPanePlaceholder(index) {
+    calls.synced.push(index);
+    calls.order.push('sync-placeholder');
+}
 function showTerminalToast(message) { calls.toasts.push(message); }
 
 function fakeClassList() {
@@ -149,9 +177,19 @@ async function fetch(url, options) {
     if (String(url).includes('/api/wsl-distros')) {
         return { ok: true, json: async () => WSL_DISTROS };
     }
+    calls.order.push('request');
+    /* Whatever happens to the grid between the press and the answer. */
+    if (typeof ON_RESPONSE === 'function') { ON_RESPONSE(); }
+    if (RELAUNCH_REFUSED) {
+        return { ok: false, status: 400, json: async () => ({ error: 'claude is not installed' }) };
+    }
     return { ok: true, json: async () => Object.assign({ host: 'relaunched' }, RELAUNCH_RESPONSE) };
 }
 var RELAUNCH_RESPONSE = {};
+/* The route's own refusal — an absent agent binary, say — which arrives after
+   the pane has already been painted for the relaunch it is not getting. */
+var RELAUNCH_REFUSED = false;
+var ON_RESPONSE = null;
 
 /* The rendered menu, read back as rows. Attribute values are escaped, so the
    opening tag really does end at its first '>'. */
@@ -177,7 +215,10 @@ function parseRows(html) {
             label: label ? label[1].trim() : (attrs['aria-label'] || ''),
             checked: attrs['aria-checked'] === 'true',
             expander: Object.prototype.hasOwnProperty.call(dataset, 'paneShellExpand'),
-            launch: Object.prototype.hasOwnProperty.call(dataset, 'paneShellLaunch')
+            launch: Object.prototype.hasOwnProperty.call(dataset, 'paneShellLaunch'),
+            /* The MCP button carries no label span -- its text is the badge --
+               so it is told apart by the class the page styles it with. */
+            tools: /class="[^"]*pane-shell-menu-mcp/.test(match[1])
         });
     }
     return rows;
@@ -191,7 +232,12 @@ async function press(index, row) {
     const target = {
         closest: selector => {
             if (selector === '[data-pane-shell-expand]') { return row.expander ? node : null; }
-            if (selector === '.pane-shell-menu-item') { return row.expander ? null : node; }
+            if (selector === '[data-pane-shell-launch]') { return row.launch ? node : null; }
+            /* The MCP button is a sibling control, not a menu item, so it is
+               reachable only through the launch lookup above. */
+            if (selector === '.pane-shell-menu-item') {
+                return row.expander || row.tools ? null : node;
+            }
             return null;
         }
     };
@@ -210,7 +256,10 @@ async function openMenu(index, session, options) {
     if (Object.prototype.hasOwnProperty.call(opts, 'windowsShells')) {
         LOCAL_SHELL_MODES_AVAILABLE = opts.windowsShells;
     }
-    terminals[index] = { _session: session, term: { reset() {} } };
+    terminals[index] = {
+        _session: session,
+        term: { reset() { calls.order.push('term-reset'); } }
+    };
     sessionIds[index] = session.session_id || 'sess-1';
     const card = { querySelector: () => paneMenu(index) };
     wirePaneShellMenu(card, index);
@@ -322,11 +371,16 @@ class ShellFamilyChevronTestCase(TerminalShellMenuTestCase):
         # The registry's agents, named in prose, all under the family that was
         # opened -- and the launcher's free-text "other" is not among them,
         # because composing a custom command needs an input this menu has none of.
+        # Each MCP-capable one brings its tools button along; the one that
+        # publishes no mechanism does not.
         self.assertEqual(
             result["agents"],
             [
                 {"label": "Claude Code", "kind": "powershell"},
+                {"label": "Claude Code with GridVibe tools", "kind": "powershell"},
                 {"label": "OpenAI Codex CLI", "kind": "powershell"},
+                {"label": "OpenAI Codex CLI with GridVibe tools", "kind": "powershell"},
+                {"label": "Kilo CLI", "kind": "powershell"},
             ],
         )
         # "Plain shell" joins the four family rows, directly under the one it
@@ -367,7 +421,8 @@ class ShellFamilyChevronTestCase(TerminalShellMenuTestCase):
             report({ whileOpen, reopened: rowsFor(0).filter(row => row.dataset.paneShellAgent).length });
             """
         )
-        self.assertEqual(result["whileOpen"], 2)
+        # Three agents and the two tools buttons beside the capable ones.
+        self.assertEqual(result["whileOpen"], 5)
         self.assertEqual(result["reopened"], 0)
 
 
@@ -387,7 +442,7 @@ class RelaunchRowPayloadTestCase(TerminalShellMenuTestCase):
         self.assertEqual(len(result["requests"]), 1)
         self.assertEqual(
             result["requests"][0]["body"],
-            {"agent": "", "shell": "powershell", "distribution": ""},
+            {"agent": "", "mcp": False, "shell": "powershell", "distribution": ""},
         )
 
     def test_an_agent_row_carries_the_family_it_was_opened_under(self):
@@ -402,7 +457,7 @@ class RelaunchRowPayloadTestCase(TerminalShellMenuTestCase):
         )
         self.assertEqual(
             result["requests"][0]["body"],
-            {"agent": "claude", "shell": "wsl", "distribution": "Ubuntu"},
+            {"agent": "claude", "mcp": False, "shell": "wsl", "distribution": "Ubuntu"},
         )
 
     def test_reselecting_what_the_pane_already_runs_requests_a_relaunch(self):
@@ -422,7 +477,7 @@ class RelaunchRowPayloadTestCase(TerminalShellMenuTestCase):
         )
         self.assertEqual(
             result["requests"][0]["body"],
-            {"agent": "claude", "shell": "powershell", "distribution": ""},
+            {"agent": "claude", "mcp": False, "shell": "powershell", "distribution": ""},
         )
         self.assertTrue(result["menuClosed"])
 
@@ -464,12 +519,22 @@ class PaneWithoutShellFamiliesTestCase(TerminalShellMenuTestCase):
             """
         )
         self.assertEqual(
-            result["labels"], ["Plain shell", "Claude Code", "OpenAI Codex CLI"]
+            result["labels"],
+            [
+                "Plain shell",
+                "Claude Code",
+                "Claude Code with GridVibe tools",
+                "OpenAI Codex CLI",
+                "OpenAI Codex CLI with GridVibe tools",
+                "Kilo CLI",
+            ],
         )
         self.assertEqual(result["expanders"], 0)
         # No `shell` key at all: an unstated shell is what leaves the pane's own
         # alone, and an SSH pane has no local family to state.
-        self.assertEqual(result["requests"][0]["body"], {"agent": "claude"})
+        self.assertEqual(
+            result["requests"][0]["body"], {"agent": "claude", "mcp": False}
+        )
 
     def test_a_local_pane_on_a_posix_host_gets_the_same_flat_list(self):
         result = self._run_node(
@@ -482,7 +547,15 @@ class PaneWithoutShellFamiliesTestCase(TerminalShellMenuTestCase):
             """
         )
         self.assertEqual(
-            result["labels"], ["Plain shell", "Claude Code", "OpenAI Codex CLI"]
+            result["labels"],
+            [
+                "Plain shell",
+                "Claude Code",
+                "Claude Code with GridVibe tools",
+                "OpenAI Codex CLI",
+                "OpenAI Codex CLI with GridVibe tools",
+                "Kilo CLI",
+            ],
         )
         self.assertEqual(result["expanders"], 0)
 
@@ -496,7 +569,109 @@ class PaneWithoutShellFamiliesTestCase(TerminalShellMenuTestCase):
             report({ requests: calls.requests.filter(request => request.body) });
             """
         )
-        self.assertEqual(result["requests"][0]["body"], {"agent": ""})
+        self.assertEqual(result["requests"][0]["body"], {"agent": "", "mcp": False})
+
+
+class AgentToolsButtonTestCase(TerminalShellMenuTestCase):
+    """The third dimension: starting an agent with GridVibe tools.
+
+    Seated as a second target on the agent's own row rather than as a flyout,
+    so the panel never opens sideways out of the window on a pane docked
+    against its right edge -- and so either choice is one press.
+    """
+
+    def test_only_an_agent_whose_cli_can_take_the_sidecar_carries_a_button(self):
+        result = self._run_node(
+            """
+            let rows = await openMenu(0, sshPane());
+            report({
+                tools: rows.filter(row => row.tools).map(row => row.dataset.paneShellAgent),
+                stated: rows.filter(row => row.launch)
+                    .map(row => (row.dataset.paneShellAgent || '-') + '=' + row.dataset.paneShellMcp)
+            });
+            """
+        )
+        # The CLI publishing no MCP mechanism gets the bare row, exactly as a
+        # pane with no shell family gets no chevron.
+        self.assertEqual(result["tools"], ["claude", "codex"])
+        # Every row states the dimension, and only the buttons state it true --
+        # so a plain row is the way back off the tools rather than a silence
+        # the route would read as "leave that alone".
+        self.assertEqual(
+            result["stated"],
+            ["-=0", "claude=0", "claude=1", "codex=0", "codex=1", "kilo=0"],
+        )
+
+    def test_the_button_starts_that_agent_with_gridvibe_tools(self):
+        result = self._run_node(
+            """
+            let rows = await openMenu(0, localPane());
+            await press(0, rows.find(row => row.dataset.paneShellExpand === 'wsl Ubuntu'));
+            rows = rowsFor(0);
+            await press(0, rows.find(row => row.tools && row.dataset.paneShellAgent === 'codex'));
+            report({ requests: calls.requests.filter(request => request.body) });
+            """
+        )
+        # The button carries the family it was opened under, exactly as the row
+        # beside it does: "this pane, but Codex in WSL Ubuntu, with tools".
+        self.assertEqual(
+            result["requests"][0]["body"],
+            {"agent": "codex", "mcp": True, "shell": "wsl", "distribution": "Ubuntu"},
+        )
+
+    def test_an_ssh_pane_may_start_its_agent_with_tools_too(self):
+        """A remote pane's tools ride home on its own transport."""
+        result = self._run_node(
+            """
+            const rows = await openMenu(0, sshPane());
+            await press(0, rows.find(row => row.tools && row.dataset.paneShellAgent === 'claude'));
+            report({ requests: calls.requests.filter(request => request.body) });
+            """
+        )
+        self.assertEqual(
+            result["requests"][0]["body"], {"agent": "claude", "mcp": True}
+        )
+
+    def test_the_row_beside_the_button_is_the_way_back_off_the_tools(self):
+        result = self._run_node(
+            """
+            const rows = await openMenu(0, sshPane({
+                startup_mode: 'agent', agent_selection: 'claude', agent_mcp: true
+            }));
+            await press(0, rows.find(row => !row.tools && row.label === 'Claude Code'));
+            report({ requests: calls.requests.filter(request => request.body) });
+            """
+        )
+        self.assertEqual(
+            result["requests"][0]["body"], {"agent": "claude", "mcp": False}
+        )
+
+    def test_the_pair_reports_which_of_the_two_the_pane_is_running(self):
+        result = self._run_node(
+            """
+            function checkedIn(session) {
+                menus.clear();
+                return openMenu(0, session).then(rows => rows
+                    .filter(row => row.checked)
+                    .map(row => row.label));
+            }
+            const withTools = await checkedIn(sshPane({
+                startup_mode: 'agent', agent_selection: 'claude', agent_mcp: true
+            }));
+            const without = await checkedIn(sshPane({
+                startup_mode: 'agent', agent_selection: 'claude'
+            }));
+            const plain = await checkedIn(sshPane({ agent_mcp: true }));
+            report({ withTools, without, plain });
+            """
+        )
+        # Exactly one of the pair wears the check, and it is the one describing
+        # what the pane is actually running.
+        self.assertEqual(result["withTools"], ["Claude Code with GridVibe tools"])
+        self.assertEqual(result["without"], ["Claude Code"])
+        # No agent, no tools -- however a preset written before the pane was
+        # sent back to a plain shell left the flag.
+        self.assertEqual(result["plain"], ["Plain shell"])
 
 
 class RelaunchedPaneHeaderTestCase(TerminalShellMenuTestCase):
@@ -551,6 +726,83 @@ class RelaunchedPaneHeaderTestCase(TerminalShellMenuTestCase):
             "OpenAI Codex CLI",
         )
         self.assertEqual(result["name"], "build box")
+
+
+class RelaunchedPaneOverlayTestCase(TerminalShellMenuTestCase):
+    """When the pane is painted for the relaunch it asked for.
+
+    The new transport is started while the route is still writing its response,
+    and a local shell is marked connected inside that same request — so the
+    connected broadcast can reach the page before the response does. That event
+    is the only thing that takes the overlay off an attached pane, so a spinner
+    raised behind it is a spinner nothing removes (ISSUE-2026-053). The order is
+    therefore part of the contract, not an implementation detail.
+    """
+
+    def test_the_pane_is_painted_before_the_relaunch_is_requested(self):
+        result = self._run_node(
+            """
+            const rows = await openMenu(0, sshPane());
+            await press(0, rows.find(row => row.label === 'Claude Code'));
+            report({ order: calls.order, connecting: calls.connecting });
+            """
+        )
+        # The reset rides in front for the same reason: the backend has already
+        # dropped the old shell's replay buffer, so a reset that waited for the
+        # response would clear what the new shell had drawn in the meantime.
+        self.assertEqual(result["order"], ["term-reset", "connecting", "request"])
+        self.assertEqual(result["connecting"], [0])
+
+    def test_a_refused_relaunch_takes_its_own_spinner_back_off(self):
+        """Nothing was relaunched, so the pane is still running what it was —
+        and a live shell must not end up behind a permanent "Connecting…"."""
+        result = self._run_node(
+            """
+            RELAUNCH_REFUSED = true;
+            const rows = await openMenu(0, sshPane());
+            await press(0, rows.find(row => row.label === 'Claude Code'));
+            report({ order: calls.order, toasts: calls.toasts, synced: calls.synced });
+            """
+        )
+        self.assertEqual(result["toasts"], ["claude is not installed"])
+        # Repainted from the pane's own session record rather than blanked: a
+        # pane that was disconnected before the press still says so.
+        self.assertEqual(result["synced"], [0])
+        self.assertEqual(
+            result["order"],
+            ["term-reset", "connecting", "request", "sync-placeholder"],
+        )
+
+    def test_a_relaunch_refused_before_the_request_paints_nothing(self):
+        """An SSH pane has no local shell family, so naming one is refused where
+        it is read — and a refusal that never asked for anything must not leave
+        an overlay over the pane it declined to touch."""
+        result = self._run_node(
+            """
+            await openMenu(0, sshPane());
+            await relaunchSessionShell(0, { shell: 'powershell', agent: '' });
+            report({ order: calls.order, requests: calls.requests.filter(r => r.body) });
+            """
+        )
+        self.assertEqual(result["order"], [])
+        self.assertEqual(result["requests"], [])
+
+    def test_a_pane_whose_slot_changed_hands_is_not_repainted(self):
+        """The answer belongs to the pane that asked. If that pane left the grid
+        while the request was in flight, its replacement is not the one whose
+        relaunch failed."""
+        result = self._run_node(
+            """
+            RELAUNCH_REFUSED = true;
+            ON_RESPONSE = () => { terminals[0] = { _session: sshPane(), term: {} }; };
+            const rows = await openMenu(0, sshPane());
+            await press(0, rows.find(row => row.label === 'Claude Code'));
+            report({ synced: calls.synced, toasts: calls.toasts });
+            """
+        )
+        self.assertEqual(result["synced"], [])
+        # The failure is still reported: the toast is not addressed to a pane.
+        self.assertEqual(result["toasts"], ["claude is not installed"])
 
 
 class PaneWithoutARelaunchTestCase(TerminalShellMenuTestCase):

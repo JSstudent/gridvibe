@@ -24,6 +24,11 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r requirements-dev.txt
+      - name: Install the optional MCP sidecar SDK
+        # Optional everywhere else -- the suite skips the two checks that spawn
+        # a real sidecar when it is absent. CI installs it so those two are
+        # actually run rather than quietly skipped.
+        run: python -m pip install -r requirements-mcp.txt
       - name: Lint
         run: python -m ruff check .
       - name: Test

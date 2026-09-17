@@ -213,5 +213,28 @@ def _reject_cross_origin_writes():
     return None
 
 
+#: Which kind of window this process can open. "browser" is what a bare
+#: `python main.py` is; the desktop launcher writes "native" before it starts
+#: the server, which it can because it runs the Flask app in a thread inside
+#: its own process. Published by `GET /api/health` and read per call by the MCP
+#: sidecar, never cached -- a browser-mode fallback can happen mid-session.
+_window_mode = "browser"
+
+WINDOW_MODES = ("browser", "native")
+
+
+def set_window_mode(mode: str) -> str:
+    """Record which kind of window this process can open."""
+    global _window_mode
+    resolved = str(mode or "").strip().lower()
+    _window_mode = resolved if resolved in WINDOW_MODES else "browser"
+    return _window_mode
+
+
+def window_mode() -> str:
+    """The window mode this process is running in."""
+    return _window_mode
+
+
 # Initialize session manager
 session_manager = SessionManager()

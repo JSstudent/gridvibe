@@ -268,6 +268,7 @@ const sidebar = GridVibeDashboardSidebar.create({
         line: dashboardPaneLine,
         hover: dashboardPaneHover,
         agentName: dashboardAgentName,
+        mcp: dashboardMcpTagHtml,
         workspaceLabel: dashboardWorkspaceLabel,
         sessionColourStyle: dashboardSessionColourStyle,
         totals: dashboardTotalsText
@@ -347,6 +348,8 @@ function parseAgentRows() {
             who: grab('dash-agent-who'),
             line: grab('dash-agent-line'),
             state: /class="dash-activity dash-state-([a-z]+)"/.exec(inner)?.[1] || '',
+            tags: [...inner.matchAll(/<span class="dash-tag[^"]*"[^>]*>([\s\S]*?)<\/span>/g)]
+                .map(match => match[1].trim()),
             word: grab('dash-state-word'),
             glyph: glyph ? glyph[0] : '',
             hasBar: inner.includes('dash-progress-fill'),
@@ -420,6 +423,7 @@ function pane(overrides) {
         agent_selection: 'claude',
         custom_agent: '',
         agent_auto_mode: false,
+        agent_mcp: false,
         use_wsl: false,
         use_powershell: false,
         distribution: '',
@@ -551,6 +555,56 @@ class DashboardSidebarRowTestCase(DashboardSidebarNodeTestCase):
             ],
         )
 
+    def test_the_pane_running_with_gridvibe_tools_says_so_here_too(self):
+        """The one chip this row keeps, and the reason it is not the name.
+
+        The mark already answers which agent a row is; nothing else on it
+        answers whether that agent can create workspaces, launch panes and
+        split the grid — which is what a reader picking a pane to instruct is
+        deciding, and picking one *while* working is what this panel is for.
+        """
+        result = self._run_node(
+            """
+            sidebarShown();
+            fetchAnswer = snapshot([group([
+                pane({ agent_mcp: true }),
+                pane({ session_id: 's2', index: 1 }),
+                pane({
+                    session_id: 's3', index: 2, mode: 'wsl', use_powershell: true,
+                    host: 'PowerShell', agent_mcp: true
+                }),
+                pane({
+                    session_id: 's4', index: 3, startup_mode: 'terminal',
+                    agent_selection: '', agent_mcp: true
+                })
+            ])]);
+            await sidebar.refresh();
+            report(parseAgentRows().map(row => ({
+                key: row.key, tags: row.tags, columns: row.columns
+            })));
+            """
+        )
+        tags = {row["key"]: row["tags"] for row in result}
+        self.assertEqual(tags["pane:s1"], ["MCP"])
+        self.assertEqual(tags["pane:s2"], [])
+        # A remote pane's tools ride its own transport home, so it wears the
+        # chip exactly as a local one does.
+        self.assertEqual(tags["pane:s3"], ["MCP"])
+        # And a flag left behind on a pane that is no longer running an agent
+        # paints nothing, the same rule the pane header and the dialog apply.
+        self.assertEqual(tags["pane:s4"], [])
+        # The chip sits after the title and before the bar, so the four columns
+        # the eye runs along are still in the order they were.
+        self.assertEqual(
+            [row["columns"] for row in result][0][:4],
+            [
+                "dash-agent-reading",
+                "dash-agent-icon",
+                "dash-agent-who",
+                "dash-agent-line",
+            ],
+        )
+
     def test_every_other_field_is_the_dialogs_own_answer(self):
         """The naming rule, the transport tag, the state word, the hue and the
         bar all come from the modules the dialog reads, asked for by name. A
@@ -577,7 +631,8 @@ class DashboardSidebarRowTestCase(DashboardSidebarNodeTestCase):
                     name: dashboardAgentName(reading),
                     glyphKey: dashboardAgentGlyphKey(reading),
                     activity: dashboardActivityHtml(reading),
-                    progress: dashboardProgressHtml(reading)
+                    progress: dashboardProgressHtml(reading),
+                    mcp: dashboardMcpTagHtml(reading)
                 },
                 totals: totals().textContent
             });
@@ -591,6 +646,10 @@ class DashboardSidebarRowTestCase(DashboardSidebarNodeTestCase):
         self.assertIn(dialog["activity"].strip(), row["html"])
         self.assertIn(dialog["progress"].strip(), row["html"])
         self.assertEqual(row["percent"], 42)
+        # The chip is the dialog's builder too, so a pane without the tools
+        # draws exactly what the dialog draws for it: nothing.
+        self.assertEqual(dialog["mcp"], "")
+        self.assertEqual(row["tags"], [])
         # The shell the pane runs on left the line in the dialog too; it is the
         # last line of the hover on both surfaces.
         self.assertTrue(row["hover"].endswith("SSH"))
