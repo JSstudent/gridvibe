@@ -25,6 +25,7 @@ import threading
 import unittest
 from contextlib import redirect_stdout
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from importlib.util import find_spec
 from io import StringIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -39,6 +40,16 @@ from utils import mcp_status  # noqa: E402
 
 #: A stand-in whose only job is to not be a Python interpreter with the SDK.
 _NO_SDK = [sys.executable, "-c", "raise SystemExit(0)"]
+
+#: The sidecar's SDK is optional -- only `make mcp-deps` installs it, so
+#: `make check`, a plain `pip install -r requirements.txt` and CI all run
+#: without it. The two checks below spawn a *real* sidecar, which is the one
+#: thing that cannot be done without it; they say so rather than failing a
+#: suite that was never promised the dependency.
+needs_the_sdk = unittest.skipUnless(
+    find_spec("mcp") is not None,
+    "the MCP SDK is optional -- run `make mcp-deps` to cover this",
+)
 
 
 class _OneRouteHandler(BaseHTTPRequestHandler):
@@ -89,6 +100,7 @@ class StatusChecksTestCase(unittest.TestCase):
         self.config_path.write_text(json.dumps(document), encoding="utf-8")
         return patch.object(mcp_status, "mcp_config_path", lambda: str(self.config_path))
 
+    @needs_the_sdk
     def test_the_real_sidecar_answers_its_own_handshake(self):
         """The whole chain, run as the agent CLI would run it."""
         state, detail = mcp_status.check_handshake(
@@ -101,11 +113,12 @@ class StatusChecksTestCase(unittest.TestCase):
         self.assertEqual(state, mcp_status.OK, detail)
         self.assertIn("gridvibe", detail)
 
+    @needs_the_sdk
     def test_this_interpreter_reports_the_sdk_it_actually_has(self):
         state, detail = mcp_status.check_sdk(sys.executable)
 
-        # The suite runs under the interpreter the sidecar tests need, so the
-        # positive case here is a real spawn of a real import.
+        # When the optional SDK is installed, the positive case here is a
+        # real spawn of a real import in the interpreter running the tests.
         self.assertEqual(state, mcp_status.OK, detail)
         self.assertTrue(detail.startswith("mcp "), detail)
 

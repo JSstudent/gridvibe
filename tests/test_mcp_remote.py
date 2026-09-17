@@ -22,6 +22,7 @@ never its agent, and never its shell.
 """
 
 import json
+import os
 import socket
 import sys
 import threading
@@ -1453,8 +1454,11 @@ class AgentLaunchDestinationTestCase(unittest.TestCase):
         self.assertEqual(body["connection_mode"], "wsl")
         pane = self.api.session_manager.get_session(body["sessions"][0]["session_id"])
         self.assertEqual(pane.mode, "wsl")
-        # The pane family the caller chose is still the caller's to choose.
-        self.assertTrue(pane.use_powershell)
+        # The pane family the caller chose is still the caller's to choose --
+        # where the host has one to choose. PowerShell exists only on Windows,
+        # and the launch service drops a family the host cannot run, so off
+        # Windows "local" is the whole of what a local pane carries.
+        self.assertEqual(pane.use_powershell, os.name == "nt")
         self.assertIsNone(pane.password)
 
     def test_a_launch_from_no_pane_at_all_is_the_launcher_unchanged(self):

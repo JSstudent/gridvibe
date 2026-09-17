@@ -609,7 +609,13 @@ class FlagCompositionTestCase(unittest.TestCase):
         self.assertEqual(web_agents._agent_mcp_command_fragment("codex"), "")
 
     def test_each_local_shell_family_gets_its_own_quoting_end_to_end(self):
-        """The pane, not the caller, decides the quoting."""
+        """The pane, not the caller, decides the quoting.
+
+        Pinned to a Windows host because cmd and PowerShell are the two shells
+        that disagree, and a local pane can only be either of them there --
+        everywhere else `_pane_shell_family` answers `posix` for every pane, so
+        the split this test exists to check would not be reachable.
+        """
         self.config_path.write_text(
             json.dumps(
                 {"mcpServers": {"gridvibe": {"command": "py.exe", "args": ["entry.py"]}}}
@@ -620,9 +626,10 @@ class FlagCompositionTestCase(unittest.TestCase):
             initial_command="codex", agent_selection="codex", agent_mcp=True
         )
 
-        cmd_line = web_agents._compose_agent_startup_command(pane)
-        pane.use_powershell = True
-        ps_line = web_agents._compose_agent_startup_command(pane)
+        with patch.object(web_agents.os, "name", "nt"):
+            cmd_line = web_agents._compose_agent_startup_command(pane)
+            pane.use_powershell = True
+            ps_line = web_agents._compose_agent_startup_command(pane)
 
         self.assertIn("-c mcp_servers.gridvibe.command='py.exe'", cmd_line)
         self.assertIn("-c \"mcp_servers.gridvibe.command='py.exe'\"", ps_line)
