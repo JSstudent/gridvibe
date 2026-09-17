@@ -4346,6 +4346,29 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("socket.emit('clear_terminal_buffer', { session_id: sessionId });", clear_body)
         self.assertIn("socket.emit('terminal_input', { session_id: sessionId, data: clearCommand });", clear_body)
 
+    def test_terminals_page_runs_the_clear_button_for_a_clear_asked_elsewhere(self):
+        """The MCP's `clear_pane` purges the buffer and broadcasts the rest.
+
+        The page half has to be the button's *own* handler, or the two paths
+        drift and the shell's clear command grows a second owner. A pane in a
+        cached group cannot run it -- `clearTerminalDisplay` addresses a live
+        grid slot, and a cached group's index names a different pane -- so that
+        branch resets the terminal it actually holds instead.
+        """
+        response = self.client.get("/terminals")
+
+        self.assertEqual(response.status_code, 200)
+        html = self._page_html(response)
+        start = html.index("socket.on('terminal_cleared'")
+        end = html.index("socket.on('app_config_updated'", start)
+        body = html[start:end]
+        self.assertIn("resolveSessionTarget(session_id)", body)
+        self.assertIn("clearTerminalDisplay(target.index)", body)
+        # The cached-group branch, and the guard that keeps the button's
+        # handler off a slot it does not own.
+        self.assertIn("if (target.active)", body)
+        self.assertIn("term.reset();", body)
+
     def test_terminals_page_recovery_controls_both_reset_mouse_reporting(self):
         """ISSUE-2026-038 — a TUI that died without unwinding leaves its mouse
         reporting armed and the shell types the reports at its own prompt. Both

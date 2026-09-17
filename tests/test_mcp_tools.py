@@ -3,8 +3,9 @@
 Four things are pinned here, and each is a property of the build rather than
 of a code path:
 
-- **The registered surface is exactly eleven**, and the tier that ends a
-  process holds exactly one. The destroy tier is *absent from the build*, not
+- **The registered surface is exactly thirteen**, and the tiers that reach an
+  existing pane hold exactly three -- two that replace what it is, one that
+  erases what it has drawn. The destroy tier is *absent from the build*, not
   flag-gated: a tool that does not exist cannot be talked into running by a
   file an agent reads. The test names those tools so that adding one has to be
   a deliberate edit here too.
@@ -31,7 +32,9 @@ import tests  # noqa: E402,F401 - redirects durable state away from the real fil
 from gridvibe_mcp.identity import read_identity  # noqa: E402
 from gridvibe_mcp.server import (  # noqa: E402
     CREATE_TOOLS,
+    DISPLAY_TOOLS,
     LAYOUTS,
+    PANE_MODES,
     READ_TOOLS,
     RELAUNCH_TOOLS,
     dispatch,
@@ -54,9 +57,12 @@ ABSENT_TOOLS = (
     "close_pane",
     "close_group",
     "close_workspace",
-    "set_pane_mode",
     "set_pane_shell",
     "move_group",
+    # `clear_pane` is not this one wearing a different name: the only bytes it
+    # puts on a shell's stdin are GridVibe's own clear command, chosen by the
+    # window that knows the pane's shell family, and no tool argument reaches
+    # them.
     "send_input",
 )
 
@@ -80,19 +86,20 @@ class RefusingOpener:
 
 
 class ToolSurfaceTestCase(unittest.TestCase):
-    def test_the_registered_surface_is_exactly_eleven(self):
-        """Six read, four create, and one that replaces a running process.
+    def test_the_registered_surface_is_exactly_thirteen(self):
+        """Six read, four create, two that replace, one that erases.
 
-        The last tier has exactly one member on purpose: `set_pane_agent` is
-        the first thing in this surface that ends anything, and what bounds it
-        is three gates on GridVibe's own route rather than the tool itself.
+        The last two tiers are the only things in this surface that end
+        anything, and what bounds them is the gates on GridVibe's own routes
+        rather than the tools themselves.
         """
         names = tool_names()
 
-        self.assertEqual(len(names), 11)
+        self.assertEqual(len(names), 13)
         self.assertEqual(names[:6], list(READ_TOOLS))
         self.assertEqual(names[6:10], list(CREATE_TOOLS))
-        self.assertEqual(names[10:], list(RELAUNCH_TOOLS))
+        self.assertEqual(names[10:12], list(RELAUNCH_TOOLS))
+        self.assertEqual(names[12:], list(DISPLAY_TOOLS))
 
     def test_the_layout_enum_is_the_set_gridvibe_actually_accepts(self):
         """`stack` was never a GridVibe layout, and the two that are were
@@ -111,6 +118,34 @@ class ToolSurfaceTestCase(unittest.TestCase):
         self.assertIn("ENDS", spec["description"])
         for gate in ("plain terminal", "created", "own pane"):
             self.assertIn(gate, spec["description"])
+
+    def test_the_mode_tool_says_what_it_ends_and_what_gates_it(self):
+        """A pane switched out of terminal mode loses the shell behind it."""
+        spec = next(
+            item for item in tool_specs() if item["name"] == "set_pane_mode"
+        )
+
+        self.assertIn("ENDS", spec["description"])
+        for gate in ("created", "own pane", "already running an agent"):
+            self.assertIn(gate, spec["description"])
+        # The one dimension it deliberately does not own, named so an agent
+        # asked for "a plain PowerShell terminal" reaches the right tool.
+        self.assertIn("set_pane_agent", spec["description"])
+        self.assertEqual(
+            spec["inputSchema"]["properties"]["mode"]["enum"], list(PANE_MODES)
+        )
+
+    def test_the_clear_tool_says_the_scrollback_is_unrecoverable(self):
+        """The thing it destroys cannot be read back, so it has to say so."""
+        spec = next(
+            item for item in tool_specs() if item["name"] == "clear_pane"
+        )
+
+        self.assertIn("GONE", spec["description"])
+        for gate in ("created", "own pane", "terminal pane"):
+            self.assertIn(gate, spec["description"])
+        # Not the absent `send_input` under another name.
+        self.assertIn("not a way to type into a terminal", spec["description"])
 
     def test_the_destroy_tier_is_absent_from_the_build(self):
         names = set(tool_names())
@@ -1238,6 +1273,260 @@ class SetPaneAgentTestCase(unittest.TestCase):
         )
 
         # Verbatim and unretried: an agent told only "refused" calls again.
+        self.assertEqual(result["error"], sentence)
+        self.assertEqual(result["status"], 403)
+        self.assertEqual(len(opener.requests), 1)
+
+
+class SetPaneModeTestCase(unittest.TestCase):
+    """Turning a pane into an explorer, a browser, or back into a terminal."""
+
+    def switch(self, arguments, environ=None, answer=None):
+        opener = StubOpener([answer or {
+            "session_id": "pane-4",
+            "startup_mode": "explorer",
+            "directory": "/srv/app",
+            "password": "gAAAAsecret",
+        }])
+        result = dispatch(
+            "set_pane_mode",
+            arguments,
+            client=client_for(opener),
+            identity=read_identity(environ or INSIDE_PANE),
+        )
+        return result, opener
+
+    def test_the_request_names_the_pane_asking_and_the_mode(self):
+        result, opener = self.switch({"session_id": "pane-4", "mode": "explorer"})
+
+        body = json.loads(opener.requests[0].data.decode("utf-8"))
+        self.assertEqual(body["requested_by_session_id"], "pane-1")
+        self.assertEqual(body["startup_mode"], "explorer")
+        self.assertEqual(result["pane"]["startup_mode"], "explorer")
+        # The gated route, never the header toggle's own.
+        self.assertTrue(opener.requests[0].full_url.endswith("/agent-mode-switch"))
+        self.assertNotIn("password", json.dumps(result))
+
+    def test_an_explorer_with_no_directory_asks_where_the_pane_is_standing(self):
+        """What the header's own toggle asks for, stated rather than assumed."""
+        _result, opener = self.switch({"session_id": "pane-4", "mode": "explorer"})
+
+        body = json.loads(opener.requests[0].data.decode("utf-8"))
+        self.assertTrue(body["refresh_cwd"])
+        self.assertNotIn("directory", body)
+
+    def test_a_stated_directory_replaces_the_probe(self):
+        """A caller that named a root has already answered the question."""
+        _result, opener = self.switch({
+            "session_id": "pane-4", "mode": "explorer", "directory": "/srv/app/web",
+        })
+
+        body = json.loads(opener.requests[0].data.decode("utf-8"))
+        self.assertEqual(body["directory"], "/srv/app/web")
+        self.assertNotIn("refresh_cwd", body)
+
+    def test_a_terminal_switch_probes_nothing(self):
+        """Leaving explorer mode reads the browsed folder, not the shell."""
+        _result, opener = self.switch({"session_id": "pane-4", "mode": "terminal"})
+
+        body = json.loads(opener.requests[0].data.decode("utf-8"))
+        self.assertNotIn("refresh_cwd", body)
+
+    def test_a_browser_pane_carries_its_url(self):
+        _result, opener = self.switch({
+            "session_id": "pane-4", "mode": "browser", "url": "http://localhost:5050",
+        })
+
+        body = json.loads(opener.requests[0].data.decode("utf-8"))
+        self.assertEqual(body["url"], "http://localhost:5050")
+
+    def test_a_browser_pane_with_no_url_is_refused_before_any_http(self):
+        result = dispatch(
+            "set_pane_mode",
+            {"session_id": "pane-4", "mode": "browser"},
+            client=client_for(RefusingOpener(self)),
+            identity=read_identity(INSIDE_PANE),
+        )
+
+        self.assertEqual(result["kind"], "invalid_arguments")
+        self.assertIn("url", result["error"])
+
+    def test_a_url_on_a_non_browser_mode_is_refused_rather_than_dropped(self):
+        """Silently dropping it would open an explorer and report success."""
+        result = dispatch(
+            "set_pane_mode",
+            {"session_id": "pane-4", "mode": "explorer", "url": "http://x"},
+            client=client_for(RefusingOpener(self)),
+            identity=read_identity(INSIDE_PANE),
+        )
+
+        self.assertEqual(result["kind"], "invalid_arguments")
+        self.assertIn("browser", result["error"])
+
+    def test_an_unknown_mode_is_refused_before_any_http(self):
+        result = dispatch(
+            "set_pane_mode",
+            {"session_id": "pane-4", "mode": "agent"},
+            client=client_for(RefusingOpener(self)),
+            identity=read_identity(INSIDE_PANE),
+        )
+
+        self.assertEqual(result["kind"], "invalid_arguments")
+        for named in PANE_MODES:
+            self.assertIn(named, result["error"])
+
+    def test_a_missing_mode_is_refused_before_any_http(self):
+        result = dispatch(
+            "set_pane_mode",
+            {"session_id": "pane-4"},
+            client=client_for(RefusingOpener(self)),
+            identity=read_identity(INSIDE_PANE),
+        )
+
+        self.assertEqual(result["kind"], "invalid_arguments")
+
+    def test_an_unstated_override_is_left_out_of_the_body(self):
+        _result, opener = self.switch({"session_id": "pane-4", "mode": "explorer"})
+
+        body = json.loads(opener.requests[0].data.decode("utf-8"))
+        self.assertNotIn("override", body)
+
+    def test_a_stated_override_travels(self):
+        _result, opener = self.switch({
+            "session_id": "pane-4", "mode": "explorer", "override": True,
+        })
+
+        body = json.loads(opener.requests[0].data.decode("utf-8"))
+        self.assertTrue(body["override"])
+
+    def test_a_mode_switch_costs_no_depth_budget(self):
+        """It starts no agent, so the budget that bounds agents does not apply."""
+        opener = StubOpener([{"session_id": "pane-4", "startup_mode": "explorer"}])
+
+        result = dispatch(
+            "set_pane_mode",
+            {"session_id": "pane-4", "mode": "explorer"},
+            client=client_for(opener),
+            identity=read_identity({**INSIDE_PANE, "GRIDVIBE_AGENT_DEPTH": "2"}),
+        )
+
+        self.assertNotIn("error", result)
+        self.assertEqual(len(opener.requests), 1)
+
+    def test_an_agent_outside_gridvibe_owns_no_panes_and_is_refused(self):
+        result = dispatch(
+            "set_pane_mode",
+            {"session_id": "pane-4", "mode": "explorer"},
+            client=client_for(RefusingOpener(self)),
+            identity=read_identity({"GRIDVIBE_URL": "http://127.0.0.1:5050"}),
+        )
+
+        self.assertEqual(result["kind"], "invalid_arguments")
+        self.assertIn("created", result["error"])
+
+    def test_a_gate_refusal_reaches_the_agent_naming_the_gate(self):
+        sentence = (
+            "[lineage gate] This pane was created by a different pane. An "
+            "agent switches the mode of only the panes it created itself, "
+            "unless the user explicitly asked to override this pane."
+        )
+        opener = StubOpener(raises=http_error(403, {"error": sentence}))
+
+        result = dispatch(
+            "set_pane_mode",
+            {"session_id": "pane-4", "mode": "explorer"},
+            client=client_for(opener),
+            identity=read_identity(INSIDE_PANE),
+        )
+
+        self.assertEqual(result["error"], sentence)
+        self.assertEqual(result["status"], 403)
+        self.assertEqual(len(opener.requests), 1)
+
+
+class ClearPaneTestCase(unittest.TestCase):
+    """The Clear button, asked for by a tool, and what its answer may claim."""
+
+    def clear(self, arguments, environ=None, answer=None):
+        opener = StubOpener([answer or {
+            "session_id": "pane-4",
+            "buffer_purged": True,
+            "display_reset_requested": True,
+            "password": "gAAAAsecret",
+        }])
+        result = dispatch(
+            "clear_pane",
+            arguments,
+            client=client_for(opener),
+            identity=read_identity(environ or INSIDE_PANE),
+        )
+        return result, opener
+
+    def test_the_request_names_the_pane_asking_and_nothing_else(self):
+        result, opener = self.clear({"session_id": "pane-4"})
+
+        body = json.loads(opener.requests[0].data.decode("utf-8"))
+        self.assertEqual(body, {"requested_by_session_id": "pane-1"})
+        self.assertTrue(opener.requests[0].full_url.endswith("/pane-4/clear"))
+        self.assertNotIn("password", json.dumps(result))
+
+    def test_the_answer_keeps_the_purge_and_the_request_apart(self):
+        """One is a fact about GridVibe, the other is what windows were told."""
+        result, _opener = self.clear({"session_id": "pane-4"})
+
+        self.assertTrue(result["buffer_purged"])
+        self.assertTrue(result["display_reset_requested"])
+        # Never a single `cleared: true`: a pane nobody has open resets no
+        # display, and the field list is what stops the result pretending.
+        self.assertNotIn("cleared", result)
+
+    def test_a_missing_session_is_refused_before_any_http(self):
+        result = dispatch(
+            "clear_pane",
+            {},
+            client=client_for(RefusingOpener(self)),
+            identity=read_identity(INSIDE_PANE),
+        )
+
+        self.assertEqual(result["kind"], "invalid_arguments")
+
+    def test_an_unstated_override_is_left_out_of_the_body(self):
+        _result, opener = self.clear({"session_id": "pane-4"})
+
+        body = json.loads(opener.requests[0].data.decode("utf-8"))
+        self.assertNotIn("override", body)
+
+    def test_a_stated_override_travels(self):
+        _result, opener = self.clear({"session_id": "pane-4", "override": True})
+
+        body = json.loads(opener.requests[0].data.decode("utf-8"))
+        self.assertTrue(body["override"])
+
+    def test_an_agent_outside_gridvibe_owns_no_panes_and_is_refused(self):
+        result = dispatch(
+            "clear_pane",
+            {"session_id": "pane-4"},
+            client=client_for(RefusingOpener(self)),
+            identity=read_identity({"GRIDVIBE_URL": "http://127.0.0.1:5050"}),
+        )
+
+        self.assertEqual(result["kind"], "invalid_arguments")
+        self.assertIn("created", result["error"])
+
+    def test_a_gate_refusal_reaches_the_agent_naming_the_gate(self):
+        sentence = (
+            "[mode gate] This pane is running an agent, and a clear types at "
+            "the prompt -- which here is that agent's own input."
+        )
+        opener = StubOpener(raises=http_error(403, {"error": sentence}))
+
+        result = dispatch(
+            "clear_pane",
+            {"session_id": "pane-4"},
+            client=client_for(opener),
+            identity=read_identity(INSIDE_PANE),
+        )
+
         self.assertEqual(result["error"], sentence)
         self.assertEqual(result["status"], 403)
         self.assertEqual(len(opener.requests), 1)

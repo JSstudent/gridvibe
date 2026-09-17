@@ -136,6 +136,17 @@ GEOMETRY_FIELDS = (
     "original_split_slot_count",
 )
 
+#: What a clear answers. Two fields rather than one `cleared: true`, because
+#: they are not the same kind of claim: the replay buffer is gone, and the
+#: windows showing the pane have been *told* to reset their display. A pane
+#: nobody has open resets nothing, and this list is what stops the result from
+#: pretending otherwise.
+CLEAR_FIELDS = (
+    "session_id",
+    "buffer_purged",
+    "display_reset_requested",
+)
+
 #: A ceiling on the per-preset reads `list_saved_layouts` makes, so a store
 #: holding hundreds of presets cannot turn one tool call into hundreds of
 #: requests. The result says when it stopped.
@@ -530,6 +541,43 @@ class GridVibeClient:
             body=dict(body),
         )
         return project(payload, PANE_FIELDS)
+
+    def switch_pane_mode(
+        self,
+        session_id: str,
+        body: Mapping[str, Any],
+    ) -> Dict[str, Any]:
+        """Switch one pane between terminal, explorer and browser modes.
+
+        Deliberately not ``POST /api/sessions/<id>/mode``: that route is the
+        pane header's own toggle and checks nobody, because the person pressing
+        it is looking at the pane. The gates live on the route this calls, in
+        GridVibe's own process, so a tool cannot reach past them.
+        """
+        payload = self.request(
+            "POST",
+            f"/api/sessions/{urllib.parse.quote(session_id)}/agent-mode-switch",
+            body=dict(body),
+        )
+        return project(payload, PANE_FIELDS)
+
+    def clear_pane(
+        self,
+        session_id: str,
+        body: Mapping[str, Any],
+    ) -> Dict[str, Any]:
+        """Purge one pane's replay buffer and ask its windows to reset it.
+
+        The header's Clear button is not a route -- it is an xterm reset plus a
+        socket event -- so this is the gated equivalent, and the same three
+        gates the relaunch passes stand in front of it.
+        """
+        payload = self.request(
+            "POST",
+            f"/api/sessions/{urllib.parse.quote(session_id)}/clear",
+            body=dict(body),
+        )
+        return project(payload, CLEAR_FIELDS)
 
     @staticmethod
     def _launch_result(payload: Any) -> Dict[str, Any]:

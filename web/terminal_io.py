@@ -157,6 +157,21 @@ def _broadcast_session_status(session_id: str):
         socketio.emit('session_status', payload, room=session_id)
 
 
+def _broadcast_terminal_cleared(session_id: str):
+    """Tell every window showing this pane to run the Clear button's reset.
+
+    Room-scoped like `_broadcast_session_status`, and for the same reason: only
+    the clients that joined this pane have anything to do with it.
+
+    The server has already purged the replay buffer by the time this goes out.
+    What the page adds is the half no process outside it can do -- resetting the
+    live xterm and unwinding the mouse reporting a crashed TUI left armed -- so
+    the event carries no instructions, only the pane it applies to. What
+    "cleared" means stays on the page, in the one handler the button runs.
+    """
+    socketio.emit('terminal_cleared', {'session_id': session_id}, room=session_id)
+
+
 def _broadcast_session_groups_updated(
     reason: str = "",
     group_id: str = "",

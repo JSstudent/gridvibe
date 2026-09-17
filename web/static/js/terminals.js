@@ -8724,6 +8724,31 @@
             }
         });
 
+        /* A clear asked for from outside this window — the MCP's `clear_pane`.
+           The server has already purged the replay buffer; this is the half no
+           process outside a page can do, and it is the Clear button's own
+           handler so the two paths cannot drift and the shell's clear command
+           keeps its single owner here.
+
+           Only for a pane in the group on screen: `clearTerminalDisplay` takes
+           a live grid slot, and a cached group's index names a different pane
+           entirely. A cached pane is reset in place instead — its xterm is the
+           only thing that would still be holding the old scrollback when the
+           reader comes back to it. */
+        socket.on('terminal_cleared', ({ session_id }) => {
+            const target = resolveSessionTarget(session_id);
+            if (!target) return;
+            if (target.active) {
+                clearTerminalDisplay(target.index);
+                return;
+            }
+            const term = target.terminal?.term;
+            if (!term) return;
+            target.terminal._pendingOutput = '';
+            term.reset();
+            term.clear();
+        });
+
         socket.on('app_config_updated', (message) => {
             applyAppConfigUpdate(message || {});
         });

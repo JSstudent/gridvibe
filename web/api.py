@@ -254,10 +254,16 @@ from web.selfupdate import (  # noqa: F401 - perform_self_update re-exported for
     perform_app_update,
     perform_self_update,
 )
+from web.session_clear import (  # noqa: F401 - re-exported for backwards compatibility
+    ClearEffects,
+    ClearTransitionError,
+    apply_agent_pane_clear,
+)
 from web.session_modes import (  # noqa: F401 - re-exported for backwards compatibility
     ModeTransitionEffects,
     ModeTransitionError,
     _refresh_pane_cwd,
+    apply_agent_pane_mode_change,
     apply_pane_mode_change,
 )
 from web.session_presentation import (
@@ -283,6 +289,7 @@ from web.terminal_io import (  # noqa: F401 - re-exported for backwards compatib
     _agent_from_terminal_command,
     _broadcast_session_groups_updated,
     _broadcast_session_status,
+    _broadcast_terminal_cleared,
     _build_local_command,
     _cache_terminal_output,
     _clear_client_joined_sessions,
@@ -3534,6 +3541,60 @@ def change_session_mode(session_id: str):
             ),
         )
     except ModeTransitionError as exc:
+        return jsonify({"error": exc.message}), exc.status_code
+    return jsonify(payload)
+
+
+@app.route('/api/sessions/<session_id>/agent-mode-switch', methods=['POST'])
+def switch_session_mode_for_agent(session_id: str):
+    """Switch one pane's mode, on behalf of the pane that asked.
+
+    The gated twin of `POST /api/sessions/<id>/mode`. That route is the pane
+    header's own mode toggle, pressed by the person looking at the pane; this
+    one is reached by a tool, so it names the pane asking and passes the self,
+    lineage and agent gates first -- all in `web/session_modes.py`, over
+    `web/pane_gates.py`.
+
+    HTTP adaptation only, and the same three effects the mode route resolves.
+    """
+    try:
+        payload = apply_agent_pane_mode_change(
+            session_id,
+            request.get_json(silent=True) or {},
+            ModeTransitionEffects(
+                close_connection=_close_ssh_connection,
+                broadcast_status=_broadcast_session_status,
+                start_connector=lambda pane_session_id: socketio.start_background_task(
+                    _connect_session, pane_session_id
+                ),
+            ),
+        )
+    except ModeTransitionError as exc:
+        return jsonify({"error": exc.message}), exc.status_code
+    return jsonify(payload)
+
+
+@app.route('/api/sessions/<session_id>/clear', methods=['POST'])
+def clear_session_for_agent(session_id: str):
+    """Clear one pane, on behalf of the pane that asked.
+
+    The gated twin of the header's Clear button, which is not a route at all --
+    it is an xterm reset plus the `clear_terminal_buffer` socket event. A tool
+    has no xterm, so this purges the buffer and asks every window showing the
+    pane to run the button's own handler.
+
+    HTTP adaptation only: the transaction lives in `web/session_clear.py`.
+    """
+    try:
+        payload = apply_agent_pane_clear(
+            session_id,
+            request.get_json(silent=True) or {},
+            ClearEffects(
+                purge_buffer=_clear_terminal_output_buffer,
+                broadcast_cleared=_broadcast_terminal_cleared,
+            ),
+        )
+    except ClearTransitionError as exc:
         return jsonify({"error": exc.message}), exc.status_code
     return jsonify(payload)
 

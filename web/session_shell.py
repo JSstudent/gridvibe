@@ -42,6 +42,17 @@ from sessions.manager import SessionStatus
 from web.agents import AGENT_REGISTRY, _agent_absent_reason, _normalize_agent_key
 from web.app import session_manager
 from web.explorer import _is_browser_session, _is_explorer_session
+from web.pane_gates import (  # noqa: F401 - LINEAGE_GATE/SELF_GATE re-exported
+    LINEAGE_GATE,
+    MODE_GATE,
+    SELF_GATE,
+    GateWording,
+    PaneGateRefusal,
+    check_caller,
+    check_lineage,
+    read_agent_request,
+    refuse,
+)
 from web.terminal_io import (
     LOCAL_SHELL_KINDS,
     _local_shell_display_name,
@@ -393,13 +404,17 @@ def apply_pane_shell_change(
 # whatever is running in the pane -- the first thing in the MCP surface that
 # destroys anything.
 #
-# Three gates, and all three must hold. Either of the first two alone leaves a
+# The self and lineage gates are `web/pane_gates.py`'s, shared with the two
+# other tool-reachable pane transactions. Either of them alone would leave a
 # hole the other closes:
 #
 # * **Mode alone** would let an agent relaunch any plain terminal in the
 #   workspace, including one the user opened and is about to type into.
 # * **Lineage alone** would let an agent relaunch a pane it created, then handed
 #   to the user, who has been working in it for an hour.
+#
+# The third gate is this transaction's own, and it is the strictest of the
+# three: only a plain terminal pane is relaunched by a tool.
 #
 # The residual risk is stated rather than designed away: a pane that passes all
 # three can still be sitting mid-command. The gates establish *who made it* and
@@ -422,15 +437,13 @@ def apply_pane_shell_change(
 # is a mode switch, a different transaction entirely -- see
 # `web/session_modes.py`), and the caller can still never relaunch itself.
 
-#: Named so a refusal says which gate failed. An agent told only "refused"
-#: tries the same call again; an agent told "the lineage gate" offers a split.
-MODE_GATE = "mode"
-LINEAGE_GATE = "lineage"
-SELF_GATE = "self"
-
-
-def _refuse(gate: str, message: str) -> "ShellTransitionError":
-    return ShellTransitionError(f"[{gate} gate] {message}", 403)
+#: How this transaction names itself inside a shared refusal.
+RELAUNCH_WORDING = GateWording(
+    request_noun="a relaunch",
+    self_reason="Relaunching it would end this agent in the middle of the call.",
+    act="relaunch it",
+    acts="relaunches",
+)
 
 
 def apply_agent_pane_relaunch(
@@ -444,74 +457,38 @@ def apply_agent_pane_relaunch(
     refusal leaves the pane exactly as it was found -- which is what the
     whole-pane snapshot assertions in the tests pin.
     """
-    caller_session_id = str(payload.get("requested_by_session_id") or "").strip()
-    if not caller_session_id:
-        raise ShellTransitionError(
-            "requested_by_session_id is required: a relaunch has to name the "
-            "pane asking for it.",
-            400,
-        )
-    override = bool(payload.get("override"))
+    # One translation point for the whole gate sequence: every refusal below
+    # is a `PaneGateRefusal` carrying the status the route should answer, and
+    # this is where it becomes the one exception `web/api.py` maps.
+    try:
+        request = read_agent_request(payload, RELAUNCH_WORDING)
 
-    session = session_manager.get_session(session_id)
-    if not session:
-        raise ShellTransitionError("Session not found", 404)
+        session = session_manager.get_session(session_id)
+        if not session:
+            raise PaneGateRefusal("Session not found", 404)
 
-    if session_id == caller_session_id:
-        raise _refuse(
-            SELF_GATE,
-            "This is the pane the request came from. Relaunching it would end "
-            "this agent in the middle of the call.",
-        )
+        check_caller(session_id, request, RELAUNCH_WORDING)
 
-    if session_manager.get_session(caller_session_id) is None:
-        raise _refuse(
-            LINEAGE_GATE,
-            "The pane this request came from is no longer open, so GridVibe "
-            "cannot tell whether it created this one.",
-        )
-
-    startup_mode = str(getattr(session, "startup_mode", "") or "")
-    already_agent = startup_mode == "agent" and bool(_pane_agent_key(session))
-    if startup_mode not in ("terminal", "agent"):
-        raise _refuse(
-            MODE_GATE,
-            f"This pane is a {startup_mode or 'non-terminal'} pane. Only a "
-            "plain terminal pane is relaunched by a tool; split off a new "
-            "pane instead.",
-        )
-    if already_agent and not override:
-        raise _refuse(
-            MODE_GATE,
-            "This pane is already running an agent. Only a plain terminal "
-            "pane is relaunched by a tool; split off a new pane instead, "
-            "unless the user explicitly asked to override this pane.",
-        )
-
-    creator = str(getattr(session, "created_by_session_id", "") or "")
-    if not override:
-        if not creator:
-            raise _refuse(
-                LINEAGE_GATE,
-                "This pane was not created by an agent, so a tool does not "
-                "relaunch it. Split off a new pane instead, unless the user "
-                "explicitly asked to override this pane.",
+        startup_mode = str(getattr(session, "startup_mode", "") or "")
+        already_agent = startup_mode == "agent" and bool(_pane_agent_key(session))
+        if startup_mode not in ("terminal", "agent"):
+            raise refuse(
+                MODE_GATE,
+                f"This pane is a {startup_mode or 'non-terminal'} pane. Only a "
+                "plain terminal pane is relaunched by a tool; split off a new "
+                "pane instead.",
             )
-        if creator != caller_session_id:
-            raise _refuse(
-                LINEAGE_GATE,
-                "This pane was created by a different pane. An agent "
-                "relaunches only the panes it created itself, unless the "
-                "user explicitly asked to override this pane.",
+        if already_agent and not request.override:
+            raise refuse(
+                MODE_GATE,
+                "This pane is already running an agent. Only a plain terminal "
+                "pane is relaunched by a tool; split off a new pane instead, "
+                "unless the user explicitly asked to override this pane.",
             )
-    elif not creator or creator != caller_session_id:
-        logger.info(
-            "Pane relaunch session_id=%s overriding lineage gate on behalf of "
-            "requested_by_session_id=%s (creator=%s)",
-            session_id,
-            caller_session_id,
-            creator or "-",
-        )
+
+        check_lineage(session, request, RELAUNCH_WORDING)
+    except PaneGateRefusal as exc:
+        raise ShellTransitionError(exc.message, exc.status_code) from exc
 
     # Past the gates this is the ordinary relaunch, with the ordinary refusals:
     # an unknown agent key, a binary that is not installed, a pane with no shell.
@@ -521,7 +498,7 @@ def apply_agent_pane_relaunch(
         key: payload[key] for key in ("shell", "agent", "mcp", "distribution")
         if key in payload
     }
-    caller = session_manager.get_session(caller_session_id)
+    caller = session_manager.get_session(request.caller_session_id)
     return apply_pane_shell_change(
         session_id,
         relaunch,
