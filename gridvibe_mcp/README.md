@@ -96,7 +96,7 @@ Thirteen, in four tiers by blast radius. The order below is the order
 | `list_panes` | the panes in one workspace or group: what each is, where it points, what it runs on, and where it sits — `index`, `rect`, `relative_area`, and the `neighbours` above, below, left and right |
 | `list_agents` | every agent anywhere, with a working/idle reading, under the workspace and session holding it |
 | `list_saved_layouts` | every saved launcher preset as a *shape* — name, layout, pane count, geometry, and what each pane is. Never a connection |
-| `whoami` | which pane this agent is in, its directory, **which machine that directory is on**, how deep it is, and where it sits |
+| `whoami` | which pane this agent is in, its directory, **which machine that directory is on**, how deep it is, where it sits, and whether it may still launch (`may_launch_panes`) or split (`may_split_panes`) — a refusal of the first carries a `split_note` saying the second is still open |
 
 `whoami` before resolving "this directory", "this workspace" or "the terminal
 below this one". Its `runs_on` is the field that stops a remote path being
@@ -106,7 +106,7 @@ handed to a pane opened on the wrong machine.
 
 | Tool | Makes |
 | --- | --- |
-| `create_workspace` | one empty, labelled workspace. Creating it does not make a window appear |
+| `create_workspace` | one empty, labelled workspace. Creating it does not make a window appear, and it is refused past sixteen workspaces that are *still* empty — counted over the whole app, because the server cannot tell a tool from the launcher's own button |
 | `launch_panes` | one session group of panes — agent, terminal, file explorer or browser preview |
 | `open_window` | a workspace on screen. Reports `opened`, `blocked` or `no_window_available` |
 | `split_pane` | halves one pane on a chosen axis and says what the new pane runs. Reports `split`, `refused` or `no_window_available` |
@@ -173,8 +173,18 @@ mechanism answers both (`web/window_intents.py`, `web/static/js/window-intent.js
   terminal. A process that cannot measure a pane cannot place one.
 
 So the sidecar records an *intent*, exactly one open page claims it, that page
-runs the split button's own handler, and reports back. The sidecar polls until it
-settles or the wait runs out.
+runs the split button's own handler, and reports back. The sidecar waits 40s,
+deliberately above the store's real worst case — 15s for a page to claim the
+intent, then the claimant's own 20s to report — so an expiry means the request
+really did lapse untouched, which is what the answer says. Over HTTP the wait is
+on the store itself rather than a poll: same process, one condition variable, no
+request thread spinning against the server it lives in.
+
+A read that fails mid-wait is swallowed, because a dropped poll is not a failed
+split. If the wait then ends having read nothing, the answer says that in those
+words and names `list_panes`, rather than the sentence promising the panes are
+untouched — only one of the two ways to reach `no_window_available` knows that
+nothing happened.
 
 Everything decidable without measuring a pane is decided before any waiting
 starts — an unknown agent key, a browser pane on a remote host, an axis that is
@@ -210,8 +220,10 @@ this pane".
   are one request away and pass no gate at all. What the gates buy is real and
   worth having — an agent *following its instructions* does not end a pane it
   did not make, and getting past them means leaving the tool surface entirely —
-  but it is a raised bar, not a wall. Identity on the tunnelled path is not
-  settable this way: it comes from the token registry, not from the caller.
+  but it is a raised bar, not a wall. None of that carries to the tunnelled path:
+  identity there comes from the token registry rather than from the caller, and
+  the forward's filter means a remote process cannot reach those ungated routes
+  at all.
 - **No credential ever reaches a tool result.** Every result is built from an
   explicit field list in `client.py`, and anything whose key looks like a
   secret is dropped at any depth regardless. `list_saved_layouts` is the sharp
@@ -219,7 +231,12 @@ this pane".
   and `SAVED_LAYOUT_FIELDS` is what stops it.
 - **The MCP endpoint is the POST half of streamable HTTP.** No SSE `GET`
   stream, no `DELETE`, no `Mcp-Session-Id`. The three CLIs that are handed a URL
-  today are content with request/response.
+  today are content with request/response. Both verbs are answered with a
+  deliberate `405` and `Allow: POST`, naming what the endpoint is and why the
+  other half is absent, rather than Flask's bare method-not-allowed — decided
+  before the token is resolved, so it says nothing about whether one is live. A
+  *tunnelled* client never reaches it: the forward's filter answers anything that
+  is not this pane's own POST with `404`.
 
 ## Which CLIs can be handed the sidecar
 
@@ -267,7 +284,7 @@ remote agent ──HTTP──▶ 127.0.0.1:<assigned>   (on the remote host)
 | Piece | Where |
 | --- | --- |
 | MCP over streamable HTTP | `web/mcp_http.py` — reuses the sidecar's own synchronous `dispatch`, so a tool cannot behave differently by transport |
-| Per-pane token | `web/mcp_http.py` → `pane_tokens` — identity cannot cross a machine by inheritance, so it rides in the URL |
+| Per-pane token | `web/mcp_http.py` → `pane_tokens` — identity cannot cross a machine by inheritance, so it rides in the URL. Minted idempotently, revoked on the pane's own close path, and the registry is bounded (128, oldest evicted) so a revoke that never runs is a bounded leak rather than a permanent one |
 | Reverse tunnel + remote config | `web/ssh_tunnel.py` — `request_port_forward` on the pane's existing transport, config placed over SFTP at `~/.gridvibe/mcp-<pane>.json`, mode `0600` |
 | Wiring | `terminal_io._establish_mcp_tunnel`, torn down in `_shutdown_connection` |
 
@@ -277,22 +294,44 @@ than the inline command-and-args form a local pane gets.
 
 Every failure costs the pane its tools and never its shell: a forward the remote
 sshd refuses, or a config that cannot be written, leaves the pane running and
-tells the reader in the terminal.
+tells the reader in the terminal. A close landing *inside* the setup is the same
+promise: the tunnel is torn down rather than recorded, and the token is revoked
+even when the teardown itself raises. A pane whose agent CLI publishes no MCP
+mechanism never has `agent_mcp` set by any route, so it opens nothing either.
 
 ### What this widens
 
 `sshd` binds the *remote host's own loopback* (`GatewayPorts no`, the default, so
 it does that whatever address is requested), never its network, and the port
 exists only for the life of that pane's connection. A pane whose box is unticked
-opens no port and mints no token at all.
+— or whose agent CLI has no MCP mechanism to begin with — opens no port, mints no
+token and writes nothing on the remote host.
 
-Inside those bounds, be precise about what is exposed: the forward is a plain
-TCP forward to GridVibe's HTTP port, so what a process on that remote host
-reaches is **GridVibe's loopback API**, of which `POST /mcp/<token>` is one
-route. The token gates the tool surface. The rest of that API — which was only
-ever reachable from the machine GridVibe runs on, and is unauthenticated for
-that reason — is reachable too. Tick the box on a remote host you would not give
-a shell on this machine to, and you have given it more than the tools.
+Inside those bounds, be precise about what is exposed. The forwarded channel does
+**not** reach GridVibe's port. It reaches a filter in `web/ssh_tunnel.py`, and a
+socket to GridVibe is opened only for a request that survives it: one request per
+connection, `POST`, and a target equal to *this pane's own* `/mcp/<token>`,
+compared with `secrets.compare_digest` on bytes. Exactly `Content-Length` bytes
+are read and nothing behind them is forwarded; `Transfer-Encoding`, a repeated
+`Content-Length` and obsolete line folding are refused rather than normalised,
+because a filter that cannot say where the body ends cannot say that nothing
+rides behind it. Bounded at 16 KiB of head, 1 MiB of body, 30s. Refusals say
+nothing — `404` for a method or path that is not this pane's, the same answer
+either way, so a caller learns neither which routes exist nor whether it guessed
+a live token; `400` for framing, `413` for an oversized declared body, `502` when
+GridVibe itself cannot be reached — and the warning log prints only the target's
+first segment, because `/mcp/<token>` is a credential.
+
+That filter is load-bearing, not defence in depth. On this end of the forward is
+GridVibe's whole loopback HTTP API: saved sessions with decryptable credentials,
+the destroy tier the tool surface deliberately does not contain, the ungated
+twins of every gated route. Their only guard has ever been "you have to be on
+this machine", and a plain byte pump would have handed every one of them to the
+remote host with the token guarding exactly one route on it.
+
+So what a process on that remote host can reach is this pane's tool surface, and
+that is still the create tier acting on *this* machine. Tick the box on a host
+whose other processes you would not give that to, and you have given it that.
 
 ## Where a launched pane opens
 

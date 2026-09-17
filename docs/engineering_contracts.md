@@ -1071,7 +1071,10 @@ in `README.md`; state the rules a change has to keep.
 - **One dispatch, both transports.** stdio and `POST /mcp/<token>` both run
   `gridvibe_mcp.server.dispatch` against a `GridVibeClient`. A tool must not
   behave differently depending on which transport asked; a new tool is added
-  once, in `tool_specs()` and `_run()`, and reaches both.
+  once, in `tool_specs()` and `_run()`, and reaches both. The endpoint is the POST
+  half of streamable HTTP deliberately: `GET` and `DELETE` answer `405` with
+  `Allow: POST` and a sentence naming what is absent and why, decided before the
+  token is resolved so the refusal says nothing about whether one is live.
 - **Every tool result is built from an explicit field list in `client.py`, never
   a pass-through of `to_dict()`**, and `scrub()` drops any key that looks like a
   secret at any depth regardless of the list. `list_saved_layouts` is the sharp
@@ -1085,6 +1088,13 @@ in `README.md`; state the rules a change has to keep.
   not exist cannot be talked into running by a file an agent reads. `clear_pane`
   is not `send_input`: the only thing reaching stdin is GridVibe's own clear
   command, chosen by the window that knows the pane's shell family.
+- **Every create verb is bounded by something.** `launch_panes` by
+  `terminal.max_sessions` and the depth budget, `split_pane` by the group cap, and
+  `create_workspace` by `MAX_EMPTY_WORKSPACES` — counted over workspaces that are
+  both `retain_when_empty` and still holding no group, so filling one makes room
+  for another, and decided inside the label claim so two requests cannot both read
+  fifteen. The count is over the world rather than the caller, because the route
+  cannot tell a tool from the launcher's **New Workspace** button.
 - **Every tool-reachable pane transaction passes the shared gates in
   `web/pane_gates.py` before anything is mutated, closed or restarted**, so a
   refusal leaves a whole-pane snapshot unchanged — which is what the suites pin.
@@ -1106,8 +1116,11 @@ in `README.md`; state the rules a change has to keep.
 - **The depth budget bounds agents launching agents, and only that.** A pane a
   tool creates is stamped one deeper than the pane that *asked*; a split that
   creates an agent costs budget, a split that creates a plain pane does not.
-  Depths are bounded by `_normalize_agent_depth` wherever they are written. The
-  gated relaunch route inherits the caller's budget for the same reason.
+  Depths are bounded by `_normalize_agent_depth` wherever they are written — the
+  gated relaunch included, which is the one path whose raw `setattr` through
+  `update_session_metadata` normalizes nothing of its own. That route reads the
+  caller *inside* the gate sequence, so a caller that closed mid-call raises the
+  lineage refusal rather than restarting the chain's budget at 1.
 - **A tool is never handed a silent normalization.** Where a page's own route may
   normalize (the toggle only offers what a pane can be), the gated twin refuses
   instead: browser mode on a remote pane, a `startup_mode` outside
@@ -1125,7 +1138,20 @@ in `README.md`; state the rules a change has to keep.
   kill switch for the prompt hook and says nothing about MCP. WSL panes extend
   `WSLENV` through `merge_wslenv` so the two callers cannot overwrite each other.
   A tunnelled pane's identity comes from `PaneTokenRegistry`, in memory only,
-  minted idempotently per pane and never written into a preset or a snapshot.
+  minted idempotently per pane and never written into a preset or a snapshot. It
+  is revoked on the pane's own close path — the one that knows the session id,
+  not `_shutdown_connection`, which does not — including the close that lands
+  *inside* `_establish_mcp_tunnel`, where a stale connection is torn down rather
+  than recorded and a raising teardown still costs the token. The registry is
+  bounded (`MAX_PANE_TOKENS`, oldest evicted, logged) so a revoke that never runs
+  is a bounded leak rather than a permanent one.
+- **`agent_mcp` is only ever set on a CLI that publishes a mechanism.**
+  `_agent_supports_mcp` is asked at every write of the flag, not only where it is
+  spent: the one launch normalizer in `web/saved_sessions.py`, the split
+  overrides in `web/api.py`, `apply_pane_shell_change` in `web/session_shell.py`,
+  and `_establish_mcp_tunnel` last, which is the only one with a cost attached —
+  such a pane opens no port, mints no token and writes no remote file. The pane
+  header's **MCP** tag paints off the flag, so the tag is honest for free.
 - **`pane_can_run_the_sidecar()` picks the *shape* of the answer, never whether
   there is one.** A local pane gets the generated config; a remote pane gets a
   URL. The predicate is held there rather than at the launcher checkbox because a
@@ -1142,11 +1168,21 @@ in `README.md`; state the rules a change has to keep.
   shell.** `sshd` binds the remote host's own loopback; the port lives only for
   that connection; the remote config is written over SFTP at `0600` and named per
   pane; teardown runs off the close path on its own thread because every step is a
-  round trip to a host that may be unreachable. The forward is a plain TCP forward
-  to GridVibe's HTTP port, so what it exposes to the remote host is the whole
-  loopback API and only `POST /mcp/<token>` is token-gated — a narrowing of the
-  local-bind guarantee that must be stated wherever it is described, not implied
-  away.
+  round trip to a host that may be unreachable.
+- **The forwarded channel reaches a filter, never GridVibe's port.** On this end
+  of a reverse forward sits the whole unauthenticated loopback API, whose only
+  guard has ever been "you have to be on this machine", so a socket to GridVibe
+  is opened only for a request that survives `web/ssh_tunnel.py`'s filter: one
+  request per connection, `POST`, and a target equal to *this pane's own*
+  `/mcp/<token>` under `secrets.compare_digest`. The token is a parameter of
+  `open_reverse_tunnel`, so a port opened for one pane cannot spend another's,
+  and `mcp_path()` is the one spelling `tunnel_url()` also builds the remote
+  config from. Framing that cannot prove where the body ends is refused rather
+  than normalized, the head and body are bounded, and refusals name nothing — the
+  same `404` for a wrong method and a wrong token, and only the target's first
+  segment in the log, because the path is a credential. The still-true narrowing
+  is what it now is: a remote process reaches this pane's tool surface, acting on
+  this machine, and nothing else on the API.
 - **Opening a window and splitting a pane are page work, recorded as intents.**
   The split axis never reaches the server: the page computes the rectangles and
   measures its own refusals off the live terminal. `web/window_intents.py` is in
@@ -1155,6 +1191,19 @@ in `README.md`; state the rules a change has to keep.
   before the intent is recorded. A page reports only its own kind's outcomes, and
   a refusal is relayed with the axis that would have worked — never a silent
   retry on the other axis.
+- **The sidecar's wait must exceed the store's worst case, and the relation is
+  pinned rather than derived.** `DEFAULT_WAIT_SECONDS` in `splits.py` and
+  `windows.py` is above `INTENT_TTL_SECONDS + CLAIM_TTL_SECONDS`, so an expiry the
+  sidecar reports is an expiry the store reached — which is what makes
+  "the panes and the workspace are untouched" true wherever it is said. The
+  sidecar cannot import `web/`, so a test asserts the inequality. The HTTP path
+  waits on the store's own condition variable (`wait_for_settled`, reached by
+  overriding `read_window_intent` on a `GridVibeClient` subclass) rather than
+  re-entering the server, so neither tool module knows which transport it serves.
+- **A failed poll is not a failed verb.** Both loops swallow `GridVibeError` and
+  keep waiting to the deadline; a wait that *ends* never having read the store
+  answers `no_window_available` with the sentence that says so and names
+  `list_panes`, never the one claiming nothing happened.
 - **Three honest outcomes per intent verb** (`opened`/`blocked`/`no_window_available`,
   `split`/`refused`/`no_window_available`), never a retry and never a pretended
   result. Browser mode answers `no_window_available` for a split because the
