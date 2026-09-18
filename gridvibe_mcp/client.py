@@ -341,6 +341,7 @@ class GridVibeClient:
         workspace_id: str = "",
         group_id: str = "",
         position_group_id: str = "",
+        layout: Optional[Mapping[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Every pane in scope, and where the panes of one group sit.
 
@@ -352,6 +353,12 @@ class GridVibeClient:
         position across groups means nothing. The ``layout`` block follows the
         same rule: it is published only when at least one pane in this answer is
         in the group it describes.
+
+        ``layout`` is that same arrangement already in hand. The caller reads it
+        first when it needs the group to say which *workspace* to list, and
+        passing it here is what keeps that one read from becoming two. Given
+        and empty means "read, and it answered nothing" -- which is not the same
+        as not given, and does not send this call looking again.
         """
         params = {}
         if workspace_id:
@@ -369,7 +376,8 @@ class GridVibeClient:
                 pane["index"] = None
             return result
 
-        layout = self.pane_layout(resolved_group)
+        if layout is None:
+            layout = self.pane_layout(resolved_group)
         positions = {
             str(entry.get("session_id") or ""): entry
             for entry in (layout.get("panes") or [])

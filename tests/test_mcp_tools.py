@@ -256,12 +256,22 @@ class ArgumentRefusalTestCase(unittest.TestCase):
 class LaunchRequestTestCase(unittest.TestCase):
     """The acceptance scenario, as a request body."""
 
-    def launch(self, arguments, environ=None, answer=None):
-        opener = StubOpener([answer or {
+    def launch(self, arguments, environ=None, answer=None, live_workspace="ws-1"):
+        """Dispatch one launch. The POST is always `opener.requests[-1]`.
+
+        A launch that names no workspace reads the caller's own group first,
+        because that -- and not the workspace id inherited at spawn -- is where
+        this pane is now.
+        """
+        answers = []
+        if not arguments.get("workspace_id") and not arguments.get("new_workspace"):
+            answers.append({"group_id": "group-1", "workspace_id": live_workspace})
+        answers.append(answer or {
             "workspace_id": "ws-2",
             "group_id": "g-2",
             "sessions": [],
-        }])
+        })
+        opener = StubOpener(answers)
         result = dispatch(
             "launch_panes",
             arguments,
@@ -285,7 +295,7 @@ class LaunchRequestTestCase(unittest.TestCase):
             ],
         })
 
-        body = json.loads(opener.requests[0].data.decode("utf-8"))
+        body = json.loads(opener.requests[-1].data.decode("utf-8"))
         self.assertTrue(body["new_workspace"])
         self.assertEqual(body["workspace_label"], "test")
         self.assertEqual(body["session_name"], "test")
@@ -323,14 +333,58 @@ class LaunchRequestTestCase(unittest.TestCase):
     def test_an_unstated_workspace_means_the_one_this_agent_is_in(self):
         _result, opener = self.launch({"panes": [{"kind": "terminal"}]})
 
-        body = json.loads(opener.requests[0].data.decode("utf-8"))
+        body = json.loads(opener.requests[-1].data.decode("utf-8"))
         self.assertEqual(body["workspace_id"], "ws-1")
         self.assertNotIn("new_workspace", body)
+
+    def test_a_moved_group_launches_into_the_workspace_it_is_in_now(self):
+        """Identity is captured once; a workspace is not a property of a pane.
+
+        Moving a session to another workspace keeps its processes and its SSH
+        connections running on purpose, so an agent launched before the move
+        went on naming the workspace it *was* in -- a 404 once that workspace
+        was pruned, and a pane opened in somebody else's workspace when it was
+        not. The group travels with the move and every pane keeps its
+        `group_id`, so the group is what is asked.
+        """
+        _result, opener = self.launch(
+            {"panes": [{"kind": "terminal"}]}, live_workspace="ws-moved"
+        )
+
+        self.assertIn("group_id=group-1", opener.requests[0].full_url)
+        body = json.loads(opener.requests[-1].data.decode("utf-8"))
+        self.assertEqual(body["workspace_id"], "ws-moved")
+
+    def test_a_named_workspace_costs_no_read_at_all(self):
+        """The resolution is the *default*, not a second opinion on a caller
+        that named one."""
+        _result, opener = self.launch(
+            {"workspace_id": "ws-9", "panes": [{"kind": "terminal"}]}
+        )
+
+        self.assertEqual(len(opener.requests), 1)
+        self.assertTrue(opener.requests[0].full_url.endswith("/api/sessions"))
+
+    def test_a_group_that_cannot_be_read_falls_back_to_the_inherited_one(self):
+        """Degraded rather than wrong: a failed read is not a reason to refuse
+        a launch, and the spawn-time workspace is still the best guess."""
+        # One opener that refuses everything: the layout read fails, and what
+        # matters is what the launch still *sent*.
+        opener = StubOpener(raises=http_error(404, {"error": "gone"}))
+        dispatch(
+            "launch_panes",
+            {"panes": [{"kind": "terminal"}]},
+            client=client_for(opener),
+            identity=read_identity(INSIDE_PANE),
+        )
+
+        body = json.loads(opener.requests[-1].data.decode("utf-8"))
+        self.assertEqual(body["workspace_id"], "ws-1")
 
     def test_a_single_pane_launch_does_not_claim_a_split(self):
         _result, opener = self.launch({"panes": [{"kind": "terminal"}]})
 
-        self.assertEqual(json.loads(opener.requests[0].data.decode("utf-8"))["layout"], "single")
+        self.assertEqual(json.loads(opener.requests[-1].data.decode("utf-8"))["layout"], "single")
 
     def test_an_unstated_shell_is_left_to_gridvibe(self):
         """An omitted `shell` is not a choice of PowerShell.
@@ -345,7 +399,7 @@ class LaunchRequestTestCase(unittest.TestCase):
             "panes": [{"kind": "terminal"}, {"kind": "agent", "agent": "claude"}],
         })
 
-        for session in json.loads(opener.requests[0].data.decode("utf-8"))["sessions"]:
+        for session in json.loads(opener.requests[-1].data.decode("utf-8"))["sessions"]:
             with self.subTest(startup_mode=session["startup_mode"]):
                 self.assertNotIn("use_powershell", session)
                 self.assertNotIn("use_wsl", session)
@@ -358,7 +412,7 @@ class LaunchRequestTestCase(unittest.TestCase):
             ],
         })
 
-        sessions = json.loads(opener.requests[0].data.decode("utf-8"))["sessions"]
+        sessions = json.loads(opener.requests[-1].data.decode("utf-8"))["sessions"]
         self.assertEqual(
             [(item["use_powershell"], item["use_wsl"]) for item in sessions],
             [(False, False), (False, True)],
@@ -370,7 +424,7 @@ class LaunchRequestTestCase(unittest.TestCase):
             {"panes": [{"kind": "terminal", "shell": "powershell"}]}
         )
 
-        session = json.loads(opener.requests[0].data.decode("utf-8"))["sessions"][0]
+        session = json.loads(opener.requests[-1].data.decode("utf-8"))["sessions"][0]
         self.assertTrue(session["use_powershell"])
         self.assertFalse(session["use_wsl"])
 
@@ -378,7 +432,7 @@ class LaunchRequestTestCase(unittest.TestCase):
         """Where, not what -- GridVibe reads the connection, the agent cannot."""
         _result, opener = self.launch({"panes": [{"kind": "terminal"}]})
 
-        body = json.loads(opener.requests[0].data.decode("utf-8"))
+        body = json.loads(opener.requests[-1].data.decode("utf-8"))
         self.assertEqual(body["origin_session_id"], "pane-1")
         # And nothing resembling a credential travelled with it: an agent is
         # never shown its own pane's password, so it cannot state one.
@@ -390,7 +444,7 @@ class LaunchRequestTestCase(unittest.TestCase):
             environ={"GRIDVIBE_URL": "http://127.0.0.1:5050"},
         )
 
-        body = json.loads(opener.requests[0].data.decode("utf-8"))
+        body = json.loads(opener.requests[-1].data.decode("utf-8"))
         self.assertNotIn("origin_session_id", body)
         self.assertEqual(body["connection_mode"], "wsl")
 
@@ -684,11 +738,11 @@ class PanePositionTestCase(unittest.TestCase):
 
     def test_list_panes_carries_a_position_and_a_layout_block(self):
         opener = StubOpener([
+            _layout_payload(["pane-1", "pane-2"]),
             {"sessions": [
                 {"session_id": "pane-1", "group_id": "group-1", "title": "Terminal 1"},
                 {"session_id": "pane-2", "group_id": "group-1", "title": "Terminal 2"},
             ]},
-            _layout_payload(["pane-1", "pane-2"]),
         ])
 
         result = dispatch(
@@ -710,8 +764,8 @@ class PanePositionTestCase(unittest.TestCase):
     def test_the_arrangement_read_is_the_callers_own_group_by_default(self):
         """"What is around me" is a question about the panes beside this one."""
         opener = StubOpener([
-            {"sessions": [{"session_id": "pane-1", "group_id": "group-1"}]},
             _layout_payload(["pane-1"]),
+            {"sessions": [{"session_id": "pane-1", "group_id": "group-1"}]},
         ])
 
         dispatch(
@@ -721,16 +775,16 @@ class PanePositionTestCase(unittest.TestCase):
             identity=read_identity(INSIDE_PANE),
         )
 
-        self.assertIn("group_id=group-1", opener.requests[1].full_url)
+        self.assertIn("group_id=group-1", opener.requests[0].full_url)
 
     def test_a_pane_outside_the_arranged_group_states_index_none(self):
         """Array position across groups means nothing, so no number is given."""
         opener = StubOpener([
+            _layout_payload(["pane-1"]),
             {"sessions": [
                 {"session_id": "pane-1", "group_id": "group-1"},
                 {"session_id": "pane-9", "group_id": "group-2"},
             ]},
-            _layout_payload(["pane-1"]),
         ])
 
         result = dispatch(
@@ -758,11 +812,11 @@ class PanePositionTestCase(unittest.TestCase):
         arranged" could not.
         """
         opener = StubOpener([
+            _layout_payload(["pane-1"]),
             {"sessions": [
                 {"session_id": "pane-7", "group_id": "group-2"},
                 {"session_id": "pane-8", "group_id": "group-2"},
             ]},
-            _layout_payload(["pane-1"]),
         ])
 
         result = dispatch(
@@ -779,11 +833,11 @@ class PanePositionTestCase(unittest.TestCase):
     def test_the_block_survives_a_stranger_beside_a_pane_that_did_match(self):
         """One matched pane is enough: the block describes something here."""
         opener = StubOpener([
+            _layout_payload(["pane-1"]),
             {"sessions": [
                 {"session_id": "pane-1", "group_id": "group-1"},
                 {"session_id": "pane-9", "group_id": "group-2"},
             ]},
-            _layout_payload(["pane-1"]),
         ])
 
         result = dispatch(
@@ -796,6 +850,43 @@ class PanePositionTestCase(unittest.TestCase):
         self.assertEqual(result["layout"]["group_id"], "group-1")
         self.assertEqual(result["panes"][0]["index"], 0)
         self.assertIsNone(result["panes"][1]["index"])
+
+    def test_a_moved_group_lists_the_workspace_it_is_in_now(self):
+        """The read half of the same staleness the launch half had.
+
+        A group moved to another workspace keeps its panes running, so an agent
+        launched before the move went on listing the workspace it had left --
+        and `index: None` on every pane in it, because the group it was asking
+        about was not in the answer.
+        """
+        opener = StubOpener([
+            {"group_id": "group-1", "workspace_id": "ws-moved"},
+            {"sessions": [{"session_id": "pane-1", "group_id": "group-1"}]},
+        ])
+
+        dispatch(
+            "list_panes",
+            {},
+            client=client_for(opener),
+            identity=read_identity(INSIDE_PANE),
+        )
+
+        self.assertIn("workspace_id=ws-moved", opener.requests[1].full_url)
+
+    def test_a_stated_workspace_is_never_second_guessed(self):
+        opener = StubOpener([
+            {"group_id": "group-1", "workspace_id": "ws-moved"},
+            {"sessions": []},
+        ])
+
+        dispatch(
+            "list_panes",
+            {"workspace_id": "ws-9"},
+            client=client_for(opener),
+            identity=read_identity(INSIDE_PANE),
+        )
+
+        self.assertIn("workspace_id=ws-9", opener.requests[1].full_url)
 
     def test_an_agent_with_no_group_gets_panes_and_no_positions(self):
         opener = StubOpener([
@@ -815,20 +906,25 @@ class PanePositionTestCase(unittest.TestCase):
         self.assertEqual(len(opener.requests), 1)
 
     def test_a_geometry_read_that_failed_still_answers_with_the_panes(self):
-        """An agent asking what is open gets the panes, minus what was not read."""
+        """An agent asking what is open gets the panes, minus what was not read.
+
+        That read is now also the one saying which workspace this pane is in,
+        and it degrades the same way in both directions: no positions, and the
+        workspace the pane was launched in rather than a refusal.
+        """
         opener = StubOpener(
             [{"sessions": [{"session_id": "pane-1", "group_id": "group-1"}]}]
         )
-        opener.raises_after = 1
         client = client_for(opener)
 
-        # The second call raises; the first answers.
+        # The arrangement is asked for first, and raises; the panes answer.
         original = opener.open
         calls = {"count": 0}
 
         def failing(request, timeout=None):
             calls["count"] += 1
-            if calls["count"] > 1:
+            if calls["count"] == 1:
+                opener.requests.append(request)
                 raise http_error(500, {"error": "boom"})
             return original(request, timeout=timeout)
 
@@ -840,6 +936,24 @@ class PanePositionTestCase(unittest.TestCase):
         self.assertEqual(result["count"], 1)
         self.assertIsNone(result["panes"][0]["index"])
         self.assertNotIn("layout", result)
+        self.assertIn("workspace_id=ws-1", opener.requests[-1].full_url)
+
+    def test_whoami_says_which_workspace_the_pane_is_in_now(self):
+        """The field an agent reads before naming a workspace to any other
+        tool, so it must not be the one the pane was launched in."""
+        opener = StubOpener([
+            {"session_id": "pane-1", "mode": "wsl"},
+            {"group_id": "group-1", "workspace_id": "ws-moved"},
+        ])
+
+        result = dispatch(
+            "whoami",
+            {},
+            client=client_for(opener),
+            identity=read_identity(INSIDE_PANE),
+        )
+
+        self.assertEqual(result["workspace_id"], "ws-moved")
 
     def test_whoami_knows_which_pane_is_below_it(self):
         opener = StubOpener([
@@ -910,14 +1024,19 @@ class LaunchGeometryTestCase(unittest.TestCase):
     }
 
     def launch(self, arguments):
-        opener = StubOpener([{"workspace_id": "ws-2", "group_id": "g-2", "sessions": []}])
+        opener = StubOpener([
+            # The caller's own group, read first to resolve the workspace it
+            # is in now; the launch POST is the request after it.
+            {"group_id": "group-1", "workspace_id": "ws-1"},
+            {"workspace_id": "ws-2", "group_id": "g-2", "sessions": []},
+        ])
         dispatch(
             "launch_panes",
             arguments,
             client=client_for(opener),
             identity=read_identity(INSIDE_PANE),
         )
-        return json.loads(opener.requests[0].data.decode("utf-8"))
+        return json.loads(opener.requests[-1].data.decode("utf-8"))
 
     def test_a_stated_geometry_reaches_the_launch_body(self):
         body = self.launch({

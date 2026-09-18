@@ -720,14 +720,53 @@ def build_split_pane_request(arguments: Mapping[str, Any]) -> Dict[str, Any]:
     return pane
 
 
-def _own_position(client: GridVibeClient, identity: PaneIdentity) -> Dict[str, Any]:
+def live_workspace_id(
+    identity: PaneIdentity,
+    layout: Optional[Mapping[str, Any]] = None,
+) -> str:
+    """Which workspace this pane is in *now*, or the spawn-time answer.
+
+    Identity is captured once -- inherited from the pane's environment, or
+    written into the token registry when the pane connected -- and a workspace
+    is not a property of a pane that holds still. Moving a session to another
+    workspace deliberately keeps its processes and its SSH connections running,
+    so an agent launched before the move goes on naming the workspace it *was*
+    in: `list_panes` reads a workspace the pane has left, and `launch_panes`
+    opens panes in it -- a 404 when it has since been pruned, and something
+    worse when it has not.
+
+    The group is the anchor, because a move carries the whole group and leaves
+    every pane's `group_id` alone. So the group's own current workspace is the
+    answer, and the inherited one is the fallback for when it cannot be read --
+    degraded rather than wrong, exactly like the geometry read below.
+    """
+    resolved = str((layout or {}).get("workspace_id") or "").strip()
+    return resolved or identity.workspace_id
+
+
+def resolve_live_workspace_id(
+    client: GridVibeClient,
+    identity: PaneIdentity,
+) -> str:
+    """:func:`live_workspace_id`, reading the caller's own group for itself."""
+    if not identity.group_id:
+        return identity.workspace_id
+    return live_workspace_id(identity, client.pane_layout(identity.group_id))
+
+
+def _own_position(
+    layout: Mapping[str, Any],
+    identity: PaneIdentity,
+) -> Dict[str, Any]:
     """This pane's own place in its own group, for ``whoami``.
+
+    Takes the arrangement already read rather than reading it again: that same
+    call is what says which workspace this pane is in now.
 
     Degrades to nothing rather than failing the call: an agent asking who it is
     still gets an answer when the geometry read fails, minus the part that
     could not be read.
     """
-    layout = client.pane_layout(identity.group_id)
     if not layout:
         return {}
     for entry in layout.get("panes") or []:
@@ -751,8 +790,14 @@ def build_launch_request(
     arguments: Mapping[str, Any],
     *,
     identity: PaneIdentity,
+    resolve_workspace_id: Optional[Callable[[], str]] = None,
 ) -> Dict[str, Any]:
-    """Build the whole ``POST /api/sessions`` body, or refuse before sending."""
+    """Build the whole ``POST /api/sessions`` body, or refuse before sending.
+
+    ``resolve_workspace_id`` is asked only where the default is applied, so a
+    caller that named a workspace or asked for a new one costs no extra read.
+    It answers where the caller's pane is *now* (:func:`live_workspace_id`).
+    """
     panes = arguments.get("panes")
     if not isinstance(panes, list) or not panes:
         raise ToolArgumentError("'panes' must be a non-empty list.")
@@ -760,23 +805,41 @@ def build_launch_request(
     workspace_id = _text(arguments, "workspace_id")
     workspace_label = _text(arguments, "workspace_label")
     new_workspace = _flag(arguments, "new_workspace", bool(workspace_label) and not workspace_id)
+
+    session_name = _text(arguments, "session_name") or workspace_label
+    layout = _choice(_text(arguments, "layout"), LAYOUTS, "layout", "")
+
+    # Shape, stated by the caller and validated by the same normalizer the
+    # presentation route uses. The sidecar used to drop it, so a group read out
+    # of one workspace could not be reproduced in another: the pane list came
+    # back and the arrangement did not.
+    geometry = arguments.get("workspace_layout")
+    if geometry is not None and not isinstance(geometry, Mapping):
+        raise ToolArgumentError("'workspace_layout' must be an object.")
+
+    sessions = [
+        build_pane_request(pane, agent_depth=identity.child_depth) for pane in panes
+    ]
+
+    # Every refusal this function can decide is decided above, because the
+    # resolver below is the first thing here that talks to GridVibe and a
+    # request that is going to be refused must not have asked it anything.
     if not workspace_id and not new_workspace:
         # Default to the workspace this agent is already in rather than
-        # guessing at one; an agent outside GridVibe must state one.
-        workspace_id = identity.workspace_id
+        # guessing at one; an agent outside GridVibe must state one. "Already
+        # in" is read off the live group rather than off the spawn-time
+        # identity -- see `live_workspace_id`.
+        workspace_id = (
+            resolve_workspace_id() if resolve_workspace_id else ""
+        ) or identity.workspace_id
     if not workspace_id and not new_workspace:
         raise ToolArgumentError(
             "Name a 'workspace_id', or set 'new_workspace' with a 'workspace_label'."
         )
 
-    session_name = _text(arguments, "session_name") or workspace_label
-    layout = _choice(_text(arguments, "layout"), LAYOUTS, "layout", "")
-
     body: Dict[str, Any] = {
         "connection_mode": LOCAL_CONNECTION_MODE,
-        "sessions": [
-            build_pane_request(pane, agent_depth=identity.child_depth) for pane in panes
-        ],
+        "sessions": sessions,
     }
     if identity.session_id:
         # Where, not what. GridVibe reads the connection off this pane in its
@@ -793,15 +856,7 @@ def build_launch_request(
     if session_name:
         body["session_name"] = session_name
     body["layout"] = layout or ("split" if len(body["sessions"]) > 1 else "single")
-
-    # Shape, stated by the caller and validated by the same normalizer the
-    # presentation route uses. The sidecar used to drop it, so a group read out
-    # of one workspace could not be reproduced in another: the pane list came
-    # back and the arrangement did not.
-    geometry = arguments.get("workspace_layout")
     if geometry is not None:
-        if not isinstance(geometry, Mapping):
-            raise ToolArgumentError("'workspace_layout' must be an object.")
         body["workspace_layout"] = dict(geometry)
     return body
 
@@ -873,16 +928,24 @@ def _run(
         return {"workspaces": workspaces, "count": len(workspaces)}
 
     if name == "list_panes":
-        workspace_id = _text(args, "workspace_id") or identity.workspace_id
         group_id = _text(args, "group_id")
         # Position is only meaningful inside one group. The group whose
         # arrangement is resolved is the one asked for, or -- when the read is
         # workspace-wide -- the caller's own, because "what is around me" is a
         # question about the panes beside this one.
+        position_group_id = group_id or identity.group_id
+        # Read before the panes rather than after them, because that same group
+        # is also what says which workspace this pane is in now. Handed on, so
+        # the two questions still cost one read.
+        layout = client.pane_layout(position_group_id) if position_group_id else {}
+        workspace_id = _text(args, "workspace_id") or live_workspace_id(
+            identity, layout
+        )
         return client.panes(
             workspace_id=workspace_id,
             group_id=group_id,
-            position_group_id=group_id or identity.group_id,
+            position_group_id=position_group_id,
+            layout=layout,
         )
 
     if name == "list_agents":
@@ -942,7 +1005,12 @@ def _run(
         if identity.session_id and identity.group_id:
             # Its own place in its own group, so "the terminal below this one"
             # is one call rather than a list_panes plus a search for oneself.
-            payload.update(_own_position(client, identity))
+            layout = client.pane_layout(identity.group_id)
+            # And where that group is now: this is the field an agent reads
+            # before naming a workspace to any other tool, so it must not be
+            # the one the pane was launched in.
+            payload["workspace_id"] = live_workspace_id(identity, layout)
+            payload.update(_own_position(layout, identity))
         return payload
 
     if name == "create_workspace":
@@ -955,7 +1023,11 @@ def _run(
         allowed, refusal = depth_budget(identity, max_agent_depth)
         if not allowed:
             return {"error": refusal, "kind": "depth_limit", "agent_depth": identity.agent_depth}
-        body = build_launch_request(args, identity=identity)
+        body = build_launch_request(
+            args,
+            identity=identity,
+            resolve_workspace_id=lambda: resolve_live_workspace_id(client, identity),
+        )
         result = client.launch(body)
         result["request"] = body
         return result
