@@ -1112,7 +1112,12 @@ in `README.md`; state the rules a change has to keep.
   `created_by_session_id` is stamped from the pane a launch or split actually
   came from (`_live_session_id` / `_live_origin_session_id`), and is deliberately
   absent from `runtime_state.json`: a creator id that survived a restart would
-  name a stranger, so every restored pane refuses the gate that reads it.
+  name a stranger, so every restored pane refuses the gate that reads it. An
+  origin that is *stated* and names nothing open is a lineage refusal at both
+  ends of the record-then-perform split — when the intent is recorded and again
+  when the page performs it — never a pane stamped with nobody, which would hand
+  an agent's new pane a fresh depth budget of 0. Only an omitted origin is a
+  person's own split.
 - **The depth budget bounds agents launching agents, and only that.** A pane a
   tool creates is stamped one deeper than the pane that *asked*; a split that
   creates an agent costs budget, a split that creates a plain pane does not.
@@ -1131,6 +1136,16 @@ in `README.md`; state the rules a change has to keep.
   user, port and password off that live session in this process; none of it
   reaches a response, a preset or a snapshot. An origin pane that has closed is a
   refusal, never a fall back to this machine.
+- **That same pane, not the caller, answers an unstated workspace.** "Here" is
+  the workspace the origin pane's *group* is in — read by GridVibe, in the launch
+  itself (`workspace_anchor_session_id`), and re-read inside the lock that
+  publishes the new group (`install_session_group`'s `workspace_from_session_id`).
+  A caller that resolves it for itself and names the result in a second request
+  can only ever be naming where the group *was*: a move carries the whole group
+  and leaves every pane's `group_id` alone, so the panes would open in the
+  workspace it just left, or fail once that workspace had been pruned. A stated
+  `workspace_id` or `new_workspace` still wins; this is the default, not a second
+  opinion.
 - **Identity arrives by inheritance locally and by token remotely.** The five
   `GRIDVIBE_*` variables are merged at the spawn call site in
   `_connect_local_session`, *not* inside `_local_shell_integration` — that

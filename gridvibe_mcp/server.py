@@ -744,16 +744,6 @@ def live_workspace_id(
     return resolved or identity.workspace_id
 
 
-def resolve_live_workspace_id(
-    client: GridVibeClient,
-    identity: PaneIdentity,
-) -> str:
-    """:func:`live_workspace_id`, reading the caller's own group for itself."""
-    if not identity.group_id:
-        return identity.workspace_id
-    return live_workspace_id(identity, client.pane_layout(identity.group_id))
-
-
 def _own_position(
     layout: Mapping[str, Any],
     identity: PaneIdentity,
@@ -790,13 +780,15 @@ def build_launch_request(
     arguments: Mapping[str, Any],
     *,
     identity: PaneIdentity,
-    resolve_workspace_id: Optional[Callable[[], str]] = None,
 ) -> Dict[str, Any]:
     """Build the whole ``POST /api/sessions`` body, or refuse before sending.
 
-    ``resolve_workspace_id`` is asked only where the default is applied, so a
-    caller that named a workspace or asked for a new one costs no extra read.
-    It answers where the caller's pane is *now* (:func:`live_workspace_id`).
+    A caller that names no workspace states none: the body carries only the
+    pane the launch came from, and GridVibe resolves "here" inside the launch
+    itself. Resolving it here cost a second read that could only ever answer
+    where the group *was* -- the group can move between that read and the
+    launch, which opened panes in the workspace it had just left, or failed
+    when that workspace had since been pruned.
     """
     panes = arguments.get("panes")
     if not isinstance(panes, list) or not panes:
@@ -821,18 +813,10 @@ def build_launch_request(
         build_pane_request(pane, agent_depth=identity.child_depth) for pane in panes
     ]
 
-    # Every refusal this function can decide is decided above, because the
-    # resolver below is the first thing here that talks to GridVibe and a
-    # request that is going to be refused must not have asked it anything.
-    if not workspace_id and not new_workspace:
-        # Default to the workspace this agent is already in rather than
-        # guessing at one; an agent outside GridVibe must state one. "Already
-        # in" is read off the live group rather than off the spawn-time
-        # identity -- see `live_workspace_id`.
-        workspace_id = (
-            resolve_workspace_id() if resolve_workspace_id else ""
-        ) or identity.workspace_id
-    if not workspace_id and not new_workspace:
+    # An agent outside GridVibe has no pane to be "here", so it must name a
+    # destination. An agent in a pane names none and GridVibe reads it off that
+    # pane's live group, in the process that owns the group.
+    if not workspace_id and not new_workspace and not identity.session_id:
         raise ToolArgumentError(
             "Name a 'workspace_id', or set 'new_workspace' with a 'workspace_label'."
         )
@@ -842,16 +826,17 @@ def build_launch_request(
         "sessions": sessions,
     }
     if identity.session_id:
-        # Where, not what. GridVibe reads the connection off this pane in its
-        # own process -- an agent is never shown its pane's credential, and an
-        # agent on an SSH pane that fell back to `connection_mode` above got
-        # panes opened on GridVibe's machine holding the remote host's paths.
+        # Where, not what -- and, for a caller that named no destination,
+        # which workspace. GridVibe reads both off this pane in its own
+        # process: an agent is never shown its pane's credential, and an agent
+        # on an SSH pane that fell back to `connection_mode` above got panes
+        # opened on GridVibe's machine holding the remote host's paths.
         body["origin_session_id"] = identity.session_id
     if new_workspace:
         body["new_workspace"] = True
         if workspace_label:
             body["workspace_label"] = workspace_label
-    else:
+    elif workspace_id:
         body["workspace_id"] = workspace_id
     if session_name:
         body["session_name"] = session_name
@@ -1023,11 +1008,7 @@ def _run(
         allowed, refusal = depth_budget(identity, max_agent_depth)
         if not allowed:
             return {"error": refusal, "kind": "depth_limit", "agent_depth": identity.agent_depth}
-        body = build_launch_request(
-            args,
-            identity=identity,
-            resolve_workspace_id=lambda: resolve_live_workspace_id(client, identity),
-        )
+        body = build_launch_request(args, identity=identity)
         result = client.launch(body)
         result["request"] = body
         return result

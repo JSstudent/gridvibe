@@ -351,8 +351,16 @@ on. An origin pane that has closed is a refusal, not a fall back to this
 machine: "here" is exactly the wrong answer, and the one that used to open a
 PowerShell pane on a `/home/...` path.
 
-The same read stamps `created_by_session_id` on the panes it makes, which is
-what the lineage gate later reads.
+The same read answers *which workspace* when the call names none: the
+destination is the workspace the origin pane's group is in, resolved by GridVibe
+inside the launch rather than by the sidecar in a read before it. A group can
+move between two requests, which would have opened the panes in the workspace it
+had just left. A stated `workspace_id` or `new_workspace` still wins.
+
+The same read also stamps `created_by_session_id` on the panes it makes, which
+is what the lineage gate later reads. A `split_pane` that names an origin pane
+which is no longer open is refused by that gate when the split is *recorded*,
+not silently recorded as a pane nobody created.
 
 ## Checking the surface without a running GridVibe
 

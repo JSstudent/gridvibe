@@ -256,22 +256,13 @@ class ArgumentRefusalTestCase(unittest.TestCase):
 class LaunchRequestTestCase(unittest.TestCase):
     """The acceptance scenario, as a request body."""
 
-    def launch(self, arguments, environ=None, answer=None, live_workspace="ws-1"):
-        """Dispatch one launch. The POST is always `opener.requests[-1]`.
-
-        A launch that names no workspace reads the caller's own group first,
-        because that -- and not the workspace id inherited at spawn -- is where
-        this pane is now.
-        """
-        answers = []
-        if not arguments.get("workspace_id") and not arguments.get("new_workspace"):
-            answers.append({"group_id": "group-1", "workspace_id": live_workspace})
-        answers.append(answer or {
+    def launch(self, arguments, environ=None, answer=None):
+        """Dispatch one launch. The POST is the only request it ever makes."""
+        opener = StubOpener([answer or {
             "workspace_id": "ws-2",
             "group_id": "g-2",
             "sessions": [],
-        })
-        opener = StubOpener(answers)
+        }])
         result = dispatch(
             "launch_panes",
             arguments,
@@ -330,56 +321,58 @@ class LaunchRequestTestCase(unittest.TestCase):
         self.assertEqual(result["workspace_id"], "ws-2")
         self.assertEqual(result["group_id"], "g-2")
 
-    def test_an_unstated_workspace_means_the_one_this_agent_is_in(self):
+    def test_an_unstated_workspace_is_left_for_gridvibe_to_resolve(self):
+        """"Here" is a question only GridVibe can answer without a race.
+
+        The sidecar used to read its own group's workspace and name the answer
+        in the launch that followed -- two requests, with a move possible
+        between them, so the panes could open in the workspace the group had
+        just left. The body now states the pane instead, and GridVibe resolves
+        the destination inside the launch itself.
+        """
         _result, opener = self.launch({"panes": [{"kind": "terminal"}]})
 
         body = json.loads(opener.requests[-1].data.decode("utf-8"))
-        self.assertEqual(body["workspace_id"], "ws-1")
+        self.assertNotIn("workspace_id", body)
         self.assertNotIn("new_workspace", body)
+        self.assertEqual(body["origin_session_id"], "pane-1")
 
-    def test_a_moved_group_launches_into_the_workspace_it_is_in_now(self):
-        """Identity is captured once; a workspace is not a property of a pane.
+    def test_a_launch_asks_gridvibe_exactly_once(self):
+        """Whether or not the caller named a workspace: nothing is read first,
+        so there is no window between what was read and what was launched."""
+        for arguments in (
+            {"panes": [{"kind": "terminal"}]},
+            {"workspace_id": "ws-9", "panes": [{"kind": "terminal"}]},
+        ):
+            with self.subTest(workspace=arguments.get("workspace_id") or "unstated"):
+                _result, opener = self.launch(arguments)
 
-        Moving a session to another workspace keeps its processes and its SSH
-        connections running on purpose, so an agent launched before the move
-        went on naming the workspace it *was* in -- a 404 once that workspace
-        was pruned, and a pane opened in somebody else's workspace when it was
-        not. The group travels with the move and every pane keeps its
-        `group_id`, so the group is what is asked.
-        """
-        _result, opener = self.launch(
-            {"panes": [{"kind": "terminal"}]}, live_workspace="ws-moved"
-        )
+                self.assertEqual(len(opener.requests), 1)
+                self.assertTrue(
+                    opener.requests[0].full_url.endswith("/api/sessions")
+                )
 
-        self.assertIn("group_id=group-1", opener.requests[0].full_url)
-        body = json.loads(opener.requests[-1].data.decode("utf-8"))
-        self.assertEqual(body["workspace_id"], "ws-moved")
-
-    def test_a_named_workspace_costs_no_read_at_all(self):
-        """The resolution is the *default*, not a second opinion on a caller
-        that named one."""
+    def test_a_named_workspace_is_still_the_one_that_is_sent(self):
         _result, opener = self.launch(
             {"workspace_id": "ws-9", "panes": [{"kind": "terminal"}]}
         )
 
-        self.assertEqual(len(opener.requests), 1)
-        self.assertTrue(opener.requests[0].full_url.endswith("/api/sessions"))
+        body = json.loads(opener.requests[-1].data.decode("utf-8"))
+        self.assertEqual(body["workspace_id"], "ws-9")
 
-    def test_a_group_that_cannot_be_read_falls_back_to_the_inherited_one(self):
-        """Degraded rather than wrong: a failed read is not a reason to refuse
-        a launch, and the spawn-time workspace is still the best guess."""
-        # One opener that refuses everything: the layout read fails, and what
-        # matters is what the launch still *sent*.
-        opener = StubOpener(raises=http_error(404, {"error": "gone"}))
-        dispatch(
+    def test_an_agent_with_no_pane_must_name_a_destination(self):
+        """Outside GridVibe there is no pane to be "here", and nothing to
+        inherit -- so the refusal happens before anything is asked."""
+        opener = StubOpener()
+        result = dispatch(
             "launch_panes",
             {"panes": [{"kind": "terminal"}]},
             client=client_for(opener),
-            identity=read_identity(INSIDE_PANE),
+            identity=read_identity({"GRIDVIBE_URL": "http://127.0.0.1:5050"}),
         )
 
-        body = json.loads(opener.requests[-1].data.decode("utf-8"))
-        self.assertEqual(body["workspace_id"], "ws-1")
+        self.assertIn("workspace_id", result["error"])
+        self.assertEqual(opener.requests, [])
 
     def test_a_single_pane_launch_does_not_claim_a_split(self):
         _result, opener = self.launch({"panes": [{"kind": "terminal"}]})
@@ -1024,10 +1017,9 @@ class LaunchGeometryTestCase(unittest.TestCase):
     }
 
     def launch(self, arguments):
+        # One request: the launch POST. The destination an unstated workspace
+        # resolves to is GridVibe's own to decide, inside that same call.
         opener = StubOpener([
-            # The caller's own group, read first to resolve the workspace it
-            # is in now; the launch POST is the request after it.
-            {"group_id": "group-1", "workspace_id": "ws-1"},
             {"workspace_id": "ws-2", "group_id": "g-2", "sessions": []},
         ])
         dispatch(

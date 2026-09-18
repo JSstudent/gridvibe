@@ -1025,6 +1025,7 @@ class SessionManager:
         saved_session_id: str = "",
         workspace_layout: Optional[Dict[str, Any]] = None,
         workspace_id: str = DEFAULT_WORKSPACE_ID,
+        workspace_from_session_id: str = "",
     ) -> GroupInstallation:
         """Install one complete group and every one of its panes atomically.
 
@@ -1041,6 +1042,14 @@ class SessionManager:
         inside a single ``self.lock`` hold. Nothing slow runs under the lock:
         the transports of replaced panes are returned as
         ``displaced_session_ids`` for the caller to close afterwards.
+
+        ``workspace_from_session_id`` names the pane the launch was asked from,
+        for a caller that stated no destination of its own: the group that pane
+        is in is read *inside* the same lock hold that publishes this one, so a
+        move landing between resolving the destination and installing the group
+        cannot open these panes in the workspace that pane has just left. It
+        beats ``workspace_id``, which stays the fallback for when the pane or
+        its group is gone.
 
         Raises ``ValueError`` — before touching anything — when the workspace
         is gone, when the group id is owned by another workspace or by another
@@ -1074,6 +1083,18 @@ class SessionManager:
         legacy_appearance = workspace_appearance_from_panes(sessions_config)
 
         with self.lock:
+            # Where the asking pane's group is *now*, read in the hold that
+            # publishes this group rather than before the slow preparation
+            # above it. A group keeps its panes and its `group_id` across a
+            # move, so the group is the anchor and its workspace is the answer.
+            anchor = str(workspace_from_session_id or "").strip()
+            if anchor:
+                origin = self.sessions.get(anchor)
+                origin_group = (
+                    self.groups.get(origin.group_id) if origin is not None else None
+                )
+                if origin_group is not None:
+                    resolved_workspace_id = origin_group.workspace_id
             if resolved_workspace_id not in self.workspaces:
                 raise ValueError("Workspace not found")
             workspace = self.workspaces[resolved_workspace_id]
