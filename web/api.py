@@ -3309,9 +3309,9 @@ def split_session(session_id: str):
     """Append one session to the source session's group, and say what it is.
 
     With no `kind` stated this is exactly what it always was: a terminal pane
-    clones itself, and an explorer or browser pane splits into a plain terminal
-    rooted at the directory it is currently showing, for both SSH and Local
-    Repo panes — the pane kind is deliberately not cloned.
+    clones itself, and an explorer, browser or agent pane splits into a plain
+    terminal rooted at the directory it is currently showing, for both SSH and
+    Local Repo panes — the pane kind is deliberately not cloned.
 
     A stated `kind` chooses the new pane instead, so an agent pane is created
     directly rather than created and then relaunched. Every refusal is decided
@@ -3348,6 +3348,16 @@ def split_session(session_id: str):
         source.explorer_root_directory if source.explorer_root_configured else ""
     )
     startup_mode = source.startup_mode
+    if startup_mode == "agent":
+        # With no `kind` stated the new pane is a plain terminal, and the fields
+        # below clear the command, the agent selection and both agent flags --
+        # so carrying the source's `agent` startup_mode across would leave a
+        # plain shell wearing an agent pane's metadata. Everything that reads
+        # `startup_mode` would believe it: the dashboard would list it as an
+        # agent with no agent, the header would paint it as one, and the gated
+        # relaunch reads that field to decide what a tool may do to the pane. A
+        # stated `kind` replaces this anyway, and always has.
+        startup_mode = "terminal"
 
     if _is_explorer_session(source) or _is_browser_session(source):
         try:
