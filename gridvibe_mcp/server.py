@@ -146,9 +146,10 @@ NEW_PANE_PROPERTIES = {
         "type": "string",
         "enum": list(PANE_KINDS),
         "description": (
-            "What the new pane is. Omit for GridVibe's own default: a terminal "
-            "pane clones its source, an explorer or browser pane splits off a "
-            "terminal rooted where it is showing."
+            "What the new pane is. Omit for GridVibe's own default, which "
+            "never clones the kind: a plain terminal clones its source, and an "
+            "agent, explorer or browser pane splits off a plain terminal "
+            "rooted where it is working. State kind='agent' to get an agent."
         ),
     },
     "agent": {"type": "string", "description": "Agent CLI key for kind='agent', e.g. 'claude'."},

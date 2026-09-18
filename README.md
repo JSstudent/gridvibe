@@ -127,7 +127,7 @@ Until it is installed the checkbox still appears and the agent simply finds no t
 - **Nothing closes and nothing types.** There is no tool for closing a pane, a tab, or a workspace, and none for sending keystrokes to a terminal. They are absent from the build, not switched off.
 - **An agent only touches panes it made.** The three tools that replace or clear a pane refuse the agent's own pane always, and refuse any pane it did not create — including every pane from before a restart — unless you tell it in that conversation to replace that particular one.
 - **Agents launching agents is bounded.** A pane an agent creates counts one generation deeper than the pane that asked for it, and the chain stops after two.
-- **New panes open where the asking agent is.** A tool called from an SSH pane opens its panes on that same host over the same connection, and refuses rather than quietly falling back to this machine.
+- **New panes open where the asking agent is.** A tool called from an SSH pane opens its panes on that same host over the same connection, and refuses rather than quietly falling back to this machine. They land in the workspace that agent's tab is in *now*, so moving a session between workspaces takes its agent with it.
 - **SSH panes get the tools too**, with nothing installed on the remote host. The pane reaches GridVibe back down its own connection, on a port that exists only while the pane does, is reachable only from that host, and answers only that pane's own requests.
 - **No credential ever reaches an agent.** Saved presets come back as shapes — layout, pane count, what each pane is — never as a connection.
 - **Splitting a pane needs a window open.** Only a real GridVibe page can measure a pane, so a split in browser mode is refused as *no window available* rather than guessed at. Opening a workspace works in either mode.
@@ -282,7 +282,7 @@ The one configurable chord in GridVibe is voice push-to-talk, set in App Setting
 | 🔄 | Reset the view and replay recent output. On a terminal it opens a dropdown that also relaunches the pane in another shell and/or under another agent |
 | 📁 ⇄ 💻 | Swap between terminal and file explorer at the current directory |
 | 🌐 ⇄ 💻 | Swap a Local Repo pane between terminal and browser preview |
-| 🪟 | Split side-by-side or stacked into two equal halves, however the grid has been resized. A terminal clones its connection where it *is*; an explorer or browser pane splits off a terminal rooted where it is browsing |
+| 🪟 | Split side-by-side or stacked into two equal halves, however the grid has been resized. A terminal clones its connection where it *is*; an agent, explorer or browser pane splits off a plain terminal where it is working |
 | 🧹 | Clear the display and purge the replay buffer |
 | 🎙️ | Start/stop voice input (when enabled) |
 | 🌙 ⇄ ☀️ | Toggle an explorer pane between dark and light |
@@ -339,7 +339,7 @@ GridVibe is a local tool, not a public web service: it binds to `127.0.0.1` by d
 - Socket.IO CORS defaults to same-origin, following the address the server actually resolved plus the host each request was addressed to; state-changing cross-origin requests are rejected on the same rule. Set `security.cors_origins` only if you serve GridVibe from another origin.
 - SSH host keys persist to `.known_hosts`; `ssh.host_key_policy` can be `auto-add` (default), `known-hosts`, or `strict`. All modes reject changed keys, and an unreadable trust file refuses the connection rather than being overwritten.
 - Saved SSH passwords are Fernet-encrypted; the key lives in `.encryption_key`.
-- An SSH pane given GridVibe tools opens a port on the remote host's own loopback, for as long as that pane stays connected. It carries a per-pane token, accepts nothing but that pane's own tool calls, and is withdrawn when the pane closes. A pane without the checkbox opens nothing.
+- An SSH pane given GridVibe tools opens a port on the remote host's own loopback, for as long as that pane stays connected. It carries a per-pane token, accepts nothing but that pane's own tool calls, and is withdrawn when the pane closes. The small config file holding that token is left on the host only if it can be made readable by your account alone — otherwise it is removed and the pane starts without tools. A pane without the checkbox opens nothing.
 
 See [`SECURITY.md`](SECURITY.md) for reporting and scope.
 

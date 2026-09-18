@@ -307,6 +307,16 @@ changing any field that survives restart; it owns the complete save/restore flow
   by the pane header — `agent-relaunch`, `agent-mode-switch`, `clear` — and the
   rules those add are in [Agent tools (MCP)](#agent-tools-mcp). Everything in
   this section holds for both halves; the gates run before any of it.
+- **A split with no stated `kind` is a plain terminal, and its metadata has to
+  say so.** The pane kind is deliberately not cloned: an explorer, browser or
+  agent source all split off a terminal rooted where the source is showing. The
+  clone already clears the command, the agent selection and both agent flags, so
+  an `agent` `startup_mode` carried across would leave a plain shell wearing an
+  agent pane's metadata — and everything reading that field believes it: the
+  dashboard would list an agent with no agent, the header would paint one, and
+  the gated relaunch reads the same field to decide what a tool may do to the
+  pane. Normalize it beside the explorer and browser cases; a stated `kind`
+  replaces it, as it always did.
 - **A stated agent is preflighted before anything moves, and an absent binary
   refuses the relaunch.** The launcher has no pane yet, so it opens one as a
   plain terminal; the menu's pane is already running, so the honest outcome is
@@ -1146,6 +1156,15 @@ in `README.md`; state the rules a change has to keep.
   workspace it just left, or fail once that workspace had been pruned. A stated
   `workspace_id` or `new_workspace` still wins; this is the default, not a second
   opinion.
+- **Every *read* of "my workspace" is the group's answer too, never the
+  inherited one.** Identity is captured once — at spawn, or when the token was
+  minted — and a workspace is not a property of a pane that holds still, so
+  `whoami` and `list_panes` resolve it through `live_workspace_id()` off the
+  live group and keep the inherited id only as the fallback for a read that
+  failed: degraded rather than wrong, exactly like the geometry beside it.
+  `list_panes` reads that arrangement *before* the panes and hands it on, so
+  both questions still cost one request and a caller that names a workspace
+  costs none.
 - **Identity arrives by inheritance locally and by token remotely.** The five
   `GRIDVIBE_*` variables are merged at the spawn call site in
   `_connect_local_session`, *not* inside `_local_shell_integration` — that
@@ -1157,7 +1176,9 @@ in `README.md`; state the rules a change has to keep.
   is revoked on the pane's own close path — the one that knows the session id,
   not `_shutdown_connection`, which does not — including the close that lands
   *inside* `_establish_mcp_tunnel`, where a stale connection is torn down rather
-  than recorded and a raising teardown still costs the token. The registry is
+  than recorded and a raising teardown still costs the token. A tunnel that could
+  not be opened at all revokes it on the same breath: a token with nothing to
+  spend it on is still a live key to this machine's tools. The registry is
   bounded (`MAX_PANE_TOKENS`, oldest evicted, logged) so a revoke that never runs
   is a bounded leak rather than a permanent one.
 - **`agent_mcp` is only ever set on a CLI that publishes a mechanism.**
@@ -1179,11 +1200,39 @@ in `README.md`; state the rules a change has to keep.
   launch line, `_toml_override_flag` owns the per-shell quoting Codex needs, and
   anything that cannot be composed safely resolves to *no fragment* — costing the
   pane its tools, never its agent. A test-mode process refuses the production path.
+- **The two Windows shells disagree about Codex's `-c` overrides, and the bare
+  form is not always available.** `_toml_override_flag` is the one owner: cmd
+  must see the TOML literal quotes bare (wrapped, the override is silently
+  ignored), PowerShell and every POSIX shell must see the outer double quotes
+  (bare, Codex exits before it starts). The exception is cmd's own argument
+  parsing — an override carrying a space or any of `_CMD_ARGUMENT_SPECIALS`
+  cannot cross as one argument at all, so it is quoted there too, which is not
+  the silently-ignored case: the child strips those outer quotes before Codex
+  parses anything, so it reads exactly what the bare form would have given it.
+  Anything rendered into an override therefore avoids a space it does not need —
+  `_inline_toml_env_fragment`'s inline table has none, deliberately.
+- **The generated URL is one a URL parser reads back.** `url_host()` brackets an
+  IPv6 literal, `loopback_base_url()` unwraps a bracketed bind address before
+  the wildcard check so `::` still resolves to a dialable host, and the sidecar's
+  own `normalize_base_url()` re-brackets the hostname `urlsplit` handed back
+  un-bracketed. Both halves have to keep agreeing: one of them alone leaves the
+  fix undone a process later, with the sidecar silently on the loopback default
+  and unable to reach a GridVibe bound to IPv6 only.
 - **The SSH reverse forward is opt-in per pane and costs the tools, never the
   shell.** `sshd` binds the remote host's own loopback; the port lives only for
   that connection; the remote config is written over SFTP at `0600` and named per
   pane; teardown runs off the close path on its own thread because every step is a
   round trip to a host that may be unreachable.
+- **The remote config fails closed, because it *is* the token.** Both the file
+  and the `~/.gridvibe` directory holding it are narrowed and then read back
+  (`_restricted_to_owner`), and an existing directory is checked exactly like a
+  new one — a previous run or a permissive `umask` may have left it open, and a
+  directory other accounts can list names every pane's config. A mode that could
+  not be applied, could not be read back, or still carries `FORBIDDEN_MODE_BITS`
+  is the same answer: nobody knows who can read this. The file is removed again,
+  the listener is withdrawn and the token revoked, and the pane starts without
+  tools. A readable token left on a shared host is the one outcome worse than
+  that.
 - **The forwarded channel reaches a filter, never GridVibe's port.** On this end
   of a reverse forward sits the whole unauthenticated loopback API, whose only
   guard has ever been "you have to be on this machine", so a socket to GridVibe
@@ -1198,6 +1247,18 @@ in `README.md`; state the rules a change has to keep.
   segment in the log, because the path is a credential. The still-true narrowing
   is what it now is: a remote process reaches this pane's tool surface, acting on
   this machine, and nothing else on the API.
+- **The channels that filter are bounded, and handed off at once.** Paramiko
+  calls the forward handler on the transport's own packet thread — the thread
+  carrying the pane's *shell* — so serving inline froze the terminal and starved
+  the very bytes the tunnel exists for; one daemon thread per connection, started
+  and returned from. That thread is then a budget: `MAX_FORWARDED_CHANNELS` per
+  pane, held by that pane's own handler so one noisy host cannot starve a pane
+  connected elsewhere, and a connection arriving with none free is *closed*
+  rather than queued or refused — writing a refusal would put the work back on
+  the thread the handoff exists to release. A thread that fails to start gives
+  its slot back, because a budget that leaks is a tunnel that stops answering.
+  The per-request head and body bounds cannot see this: an idle connection that
+  sends nothing still costs a slot for `REQUEST_READ_TIMEOUT`.
 - **Opening a window and splitting a pane are page work, recorded as intents.**
   The split axis never reaches the server: the page computes the rectangles and
   measures its own refusals off the live terminal. `web/window_intents.py` is in
