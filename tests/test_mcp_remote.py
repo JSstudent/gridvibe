@@ -676,6 +676,68 @@ class ReverseTunnelTestCase(unittest.TestCase):
             self.assertGreater(_threading.active_count(), before)
             released.set()
 
+    def test_a_flood_of_forwarded_connections_is_bounded(self):
+        """Anything on the remote host can reach the pane's forwarded port.
+
+        Each accepted connection costs a thread of *this* process for up to
+        `REQUEST_READ_TIMEOUT`, whether or not it ever sends a request, so a
+        loop of idle connections used to grow threads and memory here without
+        tripping any per-request bound. The excess is closed at the door, and
+        the budget is a budget rather than a fuse: the pane's next real tool
+        call is served as soon as one of its own calls finishes.
+        """
+        import threading as _threading
+
+        cap = ssh_tunnel.MAX_FORWARDED_CHANNELS
+        released = _threading.Event()
+        served = []
+        lock = _threading.Lock()
+
+        def fake_serve(channel, host, port, expected_path=""):
+            with lock:
+                served.append(channel)
+            released.wait(5)
+
+        def wait_until(count):
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                with lock:
+                    if len(served) >= count:
+                        return
+                time.sleep(0.01)
+
+        handler = ssh_tunnel._forward_handler("127.0.0.1", 5050, "/mcp/TOK")
+        channels = [_FakeChannel() for _ in range(cap + 5)]
+        with patch.object(ssh_tunnel, "_serve_forwarded_channel", fake_serve):
+            try:
+                for channel in channels:
+                    handler(channel, ("10.0.0.1", 5), ("127.0.0.1", 41234))
+                wait_until(cap)
+
+                with lock:
+                    self.assertEqual(len(served), cap)
+                # The ones over the ceiling are closed at once rather than
+                # queued: a queue is the same exhaustion one level down.
+                self.assertTrue(all(channel.closed for channel in channels[cap:]))
+                self.assertFalse(any(channel.closed for channel in channels[:cap]))
+            finally:
+                released.set()
+
+            # The slot comes back with the worker that held it, so the retry
+            # below is waiting on those threads and not on a timer.
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline and any(
+                thread.name == "gridvibe-mcp-tunnel" and thread.is_alive()
+                for thread in _threading.enumerate()
+            ):
+                time.sleep(0.01)
+
+            later = _FakeChannel()
+            handler(later, ("10.0.0.1", 5), ("127.0.0.1", 41234))
+            wait_until(cap + 1)
+            with lock:
+                self.assertIn(later, served)
+
     def test_teardown_does_not_block_the_close_path(self):
         """Closing a workspace waits on this; a dead host must not stall it.
 

@@ -63,6 +63,20 @@ MAX_BODY_BYTES = 1048576
 #: *reply* is not bounded by this -- two tools wait on a page for 25s.
 REQUEST_READ_TIMEOUT = 30.0
 
+#: Forwarded connections one tunnelled pane may have in flight at once. An
+#: agent makes one tool call at a time and each connection carries exactly one
+#: request, so this is far above any real use -- it is here because *anything*
+#: on the remote host can reach that pane's forwarded port, and every accepted
+#: connection costs a thread of this process for up to `REQUEST_READ_TIMEOUT`
+#: even if it never sends a byte. Without a ceiling, a loop opening idle
+#: connections turns a pane's tunnel into sustained thread and memory growth
+#: here, which the per-request head and body bounds cannot see.
+#:
+#: Per pane rather than per process: one noisy host must not be able to starve
+#: the tools of a pane connected to a different one, and the number of tunnels
+#: is already bounded by the panes the reader opened with MCP ticked.
+MAX_FORWARDED_CHANNELS = 8
+
 #: Headers that describe the hop rather than the request, so the filter states
 #: its own instead of forwarding the caller's. ``content-length`` is here
 #: because the filter re-derives it from the body it actually read.
@@ -306,6 +320,16 @@ def _accepted_request(channel: Any, expected_path: str) -> Optional[bytes]:
     return _forwarded_request(method, target, version, headers, body)
 
 
+def _close_quietly(closeable: Any) -> None:
+    """Close a channel or socket that may already be gone."""
+    if closeable is None:
+        return
+    try:
+        closeable.close()
+    except Exception:
+        pass
+
+
 def _relay_response(channel: Any, sock: socket.socket) -> None:
     """Move the reply back until GridVibe closes, which it does when done."""
     try:
@@ -362,11 +386,7 @@ def _serve_forwarded_channel(
         logger.exception("MCP tunnel channel failed")
     finally:
         for closeable in (channel, sock):
-            try:
-                if closeable is not None:
-                    closeable.close()
-            except Exception:
-                pass
+            _close_quietly(closeable)
 
 
 def _forward_handler(local_host: str, local_port: int, expected_path: str = ""):
@@ -380,16 +400,51 @@ def _forward_handler(local_host: str, local_port: int, expected_path: str = ""):
     accepted input), starved the very bytes the tunnel was opened to carry, and
     left ``cancel_port_forward`` waiting on a reply the blocked thread could
     never read. One thread per forwarded connection, handed off at once.
+
+    **And bounded.** "A thread per connection" is fine for an agent making a
+    tool call and open to abuse from anything else on that remote host, which
+    is the same population the filter below exists for: a loop of connections
+    that send nothing costs a thread each for `REQUEST_READ_TIMEOUT`. So the
+    threads are a budget (`MAX_FORWARDED_CHANNELS`) held by this pane's own
+    handler, and a connection arriving with none free is closed rather than
+    queued -- the pane's next real tool call is served as soon as one frees.
     """
 
+    slots = threading.BoundedSemaphore(MAX_FORWARDED_CHANNELS)
+
+    def serve(channel: Any) -> None:
+        try:
+            _serve_forwarded_channel(channel, local_host, local_port, expected_path)
+        finally:
+            slots.release()
+
     def handler(channel: Any, origin: Any, server: Any) -> None:
-        worker = threading.Thread(
-            target=_serve_forwarded_channel,
-            args=(channel, local_host, local_port, expected_path),
-            name="gridvibe-mcp-tunnel",
-            daemon=True,
-        )
-        worker.start()
+        if not slots.acquire(blocking=False):
+            # Closed rather than queued, and rather than answered: a refusal
+            # written here would be written on the transport's own packet
+            # thread, which is the thread this function exists to release.
+            logger.warning(
+                "MCP tunnel dropped a forwarded connection: %d are already in "
+                "flight for this pane",
+                MAX_FORWARDED_CHANNELS,
+            )
+            _close_quietly(channel)
+            return
+        try:
+            worker = threading.Thread(
+                target=serve,
+                args=(channel,),
+                name="gridvibe-mcp-tunnel",
+                daemon=True,
+            )
+            worker.start()
+        except Exception as exc:
+            # A thread that could not start never reaches the `finally` that
+            # gives the slot back, and a budget that leaks is a tunnel that
+            # stops answering.
+            slots.release()
+            _close_quietly(channel)
+            logger.warning("MCP tunnel could not serve a forwarded channel: %s", exc)
 
     return handler
 
