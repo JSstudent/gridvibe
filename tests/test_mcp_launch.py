@@ -42,12 +42,14 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
+from urllib.parse import urlsplit
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 import tests  # noqa: E402,F401 - redirects durable state away from the real files
+from gridvibe_mcp.client import normalize_base_url  # noqa: E402
 from gridvibe_mcp.identity import IDENTITY_VARIABLES  # noqa: E402
 from sessions.manager import SessionStatus  # noqa: E402
 from web import agents as web_agents  # noqa: E402
@@ -105,6 +107,44 @@ class GeneratedConfigTestCase(unittest.TestCase):
         # `0.0.0.0` names no reachable host for a child process on this machine.
         self.assertEqual(
             mcp_launch.loopback_base_url("0.0.0.0", 5050), "http://127.0.0.1:5050"
+        )
+
+    def test_an_ipv6_bind_is_written_as_a_url_that_parses(self):
+        """`http://::1:5050` is not a URL.
+
+        Everything that reads one splits the host from the port at the last
+        colon, so an explicit `::1` bind produced a config whose address had no
+        port at all -- and every pane's sidecar started against something that
+        does not exist. Brackets are what separate the two.
+        """
+        url = mcp_launch.loopback_base_url("::1", 5050)
+
+        self.assertEqual(url, "http://[::1]:5050")
+        parsed = urlsplit(url)
+        self.assertEqual(parsed.hostname, "::1")
+        self.assertEqual(parsed.port, 5050)
+
+    def test_an_already_bracketed_bind_is_not_bracketed_twice(self):
+        self.assertEqual(
+            mcp_launch.loopback_base_url("[::1]", 5050), "http://[::1]:5050"
+        )
+
+    def test_the_ipv6_wildcard_still_names_a_host_a_child_can_reach(self):
+        # `::` is every interface, which is not an address to dial.
+        self.assertEqual(
+            mcp_launch.loopback_base_url("::", 5050), "http://127.0.0.1:5050"
+        )
+        self.assertEqual(
+            mcp_launch.loopback_base_url("[::]", 5050), "http://127.0.0.1:5050"
+        )
+
+    def test_the_sidecar_keeps_the_brackets_it_is_handed(self):
+        """The two halves have to agree: the sidecar normalizes the URL it is
+        given, and rebuilding one from a parsed host drops the brackets unless
+        they are put back."""
+        self.assertEqual(
+            normalize_base_url(mcp_launch.loopback_base_url("::1", 5050)),
+            "http://[::1]:5050",
         )
 
     def test_a_write_that_fails_costs_the_checkbox_and_nothing_else(self):

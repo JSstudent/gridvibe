@@ -200,6 +200,17 @@ def project_all(payloads: Any, fields: Iterable[str]) -> List[Dict[str, Any]]:
     return [project(item, fields) for item in payloads]
 
 
+def _url_host(host: str) -> str:
+    """An IPv6 literal wears brackets; every other host is itself.
+
+    ``urlsplit`` hands back the address *without* them, so rebuilding a URL
+    from `hostname` un-brackets an IPv6 one and produces a string nothing can
+    parse a port out of. Stated here rather than imported: this package reaches
+    GridVibe over HTTP and never by import, so it states its own.
+    """
+    return f"[{host}]" if ":" in host else host
+
+
 def normalize_base_url(url: Any) -> str:
     """Return a bare ``scheme://host:port`` with no trailing slash."""
     text = str(url or "").strip()
@@ -211,7 +222,7 @@ def normalize_base_url(url: Any) -> str:
     if not parsed.hostname:
         return DEFAULT_BASE_URL
     port = f":{parsed.port}" if parsed.port else ""
-    return f"{parsed.scheme or 'http'}://{parsed.hostname}{port}"
+    return f"{parsed.scheme or 'http'}://{_url_host(parsed.hostname)}{port}"
 
 
 class GridVibeClient:
