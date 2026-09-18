@@ -531,6 +531,36 @@ class SplitIntentRouteTestCase(unittest.TestCase):
         )
         self.assertEqual(invented["split_request"]["created_by_session_id"], "")
 
+    def test_a_creator_that_closed_before_the_page_split_is_refused(self):
+        """The race the whole record-then-perform shape leaves open.
+
+        The stamp is validated when the intent is recorded, and the split
+        happens whenever a page next claims it -- so the pane that asked can
+        have gone by then. The body the page posts back still names it, and a
+        pane stamped with nobody would start its own depth budget over.
+        """
+        group, pane = self._pane()
+        _caller_group, caller = self._pane()
+
+        recorded = self.client.post(
+            f"/api/sessions/{pane.session_id}/split-intent",
+            json={"axis": "vertical", "origin_session_id": caller.session_id},
+        ).get_json()["split_request"]
+        self.assertEqual(recorded["created_by_session_id"], caller.session_id)
+
+        # The agent's own pane closes while the intent sits waiting for a page.
+        self.assertEqual(
+            self.client.delete(f"/api/sessions/{caller.session_id}").status_code, 200
+        )
+
+        performed = self.client.post(
+            f"/api/sessions/{pane.session_id}/split", json=recorded
+        )
+
+        self.assertEqual(performed.status_code, 403)
+        self.assertIn("lineage gate", performed.get_json()["error"])
+        self.assertEqual(len(api.session_manager.get_group_sessions(group.group_id)), 1)
+
     def test_the_recorded_request_is_what_the_page_posts_back(self):
         """Built here, so the page forwards a validated body rather than one
         it composed."""

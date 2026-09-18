@@ -1527,16 +1527,28 @@ class SplitSaysWhatToCreateTestCase(ShellTransitionTestCase):
         self.assertEqual(created["agent_depth"], 2)
         self.assertEqual(len(api.session_manager.get_group_sessions(group.group_id)), 2)
 
-    def test_a_creator_that_names_nothing_open_stamps_nothing(self):
-        """Read against the live registry rather than believed."""
-        _group, pane = self._pane()
+    def test_a_creator_that_names_nothing_open_is_refused(self):
+        """Read against the live registry rather than believed -- and a stated
+        creator that is not there is a refusal, not a pane with no lineage.
 
-        created = self._split(
+        A split an agent asks for is *recorded* and performed later by whatever
+        page can measure the pane, so the pane that asked can close in between.
+        Stamping nothing then is not neutral: the new pane gets `agent_depth`
+        0, a fresh recursion budget for a pane an agent is about to be handed,
+        and no gate downstream can tell it from one a person made. The gated
+        relaunch refuses this same race rather than restarting the chain at 1.
+        """
+        group, pane = self._pane()
+
+        response = self._split(
             pane.session_id,
             {"axis": "vertical", "created_by_session_id": "ghost-pane"},
-        ).get_json()["session"]
+        )
 
-        self.assertEqual(created["created_by_session_id"], "")
+        self.assertEqual(response.status_code, 403)
+        self.assertIn("lineage gate", response.get_json()["error"])
+        # Refused before anything was appended.
+        self.assertEqual(len(api.session_manager.get_group_sessions(group.group_id)), 1)
 
     def test_a_launch_from_inside_a_pane_stamps_that_pane_on_every_new_one(self):
         """The other half of the stamp: `origin_session_id` used to be read for

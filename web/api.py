@@ -195,6 +195,7 @@ from web.mcp_launch import (  # noqa: F401 - mcp_config_path re-exported for tes
     set_server_address,
     write_mcp_config,
 )
+from web.pane_gates import LINEAGE_GATE, refusal_text
 from web.pane_geometry import compose_group_geometry
 from web.paths import BASE_DIR, install_kind
 from web.runtime_state import (  # noqa: F401 - re-exported for backwards compatibility
@@ -3373,6 +3374,24 @@ def split_session(session_id: str):
     except SplitRequestError as exc:
         return jsonify({"error": str(exc)}), 400
 
+    # A split an agent asked for is recorded as an intent and performed later,
+    # by whichever page can measure the pane -- so the pane that asked can have
+    # closed in between. Stamping nothing then would not be neutral: the new
+    # pane would get `agent_depth` 0, a fresh recursion budget for a pane an
+    # agent is about to be handed. The gated relaunch refuses the same race
+    # rather than restarting the chain at 1, and so does this. A person's own
+    # split states no creator at all and is untouched.
+    requested_creator = str(request_data.get("created_by_session_id") or "").strip()
+    creator_session_id = _live_session_id(requested_creator)
+    if requested_creator and not creator_session_id:
+        return jsonify({
+            "error": refusal_text(
+                LINEAGE_GATE,
+                "The pane this split was recorded for is no longer open, so "
+                "GridVibe cannot tell what it created. No pane was added.",
+            )
+        }), 403
+
     if overrides.get("startup_mode") == "explorer":
         # An explorer pane is confined to where the split is rooted, and that
         # boundary is chosen by the caller rather than derived from where a
@@ -3401,9 +3420,7 @@ def split_session(session_id: str):
         # source's was configured, so the new pane inherits that pin even
         # though a terminal pane's own root would read as a derived one.
         "explorer_root_configured": bool(root_directory),
-        "created_by_session_id": _live_session_id(
-            request_data.get("created_by_session_id")
-        ),
+        "created_by_session_id": creator_session_id,
     }
     fields.update(overrides)
     # One level deeper than the pane that *asked*, which is not necessarily the
@@ -3411,7 +3428,7 @@ def split_session(session_id: str):
     # nobody claimed is a split a person made with the button, and an
     # unattributed pane starts a fresh budget rather than inheriting one --
     # just as it is refused by the relaunch gate that reads the same stamp.
-    creator = session_manager.get_session(fields["created_by_session_id"] or "")
+    creator = session_manager.get_session(creator_session_id or "")
     fields["agent_depth"] = (
         _normalize_agent_depth(int(getattr(creator, "agent_depth", 0)) + 1)
         if creator is not None
