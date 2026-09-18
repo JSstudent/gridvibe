@@ -63,19 +63,23 @@ MAX_BODY_BYTES = 1048576
 #: *reply* is not bounded by this -- two tools wait on a page for 25s.
 REQUEST_READ_TIMEOUT = 30.0
 
-#: Forwarded connections one tunnelled pane may have in flight at once. An
-#: agent makes one tool call at a time and each connection carries exactly one
-#: request, so this is far above any real use -- it is here because *anything*
-#: on the remote host can reach that pane's forwarded port, and every accepted
-#: connection costs a thread of this process for up to `REQUEST_READ_TIMEOUT`
-#: even if it never sends a byte. Without a ceiling, a loop opening idle
-#: connections turns a pane's tunnel into sustained thread and memory growth
-#: here, which the per-request head and body bounds cannot see.
+#: Forwarded connections one tunnelled pane may have in flight at once. It is
+#: here because *anything* on the remote host can reach that pane's forwarded
+#: port, and every accepted connection costs a thread of this process for up to
+#: `REQUEST_READ_TIMEOUT` even if it never sends a byte: without a ceiling, a
+#: loop opening idle connections turns a pane's tunnel into sustained thread
+#: and memory growth here, which the per-request head and body bounds cannot
+#: see.
+#:
+#: Well above what one agent does. A connection carries exactly one request,
+#: and the two that wait -- `split_pane` and `open_window` wait on a page --
+#: are the only ones that hold a slot for long, so the number to clear is a
+#: CLI's parallel tool calls plus those, not one.
 #:
 #: Per pane rather than per process: one noisy host must not be able to starve
 #: the tools of a pane connected to a different one, and the number of tunnels
 #: is already bounded by the panes the reader opened with MCP ticked.
-MAX_FORWARDED_CHANNELS = 8
+MAX_FORWARDED_CHANNELS = 16
 
 #: Headers that describe the hop rather than the request, so the filter states
 #: its own instead of forwarding the caller's. ``content-length`` is here
