@@ -28,7 +28,9 @@ Four properties, each of which has a way of silently not happening:
   Codex as a value it silently declines to apply), and the outer double quotes
   are what PowerShell must see (bare, it eats the brackets itself and Codex
   exits with *failed to load bootstrap configuration*). No single string
-  serves both, so the composition reads the pane's shell family.
+  serves both, so the composition reads the pane's shell family -- and bare is
+  not available for a value holding a space, which cmd's own command line hands
+  on for the child to split into tokens Codex then applies none of.
 """
 
 import io
@@ -512,6 +514,83 @@ class FlagCompositionTestCase(unittest.TestCase):
         )
         # No config *path* is named: the file's contents travel, not its name.
         self.assertNotIn(str(self.config_path), cmd_form)
+
+    def test_a_spaced_path_reaches_cmd_as_one_argument(self):
+        r"""`C:\Program Files` is where Python installs itself by default.
+
+        cmd hands its command line on and the child's own argv parsing ends the
+        argument at the space, so the bare form arrived at Codex as two or
+        three unrelated tokens -- and Codex applied none of them: no server and
+        no error, on exactly the installs most likely to hit it. Quoted, the
+        child's parsing strips the double quotes again and Codex reads the
+        string the bare form meant to give it.
+        """
+        interpreter = r"C:\Program Files\venv\python.exe"
+        entry = r"C:\My Tools\gv\__main__.py"
+        self.config_path.write_text(
+            json.dumps(
+                {
+                    "mcpServers": {
+                        "gridvibe": {
+                            "command": interpreter,
+                            "args": [entry, "--url", "http://127.0.0.1:5050"],
+                        }
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        fragment = web_agents._agent_mcp_command_fragment("codex", shell_family="cmd")
+
+        self.assertEqual(
+            fragment,
+            "-c \"mcp_servers.gridvibe.command='" + interpreter + "'\""
+            " -c \"mcp_servers.gridvibe.args=['" + entry
+            + "','--url','http://127.0.0.1:5050']\"",
+        )
+        # Single quotes, so it is still a TOML literal string and the
+        # backslashes travel through it unescaped.
+        self.assertIn("'" + interpreter + "'", fragment)
+
+    def test_a_space_free_path_is_still_handed_to_cmd_bare(self):
+        """The quoting above is what a space forces, not a change of mind:
+        bare is what Codex applies, verified against the CLI."""
+        self.config_path.write_text(
+            json.dumps(
+                {"mcpServers": {"gridvibe": {"command": "py.exe", "args": ["entry.py"]}}}
+            ),
+            encoding="utf-8",
+        )
+
+        fragment = web_agents._agent_mcp_command_fragment("codex", shell_family="cmd")
+
+        self.assertEqual(
+            fragment,
+            "-c mcp_servers.gridvibe.command='py.exe'"
+            " -c mcp_servers.gridvibe.args=['entry.py']",
+        )
+
+    def test_a_spaced_identity_value_is_quoted_rather_than_torn_apart(self):
+        """Nothing GridVibe writes into the identity table holds a space today;
+        one that did would have been split into tokens the same way."""
+        self.config_path.write_text(
+            json.dumps(
+                {"mcpServers": {"gridvibe": {"command": "py.exe", "args": ["entry.py"]}}}
+            ),
+            encoding="utf-8",
+        )
+
+        fragment = web_agents._agent_mcp_command_fragment(
+            "codex",
+            shell_family="cmd",
+            identity={"GRIDVIBE_SESSION_ID": "pane one"},
+        )
+
+        self.assertIn(
+            "-c \"mcp_servers.gridvibe.env={GRIDVIBE_SESSION_ID='pane one'}\"",
+            fragment,
+        )
 
     def test_codex_also_states_its_pane_identity_inline(self):
         """Codex does not forward the pane's env to the sidecar it spawns.
