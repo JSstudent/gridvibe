@@ -1208,6 +1208,28 @@ class EstablishTunnelTestCase(unittest.TestCase):
         self.assertTrue(mcp_http.pane_tokens.resolve(self._minted_token()))
         self.teardown.assert_not_called()
 
+    def test_a_tunnel_that_could_not_be_opened_leaves_no_token_standing(self):
+        """The other half of failing closed on the remote config.
+
+        A config whose permissions could not be applied or verified is removed
+        again and reported as a failure, which brings the whole tunnel down --
+        and this is where that becomes "and the token it named is dead". A live
+        token with no listener is not harmless: it is a key to this pane's tool
+        surface, acting on GridVibe's own machine.
+        """
+        connection = self._open_pane()
+        self.establish.return_value = None
+
+        self.terminal._establish_mcp_tunnel(
+            "pane-1", self._session(), connection, self.client
+        )
+
+        self.assertNotIn("mcp_tunnel", connection)
+        self.assertEqual(mcp_http.pane_tokens.resolve(self._minted_token()), {})
+        # And the reader is told, in the pane itself, why the agent it just
+        # started has no GridVibe tools.
+        self.assertTrue(self._publish_ssh_terminal_output.called)
+
     def test_a_close_landing_while_it_opened_withdraws_it(self):
         """The race: `_shutdown_connection` popped an `mcp_tunnel` that was not
         there yet, so without this the record lands on a retired connection and
