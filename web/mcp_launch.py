@@ -97,16 +97,37 @@ def pane_can_run_the_sidecar(session: Any) -> bool:
     return str(getattr(session, "mode", "") or "") == LOCAL_PANE_MODE
 
 
+def url_host(host: Any) -> str:
+    """One host as a URL authority: an IPv6 literal wears brackets.
+
+    ``http://::1:5050`` is not a URL: everything that reads one separates the
+    host from the port at a colon, and that address is all colons. An explicit
+    ``::1`` bind wrote it into the generated config anyway, where ``urlsplit``
+    reads neither a host nor a port out of it -- so every pane's sidecar fell
+    back to the loopback default and could not reach a GridVibe that is bound
+    to IPv6 only. Brackets are what separate the two, and a host that already
+    carries them is left alone.
+    """
+    text = str(host or "").strip()
+    if text.startswith("[") and text.endswith("]"):
+        return text
+    return f"[{text}]" if ":" in text else text
+
+
 def loopback_base_url(host: Any, port: Any) -> str:
     """Return the URL a child process on this machine should call."""
     resolved_host = str(host or "").strip()
+    if resolved_host.startswith("[") and resolved_host.endswith("]"):
+        # A bracketed bind address is the same address; unwrap it so the
+        # unroutable check below reads it, and `url_host` puts them back.
+        resolved_host = resolved_host[1:-1].strip()
     if resolved_host in _UNROUTABLE_BIND_HOSTS:
         resolved_host = "127.0.0.1"
     try:
         resolved_port = int(port)
     except (TypeError, ValueError):
         resolved_port = 5050
-    return f"http://{resolved_host}:{resolved_port}"
+    return f"http://{url_host(resolved_host)}:{resolved_port}"
 
 
 def set_server_address(host: Any, port: Any) -> str:

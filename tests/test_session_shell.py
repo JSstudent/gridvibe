@@ -1414,6 +1414,46 @@ class SplitSaysWhatToCreateTestCase(ShellTransitionTestCase):
         self.assertEqual(created["startup_mode"], "terminal")
         self.assertEqual(created["agent_selection"], "")
 
+    def test_a_split_with_no_kind_off_an_agent_pane_is_a_plain_terminal(self):
+        """An omitted kind is a terminal, including from an agent pane.
+
+        The clone clears the command, the agent selection and both agent flags
+        -- but used to carry the source's `startup_mode` across, so the new
+        pane was an "agent" pane running nothing: the dashboard listed it as an
+        agent with no agent, and `startup_mode` is the field the gated relaunch
+        reads to decide what a tool may do to a pane.
+        """
+        _group, pane = self._pane(
+            startup_mode="agent",
+            initial_command="claude",
+            initial_command_mode="agent",
+            agent_selection="claude",
+            agent_auto_mode=True,
+            agent_mcp=True,
+        )
+
+        response = self._split(pane.session_id, {"axis": "vertical"})
+
+        self.assertEqual(response.status_code, 201, response.get_json())
+        created = response.get_json()["session"]
+        self.assertEqual(created["startup_mode"], "terminal")
+        self.assertEqual(created["initial_command_mode"], "command")
+        self.assertIsNone(created["initial_command"])
+        self.assertEqual(created["agent_selection"], "")
+        self.assertFalse(created["agent_auto_mode"])
+        self.assertFalse(created["agent_mcp"])
+
+        # The surface that reads the field: the pane it was split off is an
+        # agent and is listed; the plain shell beside it is not.
+        listed = {
+            str(row.get("session_id") or "")
+            for workspace in self.client.get("/api/dashboard").get_json()["workspaces"]
+            for group in workspace["groups"]
+            for row in group["panes"]
+        }
+        self.assertIn(pane.session_id, listed)
+        self.assertNotIn(created["session_id"], listed)
+
     def test_a_split_can_create_an_agent_pane_outright(self):
         _group, pane = self._pane()
 
@@ -1527,16 +1567,28 @@ class SplitSaysWhatToCreateTestCase(ShellTransitionTestCase):
         self.assertEqual(created["agent_depth"], 2)
         self.assertEqual(len(api.session_manager.get_group_sessions(group.group_id)), 2)
 
-    def test_a_creator_that_names_nothing_open_stamps_nothing(self):
-        """Read against the live registry rather than believed."""
-        _group, pane = self._pane()
+    def test_a_creator_that_names_nothing_open_is_refused(self):
+        """Read against the live registry rather than believed -- and a stated
+        creator that is not there is a refusal, not a pane with no lineage.
 
-        created = self._split(
+        A split an agent asks for is *recorded* and performed later by whatever
+        page can measure the pane, so the pane that asked can close in between.
+        Stamping nothing then is not neutral: the new pane gets `agent_depth`
+        0, a fresh recursion budget for a pane an agent is about to be handed,
+        and no gate downstream can tell it from one a person made. The gated
+        relaunch refuses this same race rather than restarting the chain at 1.
+        """
+        group, pane = self._pane()
+
+        response = self._split(
             pane.session_id,
             {"axis": "vertical", "created_by_session_id": "ghost-pane"},
-        ).get_json()["session"]
+        )
 
-        self.assertEqual(created["created_by_session_id"], "")
+        self.assertEqual(response.status_code, 403)
+        self.assertIn("lineage gate", response.get_json()["error"])
+        # Refused before anything was appended.
+        self.assertEqual(len(api.session_manager.get_group_sessions(group.group_id)), 1)
 
     def test_a_launch_from_inside_a_pane_stamps_that_pane_on_every_new_one(self):
         """The other half of the stamp: `origin_session_id` used to be read for

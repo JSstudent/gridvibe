@@ -222,9 +222,25 @@ class TransportTestCase(unittest.TestCase):
             ("127.0.0.1:5050", "http://127.0.0.1:5050"),
             ("http://localhost:5050/", "http://localhost:5050"),
             ("", "http://127.0.0.1:5050"),
+            # An IPv6 literal keeps its brackets: `urlsplit` hands back the
+            # address without them, and a URL rebuilt that way has no port
+            # anything can read.
+            ("http://[::1]:5050", "http://[::1]:5050"),
+            ("[::1]:5050", "http://[::1]:5050"),
         ):
             with self.subTest(given=given):
                 self.assertEqual(normalize_base_url(given), expected)
+
+    def test_every_request_is_built_on_a_url_the_host_can_be_read_out_of(self):
+        """The base URL is string-concatenated into every path, so a host that
+        loses its brackets there reaches urllib as an address with no port."""
+        opener = StubOpener([{"workspaces": []}])
+
+        GridVibeClient("http://[::1]:5050", opener=opener).workspaces()
+
+        self.assertEqual(
+            opener.requests[0].full_url, "http://[::1]:5050/api/workspaces"
+        )
 
     def test_the_dashboard_is_flattened_to_rows_an_agent_can_act_on(self):
         opener = StubOpener([{

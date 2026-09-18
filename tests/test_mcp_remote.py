@@ -449,20 +449,33 @@ class RemoteConfigTestCase(unittest.TestCase):
         self.assertTrue(path.startswith("/home/ubuntu/.gridvibe/"))
         self.assertNotIn("..", path)
 
-    def test_the_written_file_is_readable_only_by_its_owner(self):
+    PATH = "/home/u/.gridvibe/mcp-a.json"
+
+    @staticmethod
+    def _sftp(mode=0o100600):
+        """An SFTP channel that accepts the write and reports ``mode`` back."""
         sftp = MagicMock()
         handle = MagicMock()
         sftp.open.return_value.__enter__ = MagicMock(return_value=handle)
         sftp.open.return_value.__exit__ = MagicMock(return_value=False)
+        sftp.stat.return_value = SimpleNamespace(st_mode=mode)
+        sftp.handle = handle
+        return sftp
+
+    def test_the_written_file_is_readable_only_by_its_owner(self):
+        sftp = self._sftp()
 
         written = ssh_tunnel.write_remote_config(
-            sftp, "/home/u/.gridvibe/mcp-a.json", "http://127.0.0.1:1/mcp/T"
+            sftp, self.PATH, "http://127.0.0.1:1/mcp/T"
         )
 
         self.assertTrue(written)
         # The token is a credential for this pane's tools.
-        sftp.chmod.assert_called_once_with("/home/u/.gridvibe/mcp-a.json", 0o600)
-        self.assertIn("mcpServers", handle.write.call_args.args[0])
+        sftp.chmod.assert_called_once_with(self.PATH, 0o600)
+        # And the mode is read back rather than assumed: a `chmod` that
+        # answered without applying anything is the case this catches.
+        sftp.stat.assert_called_with(self.PATH)
+        self.assertIn("mcpServers", sftp.handle.write.call_args.args[0])
 
     def test_a_write_that_fails_reports_rather_than_raises(self):
         sftp = MagicMock()
@@ -471,6 +484,102 @@ class RemoteConfigTestCase(unittest.TestCase):
         self.assertFalse(
             ssh_tunnel.write_remote_config(sftp, "/x/y.json", "http://h/mcp/T")
         )
+
+    def test_permissions_that_cannot_be_applied_take_the_file_with_them(self):
+        """The whole point of failing closed.
+
+        The document names this pane's bearer token, and the token is the whole
+        of the endpoint's authentication. A host that declines `chmod` -- a
+        share mounted from Windows, an exotic SFTP server -- used to leave the
+        file lying there at whatever mode the umask chose, with the caller
+        told it had succeeded.
+        """
+        sftp = self._sftp()
+        sftp.chmod.side_effect = OSError("operation not supported")
+
+        written = ssh_tunnel.write_remote_config(
+            sftp, self.PATH, "http://127.0.0.1:1/mcp/T"
+        )
+
+        self.assertFalse(written)
+        sftp.remove.assert_called_once_with(self.PATH)
+
+    def test_a_mode_the_host_will_not_confirm_is_a_refusal(self):
+        """Unverifiable is refused exactly like unapplied: neither knows who
+        can read the file, and the file is a credential."""
+        sftp = self._sftp()
+        sftp.stat.side_effect = OSError("permission denied")
+
+        self.assertFalse(
+            ssh_tunnel.write_remote_config(sftp, self.PATH, "http://h/mcp/T")
+        )
+        sftp.remove.assert_called_once_with(self.PATH)
+
+    def test_a_file_other_accounts_can_still_read_is_taken_back(self):
+        # `chmod` answered, and the mode that came back is group- and
+        # world-readable anyway.
+        sftp = self._sftp(mode=0o100644)
+
+        self.assertFalse(
+            ssh_tunnel.write_remote_config(sftp, self.PATH, "http://h/mcp/T")
+        )
+        sftp.remove.assert_called_once_with(self.PATH)
+
+    def test_an_existing_directory_is_narrowed_before_anything_is_written(self):
+        """`~/.gridvibe` outlives the pane, so finding it is not trusting it.
+
+        A directory the rest of the host can read lists every pane's config
+        file, whatever mode the files themselves carry.
+        """
+        sftp = MagicMock()
+        sftp.stat.return_value = SimpleNamespace(st_mode=0o40700)
+
+        self.assertTrue(ssh_tunnel.ensure_remote_directory(sftp, self.PATH))
+        sftp.mkdir.assert_not_called()
+        sftp.chmod.assert_called_once_with("/home/u/.gridvibe", 0o700)
+
+    def test_a_directory_that_cannot_be_narrowed_stops_the_tunnel(self):
+        sftp = MagicMock()
+        sftp.stat.return_value = SimpleNamespace(st_mode=0o40777)
+
+        self.assertFalse(ssh_tunnel.ensure_remote_directory(sftp, self.PATH))
+
+    def test_a_created_directory_is_verified_like_an_existing_one(self):
+        sftp = MagicMock()
+        sftp.stat.side_effect = [OSError("no such file"), SimpleNamespace(st_mode=0o40700)]
+
+        self.assertTrue(ssh_tunnel.ensure_remote_directory(sftp, self.PATH))
+        sftp.mkdir.assert_called_once_with("/home/u/.gridvibe", 0o700)
+
+    def test_a_config_that_could_not_be_secured_costs_the_whole_tunnel(self):
+        """End to end: the listener is withdrawn, and nothing is recorded.
+
+        The caller revokes the pane's token on a `None` record, so a file that
+        could not be protected leaves no live token to have been written into
+        it -- and the pane's shell and agent are untouched either way.
+        """
+        client = MagicMock()
+        transport = client.get_transport.return_value
+        transport.request_port_forward.return_value = 41234
+        sftp = self._sftp()
+        sftp.normalize.return_value = "/home/u"
+        # The directory is fine; the file is the one that stays readable.
+        sftp.stat.side_effect = lambda path: SimpleNamespace(
+            st_mode=0o40700 if path.endswith(".gridvibe") else 0o100666
+        )
+        client.open_sftp.return_value = sftp
+
+        record = ssh_tunnel.establish(
+            client,
+            session_id="pane-1",
+            token="TOK",
+            local_host="127.0.0.1",
+            local_port=5050,
+        )
+
+        self.assertIsNone(record)
+        transport.cancel_port_forward.assert_called_once_with("127.0.0.1", 41234)
+        sftp.close.assert_called_once()
 
 
 class ReverseTunnelTestCase(unittest.TestCase):
@@ -566,6 +675,68 @@ class ReverseTunnelTestCase(unittest.TestCase):
             self.assertTrue(pumped.wait(5), "the channel was never served")
             self.assertGreater(_threading.active_count(), before)
             released.set()
+
+    def test_a_flood_of_forwarded_connections_is_bounded(self):
+        """Anything on the remote host can reach the pane's forwarded port.
+
+        Each accepted connection costs a thread of *this* process for up to
+        `REQUEST_READ_TIMEOUT`, whether or not it ever sends a request, so a
+        loop of idle connections used to grow threads and memory here without
+        tripping any per-request bound. The excess is closed at the door, and
+        the budget is a budget rather than a fuse: the pane's next real tool
+        call is served as soon as one of its own calls finishes.
+        """
+        import threading as _threading
+
+        cap = ssh_tunnel.MAX_FORWARDED_CHANNELS
+        released = _threading.Event()
+        served = []
+        lock = _threading.Lock()
+
+        def fake_serve(channel, host, port, expected_path=""):
+            with lock:
+                served.append(channel)
+            released.wait(5)
+
+        def wait_until(count):
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                with lock:
+                    if len(served) >= count:
+                        return
+                time.sleep(0.01)
+
+        handler = ssh_tunnel._forward_handler("127.0.0.1", 5050, "/mcp/TOK")
+        channels = [_FakeChannel() for _ in range(cap + 5)]
+        with patch.object(ssh_tunnel, "_serve_forwarded_channel", fake_serve):
+            try:
+                for channel in channels:
+                    handler(channel, ("10.0.0.1", 5), ("127.0.0.1", 41234))
+                wait_until(cap)
+
+                with lock:
+                    self.assertEqual(len(served), cap)
+                # The ones over the ceiling are closed at once rather than
+                # queued: a queue is the same exhaustion one level down.
+                self.assertTrue(all(channel.closed for channel in channels[cap:]))
+                self.assertFalse(any(channel.closed for channel in channels[:cap]))
+            finally:
+                released.set()
+
+            # The slot comes back with the worker that held it, so the retry
+            # below is waiting on those threads and not on a timer.
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline and any(
+                thread.name == "gridvibe-mcp-tunnel" and thread.is_alive()
+                for thread in _threading.enumerate()
+            ):
+                time.sleep(0.01)
+
+            later = _FakeChannel()
+            handler(later, ("10.0.0.1", 5), ("127.0.0.1", 41234))
+            wait_until(cap + 1)
+            with lock:
+                self.assertIn(later, served)
 
     def test_teardown_does_not_block_the_close_path(self):
         """Closing a workspace waits on this; a dead host must not stall it.
@@ -1036,6 +1207,28 @@ class EstablishTunnelTestCase(unittest.TestCase):
         self.assertIs(connection["mcp_tunnel"], self.record)
         self.assertTrue(mcp_http.pane_tokens.resolve(self._minted_token()))
         self.teardown.assert_not_called()
+
+    def test_a_tunnel_that_could_not_be_opened_leaves_no_token_standing(self):
+        """The other half of failing closed on the remote config.
+
+        A config whose permissions could not be applied or verified is removed
+        again and reported as a failure, which brings the whole tunnel down --
+        and this is where that becomes "and the token it named is dead". A live
+        token with no listener is not harmless: it is a key to this pane's tool
+        surface, acting on GridVibe's own machine.
+        """
+        connection = self._open_pane()
+        self.establish.return_value = None
+
+        self.terminal._establish_mcp_tunnel(
+            "pane-1", self._session(), connection, self.client
+        )
+
+        self.assertNotIn("mcp_tunnel", connection)
+        self.assertEqual(mcp_http.pane_tokens.resolve(self._minted_token()), {})
+        # And the reader is told, in the pane itself, why the agent it just
+        # started has no GridVibe tools.
+        self.assertTrue(self._publish_ssh_terminal_output.called)
 
     def test_a_close_landing_while_it_opened_withdraws_it(self):
         """The race: `_shutdown_connection` popped an `mcp_tunnel` that was not

@@ -195,6 +195,7 @@ from web.mcp_launch import (  # noqa: F401 - mcp_config_path re-exported for tes
     set_server_address,
     write_mcp_config,
 )
+from web.pane_gates import LINEAGE_GATE, PaneGateRefusal, refuse
 from web.pane_geometry import compose_group_geometry
 from web.paths import BASE_DIR, install_kind
 from web.runtime_state import (  # noqa: F401 - re-exported for backwards compatibility
@@ -3233,6 +3234,31 @@ def _live_session_id(value: Any) -> str:
     return requested if session_manager.get_session(requested) is not None else ""
 
 
+def _creator_stamp(value: Any, *, nothing_happened: str) -> str:
+    """The creator stamp a split carries, or a lineage refusal.
+
+    Three readings, not two. An omitted origin is a person pressing the split
+    button: it stamps nothing on purpose, and the new pane starts its own
+    recursion budget. A stated origin that is open stamps that pane. A stated
+    origin that names nothing open is neither -- stamping nothing there would
+    hand a pane an agent is about to be given a fresh `agent_depth` of 0 and
+    tell the caller nothing, so it is refused by the gate that owns lineage.
+
+    Raised rather than returned so the recording of an intent and the split
+    itself refuse identically; ``nothing_happened`` is the sentence that says
+    what was not done, which is the only part the two do not share.
+    """
+    requested = str(value or "").strip()
+    stamped = _live_session_id(requested)
+    if requested and not stamped:
+        raise refuse(
+            LINEAGE_GATE,
+            "The pane this split was requested from is no longer open, so "
+            f"GridVibe cannot tell what it created. {nothing_happened}",
+        )
+    return stamped
+
+
 #: The two axes a split button offers. The server never computes a rectangle
 #: from either -- it records which one was asked for, and the page that can
 #: measure the pane performs the split.
@@ -3281,9 +3307,13 @@ def open_split_intent(session_id: str):
         if key in data
     }
     split_request["axis"] = axis
-    split_request["created_by_session_id"] = _live_session_id(
-        data.get("origin_session_id")
-    )
+    try:
+        split_request["created_by_session_id"] = _creator_stamp(
+            data.get("origin_session_id"),
+            nothing_happened="No split was recorded.",
+        )
+    except PaneGateRefusal as exc:
+        return jsonify({"error": exc.message}), exc.status_code
 
     intent = window_intents.open_split(
         session_id,
@@ -3308,9 +3338,9 @@ def split_session(session_id: str):
     """Append one session to the source session's group, and say what it is.
 
     With no `kind` stated this is exactly what it always was: a terminal pane
-    clones itself, and an explorer or browser pane splits into a plain terminal
-    rooted at the directory it is currently showing, for both SSH and Local
-    Repo panes — the pane kind is deliberately not cloned.
+    clones itself, and an explorer, browser or agent pane splits into a plain
+    terminal rooted at the directory it is currently showing, for both SSH and
+    Local Repo panes — the pane kind is deliberately not cloned.
 
     A stated `kind` chooses the new pane instead, so an agent pane is created
     directly rather than created and then relaunched. Every refusal is decided
@@ -3347,6 +3377,16 @@ def split_session(session_id: str):
         source.explorer_root_directory if source.explorer_root_configured else ""
     )
     startup_mode = source.startup_mode
+    if startup_mode == "agent":
+        # With no `kind` stated the new pane is a plain terminal, and the fields
+        # below clear the command, the agent selection and both agent flags --
+        # so carrying the source's `agent` startup_mode across would leave a
+        # plain shell wearing an agent pane's metadata. Everything that reads
+        # `startup_mode` would believe it: the dashboard would list it as an
+        # agent with no agent, the header would paint it as one, and the gated
+        # relaunch reads that field to decide what a tool may do to the pane. A
+        # stated `kind` replaces this anyway, and always has.
+        startup_mode = "terminal"
 
     if _is_explorer_session(source) or _is_browser_session(source):
         try:
@@ -3372,6 +3412,21 @@ def split_session(session_id: str):
         overrides = _split_pane_overrides(source, request_data)
     except SplitRequestError as exc:
         return jsonify({"error": str(exc)}), 400
+
+    # A split an agent asked for is recorded as an intent and performed later,
+    # by whichever page can measure the pane -- so the pane that asked can have
+    # closed in between. Stamping nothing then would not be neutral: the new
+    # pane would get `agent_depth` 0, a fresh recursion budget for a pane an
+    # agent is about to be handed. The gated relaunch refuses the same race
+    # rather than restarting the chain at 1, and so does this. A person's own
+    # split states no creator at all and is untouched.
+    try:
+        creator_session_id = _creator_stamp(
+            request_data.get("created_by_session_id"),
+            nothing_happened="No pane was added.",
+        )
+    except PaneGateRefusal as exc:
+        return jsonify({"error": exc.message}), exc.status_code
 
     if overrides.get("startup_mode") == "explorer":
         # An explorer pane is confined to where the split is rooted, and that
@@ -3401,9 +3456,7 @@ def split_session(session_id: str):
         # source's was configured, so the new pane inherits that pin even
         # though a terminal pane's own root would read as a derived one.
         "explorer_root_configured": bool(root_directory),
-        "created_by_session_id": _live_session_id(
-            request_data.get("created_by_session_id")
-        ),
+        "created_by_session_id": creator_session_id,
     }
     fields.update(overrides)
     # One level deeper than the pane that *asked*, which is not necessarily the
@@ -3411,7 +3464,7 @@ def split_session(session_id: str):
     # nobody claimed is a split a person made with the button, and an
     # unattributed pane starts a fresh budget rather than inheriting one --
     # just as it is refused by the relaunch gate that reads the same stamp.
-    creator = session_manager.get_session(fields["created_by_session_id"] or "")
+    creator = session_manager.get_session(creator_session_id or "")
     fields["agent_depth"] = (
         _normalize_agent_depth(int(getattr(creator, "agent_depth", 0)) + 1)
         if creator is not None

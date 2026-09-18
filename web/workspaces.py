@@ -504,16 +504,52 @@ def rename_workspace_label(workspace_id: Any, label: Any) -> Any:
 # ==================== Destination resolution ====================
 
 
+def workspace_anchor_session_id(data: Dict[str, Any]) -> str:
+    """The pane whose live group names this launch's destination, if any.
+
+    "Here" is a question only a launch made from inside a pane can ask, and
+    only when it named no destination of its own. The answer is the pane's
+    *group's* workspace rather than anything the caller carries: identity is
+    captured once, a move carries the whole group and leaves every pane's
+    `group_id` alone, and a pane that has been moved would otherwise go on
+    naming the workspace it was launched in.
+
+    ``""`` for the launcher, for restore, for a caller that named a workspace
+    or asked for a new one, and for an origin that is no longer open.
+    """
+    if data.get("new_workspace"):
+        return ""
+    if str(data.get("workspace_id") or "").strip():
+        return ""
+    return _live_origin_session_id(data.get("origin_session_id"))
+
+
+def _anchored_workspace_id(anchor_session_id: str) -> str:
+    """The workspace the anchor pane's group is in now, or ``""``."""
+    session_manager = _manager()
+    session = session_manager.get_session(anchor_session_id)
+    group = session_manager.get_group(session.group_id) if session is not None else None
+    return group.workspace_id if group is not None else ""
+
+
 def resolve_launch_destination(data: Dict[str, Any]) -> Tuple[str, str]:
     """Resolve a launch/move destination to ``(workspace_id, created_id)``.
 
     ``created_id`` is non-empty only when this call created the workspace, so a
     failure downstream can roll it back and never leave a dead destination in
-    the picker. Omitting both fields keeps targeting ``default``.
+    the picker. A launch from inside a pane that named no destination targets
+    that pane's own workspace, read here rather than sent by the caller — a
+    second process resolving it and then launching into it can only ever be
+    resolving where the group *was*. Omitting all three keeps targeting
+    ``default``.
     """
     session_manager = _manager()
     wants_new = bool(data.get("new_workspace"))
     requested_id = data.get("workspace_id")
+
+    anchored = _anchored_workspace_id(workspace_anchor_session_id(data))
+    if anchored:
+        return anchored, ""
 
     if wants_new:
         label = normalize_workspace_label(
@@ -938,6 +974,12 @@ def launch_session_group(
         # ownership would tear down the *source* workspace's live sessions and
         # only then discover the conflict.
         workspace_id, created_workspace_id = resolve_launch_destination(data)
+        # The same pane, carried into the install below, because the window the
+        # reservation covers is also a window a *move* fits in:
+        # `install_session_group` re-reads the anchor's group under the lock
+        # that publishes this one, so a group that moves mid-launch takes these
+        # panes with it rather than leaving them in the workspace it left.
+        workspace_anchor = workspace_anchor_session_id(data)
         # Everything between here and the install — pane normalization, the
         # agent preflight, an SSH ping — can take seconds, and a destination
         # this call just created holds no groups yet. Reserve it so a
@@ -1001,6 +1043,7 @@ def launch_session_group(
             saved_session_id=saved_session_id,
             workspace_layout=workspace_layout,
             workspace_id=workspace_id,
+            workspace_from_session_id=workspace_anchor,
         )
         group = installation.group
         created_sessions = installation.sessions

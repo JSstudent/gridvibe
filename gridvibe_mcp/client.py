@@ -200,6 +200,17 @@ def project_all(payloads: Any, fields: Iterable[str]) -> List[Dict[str, Any]]:
     return [project(item, fields) for item in payloads]
 
 
+def _url_host(host: str) -> str:
+    """An IPv6 literal wears brackets; every other host is itself.
+
+    ``urlsplit`` hands back the address *without* them, so rebuilding a URL
+    from `hostname` un-brackets an IPv6 one and produces a string nothing can
+    parse a port out of. Stated here rather than imported: this package reaches
+    GridVibe over HTTP and never by import, so it states its own.
+    """
+    return f"[{host}]" if ":" in host else host
+
+
 def normalize_base_url(url: Any) -> str:
     """Return a bare ``scheme://host:port`` with no trailing slash."""
     text = str(url or "").strip()
@@ -211,7 +222,7 @@ def normalize_base_url(url: Any) -> str:
     if not parsed.hostname:
         return DEFAULT_BASE_URL
     port = f":{parsed.port}" if parsed.port else ""
-    return f"{parsed.scheme or 'http'}://{parsed.hostname}{port}"
+    return f"{parsed.scheme or 'http'}://{_url_host(parsed.hostname)}{port}"
 
 
 class GridVibeClient:
@@ -341,6 +352,7 @@ class GridVibeClient:
         workspace_id: str = "",
         group_id: str = "",
         position_group_id: str = "",
+        layout: Optional[Mapping[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Every pane in scope, and where the panes of one group sit.
 
@@ -352,6 +364,12 @@ class GridVibeClient:
         position across groups means nothing. The ``layout`` block follows the
         same rule: it is published only when at least one pane in this answer is
         in the group it describes.
+
+        ``layout`` is that same arrangement already in hand. The caller reads it
+        first when it needs the group to say which *workspace* to list, and
+        passing it here is what keeps that one read from becoming two. Given
+        and empty means "read, and it answered nothing" -- which is not the same
+        as not given, and does not send this call looking again.
         """
         params = {}
         if workspace_id:
@@ -369,7 +387,8 @@ class GridVibeClient:
                 pane["index"] = None
             return result
 
-        layout = self.pane_layout(resolved_group)
+        if layout is None:
+            layout = self.pane_layout(resolved_group)
         positions = {
             str(entry.get("session_id") or ""): entry
             for entry in (layout.get("panes") or [])

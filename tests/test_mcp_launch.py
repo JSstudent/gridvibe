@@ -28,7 +28,9 @@ Four properties, each of which has a way of silently not happening:
   Codex as a value it silently declines to apply), and the outer double quotes
   are what PowerShell must see (bare, it eats the brackets itself and Codex
   exits with *failed to load bootstrap configuration*). No single string
-  serves both, so the composition reads the pane's shell family.
+  serves both, so the composition reads the pane's shell family -- and bare is
+  not available for a value holding a space, which cmd's own command line hands
+  on for the child to split into tokens Codex then applies none of.
 """
 
 import io
@@ -40,12 +42,14 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
+from urllib.parse import urlsplit
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 import tests  # noqa: E402,F401 - redirects durable state away from the real files
+from gridvibe_mcp.client import normalize_base_url  # noqa: E402
 from gridvibe_mcp.identity import IDENTITY_VARIABLES  # noqa: E402
 from sessions.manager import SessionStatus  # noqa: E402
 from web import agents as web_agents  # noqa: E402
@@ -103,6 +107,44 @@ class GeneratedConfigTestCase(unittest.TestCase):
         # `0.0.0.0` names no reachable host for a child process on this machine.
         self.assertEqual(
             mcp_launch.loopback_base_url("0.0.0.0", 5050), "http://127.0.0.1:5050"
+        )
+
+    def test_an_ipv6_bind_is_written_as_a_url_that_parses(self):
+        """`http://::1:5050` is not a URL.
+
+        Everything that reads one splits the host from the port at the last
+        colon, so an explicit `::1` bind produced a config whose address had no
+        port at all -- and every pane's sidecar started against something that
+        does not exist. Brackets are what separate the two.
+        """
+        url = mcp_launch.loopback_base_url("::1", 5050)
+
+        self.assertEqual(url, "http://[::1]:5050")
+        parsed = urlsplit(url)
+        self.assertEqual(parsed.hostname, "::1")
+        self.assertEqual(parsed.port, 5050)
+
+    def test_an_already_bracketed_bind_is_not_bracketed_twice(self):
+        self.assertEqual(
+            mcp_launch.loopback_base_url("[::1]", 5050), "http://[::1]:5050"
+        )
+
+    def test_the_ipv6_wildcard_still_names_a_host_a_child_can_reach(self):
+        # `::` is every interface, which is not an address to dial.
+        self.assertEqual(
+            mcp_launch.loopback_base_url("::", 5050), "http://127.0.0.1:5050"
+        )
+        self.assertEqual(
+            mcp_launch.loopback_base_url("[::]", 5050), "http://127.0.0.1:5050"
+        )
+
+    def test_the_sidecar_keeps_the_brackets_it_is_handed(self):
+        """The two halves have to agree: the sidecar normalizes the URL it is
+        given, and rebuilding one from a parsed host drops the brackets unless
+        they are put back."""
+        self.assertEqual(
+            normalize_base_url(mcp_launch.loopback_base_url("::1", 5050)),
+            "http://[::1]:5050",
         )
 
     def test_a_write_that_fails_costs_the_checkbox_and_nothing_else(self):
@@ -512,6 +554,83 @@ class FlagCompositionTestCase(unittest.TestCase):
         )
         # No config *path* is named: the file's contents travel, not its name.
         self.assertNotIn(str(self.config_path), cmd_form)
+
+    def test_a_spaced_path_reaches_cmd_as_one_argument(self):
+        r"""`C:\Program Files` is where Python installs itself by default.
+
+        cmd hands its command line on and the child's own argv parsing ends the
+        argument at the space, so the bare form arrived at Codex as two or
+        three unrelated tokens -- and Codex applied none of them: no server and
+        no error, on exactly the installs most likely to hit it. Quoted, the
+        child's parsing strips the double quotes again and Codex reads the
+        string the bare form meant to give it.
+        """
+        interpreter = r"C:\Program Files\venv\python.exe"
+        entry = r"C:\My Tools\gv\__main__.py"
+        self.config_path.write_text(
+            json.dumps(
+                {
+                    "mcpServers": {
+                        "gridvibe": {
+                            "command": interpreter,
+                            "args": [entry, "--url", "http://127.0.0.1:5050"],
+                        }
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        fragment = web_agents._agent_mcp_command_fragment("codex", shell_family="cmd")
+
+        self.assertEqual(
+            fragment,
+            "-c \"mcp_servers.gridvibe.command='" + interpreter + "'\""
+            " -c \"mcp_servers.gridvibe.args=['" + entry
+            + "','--url','http://127.0.0.1:5050']\"",
+        )
+        # Single quotes, so it is still a TOML literal string and the
+        # backslashes travel through it unescaped.
+        self.assertIn("'" + interpreter + "'", fragment)
+
+    def test_a_space_free_path_is_still_handed_to_cmd_bare(self):
+        """The quoting above is what a space forces, not a change of mind:
+        bare is what Codex applies, verified against the CLI."""
+        self.config_path.write_text(
+            json.dumps(
+                {"mcpServers": {"gridvibe": {"command": "py.exe", "args": ["entry.py"]}}}
+            ),
+            encoding="utf-8",
+        )
+
+        fragment = web_agents._agent_mcp_command_fragment("codex", shell_family="cmd")
+
+        self.assertEqual(
+            fragment,
+            "-c mcp_servers.gridvibe.command='py.exe'"
+            " -c mcp_servers.gridvibe.args=['entry.py']",
+        )
+
+    def test_a_spaced_identity_value_is_quoted_rather_than_torn_apart(self):
+        """Nothing GridVibe writes into the identity table holds a space today;
+        one that did would have been split into tokens the same way."""
+        self.config_path.write_text(
+            json.dumps(
+                {"mcpServers": {"gridvibe": {"command": "py.exe", "args": ["entry.py"]}}}
+            ),
+            encoding="utf-8",
+        )
+
+        fragment = web_agents._agent_mcp_command_fragment(
+            "codex",
+            shell_family="cmd",
+            identity={"GRIDVIBE_SESSION_ID": "pane one"},
+        )
+
+        self.assertIn(
+            "-c \"mcp_servers.gridvibe.env={GRIDVIBE_SESSION_ID='pane one'}\"",
+            fragment,
+        )
 
     def test_codex_also_states_its_pane_identity_inline(self):
         """Codex does not forward the pane's env to the sidecar it spawns.

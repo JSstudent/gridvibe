@@ -521,15 +521,61 @@ class SplitIntentRouteTestCase(unittest.TestCase):
             f"/api/sessions/{pane.session_id}/split-intent",
             json={"axis": "vertical", "origin_session_id": caller.session_id},
         ).get_json()
-        invented = self.client.post(
-            f"/api/sessions/{pane.session_id}/split-intent",
-            json={"axis": "vertical", "origin_session_id": "ghost-pane"},
-        ).get_json()
 
         self.assertEqual(
             claimed["split_request"]["created_by_session_id"], caller.session_id
         )
-        self.assertEqual(invented["split_request"]["created_by_session_id"], "")
+
+    def test_an_origin_that_is_not_open_is_refused_rather_than_unstamped(self):
+        """Stating a pane that is gone is not the same as stating none.
+
+        An omitted origin is a person's own split and starts its own recursion
+        budget. A stated one that names nothing open used to be written down as
+        exactly that -- so the split was performed, the new pane was stamped
+        with nobody, and an agent about to be handed it got a fresh
+        `agent_depth` of 0. The lineage gate answers it now, and nothing is
+        recorded for a page to claim.
+        """
+        _group, pane = self._pane()
+
+        response = self.client.post(
+            f"/api/sessions/{pane.session_id}/split-intent",
+            json={"axis": "vertical", "origin_session_id": "ghost-pane"},
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertIn("[lineage gate]", response.get_json()["error"])
+        self.assertEqual(window_intents.pending(), [])
+
+    def test_a_creator_that_closed_before_the_page_split_is_refused(self):
+        """The race the whole record-then-perform shape leaves open.
+
+        The stamp is validated when the intent is recorded, and the split
+        happens whenever a page next claims it -- so the pane that asked can
+        have gone by then. The body the page posts back still names it, and a
+        pane stamped with nobody would start its own depth budget over.
+        """
+        group, pane = self._pane()
+        _caller_group, caller = self._pane()
+
+        recorded = self.client.post(
+            f"/api/sessions/{pane.session_id}/split-intent",
+            json={"axis": "vertical", "origin_session_id": caller.session_id},
+        ).get_json()["split_request"]
+        self.assertEqual(recorded["created_by_session_id"], caller.session_id)
+
+        # The agent's own pane closes while the intent sits waiting for a page.
+        self.assertEqual(
+            self.client.delete(f"/api/sessions/{caller.session_id}").status_code, 200
+        )
+
+        performed = self.client.post(
+            f"/api/sessions/{pane.session_id}/split", json=recorded
+        )
+
+        self.assertEqual(performed.status_code, 403)
+        self.assertIn("lineage gate", performed.get_json()["error"])
+        self.assertEqual(len(api.session_manager.get_group_sessions(group.group_id)), 1)
 
     def test_the_recorded_request_is_what_the_page_posts_back(self):
         """Built here, so the page forwards a validated body rather than one
