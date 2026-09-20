@@ -34,6 +34,11 @@
      module has never heard of still cannot leak. It is structural, and it is
      what makes this not merely a longer list.
 
+   A terminal sequence may straddle the deferred/direct-write boundary. The
+   incomplete tail therefore stays on the pane until the next output arrives;
+   xterm would keep exactly the same parser residue, but retaining it here lets
+   the completed sequence pass through the same stripping and quiet window.
+
    Both apply only to a backlog held longer than `STALE_DEFERRAL_MS`. That bound
    is the whole reason the budget exists: a pane that fits promptly answers
    colour queries normally, so agents keep detecting the theme, and only a pane
@@ -94,6 +99,7 @@
     /* A depth rather than a flag: two late writes can overlap on one pane, and
        the first to finish must not reopen the channel for the second. */
     const SUPPRESSION_FIELD = '_replySuppressionDepth';
+    const QUERY_RESIDUE_FIELD = '_terminalQueryResidue';
 
     function suppressionDepth(pane) {
         const depth = Number(pane && pane[SUPPRESSION_FIELD]);
@@ -114,6 +120,74 @@
         return data.replace(new RegExp(TERMINAL_QUERY_PATTERN, 'g'), '');
     }
 
+    function terminalQueryResidue(pane) {
+        return typeof pane?.[QUERY_RESIDUE_FIELD] === 'string'
+            ? pane[QUERY_RESIDUE_FIELD]
+            : '';
+    }
+
+    function clearTerminalQueryResidue(pane) {
+        if (pane) {
+            pane[QUERY_RESIDUE_FIELD] = '';
+        }
+    }
+
+    /* Split off a trailing terminal sequence that xterm cannot finish parsing
+       until another write. CSI ends at its final byte; OSC and DCS end at BEL
+       or ST. Other two-byte ESC sequences are already complete. */
+    function splitTrailingTerminalSequence(data) {
+        const value = typeof data === 'string' ? data : '';
+        let cursor = 0;
+        while (cursor < value.length) {
+            const escape = value.indexOf('\x1b', cursor);
+            if (escape < 0) {
+                break;
+            }
+            if (escape + 1 >= value.length) {
+                return { data: value.slice(0, escape), residue: value.slice(escape) };
+            }
+
+            const kind = value[escape + 1];
+            if (kind === '[') {
+                let final = escape + 2;
+                while (final < value.length) {
+                    const code = value.charCodeAt(final);
+                    if (code >= 0x40 && code <= 0x7e) {
+                        break;
+                    }
+                    final += 1;
+                }
+                if (final >= value.length) {
+                    return { data: value.slice(0, escape), residue: value.slice(escape) };
+                }
+                cursor = final + 1;
+                continue;
+            }
+
+            if (kind === ']' || kind === 'P') {
+                let final = escape + 2;
+                while (final < value.length) {
+                    if (value.charCodeAt(final) === 0x07) {
+                        break;
+                    }
+                    if (value.charCodeAt(final) === 0x1b && value[final + 1] === '\\') {
+                        final += 1;
+                        break;
+                    }
+                    final += 1;
+                }
+                if (final >= value.length) {
+                    return { data: value.slice(0, escape), residue: value.slice(escape) };
+                }
+                cursor = final + 1;
+                continue;
+            }
+
+            cursor = escape + 2;
+        }
+        return { data: value, residue: '' };
+    }
+
     /* What a deferred backlog becomes, decided before anything is written so
        the decision can be read on its own. */
     function deferredWritePlan(io) {
@@ -123,12 +197,16 @@
         const budgetMs = Number.isFinite(target.budgetMs) && target.budgetMs >= 0
             ? target.budgetMs
             : STALE_DEFERRAL_MS;
-        const stale = heldMs > budgetMs;
+        const stale = Boolean(target.forceStale) || heldMs > budgetMs;
+        const split = stale
+            ? splitTrailingTerminalSequence(data)
+            : { data, residue: '' };
         return {
             stale,
             heldMs,
             budgetMs,
-            data: stale ? stripTerminalQueries(data) : data
+            data: stale ? stripTerminalQueries(split.data) : split.data,
+            residue: split.residue
         };
     }
 
@@ -194,27 +272,105 @@
        unguarded when it is not. */
     function writeDeferred(io) {
         const target = io || {};
-        const plan = deferredWritePlan(target);
+        const pane = target.pane || null;
+        const residue = terminalQueryResidue(pane);
+        const plan = deferredWritePlan({
+            ...target,
+            data: residue + (typeof target.data === 'string' ? target.data : ''),
+            forceStale: Boolean(residue)
+        });
+        if (pane) {
+            pane[QUERY_RESIDUE_FIELD] = plan.residue;
+        }
         if (!plan.data) {
-            return { written: false, stale: plan.stale, data: plan.data };
+            return {
+                written: false,
+                stale: plan.stale,
+                data: plan.data,
+                residue: plan.residue
+            };
         }
         if (!plan.stale) {
             const write = typeof target.write === 'function' ? target.write : null;
             if (!write) {
-                return { written: false, stale: false, data: plan.data };
+                return {
+                    written: false,
+                    stale: false,
+                    data: plan.data,
+                    residue: plan.residue
+                };
             }
             write(plan.data);
-            return { written: true, stale: false, data: plan.data };
+            return {
+                written: true,
+                stale: false,
+                data: plan.data,
+                residue: plan.residue
+            };
         }
         const written = quietWrite({
-            pane: target.pane,
+            pane,
             data: plan.data,
             write: target.write,
             setTimeout: target.setTimeout,
             clearTimeout: target.clearTimeout,
             timeoutMs: target.timeoutMs
         });
-        return { written, stale: true, data: plan.data };
+        return { written, stale: true, data: plan.data, residue: plan.residue };
+    }
+
+    /* The direct-write companion to `writeDeferred`. Usually this is a plain
+       xterm write. When a stale backlog left an incomplete terminal sequence,
+       combine it with the new bytes and keep the whole completion inside the
+       stale-query filter and pane-local quiet window. */
+    function writeFollowing(io) {
+        const target = io || {};
+        const pane = target.pane || null;
+        const write = typeof target.write === 'function' ? target.write : null;
+        const data = typeof target.data === 'string' ? target.data : '';
+        const residue = terminalQueryResidue(pane);
+        if (!residue) {
+            if (!write || !data) {
+                return { written: false, stale: false, data, residue: '' };
+            }
+            write(data);
+            return { written: true, stale: false, data, residue: '' };
+        }
+
+        const plan = deferredWritePlan({ data: residue + data, forceStale: true });
+        pane[QUERY_RESIDUE_FIELD] = plan.residue;
+        if (!plan.data) {
+            return { written: false, stale: true, data: '', residue: plan.residue };
+        }
+        const written = quietWrite({
+            pane,
+            data: plan.data,
+            write,
+            setTimeout: target.setTimeout,
+            clearTimeout: target.clearTimeout,
+            timeoutMs: target.timeoutMs
+        });
+        return { written, stale: true, data: plan.data, residue: plan.residue };
+    }
+
+    /* Resolve input against the pane that owns the xterm callback, never the
+       grid slot that pane occupied when the callback was registered. */
+    function inputForwardPlan(io) {
+        const target = io || {};
+        const pane = target.pane || null;
+        const sessionId = typeof target.sessionId === 'string' ? target.sessionId : '';
+        const activePanes = Array.isArray(target.activePanes) ? target.activePanes : [];
+        const activeSessionIds = Array.isArray(target.activeSessionIds)
+            ? target.activeSessionIds
+            : [];
+        if (!pane || !sessionId || repliesSuppressed(pane)) {
+            return { send: false, sessionId, broadcastIndex: -1 };
+        }
+        const activeIndex = activePanes.indexOf(pane);
+        const broadcastIndex = activeIndex >= 0 && activeSessionIds[activeIndex] === sessionId
+            ? activeIndex
+            : -1;
+        return { send: true, sessionId, broadcastIndex };
     }
 
     return {
@@ -223,11 +379,17 @@
         STALE_DEFERRAL_MS,
         QUIET_WRITE_TIMEOUT_MS,
         SUPPRESSION_FIELD,
+        QUERY_RESIDUE_FIELD,
         suppressionDepth,
         repliesSuppressed,
         stripTerminalQueries,
+        terminalQueryResidue,
+        clearTerminalQueryResidue,
+        splitTrailingTerminalSequence,
         deferredWritePlan,
         quietWrite,
-        writeDeferred
+        writeDeferred,
+        writeFollowing,
+        inputForwardPlan
     };
 }));

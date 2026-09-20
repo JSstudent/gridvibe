@@ -308,6 +308,69 @@ class StaleDeferralBudgetTestCase(TerminalRepliesNodeTestCase):
         # Nothing was written, so nothing may be left suppressed either.
         self.assertEqual(result["depth"], 0)
 
+    def test_a_query_split_across_the_next_write_is_removed_as_one_sequence(self):
+        result = self._run_node(
+            """
+            const pane = {};
+            const writes = [];
+            const clock = fakeClock();
+            const io = {
+                pane,
+                write: (payload, done) => { writes.push(payload); if (done) done(); },
+                setTimeout: clock.setTimeout,
+                clearTimeout: clock.clearTimeout
+            };
+            const first = replies.writeDeferred({
+                ...io,
+                data: 'banner' + '\\u001b]11;',
+                heldMs: replies.STALE_DEFERRAL_MS + 1
+            });
+            const second = replies.writeFollowing({
+                ...io,
+                data: '?' + '\\u001b\\\\' + 'prompt$ '
+            });
+            process.stdout.write(JSON.stringify({
+                first,
+                second,
+                writes,
+                residue: replies.terminalQueryResidue(pane),
+                suppressed: replies.repliesSuppressed(pane)
+            }));
+            """
+        )
+        self.assertEqual(result["writes"], ["banner", "prompt$ "])
+        self.assertEqual(result["first"]["residue"], "\x1b]11;")
+        self.assertEqual(result["second"]["residue"], "")
+        self.assertEqual(result["residue"], "")
+        self.assertFalse(result["suppressed"])
+
+    def test_a_rendering_sequence_split_at_the_same_boundary_is_preserved(self):
+        result = self._run_node(
+            """
+            const pane = {};
+            const writes = [];
+            const clock = fakeClock();
+            const io = {
+                pane,
+                write: (payload, done) => { writes.push(payload); if (done) done(); },
+                setTimeout: clock.setTimeout,
+                clearTimeout: clock.clearTimeout
+            };
+            replies.writeDeferred({
+                ...io,
+                data: 'banner' + '\\u001b[?1003',
+                heldMs: replies.STALE_DEFERRAL_MS + 1
+            });
+            replies.writeFollowing({ ...io, data: 'hprompt$ ' });
+            process.stdout.write(JSON.stringify({
+                writes,
+                residue: replies.terminalQueryResidue(pane)
+            }));
+            """
+        )
+        self.assertEqual(result["writes"], ["banner", "\x1b[?1003hprompt$ "])
+        self.assertEqual(result["residue"], "")
+
 
 class QuietWindowTestCase(TerminalRepliesNodeTestCase):
     """The backstop: a query form the list has never heard of still cannot leak."""
@@ -532,6 +595,51 @@ class PaneInputGateTestCase(TerminalRepliesNodeTestCase):
                 {"pane": "a", "data": "ls"},
             ],
         )
+
+    def test_suppression_follows_the_pane_when_its_slot_changes_hands(self):
+        result = self._run_node(
+            """
+            const paneA = {};
+            const paneB = {};
+            const clock = fakeClock();
+            let finish = null;
+            replies.quietWrite({
+                pane: paneA,
+                data: 'late bytes',
+                write: (payload, done) => { finish = done; },
+                setTimeout: clock.setTimeout,
+                clearTimeout: clock.clearTimeout
+            });
+
+            const whileSuppressed = replies.inputForwardPlan({
+                pane: paneA,
+                sessionId: 'A',
+                activePanes: [paneB],
+                activeSessionIds: ['B']
+            });
+            finish();
+            const afterParse = replies.inputForwardPlan({
+                pane: paneA,
+                sessionId: 'A',
+                activePanes: [paneB],
+                activeSessionIds: ['B']
+            });
+            const replacement = replies.inputForwardPlan({
+                pane: paneB,
+                sessionId: 'B',
+                activePanes: [paneB],
+                activeSessionIds: ['B']
+            });
+            process.stdout.write(JSON.stringify({ whileSuppressed, afterParse, replacement }));
+            """
+        )
+        self.assertFalse(result["whileSuppressed"]["send"])
+        self.assertEqual(result["whileSuppressed"]["broadcastIndex"], -1)
+        self.assertTrue(result["afterParse"]["send"])
+        self.assertEqual(result["afterParse"]["sessionId"], "A")
+        self.assertEqual(result["afterParse"]["broadcastIndex"], -1)
+        self.assertTrue(result["replacement"]["send"])
+        self.assertEqual(result["replacement"]["broadcastIndex"], 0)
 
 
 if __name__ == "__main__":

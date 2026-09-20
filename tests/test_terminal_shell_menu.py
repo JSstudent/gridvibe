@@ -781,12 +781,11 @@ class RelaunchedPaneOverlayTestCase(TerminalShellMenuTestCase):
         # The reset rides in front for the same reason: the backend has already
         # dropped the old shell's replay buffer, so a reset that waited for the
         # response would clear what the new shell had drawn in the meantime.
-        # The mouse teardown is the one thing that comes *after* the answer —
-        # it draws nothing, so it cannot wipe anything, and by then the program
-        # that kept re-arming the mode is gone.
+        # A newly launched agent owns its mouse mode. The response can arrive
+        # after that agent has already armed it, so no teardown may follow.
         self.assertEqual(
             result["order"],
-            ["term-reset", "connecting", "request", "mouse-teardown"],
+            ["term-reset", "connecting", "request"],
         )
         self.assertEqual(result["connecting"], [0])
 
@@ -879,6 +878,17 @@ class RelaunchedPaneMouseReportingTestCase(TerminalShellMenuTestCase):
             result["order"].index("request"),
             result["order"].index("mouse-teardown"),
         )
+
+    def test_a_new_agent_keeps_the_mouse_mode_it_owns(self):
+        result = self._run_node(
+            """
+            const rows = await openMenu(0, sshPane({ startup_mode: 'terminal' }));
+            await press(0, rows.find(row => row.label === 'Claude Code'));
+            report({ order: calls.order, writes: calls.writes });
+            """
+        )
+        self.assertEqual(result["writes"], [])
+        self.assertNotIn("mouse-teardown", result["order"])
 
     def test_the_dying_agents_queued_bytes_land_before_the_teardown(self):
         """A backlog held behind a not-yet-fitted pane is exactly where the

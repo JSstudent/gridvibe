@@ -4519,7 +4519,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("const target = resolveSessionTarget(session_id);", html)
         self.assertIn("if (pendingModeSwitchSessionIds.has(session_id)) return;", html)
         self.assertIn("if (!target.active) {", html)
-        self.assertIn("target.terminal.term.write(data);", html)
+        self.assertIn("writeFollowingPendingOutput(target.terminal, data);", html)
 
     def test_create_sessions_requires_sessions_field(self):
         response = self.client.post("/api/sessions", json={})
@@ -20654,10 +20654,17 @@ class BroadcastInputTestCase(unittest.TestCase):
 
     def test_input_forwarding_goes_through_the_broadcast_helper(self):
         terminals_js = self._static("js/terminals.js")
-        self.assertIn("function forwardTerminalInput(index, data)", terminals_js)
-        # both onData wiring sites (grid build + split panes) share the helper
+        self.assertIn(
+            "function forwardTerminalInput(terminal, sessionId, data)", terminals_js
+        )
+        # Grid build and split panes share one identity-capturing onData owner.
+        self.assertIn(
+            "terminals.forEach((t, i) => wirePaneInputForwarding(t, i));",
+            terminals_js,
+        )
+        self.assertIn("wirePaneInputForwarding(terminal, index);", terminals_js)
         self.assertEqual(
-            terminals_js.count("onData(data => forwardTerminalInput("), 2
+            terminals_js.count("onData(data => forwardTerminalInput("), 1
         )
         # the peer fan-out lives in a shared helper reused by keyboard + voice
         self.assertIn(
@@ -20667,7 +20674,7 @@ class BroadcastInputTestCase(unittest.TestCase):
             terminals_js.index("function forwardTerminalInput"):
             terminals_js.index("function wirePaneInputForwarding")
         ]
-        self.assertIn("broadcastInputToPeers(index, data)", forward_fn)
+        self.assertIn("broadcastInputToPeers(plan.broadcastIndex, data)", forward_fn)
         # explorer/browser panes are skipped (no `term`) in the shared helper
         peer_fn = terminals_js[
             terminals_js.index("function broadcastInputToPeers"):
@@ -20821,9 +20828,10 @@ class BroadcastInputTestCase(unittest.TestCase):
         keyboard input rather than growing a second fan-out.
         """
         terminals_js = self._static("js/terminals.js")
-        self.assertEqual(
-            terminals_js.count("broadcastInputToPeers(index, "), 2
+        self.assertIn(
+            "broadcastInputToPeers(plan.broadcastIndex, data);", terminals_js
         )
+        self.assertIn("broadcastInputToPeers(index, text);", terminals_js)
 
     def test_broadcast_highlight_drops_when_focus_leaves_terminals(self):
         """Wave 4 / 6.a (OD-10): the all-panes broadcast ring only paints while

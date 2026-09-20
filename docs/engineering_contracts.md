@@ -151,12 +151,63 @@ changing any field that survives restart; it owns the complete save/restore flow
   Continue partial SSH/POSIX writes from remaining bytes. Closed, retired,
   zero-progress, or timed-out writes fail without replaying the whole command;
   input tracking follows successful delivery only. WinPty keeps its string API.
-- Replay buffers stay verbatim. `handle_join_session()` emits replay inside the
-  handler, not a background task. Mouse recovery is a client `term.write()` of
-  `MOUSE_REPORTING_RESET`, never shell input or replay sanitization. Clear also
-  purges the server buffer; Reset view waits for replay acknowledgement or a
-  bounded fallback and resets exactly once, on the captured pane. A live TUI may
-  need to re-arm mouse reporting afterwards.
+- Replay buffers keep every rendering and mode-setting sequence verbatim; only
+  terminal *queries* are filtered out of them (`_TERMINAL_QUERY_RE`, below).
+  `handle_join_session()` emits replay inside the handler, not a background
+  task. Mouse recovery is a client `term.write()` of `MOUSE_REPORTING_RESET`,
+  never shell input or replay sanitization. Clear also purges the server buffer;
+  Reset view waits for replay acknowledgement or a bounded fallback and resets
+  exactly once, on the captured pane. A live TUI may need to re-arm mouse
+  reporting afterwards.
+- **A terminal's answer is only correct in the instant it is produced, so an
+  answer GridVibe is late in producing is not delivered at all.** A query —
+  `\x1b]11;?` for the background colour, `\x1b[6n` for the cursor, DA,
+  XTVERSION, DECRQM, the XTWINOPS *reports*, OSC 4/5/52, DCS `+q`/`$q` — travels
+  the pane's output and is answered on its *input*, where the answer is
+  indistinguishable from a keystroke. GridVibe answers late because it defers
+  parsing: a pane that is not yet fitted holds output in `_pendingOutput` behind
+  a debounce and a bounded fit-retry ladder, so a pane being restored, replaced
+  or switched to parses its backlog long after the asker stopped reading and the
+  reply is typed into whatever prompt is there by then.
+  `web/static/js/terminal-replies.js` owns the rule, and the rule is about
+  *age*, not identity: a backlog held longer than `STALE_DEFERRAL_MS` is
+  stripped of its queries before the parser can see them and parsed inside a
+  per-pane quiet window in which that pane's `onData` is refused. Stripping is
+  the cure and is a known list; the quiet window is the structural backstop
+  under it, so a query form the list has never heard of still cannot leak. A
+  backlog inside the budget is written exactly as an undeferred one — which is
+  what keeps an agent CLI on a promptly-fitted pane detecting the terminal's
+  colours at all.
+- The two owners of that list must agree. `TERMINAL_QUERY_SOURCES` filters the
+  backlog the page writes late; `_TERMINAL_QUERY_RE` filters the buffer the
+  server replays into a pane whose program has since changed. Neither may filter
+  a sequence that renders or sets state — a rejoin to a pane whose TUI is still
+  running has to restore that program's modes, and the title stack (`CSI 22/23
+  t`) and DECSCUSR sit beside query shapes the list does match.
+  `tests/test_terminal_replies.py` pins both sides to one fixture table.
+- **The quiet window always closes.** It is a depth rather than a flag, so two
+  overlapping late writes cannot reopen it early. It is released by the parse
+  completion callback, by `QUIET_WRITE_TIMEOUT_MS` when that callback never
+  arrives, by a throwing write, and on the call itself when no clock was
+  supplied. A permanently mute pane is a far worse failure than one unsuppressed
+  reply.
+- **A sequence split across the deferral boundary is completed inside the same
+  filter, never outside it.** A stale backlog can end mid-sequence, so its
+  incomplete tail is held on the pane (`_terminalQueryResidue`) instead of being
+  written, and the next output is prepended with it so the whole completion runs
+  through the strip and the quiet window again (`writeFollowing()`). Otherwise a
+  query straddling the boundary would be reassembled by xterm alone and answered
+  after everything around it had been filtered. The residue is pane state and is
+  dropped wherever that pane's stream is: Clear, Reset view, a `terminal_cleared`
+  raised from outside the window, a reconnect, and a relaunch.
+- **Input is forwarded to the pane that owns the xterm callback, never to the
+  grid slot that pane occupied when the callback was registered.** `onData`
+  closes over the pane object and the session id captured at wiring time, and
+  `inputForwardPlan()` resolves both: the keystroke goes to that session, and
+  Broadcast typing fans out from the pane's *current* index only while that pane
+  still holds it under that session. A pane whose slot has changed hands types
+  into its own session or into nothing — never into the session that took the
+  slot.
 - **A PTY is opened at the size the pane is already drawn at, never at a
   default it waits to be corrected from.** `session_terminal_sizes` records the
   last viewport a client reported, keyed by *session id* so it outlives the
@@ -360,6 +411,22 @@ changing any field that survives restart; it owns the complete save/restore flow
   status refresh takes the overlay off a connected pane that is already
   attached, which is also what heals a pane that connected while its group was
   not the visible one.
+- **A relaunch undoes the mouse reporting its own transition leaves armed, and
+  only where the successor has no program to own it.** The pre-POST reset
+  disarms the mode; the outgoing agent, still alive while the request is in
+  flight, goes on redrawing and re-asserts `\x1b[?1003h` after it, so the plain
+  shell that inherits the prompt collects every pointer movement and Enter
+  submits the lot. `relaunchSessionShell()` therefore writes
+  `MOUSE_REPORTING_RESET` once the response is in and the old shell is gone: a
+  teardown draws nothing, so unlike a second `term.reset()` it cannot wipe what
+  the new shell has already drawn — which is why the reset itself must stay in
+  front of the request. It is owed to the pane and not to the slot, so the
+  captured target flushes that pane's own queue first and follows it across a
+  slot change. It is skipped when the relaunch starts a **new agent**, whose
+  connector has already started and which owns its own mouse mode, and a
+  *refused* relaunch writes none at all — that pane is still running the TUI
+  that armed it. Until this, only the Reset view button undid the state
+  GridVibe's own transition had created.
 - **Every terminal/agent→Files switch derives a fresh root from where the pane
   is standing:** the Git worktree containing its working directory, else that
   directory itself (`_resolve_explorer_open_root()`, which takes those two

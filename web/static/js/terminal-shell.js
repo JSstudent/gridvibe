@@ -583,6 +583,7 @@
            reverse: the backend has already dropped the old shell's replay
            buffer, so a reset awaited first wipes what the *new* shell has
            already drawn. */
+        globalThis.GridVibeTerminalReplies?.clearTerminalQueryResidue?.(pane);
         pane?.term?.reset?.();
         showPlaceholderConnecting(index);
         try {
@@ -598,7 +599,8 @@
 
             pane._session = data;
 
-            /* The reset above disarmed mouse reporting, and then the agent
+            /* When the successor is a plain shell, the reset above disarmed
+               mouse reporting and then the agent
                that was dying while this request was in flight went on emitting
                — a full-screen TUI re-asserts `\x1b[?1003h` on every redraw —
                so bytes that re-arm the mode are written to the pane *after*
@@ -614,18 +616,22 @@
                drawn — which is the race the pre-fetch reset above is placed
                where it is to avoid. Owed to the pane, never to the slot: the
                capture flushes that pane's own queue first and follows it even
-               if the grid has since handed its slot to somebody else. */
-            const resetTarget = GridVibeTerminalModes.captureResetTarget({
-                pane,
-                sessionId,
-                flush: target => flushCapturedPendingOutput(target),
-                write: (target, payload) => {
-                    if (target?.term) {
-                        target.term.write(payload);
+               if the grid has since handed its slot to somebody else. A new
+               agent owns its mouse mode and must not have it torn down after
+               its connector has already started. */
+            if (!agent) {
+                const resetTarget = GridVibeTerminalModes.captureResetTarget({
+                    pane,
+                    sessionId,
+                    flush: target => flushCapturedPendingOutput(target),
+                    write: (target, payload) => {
+                        if (target?.term) {
+                            target.term.write(payload);
+                        }
                     }
-                }
-            });
-            GridVibeTerminalModes.resetMouseReporting(payload => resetTarget.write(payload));
+                });
+                GridVibeTerminalModes.resetMouseReporting(payload => resetTarget.write(payload));
+            }
 
             const ownerIndex = terminals.indexOf(pane);
             if (ownerIndex < 0 || sessionIds[ownerIndex] !== sessionId) return;

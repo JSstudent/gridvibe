@@ -4740,6 +4740,16 @@
         });
     }
 
+    function writeFollowingPendingOutput(terminal, data) {
+        GridVibeTerminalReplies.writeFollowing({
+            pane: terminal,
+            data,
+            write: (payload, done) => terminal.term.write(payload, done),
+            setTimeout: (fn, ms) => window.setTimeout(fn, ms),
+            clearTimeout: handle => window.clearTimeout(handle)
+        });
+    }
+
     /* One owner for "these bytes are being held": the timestamp is taken when
        a backlog starts, never refreshed while it grows, so the age read at
        flush time is the age of the *oldest* byte in it — the one whose query
@@ -4988,6 +4998,7 @@
 
             terminal._pendingOutput = '';
             terminal._pendingSince = 0;
+            GridVibeTerminalReplies.clearTerminalQueryResidue(terminal);
 
             if (terminal._attached) {
                 terminal.term.reset();
@@ -5073,6 +5084,7 @@
 
             terminal._pendingOutput = '';
             terminal._pendingSince = 0;
+            GridVibeTerminalReplies.clearTerminalQueryResidue(terminal);
             terminal.term.reset();
             terminal.term.clear();
             /* Clear purges the replay buffer below, so nothing can re-arm what
@@ -5961,7 +5973,7 @@
         }
     });
 
-    function forwardTerminalInput(index, data) {
+    function forwardTerminalInput(terminal, sessionId, data) {
         /* Selection is focus-driven only — never set it from `onData`, which
            also fires for TUI mouse-tracking sequences and would make the
            highlight follow the mouse into an unfocused pane. */
@@ -5972,19 +5984,27 @@
            a reply born while GridVibe is writing a backlog it held too long is
            answering a program that stopped listening — the leak
            GridVibeTerminalReplies owns. The window is one late parse wide. */
-        if (GridVibeTerminalReplies.repliesSuppressed(terminals[index])) {
+        const plan = GridVibeTerminalReplies.inputForwardPlan({
+            pane: terminal,
+            sessionId,
+            activePanes: terminals,
+            activeSessionIds: sessionIds
+        });
+        if (!plan.send) {
             return;
         }
-        const sid = sessionIds[index];
-        if (sid) socket.emit('terminal_input', { session_id: sid, data });
-        broadcastInputToPeers(index, data);
+        socket.emit('terminal_input', { session_id: plan.sessionId, data });
+        if (plan.broadcastIndex >= 0) {
+            broadcastInputToPeers(plan.broadcastIndex, data);
+        }
     }
 
     function wirePaneInputForwarding(t, i) {
         if (!t?.term) {
             return;
         }
-        t.term.onData(data => forwardTerminalInput(i, data));
+        const sessionId = t._session?.session_id || sessionIds[i] || '';
+        t.term.onData(data => forwardTerminalInput(t, sessionId, data));
     }
 
     function remapCardIndexAttributes(card, sourceIndex, targetIndex) {
@@ -6163,7 +6183,7 @@
             return;
         }
 
-        terminal.term.onData(data => forwardTerminalInput(index, data));
+        wirePaneInputForwarding(terminal, index);
     }
 
     function getExplorerSelectedDirectory(index) {
@@ -8108,7 +8128,9 @@
                 throw new Error(data.error || `Reconnect failed with status ${response.status}`);
             }
             /* Discard the dead connection's output before the fresh stream lands. */
-            terminals[index]?.term?.reset?.();
+            const terminal = terminals[index];
+            GridVibeTerminalReplies.clearTerminalQueryResidue(terminal);
+            terminal?.term?.reset?.();
         } catch (e) {
             showPlaceholderError(index, e.message);
         }
@@ -8691,7 +8713,7 @@
                     holdPendingOutput(target.terminal, data);
                     return;
                 }
-                target.terminal.term.write(data);
+                writeFollowingPendingOutput(target.terminal, data);
                 return;
             }
 
@@ -8702,7 +8724,7 @@
                 scheduleFit(index);
                 return;
             }
-            terminal.term.write(data);
+            writeFollowingPendingOutput(terminal, data);
         });
 
         socket.on('session_status', (session) => {
@@ -8781,6 +8803,7 @@
             if (!term) return;
             target.terminal._pendingOutput = '';
             target.terminal._pendingSince = 0;
+            GridVibeTerminalReplies.clearTerminalQueryResidue(target.terminal);
             term.reset();
             term.clear();
         });

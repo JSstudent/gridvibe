@@ -29,11 +29,11 @@ async function shellCallbacks() {
            stubbed. */
         vm.runInContext(source('terminal-modes.js'), ctx);
         vm.runInContext(source('terminal-shell.js'), ctx);
-        const pending = ctx.relaunchSessionShell(0, { agent: 'claude' });
+        const pending = ctx.relaunchSessionShell(0, { agent: '' });
         ctx.terminals[0] = b; ctx.sessionIds[0] = 'B';
         assert.equal(vm.runInContext('_pendingShellSwitchPanes.has(terminals[0])', ctx), false);
         if (returnToOwner) { ctx.terminals[0] = a; ctx.sessionIds[0] = 'A'; }
-        complete({ ok, json: async () => ({ session_id: 'A', mode: 'ssh', startup_mode: 'agent', agent_selection: 'claude' }) });
+        complete({ ok, json: async () => ({ session_id: 'A', mode: 'ssh', startup_mode: 'terminal', agent_selection: '' }) });
         await pending;
         assert.equal(b._session.session_id, 'B');
         /* The pane that asked is reset and painted before the request goes out
@@ -49,7 +49,7 @@ async function shellCallbacks() {
         /* Only the repaint that undoes a failed request waits for the answer,
            and it is addressed to the pane that still owns the slot. */
         assert.deepEqual(synced, !ok && returnToOwner ? ['A'] : []);
-        assert.equal(a._session.startup_mode, ok ? 'agent' : 'terminal');
+        assert.equal(a._session.startup_mode, 'terminal');
         assert.equal(vm.runInContext('_pendingShellSwitchPanes.size', ctx), 0);
     }
 }
