@@ -151,12 +151,63 @@ changing any field that survives restart; it owns the complete save/restore flow
   Continue partial SSH/POSIX writes from remaining bytes. Closed, retired,
   zero-progress, or timed-out writes fail without replaying the whole command;
   input tracking follows successful delivery only. WinPty keeps its string API.
-- Replay buffers stay verbatim. `handle_join_session()` emits replay inside the
-  handler, not a background task. Mouse recovery is a client `term.write()` of
-  `MOUSE_REPORTING_RESET`, never shell input or replay sanitization. Clear also
-  purges the server buffer; Reset view waits for replay acknowledgement or a
-  bounded fallback and resets exactly once, on the captured pane. A live TUI may
-  need to re-arm mouse reporting afterwards.
+- Replay buffers keep every rendering and mode-setting sequence verbatim; only
+  terminal *queries* are filtered out of them (`_TERMINAL_QUERY_RE`, below).
+  `handle_join_session()` emits replay inside the handler, not a background
+  task. Mouse recovery is a client `term.write()` of `MOUSE_REPORTING_RESET`,
+  never shell input or replay sanitization. Clear also purges the server buffer;
+  Reset view waits for replay acknowledgement or a bounded fallback and resets
+  exactly once, on the captured pane. A live TUI may need to re-arm mouse
+  reporting afterwards.
+- **A terminal's answer is only correct in the instant it is produced, so an
+  answer GridVibe is late in producing is not delivered at all.** A query —
+  `\x1b]11;?` for the background colour, `\x1b[6n` for the cursor, DA,
+  XTVERSION, DECRQM, the XTWINOPS *reports*, OSC 4/5/52, DCS `+q`/`$q` — travels
+  the pane's output and is answered on its *input*, where the answer is
+  indistinguishable from a keystroke. GridVibe answers late because it defers
+  parsing: a pane that is not yet fitted holds output in `_pendingOutput` behind
+  a debounce and a bounded fit-retry ladder, so a pane being restored, replaced
+  or switched to parses its backlog long after the asker stopped reading and the
+  reply is typed into whatever prompt is there by then.
+  `web/static/js/terminal-replies.js` owns the rule, and the rule is about
+  *age*, not identity: a backlog held longer than `STALE_DEFERRAL_MS` is
+  stripped of its queries before the parser can see them and parsed inside a
+  per-pane quiet window in which that pane's `onData` is refused. Stripping is
+  the cure and is a known list; the quiet window is the structural backstop
+  under it, so a query form the list has never heard of still cannot leak. A
+  backlog inside the budget is written exactly as an undeferred one — which is
+  what keeps an agent CLI on a promptly-fitted pane detecting the terminal's
+  colours at all.
+- The two owners of that list must agree. `TERMINAL_QUERY_SOURCES` filters the
+  backlog the page writes late; `_TERMINAL_QUERY_RE` filters the buffer the
+  server replays into a pane whose program has since changed. Neither may filter
+  a sequence that renders or sets state — a rejoin to a pane whose TUI is still
+  running has to restore that program's modes, and the title stack (`CSI 22/23
+  t`) and DECSCUSR sit beside query shapes the list does match.
+  `tests/test_terminal_replies.py` pins both sides to one fixture table.
+- **The quiet window always closes.** It is a depth rather than a flag, so two
+  overlapping late writes cannot reopen it early. It is released by the parse
+  completion callback, by `QUIET_WRITE_TIMEOUT_MS` when that callback never
+  arrives, by a throwing write, and on the call itself when no clock was
+  supplied. A permanently mute pane is a far worse failure than one unsuppressed
+  reply.
+- **A sequence split across the deferral boundary is completed inside the same
+  filter, never outside it.** A stale backlog can end mid-sequence, so its
+  incomplete tail is held on the pane (`_terminalQueryResidue`) instead of being
+  written, and the next output is prepended with it so the whole completion runs
+  through the strip and the quiet window again (`writeFollowing()`). Otherwise a
+  query straddling the boundary would be reassembled by xterm alone and answered
+  after everything around it had been filtered. The residue is pane state and is
+  dropped wherever that pane's stream is: Clear, Reset view, a `terminal_cleared`
+  raised from outside the window, a reconnect, and a relaunch.
+- **Input is forwarded to the pane that owns the xterm callback, never to the
+  grid slot that pane occupied when the callback was registered.** `onData`
+  closes over the pane object and the session id captured at wiring time, and
+  `inputForwardPlan()` resolves both: the keystroke goes to that session, and
+  Broadcast typing fans out from the pane's *current* index only while that pane
+  still holds it under that session. A pane whose slot has changed hands types
+  into its own session or into nothing — never into the session that took the
+  slot.
 - **A PTY is opened at the size the pane is already drawn at, never at a
   default it waits to be corrected from.** `session_terminal_sizes` records the
   last viewport a client reported, keyed by *session id* so it outlives the
@@ -307,6 +358,16 @@ changing any field that survives restart; it owns the complete save/restore flow
   by the pane header — `agent-relaunch`, `agent-mode-switch`, `clear` — and the
   rules those add are in [Agent tools (MCP)](#agent-tools-mcp). Everything in
   this section holds for both halves; the gates run before any of it.
+- **A split with no stated `kind` is a plain terminal, and its metadata has to
+  say so.** The pane kind is deliberately not cloned: an explorer, browser or
+  agent source all split off a terminal rooted where the source is showing. The
+  clone already clears the command, the agent selection and both agent flags, so
+  an `agent` `startup_mode` carried across would leave a plain shell wearing an
+  agent pane's metadata — and everything reading that field believes it: the
+  dashboard would list an agent with no agent, the header would paint one, and
+  the gated relaunch reads the same field to decide what a tool may do to the
+  pane. Normalize it beside the explorer and browser cases; a stated `kind`
+  replaces it, as it always did.
 - **A stated agent is preflighted before anything moves, and an absent binary
   refuses the relaunch.** The launcher has no pane yet, so it opens one as a
   plain terminal; the menu's pane is already running, so the honest outcome is
@@ -350,6 +411,22 @@ changing any field that survives restart; it owns the complete save/restore flow
   status refresh takes the overlay off a connected pane that is already
   attached, which is also what heals a pane that connected while its group was
   not the visible one.
+- **A relaunch undoes the mouse reporting its own transition leaves armed, and
+  only where the successor has no program to own it.** The pre-POST reset
+  disarms the mode; the outgoing agent, still alive while the request is in
+  flight, goes on redrawing and re-asserts `\x1b[?1003h` after it, so the plain
+  shell that inherits the prompt collects every pointer movement and Enter
+  submits the lot. `relaunchSessionShell()` therefore writes
+  `MOUSE_REPORTING_RESET` once the response is in and the old shell is gone: a
+  teardown draws nothing, so unlike a second `term.reset()` it cannot wipe what
+  the new shell has already drawn — which is why the reset itself must stay in
+  front of the request. It is owed to the pane and not to the slot, so the
+  captured target flushes that pane's own queue first and follows it across a
+  slot change. It is skipped when the relaunch starts a **new agent**, whose
+  connector has already started and which owns its own mouse mode, and a
+  *refused* relaunch writes none at all — that pane is still running the TUI
+  that armed it. Until this, only the Reset view button undid the state
+  GridVibe's own transition had created.
 - **Every terminal/agent→Files switch derives a fresh root from where the pane
   is standing:** the Git worktree containing its working directory, else that
   directory itself (`_resolve_explorer_open_root()`, which takes those two
@@ -1112,7 +1189,12 @@ in `README.md`; state the rules a change has to keep.
   `created_by_session_id` is stamped from the pane a launch or split actually
   came from (`_live_session_id` / `_live_origin_session_id`), and is deliberately
   absent from `runtime_state.json`: a creator id that survived a restart would
-  name a stranger, so every restored pane refuses the gate that reads it.
+  name a stranger, so every restored pane refuses the gate that reads it. An
+  origin that is *stated* and names nothing open is a lineage refusal at both
+  ends of the record-then-perform split — when the intent is recorded and again
+  when the page performs it — never a pane stamped with nobody, which would hand
+  an agent's new pane a fresh depth budget of 0. Only an omitted origin is a
+  person's own split.
 - **The depth budget bounds agents launching agents, and only that.** A pane a
   tool creates is stamped one deeper than the pane that *asked*; a split that
   creates an agent costs budget, a split that creates a plain pane does not.
@@ -1131,6 +1213,25 @@ in `README.md`; state the rules a change has to keep.
   user, port and password off that live session in this process; none of it
   reaches a response, a preset or a snapshot. An origin pane that has closed is a
   refusal, never a fall back to this machine.
+- **That same pane, not the caller, answers an unstated workspace.** "Here" is
+  the workspace the origin pane's *group* is in — read by GridVibe, in the launch
+  itself (`workspace_anchor_session_id`), and re-read inside the lock that
+  publishes the new group (`install_session_group`'s `workspace_from_session_id`).
+  A caller that resolves it for itself and names the result in a second request
+  can only ever be naming where the group *was*: a move carries the whole group
+  and leaves every pane's `group_id` alone, so the panes would open in the
+  workspace it just left, or fail once that workspace had been pruned. A stated
+  `workspace_id` or `new_workspace` still wins; this is the default, not a second
+  opinion.
+- **Every *read* of "my workspace" is the group's answer too, never the
+  inherited one.** Identity is captured once — at spawn, or when the token was
+  minted — and a workspace is not a property of a pane that holds still, so
+  `whoami` and `list_panes` resolve it through `live_workspace_id()` off the
+  live group and keep the inherited id only as the fallback for a read that
+  failed: degraded rather than wrong, exactly like the geometry beside it.
+  `list_panes` reads that arrangement *before* the panes and hands it on, so
+  both questions still cost one request and a caller that names a workspace
+  costs none.
 - **Identity arrives by inheritance locally and by token remotely.** The five
   `GRIDVIBE_*` variables are merged at the spawn call site in
   `_connect_local_session`, *not* inside `_local_shell_integration` — that
@@ -1142,7 +1243,9 @@ in `README.md`; state the rules a change has to keep.
   is revoked on the pane's own close path — the one that knows the session id,
   not `_shutdown_connection`, which does not — including the close that lands
   *inside* `_establish_mcp_tunnel`, where a stale connection is torn down rather
-  than recorded and a raising teardown still costs the token. The registry is
+  than recorded and a raising teardown still costs the token. A tunnel that could
+  not be opened at all revokes it on the same breath: a token with nothing to
+  spend it on is still a live key to this machine's tools. The registry is
   bounded (`MAX_PANE_TOKENS`, oldest evicted, logged) so a revoke that never runs
   is a bounded leak rather than a permanent one.
 - **`agent_mcp` is only ever set on a CLI that publishes a mechanism.**
@@ -1164,11 +1267,39 @@ in `README.md`; state the rules a change has to keep.
   launch line, `_toml_override_flag` owns the per-shell quoting Codex needs, and
   anything that cannot be composed safely resolves to *no fragment* — costing the
   pane its tools, never its agent. A test-mode process refuses the production path.
+- **The two Windows shells disagree about Codex's `-c` overrides, and the bare
+  form is not always available.** `_toml_override_flag` is the one owner: cmd
+  must see the TOML literal quotes bare (wrapped, the override is silently
+  ignored), PowerShell and every POSIX shell must see the outer double quotes
+  (bare, Codex exits before it starts). The exception is cmd's own argument
+  parsing — an override carrying a space or any of `_CMD_ARGUMENT_SPECIALS`
+  cannot cross as one argument at all, so it is quoted there too, which is not
+  the silently-ignored case: the child strips those outer quotes before Codex
+  parses anything, so it reads exactly what the bare form would have given it.
+  Anything rendered into an override therefore avoids a space it does not need —
+  `_inline_toml_env_fragment`'s inline table has none, deliberately.
+- **The generated URL is one a URL parser reads back.** `url_host()` brackets an
+  IPv6 literal, `loopback_base_url()` unwraps a bracketed bind address before
+  the wildcard check so `::` still resolves to a dialable host, and the sidecar's
+  own `normalize_base_url()` re-brackets the hostname `urlsplit` handed back
+  un-bracketed. Both halves have to keep agreeing: one of them alone leaves the
+  fix undone a process later, with the sidecar silently on the loopback default
+  and unable to reach a GridVibe bound to IPv6 only.
 - **The SSH reverse forward is opt-in per pane and costs the tools, never the
   shell.** `sshd` binds the remote host's own loopback; the port lives only for
   that connection; the remote config is written over SFTP at `0600` and named per
   pane; teardown runs off the close path on its own thread because every step is a
   round trip to a host that may be unreachable.
+- **The remote config fails closed, because it *is* the token.** Both the file
+  and the `~/.gridvibe` directory holding it are narrowed and then read back
+  (`_restricted_to_owner`), and an existing directory is checked exactly like a
+  new one — a previous run or a permissive `umask` may have left it open, and a
+  directory other accounts can list names every pane's config. A mode that could
+  not be applied, could not be read back, or still carries `FORBIDDEN_MODE_BITS`
+  is the same answer: nobody knows who can read this. The file is removed again,
+  the listener is withdrawn and the token revoked, and the pane starts without
+  tools. A readable token left on a shared host is the one outcome worse than
+  that.
 - **The forwarded channel reaches a filter, never GridVibe's port.** On this end
   of a reverse forward sits the whole unauthenticated loopback API, whose only
   guard has ever been "you have to be on this machine", so a socket to GridVibe
@@ -1183,6 +1314,18 @@ in `README.md`; state the rules a change has to keep.
   segment in the log, because the path is a credential. The still-true narrowing
   is what it now is: a remote process reaches this pane's tool surface, acting on
   this machine, and nothing else on the API.
+- **The channels that filter are bounded, and handed off at once.** Paramiko
+  calls the forward handler on the transport's own packet thread — the thread
+  carrying the pane's *shell* — so serving inline froze the terminal and starved
+  the very bytes the tunnel exists for; one daemon thread per connection, started
+  and returned from. That thread is then a budget: `MAX_FORWARDED_CHANNELS` per
+  pane, held by that pane's own handler so one noisy host cannot starve a pane
+  connected elsewhere, and a connection arriving with none free is *closed*
+  rather than queued or refused — writing a refusal would put the work back on
+  the thread the handoff exists to release. A thread that fails to start gives
+  its slot back, because a budget that leaks is a tunnel that stops answering.
+  The per-request head and body bounds cannot see this: an idle connection that
+  sends nothing still costs a slot for `REQUEST_READ_TIMEOUT`.
 - **Opening a window and splitting a pane are page work, recorded as intents.**
   The split axis never reaches the server: the page computes the rectangles and
   measures its own refusals off the live terminal. `web/window_intents.py` is in

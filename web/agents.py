@@ -205,6 +205,15 @@ def _pane_shell_family(session: Any) -> str:
     return "powershell" if getattr(session, "use_powershell", False) else "cmd"
 
 
+#: What one ``-c`` override cannot be handed to cmd bare. The space is the one
+#: that matters -- an interpreter under ``C:/Program Files`` or a checkout with
+#: a space in its name -- because cmd passes its command line on and the child's
+#: own argv parsing ends the argument there: Codex received two or three
+#: unrelated tokens and silently applied none of them. The rest is cmd's own
+#: syntax, which would break the line before Codex ever saw it.
+_CMD_ARGUMENT_SPECIALS = frozenset(' \t&|<>^()"')
+
+
 def _toml_override_flag(key: str, value: str, shell_family: str) -> str:
     """One ``-c key=value`` override, quoted for the shell that will read it.
 
@@ -224,9 +233,20 @@ def _toml_override_flag(key: str, value: str, shell_family: str) -> str:
 
     Verified both ways against the installed CLI rather than reasoned about;
     the two shells genuinely disagree and no single string serves both.
+
+    Bare is not *available* for every value, though: an override holding a
+    space or any of cmd's own syntax cannot survive the trip as one argument
+    at all, so those are quoted. That is not the failure above -- the child's
+    argv parsing strips those outer double quotes before Codex parses
+    anything, so it reads exactly the string the bare form would have given
+    it, which is the one thing a torn-apart argument cannot do.
     """
     override = f"{key}={value}"
-    return f"-c {override}" if shell_family == "cmd" else f'-c "{override}"'
+    if shell_family != "cmd":
+        return f'-c "{override}"'
+    if any(char in _CMD_ARGUMENT_SPECIALS for char in override):
+        return f'-c "{override}"'
+    return f"-c {override}"
 
 
 def _inline_toml_env_fragment(
@@ -249,12 +269,11 @@ def _inline_toml_env_fragment(
     the whole registration.
 
     No space anywhere in the rendered table -- TOML does not require one
-    around ``=`` or after ``,`` in an inline table, and the ``cmd`` branch of
-    ``_toml_override_flag`` emits this bare, unquoted. A space there is not a
-    cosmetic choice: cmd's own word-splitting tears an unquoted argument apart
-    at it, so a spaced table reaches Codex as several unrelated tokens instead
-    of one override -- exactly the failure the command/args fragment above
-    avoids by never containing one.
+    around ``=`` or after ``,`` in an inline table, and on ``cmd`` this is
+    emitted bare whenever it can be. A space there is not a cosmetic choice: it
+    would cost the table that bare form and put the whole override behind
+    quotes for nothing, where the values GridVibe writes here (ids, a loopback
+    URL, a depth) never need it.
     """
     if not identity:
         return ""

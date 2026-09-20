@@ -7117,6 +7117,144 @@ class LaunchDestinationReservationTestCase(unittest.TestCase):
         self.assertIsNone(api.session_manager.get_workspace(payload["workspace_id"]))
 
 
+class LaunchFromInsideAPaneDestinationTestCase(unittest.TestCase):
+    """"Here" is resolved by GridVibe, inside the launch that asked for it.
+
+    A launch made from inside a pane and naming no workspace means "beside
+    me", and the answer is the workspace that pane's *group* is in now -- a
+    move carries the whole group and leaves every pane's `group_id` alone.
+
+    The sidecar used to resolve it for itself, over one HTTP read, and name the
+    result in the launch that followed. Two requests with a move possible
+    between them: the panes opened in the workspace the group had just left, or
+    the launch failed because that workspace had since been pruned.
+    """
+
+    def setUp(self):
+        api.app.config["TESTING"] = True
+        self.client = api.app.test_client()
+        api.session_manager.reset_sessions()
+        self.addCleanup(api.session_manager.reset_sessions)
+        self.temp_dir = TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        self.repo_dir = Path(self.temp_dir.name) / "repo"
+        self.repo_dir.mkdir()
+
+    def _pane(self, **overrides):
+        """One live explorer pane, and the group it is in."""
+        body = {
+            "connection_mode": "wsl",
+            "session_name": "Origin",
+            "sessions": [
+                {
+                    "directory": str(self.repo_dir),
+                    "title": "Files",
+                    "startup_mode": "explorer",
+                }
+            ],
+        }
+        body.update(overrides)
+        response = self.client.post("/api/sessions", json=body)
+        self.assertEqual(response.status_code, 201, response.get_json())
+        payload = response.get_json()
+        return payload["sessions"][0]["session_id"], payload["group_id"]
+
+    def _launch_from(self, session_id, **overrides):
+        body = {
+            "connection_mode": "wsl",
+            "session_name": "Asked for",
+            "origin_session_id": session_id,
+            "sessions": [
+                {
+                    "directory": str(self.repo_dir),
+                    "title": "Files",
+                    "startup_mode": "explorer",
+                }
+            ],
+        }
+        body.update(overrides)
+        return self.client.post("/api/sessions", json=body)
+
+    def test_an_unstated_destination_is_the_asking_panes_own_workspace(self):
+        session_id, group_id = self._pane()
+        elsewhere = api.session_manager.create_workspace("Elsewhere")
+        api.session_manager.move_group(group_id, elsewhere.workspace_id)
+
+        response = self._launch_from(session_id)
+
+        self.assertEqual(response.status_code, 201, response.get_json())
+        self.assertEqual(response.get_json()["workspace_id"], elsewhere.workspace_id)
+
+    def test_a_move_between_resolving_and_installing_still_lands_with_the_group(self):
+        """The window the second request could never see.
+
+        Resolving the destination and publishing the group are not the same
+        moment: the pane normalization, the agent preflight and an SSH ping sit
+        between them and can take seconds. The asking pane's group is read
+        again inside the lock that publishes this one, so a move in that window
+        carries the new panes with it rather than stranding them.
+        """
+        session_id, group_id = self._pane()
+        elsewhere = api.session_manager.create_workspace("Elsewhere")
+        original = web_workspaces._prepare_launch_sessions
+
+        def move_the_group_mid_launch(sessions_config, connection_mode):
+            api.session_manager.move_group(group_id, elsewhere.workspace_id)
+            return original(sessions_config, connection_mode)
+
+        with patch.object(
+            web_workspaces, "_prepare_launch_sessions", move_the_group_mid_launch
+        ):
+            response = self._launch_from(session_id)
+
+        self.assertEqual(response.status_code, 201, response.get_json())
+        self.assertEqual(response.get_json()["workspace_id"], elsewhere.workspace_id)
+        self.assertEqual(
+            len(api.session_manager.get_workspace_groups(elsewhere.workspace_id)), 2
+        )
+
+    def test_a_stated_destination_is_never_second_guessed(self):
+        """The resolution is the default, not a second opinion."""
+        session_id, _group_id = self._pane()
+        elsewhere = api.session_manager.create_workspace("Elsewhere")
+
+        response = self._launch_from(session_id, workspace_id=elsewhere.workspace_id)
+
+        self.assertEqual(response.status_code, 201, response.get_json())
+        self.assertEqual(response.get_json()["workspace_id"], elsewhere.workspace_id)
+
+    def test_a_new_workspace_is_never_the_asking_panes_one(self):
+        session_id, _group_id = self._pane()
+
+        response = self._launch_from(
+            session_id, new_workspace=True, workspace_label="Fresh"
+        )
+
+        self.assertEqual(response.status_code, 201, response.get_json())
+        payload = response.get_json()
+        self.assertTrue(payload["workspace_created"])
+        self.assertNotEqual(payload["workspace_id"], "default")
+
+    def test_a_launch_that_names_no_pane_still_targets_default(self):
+        """The launcher and restore name no origin, and are untouched by it."""
+        response = self.client.post(
+            "/api/sessions",
+            json={
+                "connection_mode": "wsl",
+                "sessions": [
+                    {
+                        "directory": str(self.repo_dir),
+                        "title": "Files",
+                        "startup_mode": "explorer",
+                    }
+                ],
+            },
+        )
+
+        self.assertEqual(response.status_code, 201, response.get_json())
+        self.assertEqual(response.get_json()["workspace_id"], "default")
+
+
 class ConnectionTargetProposalTestCase(unittest.TestCase):
     """`GET /api/session-targets`: reusable addresses, without the secrets."""
 

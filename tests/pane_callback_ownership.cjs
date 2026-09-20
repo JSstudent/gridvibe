@@ -12,22 +12,28 @@ async function shellCallbacks() {
         let complete;
         let resets = 0;
         let placeholders = 0;
+        let teardowns = 0;
         const synced = [];
         const a = pane('A'), b = pane('B');
-        a.term = { reset() { resets++; } };
-        b.term = { reset() { throw Error('Reset wrong pane'); } };
+        a.term = { reset() { resets++; }, write() { teardowns++; } };
+        b.term = { reset() { throw Error('Reset wrong pane'); },
+                   write() { throw Error('Wrote wrong pane'); } };
         const ctx = vm.createContext({ console: { error() {} }, terminals: [a], sessionIds: ['A'],
             isExplorerSession: () => false, isBrowserSession: () => false, document,
-            syncPaneIdentityChrome() {},
+            syncPaneIdentityChrome() {}, flushCapturedPendingOutput() {},
             showPlaceholderConnecting() { placeholders++; }, showTerminalToast() {},
             syncPanePlaceholder(index) { synced.push(ctx.sessionIds[index]); },
             fetch: () => new Promise(resolve => { complete = resolve; }) });
+        /* The relaunch writes the mouse teardown itself once the old shell is
+           gone, so the module that owns that sequence is loaded rather than
+           stubbed. */
+        vm.runInContext(source('terminal-modes.js'), ctx);
         vm.runInContext(source('terminal-shell.js'), ctx);
-        const pending = ctx.relaunchSessionShell(0, { agent: 'claude' });
+        const pending = ctx.relaunchSessionShell(0, { agent: '' });
         ctx.terminals[0] = b; ctx.sessionIds[0] = 'B';
         assert.equal(vm.runInContext('_pendingShellSwitchPanes.has(terminals[0])', ctx), false);
         if (returnToOwner) { ctx.terminals[0] = a; ctx.sessionIds[0] = 'A'; }
-        complete({ ok, json: async () => ({ session_id: 'A', mode: 'ssh', startup_mode: 'agent', agent_selection: 'claude' }) });
+        complete({ ok, json: async () => ({ session_id: 'A', mode: 'ssh', startup_mode: 'terminal', agent_selection: '' }) });
         await pending;
         assert.equal(b._session.session_id, 'B');
         /* The pane that asked is reset and painted before the request goes out
@@ -35,10 +41,15 @@ async function shellCallbacks() {
            changing hands afterwards can never move either onto B. */
         assert.equal(resets, 1);
         assert.equal(placeholders, 1);
+        /* The mouse teardown is the one write that waits for the answer, so it
+           is the one a slot change could misdeliver. It follows the pane that
+           asked — B's `write` throws — and a refused relaunch writes none at
+           all, because that pane is still running the TUI that armed the mode. */
+        assert.equal(teardowns, ok ? 1 : 0);
         /* Only the repaint that undoes a failed request waits for the answer,
            and it is addressed to the pane that still owns the slot. */
         assert.deepEqual(synced, !ok && returnToOwner ? ['A'] : []);
-        assert.equal(a._session.startup_mode, ok ? 'agent' : 'terminal');
+        assert.equal(a._session.startup_mode, 'terminal');
         assert.equal(vm.runInContext('_pendingShellSwitchPanes.size', ctx), 0);
     }
 }

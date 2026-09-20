@@ -63,6 +63,24 @@ MAX_BODY_BYTES = 1048576
 #: *reply* is not bounded by this -- two tools wait on a page for 25s.
 REQUEST_READ_TIMEOUT = 30.0
 
+#: Forwarded connections one tunnelled pane may have in flight at once. It is
+#: here because *anything* on the remote host can reach that pane's forwarded
+#: port, and every accepted connection costs a thread of this process for up to
+#: `REQUEST_READ_TIMEOUT` even if it never sends a byte: without a ceiling, a
+#: loop opening idle connections turns a pane's tunnel into sustained thread
+#: and memory growth here, which the per-request head and body bounds cannot
+#: see.
+#:
+#: Well above what one agent does. A connection carries exactly one request,
+#: and the two that wait -- `split_pane` and `open_window` wait on a page --
+#: are the only ones that hold a slot for long, so the number to clear is a
+#: CLI's parallel tool calls plus those, not one.
+#:
+#: Per pane rather than per process: one noisy host must not be able to starve
+#: the tools of a pane connected to a different one, and the number of tunnels
+#: is already bounded by the panes the reader opened with MCP ticked.
+MAX_FORWARDED_CHANNELS = 16
+
 #: Headers that describe the hop rather than the request, so the filter states
 #: its own instead of forwarding the caller's. ``content-length`` is here
 #: because the filter re-derives it from the body it actually read.
@@ -306,6 +324,16 @@ def _accepted_request(channel: Any, expected_path: str) -> Optional[bytes]:
     return _forwarded_request(method, target, version, headers, body)
 
 
+def _close_quietly(closeable: Any) -> None:
+    """Close a channel or socket that may already be gone."""
+    if closeable is None:
+        return
+    try:
+        closeable.close()
+    except Exception:
+        pass
+
+
 def _relay_response(channel: Any, sock: socket.socket) -> None:
     """Move the reply back until GridVibe closes, which it does when done."""
     try:
@@ -362,11 +390,7 @@ def _serve_forwarded_channel(
         logger.exception("MCP tunnel channel failed")
     finally:
         for closeable in (channel, sock):
-            try:
-                if closeable is not None:
-                    closeable.close()
-            except Exception:
-                pass
+            _close_quietly(closeable)
 
 
 def _forward_handler(local_host: str, local_port: int, expected_path: str = ""):
@@ -380,16 +404,51 @@ def _forward_handler(local_host: str, local_port: int, expected_path: str = ""):
     accepted input), starved the very bytes the tunnel was opened to carry, and
     left ``cancel_port_forward`` waiting on a reply the blocked thread could
     never read. One thread per forwarded connection, handed off at once.
+
+    **And bounded.** "A thread per connection" is fine for an agent making a
+    tool call and open to abuse from anything else on that remote host, which
+    is the same population the filter below exists for: a loop of connections
+    that send nothing costs a thread each for `REQUEST_READ_TIMEOUT`. So the
+    threads are a budget (`MAX_FORWARDED_CHANNELS`) held by this pane's own
+    handler, and a connection arriving with none free is closed rather than
+    queued -- the pane's next real tool call is served as soon as one frees.
     """
 
+    slots = threading.BoundedSemaphore(MAX_FORWARDED_CHANNELS)
+
+    def serve(channel: Any) -> None:
+        try:
+            _serve_forwarded_channel(channel, local_host, local_port, expected_path)
+        finally:
+            slots.release()
+
     def handler(channel: Any, origin: Any, server: Any) -> None:
-        worker = threading.Thread(
-            target=_serve_forwarded_channel,
-            args=(channel, local_host, local_port, expected_path),
-            name="gridvibe-mcp-tunnel",
-            daemon=True,
-        )
-        worker.start()
+        if not slots.acquire(blocking=False):
+            # Closed rather than queued, and rather than answered: a refusal
+            # written here would be written on the transport's own packet
+            # thread, which is the thread this function exists to release.
+            logger.warning(
+                "MCP tunnel dropped a forwarded connection: %d are already in "
+                "flight for this pane",
+                MAX_FORWARDED_CHANNELS,
+            )
+            _close_quietly(channel)
+            return
+        try:
+            worker = threading.Thread(
+                target=serve,
+                args=(channel,),
+                name="gridvibe-mcp-tunnel",
+                daemon=True,
+            )
+            worker.start()
+        except Exception as exc:
+            # A thread that could not start never reaches the `finally` that
+            # gives the slot back, and a budget that leaks is a tunnel that
+            # stops answering.
+            slots.release()
+            _close_quietly(channel)
+            logger.warning("MCP tunnel could not serve a forwarded channel: %s", exc)
 
     return handler
 
@@ -480,6 +539,49 @@ def remote_mcp_document(url: str) -> Dict[str, Any]:
     }
 
 
+#: The bits that must be clear on the remote config and on the directory
+#: holding it. The file carries this pane's bearer token, and that token is the
+#: whole of the endpoint's authentication -- so a group- or world-readable mode
+#: on a shared host hands another account this pane's tool surface, acting on
+#: GridVibe's own machine.
+FORBIDDEN_MODE_BITS = 0o077
+
+
+def _restricted_to_owner(sftp: Any, remote_path: str, mode: int) -> bool:
+    """Apply ``mode`` and read it back. False when it cannot be *proved*.
+
+    Both halves refuse, and for the same reason: a ``chmod`` the remote host
+    declined and a mode that could not be read back are equally "nobody here
+    knows who can read this", and what is being written is a credential. A host
+    whose SFTP implementation can do neither costs the pane its tools -- the
+    price every other tunnel failure charges, and never its shell.
+    """
+    try:
+        sftp.chmod(remote_path, mode)
+    except Exception as exc:
+        logger.warning("Could not restrict permissions on %s: %s", remote_path, exc)
+        return False
+    try:
+        current = getattr(sftp.stat(remote_path), "st_mode", None)
+    except Exception as exc:
+        logger.warning("Could not verify permissions on %s: %s", remote_path, exc)
+        return False
+    try:
+        bits = int(current)
+    except (TypeError, ValueError):
+        logger.warning("The remote host reported no mode for %s", remote_path)
+        return False
+    if bits & FORBIDDEN_MODE_BITS:
+        logger.warning(
+            "%s is still reachable by other accounts on the remote host "
+            "(mode %o), so it was not left there",
+            remote_path,
+            bits & 0o777,
+        )
+        return False
+    return True
+
+
 def write_remote_config(
     sftp: Any,
     remote_path: str,
@@ -489,22 +591,26 @@ def write_remote_config(
 
     Written through the SFTP channel of the pane's own connection, so it needs
     no second authentication and lands as the same user the pane runs as.
+
+    Fails **closed**. The document names this pane's token, so a file whose
+    permissions could not be applied or verified is removed again rather than
+    left behind: the caller then withdraws the listener and revokes the token,
+    and the pane starts without tools. A readable token would instead be a
+    standing invitation for every other account on that host, which is the one
+    outcome worse than a pane with no tools.
     """
     if not sftp or not remote_path or not url:
         return False
     try:
         with sftp.open(remote_path, "w") as handle:
             handle.write(json.dumps(remote_mcp_document(url), indent=2) + "\n")
-        try:
-            # The token is a credential for this pane's tools; nobody else on
-            # a shared host needs to read it.
-            sftp.chmod(remote_path, 0o600)
-        except Exception:
-            logger.debug("Could not restrict permissions on %s", remote_path)
-        return True
     except Exception as exc:
         logger.warning("Could not write the remote MCP config %s: %s", remote_path, exc)
         return False
+    if not _restricted_to_owner(sftp, remote_path, 0o600):
+        remove_remote_config(sftp, remote_path)
+        return False
+    return True
 
 
 def remove_remote_config(sftp: Any, remote_path: str) -> None:
@@ -532,21 +638,27 @@ def remote_config_path(home: str, session_id: str) -> str:
 
 
 def ensure_remote_directory(sftp: Any, remote_path: str) -> bool:
-    """Create the parent directory of the remote config if it is missing."""
+    """Create the parent directory of the remote config, owner-only. Success?
+
+    Checked even when it was already there. ``~/.gridvibe`` outlives any one
+    pane, and a previous run, another tool or a permissive ``umask`` may have
+    left it open to the rest of the host -- a directory other accounts can read
+    lists every pane's config file, whatever mode the files themselves carry.
+    So an existing directory is narrowed and verified exactly like a new one,
+    and one that cannot be proved owner-only is not written into.
+    """
     parent = remote_path.rsplit("/", 1)[0] if "/" in remote_path else ""
     if not parent:
         return True
     try:
         sftp.stat(parent)
-        return True
     except Exception:
-        pass
-    try:
-        sftp.mkdir(parent, 0o700)
-        return True
-    except Exception as exc:
-        logger.warning("Could not create %s on the remote host: %s", parent, exc)
-        return False
+        try:
+            sftp.mkdir(parent, 0o700)
+        except Exception as exc:
+            logger.warning("Could not create %s on the remote host: %s", parent, exc)
+            return False
+    return _restricted_to_owner(sftp, parent, 0o700)
 
 
 def resolve_remote_home(sftp: Any) -> str:

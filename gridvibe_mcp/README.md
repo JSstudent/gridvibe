@@ -56,6 +56,14 @@ GridVibe writes `<install>/.gridvibe_mcp.json` on every app start, naming this
 install's interpreter and the port it actually bound. The file is gitignored,
 carries no `env` block, and is identical for every pane.
 
+The URL in it is one a URL parser reads back: a wildcard bind resolves to
+loopback, and an IPv6 literal is bracketed, because `http://::1:5050` is not a
+URL — everything that reads one separates host from port at a colon, and that
+address is all colons. `normalize_base_url` in `client.py` puts the brackets
+back after `urlsplit` hands the hostname over without them, so both halves
+agree; one of them alone leaves a sidecar silently on the loopback default,
+unable to reach a GridVibe bound to IPv6 only.
+
 When the pane closes, the CLI exits and the sidecar exits with it: no orphan,
 nothing to supervise.
 
@@ -66,7 +74,7 @@ process, so the pane's environment is already its environment:
 
 | Variable | Value |
 | --- | --- |
-| `GRIDVIBE_URL` | `http://127.0.0.1:<port>` |
+| `GRIDVIBE_URL` | `http://<bound host>:<port>`, an IPv6 literal bracketed |
 | `GRIDVIBE_SESSION_ID` | the pane id |
 | `GRIDVIBE_GROUP_ID` | the group (tab) id |
 | `GRIDVIBE_WORKSPACE_ID` | the workspace id |
@@ -102,6 +110,14 @@ Thirteen, in four tiers by blast radius. The order below is the order
 below this one". Its `runs_on` is the field that stops a remote path being
 handed to a pane opened on the wrong machine.
 
+Its `workspace_id` — and the workspace `list_panes` defaults to — is the one the
+pane's *group* is in now, not the one the pane was started in. Identity is
+captured once, at spawn or when the token was minted, and a session can be moved
+between workspaces with its processes and its SSH connections still running; an
+agent that went on naming the workspace it had left read panes that were no
+longer there. The group is the anchor because a move carries the whole group, and
+the inherited id is only the fallback for a read that failed.
+
 ### create — four
 
 | Tool | Makes |
@@ -109,7 +125,7 @@ handed to a pane opened on the wrong machine.
 | `create_workspace` | one empty, labelled workspace. Creating it does not make a window appear, and it is refused past sixteen workspaces that are *still* empty — counted over the whole app, because the server cannot tell a tool from the launcher's own button |
 | `launch_panes` | one session group of panes — agent, terminal, file explorer or browser preview |
 | `open_window` | a workspace on screen. Reports `opened`, `blocked` or `no_window_available` |
-| `split_pane` | halves one pane on a chosen axis and says what the new pane runs. Reports `split`, `refused` or `no_window_available` |
+| `split_pane` | halves one pane on a chosen axis and says what the new pane runs. With no `kind` stated it is what the 🪟 button makes: a terminal clones its source, and an explorer, browser or *agent* pane splits off a plain terminal rooted where it is showing — the kind is never cloned. Reports `split`, `refused` or `no_window_available` |
 
 ### replace — two
 
@@ -260,6 +276,18 @@ POSIX shells must see the outer double quotes (bare, Codex exits with *failed
 to load bootstrap configuration*). `_toml_override_flag` owns that one rule and
 the terminal-title override reads it too.
 
+Bare is not always *available* on cmd, though. cmd passes its command line
+through and the child's own argv parsing ends an argument at a space, so an
+interpreter under `C:\Program Files`, or a checkout whose name has a space in
+it, reached Codex as two or three unrelated tokens and none of them were
+applied. An override carrying a space — or any of cmd's own syntax — is
+therefore double-quoted there as well. That is not the silently-ignored case
+above: the child strips those outer quotes before Codex parses anything, so it
+reads exactly the string the bare form would have handed it, which is the one
+thing a torn-apart argument cannot do. Which is also why nothing rendered into
+an override carries a space it does not need: the inline identity table is
+written without one so it keeps the bare form wherever it can.
+
 `grok`, `hermes`, `opencode`, `kilo` and `kimi` publish nothing. Their only
 mechanism is an `<agent> mcp add` subcommand that edits the user's own config
 permanently — a change that would outlive the pane whose checkbox asked for it,
@@ -285,7 +313,7 @@ remote agent ──HTTP──▶ 127.0.0.1:<assigned>   (on the remote host)
 | --- | --- |
 | MCP over streamable HTTP | `web/mcp_http.py` — reuses the sidecar's own synchronous `dispatch`, so a tool cannot behave differently by transport |
 | Per-pane token | `web/mcp_http.py` → `pane_tokens` — identity cannot cross a machine by inheritance, so it rides in the URL. Minted idempotently, revoked on the pane's own close path, and the registry is bounded (128, oldest evicted) so a revoke that never runs is a bounded leak rather than a permanent one |
-| Reverse tunnel + remote config | `web/ssh_tunnel.py` — `request_port_forward` on the pane's existing transport, config placed over SFTP at `~/.gridvibe/mcp-<pane>.json`, mode `0600` |
+| Reverse tunnel + remote config | `web/ssh_tunnel.py` — `request_port_forward` on the pane's existing transport, config placed over SFTP at `~/.gridvibe/mcp-<pane>.json`, mode `0600` inside a `0700` directory, both read back after they are set |
 | Wiring | `terminal_io._establish_mcp_tunnel`, torn down in `_shutdown_connection` |
 
 Nothing is installed on the remote host. The config written there names a URL,
@@ -296,8 +324,22 @@ Every failure costs the pane its tools and never its shell: a forward the remote
 sshd refuses, or a config that cannot be written, leaves the pane running and
 tells the reader in the terminal. A close landing *inside* the setup is the same
 promise: the tunnel is torn down rather than recorded, and the token is revoked
-even when the teardown itself raises. A pane whose agent CLI publishes no MCP
-mechanism never has `agent_mcp` set by any route, so it opens nothing either.
+even when the teardown itself raises — as it is when the setup simply fails,
+because a token with nothing to spend it on is still a live key to this
+machine's tools. A pane whose agent CLI publishes no MCP mechanism never has
+`agent_mcp` set by any route, so it opens nothing either.
+
+The config **fails closed**, because the document is the token in plain text.
+Its mode and its directory's are applied and then read back, and an existing
+`~/.gridvibe` is narrowed and verified exactly like a new one — a previous run,
+another tool or a permissive `umask` may have left it open, and a directory the
+rest of the host can list names every pane's config whatever the files
+themselves carry. A `chmod` the host declined, a mode that could not be read
+back, and a mode that still lets anyone else in are one answer: nobody here
+knows who can read this. The file is removed again, the listener is withdrawn,
+the token is revoked, and the pane starts without tools — the price every other
+tunnel failure charges. A readable token on a shared host is the one outcome
+worse than that.
 
 ### What this widens
 
@@ -321,6 +363,20 @@ either way, so a caller learns neither which routes exist nor whether it guessed
 a live token; `400` for framing, `413` for an oversized declared body, `502` when
 GridVibe itself cannot be reached — and the warning log prints only the target's
 first segment, because `/mcp/<token>` is a credential.
+
+Connections are bounded as well as requests, and they have to be handed off at
+once. Paramiko calls the forward handler on the transport's own packet thread,
+which is the thread carrying the pane's *shell*, so filtering inline froze the
+terminal and starved the very bytes the tunnel was opened for: one daemon thread
+per connection, started and returned from. Those threads are then a budget —
+sixteen in flight per pane, well above a CLI's parallel tool calls plus the two
+that wait on a page, and per pane so one noisy host cannot starve a pane
+connected elsewhere. A connection arriving with none free is closed rather than
+queued or answered, since writing a refusal would put the work back on the
+thread the handoff exists to release; the pane's next real tool call is served
+as soon as a slot frees. The head and body ceilings cannot see this case at all:
+a loop of connections that send nothing still costs a thread each for the
+30-second read timeout.
 
 That filter is load-bearing, not defence in depth. On this end of the forward is
 GridVibe's whole loopback HTTP API: saved sessions with decryptable credentials,
@@ -351,8 +407,16 @@ on. An origin pane that has closed is a refusal, not a fall back to this
 machine: "here" is exactly the wrong answer, and the one that used to open a
 PowerShell pane on a `/home/...` path.
 
-The same read stamps `created_by_session_id` on the panes it makes, which is
-what the lineage gate later reads.
+The same read answers *which workspace* when the call names none: the
+destination is the workspace the origin pane's group is in, resolved by GridVibe
+inside the launch rather than by the sidecar in a read before it. A group can
+move between two requests, which would have opened the panes in the workspace it
+had just left. A stated `workspace_id` or `new_workspace` still wins.
+
+The same read also stamps `created_by_session_id` on the panes it makes, which
+is what the lineage gate later reads. A `split_pane` that names an origin pane
+which is no longer open is refused by that gate when the split is *recorded*,
+not silently recorded as a pane nobody created.
 
 ## Checking the surface without a running GridVibe
 
