@@ -4722,8 +4722,33 @@
         }
 
         const pendingOutput = terminal._pendingOutput;
+        /* How long these bytes waited is the whole input to the rule: a
+           backlog held past the budget carries queries nobody can still use an
+           answer to, so they are stripped and whatever the parser produces
+           anyway is refused the input channel. A prompt flush is written
+           exactly as before. */
+        const heldMs = terminal._pendingSince ? Date.now() - terminal._pendingSince : 0;
         terminal._pendingOutput = '';
-        terminal.term.write(pendingOutput);
+        terminal._pendingSince = 0;
+        GridVibeTerminalReplies.writeDeferred({
+            pane: terminal,
+            data: pendingOutput,
+            heldMs,
+            write: (payload, done) => terminal.term.write(payload, done),
+            setTimeout: (fn, ms) => window.setTimeout(fn, ms),
+            clearTimeout: handle => window.clearTimeout(handle)
+        });
+    }
+
+    /* One owner for "these bytes are being held": the timestamp is taken when
+       a backlog starts, never refreshed while it grows, so the age read at
+       flush time is the age of the *oldest* byte in it — the one whose query
+       has been waiting longest. */
+    function holdPendingOutput(terminal, data) {
+        if (!terminal._pendingOutput) {
+            terminal._pendingSince = Date.now();
+        }
+        terminal._pendingOutput = (terminal._pendingOutput || '') + data;
     }
 
     function fitTerminal(index) {
@@ -4962,6 +4987,7 @@
             });
 
             terminal._pendingOutput = '';
+            terminal._pendingSince = 0;
 
             if (terminal._attached) {
                 terminal.term.reset();
@@ -5046,6 +5072,7 @@
             });
 
             terminal._pendingOutput = '';
+            terminal._pendingSince = 0;
             terminal.term.reset();
             terminal.term.clear();
             /* Clear purges the replay buffer below, so nothing can re-arm what
@@ -5939,6 +5966,13 @@
            also fires for TUI mouse-tracking sequences and would make the
            highlight follow the mouse into an unfocused pane. */
         if (!socket) {
+            return;
+        }
+        /* `onData` carries the pane's *replies* as well as its keystrokes, and
+           a reply born while GridVibe is writing a backlog it held too long is
+           answering a program that stopped listening — the leak
+           GridVibeTerminalReplies owns. The window is one late parse wide. */
+        if (GridVibeTerminalReplies.repliesSuppressed(terminals[index])) {
             return;
         }
         const sid = sessionIds[index];
@@ -7693,6 +7727,7 @@
         terminals[index]._attached = true;
         terminals[index]._fitReady = false;
         terminals[index]._pendingOutput = terminals[index]._pendingOutput || '';
+        terminals[index]._pendingSince = terminals[index]._pendingSince || 0;
         observeTerminalResize(index);
         scheduleFit(index);
     }
@@ -8653,7 +8688,7 @@
 
             if (!target.active) {
                 if (!target.terminal._attached) {
-                    target.terminal._pendingOutput = (target.terminal._pendingOutput || '') + data;
+                    holdPendingOutput(target.terminal, data);
                     return;
                 }
                 target.terminal.term.write(data);
@@ -8663,7 +8698,7 @@
             const { index, terminal } = target;
             if (!terminal._attached) attachTerminal(index);
             if (!terminal._fitReady) {
-                terminal._pendingOutput = (terminal._pendingOutput || '') + data;
+                holdPendingOutput(terminal, data);
                 scheduleFit(index);
                 return;
             }
@@ -8745,6 +8780,7 @@
             const term = target.terminal?.term;
             if (!term) return;
             target.terminal._pendingOutput = '';
+            target.terminal._pendingSince = 0;
             term.reset();
             term.clear();
         });

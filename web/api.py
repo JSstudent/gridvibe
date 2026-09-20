@@ -3860,14 +3860,43 @@ def handle_lifecycle_flush_ack(data):
     lifecycle_coordinator.acknowledge_flush(request.sid, data) # type: ignore
 
 
+# Every sequence whose only purpose is to make the terminal talk back. A
+# replayed query is answered by whichever program owns the pty *now*, which is
+# never the one that asked, so the replay drops them rather than delivering
+# them. Kept in step with `TERMINAL_QUERY_SOURCES` in
+# web/static/js/terminal-replies.js, which strips the same list off a backlog
+# the page is writing late; tests/test_terminal_replies.py pins the two to one
+# fixture table so neither side can drift.
 _TERMINAL_QUERY_RE = re.compile(
-    r'\x1b\['       # CSI
-    r'[>=]?'        # DA2 (>) or DA3 (=) prefix, optional
-    r'(?:0?c|\?[0-9;]*c)'  # Device Attributes request or response
+    # Device Attributes -- DA1 (CSI c), DA2 (CSI > c), DA3 (CSI = c), and the
+    # `CSI ? ... c` shape a response shares with them.
+    r'\x1b\[[>=]?(?:0?c|\?[0-9;]*c)'
     r'|'
-    r'\x1b\[[56]n'  # Device Status Report / Cursor Position Report
+    # Device Status Report, ANSI and DEC private alike: CSI 5n, CSI 6n,
+    # CSI ?6n (DECXCPR), CSI ?25n. `n` has no rendering use at all, so the
+    # parameter is left open rather than enumerated.
+    r'\x1b\[\??[0-9]{1,4}n'
     r'|'
-    r'\x1b\](?:1[012]);\?(?:\x07|\x1b\\)'  # OSC foreground/background/cursor color query
+    # XTVERSION (CSI > Ps q). Never `CSI Ps SP q` (DECSCUSR), which sets the
+    # cursor shape and carries an intervening space.
+    r'\x1b\[>[0-9]*q'
+    r'|'
+    # DECRQM mode request, ANSI and DEC private.
+    r'\x1b\[\??[0-9;]{1,32}\$p'
+    r'|'
+    # XTWINOPS *reports* -- 11, 13..16, 18..21. Emphatically not 22 and 23,
+    # which push and pop the title stack and are actions a live program relies
+    # on.
+    r'\x1b\[(?:1[1345689]|2[01])(?:;[0-9]+)*t'
+    r'|'
+    # OSC queries: foreground/background/cursor colour (10/11/12), the indexed
+    # palette (4) and the special colours (5), and the clipboard read (52).
+    # Each is a query only because of the `;?` before its terminator -- the
+    # same OSCs *set* those values without it.
+    r'\x1b\](?:1[012]|4;[0-9]+|5;[0-9]+|52;[a-zA-Z]*);\?(?:\x07|\x1b\\)'
+    r'|'
+    # DCS requests: XTGETTCAP (DCS + q) and DECRQSS (DCS $ q).
+    r'\x1bP[+$]q[^\x1b\x07]*(?:\x07|\x1b\\)'
 )
 
 

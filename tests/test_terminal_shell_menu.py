@@ -41,6 +41,10 @@ from tests.test_dashboard_targeting import PANE_IDENTITY_SOURCE
 
 STATIC_JS = Path(__file__).resolve().parent.parent / "web" / "static" / "js"
 TERMINAL_SHELL_JS = STATIC_JS / "terminal-shell.js"
+# The real teardown, loaded rather than imitated: a relaunch writes the mouse
+# reporting reset itself once the old shell is gone, and a harness with its own
+# copy of that sequence would be checking the harness.
+TERMINAL_MODES_JS = STATIC_JS / "terminal-modes.js"
 # The real naming rule, loaded rather than imitated: a relaunch repaints the
 # pane header from the session it got back, and a harness with a second rule of
 # its own would be checking the harness.
@@ -97,8 +101,20 @@ function paneDisplayTitle(session, index) {
 /* `order` is what the overlay cases read: a relaunch has to paint the pane
    before it asks for one, because the new transport can report connected while
    the route is still writing its response. */
-const calls = { reset: [], connecting: [], toasts: [], requests: [], synced: [], order: [] };
+const calls = {
+    reset: [], connecting: [], toasts: [], requests: [], synced: [], order: [], writes: []
+};
 function refreshTerminalDisplay(index) { calls.reset.push(index); }
+
+/* terminals.js's captured flush. Anything the dying agent queued behind a
+   not-yet-fitted pane has to reach the pane before the teardown that exists to
+   undo it, so the relaunch flushes first and the harness records the order. */
+function flushCapturedPendingOutput(pane) {
+    if (!pane || !pane._attached || !pane.term || !pane._pendingOutput) { return; }
+    const pending = pane._pendingOutput;
+    pane._pendingOutput = '';
+    pane.term.write(pending);
+}
 function showPlaceholderConnecting(index) {
     calls.connecting.push(index);
     calls.order.push('connecting');
@@ -256,9 +272,23 @@ async function openMenu(index, session, options) {
     if (Object.prototype.hasOwnProperty.call(opts, 'windowsShells')) {
         LOCAL_SHELL_MODES_AVAILABLE = opts.windowsShells;
     }
+    /* A live, attached pane holding whatever the outgoing program queued: the
+       relaunch has to get that in front of its own teardown. */
     terminals[index] = {
         _session: session,
-        term: { reset() { calls.order.push('term-reset'); } }
+        _attached: true,
+        _pendingOutput: Object.prototype.hasOwnProperty.call(opts, 'pending') ? opts.pending : '',
+        term: {
+            reset() { calls.order.push('term-reset'); },
+            write(data) {
+                calls.writes.push(data);
+                calls.order.push(
+                    data === window.GridVibeTerminalModes.MOUSE_REPORTING_RESET
+                        ? 'mouse-teardown'
+                        : 'pane-write'
+                );
+            }
+        }
     };
     sessionIds[index] = session.session_id || 'sess-1';
     const card = { querySelector: () => paneMenu(index) };
@@ -299,6 +329,7 @@ class TerminalShellMenuTestCase(unittest.TestCase):
     def _run_node(self, body: str):
         script = (
             HARNESS_STUBS
+            + TERMINAL_MODES_JS.read_text(encoding="utf-8")
             + AGENT_IDENTITY_JS.read_text(encoding="utf-8")
             + (STATIC_JS / "agent-glyphs.js").read_text(encoding="utf-8")
             + PANE_IDENTITY_SOURCE
@@ -750,7 +781,13 @@ class RelaunchedPaneOverlayTestCase(TerminalShellMenuTestCase):
         # The reset rides in front for the same reason: the backend has already
         # dropped the old shell's replay buffer, so a reset that waited for the
         # response would clear what the new shell had drawn in the meantime.
-        self.assertEqual(result["order"], ["term-reset", "connecting", "request"])
+        # The mouse teardown is the one thing that comes *after* the answer —
+        # it draws nothing, so it cannot wipe anything, and by then the program
+        # that kept re-arming the mode is gone.
+        self.assertEqual(
+            result["order"],
+            ["term-reset", "connecting", "request", "mouse-teardown"],
+        )
         self.assertEqual(result["connecting"], [0])
 
     def test_a_refused_relaunch_takes_its_own_spinner_back_off(self):
@@ -803,6 +840,105 @@ class RelaunchedPaneOverlayTestCase(TerminalShellMenuTestCase):
         self.assertEqual(result["synced"], [])
         # The failure is still reported: the toast is not addressed to a pane.
         self.assertEqual(result["toasts"], ["claude is not installed"])
+
+
+class RelaunchedPaneMouseReportingTestCase(TerminalShellMenuTestCase):
+    """The pointer movement a relaunched pane used to start typing at its shell.
+
+    Mouse reporting belongs to whatever runs in the pane: a TUI arms it with
+    `\\x1b[?1003h` and re-asserts it on every redraw. Relaunching a pane off an
+    agent and onto a plain shell resets the xterm *before* the request, which
+    disarms the mode — and then the agent, still alive while the request is in
+    flight, goes on redrawing. Those bytes are written to the pane after the
+    reset that cleared them, so the plain shell that inherits the prompt gets
+    every pointer movement typed at it and Enter submits the lot.
+
+    That is the pane `terminal-modes.js` exists to rescue, and until now only
+    the Reset view button rescued it. Here GridVibe caused the state itself, so
+    the relaunch undoes it without the reader having to notice.
+    """
+
+    def test_the_teardown_is_written_once_the_old_shell_is_gone(self):
+        result = self._run_node(
+            """
+            const rows = await openMenu(0, sshPane({
+                startup_mode: 'agent', agent_selection: 'claude'
+            }));
+            await press(0, rows.find(row => row.label === 'Plain shell'));
+            report({
+                order: calls.order,
+                writes: calls.writes,
+                teardown: window.GridVibeTerminalModes.MOUSE_REPORTING_RESET
+            });
+            """
+        )
+        self.assertEqual(result["writes"], [result["teardown"]])
+        # After the answer, never before it: the program that kept re-arming
+        # the mode is only gone once the route has replaced it.
+        self.assertLess(
+            result["order"].index("request"),
+            result["order"].index("mouse-teardown"),
+        )
+
+    def test_the_dying_agents_queued_bytes_land_before_the_teardown(self):
+        """A backlog held behind a not-yet-fitted pane is exactly where the
+        re-arming redraw sits, so a teardown written in front of it would be
+        undone by the very bytes it exists to undo."""
+        result = self._run_node(
+            """
+            const rows = await openMenu(0, sshPane({
+                startup_mode: 'agent', agent_selection: 'claude'
+            }), { pending: '\\u001b[?1003h\\u001b[?1006hredraw' });
+            await press(0, rows.find(row => row.label === 'Plain shell'));
+            report({ order: calls.order, writes: calls.writes });
+            """
+        )
+        self.assertEqual(
+            result["order"],
+            ["term-reset", "connecting", "request", "pane-write", "mouse-teardown"],
+        )
+        self.assertEqual(result["writes"][0], "\x1b[?1003h\x1b[?1006hredraw")
+
+    def test_a_refused_relaunch_writes_no_teardown(self):
+        """Nothing was relaunched, so the pane is still running the TUI that
+        armed the mode — disarming it would break a live program instead."""
+        result = self._run_node(
+            """
+            RELAUNCH_REFUSED = true;
+            const rows = await openMenu(0, sshPane({
+                startup_mode: 'agent', agent_selection: 'claude'
+            }));
+            await press(0, rows.find(row => row.label === 'Plain shell'));
+            report({ order: calls.order, writes: calls.writes });
+            """
+        )
+        self.assertEqual(result["writes"], [])
+        self.assertNotIn("mouse-teardown", result["order"])
+
+    def test_the_teardown_follows_the_pane_whose_slot_changed_hands(self):
+        """The write is owed to the pane that asked for it, wherever the grid
+        has since put it — the same rule Reset view follows."""
+        result = self._run_node(
+            """
+            const rows = await openMenu(0, sshPane({
+                startup_mode: 'agent', agent_selection: 'claude'
+            }));
+            const asked = terminals[0];
+            const replacement = { _session: sshPane({ session_id: 'sess-other' }),
+                                  _attached: true, _pendingOutput: '',
+                                  term: { reset() {}, write() { throw new Error('wrong pane'); } } };
+            ON_RESPONSE = () => { terminals[0] = replacement; sessionIds[0] = 'sess-other'; };
+            await press(0, rows.find(row => row.label === 'Plain shell'));
+            report({
+                writes: calls.writes,
+                teardown: window.GridVibeTerminalModes.MOUSE_REPORTING_RESET,
+                askedStillHeld: calls.writes.length === 1
+            });
+            """
+        )
+        # The replacement pane's `write` throws, so reaching it at all would
+        # fail the harness rather than pass quietly.
+        self.assertEqual(result["writes"], [result["teardown"]])
 
 
 class PaneWithoutARelaunchTestCase(TerminalShellMenuTestCase):
