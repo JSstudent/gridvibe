@@ -161,6 +161,7 @@ from web.explorer import (  # noqa: F401 - some names re-exported for backwards 
     read_explorer_file_preview,
     save_explorer_file_payload,
 )
+from web.explorer_download import build_explorer_directory_archive
 from web.explorer_fs import (
     EXPLORER_UPLOAD_MAX_BYTES,
     create_explorer_entry_payload,
@@ -1570,7 +1571,7 @@ EXPLORER_DOWNLOAD_CHUNK_BYTES = 64 * 1024
 
 @app.route('/api/explorer/<session_id>/download', methods=['GET'])
 def download_explorer_file(session_id: str):
-    """Stream one explorer file as an attachment (read-only; binaries allowed).
+    """Stream one explorer file or one bounded directory ZIP as an attachment.
 
     Resolution, the root confinement check, the `stat` and the size cap all run
     *before* any byte of the response is committed, so a refusal is still a
@@ -1590,6 +1591,9 @@ def download_explorer_file(session_id: str):
     if session is None:
         return jsonify({"error": "Session not found"}), 404
     requested_path = request.args.get("path", "")
+    download_kind = request.args.get("kind", "file")
+    if download_kind not in {"file", "directory"}:
+        return jsonify({"error": "Download kind must be file or directory"}), 400
     error_types = (
         _sftp_request_error_types()
         if _is_remote_explorer_session(session)
@@ -1598,14 +1602,27 @@ def download_explorer_file(session_id: str):
     with contextlib.ExitStack() as resources:
         try:
             backend = resources.enter_context(_explorer_backend(session))
-            _root_path, file_path = backend.resolve_file(requested_path)
-            size, _modified = backend.stat_file(file_path)
-            if size is not None and size > EXPLORER_DOWNLOAD_MAX_BYTES:
-                return jsonify({"error": "File exceeds the 100 MB download limit"}), 400
-            filename = backend.basename(file_path) or "download"
-            handle = resources.enter_context(
-                contextlib.closing(backend.open_file_stream(file_path))
-            )
+            if download_kind == "directory":
+                archive = build_explorer_directory_archive(
+                    backend,
+                    requested_path,
+                    max_bytes=EXPLORER_DOWNLOAD_MAX_BYTES,
+                    chunk_bytes=EXPLORER_DOWNLOAD_CHUNK_BYTES,
+                )
+                size = archive.size
+                filename = archive.filename
+                mimetype = "application/zip"
+                handle = resources.enter_context(contextlib.closing(archive.handle))
+            else:
+                _root_path, file_path = backend.resolve_file(requested_path)
+                size, _modified = backend.stat_file(file_path)
+                if size is not None and size > EXPLORER_DOWNLOAD_MAX_BYTES:
+                    return jsonify({"error": "File exceeds the 100 MB download limit"}), 400
+                filename = backend.basename(file_path) or "download"
+                mimetype = "application/octet-stream"
+                handle = resources.enter_context(
+                    contextlib.closing(backend.open_file_stream(file_path))
+                )
         except ValueError as exc:
             return jsonify({"error": str(exc)}), 400
         except error_types as exc:
@@ -1649,7 +1666,7 @@ def download_explorer_file(session_id: str):
     response = app.response_class(
         _stream(),
         status=206 if partial else 200,
-        mimetype="application/octet-stream",
+        mimetype=mimetype,
     )
     response.headers.set("Content-Disposition", "attachment", filename=filename)
     response.headers["Cache-Control"] = "no-cache"

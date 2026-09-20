@@ -13,6 +13,7 @@ import sys
 import threading
 import time
 import unittest
+import zipfile
 from collections import deque
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -20156,6 +20157,50 @@ class ExplorerDownloadTestCase(unittest.TestCase):
         self.assertIn("artifact.bin", disposition)
         response.close()
 
+    def test_download_directory_returns_one_rooted_zip_archive(self):
+        source = self.root / "assets"
+        (source / "empty").mkdir(parents=True)
+        (source / "readme.txt").write_text("directory download", encoding="utf-8")
+        session_id = self._create_local_explorer_session()
+
+        response = self.client.get(
+            f"/api/explorer/{session_id}/download?path=assets&kind=directory"
+        )
+        body = response.get_data()
+        response.close()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers["Content-Type"], "application/zip")
+        self.assertEqual(response.headers["Content-Length"], str(len(body)))
+        self.assertIn("assets.zip", response.headers["Content-Disposition"])
+        with zipfile.ZipFile(io.BytesIO(body)) as archive:
+            self.assertEqual(
+                archive.namelist(),
+                ["assets/", "assets/empty/", "assets/readme.txt"],
+            )
+            self.assertEqual(archive.read("assets/readme.txt"), b"directory download")
+
+    def test_download_directory_rejects_a_file_path(self):
+        (self.root / "artifact.bin").write_bytes(b"data")
+        session_id = self._create_local_explorer_session()
+
+        response = self.client.get(
+            f"/api/explorer/{session_id}/download?path=artifact.bin&kind=directory"
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("not a directory", response.get_json()["error"])
+
+    def test_download_rejects_an_unknown_kind(self):
+        session_id = self._create_local_explorer_session()
+
+        response = self.client.get(
+            f"/api/explorer/{session_id}/download?path=assets&kind=archive"
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("file or directory", response.get_json()["error"])
+
     def test_download_unknown_session_returns_404(self):
         response = self.client.get("/api/explorer/missing/download?path=x")
         self.assertEqual(response.status_code, 404)
@@ -20392,6 +20437,48 @@ class ExplorerDownloadTestCase(unittest.TestCase):
             response.close()
 
         self.assertEqual(body, payload)
+        self.assertTrue(fake_sftp.closed)
+
+    def test_remote_directory_download_uses_the_same_sftp_backend_and_releases_it(self):
+        api._evict_all_pooled_ssh_clients()
+        self.addCleanup(api._evict_all_pooled_ssh_clients)
+        group = api.session_manager.create_group(
+            name="SSH ZIP", connection_mode="ssh", layout="single", terminal_count=1
+        )
+        session = api.session_manager.create_session(
+            group_id=group.group_id,
+            host="example.com",
+            directory="/srv/app",
+            username="ubuntu",
+            mode="ssh",
+            startup_mode="explorer",
+            explorer_root_directory="/srv/app",
+        )
+        fake_sftp = FakeSftp(
+            {
+                "/srv/app": {"type": "directory"},
+                "/srv/app/assets": {"type": "directory"},
+                "/srv/app/assets/empty": {"type": "directory"},
+                "/srv/app/assets/report.bin": {"type": "file", "content": b"remote"},
+            }
+        )
+
+        with patch.object(
+            web_explorer, "_open_ssh_sftp", return_value=(MagicMock(), fake_sftp)
+        ):
+            response = self.client.get(
+                f"/api/explorer/{session.session_id}/download?path=assets&kind=directory"
+            )
+            self.assertFalse(fake_sftp.closed)
+            body = response.get_data()
+            response.close()
+
+        with zipfile.ZipFile(io.BytesIO(body)) as archive:
+            self.assertEqual(
+                archive.namelist(),
+                ["assets/", "assets/empty/", "assets/report.bin"],
+            )
+            self.assertEqual(archive.read("assets/report.bin"), b"remote")
         self.assertTrue(fake_sftp.closed)
 
     def test_file_viewer_ships_download_button(self):

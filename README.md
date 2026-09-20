@@ -194,13 +194,14 @@ A pane running an agent also renames itself after it: `Terminal 1` becomes `Clau
 Swap any pane between a terminal and a file explorer with one button — same directory, no re-navigation. Works on a local repo folder or a remote host over SFTP.
 
 - **Files follows your shell** — opening the explorer roots on the Git repository your terminal is standing in, whatever root the pane had before. `cd` somewhere else and open Files again to re-root there.
-- **Browse & preview** — breadcrumbs, a lazy Files tree, draggable file tabs, syntax-coloured source, rendered Markdown and Mermaid, inline images, and downloads.
+- **Browse & preview** — breadcrumbs, a lazy Files tree, draggable file tabs, syntax-coloured source, rendered Markdown and Mermaid, and inline images.
 - **Edit in place** — open any UTF-8 text file, edit it, and save with `Ctrl+S`. Saves are atomic, and a conflict prompt protects files that changed on disk.
 - **Search the repo** (`Ctrl+Shift+F`) — case, whole-word, regex, file-pattern, scope, and `.gitignore` controls, with results marked when a limit is hit.
 - **Find a file** — the Files tree's filter box finds files and folders by name anywhere under the root, with the matched part highlighted in place.
 - **Fold a level** — `Alt`-click a fold arrow to fold or unfold every folder beside it, so one click collapses the whole tree.
 - **Manage files** — create, copy, move, rename, and delete from the context menu. Every write stays inside the explorer root, nothing is ever overwritten, and deletion asks first.
 - **Upload files** — through the usual picker, from any folder row or the explorer bar. Local or SFTP, multi-select, 100 MB per file. A name already in use is numbered (`report (1).pdf`), never replaced.
+- **Download files & folders** — save files directly, or right-click any folder in Files or Preview to save it as one ZIP. Local and SFTP downloads are capped at 100 MB; multi-selected files still download individually.
 - **Select several** — `Ctrl`-click to add or remove rows, `Shift`-click for a range. Copy, Cut, Delete, Download, and Copy path act on the whole selection with one confirmation.
 - **Big files stay usable** — very large files open in a plain fast view with a notice saying what is turned off, and large diffs keep side-by-side layout, line numbers, and undo.
 - **Restores with your workspace** — root, ordered tabs, view mode, scroll, wrapping, folds, sidebar width, theme, and Markdown appearance.
