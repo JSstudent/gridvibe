@@ -4,6 +4,8 @@ All notable changes to GridVibe will be documented in this file.
 
 ## Unreleased
 
+## 1.12.0 - 2026-09-21
+
 - **(fix) Codex conversation names and directory downloads remain reliable under retries, limits, and resumes.** Codex `/rename` now reuses identities learned from terminal announcements as well as `codex resume` commands, invalidates the shared stale-name cache, and queues command and rename lookups that encounter the resolver ceiling. Local App Server probes enforce their output limit per read even when no newline arrives, while explicit thread names and the established thread-preview fallback continue to label panes and dashboard rows.
 
   Browser folder downloads now prepare one immutable ZIP and hand its tokenized URL to the download anchor, so large archives are not rebuilt by the status-check/download pair. Prepared archives have strong validators for safe range resumes; ad-hoc rebuilt ZIPs do not advertise ranges. Archive preparation has a wall-clock deadline, bounds each remaining SFTP operation to it, and releases the pooled SFTP channel as soon as the temporary ZIP is complete rather than holding it while the browser downloads local bytes.
