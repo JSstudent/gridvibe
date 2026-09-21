@@ -13,6 +13,7 @@ import os
 import re
 import select
 import shlex
+import shutil
 import socket
 import struct
 import subprocess
@@ -24,17 +25,31 @@ from typing import Any, Deque, Dict, Iterable, List, Optional, Tuple
 
 from sessions.manager import SessionStatus
 from web.agent_activity import (
+    announced_agent_title,
     apply_agent_events,
+    apply_conversation_name,
     blank_agent_activity,
     has_agent_screen_output,
     mask_agent_titles,
     note_agent_output,
     parse_agent_events,
 )
+from web.agent_conversations import (
+    CONVERSATION_PROVIDER_CODEX,
+    ConversationNameCache,
+    cache_key,
+    command_thread_id,
+    conversation_thread_id,
+    local_probe_target,
+    probe_conversation_name,
+    remote_probe_target,
+    retry_delay,
+)
 from web.agents import (
     AGENT_REGISTRY,
     _compose_agent_startup_command,
     _find_wsl_executable,
+    _normalize_agent_key,
     _powershell_single_quote,
 )
 from web.app import session_manager, socketio
@@ -708,7 +723,7 @@ def _note_shell_prompt(session_id: str, connection: Dict[str, Any]) -> bool:
     return _mark_runtime_agent_exited(session_id, "shell prompt")
 
 
-def _observe_agent_activity(connection: Dict[str, Any], output: str) -> None:
+def _observe_agent_activity(session_id: str, connection: Dict[str, Any], output: str) -> None:
     """Record what one pane just announced about itself, from its own output.
 
     The sibling of :func:`_observe_terminal_output_cwd`, and deliberately the
@@ -741,6 +756,355 @@ def _observe_agent_activity(connection: Dict[str, Any], output: str) -> None:
         if events:
             record = apply_agent_events(record, events, now)
     connection["agent_activity"] = record
+    _note_agent_conversation(session_id, connection, record)
+
+
+#: How many panes may be resolving a conversation name at once. A refusal
+#: costs the pane nothing but its name, and the announcement re-arms, so this
+#: is a ceiling on threads rather than a queue: the lookup is not work anybody
+#: is waiting for.
+CONVERSATION_RESOLVER_MAX_INFLIGHT = 6
+
+#: How long a pane whose lookup could not start waits before its unchanged
+#: announcement counts as new again. Without it, a pane that lost the race for
+#: a slot would re-ask on every chunk it writes.
+CONVERSATION_RESOLVER_DEFER_SECONDS = 15.0
+
+#: Names found so far, shared across panes: two panes resumed on one
+#: thread cost one lookup. Negative answers are deliberately not here --
+#: see `web/agent_conversations.py`'s `retry_delay`.
+conversation_names = ConversationNameCache()
+
+_conversation_resolvers: set = set()
+_conversation_resolver_lock = threading.Lock()
+
+
+def _note_agent_conversation(
+    session_id: str,
+    connection: Dict[str, Any],
+    record: Dict[str, Any],
+) -> None:
+    """Arm a conversation lookup when a pane starts announcing only an id.
+
+    This is on the pump's hot path -- every chunk of every pane, agent or not
+    -- so the first thing it does is the cheapest thing it can: compare the
+    announced title against the one this connection last armed on. They are
+    equal for every frame an agent paints, and the function returns without
+    reading a session, taking a lock or running a pattern.
+
+    Everything past that comparison happens once per *new* announcement, which
+    is what keeps the whole feature off the poll: a dashboard read still reads
+    a dictionary, and the lookup is paid for by the pane that changed.
+    """
+    title = announced_agent_title(record)
+    if title == connection.get("agent_conversation_title"):
+        deferred = float(connection.get("agent_conversation_deferred_until") or 0.0)
+        if deferred <= 0.0 or time.time() < deferred:
+            return
+    connection["agent_conversation_title"] = title
+    connection["agent_conversation_deferred_until"] = 0.0
+    thread_id = conversation_thread_id(title)
+    if not thread_id:
+        return
+    session = session_manager.get_session(session_id)
+    if session is None or getattr(session, "startup_mode", "") != "agent":
+        return
+    if _normalize_agent_key(getattr(session, "agent_selection", "")) != CONVERSATION_PROVIDER_CODEX:
+        return
+    if not _start_conversation_resolver(session_id, connection, title, thread_id):
+        connection["agent_conversation_deferred_until"] = (
+            time.time() + CONVERSATION_RESOLVER_DEFER_SECONDS
+        )
+
+
+#: Lines a reader submits inside the Codex TUI that put the pane in a
+#: *different* conversation. Nothing announces this: a pane with no
+#: ``thread-title`` override names its project, and the project does not
+#: change when the chat does -- so the submitted line is the only observation
+#: there is, and without it a resolved name would go on labelling a
+#: conversation the reader has left.
+CONVERSATION_SWITCH_COMMANDS = frozenset({"/new", "/resume", "/fork"})
+
+#: And the line that keeps the conversation but changes its answer.
+CONVERSATION_RENAME_COMMANDS = frozenset({"/rename", "/name"})
+
+
+def _note_agent_conversation_command(
+    session_id: str,
+    connection: Optional[Dict[str, Any]],
+    command: Any,
+) -> None:
+    """Arm a lookup from the command that started this pane's agent.
+
+    The trigger that answers for a pane GridVibe did not compose the command
+    for. ``codex resume <uuid>`` names the conversation outright, whether the
+    launcher carried that line or the reader typed it at the prompt -- and it
+    is the case the announcement cannot answer, because GridVibe applies the
+    ``thread-title`` override to the built-in ``codex`` and to nothing else,
+    so a resumed pane announces its project and never its thread.
+
+    The command is kept beside the answer because it is what a later rename
+    re-reads; it is launch metadata the pane already carries, and no part of
+    it reaches a payload.
+    """
+    if connection is None:
+        return
+    line = str(command or "")
+    thread_id = command_thread_id(line)
+    if not thread_id:
+        return
+    with connection_lock:
+        connection["agent_conversation_command"] = line
+    _start_conversation_resolver(session_id, connection, None, thread_id)
+
+
+def _note_agent_conversation_switch(
+    session_id: str,
+    connection: Dict[str, Any],
+    session: Any,
+    submitted_line: str,
+) -> None:
+    """Stop naming a conversation the reader has just left, or just renamed.
+
+    Read off complete submitted lines, never keystrokes or agent output, the
+    way the runtime-exit watcher reads ``/exit``. A switch drops the name
+    outright: the pane's identity is unknown again and ``New session`` is the
+    honest answer until something says otherwise. A rename keeps the identity
+    and re-asks -- refusing the name it just dropped, because a rename the
+    reader is still typing would otherwise be answered with the old one and
+    settled.
+    """
+    if not connection:
+        return
+    if _normalize_agent_key(getattr(session, "agent_selection", "")) != CONVERSATION_PROVIDER_CODEX:
+        return
+    words = str(submitted_line or "").strip().split()
+    verb = words[0].lower() if words else ""
+    if verb in CONVERSATION_SWITCH_COMMANDS:
+        _forget_agent_conversation(connection)
+        return
+    if verb not in CONVERSATION_RENAME_COMMANDS:
+        return
+    with connection_lock:
+        command = str(connection.get("agent_conversation_command") or "")
+        previous = str((connection.get("agent_conversation") or {}).get("name") or "")
+    thread_id = command_thread_id(command)
+    if not thread_id:
+        return
+    target = _conversation_probe_target(session, connection)
+    if target:
+        conversation_names.forget(cache_key(CONVERSATION_PROVIDER_CODEX, target, thread_id))
+    _forget_agent_conversation(connection, forget_command=False)
+    _start_conversation_resolver(
+        session_id,
+        connection,
+        None,
+        thread_id,
+        # One rung of the published schedule before the first read: a
+        # rename the reader is still typing would otherwise be answered
+        # instantly with the name it is replacing.
+        start_delay=retry_delay(0) or 0.0,
+        reject_name=previous,
+    )
+
+
+def _start_conversation_resolver(
+    session_id: str,
+    connection: Dict[str, Any],
+    title: Optional[str],
+    thread_id: str,
+    *,
+    start_delay: float = 0.0,
+    reject_name: str = "",
+) -> bool:
+    """Hand one pane's lookup to its own thread, or refuse and say so.
+
+    One resolver per pane and a ceiling across all of them, because the thread
+    outlives the first attempt: it owns the whole negative schedule and sleeps
+    between the tries rather than waking anything up to ask again.
+    """
+    with _conversation_resolver_lock:
+        if session_id in _conversation_resolvers:
+            return False
+        if len(_conversation_resolvers) >= CONVERSATION_RESOLVER_MAX_INFLIGHT:
+            return False
+        _conversation_resolvers.add(session_id)
+    try:
+        threading.Thread(
+            target=_resolve_agent_conversation,
+            args=(session_id, connection, title, thread_id),
+            kwargs={"start_delay": start_delay, "reject_name": reject_name},
+            name=f"gridvibe-conversation-{session_id[:8]}",
+            daemon=True,
+        ).start()
+    except RuntimeError:
+        with _conversation_resolver_lock:
+            _conversation_resolvers.discard(session_id)
+        return False
+    return True
+
+
+def _conversation_probe_target(
+    session: Any,
+    connection: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Describe where this pane's threads are stored, which is where it runs.
+
+    A thread store belongs to one machine and one account, so the answer for
+    an SSH pane is its own transport and the answer for a WSL pane is inside
+    that distribution. Asking this host about either would answer confidently
+    about somebody else's threads.
+    """
+    binary = str(
+        (AGENT_REGISTRY.get(CONVERSATION_PROVIDER_CODEX) or {}).get("binary")
+        or CONVERSATION_PROVIDER_CODEX
+    )
+    if connection.get("kind") == "ssh":
+        client = connection.get("client")
+        transport = client.get_transport() if client is not None else None
+        return remote_probe_target(
+            transport,
+            binary,
+            username=str(getattr(session, "username", "") or ""),
+            host=str(getattr(session, "host", "") or ""),
+            port=getattr(session, "port", 22),
+        )
+    shell_kind = str(connection.get("shell_kind") or "") or _local_shell_kind(session)
+    if shell_kind == "wsl":
+        return local_probe_target(
+            binary,
+            shell_kind="wsl",
+            distribution=_resolve_wsl_distribution(session),
+            wsl_executable=_find_wsl_executable() or "",
+        )
+    return local_probe_target(
+        binary,
+        shell_kind=shell_kind,
+        resolved_binary=shutil.which(binary) or "",
+    )
+
+
+def _conversation_announcement_is_current(
+    session_id: str,
+    connection: Dict[str, Any],
+    title: Optional[str],
+) -> bool:
+    """Is this still the same pane, and still asking the same question?
+
+    Ownership always: a replaced connection means the lookup is about a pane
+    that no longer exists. The announcement only when the lookup came from
+    one -- a changed title then means the pane has answered the question
+    itself while the lookup was out. A command-borne lookup states no title,
+    because the pane never announced its conversation in the first place and
+    a title change says nothing about it either way.
+    """
+    with connection_lock:
+        if ssh_connections.get(session_id) is not connection:
+            return False
+    if title is None:
+        return True
+    return announced_agent_title(connection.get("agent_activity")) == title
+
+
+def _resolve_agent_conversation(
+    session_id: str,
+    connection: Dict[str, Any],
+    title: Optional[str],
+    thread_id: str,
+    *,
+    start_delay: float = 0.0,
+    reject_name: str = "",
+) -> None:
+    """Find out what one announced thread is called, then say so -- or stop.
+
+    The whole negative schedule belongs to this one announcement and runs in
+    this one thread: Codex names a thread from its opening turns, so a pane
+    that has just opened one is expected to be told "no name yet", and it is
+    asked again a few times, further apart each time, before it keeps its
+    fallback. Sleeping here rather than re-arming from the stream is what keeps
+    the retry off every other path -- nothing polls, and a pane retired
+    mid-sleep simply fails the next ownership check.
+
+    Only the *name* is remembered across panes. A thread that had no name when
+    one pane asked is a thread the next pane asks about again, because by then
+    it very likely has one; caching that silence would make the first pane's
+    answer permanent for every pane after it.
+    """
+    try:
+        if start_delay > 0:
+            time.sleep(start_delay)
+        session = session_manager.get_session(session_id)
+        if session is None:
+            return
+        target = _conversation_probe_target(session, connection)
+        if not target:
+            return
+        key = cache_key(CONVERSATION_PROVIDER_CODEX, target, thread_id)
+        known = conversation_names.resolved_name(key)
+        if known and known != reject_name:
+            _publish_agent_conversation(session_id, connection, title, known)
+            return
+        attempt = 0
+        while _conversation_announcement_is_current(session_id, connection, title):
+            _, name = probe_conversation_name(target, thread_id)
+            if name and name != reject_name:
+                conversation_names.remember(key, name)
+                _publish_agent_conversation(session_id, connection, title, name)
+                return
+            delay = retry_delay(attempt)
+            if delay is None:
+                return
+            attempt += 1
+            time.sleep(delay)
+    except Exception as exc:  # a name is never worth a raised pump thread
+        logger.debug("Conversation name lookup failed for %s: %s", session_id, exc)
+    finally:
+        with _conversation_resolver_lock:
+            _conversation_resolvers.discard(session_id)
+
+
+def _publish_agent_conversation(
+    session_id: str,
+    connection: Dict[str, Any],
+    title: Optional[str],
+    name: str,
+) -> bool:
+    """Write a resolved name back, but only while its connection is current.
+
+    The same ownership rule :func:`_publish_observed_cwd` follows, and for the
+    same reason: a lookup started for one pane must not name the pane that
+    replaced it. What travels with the name is the *announcement* it answers
+    for, never the thread id, so nothing downstream ever holds an identifier
+    -- and the reader can drop the name without knowing what one looks like.
+    A command-borne name answers for no announcement and states none, which is
+    what tells the reader to hold it to the pane instead.
+    """
+    record = {"provider": CONVERSATION_PROVIDER_CODEX, "name": name}
+    if title is not None:
+        record["title"] = title
+    with connection_lock:
+        if ssh_connections.get(session_id) is not connection:
+            return False
+        connection["agent_conversation"] = record
+    return True
+
+
+def _forget_agent_conversation(
+    connection: Optional[Dict[str, Any]],
+    *,
+    forget_command: bool = True,
+) -> None:
+    """Drop a pane's resolved name, and by default the identity under it.
+
+    A rename keeps the identity -- the pane is in the same conversation, which
+    is now called something else -- so it asks for the name alone.
+    """
+    if connection is None:
+        return
+    with connection_lock:
+        connection.pop("agent_conversation", None)
+        if forget_command:
+            connection.pop("agent_conversation_command", None)
 
 
 def agent_activity_snapshot() -> Dict[str, Dict[str, Any]]:
@@ -756,12 +1120,22 @@ def agent_activity_snapshot() -> Dict[str, Dict[str, Any]]:
     The title floor is applied here rather than by clearing the record, because
     the pump thread is the record's only writer and a second writer would race
     it. See :func:`~web.agent_activity.mask_agent_titles`.
+
+    A resolved conversation name is folded in on the way out for the same
+    reason, from the *other* key a connection carries -- the resolver thread
+    writes ``agent_conversation`` under this lock and the pump writes
+    ``agent_activity`` without it, so the two never share a writer. The order
+    matters: masking runs first, so a name whose announcement the floor has
+    just retired matches nothing and is dropped with it.
     """
     with connection_lock:
         return {
-            session_id: mask_agent_titles(
-                connection.get("agent_activity") or blank_agent_activity(),
-                float(connection.get("agent_title_floor") or 0.0),
+            session_id: apply_conversation_name(
+                mask_agent_titles(
+                    connection.get("agent_activity") or blank_agent_activity(),
+                    float(connection.get("agent_title_floor") or 0.0),
+                ),
+                connection.get("agent_conversation"),
             )
             for session_id, connection in ssh_connections.items()
         }
@@ -1285,6 +1659,10 @@ def _run_startup_sequence(connection: Dict[str, Any], session: Any):
             )
         else:
             _send_connection_input(connection, f"{startup_command}{newline}")
+            # The line that was actually run, which is where a resumed pane's
+            # conversation is named -- the pane itself will announce only its
+            # project. Nothing is waited on: the lookup is its own thread.
+            _note_agent_conversation_command(session_id, connection, startup_command)
 
     # Deliberately not the moment to arm an agent pane's retirement watch.
     # Nothing typed above has been *read* yet -- the pump only starts once this
@@ -1375,7 +1753,7 @@ def _decoded_terminal_output(session_id, connection, data=b'', *, final=False):
     decoder = connection.setdefault('decoder', codecs.getincrementaldecoder('utf-8')(errors='replace'))
     output = data if isinstance(data, str) else decoder.decode(data, final=final)
     _observe_terminal_output_cwd(session_id, connection, output)
-    _observe_agent_activity(connection, output)
+    _observe_agent_activity(session_id, connection, output)
     if connection.get('kind') == 'ssh':
         output = _scrub_ssh_startup_output(connection, output, force=final)
     _publish_ssh_terminal_output(session_id, output, connection)
@@ -1737,6 +2115,7 @@ def _track_current_terminal_agent_input(
         # an agent owns the pane. Only a shell (or an unassigned agent pane)
         # can promote a submitted command to a different runtime agent.
         if session and session.startup_mode == "agent" and session.agent_selection:
+            _note_agent_conversation_switch(session_id, connection, session, submitted_line)
             continue
         detected = _agent_from_terminal_command(submitted_line)
         if not detected:
@@ -1774,6 +2153,10 @@ def _track_current_terminal_agent_input(
                 session_id,
                 agent_selection,
             )
+            # The same reading as a launch: a typed `codex resume <uuid>`
+            # names the conversation the pane has just entered, and it is the
+            # only thing that does -- the pane will announce its project.
+            _note_agent_conversation_command(session_id, connection, initial_command)
             # No grace: the user was at a prompt to type this, so nothing of
             # GridVibe's is in flight and the pane's next prompt is this
             # command's own outcome -- the agent exiting, or never starting.
@@ -1810,6 +2193,12 @@ def _mark_runtime_agent_exited(session_id: str, reason: str) -> bool:
     if connection is not None:
         _disarm_agent_runtime(connection)
         connection["agent_title_floor"] = time.time()
+        # The floor already stops the retired agent's title from being read as
+        # a fact about the shell that inherited the pane, and a resolved
+        # conversation name is dropped with it because it is matched against
+        # that title. Dropping it here as well is the explicit half of the
+        # same rule: nothing about a conversation survives its agent.
+        _forget_agent_conversation(connection)
     logger.info("Detected runtime agent exit for session %s: %s", session_id, reason)
     _broadcast_session_status(session_id)
     return True

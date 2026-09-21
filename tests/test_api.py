@@ -22273,6 +22273,10 @@ class SettingsLauncherConfigTestCase(unittest.TestCase):
             )
             command = web_agents._compose_agent_startup_command(session)
             self.assertIn(' -c "tui.terminal_title=[\'thread-title\']"', command)
+            # Exactly once: the override is what makes the pane announce
+            # its thread at all, and a second copy would be a composer
+            # applying it twice rather than a CLI being asked twice.
+            self.assertEqual(command.count("tui.terminal_title"), 1)
             self.assertEqual(session.initial_command, "codex")
             self.assertEqual("--sandbox workspace-write" in command, auto)
         session.initial_command = "codex resume --last"

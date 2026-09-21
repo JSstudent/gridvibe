@@ -974,6 +974,89 @@ class DashboardDialogStructureTestCase(DashboardDialogTestCase):
             "New session \u00b7 10.0.0.5:app\n10.0.0.5: /srv/app\nSSH",
         )
 
+    def test_a_codex_row_reads_by_the_name_behind_the_id_it_announced(self):
+        """The defect this closes: a named thread that publishes only its id.
+
+        Codex is launched asking for `thread-title`, and a thread's title is
+        its id until something else is known -- so the row said `New session`
+        about a conversation Codex's own resume picker lists by name. The
+        backend resolves the name (`web/agent_conversations.py`) and publishes
+        it beside the announcement; the row paints the name and the id is
+        never on the surface at all.
+        """
+        result = self._run_node(
+            """
+            fetchAnswer = snapshot([group([pane({
+                agent_selection: 'codex',
+                activity: activity({
+                    title: '01a085f4-cc1c-7993-8ffc-2fd04d47c731',
+                    conversation_title: 'Review OCR delegation'
+                })
+            })])]);
+            showDashboard();
+            await settle();
+            report({
+                line: rowFor('pane:s1').label,
+                hover: rowFor('pane:s1').hover,
+                html: body().innerHTML
+            });
+            """
+        )
+        self.assertEqual(result["line"], "Review OCR delegation")
+        self.assertEqual(
+            result["hover"],
+            "Review OCR delegation\n10.0.0.5: /srv/app\nSSH",
+        )
+        self.assertNotIn("01a085f4", result["html"])
+
+    def test_a_name_that_arrives_later_rewrites_the_line_and_nothing_else(self):
+        """The lookup is asynchronous, so the row is painted before the answer.
+
+        The arriving name has to take the in-place path -- it is not a
+        structural change -- and the poll after it, which says exactly the same
+        thing, has to write nothing at all.
+        """
+        result = self._run_node(
+            """
+            dashboardShown();
+            const id = '01a085f4-cc1c-7993-8ffc-2fd04d47c731';
+            const unnamed = pane({ agent_selection: 'codex',
+                activity: activity({ title: id, state: 'idle', idle_seconds: 5 }) });
+            fetchAnswer = snapshot([group([unnamed])]);
+            await refreshAgentDashboard();
+            const originalHtml = body().innerHTML;
+            const line = { textContent: dashboardPaneLine(unnamed) };
+            const reading = { innerHTML: dashboardActivityHtml(unnamed) };
+            const progress = { innerHTML: dashboardProgressHtml(unnamed) };
+            const row = { dataset: { sessionId: 's1' }, title: dashboardPaneHover(unnamed),
+                querySelector: selector => ({
+                    '.dash-agent-line': line,
+                    '.dash-agent-reading': reading,
+                    '.dash-agent-progress': progress
+                }[selector]) };
+            body().querySelectorAll = () => [row];
+            const before = line.textContent;
+
+            const named = pane({ agent_selection: 'codex',
+                activity: activity({ title: id, conversation_title: 'Review OCR delegation',
+                    state: 'idle', idle_seconds: 5 }) });
+            fetchAnswer = snapshot([group([named])]);
+            await refreshAgentDashboard();
+            const after = line.textContent;
+
+            // The next poll says the same thing, so the row is left alone.
+            line.textContent = 'SENTINEL';
+            fetchAnswer = snapshot([group([named])]);
+            await refreshAgentDashboard();
+            report({ before, after, skipped: line.textContent,
+                sameButtons: body().innerHTML === originalHtml });
+            """
+        )
+        self.assertEqual(result["before"], "New session \u00b7 10.0.0.5:app")
+        self.assertEqual(result["after"], "Review OCR delegation")
+        self.assertEqual(result["skipped"], "SENTINEL")
+        self.assertTrue(result["sameButtons"])
+
     def test_the_active_chat_title_outranks_a_pane_label(self):
         result = self._run_node(
             """
