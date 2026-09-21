@@ -20118,6 +20118,8 @@ class ExplorerDownloadTestCase(unittest.TestCase):
         self.temp_dir = TemporaryDirectory()
         self.addCleanup(self.temp_dir.cleanup)
         self.root = Path(self.temp_dir.name)
+        api.prepared_directory_archives.clear()
+        self.addCleanup(api.prepared_directory_archives.clear)
 
     def _create_local_explorer_session(self):
         response = self.client.post(
@@ -20179,6 +20181,86 @@ class ExplorerDownloadTestCase(unittest.TestCase):
                 ["assets/", "assets/empty/", "assets/readme.txt"],
             )
             self.assertEqual(archive.read("assets/readme.txt"), b"directory download")
+
+    def test_direct_directory_download_does_not_offer_ranges_over_rebuilt_bytes(self):
+        source = self.root / "assets"
+        source.mkdir()
+        (source / "readme.txt").write_text("directory download", encoding="utf-8")
+        session_id = self._create_local_explorer_session()
+
+        response = self.client.get(
+            f"/api/explorer/{session_id}/download?path=assets&kind=directory",
+            headers={"Range": "bytes=10-19"},
+        )
+        body = response.get_data()
+        response.close()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers["Accept-Ranges"], "none")
+        self.assertNotIn("Content-Range", response.headers)
+        with zipfile.ZipFile(io.BytesIO(body)) as archive:
+            self.assertEqual(archive.read("assets/readme.txt"), b"directory download")
+
+    def test_prepared_directory_archive_is_built_once_and_resumes_exact_bytes(self):
+        source = self.root / "assets"
+        source.mkdir()
+        (source / "readme.txt").write_text("first contents", encoding="utf-8")
+        session_id = self._create_local_explorer_session()
+
+        with patch.object(
+            api,
+            "build_explorer_directory_archive",
+            wraps=api.build_explorer_directory_archive,
+        ) as build:
+            prepared = self.client.get(
+                f"/api/explorer/{session_id}/download?path=assets&kind=directory&prepare=1"
+            )
+            token = prepared.get_json()["token"]
+            (source / "readme.txt").write_text("changed afterwards", encoding="utf-8")
+
+            url = (
+                f"/api/explorer/{session_id}/download?path=assets&kind=directory"
+                f"&archive_token={token}"
+            )
+            whole = self.client.get(url)
+            whole_body = whole.get_data()
+            etag = whole.headers["ETag"]
+            whole.close()
+            mismatched = self.client.get(
+                url,
+                headers={"Range": "bytes=10-29", "If-Range": '"different"'},
+            )
+            mismatched_body = mismatched.get_data()
+            mismatched.close()
+            resumed = self.client.get(
+                url,
+                headers={"Range": "bytes=10-29", "If-Range": etag},
+            )
+            resumed_body = resumed.get_data()
+            resumed.close()
+
+        self.assertEqual(build.call_count, 1)
+        self.assertEqual(whole.status_code, 200)
+        self.assertEqual(mismatched.status_code, 200)
+        self.assertEqual(mismatched_body, whole_body)
+        self.assertEqual(resumed.status_code, 206)
+        self.assertEqual(resumed.headers["Accept-Ranges"], "bytes")
+        self.assertEqual(resumed.headers["ETag"], etag)
+        self.assertEqual(resumed_body, whole_body[10:30])
+        with zipfile.ZipFile(io.BytesIO(whole_body)) as archive:
+            self.assertEqual(archive.read("assets/readme.txt"), b"first contents")
+
+    def test_directory_archive_preparation_has_a_wall_clock_deadline(self):
+        (self.root / "assets").mkdir()
+        session_id = self._create_local_explorer_session()
+
+        with patch.object(api, "EXPLORER_DIRECTORY_DOWNLOAD_TIMEOUT_SECONDS", 0):
+            response = self.client.get(
+                f"/api/explorer/{session_id}/download?path=assets&kind=directory&prepare=1"
+            )
+
+        self.assertEqual(response.status_code, 504)
+        self.assertIn("too long", response.get_json()["error"])
 
     def test_download_directory_rejects_a_file_path(self):
         (self.root / "artifact.bin").write_bytes(b"data")
@@ -20469,7 +20551,9 @@ class ExplorerDownloadTestCase(unittest.TestCase):
             response = self.client.get(
                 f"/api/explorer/{session.session_id}/download?path=assets&kind=directory"
             )
-            self.assertFalse(fake_sftp.closed)
+            # The ZIP is complete in its temporary file, so its SFTP channel is
+            # returned before the browser starts consuming local archive bytes.
+            self.assertTrue(fake_sftp.closed)
             body = response.get_data()
             response.close()
 

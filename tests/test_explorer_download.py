@@ -129,6 +129,9 @@ const sandbox = {
             status: canned.status,
             headers: { get: name => (name === 'Content-Length' ? canned.length : null) },
             json: async () => {
+                if (canned.body !== undefined) {
+                    return canned.body;
+                }
                 if (canned.errorBody === undefined) {
                     throw new Error('not json');
                 }
@@ -194,6 +197,7 @@ function reset(queue) {
 }
 
 const ok = (length) => ({ ok: true, status: 200, length: String(length) });
+const prepared = (token) => ({ ok: true, status: 200, body: { token } });
 const gone = () => ({ ok: false, status: 404, errorBody: { error: 'File not found' } });
 const rows = (count) => Array.from({ length: count }, (_, i) => ({ path: `src/f${i}.txt` }));
 const snapshot = () => {
@@ -243,16 +247,16 @@ const snapshot = () => {
 
     // 6. A directory uses the same observable download path, but asks the
     //    endpoint for a ZIP and gives both browser/native saves that name.
-    reset([ok(12)]);
+    reset([prepared('directory-token')]);
     await sandbox.downloadExplorerFile(0, { path: 'src/assets', kind: 'directory' });
     results.directory = snapshot();
 
     // 7. Both browsing surfaces build the directory action from the row they
     //    actually received; choosing it reaches the same ZIP request above.
-    reset([ok(12)]);
+    reset([prepared('tree-token')]);
     results.treeDirectoryMenu = await directoryMenu('tree');
     results.treeDirectoryMenu.download = snapshot();
-    reset([ok(12)]);
+    reset([prepared('preview-token')]);
     results.previewDirectoryMenu = await directoryMenu('preview');
     results.previewDirectoryMenu.download = snapshot();
 
@@ -360,12 +364,14 @@ class ExplorerDownloadTestCase(unittest.TestCase):
         directory = self.results["directory"]
         self.assertEqual(
             directory["fetched"],
-            ["/api/explorer/s0/download?path=src%2Fassets&kind=directory"],
+            ["/api/explorer/s0/download?path=src%2Fassets&kind=directory&prepare=1"],
         )
+        self.assertIn("archive_token=directory-token", directory["anchors"][0]["href"])
+        self.assertEqual(directory["bodiesRead"], 0)
         self.assertEqual(directory["anchors"][0]["download"], "assets.zip")
         self.assertEqual(
             directory["toasts"],
-            [{"text": "Downloaded assets.zip", "kind": "success"}],
+            [{"text": "Downloading assets.zip…", "kind": "success"}],
         )
 
     def test_tree_and_preview_directory_rows_offer_the_same_download(self):
@@ -377,7 +383,7 @@ class ExplorerDownloadTestCase(unittest.TestCase):
                 self.assertIn("ZIP archive", menu["item"]["title"])
                 self.assertEqual(
                     menu["download"]["fetched"],
-                    ["/api/explorer/s0/download?path=src%2Fassets&kind=directory"],
+                    ["/api/explorer/s0/download?path=src%2Fassets&kind=directory&prepare=1"],
                 )
                 self.assertEqual(menu["download"]["anchors"][0]["download"], "assets.zip")
 

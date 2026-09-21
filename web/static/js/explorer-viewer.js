@@ -6230,6 +6230,41 @@
             }
         }
 
+        /* A directory is expensive to discover and compress, especially over
+           SFTP. Prepare it once while this fetch can still observe every
+           refusal, then hand the immutable token URL to the browser. The
+           anchor streams those already-built bytes and may safely resume them. */
+        if (directoryDownload) {
+            let response;
+            try {
+                response = await fetch(`${url}&prepare=1`);
+            } catch (error) {
+                return report({ ok: false, fileName, error: error?.message || String(error) });
+            }
+            if (!response.ok) {
+                let reason = `HTTP ${response.status}`;
+                try {
+                    const data = await response.json();
+                    if (data?.error) reason = data.error;
+                } catch (error) {
+                    // Keep the status when the response is not the API's JSON.
+                }
+                return report({ ok: false, fileName, error: reason });
+            }
+            try {
+                const prepared = await response.json();
+                const token = String(prepared?.token || '');
+                if (!token) throw new Error('Server did not prepare the directory archive');
+                triggerExplorerDownloadAnchor(
+                    `${url}&archive_token=${encodeURIComponent(token)}`,
+                    fileName
+                );
+                return report({ ok: true, fileName, message: `Downloading ${fileName}…` });
+            } catch (error) {
+                return report({ ok: false, fileName, error: error?.message || String(error) });
+            }
+        }
+
         /* Browser mode. A programmatic <a download> click cannot observe the
            response, so a stale row's 404, a 403, or the server's size refusal
            all landed as a green success toast and no file — and once a
