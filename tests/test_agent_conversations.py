@@ -36,6 +36,9 @@ What is pinned, and why each one is a way this could quietly go wrong:
   alone.** Codex names a thread from its opening turns, so the first answer is
   routinely "not yet" -- and an unbounded retry would be the poll this whole
   design exists to avoid.
+- **A newer conversation supersedes that retry immediately.** A fresh thread's
+  sleeping worker must not make the first `/resume` lose its one UUID
+  announcement and wait for unrelated terminal output to try again.
 - **The answer belongs to the announcement it answers for.** A retired
   connection cannot name its replacement, a pane that has since said something
   else is answered by that, and the title floor takes the resolved name with
@@ -45,6 +48,7 @@ What is pinned, and why each one is a way this could quietly go wrong:
 import json
 import socket
 import sys
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -69,6 +73,7 @@ from web.agent_activity import (  # noqa: E402
 THREAD_ID = "019d2e46-065b-7b22-aa9e-51bb915be2ff"
 OTHER_THREAD_ID = "01a041fa-3a1a-71e3-8827-b75ec6aefe6f"
 THREAD_NAME = "Review OCR delegation"
+THREAD_PREVIEW = "Split your pane side by side using GridVibe MCP"
 
 ESC = "\x1b"
 BEL = "\x07"
@@ -79,13 +84,20 @@ def title_sequence(text: str) -> str:
     return f"{ESC}]0;{text}{BEL}"
 
 
-def answer_line(thread_id: str = THREAD_ID, name=THREAD_NAME) -> str:
+def answer_line(thread_id: str = THREAD_ID, name=THREAD_NAME, preview="") -> str:
     """One `thread/read` answer, in the shape the app server really sends."""
     return json.dumps(
         {
             "jsonrpc": "2.0",
             "id": conversations.APP_SERVER_THREAD_READ_ID,
-            "result": {"thread": {"id": thread_id, "name": name, "cwd": "/srv/app"}},
+            "result": {
+                "thread": {
+                    "id": thread_id,
+                    "name": name,
+                    "preview": preview,
+                    "cwd": "/srv/app",
+                }
+            },
         }
     )
 
@@ -252,8 +264,19 @@ class ThreadReadExchangeTestCase(unittest.TestCase):
 
     def test_a_named_thread_answers_with_its_name(self):
         self.assertEqual(
-            conversations.parse_thread_read_output(answer_line(), THREAD_ID),
+            conversations.parse_thread_read_output(
+                answer_line(preview=THREAD_PREVIEW), THREAD_ID
+            ),
             (conversations.LOOKUP_NAMED, THREAD_NAME),
+        )
+
+    def test_an_unnamed_thread_answers_with_its_preview(self):
+        """Resume history still has a useful label when no explicit name was set."""
+        self.assertEqual(
+            conversations.parse_thread_read_output(
+                answer_line(name=None, preview=THREAD_PREVIEW), THREAD_ID
+            ),
+            (conversations.LOOKUP_NAMED, THREAD_PREVIEW),
         )
 
     def test_a_thread_with_no_name_is_unnamed_and_not_unavailable(self):
@@ -266,6 +289,14 @@ class ThreadReadExchangeTestCase(unittest.TestCase):
     def test_a_provider_that_names_a_thread_after_its_own_id_publishes_nothing(self):
         self.assertEqual(
             conversations.parse_thread_read_output(answer_line(name=THREAD_ID), THREAD_ID),
+            (conversations.LOOKUP_UNNAMED, ""),
+        )
+
+    def test_a_preview_that_is_only_the_thread_id_is_not_published(self):
+        self.assertEqual(
+            conversations.parse_thread_read_output(
+                answer_line(name=None, preview=THREAD_ID), THREAD_ID
+            ),
             (conversations.LOOKUP_UNNAMED, ""),
         )
 
@@ -861,6 +892,20 @@ class ConversationCommandObservationTestCase(unittest.TestCase):
                 self.assertNotIn("agent_conversation", self.connection)
                 self.assertNotIn("agent_conversation_command", self.connection)
 
+    def test_switching_conversations_cancels_the_fresh_threads_retry(self):
+        cancellation = threading.Event()
+        terminal._cancel_conversation_resolver("pane")
+        with terminal._conversation_resolver_lock:
+            terminal._conversation_resolvers["pane"] = cancellation
+        self.addCleanup(terminal._cancel_conversation_resolver, "pane")
+
+        terminal._note_agent_conversation_switch(
+            "pane", self.connection, self.session, "/resume"
+        )
+
+        self.assertTrue(cancellation.is_set())
+        self.assertNotIn("pane", terminal._conversation_resolvers)
+
     def test_ordinary_conversation_input_takes_nothing_away(self):
         terminal._note_agent_conversation_command(
             "pane", self.connection, f"codex resume {THREAD_ID}"
@@ -988,6 +1033,8 @@ class ConversationResolutionTestCase(unittest.TestCase):
     """The lookup loop itself: a miss, a wait, and the name that arrives."""
 
     def setUp(self):
+        terminal._cancel_conversation_resolver("pane")
+        self.addCleanup(terminal._cancel_conversation_resolver, "pane")
         self.registry = {}
         context = patch.object(terminal, "ssh_connections", self.registry)
         context.start()
@@ -1051,6 +1098,61 @@ class ConversationResolutionTestCase(unittest.TestCase):
             THREAD_NAME,
         )
 
+    def test_a_resumed_conversation_supersedes_the_fresh_threads_sleeping_retry(self):
+        """The first `/resume` must not lose to the unnamed fresh thread's worker."""
+        first_asked = threading.Event()
+        second_published = threading.Event()
+        original_publish = terminal._publish_agent_conversation
+
+        def probe(_target, thread_id, **_kwargs):
+            self.asked.append(thread_id)
+            if thread_id == THREAD_ID:
+                first_asked.set()
+                return conversations.LOOKUP_UNNAMED, ""
+            return conversations.LOOKUP_NAMED, THREAD_NAME
+
+        def publish(session_id, connection, title, name, **kwargs):
+            published = original_publish(
+                session_id, connection, title, name, **kwargs
+            )
+            if published and name == THREAD_NAME:
+                second_published.set()
+            return published
+
+        with (
+            patch.object(terminal, "probe_conversation_name", side_effect=probe),
+            patch.object(terminal, "retry_delay", return_value=2.0),
+            patch.object(
+                terminal, "_publish_agent_conversation", side_effect=publish
+            ),
+        ):
+            self.assertTrue(
+                terminal._start_conversation_resolver(
+                    "pane", self.connection, THREAD_ID, THREAD_ID
+                )
+            )
+            self.assertTrue(first_asked.wait(1.0))
+
+            self.connection["agent_activity"] = apply_agent_events(
+                self.connection["agent_activity"],
+                [(AGENT_EVENT_TITLE, OTHER_THREAD_ID)],
+                time.time(),
+            )
+            self.assertTrue(
+                terminal._start_conversation_resolver(
+                    "pane", self.connection, OTHER_THREAD_ID, OTHER_THREAD_ID
+                )
+            )
+            self.assertTrue(second_published.wait(1.0))
+
+        deadline = time.time() + 1.0
+        while "pane" in terminal._conversation_resolvers and time.time() < deadline:
+            time.sleep(0.01)
+
+        self.assertEqual(self.asked, [THREAD_ID, OTHER_THREAD_ID])
+        self.assertEqual(self.published(), THREAD_NAME)
+        self.assertNotIn("pane", terminal._conversation_resolvers)
+
     def test_a_thread_that_is_never_named_is_left_with_its_fallback(self):
         self.resolve()
 
@@ -1083,6 +1185,33 @@ class ConversationResolutionTestCase(unittest.TestCase):
         self.resolve()
 
         self.assertEqual(self.published(), "")
+
+    def test_a_cancelled_command_lookup_cannot_publish_its_late_answer(self):
+        """A `/resume` switch may cancel while app-server is still answering."""
+        cancellation = threading.Event()
+
+        def answer_then_cancel(_target, _thread_id, **_kwargs):
+            cancellation.set()
+            return conversations.LOOKUP_NAMED, THREAD_NAME
+
+        with patch.object(
+            terminal, "probe_conversation_name", side_effect=answer_then_cancel
+        ):
+            terminal._resolve_agent_conversation(
+                "pane",
+                self.connection,
+                None,
+                THREAD_ID,
+                cancel_event=cancellation,
+            )
+
+        self.assertEqual(self.published(), "")
+        self.assertEqual(
+            self.cache.resolved_name(
+                conversations.cache_key("codex", self.target, THREAD_ID)
+            ),
+            "",
+        )
 
     def test_a_pane_that_answered_the_question_itself_is_asked_nothing(self):
         self.connection["agent_activity"] = apply_agent_events(

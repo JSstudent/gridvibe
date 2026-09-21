@@ -775,7 +775,12 @@ CONVERSATION_RESOLVER_DEFER_SECONDS = 15.0
 #: see `web/agent_conversations.py`'s `retry_delay`.
 conversation_names = ConversationNameCache()
 
-_conversation_resolvers: set = set()
+#: The current resolver generation for each pane. A conversation switch must
+#: replace a sleeping retry immediately: keeping only a session-id set made the
+#: new UUID lose to the fresh thread's still-running retry schedule, after
+#: which no output necessarily arrived to re-arm it. The event both identifies
+#: the generation and wakes the superseded worker.
+_conversation_resolvers: Dict[str, threading.Event] = {}
 _conversation_resolver_lock = threading.Lock()
 
 
@@ -881,10 +886,12 @@ def _note_agent_conversation_switch(
     words = str(submitted_line or "").strip().split()
     verb = words[0].lower() if words else ""
     if verb in CONVERSATION_SWITCH_COMMANDS:
+        _cancel_conversation_resolver(session_id)
         _forget_agent_conversation(connection)
         return
     if verb not in CONVERSATION_RENAME_COMMANDS:
         return
+    _cancel_conversation_resolver(session_id)
     with connection_lock:
         command = str(connection.get("agent_conversation_command") or "")
         previous = str((connection.get("agent_conversation") or {}).get("name") or "")
@@ -908,6 +915,14 @@ def _note_agent_conversation_switch(
     )
 
 
+def _cancel_conversation_resolver(session_id: str) -> None:
+    """Retire and wake the current lookup for one pane, if it has one."""
+    with _conversation_resolver_lock:
+        cancellation = _conversation_resolvers.pop(session_id, None)
+    if cancellation is not None:
+        cancellation.set()
+
+
 def _start_conversation_resolver(
     session_id: str,
     connection: Dict[str, Any],
@@ -917,29 +932,39 @@ def _start_conversation_resolver(
     start_delay: float = 0.0,
     reject_name: str = "",
 ) -> bool:
-    """Hand one pane's lookup to its own thread, or refuse and say so.
+    """Hand one pane's lookup to its own cancellable thread.
 
-    One resolver per pane and a ceiling across all of them, because the thread
-    outlives the first attempt: it owns the whole negative schedule and sleeps
-    between the tries rather than waking anything up to ask again.
+    The current generation owns the whole negative schedule. A newer identity
+    for the same pane cancels that schedule and takes its place immediately;
+    only a different pane can be refused by the global ceiling.
     """
+    cancellation = threading.Event()
     with _conversation_resolver_lock:
-        if session_id in _conversation_resolvers:
+        previous = _conversation_resolvers.get(session_id)
+        if (
+            previous is None
+            and len(_conversation_resolvers) >= CONVERSATION_RESOLVER_MAX_INFLIGHT
+        ):
             return False
-        if len(_conversation_resolvers) >= CONVERSATION_RESOLVER_MAX_INFLIGHT:
-            return False
-        _conversation_resolvers.add(session_id)
+        if previous is not None:
+            previous.set()
+        _conversation_resolvers[session_id] = cancellation
     try:
         threading.Thread(
             target=_resolve_agent_conversation,
             args=(session_id, connection, title, thread_id),
-            kwargs={"start_delay": start_delay, "reject_name": reject_name},
+            kwargs={
+                "start_delay": start_delay,
+                "reject_name": reject_name,
+                "cancel_event": cancellation,
+            },
             name=f"gridvibe-conversation-{session_id[:8]}",
             daemon=True,
         ).start()
     except RuntimeError:
         with _conversation_resolver_lock:
-            _conversation_resolvers.discard(session_id)
+            if _conversation_resolvers.get(session_id) is cancellation:
+                _conversation_resolvers.pop(session_id, None)
         return False
     return True
 
@@ -1014,6 +1039,7 @@ def _resolve_agent_conversation(
     *,
     start_delay: float = 0.0,
     reject_name: str = "",
+    cancel_event: Optional[threading.Event] = None,
 ) -> None:
     """Find out what one announced thread is called, then say so -- or stop.
 
@@ -1023,16 +1049,20 @@ def _resolve_agent_conversation(
     asked again a few times, further apart each time, before it keeps its
     fallback. Sleeping here rather than re-arming from the stream is what keeps
     the retry off every other path -- nothing polls, and a pane retired
-    mid-sleep simply fails the next ownership check.
+    mid-sleep wakes the wait, and a newer conversation cancels the old
+    generation before it can publish an answer for the pane it no longer owns.
 
     Only the *name* is remembered across panes. A thread that had no name when
     one pane asked is a thread the next pane asks about again, because by then
     it very likely has one; caching that silence would make the first pane's
     answer permanent for every pane after it.
     """
+    cancellation = cancel_event or threading.Event()
     try:
-        if start_delay > 0:
-            time.sleep(start_delay)
+        if cancellation.is_set():
+            return
+        if start_delay > 0 and cancellation.wait(start_delay):
+            return
         session = session_manager.get_session(session_id)
         if session is None:
             return
@@ -1042,25 +1072,47 @@ def _resolve_agent_conversation(
         key = cache_key(CONVERSATION_PROVIDER_CODEX, target, thread_id)
         known = conversation_names.resolved_name(key)
         if known and known != reject_name:
-            _publish_agent_conversation(session_id, connection, title, known)
+            _publish_agent_conversation(
+                session_id,
+                connection,
+                title,
+                known,
+                cancel_event=cancellation,
+            )
             return
         attempt = 0
-        while _conversation_announcement_is_current(session_id, connection, title):
+        while (
+            not cancellation.is_set()
+            and _conversation_announcement_is_current(session_id, connection, title)
+        ):
             _, name = probe_conversation_name(target, thread_id)
+            if (
+                cancellation.is_set()
+                or not _conversation_announcement_is_current(session_id, connection, title)
+            ):
+                return
             if name and name != reject_name:
                 conversation_names.remember(key, name)
-                _publish_agent_conversation(session_id, connection, title, name)
+                _publish_agent_conversation(
+                    session_id,
+                    connection,
+                    title,
+                    name,
+                    cancel_event=cancellation,
+                )
                 return
             delay = retry_delay(attempt)
             if delay is None:
                 return
             attempt += 1
-            time.sleep(delay)
+            if cancellation.wait(delay):
+                return
     except Exception as exc:  # a name is never worth a raised pump thread
         logger.debug("Conversation name lookup failed for %s: %s", session_id, exc)
     finally:
         with _conversation_resolver_lock:
-            _conversation_resolvers.discard(session_id)
+            if _conversation_resolvers.get(session_id) is cancellation:
+                _conversation_resolvers.pop(session_id, None)
 
 
 def _publish_agent_conversation(
@@ -1068,6 +1120,8 @@ def _publish_agent_conversation(
     connection: Dict[str, Any],
     title: Optional[str],
     name: str,
+    *,
+    cancel_event: Optional[threading.Event] = None,
 ) -> bool:
     """Write a resolved name back, but only while its connection is current.
 
@@ -1084,6 +1138,12 @@ def _publish_agent_conversation(
         record["title"] = title
     with connection_lock:
         if ssh_connections.get(session_id) is not connection:
+            return False
+        # Checked while holding the same lock that a switch uses to forget the
+        # previous answer. If cancellation won first, this stale generation may
+        # not put its command-borne name back after `/resume` cleared it; if the
+        # publish won first, the following forget removes it.
+        if cancel_event is not None and cancel_event.is_set():
             return False
         connection["agent_conversation"] = record
     return True
@@ -2188,6 +2248,7 @@ def _mark_runtime_agent_exited(session_id: str, reason: str) -> bool:
     )
     if not updated:
         return False
+    _cancel_conversation_resolver(session_id)
     with connection_lock:
         connection = ssh_connections.get(session_id)
     if connection is not None:

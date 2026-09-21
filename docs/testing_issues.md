@@ -1,59 +1,7 @@
 # GridVibe Testing Issues
-Last updated: 2026-09-20
+Last updated: 2026-09-21
 
 ## Open Issues
-
-### Issue ID: ISSUE-2026-058
-- Title: Codex thread names can disappear from agent dashboards
-- Priority: Medium
-- Status: Open
-- Area: `web/agent_activity.py`, `web/terminal_io.py`, `web/agents.py`, `web/static/js/agent-identity.js`
-- Assignee: Unassigned
-- Tags: `agent`, `dashboard`, `terminal`, `session`, `codex`, `tests`
-- Reported: 2026-09-20
-
-Description:
-The agent dashboards can label a named Codex conversation as `New session · <location>` even while Codex's own resume picker knows and displays that conversation's user-facing name. GridVibe and Codex are answering from two independent channels: GridVibe reads only the latest OSC terminal title, while Codex's picker and its `To continue this session...` exit guidance read persisted thread metadata. A named thread may still publish a bare UUID (or no usable OSC title), and GridVibe deliberately rejects a bare UUID as an opaque identifier. The result looks intermittent because another unnamed Codex thread may publish useful prose over OSC and display correctly.
-
-Observed locally with Codex CLI 0.155.x. One affected persisted thread carried `thread_name: "Review OCR delegation"` in Codex's `session_index.jsonl`, and Codex's exit guidance said to run `codex resume` and select that named entry. Its GridVibe dashboard row did not show the name. A comparison thread had no session-index name, produced direct `codex resume <uuid>` guidance, and nevertheless displayed a useful dashboard title while running. The exact OSC value for the ended affected process is no longer available; that it published a bare UUID or nothing usable is an inference from the displayed fallback, not a captured fact. Independently, the live dashboard API was observed publishing bare Codex UUIDs for several panes and prose for another, confirming that both OSC forms currently reach GridVibe.
-
-Steps to reproduce:
-1. With Codex CLI 0.155.x, launch a built-in Codex agent pane through GridVibe, create or resume a conversation that Codex's resume picker lists with a user-facing name, and let the pane reach its prompt.
-2. Confirm the same UUID has a non-empty thread name in Codex's persisted thread listing or through Codex App Server `thread/read`.
-3. Open either GridVibe agent dashboard while the pane's OSC `thread-title` is still a bare UUID, or reproduce the input deterministically by passing a whole UUID as the Codex pane's `activity.title` to `paneChatLine()`.
-4. Observe that the dashboard says `New session · <location>` rather than the persisted Codex thread name. For comparison, an OSC title containing prose is shown immediately.
-
-Expected behavior:
-A Codex conversation that has a user-facing thread name is shown by that name in both agent dashboards. A genuinely unnamed thread keeps the existing `New session · <location>` fallback, and an opaque UUID is never presented as though it were a name.
-
-Actual behavior / logs:
-The stream observer accepts OSC 0/1/2, normalizes each title, and `describe_agent_activity()` publishes `tab_title or title` as `activity.title` (`web/agent_activity.py:195-222`, `:322-368`). No Codex thread metadata is consulted. `agentChatTitle()` then rejects whole UUIDs through `isOpaqueIdentifierTitle()` (`web/static/js/agent-identity.js:160-164`, `:303-324`), after which `paneChatLine()` emits the new-session fallback (`:357-374`). Both the dialog and docked sidebar use this same answer, so this is not a disagreement between dashboard renderers.
-
-The exact strings demonstrate where the loss occurs:
-
-```text
-activity.title = "<uuid>"
-paneChatLine()  = "New session · repo"
-
-activity.title = "Review OCR delegation (<uuid>)"
-paneChatLine()  = "Review OCR delegation (<uuid>)"
-```
-
-The second form is accepted by the current anchored UUID predicate. Therefore the missing name is not caused by GridVibe stripping a parenthesized UUID; that named string never reached the frontend as `activity.title`.
-
-GridVibe adds `tui.terminal_title=['thread-title']` only when the persisted built-in command is exactly `codex` (`web/agents.py:453-492`). A modified command such as `codex resume --last` is deliberately returned verbatim, so GridVibe-managed and custom resume paths can also differ in whether the conversation-title override is present. The plain `To continue this session...` line is ordinary terminal output, not an OSC event, and has no effect on the dashboard.
-
-### Proposed solution:
-Treat a whole Codex UUID observed over OSC as conversation identity to resolve, not as either a display title or proof that the thread is unnamed.
-
-- Add a bounded Codex conversation-name resolver, preferably in the planned `web/agent_conversations.py` owner from `docs/agent_conversation_restore_implementation_plan.md`. Use Codex's supported App Server `thread/read` metadata when available; it returns a stored thread's user-facing `name` without resuming it. Do not parse localized continuation prose, and do not make direct `session_index.jsonl` scraping the primary contract.
-- Resolve only when the current connection observes a new whole-title Codex UUID, never during each dashboard poll. Cache positive results by provider/environment/thread UUID and use a short, bounded negative retry schedule because Codex may assign a name after the UUID is first announced.
-- Run the lookup in the pane's own execution environment: locally for cmd/PowerShell, inside the selected WSL distribution, and over a bounded secondary channel for SSH. Failure or an unsupported Codex version leaves the existing fallback intact and must not delay terminal output or dashboard reads.
-- Keep the raw OSC title, resolved conversation name, and pane title as separate facts. Publish only the resolved human-readable name needed by the dashboard, not the UUID. `agentChatTitle()` should prefer a resolved name, then usable OSC prose; the manually typed pane title and `New session · <location>` remain the later fallbacks.
-- Before applying an asynchronous answer, verify that `ssh_connections[session_id]` is still the same connection and that its observed Codex UUID is unchanged. Clear the resolved value on relaunch, provider change, agent exit, or title-floor invalidation so a retired process cannot name its replacement.
-- Coordinate the work with the existing Codex OSC identity-capture and restore plan (`docs/agent_conversation_restore_implementation_plan.md:202-219`) so the UUID is recognized once. For GridVibe-composed Codex resume commands, apply the existing terminal-title override after composing the validated resume form; arbitrary custom commands should remain verbatim.
-
-Focused tests: extend `tests/test_agent_activity.py` for UUID observation, bounded resolution, cache/retry behavior, name arrival after an initial miss, and stale-connection rejection; extend `tests/test_agent_identity.py` for resolved-name precedence while preserving UUID rejection and the unnamed fallback; exercise local, WSL and SSH resolver adapters with injected processes/channels and strict time/output ceilings; and add command-composition cases proving a GridVibe-managed Codex resume receives the title override exactly once while an arbitrary custom command remains unchanged. Dashboard-dialog and sidebar tests should assert both surfaces paint the same resolved name and that an unchanged poll still skips repainting.
 
 ### Issue ID: ISSUE-2026-057
 - Title: An agent cannot re-root a pane above the explorer root the pane derived for itself
