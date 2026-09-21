@@ -4,6 +4,10 @@ All notable changes to GridVibe will be documented in this file.
 
 ## Unreleased
 
+- **(fix) Codex conversation names and directory downloads remain reliable under retries, limits, and resumes.** Codex `/rename` now reuses identities learned from terminal announcements as well as `codex resume` commands, invalidates the shared stale-name cache, and queues command and rename lookups that encounter the resolver ceiling. Local App Server probes enforce their output limit per read even when no newline arrives, while explicit thread names and the established thread-preview fallback continue to label panes and dashboard rows.
+
+  Browser folder downloads now prepare one immutable ZIP and hand its tokenized URL to the download anchor, so large archives are not rebuilt by the status-check/download pair. Prepared archives have strong validators for safe range resumes; ad-hoc rebuilt ZIPs do not advertise ranges. Archive preparation has a wall-clock deadline, bounds each remaining SFTP operation to it, and releases the pooled SFTP channel as soon as the temporary ZIP is complete rather than holding it while the browser downloads local bytes.
+
 - **(fix) Codex panes are named by the conversation they are in rather than by its id or the project folder.** A whole Codex thread UUID is now treated as identity to resolve, never as a label to paint. GridVibe reads the thread's name through Codex App Server in the pane's own local, WSL, or SSH environment; a resumed pane can also supply its identity from the command that started it when its terminal title only names the project. The lookup is asynchronous and bounded, retries briefly while a new thread is still unnamed, and publishes only a safe resolved name to the shared dashboard identity path.
 
   A user-set thread name wins, with the thread preview as the useful fallback when no explicit name exists. A newer conversation cancels any sleeping lookup for the old one, and lifecycle or in-TUI conversation switches clear the answer before stale work can restore it. Failed or unsupported lookups leave the existing `New session · <location>` line in place, and bare UUIDs remain hidden on both dashboards.
