@@ -147,6 +147,10 @@ for raw in sys.stdin:
         while True:
             sys.stdout.write("x" * 4096 + "\\n")
             sys.stdout.flush()
+    if mode == "unbroken_flood":
+        while True:
+            sys.stdout.write("x" * 4096)
+            sys.stdout.flush()
     if mode == "unknown":
         emit({"id": message["id"], "error": {"code": -32600, "message": "thread not loaded"}})
     elif mode == "unnamed":
@@ -270,13 +274,12 @@ class ThreadReadExchangeTestCase(unittest.TestCase):
             (conversations.LOOKUP_NAMED, THREAD_NAME),
         )
 
-    def test_an_unnamed_thread_answers_with_its_preview(self):
-        """Resume history still has a useful label when no explicit name was set."""
+    def test_an_unnamed_threads_first_prompt_is_not_published_as_its_name(self):
         self.assertEqual(
             conversations.parse_thread_read_output(
                 answer_line(name=None, preview=THREAD_PREVIEW), THREAD_ID
             ),
-            (conversations.LOOKUP_NAMED, THREAD_PREVIEW),
+            (conversations.LOOKUP_UNNAMED, ""),
         )
 
     def test_a_thread_with_no_name_is_unnamed_and_not_unavailable(self):
@@ -546,6 +549,15 @@ class LocalProbeRunnerTestCase(unittest.TestCase):
     def test_a_server_that_floods_is_cut_off_at_the_output_ceiling(self):
         started = time.monotonic()
         outcome, _ = self._probe("flood", timeout=15.0, max_output_bytes=16 * 1024)
+
+        self.assertEqual(outcome, conversations.LOOKUP_UNAVAILABLE)
+        self.assertLess(time.monotonic() - started, 10.0)
+
+    def test_a_server_without_newlines_is_cut_off_at_the_byte_ceiling(self):
+        started = time.monotonic()
+        outcome, _ = self._probe(
+            "unbroken_flood", timeout=15.0, max_output_bytes=16 * 1024
+        )
 
         self.assertEqual(outcome, conversations.LOOKUP_UNAVAILABLE)
         self.assertLess(time.monotonic() - started, 10.0)

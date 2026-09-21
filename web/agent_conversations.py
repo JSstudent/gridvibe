@@ -337,14 +337,10 @@ class ThreadReadReader:
             # A different thread's metadata answers nothing about this pane.
             self.outcome = LOOKUP_UNKNOWN
             return True
-        # A user-set thread title lives in ``name`` and must win. Ordinary
-        # threads may never acquire one, but app-server still gives history
-        # clients their ``preview`` as the summary used to identify the
-        # conversation. Resumed panes need that same fallback: unlike a fresh
-        # built-in launch, their terminal title only names the project.
+        # Only a user-set thread title is a name. ``preview`` is the opening
+        # prompt text used by history clients; publishing it here would expose
+        # the reader's prompt as though it were a title they chose.
         name = normalize_conversation_name(thread.get("name"), self.thread_id)
-        if not name:
-            name = normalize_conversation_name(thread.get("preview"), self.thread_id)
         self.outcome = LOOKUP_NAMED if name else LOOKUP_UNNAMED
         self.name = name
         return True
@@ -553,13 +549,20 @@ def run_local_probe(
 
     def _drain() -> None:
         total = 0
+        pending = bytearray()
         try:
-            for raw in process.stdout:  # type: ignore[union-attr]
+            read = getattr(process.stdout, "read1", process.stdout.read)  # type: ignore[union-attr]
+            while total < max_output_bytes:
+                raw = read(min(8192, max_output_bytes - total))
+                if not raw:
+                    break
                 total += len(raw)
-                if reader.feed_line(raw.decode("utf-8", errors="replace")):
-                    break
-                if total >= max_output_bytes:
-                    break
+                pending.extend(raw)
+                while b"\n" in pending:
+                    line, _, remainder = pending.partition(b"\n")
+                    pending = bytearray(remainder)
+                    if reader.feed_line(line.decode("utf-8", errors="replace")):
+                        return
         except (OSError, ValueError):
             pass
         finally:
