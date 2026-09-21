@@ -843,6 +843,7 @@ class ConversationCommandObservationTestCase(unittest.TestCase):
         terminal.conversation_names.clear()
         self.addCleanup(terminal.conversation_names.clear)
         self.started = []
+        self.real_start_conversation_resolver = terminal._start_conversation_resolver
         context = patch.object(
             terminal,
             "_start_conversation_resolver",
@@ -862,6 +863,7 @@ class ConversationCommandObservationTestCase(unittest.TestCase):
         title, thread_id, _ = self.started[0]
         self.assertIsNone(title)
         self.assertEqual(thread_id, THREAD_ID)
+        self.assertTrue(self.started[0][2].get("queue_if_full"))
         # Kept for a later rename to re-read; it never leaves the connection.
         self.assertEqual(
             self.connection["agent_conversation_command"], f"codex resume {THREAD_ID}"
@@ -957,6 +959,69 @@ class ConversationCommandObservationTestCase(unittest.TestCase):
         # a rename the reader is still typing would otherwise hand back.
         self.assertEqual(kwargs.get("reject_name"), "Old name")
         self.assertGreater(kwargs.get("start_delay"), 0)
+        self.assertTrue(kwargs.get("queue_if_full"))
+
+    def test_a_rename_reuses_the_identity_from_the_announcement(self):
+        terminal._publish_agent_conversation(
+            "pane", self.connection, THREAD_ID, "Old name"
+        )
+        self.connection["agent_conversation_title"] = THREAD_ID
+        target = {"kind": "local", "environment": "local", "argv": ["codex"]}
+        key = conversations.cache_key("codex", target, THREAD_ID)
+        terminal.conversation_names.remember(key, "Old name")
+
+        with patch.object(terminal, "_conversation_probe_target", return_value=target):
+            terminal._note_agent_conversation_switch(
+                "pane", self.connection, self.session, "/rename Something better"
+            )
+
+        self.assertNotIn("agent_conversation", self.connection)
+        self.assertEqual(terminal.conversation_names.resolved_name(key), "")
+        self.assertEqual(len(self.started), 1)
+        title, thread_id, kwargs = self.started[0]
+        self.assertEqual(title, THREAD_ID)
+        self.assertEqual(thread_id, THREAD_ID)
+        self.assertEqual(kwargs.get("reject_name"), "Old name")
+
+    def test_a_command_lookup_waiting_at_the_ceiling_gets_the_next_slot(self):
+        active = {}
+        started = []
+        with terminal._conversation_resolver_lock:
+            terminal._conversation_resolver_pending.clear()
+            for index in range(terminal.CONVERSATION_RESOLVER_MAX_INFLIGHT):
+                session_id = f"busy-{index}"
+                cancellation = threading.Event()
+                terminal._conversation_resolvers[session_id] = cancellation
+                active[session_id] = cancellation
+
+        def remember_start(thread):
+            started.append(thread)
+
+        try:
+            with (
+                patch.object(threading.Thread, "start", remember_start),
+                patch.object(
+                    terminal,
+                    "_start_conversation_resolver",
+                    side_effect=self.real_start_conversation_resolver,
+                ),
+            ):
+                terminal._note_agent_conversation_command(
+                    "pane", self.connection, f"codex resume {THREAD_ID}"
+                )
+                self.assertIn("pane", terminal._conversation_resolver_pending)
+
+                terminal._cancel_conversation_resolver("busy-0")
+
+            self.assertEqual(len(started), 1)
+            self.assertIn("pane", terminal._conversation_resolvers)
+            self.assertNotIn("pane", terminal._conversation_resolver_pending)
+        finally:
+            with terminal._conversation_resolver_lock:
+                terminal._conversation_resolver_pending.clear()
+                terminal._conversation_resolvers.clear()
+            for cancellation in active.values():
+                cancellation.set()
 
 
 class ConversationPublicationTestCase(unittest.TestCase):

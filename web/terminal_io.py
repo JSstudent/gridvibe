@@ -760,9 +760,9 @@ def _observe_agent_activity(session_id: str, connection: Dict[str, Any], output:
 
 
 #: How many panes may be resolving a conversation name at once. A refusal
-#: costs the pane nothing but its name, and the announcement re-arms, so this
-#: is a ceiling on threads rather than a queue: the lookup is not work anybody
-#: is waiting for.
+#: costs an announcement nothing but its name because output re-arms it.
+#: Command-borne identities have no such second signal, so they wait in the
+#: pane-keyed queue below without exceeding this thread ceiling.
 CONVERSATION_RESOLVER_MAX_INFLIGHT = 6
 
 #: How long a pane whose lookup could not start waits before its unchanged
@@ -781,6 +781,9 @@ conversation_names = ConversationNameCache()
 #: which no output necessarily arrived to re-arm it. The event both identifies
 #: the generation and wakes the superseded worker.
 _conversation_resolvers: Dict[str, threading.Event] = {}
+_conversation_resolver_pending: Dict[
+    str, Tuple[Dict[str, Any], Optional[str], str, float, str]
+] = {}
 _conversation_resolver_lock = threading.Lock()
 
 
@@ -860,7 +863,13 @@ def _note_agent_conversation_command(
         return
     with connection_lock:
         connection["agent_conversation_command"] = line
-    _start_conversation_resolver(session_id, connection, None, thread_id)
+    _start_conversation_resolver(
+        session_id,
+        connection,
+        None,
+        thread_id,
+        queue_if_full=True,
+    )
 
 
 def _note_agent_conversation_switch(
@@ -894,10 +903,20 @@ def _note_agent_conversation_switch(
     _cancel_conversation_resolver(session_id)
     with connection_lock:
         command = str(connection.get("agent_conversation_command") or "")
-        previous = str((connection.get("agent_conversation") or {}).get("name") or "")
+        conversation = connection.get("agent_conversation") or {}
+        previous = str(conversation.get("name") or "")
+        announced_title = str(
+            conversation.get("title")
+            or connection.get("agent_conversation_title")
+            or ""
+        )
     thread_id = command_thread_id(command)
+    title: Optional[str] = None
     if not thread_id:
-        return
+        thread_id = conversation_thread_id(announced_title)
+        if not thread_id:
+            return
+        title = announced_title
     target = _conversation_probe_target(session, connection)
     if target:
         conversation_names.forget(cache_key(CONVERSATION_PROVIDER_CODEX, target, thread_id))
@@ -905,22 +924,53 @@ def _note_agent_conversation_switch(
     _start_conversation_resolver(
         session_id,
         connection,
-        None,
+        title,
         thread_id,
         # One rung of the published schedule before the first read: a
         # rename the reader is still typing would otherwise be answered
         # instantly with the name it is replacing.
         start_delay=retry_delay(0) or 0.0,
         reject_name=previous,
+        queue_if_full=True,
     )
 
 
 def _cancel_conversation_resolver(session_id: str) -> None:
     """Retire and wake the current lookup for one pane, if it has one."""
     with _conversation_resolver_lock:
+        _conversation_resolver_pending.pop(session_id, None)
         cancellation = _conversation_resolvers.pop(session_id, None)
     if cancellation is not None:
         cancellation.set()
+        _start_next_pending_conversation_resolver()
+
+
+def _start_next_pending_conversation_resolver() -> None:
+    """Give one deferred command-borne lookup the next available slot."""
+    pending = None
+    with _conversation_resolver_lock:
+        if (
+            len(_conversation_resolvers) < CONVERSATION_RESOLVER_MAX_INFLIGHT
+            and _conversation_resolver_pending
+        ):
+            pending_session_id = next(iter(_conversation_resolver_pending))
+            pending = (
+                pending_session_id,
+                _conversation_resolver_pending.pop(pending_session_id),
+            )
+    if pending is None:
+        return
+    pending_session_id, args = pending
+    connection, title, thread_id, start_delay, reject_name = args
+    _start_conversation_resolver(
+        pending_session_id,
+        connection,
+        title,
+        thread_id,
+        start_delay=start_delay,
+        reject_name=reject_name,
+        queue_if_full=True,
+    )
 
 
 def _start_conversation_resolver(
@@ -931,12 +981,15 @@ def _start_conversation_resolver(
     *,
     start_delay: float = 0.0,
     reject_name: str = "",
+    queue_if_full: bool = False,
 ) -> bool:
     """Hand one pane's lookup to its own cancellable thread.
 
     The current generation owns the whole negative schedule. A newer identity
     for the same pane cancels that schedule and takes its place immediately;
-    only a different pane can be refused by the global ceiling.
+    only a different pane can be refused by the global ceiling. Command-borne
+    identities can opt into the pane-keyed queue because no later announcement
+    is guaranteed to re-arm them.
     """
     cancellation = threading.Event()
     with _conversation_resolver_lock:
@@ -945,9 +998,18 @@ def _start_conversation_resolver(
             previous is None
             and len(_conversation_resolvers) >= CONVERSATION_RESOLVER_MAX_INFLIGHT
         ):
+            if queue_if_full:
+                _conversation_resolver_pending[session_id] = (
+                    connection,
+                    title,
+                    thread_id,
+                    start_delay,
+                    reject_name,
+                )
             return False
         if previous is not None:
             previous.set()
+        _conversation_resolver_pending.pop(session_id, None)
         _conversation_resolvers[session_id] = cancellation
     try:
         threading.Thread(
@@ -965,6 +1027,7 @@ def _start_conversation_resolver(
         with _conversation_resolver_lock:
             if _conversation_resolvers.get(session_id) is cancellation:
                 _conversation_resolvers.pop(session_id, None)
+        _start_next_pending_conversation_resolver()
         return False
     return True
 
@@ -1113,6 +1176,7 @@ def _resolve_agent_conversation(
         with _conversation_resolver_lock:
             if _conversation_resolvers.get(session_id) is cancellation:
                 _conversation_resolvers.pop(session_id, None)
+        _start_next_pending_conversation_resolver()
 
 
 def _publish_agent_conversation(
