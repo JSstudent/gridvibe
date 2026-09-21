@@ -6,4 +6,4 @@
 # decorators (@server.list_tools / @server.call_tool) with an add_request_handler
 # registry, and the sidecar is written against the 1.x surface. Moving to 2.x
 # is its own piece of work, not a version bump.
-mcp>=1.9,<2.0
+mcp>=2.2.0,<3.0
