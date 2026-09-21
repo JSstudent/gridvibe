@@ -337,10 +337,14 @@ class ThreadReadReader:
             # A different thread's metadata answers nothing about this pane.
             self.outcome = LOOKUP_UNKNOWN
             return True
-        # Only a user-set thread title is a name. ``preview`` is the opening
-        # prompt text used by history clients; publishing it here would expose
-        # the reader's prompt as though it were a title they chose.
+        # A user-set thread title lives in ``name`` and must win. Ordinary
+        # threads may never acquire one, but app-server still gives history
+        # clients their ``preview`` as the summary used to identify the
+        # conversation. Resumed panes need that same fallback: unlike a fresh
+        # built-in launch, their terminal title only names the project.
         name = normalize_conversation_name(thread.get("name"), self.thread_id)
+        if not name:
+            name = normalize_conversation_name(thread.get("preview"), self.thread_id)
         self.outcome = LOOKUP_NAMED if name else LOOKUP_UNNAMED
         self.name = name
         return True

@@ -274,12 +274,13 @@ class ThreadReadExchangeTestCase(unittest.TestCase):
             (conversations.LOOKUP_NAMED, THREAD_NAME),
         )
 
-    def test_an_unnamed_threads_first_prompt_is_not_published_as_its_name(self):
+    def test_an_unnamed_thread_answers_with_its_preview(self):
+        """Resume history still has a useful label when no explicit name was set."""
         self.assertEqual(
             conversations.parse_thread_read_output(
                 answer_line(name=None, preview=THREAD_PREVIEW), THREAD_ID
             ),
-            (conversations.LOOKUP_UNNAMED, ""),
+            (conversations.LOOKUP_NAMED, THREAD_PREVIEW),
         )
 
     def test_a_thread_with_no_name_is_unnamed_and_not_unavailable(self):
