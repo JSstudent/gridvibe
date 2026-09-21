@@ -655,6 +655,34 @@ class DashboardSidebarRowTestCase(DashboardSidebarNodeTestCase):
         self.assertTrue(row["hover"].endswith("SSH"))
         self.assertEqual(result["totals"], "1 agent · 1 session · 1 workspace")
 
+    def test_a_resolved_conversation_name_paints_the_same_here(self):
+        """Same pane, same answer: the name the dialog paints for a Codex row
+        announcing only its id is the one this column paints, because both ask
+        the same module. A second reading of `conversation_title` here is how
+        one pane comes to read two ways on two surfaces."""
+        result = self._run_node(
+            """
+            sidebarShown();
+            const named = pane({
+                agent_selection: 'codex',
+                activity: activity({
+                    title: '01a085f4-cc1c-7993-8ffc-2fd04d47c731',
+                    conversation_title: 'Review OCR delegation'
+                })
+            });
+            fetchAnswer = snapshot([group([named])]);
+            await sidebar.refresh();
+            const row = parseAgentRows()[0];
+            report({ row, dialog: {
+                line: dashboardPaneLine(named), hover: dashboardPaneHover(named)
+            } });
+            """
+        )
+        self.assertEqual(result["row"]["line"], "Review OCR delegation")
+        self.assertEqual(result["row"]["line"], result["dialog"]["line"])
+        self.assertEqual(result["row"]["hover"], result["dialog"]["hover"])
+        self.assertNotIn("01a085f4", result["row"]["html"])
+
     def test_a_session_card_wears_its_own_tabs_colour(self):
         """The hue is `session-colour.js`'s answer keyed by group id — the same
         one the workspace tab strip paints — so a card is matched to its tab by

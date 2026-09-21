@@ -1933,8 +1933,8 @@
         /* Downloading is a read, so it belongs with the copy entries. It is
            offered per row (not only for the open file) because a format the
            viewer can't render never reaches editor mode and its toolbar
-           download button. Folders have no download endpoint, so a mixed
-           selection offers only the files in it. */
+           download button. One directory becomes one bounded ZIP; it is never
+           folded into the multi-file action or turned into a bulk archive. */
         const downloadTargets = multiTarget
             ? selectedTargets.filter(entry => entry.kind === 'file')
             : (row?.dataset.explorerDownloadPath
@@ -1953,6 +1953,25 @@
                     ? `Download the ${downloadTargets.length} selected files`
                     : `Download the ${downloadTargets.length} files in the selection; folders are skipped`,
                 action: () => downloadExplorerFiles(index, downloadTargets)
+            });
+        }
+        const directoryDownloadPath = (
+            (rowSurface === 'tree' || rowSurface === 'preview')
+            && row?.dataset.explorerContextKind === 'directory'
+        ) ? (row.dataset.explorerContextPath || relativePath) : '';
+        if (directoryDownloadPath) {
+            pathItems.push({
+                label: 'Download directory',
+                title: multiTarget
+                    ? 'Directory download works on one folder at a time'
+                    : `Download ${directoryDownloadPath} as a ZIP archive`,
+                disabled: multiTarget,
+                action: multiTarget
+                    ? null
+                    : () => downloadExplorerFile(index, {
+                        path: directoryDownloadPath,
+                        kind: 'directory'
+                    })
             });
         }
 
@@ -6143,7 +6162,8 @@
 
     /* `options.path` downloads a specific file instead of whatever the viewer
        has open — the context-menu entry point, so files GridVibe can't render
-       (and therefore never open in the editor) are still reachable.
+       (and therefore never open in the editor) are still reachable. Passing
+       `kind: 'directory'` asks the same endpoint for one bounded ZIP.
        `options.quiet` suppresses the per-file toast so a batch can report once
        instead of N times; the outcome is returned either way as
        `{ok, cancelled, fileName, error}`. */
@@ -6169,15 +6189,18 @@
         if (!pane || !sessionId) {
             return { ok: false, cancelled: true, fileName: '' };
         }
+        const directoryDownload = options.kind === 'directory';
         const explicitPath = String(options.path || '');
         if (!explicitPath && pane._explorerMode !== 'file') {
             return { ok: false, cancelled: true, fileName: '' };
         }
         const path = explicitPath || pane._explorerFilePath || '';
-        const fileName = explicitPath
+        const baseName = explicitPath
             ? (getDownloadBaseName(explicitPath) || 'download')
             : (pane._explorerFileName || 'download');
-        const url = `/api/explorer/${encodeURIComponent(sessionId)}/download?path=${encodeURIComponent(path)}`;
+        const fileName = directoryDownload ? `${baseName}.zip` : baseName;
+        const kindQuery = directoryDownload ? '&kind=directory' : '';
+        const url = `/api/explorer/${encodeURIComponent(sessionId)}/download?path=${encodeURIComponent(path)}${kindQuery}`;
 
         /* WebView2 silently ignores programmatic <a download> clicks, so in the
            native window route the save through the pywebview bridge (native
@@ -6202,6 +6225,41 @@
                     return report({ ok: false, cancelled: true, fileName });
                 }
                 return report({ ok: false, fileName, error: result?.error || 'unknown error' });
+            } catch (error) {
+                return report({ ok: false, fileName, error: error?.message || String(error) });
+            }
+        }
+
+        /* A directory is expensive to discover and compress, especially over
+           SFTP. Prepare it once while this fetch can still observe every
+           refusal, then hand the immutable token URL to the browser. The
+           anchor streams those already-built bytes and may safely resume them. */
+        if (directoryDownload) {
+            let response;
+            try {
+                response = await fetch(`${url}&prepare=1`);
+            } catch (error) {
+                return report({ ok: false, fileName, error: error?.message || String(error) });
+            }
+            if (!response.ok) {
+                let reason = `HTTP ${response.status}`;
+                try {
+                    const data = await response.json();
+                    if (data?.error) reason = data.error;
+                } catch (error) {
+                    // Keep the status when the response is not the API's JSON.
+                }
+                return report({ ok: false, fileName, error: reason });
+            }
+            try {
+                const prepared = await response.json();
+                const token = String(prepared?.token || '');
+                if (!token) throw new Error('Server did not prepare the directory archive');
+                triggerExplorerDownloadAnchor(
+                    `${url}&archive_token=${encodeURIComponent(token)}`,
+                    fileName
+                );
+                return report({ ok: true, fileName, message: `Downloading ${fileName}…` });
             } catch (error) {
                 return report({ ok: false, fileName, error: error?.message || String(error) });
             }

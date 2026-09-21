@@ -512,7 +512,7 @@ class DashboardObservationOwnershipTestCase(unittest.TestCase):
         with web_terminal_io.connection_lock:
             web_terminal_io.ssh_connections["s1"] = connection
         web_terminal_io._observe_agent_activity(
-            connection, f"{ESC}]0;Claude: writing tests{BEL}working..."
+            "s1", connection, f"{ESC}]0;Claude: writing tests{BEL}working..."
         )
         reading = web_terminal_io.agent_activity_snapshot()["s1"]
         self.assertEqual(reading["title"], "Claude: writing tests")
@@ -522,14 +522,14 @@ class DashboardObservationOwnershipTestCase(unittest.TestCase):
         retired = {"kind": "ssh"}
         with web_terminal_io.connection_lock:
             web_terminal_io.ssh_connections["s1"] = retired
-        web_terminal_io._observe_agent_activity(retired, f"{ESC}]0;old agent{BEL}")
+        web_terminal_io._observe_agent_activity("s1", retired, f"{ESC}]0;old agent{BEL}")
 
         replacement = {"kind": "ssh"}
         with web_terminal_io.connection_lock:
             web_terminal_io.ssh_connections["s1"] = replacement
         # The retiring shell's last frames can still be in flight, and they must
         # not put the old agent's title back on the pane that replaced it.
-        web_terminal_io._observe_agent_activity(retired, f"{ESC}]0;still old{BEL}")
+        web_terminal_io._observe_agent_activity("s1", retired, f"{ESC}]0;still old{BEL}")
 
         self.assertEqual(web_terminal_io.agent_activity_snapshot()["s1"]["title"], "")
 
@@ -649,7 +649,9 @@ class DashboardRouteTestCase(unittest.TestCase):
         with web_terminal_io.connection_lock:
             web_terminal_io.ssh_connections[agent.session_id] = connection
         web_terminal_io._observe_agent_activity(
-            connection, f"{ESC}]2;Claude: fixing the parser{BEL}{ESC}]9;4;1;65{BEL}"
+            agent.session_id,
+            connection,
+            f"{ESC}]2;Claude: fixing the parser{BEL}{ESC}]9;4;1;65{BEL}",
         )
 
         panes = self.client.get("/api/dashboard").get_json()["workspaces"][0]["groups"][0]["panes"]
@@ -665,7 +667,9 @@ class DashboardRouteTestCase(unittest.TestCase):
         connection = {"kind": "ssh"}
         with web_terminal_io.connection_lock:
             web_terminal_io.ssh_connections[agent.session_id] = connection
-        web_terminal_io._observe_agent_activity(connection, "Reticulating splines" + CRLF)
+        web_terminal_io._observe_agent_activity(
+            agent.session_id, connection, "Reticulating splines" + CRLF
+        )
 
         # Still pending as far as the transport is concerned, so the reading is
         # not yet a reading of anything.

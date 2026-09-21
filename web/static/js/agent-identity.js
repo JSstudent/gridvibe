@@ -35,10 +35,18 @@
        rather than pattern: a title that *is* the pane's own directory restates
        a fact the row already holds, whoever wrote it.
      · **An id is not a name either.** Codex is launched asking for its
-       `thread-title` (`web/agents.py`), and an unnamed thread's title *is* its
-       id, so a fresh Codex pane announces a bare UUID. `isOpaqueIdentifierTitle`
-       is a peer of the rule above rather than a clause in it: nothing about it
-       is a shell, and the honest reading is that the thread has no name yet.
+       `thread-title` (`web/agents.py`), and a thread's title *is* its id until
+       something else is known, so a Codex pane routinely announces a bare
+       UUID. `isOpaqueIdentifierTitle` is a peer of the rule above rather than
+       a clause in it: nothing about it is a shell.
+     · **But an id is something to look up.** A thread the reader has named is
+       one Codex's own resume picker lists by that name while the pane is
+       still announcing the id, so the backend resolves it
+       (`web/agent_conversations.py`) and publishes the *name* beside the
+       announcement it answers for. `activity.conversation_title` is that
+       answer, it leads the ladder, and it is absent whenever the pane has
+       prose of its own -- so a genuinely unnamed thread still falls through
+       to the line below.
      · **An agent that has announced nothing says so.** The ladder used to fall
        through to the pane's directory, which meant a freshly opened agent was
        labelled with an absolute path — clipped, on a `nowrap` line, at exactly
@@ -307,6 +315,17 @@
 
     function agentChatTitle(session, options) {
         const key = agentKeyForSession(session);
+        /* A name the backend resolved for the identifier this pane is
+           announcing, and the reason it leads: it is published only while the
+           announcement it answers for is still the whole of what the pane is
+           saying, so prose and a resolved name are never both on offer. The
+           opaque check still runs over it -- a provider that filled its own
+           name field with its own id must not get an id painted as a name
+           through a door the announcement is refused at. */
+        const resolved = text(session?.activity?.conversation_title);
+        if (resolved && !isOpaqueIdentifierTitle(resolved)) {
+            return resolved;
+        }
         let title = text(session?.activity?.title);
         // These agents decorate their published title with a changing status
         // marker. It is separate from the conversation's name.

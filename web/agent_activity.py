@@ -41,6 +41,14 @@ raising the floor is ``web/terminal_io.py``'s, at the moment the pane is
 retargeted. Clearing the record instead would put a second writer on a dict this
 module's whole no-lock design rests on having exactly one.
 
+One fact on the record is not read out of the stream at all: a Codex pane
+whose thread has a name can still announce nothing but that thread's id, so
+``web/agent_conversations.py`` looks the name up and hands it back here.
+:func:`apply_conversation_name` is the join, and it is a plain comparison
+against the announcement the name was resolved from -- which keeps every
+question about *what a thread id looks like* on that side of the line, and
+makes the title floor cover the resolved name without a second rule.
+
 Text and values in, values out -- no imports from ``web`` except the shared
 sequence scanner -- so ``tests/test_agent_activity.py`` executes it directly.
 The stream side stays in ``web/terminal_io.py``.
@@ -319,6 +327,57 @@ def mask_agent_titles(
     return masked
 
 
+def announced_agent_title(record: Optional[Dict[str, Any]]) -> str:
+    """The one title a reading publishes: the tab label, else the window one.
+
+    Both surfaces ask this question and a resolved conversation name is
+    matched against the answer, so the precedence lives here once rather than
+    being restated wherever a title is read.
+    """
+    source = record or blank_agent_activity()
+    return str(source.get("tab_title") or source.get("title") or "")
+
+
+def apply_conversation_name(
+    record: Optional[Dict[str, Any]],
+    conversation: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Attach a resolved conversation name to one *read* of the record.
+
+    A name carries the thing it answers for, and there are two of them. When
+    the conversation was identified from what the pane *announced*, the record
+    names that announcement and the name holds only while the pane is still
+    making it -- so a pane that has since said something else is answered by
+    that, because the pane is the fresher of the two. The match is the
+    announcement's own text, which is why this module needs to know nothing
+    about what a thread id looks like, and why the title floor covers the name
+    for free: :func:`mask_agent_titles` has already blanked a retired agent's
+    title by the time this runs, and a blank title matches no announcement.
+
+    When the conversation was identified from the *command* that started the
+    agent, there is no announcement to hold it to -- the pane is announcing
+    its project, and will go on announcing it whatever conversation it is in.
+    Such a record states no ``title`` at all, and its name stands until its
+    owner drops it, which ``web/terminal_io.py`` does when the agent is
+    retired or the reader switches conversations inside the TUI.
+
+    Returns the record unchanged when there is nothing to attach, so the
+    common poll allocates nothing.
+    """
+    source = record or blank_agent_activity()
+    if not conversation:
+        return source
+    name = normalize_agent_title(conversation.get("name"))
+    if not name:
+        return source
+    announcement = conversation.get("title")
+    if announcement is not None and str(announcement) != announced_agent_title(source):
+        return source
+    named = dict(source)
+    named["conversation_title"] = name
+    return named
+
+
 def describe_agent_activity(
     record: Optional[Dict[str, Any]],
     now: float,
@@ -364,7 +423,13 @@ def describe_agent_activity(
     return {
         "state": state,
         "state_source": state_source,
-        "title": str(source.get("tab_title") or source.get("title") or ""),
+        "title": announced_agent_title(source),
+        # What the conversation behind that title is actually called, when the
+        # title itself was only an identifier and somebody could say. Separate
+        # from `title` on purpose: the raw announcement, the resolved name and
+        # the pane's own typed title are three facts, and folding any two of
+        # them together is how a row starts presenting one as another.
+        "conversation_title": str(source.get("conversation_title") or ""),
         "progress_state": progress_state,
         "progress_fresh": progress_fresh,
         # The percentage only means anything while the sequence says it does;

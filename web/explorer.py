@@ -2309,6 +2309,16 @@ class _SftpExplorerBackend:
         """
         return self.sftp.open(file_path, "rb")
 
+    def set_io_timeout(self, timeout: float) -> None:
+        """Bound the next archive SFTP operation by its remaining deadline."""
+        get_channel = getattr(self.sftp, "get_channel", None)
+        if not callable(get_channel):
+            return
+        channel = get_channel()
+        settimeout = getattr(channel, "settimeout", None)
+        if callable(settimeout):
+            settimeout(max(0.001, float(timeout)))
+
     # -- bounded, atomic in-place write (in-app editor) -----------------------
     def replace_file(self, file_path: str, content_bytes: bytes) -> None:
         """Atomically replace an existing remote file with complete contents.

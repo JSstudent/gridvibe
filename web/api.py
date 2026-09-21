@@ -161,6 +161,12 @@ from web.explorer import (  # noqa: F401 - some names re-exported for backwards 
     read_explorer_file_preview,
     save_explorer_file_payload,
 )
+from web.explorer_download import (
+    EXPLORER_DIRECTORY_DOWNLOAD_TIMEOUT_SECONDS,
+    ExplorerDirectoryDownloadTimeoutError,
+    build_explorer_directory_archive,
+    prepared_directory_archives,
+)
 from web.explorer_fs import (
     EXPLORER_UPLOAD_MAX_BYTES,
     create_explorer_entry_payload,
@@ -1570,69 +1576,136 @@ EXPLORER_DOWNLOAD_CHUNK_BYTES = 64 * 1024
 
 @app.route('/api/explorer/<session_id>/download', methods=['GET'])
 def download_explorer_file(session_id: str):
-    """Stream one explorer file as an attachment (read-only; binaries allowed).
+    """Stream one explorer file or one bounded directory ZIP as an attachment.
 
     Resolution, the root confinement check, the `stat` and the size cap all run
     *before* any byte of the response is committed, so a refusal is still a
     JSON `400` with headers the client can read. Only the body is deferred: the
-    backend (and, for a remote session, its pooled SFTP channel) is handed to
-    the generator, which releases it in a `finally` — the WSGI server closes the
-    iterable on a completed response and on a client that disconnects mid-file,
-    so neither path leaks a pool entry.
+    backend for a file (and, for a remote session, its pooled SFTP channel) is
+    handed to the generator, which releases it in a `finally`. A directory's
+    backend is released as soon as its bounded temporary archive is complete.
+    The WSGI server closes the iterable on a completed response and on a client
+    that disconnects mid-file, so neither path leaks a pool entry.
 
-    Byte ranges are answered by seeking the handle, because the `send_file`
-    path this replaced advertised `Accept-Ranges: bytes` and a browser uses it
-    to resume a paused download — exactly the large files this route now
-    streams. `Cache-Control: no-cache` is kept for the same continuity reason:
-    the bytes are a live file and a re-download must not be served stale.
+    Byte ranges are answered for files and immutable prepared archives. A
+    directly requested directory archive is rebuilt and therefore advertises
+    no ranges; the browser preparation path names fixed bytes with a strong
+    validator before handing them to its download anchor. `Cache-Control:
+    no-cache` keeps live file re-downloads from being served stale.
     """
     session = session_manager.get_session(session_id)
     if session is None:
         return jsonify({"error": "Session not found"}), 404
     requested_path = request.args.get("path", "")
+    download_kind = request.args.get("kind", "file")
+    if download_kind not in {"file", "directory"}:
+        return jsonify({"error": "Download kind must be file or directory"}), 400
+    archive_token = request.args.get("archive_token", "")
+    prepare_archive = request.args.get("prepare", "") == "1"
+    if archive_token and download_kind != "directory":
+        return jsonify({"error": "Prepared downloads are only available for directories"}), 400
     error_types = (
         _sftp_request_error_types()
         if _is_remote_explorer_session(session)
         else (OSError,)
     )
-    with contextlib.ExitStack() as resources:
+    stable_archive = False
+    etag = ""
+
+    if archive_token:
+        prepared = prepared_directory_archives.acquire(archive_token, session_id)
+        if prepared is None:
+            return jsonify({"error": "Prepared directory download is unavailable"}), 404
+        held = contextlib.ExitStack()
+        held.callback(prepared_directory_archives.release, archive_token)
+        handle = held.enter_context(contextlib.closing(prepared.handle))
+        size = prepared.size
+        filename = prepared.filename
+        mimetype = "application/zip"
+        etag = prepared.etag
+        stable_archive = True
+    elif download_kind == "directory":
         try:
-            backend = resources.enter_context(_explorer_backend(session))
-            _root_path, file_path = backend.resolve_file(requested_path)
-            size, _modified = backend.stat_file(file_path)
-            if size is not None and size > EXPLORER_DOWNLOAD_MAX_BYTES:
-                return jsonify({"error": "File exceeds the 100 MB download limit"}), 400
-            filename = backend.basename(file_path) or "download"
-            handle = resources.enter_context(
-                contextlib.closing(backend.open_file_stream(file_path))
+            with _explorer_backend(session) as backend:
+                archive = build_explorer_directory_archive(
+                    backend,
+                    requested_path,
+                    max_bytes=EXPLORER_DOWNLOAD_MAX_BYTES,
+                    chunk_bytes=EXPLORER_DOWNLOAD_CHUNK_BYTES,
+                    deadline=(
+                        time.monotonic()
+                        + EXPLORER_DIRECTORY_DOWNLOAD_TIMEOUT_SECONDS
+                    ),
+                )
+        except ExplorerDirectoryDownloadTimeoutError as exc:
+            return jsonify({"error": str(exc)}), 504
+        except ValueError as exc:
+            return jsonify({"error": str(exc)}), 400
+        except error_types as exc:
+            return jsonify({"error": str(exc)}), 500
+        if prepare_archive:
+            try:
+                token = prepared_directory_archives.prepare(session_id, archive)
+            except ValueError as exc:
+                return jsonify({"error": str(exc)}), 503
+            response = jsonify(
+                {
+                    "token": token,
+                    "filename": archive.filename,
+                    "size": archive.size,
+                }
             )
+            response.headers["Cache-Control"] = "no-store"
+            return response
+        held = contextlib.ExitStack()
+        held.callback(archive.cleanup)
+        handle = archive.handle
+        size = archive.size
+        filename = archive.filename
+        mimetype = "application/zip"
+    else:
+        resources = contextlib.ExitStack()
+        try:
+            with resources:
+                backend = resources.enter_context(_explorer_backend(session))
+                _root_path, file_path = backend.resolve_file(requested_path)
+                size, _modified = backend.stat_file(file_path)
+                if size is not None and size > EXPLORER_DOWNLOAD_MAX_BYTES:
+                    return jsonify({"error": "File exceeds the 100 MB download limit"}), 400
+                filename = backend.basename(file_path) or "download"
+                mimetype = "application/octet-stream"
+                handle = resources.enter_context(
+                    contextlib.closing(backend.open_file_stream(file_path))
+                )
+                held = resources.pop_all()
         except ValueError as exc:
             return jsonify({"error": str(exc)}), 400
         except error_types as exc:
             return jsonify({"error": str(exc)}), 500
 
-        # A file that grew between the `stat` and the read must not escape the
-        # cap, so the reader carries its own ceiling rather than trusting the
-        # handle to stop.
-        ceiling = (
-            EXPLORER_DOWNLOAD_MAX_BYTES
-            if size is None
-            else min(int(size), EXPLORER_DOWNLOAD_MAX_BYTES)
-        )
-        start, length, partial = 0, ceiling, False
-        requested_range = request.range
-        if size is not None and requested_range is not None:
-            span = requested_range.range_for_length(ceiling)
-            if span is None:
-                response = jsonify({"error": "Requested range is not satisfiable"})
-                response.headers["Content-Range"] = f"bytes */{ceiling}"
-                return response, 416
-            start, stop = span
-            length, partial = stop - start, True
-
-        # Only a response that is actually going to be streamed takes the hold
-        # away from this block; every refusal and every raise above unwinds it.
-        held = resources.pop_all()
+    # A file that grew between the `stat` and the read must not escape the cap,
+    # so the reader carries its own ceiling rather than trusting the handle.
+    ceiling = (
+        EXPLORER_DOWNLOAD_MAX_BYTES
+        if size is None
+        else min(int(size), EXPLORER_DOWNLOAD_MAX_BYTES)
+    )
+    start, length, partial = 0, ceiling, False
+    range_capable = download_kind == "file" or stable_archive
+    requested_range = request.range if range_capable else None
+    if stable_archive and requested_range is not None:
+        if_range = request.headers.get("If-Range", "").strip()
+        if if_range and if_range != f'"{etag}"':
+            requested_range = None
+    if size is not None and requested_range is not None:
+        span = requested_range.range_for_length(ceiling)
+        if span is None:
+            held.close()
+            response = jsonify({"error": "Requested range is not satisfiable"})
+            response.headers["Content-Range"] = f"bytes */{ceiling}"
+            return response, 416
+        start, stop = span
+        length, partial = stop - start, True
 
     def _stream():
         with held:
@@ -1649,17 +1722,19 @@ def download_explorer_file(session_id: str):
     response = app.response_class(
         _stream(),
         status=206 if partial else 200,
-        mimetype="application/octet-stream",
+        mimetype=mimetype,
     )
     response.headers.set("Content-Disposition", "attachment", filename=filename)
     response.headers["Cache-Control"] = "no-cache"
     if size is not None:
-        response.headers["Accept-Ranges"] = "bytes"
+        response.headers["Accept-Ranges"] = "bytes" if range_capable else "none"
         response.headers["Content-Length"] = str(length)
         if partial:
             response.headers["Content-Range"] = (
                 f"bytes {start}-{start + length - 1}/{ceiling}"
             )
+    if etag:
+        response.set_etag(etag, weak=False)
     return response
 
 

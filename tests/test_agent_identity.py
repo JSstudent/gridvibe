@@ -596,6 +596,78 @@ class AgentIdentityTestCase(unittest.TestCase):
             "Agent terminals session string display",
         ])
 
+    def test_a_resolved_conversation_name_outranks_the_id_the_pane_announced(self):
+        """The other half of the same defect: the thread *has* a name.
+
+        A Codex thread the reader named is one Codex's own resume picker lists
+        by that name while the pane is still announcing nothing but the id, so
+        the backend resolves it (`web/agent_conversations.py`) and publishes
+        the name beside the announcement it answers for. Refusing to paint the
+        id stays correct; it is just no longer the end of the ladder.
+        """
+        lines = self._run_node(
+            """
+            const codex = { startup_mode: 'agent', agent_selection: 'codex' };
+            const id = '01a085f4-cc1c-7993-8ffc-2fd04d47c731';
+            report([
+                identity.paneChatLine(pane(Object.assign({
+                    mode: 'ssh', host: '172.29.2.76', directory: '/opt/cIMS/chss',
+                    activity: { title: id, conversation_title: 'Review OCR delegation' }
+                }, codex)), 0, AGENT_OPTIONS),
+                // Nothing resolved: the pane keeps the fallback it had.
+                identity.paneChatLine(pane(Object.assign({
+                    mode: 'ssh', host: '172.29.2.76', directory: '/opt/cIMS/chss',
+                    activity: { title: id, conversation_title: '' }
+                }, codex)), 0, AGENT_OPTIONS),
+                // A pane that never announced an id at all still reads as its
+                // own prose, resolved or not.
+                identity.paneChatLine(pane(Object.assign({
+                    mode: 'ssh', host: '172.29.2.76', directory: '/opt/cIMS/chss',
+                    activity: { title: 'Fix the parser' }
+                }, codex)), 0, AGENT_OPTIONS)
+            ]);
+            """
+        )
+        self.assertEqual(lines, [
+            "Review OCR delegation",
+            "New session · 172.29.2.76:chss",
+            "Fix the parser",
+        ])
+
+    def test_an_id_is_still_refused_when_it_arrives_as_a_resolved_name(self):
+        """One door, one rule: a name field holding an id is still an id."""
+        lines = self._run_node(
+            """
+            const codex = { startup_mode: 'agent', agent_selection: 'codex' };
+            const id = '01a085f4-cc1c-7993-8ffc-2fd04d47c731';
+            report([
+                identity.agentChatTitle(pane(Object.assign({
+                    activity: { title: id, conversation_title: id }
+                }, codex)), AGENT_OPTIONS),
+                identity.paneChatLine(pane(Object.assign({
+                    mode: 'local', directory: 'C:\\\\repos\\\\gridvibe',
+                    activity: { title: id, conversation_title: id }
+                }, codex)), 0, AGENT_OPTIONS)
+            ]);
+            """
+        )
+        self.assertEqual(lines, ["", "New session · gridvibe"])
+
+    def test_a_resolved_name_reaches_the_hover_with_the_path_it_shortened(self):
+        hover = self._run_node(
+            """
+            report(identity.paneChatTooltip(pane({
+                startup_mode: 'agent', agent_selection: 'codex',
+                mode: 'local', directory: 'C:\\\\Users\\\\sz\\\\gridvibe',
+                activity: {
+                    title: '01a085f4-cc1c-7993-8ffc-2fd04d47c731',
+                    conversation_title: 'Review OCR delegation'
+                }
+            }), 0, AGENT_OPTIONS));
+            """
+        )
+        self.assertEqual(hover, "Review OCR delegation\nC:\\Users\\sz\\gridvibe")
+
 
 if __name__ == "__main__":
     unittest.main()

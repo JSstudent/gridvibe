@@ -106,7 +106,14 @@ const sandbox = {
     setTimeout: scheduleTimer,
     clearTimeout() {},
     requestAnimationFrame: () => 0,
-    terminals: [{ _explorerMode: 'file', _explorerFilePath: 'src/open.txt', _explorerFileName: 'open.txt' }],
+    terminals: [{
+        _session: { startup_mode: 'explorer', explorer_root_directory: '/repo' },
+        _explorerMode: 'file',
+        _explorerFilePath: 'src/open.txt',
+        _explorerFileName: 'open.txt',
+        _explorerPath: 'src',
+        _explorerRootRevision: 'root-r1'
+    }],
     sessionIds: ['s0'],
     escHtml: value => String(value == null ? '' : value),
     applyExplorerChangeMarks: () => {},
@@ -122,6 +129,9 @@ const sandbox = {
             status: canned.status,
             headers: { get: name => (name === 'Content-Length' ? canned.length : null) },
             json: async () => {
+                if (canned.body !== undefined) {
+                    return canned.body;
+                }
                 if (canned.errorBody === undefined) {
                     throw new Error('not json');
                 }
@@ -137,6 +147,43 @@ vm.createContext(sandbox);
     vm.runInContext(fs.readFileSync(path, 'utf8'), sandbox);
 });
 
+let offeredMenu = [];
+sandbox.showExplorerContextMenu = (x, y, items) => { offeredMenu = items; };
+
+async function directoryMenu(surface) {
+    offeredMenu = [];
+    const row = {
+        dataset: {
+            explorerCopyPath: 'src/assets',
+            explorerContextPath: 'src/assets',
+            explorerContextKind: 'directory',
+            explorerContextRevision: 'dir-r1',
+            explorerContextSurface: surface
+        },
+        classList: { add() {}, remove() {}, contains: () => false },
+        matches: () => false,
+        querySelector: () => null
+    };
+    await sandbox.handleExplorerContextMenu({
+        clientX: 4,
+        clientY: 5,
+        preventDefault() {},
+        target: {
+            closest: selector => (
+                selector.includes('data-explorer-copy-path') ? row : null
+            )
+        }
+    }, 0);
+    const item = offeredMenu.find(candidate => candidate.label === 'Download directory');
+    if (item && !item.disabled) {
+        await item.action();
+    }
+    return {
+        labels: offeredMenu.map(item => item.label),
+        item: item ? { title: item.title, disabled: Boolean(item.disabled) } : null
+    };
+}
+
 function reset(queue) {
     responseQueue = queue;
     toasts.length = 0;
@@ -150,6 +197,7 @@ function reset(queue) {
 }
 
 const ok = (length) => ({ ok: true, status: 200, length: String(length) });
+const prepared = (token) => ({ ok: true, status: 200, body: { token } });
 const gone = () => ({ ok: false, status: 404, errorBody: { error: 'File not found' } });
 const rows = (count) => Array.from({ length: count }, (_, i) => ({ path: `src/f${i}.txt` }));
 const snapshot = () => {
@@ -197,27 +245,42 @@ const snapshot = () => {
     await sandbox.downloadExplorerFile(0);
     results.toolbar = snapshot();
 
-    // 6. Nine stale rows: one report, not nine successes.
+    // 6. A directory uses the same observable download path, but asks the
+    //    endpoint for a ZIP and gives both browser/native saves that name.
+    reset([prepared('directory-token')]);
+    await sandbox.downloadExplorerFile(0, { path: 'src/assets', kind: 'directory' });
+    results.directory = snapshot();
+
+    // 7. Both browsing surfaces build the directory action from the row they
+    //    actually received; choosing it reaches the same ZIP request above.
+    reset([prepared('tree-token')]);
+    results.treeDirectoryMenu = await directoryMenu('tree');
+    results.treeDirectoryMenu.download = snapshot();
+    reset([prepared('preview-token')]);
+    results.previewDirectoryMenu = await directoryMenu('preview');
+    results.previewDirectoryMenu.download = snapshot();
+
+    // 8. Nine stale rows: one report, not nine successes.
     reset(rows(9).map(() => gone()));
     await sandbox.downloadExplorerFiles(0, rows(9));
     results.batchAllFailed = snapshot();
 
-    // 7. A partly served batch names what landed.
+    // 9. A partly served batch names what landed.
     reset([ok(12), ok(12), gone(), ok(12), ok(12), ok(12), gone(), ok(12), ok(12)]);
     await sandbox.downloadExplorerFiles(0, rows(9));
     results.batchPartial = snapshot();
 
-    // 8. A wholly served batch: still one toast.
+    // 10. A wholly served batch: still one toast.
     reset(rows(3).map(() => ok(12)));
     await sandbox.downloadExplorerFiles(0, rows(3));
     results.batchServed = snapshot();
 
-    // 9. A batch of one has to read exactly like the single-entry action.
+    // 11. A batch of one has to read exactly like the single-entry action.
     reset([ok(12)]);
     await sandbox.downloadExplorerFiles(0, rows(1));
     results.batchOfOne = snapshot();
 
-    // 10. The native window keeps its bridge, and a cancelled Save dialog is
+    // 12. The native window keeps its bridge, and a cancelled Save dialog is
     //     the user's answer rather than a failure to report.
     reset([]);
     sandbox.window.pywebview = { api: { save_download: async () => ({ cancelled: true }) } };
@@ -296,6 +359,33 @@ class ExplorerDownloadTestCase(unittest.TestCase):
         toolbar = self.results["toolbar"]
         self.assertEqual(toolbar["fetched"], ["/api/explorer/s0/download?path=src%2Fopen.txt"])
         self.assertEqual(toolbar["anchors"][0]["download"], "open.txt")
+
+    def test_a_directory_download_requests_a_named_zip(self):
+        directory = self.results["directory"]
+        self.assertEqual(
+            directory["fetched"],
+            ["/api/explorer/s0/download?path=src%2Fassets&kind=directory&prepare=1"],
+        )
+        self.assertIn("archive_token=directory-token", directory["anchors"][0]["href"])
+        self.assertEqual(directory["bodiesRead"], 0)
+        self.assertEqual(directory["anchors"][0]["download"], "assets.zip")
+        self.assertEqual(
+            directory["toasts"],
+            [{"text": "Downloading assets.zip…", "kind": "success"}],
+        )
+
+    def test_tree_and_preview_directory_rows_offer_the_same_download(self):
+        for surface in ("treeDirectoryMenu", "previewDirectoryMenu"):
+            with self.subTest(surface=surface):
+                menu = self.results[surface]
+                self.assertIn("Download directory", menu["labels"])
+                self.assertFalse(menu["item"]["disabled"])
+                self.assertIn("ZIP archive", menu["item"]["title"])
+                self.assertEqual(
+                    menu["download"]["fetched"],
+                    ["/api/explorer/s0/download?path=src%2Fassets&kind=directory&prepare=1"],
+                )
+                self.assertEqual(menu["download"]["anchors"][0]["download"], "assets.zip")
 
     def test_object_urls_are_released_after_the_click_that_consumes_them(self):
         # Revoking in the same task can race the browser's read of the URL, so

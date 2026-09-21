@@ -474,10 +474,17 @@ unless the task explicitly changes this contract.
   leaf, not the whole folder; skip busy candidates. Report `requested_name`,
   `stored_name`, and `renamed`. Failure removes its partial file and reports
   `mutated: false`; failed cleanup reports possibly-applied.
-- Download is ≤100 MB, streamed in bounded chunks, with confinement/stat/cap
-  checked before committing the response and the cap enforced again during read.
-  Release generator-owned resources (including pooled SFTP channels) in `finally`,
-  also on disconnect. Fetch status before claiming browser-download success.
+- `GET .../download` serves one file or, with `kind=directory`, one ZIP rooted at
+  the requested directory. Both are root-confined and ≤100 MB. Files check stat
+  before committing the response and enforce the cap again during bounded reads.
+  Directories are planned and archived before committing the response: preserve
+  empty directories; cap the plan at 10,000 entries; refuse links, special entries
+  and unsafe archive names; cap both uncompressed bytes and the final archive; and
+  re-resolve every queued directory/file through the backend immediately before
+  listing/opening it. Stream the completed archive in the same bounded chunks.
+  Release generator-owned resources (including pooled SFTP channels and temporary
+  archives) in `finally`, also on disconnect. Fetch status before claiming
+  browser-download success.
 - Inline images are recognized types only, ≤25 MB on stat and read, with sandboxed
   `Content-Security-Policy` and `X-Content-Type-Options: nosniff`.
 - Markdown preview is a lazy `GET .../file/preview`, root-confined and ≤10 MiB;
@@ -491,7 +498,8 @@ unless the task explicitly changes this contract.
 - Multi-entry selection belongs to session id + root revision + one surface;
   changing any drops it. It never spans tree/listing or persists. Prune targets to
   topmost paths; rename stays single-entry. Batches issue N existing per-entry
-  requests, never a new bulk endpoint or archive download.
+  requests, never a new bulk endpoint or multi-selection archive. The directory
+  ZIP is a separate single-folder row action and is disabled for a multi-selection.
 - A batch has one busy hold, one confirmation, one deferred refresh and one
   outcome report. Partial failure retries only failed entries and only if every
   failure reported `mutated: false`.
@@ -899,12 +907,36 @@ unless the task explicitly changes this contract.
   therefore stays in `PANE_FIELDS` and in the repaint's structure key, so a
   relaunch on or off the tools rebuilds the row and an unchanged poll does not.
 - The dashboard conversation line is `paneChatLine()` in `agent-identity.js`,
-  not the dashboard's own ladder: the agent's usable OSC tab/window title, then
-  a non-generic pane title, then `New session` plus where the pane is. GridVibe
-  cannot synthesize a conversation name an agent never publishes, and the
-  fallback says so rather than substituting the next fact down — a directory
-  read as a title the agent chose, and a pane with no directory yet repeated the
-  agent's own name on a row that already states it.
+  not the dashboard's own ladder: a resolved conversation name, then the
+  agent's usable OSC tab/window title, then a non-generic pane title, then `New
+  session` plus where the pane is. The fallback says that no usable name is
+  known rather than substituting the next fact down — a directory read as a
+  title the agent chose, and a pane with no directory yet repeated the agent's
+  own name on a row that already states it.
+- **A whole Codex thread UUID is identity to resolve, never a conversation name
+  to display.** Built-in Codex launches request
+  `tui.terminal_title=['thread-title']` as a launch-only override (saved and
+  custom command text stays unchanged), so a fresh thread can announce its UUID.
+  A resumed pane may instead announce only the project; the exact command that
+  started or promoted the agent is therefore the second identity source. No
+  continuation prose is parsed and no persisted Codex file is the contract.
+  `web/agent_conversations.py` uses the supported App Server `thread/read`
+  exchange in the pane's own local, WSL or SSH environment. Process/channel
+  lifetime and output are bounded, positive answers are cached by provider,
+  environment and thread, and a finite widening schedule retries the ordinary
+  race in which a new thread has not been named yet. A user-set `name` wins;
+  `preview` is the fallback; an identifier in either field is still refused.
+  Resolution never blocks terminal output or a dashboard read, and failure
+  leaves the normal fallback in place.
+- **A resolved conversation name belongs to the identity that asked for it.**
+  An OSC-borne answer is published only while the exact connection still makes
+  the same announcement. A command-borne answer belongs to that agent run and
+  is cleared on retirement or `/new`, `/resume` and `/fork`; `/rename` keeps the
+  identity but rejects the old answer while it resolves again. Starting a newer
+  identity cancels and wakes the pane's older retry generation. Only the safe
+  name is joined into the activity snapshot; no thread UUID is added to the
+  dashboard payload. Both dashboard surfaces consequently inherit the same
+  resolved-name precedence and stale-ownership rule.
 - **What a pane announces is not automatically a conversation name.** Two peer
   rules reject a title before it can be read as one, both anchored to the whole
   title so prose survives. `isShellSelfTitle()` covers the shell talking about
@@ -920,8 +952,8 @@ unless the task explicitly changes this contract.
   UUID. It is a peer rule and not a clause in the first, because nothing about
   a thread id is a shell. Bare hex is rejected only from 24 characters, so a
   short commit id — prose a reader may well have titled a chat with — is left
-  alone. `agentChatTitle()` still removes known provider-only labels and
-  transient status marks.
+  alone. `agentChatTitle()` applies the same opaque-id refusal to a resolved
+  value and still removes known provider-only labels and transient status marks.
 - The line carries the pane's location as a **leaf** (`host:leaf` when remote),
   never an absolute path: it is one `nowrap` row with an ellipsis at its end, so
   a full path is clipped at exactly the segment that identifies the pane. The

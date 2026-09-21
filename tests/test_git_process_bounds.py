@@ -62,12 +62,14 @@ GIT_OUTPUT_CEILING_ATTR = "EXPLORER_GIT_MAX_OUTPUT_BYTES"
 #: small enough to stay cheap to allocate.
 OVERSIZED_OUTPUT_BYTES = 24 * 1024 * 1024
 
-#: How long the real stalled-remote case may take before the runner is judged
-#: unbounded. It only has to separate "bounded" from "waited for git to give up
-#: on its own", which is minutes away, so a few multiples of the 2 s timeout
-#: under test is plenty — and it caps what this test costs the suite while the
-#: defect is still present.
-PROCESS_TREE_BOUND_SECONDS = 8.0
+#: Keep the real stalled-remote deadline tied to the bounds the runner actually
+#: promises. On Windows, the timeout path may spend one reap allowance in
+#: ``taskkill``, one waiting for the direct child, and one on each pipe reader.
+#: The final two seconds are scheduler/process-startup slack, not another retry.
+STALLED_REMOTE_TIMEOUT_SECONDS = 2.0
+PROCESS_TREE_BOUND_SECONDS = (
+    STALLED_REMOTE_TIMEOUT_SECONDS + (4 * process_bounds.PROCESS_REAP_TIMEOUT) + 2.0
+)
 
 
 class _StubPipe:
@@ -834,8 +836,8 @@ class ExplorerGitProcessTreeTestCase(unittest.TestCase):
         self.addCleanup(listener.close)
         return listener.getsockname()[1]
 
-    def test_a_stalled_remote_returns_the_worker_thread_within_the_bound(self):
-        """A surviving Git helper must not outlast the runner's timeout.
+    def test_a_stalled_remote_returns_within_the_configured_teardown_bound(self):
+        """A stalled Git helper cannot make the runner wait without a bound.
 
         The explorer runner owned no process group at all. Its unbounded
         branch was `subprocess.run(timeout=...)`, which on Windows reaps with
@@ -847,7 +849,8 @@ class ExplorerGitProcessTreeTestCase(unittest.TestCase):
         pattern both now share through `web/process_bounds.py`.
 
         Run on a worker thread with a bounded join so an unbounded runner fails
-        this test in seconds rather than parking the suite for minutes.
+        this test instead of parking the suite for minutes. The assertion uses
+        the runner's complete teardown budget, not only the initial Git timeout.
         """
         if shutil.which("git") is None:
             self.skipTest("git executable is not available")
@@ -882,7 +885,7 @@ class ExplorerGitProcessTreeTestCase(unittest.TestCase):
                     ["fetch", "--all", "--prune"],
                     cwd=str(repo),
                     write=True,
-                    timeout=2,
+                    timeout=STALLED_REMOTE_TIMEOUT_SECONDS,
                 )
             except BaseException as exc:  # noqa: BLE001 - recorded, re-checked below
                 outcome["error"] = exc
