@@ -191,6 +191,8 @@ A pane running an agent also renames itself after it: `Terminal 1` becomes `Clau
 
 Start an agent yourself and the pane catches up within a few seconds — typed out, recalled from history or tab-completed, it is the running agent that counts, not how the command was written. That check covers local panes; in a WSL or SSH pane, relaunch through the pane's 🔄 dropdown to have it picked up.
 
+For the most reliable agent and chat-title syncing across terminal panes and the dashboard — especially after resuming a Codex chat — start or restart the agent from the pane's 🔄 dropdown. Manually started agents are still detected, but conversation changes inside them may not always expose enough information for every displayed title to refresh.
+
 ## File Explorer
 
 Swap any pane between a terminal and a file explorer with one button — same directory, no re-navigation. Works on a local repo folder or a remote host over SFTP.
