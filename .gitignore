@@ -61,6 +61,7 @@ config*.json
 # Generated on every app start: it names this install's interpreter and the
 # port GridVibe actually bound, so committing it would publish absolute paths.
 .gridvibe_mcp.json
+.gridvibe_claude_settings.json
 
 # Local environment and credentials
 .env

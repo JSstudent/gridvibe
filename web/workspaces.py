@@ -35,6 +35,7 @@ import uuid
 from contextlib import nullcontext
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
+from web.agent_conversations import prepare_conversation_launch_fields
 from web.mcp_launch import LOCAL_PANE_MODE
 
 logger = logging.getLogger(__name__)
@@ -873,7 +874,7 @@ def launch_session_group(
     Returns ``(payload, status)``; the caller only serializes it.
     """
     from sessions.manager import SessionStatus
-    from web.agents import _sanitize_agent_launch_commands
+    from web.agents import AGENT_REGISTRY, _sanitize_agent_launch_commands
     from web.app import socketio
     from web.config import runtime_config
     from web.explorer import _is_browser_session, _is_explorer_session
@@ -990,6 +991,7 @@ def launch_session_group(
             rollback_created_workspace(created_workspace_id)
             return conflict, 409
 
+        is_restore = bool(data.get("restore"))
         prepared_sessions = _prepare_launch_sessions(sessions_config, connection_mode)
 
         # A restore replays a workspace the user already had running; a cold
@@ -997,12 +999,19 @@ def launch_session_group(
         # clear its startup command, which would drop the agent and its
         # auto-mode flag. Skip preflight-clearing on restore and let the pane
         # surface any real launch error itself.
-        is_restore = bool(data.get("restore"))
         launch_warnings = (
             []
             if is_restore
             else _sanitize_agent_launch_commands(connection_mode, prepared_sessions)
         )
+        for prepared in prepared_sessions:
+            prepared.update(
+                prepare_conversation_launch_fields(
+                    prepared,
+                    AGENT_REGISTRY,
+                    restore=is_restore,
+                )
+            )
 
         if callable(on_launch_options):
             on_launch_options(
@@ -1342,6 +1351,11 @@ def _restore_group_request(
         for session in (snapshot_group.get("sessions") or [])
         if isinstance(session, dict)
     ]
+    for session in snapshot_sessions:
+        if session.get("agent_conversation_provider") and session.get(
+            "agent_conversation_id"
+        ):
+            session["agent_conversation_resume"] = True
     body = {
         "sessions": snapshot_sessions,
         "connection_mode": snapshot_group.get("connection_mode"),

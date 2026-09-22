@@ -83,6 +83,10 @@
     "label": "codex",
     "display_name": "OpenAI Codex CLI",
     "binary": "codex",
+    "conversation_restore": {
+      "strategy": "osc_uuid",
+      "resume_style": "subcommand"
+    },
     "environments": {
       "windows_native": {
         "supported": true,
@@ -296,6 +300,11 @@
     "label": "claude",
     "display_name": "Claude Code",
     "binary": "claude",
+    "conversation_restore": {
+      "strategy": "assigned_uuid",
+      "create_style": "flag",
+      "resume_style": "flag"
+    },
     "environments": {
       "windows_native": {
         "supported": true,

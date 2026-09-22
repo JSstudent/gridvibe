@@ -18,6 +18,13 @@ import threading
 import time
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
+from web.agent_conversations import (
+    CONVERSATION_ID_FIELD,
+    CONVERSATION_PROVIDER_FIELD,
+    CONVERSATION_RESUME_FIELD,
+    compose_conversation_command,
+)
+from web.agent_session_hooks import claude_settings_fragment
 from web.config import _load_json_file, runtime_config
 from web.hostkeys import _apply_host_key_policy
 from web.mcp_launch import pane_can_run_the_sidecar
@@ -456,6 +463,7 @@ def _compose_agent_startup_command(
     remote_url: str = "",
     *,
     identity: Optional[Mapping[str, str]] = None,
+    session_hook_settings: str = "",
 ) -> str:
     """Apply launch-only title settings and optional auto-mode flags.
 
@@ -469,6 +477,11 @@ def _compose_agent_startup_command(
 
     ``identity`` is this pane's own five ``GRIDVIBE_*`` values, only reached
     for a local pane -- see ``_inline_toml_env_fragment``.
+
+    ``session_hook_settings`` is the generated Claude settings file, handed in
+    only for a connection whose token lets its session hook report home -- see
+    ``web/agent_session_hooks.py``. Like the tunnel's pair it belongs to the
+    connection, so it is passed rather than read here.
     """
     base = str(getattr(session, "initial_command", "") or "").strip()
     if not base:
@@ -479,17 +492,30 @@ def _compose_agent_startup_command(
     if _normalize_agent_key(base) != agent_key:
         # Custom or already-modified commands launch verbatim.
         return base
-    command = base
     # Which shell reads this line changes how a `-c` override has to be
     # quoted, and the two Windows shells want opposite things -- see
     # `_toml_override_flag`. Read once here, for every override below.
     shell_family = _pane_shell_family(session)
+    command = compose_conversation_command(
+        base,
+        getattr(session, CONVERSATION_PROVIDER_FIELD, ""),
+        getattr(session, CONVERSATION_ID_FIELD, ""),
+        getattr(session, CONVERSATION_RESUME_FIELD, False),
+        shell_family,
+        AGENT_REGISTRY,
+    )
     if agent_key == "codex":
         # Launch-only override: the CLI's default title contains the project,
         # while thread-title follows the active conversation and /rename.
         command += " " + _toml_override_flag(
             "tui.terminal_title", "['thread-title']", shell_family
         )
+    if agent_key == "claude" and session_hook_settings:
+        # Launch-only, additive: `--settings` merges with the user's own
+        # settings, so their hooks still run beside this one.
+        fragment = claude_settings_fragment(session_hook_settings)
+        if fragment:
+            command += f" {fragment}"
     if bool(getattr(session, "agent_auto_mode", False)):
         flag = _agent_auto_mode_flag(agent_key)
         if flag:
@@ -1306,6 +1332,9 @@ def _clear_agent_launch_identity(session: Dict[str, Any]) -> None:
     session["custom_agent"] = ""
     session["agent_auto_mode"] = False
     session["agent_mcp"] = False
+    session[CONVERSATION_PROVIDER_FIELD] = ""
+    session[CONVERSATION_ID_FIELD] = ""
+    session[CONVERSATION_RESUME_FIELD] = False
 
 
 def _sanitize_agent_launch_commands(connection_mode: str, sessions: List[Dict[str, Any]]) -> List[str]:

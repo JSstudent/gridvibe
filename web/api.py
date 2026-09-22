@@ -24,6 +24,7 @@ from sessions.manager import (  # noqa: F401 - re-exported for backwards compati
     _normalize_agent_depth,
 )
 from web import mcp_http
+from web.agent_session_hooks import PANE_TOKEN_HEADER, write_claude_settings
 from web.agents import (  # noqa: F401 - re-exported for backwards compatibility
     AGENT_REGISTRY,
     AGENT_REGISTRY_PATH,
@@ -335,6 +336,7 @@ from web.terminal_io import (  # noqa: F401 - re-exported for backwards compatib
     client_joined_sessions,
     connection_lock,
     effective_directory,
+    report_agent_conversation,
     session_output_buffers,
     ssh_connections,
 )
@@ -3651,6 +3653,22 @@ def relaunch_session_as_agent(session_id: str):
     return jsonify(payload)
 
 
+@app.route('/api/sessions/<session_id>/agent-conversation', methods=['POST'])
+def report_session_agent_conversation(session_id: str):
+    """Record which conversation a pane's agent says it is in now.
+
+    Called by the agent's own session hook (`utils/agent_session_hook.py`),
+    never by a page. HTTP adaptation only: the token check and the
+    exact-connection commit live in `web/terminal_io.py`.
+    """
+    payload, status = report_agent_conversation(
+        session_id,
+        request.headers.get(PANE_TOKEN_HEADER, ""),
+        request.get_json(silent=True),
+    )
+    return jsonify(payload), status
+
+
 @app.route('/api/sessions/<session_id>/mode', methods=['POST'])
 def change_session_mode(session_id: str):
     """Switch one pane between terminal, file explorer, and browser modes.
@@ -4392,6 +4410,9 @@ def run_server(
     # self-heals with no user action.
     set_server_address(host, port)
     write_mcp_config(host, port)
+    # Same reason, one file over: the Claude session hook names this
+    # interpreter. The URL and the token reach it through the pane instead.
+    write_claude_settings()
     start_workspace_autosave()
     socketio.run(
         app,

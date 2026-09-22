@@ -248,6 +248,9 @@ def apply_pane_mode_change(
                 explorer_root_configured=False,
                 initial_command="",
                 startup_mode="explorer",
+                agent_conversation_provider="",
+                agent_conversation_id="",
+                agent_conversation_resume=False,
             )
         else:
             if requested_directory:
@@ -273,6 +276,9 @@ def apply_pane_mode_change(
                 password=None,
                 initial_command="",
                 startup_mode="explorer",
+                agent_conversation_provider="",
+                agent_conversation_id="",
+                agent_conversation_resume=False,
                 browser_tabs=[],
                 browser_active_tab=0,
             )
@@ -350,6 +356,9 @@ def apply_pane_mode_change(
         "initial_command": "",
         "initial_command_mode": "command",
         "startup_mode": "terminal",
+        "agent_conversation_provider": "",
+        "agent_conversation_id": "",
+        "agent_conversation_resume": False,
         # A pane leaving browser mode drops its tab strip; a stale strip would
         # otherwise be re-persisted and reopen browser tabs on a shell pane.
         "browser_tabs": [],
