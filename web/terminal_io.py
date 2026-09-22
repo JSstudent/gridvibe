@@ -62,6 +62,12 @@ from web.explorer import (
 )
 from web.hostkeys import _apply_host_key_policy
 from web.mcp_launch import apply_pane_identity, pane_identity_environment
+from web.pane_processes import (
+    children_index,
+    descendant_binary,
+    normalize_binary,
+    process_table,
+)
 from web.terminal_cwd import (
     CWD_EVENT_DIRECTORY,
     CWD_EVENT_SHELL_PID,
@@ -542,6 +548,32 @@ REMOTE_CWD_MAX_OUTPUT_BYTES = 4096
 #: prompt is ignored, so failing it costs nothing: the next input arms instead.
 AGENT_RUNTIME_ARM_MIN_AGE_SECONDS = 2.0
 
+#: How long after a pane's agent was retired the *previous* agent's own prompt
+#: may still be in flight.
+#:
+#: A mark can only count prompts GridVibe has *read*, and a relaunch typed
+#: straight after a quit is promoted while the bytes that ended the previous
+#: agent are still in the transport -- so the first prompt the new watch sees
+#: is the old agent's, and it retired an agent that had just started. One
+#: prompt inside this window is absorbed instead: the mark is raised to it, and
+#: the next prompt retires normally.
+#:
+#: The only thing it can cost is a *relaunch* that fails instantly -- a binary
+#: that is not installed -- which then stays labelled until the pane's next
+#: prompt rather than being retired by its own failure. A first launch has no
+#: retirement behind it, opens no window at all, and is still retired at once.
+AGENT_RETIRED_PROMPT_ABSORB_SECONDS = 2.0
+
+#: How long a submitted line naming an agent waits for the prompt that says
+#: which of the two things it was.
+#:
+#: A line naming a CLI is conversation input while an agent owns the pane and a
+#: relaunch once the shell has it back, and the pane's own prompt is what tells
+#: them apart -- but on a quick relaunch that prompt has been emitted and not
+#: yet read when the line arrives. So the line is neither acted on nor dropped:
+#: it is held for this long, and any other submitted line retires it.
+AGENT_RELAUNCH_PENDING_SECONDS = 5.0
+
 
 def _observe_terminal_output_cwd(
     session_id: str,
@@ -701,9 +733,10 @@ def _disarm_agent_runtime(connection: Optional[Dict[str, Any]]) -> None:
 
 
 def _note_shell_prompt(session_id: str, connection: Dict[str, Any]) -> bool:
-    """Retire the pane's agent metadata once the shell has the terminal back.
+    """Settle what the pane is running, now the shell has the terminal back.
 
-    Returns whether it did, so the caller knows the status has already gone out.
+    Returns whether it changed anything, so the caller knows the status has
+    already gone out.
 
     Identity is checked the way :func:`_publish_observed_cwd` checks it, and for
     the same reason: a retiring pump can still be holding the last prompt of the
@@ -711,16 +744,427 @@ def _note_shell_prompt(session_id: str, connection: Dict[str, Any]) -> bool:
     relaunch that has already put a fresh agent in the pane. The demotion itself
     broadcasts, so it runs with no lock held.
 
+    Two readings stand between the prompt and the demotion, and both exist for
+    one reason: a quick relaunch produces the prompt that *ends* an agent and
+    the command that starts the next one within a few hundred milliseconds of
+    each other, observed on two threads with nothing ordering them.
+
+    * A prompt the retired agent's own exit had already bought is absorbed once
+      rather than retiring the agent the reader has since started.
+    * A relaunch submitted before this prompt was read is what the prompt
+      actually proves, so the pane changes agent here instead of demoting into
+      a terminal that nothing will ever promote back.
     """
     if not connection.get("agent_runtime_armed"):
         return False
-    mark = int(connection.get("agent_runtime_prompt_mark") or 0)
-    if int(connection.get("prompt_count") or 0) <= mark:
+    prompts = int(connection.get("prompt_count") or 0)
+    if prompts <= int(connection.get("agent_runtime_prompt_mark") or 0):
         return False
     if not _connection_is_current(session_id, connection):
         return False
+    if _absorb_retired_agents_prompt(connection, prompts):
+        return False
+    agent_is_still_running = _pane_agent_is_still_running(session_id, connection)
+    # The process-table snapshot above is deliberately outside the registry
+    # lock. It can take long enough for a relaunch to replace this connection,
+    # so prove ownership again before this retired pump changes either the
+    # replacement's metadata or even its own prompt bookkeeping.
+    if not _connection_is_current(session_id, connection):
+        return False
+    if agent_is_still_running:
+        # The shell drew a prompt and the agent is running under it anyway, so
+        # the prompt was not the shell taking the terminal back. Spend it --
+        # the agent's own exit will draw another.
+        connection["agent_runtime_prompt_mark"] = int(prompts)
+        # And this prompt has answered what any held line was waiting on: the
+        # agent is still there, so the line was said to it rather than run.
+        # Left standing, it would be applied by some later, unrelated prompt.
+        connection.pop("agent_relaunch_pending", None)
+        return False
     connection["agent_runtime_armed"] = False
+    if _promote_pending_agent_relaunch(session_id, connection, prompts):
+        return True
     return _mark_runtime_agent_exited(session_id, "shell prompt")
+
+
+#: How often the reconcile pass asks the OS what the panes are running.
+#:
+#: It is the recovery interval a reader actually waits out, so it is seconds
+#: rather than a minute -- and one pass costs one process snapshot for the whole
+#: machine however many panes there are, which is what makes that affordable.
+PANE_AGENT_RECHECK_SECONDS = 5.0
+
+def _agent_binaries() -> Dict[str, str]:
+    """``{executable name: agent key}`` for every registered CLI.
+
+    Built per call from the registry rather than cached, because the registry
+    is loaded from ``agent_registry.json`` and a reader may have added an entry
+    since; the cost is a dictionary comprehension over eight entries.
+    """
+    binaries: Dict[str, str] = {}
+    for agent_key, spec in AGENT_REGISTRY.items():
+        name = normalize_binary((spec or {}).get("binary") or agent_key)
+        if name:
+            binaries[name] = agent_key
+    return binaries
+
+
+def _pane_shell_pid(connection: Dict[str, Any]) -> int:
+    """The pid of the shell this pane is, when it is one this machine can see.
+
+    Three panes are deliberately unanswerable and return 0. A **remote** pane's
+    processes are on another machine. A **WSL** pane's are in another kernel's
+    table -- the pid here belongs to ``wsl.exe``, whose descendants on the
+    Windows side say nothing about what is running inside the distribution. And
+    a pane whose transport never came up has no shell to ask about.
+
+    0 means "cannot see", never "nothing is running": every caller may only
+    promote on an answer, so the difference matters.
+    """
+    if connection.get("kind") != "local":
+        return 0
+    if str(connection.get("shell_kind") or "") == "wsl":
+        return 0
+    for key in ("pty_process", "process"):
+        pid = getattr(connection.get(key), "pid", None)
+        try:
+            if pid and int(pid) > 0:
+                return int(pid)
+        except (TypeError, ValueError):
+            continue
+    return 0
+
+
+def _observed_pane_agent(
+    connection: Dict[str, Any],
+    reading: Optional[Tuple[Dict[str, Any], Dict[str, Any]]] = None,
+) -> str:
+    """Which registered agent is running under this pane's shell, or "".
+
+    ``reading`` is a table and its child index, taken once and shared by a whole
+    reconcile pass. A caller with none of its own (the prompt path) gets a fresh
+    one. A positive answer cannot be reused across prompts: the next prompt may
+    be the only one the shell draws after that process exits.
+    """
+    shell_pid = _pane_shell_pid(connection)
+    if not shell_pid:
+        return ""
+    binaries = _agent_binaries()
+    if reading is None:
+        table = process_table()
+        reading = (table, children_index(table))
+    table, children = reading
+    found = descendant_binary(table, children, shell_pid, binaries.keys())
+    return binaries.get(found, "")
+
+
+def _pane_agent_is_still_running(session_id: str, connection: Dict[str, Any]) -> bool:
+    """Is the agent this pane is labelled with actually still there?
+
+    Asked only where a prompt is about to retire one, so every snapshot is paid
+    for by an event the reader caused. Each prompt gets its own answer because
+    the process may have exited since the previous one. A pane the OS cannot
+    answer for is *not* still running as far as this is concerned -- the prompt
+    is the only reading those panes have, and it must keep retiring them.
+    """
+    session = session_manager.get_session(session_id)
+    if session is None or getattr(session, "startup_mode", "") != "agent":
+        return False
+    labelled = _normalize_agent_key(getattr(session, "agent_selection", ""))
+    if not labelled:
+        return False
+    return _observed_pane_agent(connection) == labelled
+
+
+def reconcile_pane_agents() -> int:
+    """Give every local pane the agent the OS says it is running.
+
+    The recovery half, and the reason this reading exists. Promotion is the
+    only thing it does: the reader's own prompt already retires an agent that
+    has finished, and a second owner of that decision -- one that can be blind
+    to a WSL or remote pane, and to any pane whose table could not be read --
+    would retire panes that are running perfectly well.
+
+    One snapshot serves the whole pass. Returns how many panes it changed, so a
+    caller (and a test) can tell a quiet pass from a busy one.
+    """
+    with connection_lock:
+        candidates = [
+            (session_id, connection)
+            for session_id, connection in ssh_connections.items()
+            if connection.get("kind") == "local"
+        ]
+    if not candidates:
+        return 0
+
+    table = process_table()
+    if not table:
+        return 0
+    reading = (table, children_index(table))
+
+    changed = 0
+    for session_id, connection in candidates:
+        try:
+            if _reconcile_one_pane_agent(session_id, connection, reading):
+                changed += 1
+        except Exception:
+            logger.debug("Could not reconcile the agent reading for %s", session_id, exc_info=True)
+    return changed
+
+
+def _reconcile_one_pane_agent(
+    session_id: str,
+    connection: Dict[str, Any],
+    reading: Tuple[Dict[str, Any], Dict[str, Any]],
+) -> bool:
+    """Promote one pane the OS says is running an agent GridVibe does not know."""
+    if not _connection_is_current(session_id, connection):
+        return False
+    session = session_manager.get_session(session_id)
+    if session is None:
+        return False
+    # A pane that is something other than a terminal is not a pane whose shell
+    # is waiting to be read: explorer and browser panes have no shell at all,
+    # and a pane already labelled with an agent is answered by its own prompt.
+    if str(getattr(session, "startup_mode", "") or "") != "terminal":
+        return False
+    if _is_explorer_session(session) or _is_browser_session(session):
+        return False
+
+    agent_selection = _observed_pane_agent(connection, reading)
+    if not agent_selection:
+        return False
+
+    updated = session_manager.update_session_metadata(
+        session_id,
+        **_agent_promotion_updates(session, agent_selection),
+    )
+    if not updated:
+        return False
+    # Everything the pane announced before this belongs to whatever it was
+    # doing, and the agent that is running has not been read as one until now.
+    connection["agent_title_floor"] = 0.0
+    connection["agent_title_floor_exclusive"] = False
+    connection["agent_prompt_absorb_until"] = 0.0
+    # Watched from here like any other: the prompt that ends it retires it.
+    _arm_agent_runtime(session_id, connection, _prompt_observation_mark(connection))
+    logger.info(
+        "Observed a running agent in session %s: %s", session_id, agent_selection
+    )
+    _broadcast_session_status(session_id)
+    return True
+
+
+def _pane_agent_watcher() -> None:
+    """Run the reconcile pass forever, at its own pace, on its own thread."""
+    while True:
+        time.sleep(PANE_AGENT_RECHECK_SECONDS)
+        try:
+            reconcile_pane_agents()
+        except Exception:
+            logger.debug("The pane agent watcher pass failed", exc_info=True)
+
+
+def ensure_pane_agent_watcher() -> None:
+    """Start the watcher once, the first time a local pane needs one."""
+    global _pane_agent_watcher_thread
+    with _pane_agent_watcher_lock:
+        if _pane_agent_watcher_thread is not None:
+            return
+        _pane_agent_watcher_thread = threading.Thread(
+            target=_pane_agent_watcher,
+            name="gridvibe-pane-agents",
+            daemon=True,
+        )
+        _pane_agent_watcher_thread.start()
+
+
+_pane_agent_watcher_thread: Optional[threading.Thread] = None
+_pane_agent_watcher_lock = threading.Lock()
+
+
+def _absorb_retired_agents_prompt(connection: Dict[str, Any], prompts: int) -> bool:
+    """Spend the one prompt a just-retired agent's exit had already bought.
+
+    The window is opened by the retirement itself and closes on its own, so a
+    pane that is simply running an agent -- and a pane launching its first one
+    -- has none to spend: the prompt reaches the demotion exactly as before.
+    Absorbing raises the mark to the prompt it absorbed and shuts the window,
+    so it happens once and the pane's next prompt retires the agent.
+    """
+    deadline = float(connection.get("agent_prompt_absorb_until") or 0.0)
+    if deadline <= 0.0 or time.monotonic() >= deadline:
+        return False
+    connection["agent_prompt_absorb_until"] = 0.0
+    connection["agent_runtime_prompt_mark"] = int(prompts)
+    return True
+
+
+#: Lines a reader submits to end an agent, read as the gesture rather than as
+#: the decision -- the prompt still decides. Shared with the keystroke fallback
+#: below so there is one list of them.
+AGENT_END_COMMANDS = frozenset({"/exit", "/quit"})
+
+#: How recently the reader must have asked this pane's agent to end for a line
+#: naming an agent to be read as a relaunch rather than as conversation.
+#:
+#: Without it, "claude can you double check this" typed *at* a running agent is
+#: a line whose first word names a registered CLI, and an agent that exits
+#: shortly after would have the pane relabelled from the reader's prose. The
+#: gesture is what separates the two: a relaunch follows a quit.
+AGENT_END_GESTURE_WINDOW_SECONDS = 10.0
+
+
+def _agent_promotion_updates(
+    session: Any,
+    agent_selection: str,
+    command: str = "",
+) -> Dict[str, Any]:
+    """The metadata a promotion writes -- and the startup command it may not take.
+
+    ``initial_command`` is not a label. It is persisted with the pane
+    (``web/runtime_state.py``, and a saved preset derives its whole startup mode
+    from ``initial_command_mode``) and it is *typed verbatim at the shell* when
+    the pane comes back: ``_compose_agent_startup_command()`` returns it as its
+    base, and returns it unchanged whenever it is not exactly the agent's own
+    binary. Two rules follow, and both are about what a reading is entitled to:
+
+    * **Only a line a shell was seen to run may be written into it.** A
+      promotion that infers the agent -- from a line held across the prompt, or
+      from the OS's own process table -- has no such line, so it writes the
+      registered binary and never the reader's text. Otherwise a sentence typed
+      at an agent is persisted as a startup command and executed on restore.
+    * **A pane's own startup command is not this reading's to replace.** A pane
+      that opened with ``npm run dev`` and was then observed running an agent
+      keeps it: the pane is relabelled, and what it runs when it opens is left
+      exactly as the reader set it.
+    """
+    updates: Dict[str, Any] = {
+        "startup_mode": "agent",
+        "agent_selection": agent_selection,
+        "custom_agent": "",
+    }
+    existing = str(getattr(session, "initial_command", "") or "").strip()
+    existing_mode = str(getattr(session, "initial_command_mode", "") or "")
+    if existing and existing_mode != "agent":
+        return updates
+    updates["initial_command_mode"] = "agent"
+    updates["initial_command"] = str(command or agent_selection)
+    return updates
+
+
+def _note_agent_end_gesture(connection: Dict[str, Any]) -> None:
+    """Record that the reader just asked this pane's agent to end.
+
+    The gesture only, never the decision: where the pane reports its own
+    prompts the keystroke guesses stand down, and this changes nothing about
+    that. It is read by one thing -- whether a line naming an agent is a
+    relaunch or something the reader said to the agent.
+    """
+    connection["agent_end_gesture_at"] = time.monotonic()
+
+
+def _note_pending_agent_relaunch(connection: Dict[str, Any], submitted_line: str) -> None:
+    """Hold a line naming an agent that the pane cannot yet act on.
+
+    Read by the pane's own pump thread and written by the Socket.IO handler
+    that delivered the input, with no lock between them -- every touch is a
+    single dict assignment or pop, which is the same thing that lets those two
+    threads share ``agent_activity``.
+
+    Any other submitted line retires the hold: a reader who goes on talking to
+    the agent has answered the question it was waiting on.
+    """
+    detected = _agent_from_terminal_command(submitted_line)
+    if detected is None:
+        connection.pop("agent_relaunch_pending", None)
+        return
+    gesture_at = float(connection.get("agent_end_gesture_at") or 0.0)
+    if not gesture_at or (time.monotonic() - gesture_at) > AGENT_END_GESTURE_WINDOW_SECONDS:
+        # Nobody asked this agent to end, so a line whose first word happens to
+        # name a CLI is a line the reader said *to* it. "claude can you double
+        # check this" is prose, and reading it as a command is how prose gets
+        # persisted as one.
+        connection.pop("agent_relaunch_pending", None)
+        return
+    agent_selection, _submitted = detected
+    connection["agent_relaunch_pending"] = {
+        # The registered binary, never the reader's own line: what is held has
+        # not been seen to run, and `_agent_promotion_updates` says why that
+        # rules it out of the metadata a restore replays.
+        "agent_selection": agent_selection,
+        "at": time.monotonic(),
+        # The wall clock as well, because this is also the moment the pane
+        # stopped being the agent that was in it -- a title floor is exactly
+        # that moment, and the one raised by a demotion is too late by then.
+        "submitted_at": time.time(),
+    }
+
+
+def _promote_pending_agent_relaunch(
+    session_id: str,
+    connection: Dict[str, Any],
+    prompts: int,
+) -> bool:
+    """Put the agent the reader already asked for into the pane this prompt freed.
+
+    A line naming a CLI is conversation input while an agent owns the pane, so
+    :func:`_track_current_terminal_agent_input` cannot act on one -- and on a
+    quick relaunch the pane still *reads* as an agent when the line arrives,
+    because the prompt that ended the previous one has been emitted and not yet
+    read. Dropping the line there is what left a pane running Codex labelled a
+    terminal for the rest of its life: nothing promotes a pane except a
+    submitted command, and by then the reader is typing into the agent.
+
+    So the prompt that proves the shell had the terminal is also the prompt
+    that proves the line submitted just before it was a command, and the pane
+    changes agent rather than demoting. Only a prompt may apply one: the
+    keystroke guesses cannot tell a quit from an interrupted turn, and must not
+    promote on top of that reading.
+
+    The mark is this prompt. Everything drawn up to here belongs to the agent
+    that left, and the pane's next one is the new agent's own outcome.
+    """
+    pending = connection.pop("agent_relaunch_pending", None)
+    if not pending:
+        return False
+    if (time.monotonic() - float(pending.get("at") or 0.0)) > AGENT_RELAUNCH_PENDING_SECONDS:
+        return False
+    agent_selection = str(pending.get("agent_selection") or "")
+    if not agent_selection:
+        return False
+    session = session_manager.get_session(session_id)
+    if session is None:
+        return False
+    updated = session_manager.update_session_metadata(
+        session_id,
+        **_agent_promotion_updates(session, agent_selection),
+    )
+    if not updated:
+        return False
+    # Nothing about a conversation survives its agent, and the command that
+    # started the next one is the only thing that can name it -- the same two
+    # readings a launch and a typed promotion take, in the same order.
+    _cancel_conversation_resolver(session_id)
+    _forget_agent_conversation(connection)
+    # The retargeting happened when the reader submitted the line, not now, so
+    # a title this agent has already announced is its own and has to survive.
+    # This is the one floor raised *before* the titles it must not mask, so a
+    # stamp equal to it -- which is what a 15.6ms clock tick makes of a fast
+    # relaunch -- belongs to the agent arriving rather than the one that left.
+    connection["agent_title_floor"] = float(pending.get("submitted_at") or 0.0)
+    connection["agent_title_floor_exclusive"] = True
+    # This prompt was the retirement and it is already the mark, so nothing is
+    # owed; a window left open by an earlier one would eat a real exit.
+    connection["agent_prompt_absorb_until"] = 0.0
+    _arm_agent_runtime(session_id, connection, prompts)
+    logger.info(
+        "Detected runtime agent relaunch for session %s: %s",
+        session_id,
+        agent_selection,
+    )
+    _broadcast_session_status(session_id)
+    return True
 
 
 def _observe_agent_activity(session_id: str, connection: Dict[str, Any], output: str) -> None:
@@ -1258,6 +1702,7 @@ def agent_activity_snapshot() -> Dict[str, Dict[str, Any]]:
                 mask_agent_titles(
                     connection.get("agent_activity") or blank_agent_activity(),
                     float(connection.get("agent_title_floor") or 0.0),
+                    not connection.get("agent_title_floor_exclusive"),
                 ),
                 connection.get("agent_conversation"),
             )
@@ -2188,6 +2633,9 @@ def _track_current_terminal_agent_input(
     # input, Enter, Ctrl+C, Ctrl+D, and so on.
     if session and session.startup_mode == "agent" and text:
         _arm_agent_runtime_on_input(session_id, connection)
+        if "\x03" in text or "\x04" in text:
+            # The gesture, not the decision -- see `_note_agent_end_gesture`.
+            _note_agent_end_gesture(connection)
 
     # The _gridvibe_* tracking keys are shared across Socket.IO handler
     # threads (two windows may drive the same session), so read-modify-write
@@ -2232,14 +2680,20 @@ def _track_current_terminal_agent_input(
         return
 
     for submitted_line in submitted_lines:
-        if guess_allowed and submitted_line.strip().lower() in {"/exit", "/quit"}:
-            if _mark_runtime_agent_exited(session_id, "exit command"):
+        if submitted_line.strip().lower() in AGENT_END_COMMANDS:
+            _note_agent_end_gesture(connection)
+            if guess_allowed and _mark_runtime_agent_exited(session_id, "exit command"):
                 return
         # A prompt containing another CLI's name is conversation input while
         # an agent owns the pane. Only a shell (or an unassigned agent pane)
-        # can promote a submitted command to a different runtime agent.
+        # can promote a submitted command to a different runtime agent -- but a
+        # pane whose agent is quitting still reads as one here, because the
+        # prompt that ends it has not been read yet. So a line naming an agent
+        # is held rather than dropped, and the pane's next prompt settles which
+        # of the two it was.
         if session and session.startup_mode == "agent" and session.agent_selection:
             _note_agent_conversation_switch(session_id, connection, session, submitted_line)
+            _note_pending_agent_relaunch(connection, submitted_line)
             continue
         detected = _agent_from_terminal_command(submitted_line)
         if not detected:
@@ -2302,14 +2756,19 @@ def _mark_runtime_agent_exited(session_id: str, reason: str) -> bool:
     session = session_manager.get_session(session_id)
     if not session or session.startup_mode != "agent":
         return False
-    updated = session_manager.update_session_metadata(
-        session_id,
-        startup_mode="terminal",
-        initial_command_mode="command",
-        agent_selection="",
-        custom_agent="",
-        initial_command="",
-    )
+    retirement: Dict[str, Any] = {
+        "startup_mode": "terminal",
+        "agent_selection": "",
+        "custom_agent": "",
+    }
+    if str(getattr(session, "initial_command_mode", "") or "") == "agent":
+        # The agent's own launch line, which goes with it. A pane labelled from
+        # a *reading* of what is running in it can still carry a startup command
+        # of its own (`_agent_promotion_updates` leaves those alone), and that
+        # one is not the agent's to take on the way out.
+        retirement["initial_command_mode"] = "command"
+        retirement["initial_command"] = ""
+    updated = session_manager.update_session_metadata(session_id, **retirement)
     if not updated:
         return False
     _cancel_conversation_resolver(session_id)
@@ -2318,6 +2777,17 @@ def _mark_runtime_agent_exited(session_id: str, reason: str) -> bool:
     if connection is not None:
         _disarm_agent_runtime(connection)
         connection["agent_title_floor"] = time.time()
+        connection["agent_title_floor_exclusive"] = False
+        # The shell is on its way back to a prompt, and a relaunch typed before
+        # those bytes are read is promoted against a mark that cannot include
+        # them. Let the watch under it absorb one prompt rather than retire an
+        # agent that has just started -- see `_absorb_retired_agents_prompt`.
+        connection["agent_prompt_absorb_until"] = (
+            time.monotonic() + AGENT_RETIRED_PROMPT_ABSORB_SECONDS
+        )
+        # A line held against a prompt that has now arrived and retired the
+        # pane instead is a line the reader typed into the agent they ended.
+        connection.pop("agent_relaunch_pending", None)
         # The floor already stops the retired agent's title from being read as
         # a fact about the shell that inherited the pane, and a resolved
         # conversation name is dropped with it because it is matched against
@@ -2698,6 +3168,7 @@ def _connect_local_session(session_id: str, session: Any):
             return
 
         _connection_status(session_id, connection, SessionStatus.CONNECTED)
+        ensure_pane_agent_watcher()
 
         if shell_kind == "wsl":
             _drain_until_prompt(session_id, connection)

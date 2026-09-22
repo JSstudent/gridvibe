@@ -185,9 +185,13 @@ See **every session in every workspace**, agents first. Open the dashboard dialo
 - **Keep the dialog up while you work elsewhere** — it stays open when you move to another window, so you can leave it on a second screen. It closes when you click beside it, reach a pane in its own workspace, or open it somewhere else.
 - **Close from either view** — a session card's **×** and a band's **Close workspace** both offer **Cancel**, **Save and close**, or the plain close; a failed save cancels the close. **Close window** in native mode keeps the sessions running; these actions leave the dashboard open.
 - **Sessions without agents are listed too**, sorted after the ones that have them, because this is also the fastest way to reach any tab in any window.
-- **Nothing is probed** — both readings come from the pane's own output, and nothing is ever typed into a running agent.
+- **Nothing is typed into a running agent** — the chat title and the working/idle reading both come from the pane's own output, and the check for what a pane is running reads this machine's process list rather than the pane.
 
 A pane running an agent also renames itself after it: `Terminal 1` becomes `Claude Code`, with that agent's icon beside it. A title you typed yourself always wins.
+
+Start an agent yourself and the pane catches up within a few seconds — typed out, recalled from history or tab-completed, it is the running agent that counts, not how the command was written. That check covers local panes; in a WSL or SSH pane, relaunch through the pane's 🔄 dropdown to have it picked up.
+
+For the most reliable agent and chat-title syncing across terminal panes and the dashboard — especially after resuming a Codex chat — start or restart the agent from the pane's 🔄 dropdown. Manually started agents are still detected, but conversation changes inside them may not always expose enough information for every displayed title to refresh.
 
 ## File Explorer
 

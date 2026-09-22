@@ -637,6 +637,11 @@
        base (4 columns) spans 4 * SPLIT_CELL_UNIT grid lines — kept within the
        backend's split-layout coordinate bound (see saved_sessions.py). */
     const SPLIT_CELL_UNIT = 8;
+    /* The coordinate ceiling a stored geometry record has to stay inside
+       (`MAX_STORED_SESSION_PANES * 8`, `web/session_presentation.py`). The
+       server drops a geometry record all-or-nothing, so a restore-time
+       rescale that would overshoot this is not made at all. */
+    const MAX_STORED_SPLIT_GRID_LINE = 512;
     let splitSlotRects = null;
     let splitColumnWeights = null;
     let splitRowWeights = null;
@@ -3888,6 +3893,38 @@
         };
     }
 
+    /* The base layouts a group of `count` panes could have been laid out
+       from, in cells: `fixedLayoutSlotRects()` below multiplies exactly one of
+       these by SPLIT_CELL_UNIT, and a restored snapshot is read back against
+       them to find the unit it was written at. Every class variant is offered,
+       because a saved geometry record does not carry the class it was built
+       under — by the time it is saved it is `layout-split-local` — and a box
+       that fits more than one shape is left alone rather than guessed at.
+
+       The two smallest counts state their own shape rather than taking it from
+       `getBaseLayoutSlots()`: a single pane, and a stacked pair, are laid out
+       two cells wide rather than one. `tests/test_split_geometry.py` executes
+       the two functions against each other so they cannot drift. */
+    function baseLayoutCellShapes(count) {
+        const panes = Math.max(1, Number(count) || 1);
+        if (panes === 1) {
+            return [{ columns: 2, rows: 1 }];
+        }
+        if (panes === 2) {
+            return [{ columns: 2, rows: 1 }, { columns: 2, rows: 2 }];
+        }
+        const layoutClasses = panes === 3
+            ? ['layout-3-vertical', 'layout-3-horizontal', 'layout-3-split']
+            : [''];
+        return layoutClasses.map(layoutClass => {
+            const base = getBaseLayoutSlots(panes, layoutClass);
+            return {
+                columns: Math.max(1, ...base.slots.map(slot => slot.col + slot.colSpan - 1)),
+                rows: Math.max(1, ...base.slots.map(slot => slot.row + slot.rowSpan - 1)),
+            };
+        });
+    }
+
     function fixedLayoutSlotRects(count, layoutClass = '') {
         const unit = SPLIT_CELL_UNIT;
         originalSplitSlotCount = Math.max(originalSplitSlotCount, count);
@@ -3982,6 +4019,30 @@
         return true;
     }
 
+    /* A restored layout written on a coarser grid than this build draws,
+       made finer once — before anything clones, captures or saves these
+       coordinates, so one session never holds a mix of resolutions.
+
+       One-way and lossless: the rewritten coordinates say the same thing more
+       precisely, so an older GridVibe reading the newer save still renders it.
+       `split-geometry.js` owns the arithmetic and every reason to decline, and
+       a page that somehow reached this before the module loaded simply keeps
+       the coordinates it was given. */
+    function rescaleCoarseLayoutSnapshot(rects, snapshot, baseCount) {
+        const planner = window.GridVibeSplitGeometry;
+        if (typeof planner?.planSnapshotRescale !== 'function') {
+            return null;
+        }
+        return planner.planSnapshotRescale({
+            rects,
+            columnWeights: snapshot.split_column_weights,
+            rowWeights: snapshot.split_row_weights,
+            cellShapes: baseLayoutCellShapes(baseCount),
+            unit: SPLIT_CELL_UNIT,
+            maxGridLine: MAX_STORED_SPLIT_GRID_LINE
+        });
+    }
+
     function applyWorkspaceLayoutSnapshot(snapshot, expectedCount) {
         if (
             !snapshot
@@ -3991,7 +4052,7 @@
             return false;
         }
 
-        const rects = snapshot.split_slot_rects.map((rect, index) => normalizeSplitRectMetadata({
+        const stored = snapshot.split_slot_rects.map((rect, index) => normalizeSplitRectMetadata({
             id: makeSplitRectId(),
             originSlot: Number.isInteger(Number(rect.originSlot)) ? Number(rect.originSlot) : index,
             x: rect.x,
@@ -3999,14 +4060,25 @@
             w: rect.w,
             h: rect.h
         }));
-        const size = getSplitGridSize(rects);
         originalSplitSlotCount = Math.max(
             1,
             Number(snapshot.original_split_slot_count || expectedCount) || expectedCount
         );
+        /* Read against the base the snapshot was built from, not the panes it
+           holds now: a split layout carries more rectangles than its base had
+           cells, and the base is what names the unit. */
+        const rescaled = rescaleCoarseLayoutSnapshot(stored, snapshot, originalSplitSlotCount);
+        const rects = rescaled ? rescaled.rects : stored;
+        const size = getSplitGridSize(rects);
         splitSlotRects = cloneSplitSlotRects(rects);
-        splitColumnWeights = normalizeSplitTrackWeights(snapshot.split_column_weights, size.columns);
-        splitRowWeights = normalizeSplitTrackWeights(snapshot.split_row_weights, size.rows);
+        splitColumnWeights = normalizeSplitTrackWeights(
+            rescaled ? rescaled.columnWeights : snapshot.split_column_weights,
+            size.columns
+        );
+        splitRowWeights = normalizeSplitTrackWeights(
+            rescaled ? rescaled.rowWeights : snapshot.split_row_weights,
+            size.rows
+        );
         return applySplitSlotGeometry({ fit: false });
     }
 
@@ -4046,21 +4118,47 @@
         return { cols, rows };
     }
 
-    function getSplitCandidates(index, rect) {
+    /* Two independent conditions gate a split, and they are not the same
+       problem. `'grid'` is the integer grid: the pane's rectangle is one line
+       wide (or tall), a half of it cannot be written down, and no amount of
+       window will change that. `'size'` is the character floor, which a wider
+       window or a smaller font does change. `'window'` is neither — it is the
+       two page-wide refusals, answered here so one reading covers the pane.
+       An axis with no blocker is an axis that can be split.
+
+       Which one refused is what the tooltip and the sidecar's relayed sentence
+       say, so a reader is never told a pane five times wide enough is too
+       narrow. Tested in that order: a pane with no line left to halve has no
+       halves to measure. */
+    const SPLIT_BLOCKED_BY_WINDOW = 'window';
+    const SPLIT_BLOCKED_BY_GRID = 'grid';
+    const SPLIT_BLOCKED_BY_SIZE = 'size';
+
+    function getSplitBlockers(index, rect) {
         if (window.innerWidth <= 700 || terminals.length >= MAX_SPLIT_TERMINALS) {
-            return [];
+            return {
+                vertical: SPLIT_BLOCKED_BY_WINDOW,
+                horizontal: SPLIT_BLOCKED_BY_WINDOW
+            };
         }
 
-        const vertical = estimatePaneCharacters(index, 'vertical');
-        const horizontal = estimatePaneCharacters(index, 'horizontal');
-        const candidates = [];
-        if (rect.w >= 2 && vertical.cols >= MIN_SPLIT_COLS && vertical.rows >= MIN_SPLIT_ROWS) {
-            candidates.push('vertical');
-        }
-        if (rect.h >= 2 && horizontal.cols >= MIN_SPLIT_COLS && horizontal.rows >= MIN_SPLIT_ROWS) {
-            candidates.push('horizontal');
-        }
-        return candidates;
+        const blockers = {};
+        [['vertical', 'w'], ['horizontal', 'h']].forEach(([axis, span]) => {
+            if (!(Number(rect?.[span]) >= 2)) {
+                blockers[axis] = SPLIT_BLOCKED_BY_GRID;
+                return;
+            }
+            const measured = estimatePaneCharacters(index, axis);
+            blockers[axis] = measured.cols >= MIN_SPLIT_COLS && measured.rows >= MIN_SPLIT_ROWS
+                ? ''
+                : SPLIT_BLOCKED_BY_SIZE;
+        });
+        return blockers;
+    }
+
+    function getSplitCandidates(index, rect) {
+        const blockers = getSplitBlockers(index, rect);
+        return ['vertical', 'horizontal'].filter(axis => !blockers[axis]);
     }
 
     function splitSlotSpan(requested, total) {
@@ -4438,12 +4536,22 @@
         button.setAttribute('aria-label', button.title);
     }
 
-    function getSplitDisabledReason(axis) {
+    /* `blocker` comes from `getSplitBlockers()`, so a caller that has read
+       the pane gets the rule that refused it rather than the likeliest one. A
+       caller with no pane to read — the pane cap, which refuses before any
+       rectangle is looked at — passes none and gets the character floor, which
+       is what this always said. */
+    function getSplitDisabledReason(axis, blocker = '') {
         if (window.innerWidth <= 700) {
             return 'Splitting is disabled on narrow screens';
         }
         if (terminals.length >= MAX_SPLIT_TERMINALS) {
             return `Splitting is limited to ${MAX_SPLIT_TERMINALS} terminal panes`;
+        }
+        if (blocker === SPLIT_BLOCKED_BY_GRID) {
+            return axis === 'horizontal'
+                ? 'This pane has no grid space left to stack another pane below it'
+                : 'This pane has no grid space left to place another pane beside it';
         }
         return axis === 'horizontal'
             ? `Stacked split needs at least ${MIN_SPLIT_ROWS} rows below each terminal header`
@@ -4478,19 +4586,19 @@
         const visualIndex = grid && card ? Array.from(grid.children).indexOf(card) : -1;
         const rects = visualIndex >= 0 ? ensureSplitSlotRects() : [];
         const rect = rects[visualIndex];
-        const candidates = rect ? getSplitCandidates(index, rect) : [];
+        const blockers = rect ? getSplitBlockers(index, rect) : null;
 
         applySplitButtonState(
             vButton,
-            candidates.includes('vertical'),
+            Boolean(blockers) && !blockers.vertical,
             titles.vertical,
-            getSplitDisabledReason('vertical')
+            getSplitDisabledReason('vertical', blockers?.vertical)
         );
         applySplitButtonState(
             hButton,
-            candidates.includes('horizontal'),
+            Boolean(blockers) && !blockers.horizontal,
             titles.horizontal,
-            getSplitDisabledReason('horizontal')
+            getSplitDisabledReason('horizontal', blockers?.horizontal)
         );
     }
 
@@ -7046,10 +7154,10 @@
 
         const rects = ensureSplitSlotRects();
         const sourceRect = rects[visualIndex];
-        const candidates = sourceRect ? getSplitCandidates(index, sourceRect) : [];
-        if (!axis || !candidates.includes(axis)) {
+        const blockers = sourceRect ? getSplitBlockers(index, sourceRect) : null;
+        if (!axis || !blockers || blockers[axis] !== '') {
             updateSplitButtonState(index);
-            return { ok: false, error: getSplitDisabledReason(axis) };
+            return { ok: false, error: getSplitDisabledReason(axis, blockers?.[axis]) };
         }
 
         splitButtons.forEach(button => { button.disabled = true; });
@@ -7149,6 +7257,27 @@
         }
     }
 
+    /* The pane's slot and rectangle in this window, or null when it is not
+       here at all — shared by the bridge's two questions so they can never
+       answer about different panes. A pane that is here but not on screen
+       answers with a null rectangle rather than nothing, which is the
+       difference between "not this window's pane" and "nothing to measure". */
+    function paneSplitTarget(sessionId) {
+        const index = sessionIds.indexOf(String(sessionId || ''));
+        if (index < 0) {
+            return null;
+        }
+        const grid = document.getElementById('terminalsGrid');
+        const card = document.getElementById(`tc-${index}`);
+        const visualIndex = grid && card
+            ? Array.from(grid.children).indexOf(card)
+            : -1;
+        return {
+            index,
+            rect: visualIndex >= 0 ? (ensureSplitSlotRects()[visualIndex] || null) : null
+        };
+    }
+
     /* ─────────────────────────────────────────────
        Split bridge — the page half of a split intent
     ─────────────────────────────────────────────
@@ -7172,22 +7301,21 @@
         /* The axes this pane could actually be halved on right now, or `null`
            when the pane is not in this window at all. */
         candidates(sessionId) {
-            const index = sessionIds.indexOf(String(sessionId || ''));
-            if (index < 0) return null;
-            const grid = document.getElementById('terminalsGrid');
-            const card = document.getElementById(`tc-${index}`);
-            const visualIndex = grid && card
-                ? Array.from(grid.children).indexOf(card)
-                : -1;
-            if (visualIndex < 0) return [];
-            const rect = ensureSplitSlotRects()[visualIndex];
-            return rect ? getSplitCandidates(index, rect) : [];
+            const found = paneSplitTarget(sessionId);
+            if (!found) return null;
+            return found.rect ? getSplitCandidates(found.index, found.rect) : [];
         },
 
         /* GridVibe's own sentence for why an axis is unavailable — the same
-           string the disabled split button carries in its tooltip. */
-        disabledReason(axis) {
-            return getSplitDisabledReason(axis);
+           string the disabled split button carries in its tooltip, down to
+           which of the two rules refused. The pane is named because those
+           rules are its own: an agent told a pane is too narrow when what it
+           has actually run out of is grid space asks for a wider window and
+           gets the same refusal again. */
+        disabledReason(axis, sessionId) {
+            const found = paneSplitTarget(sessionId);
+            const blockers = found?.rect ? getSplitBlockers(found.index, found.rect) : null;
+            return getSplitDisabledReason(axis, blockers ? blockers[axis] : '');
         },
 
         async perform(sessionId, axis, splitRequest) {

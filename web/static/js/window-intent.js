@@ -232,7 +232,7 @@
                     detail = policy.splitRefusal(
                         axis,
                         candidates,
-                        splitBridge.disabledReason(axis)
+                        splitBridge.disabledReason(axis, sessionId)
                     );
                 } else {
                     const performed = await splitBridge.perform(
