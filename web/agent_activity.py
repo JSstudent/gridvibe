@@ -292,6 +292,7 @@ def apply_agent_events(
 def mask_agent_titles(
     record: Optional[Dict[str, Any]],
     floor: float,
+    inclusive: bool = True,
 ) -> Dict[str, Any]:
     """Drop announced titles the pane published before it was retargeted.
 
@@ -310,13 +311,27 @@ def mask_agent_titles(
     the next agent's first announcement replaces the mask rather than fighting
     it. Returns the record unchanged when there is nothing to mask, so the
     common poll allocates nothing.
+
+    ``inclusive`` says which side of the floor a title stamped *at* it falls
+    on, and the two callers genuinely differ -- which only shows on a coarse
+    clock, where ``time.time()`` ticks every 15.6ms and two ordered events read
+    it as equal. A floor raised **after** the titles it retires (an agent that
+    has exited) is inclusive: a tie is the dead agent's. A floor raised **at**
+    the moment the reader asked for the next agent is not: a tie there is the
+    incoming agent's own first announcement, and masking it blanks the pane's
+    name until that agent happens to announce itself again.
     """
     source = record or blank_agent_activity()
     limit = float(floor or 0.0)
     if limit <= 0.0:
         return source
-    stale_title = bool(source.get("title")) and float(source.get("title_at") or 0.0) <= limit
-    stale_tab = bool(source.get("tab_title")) and float(source.get("tab_title_at") or 0.0) <= limit
+
+    def stale(at: Any) -> bool:
+        stamp = float(at or 0.0)
+        return stamp <= limit if inclusive else stamp < limit
+
+    stale_title = bool(source.get("title")) and stale(source.get("title_at"))
+    stale_tab = bool(source.get("tab_title")) and stale(source.get("tab_title_at"))
     if not stale_title and not stale_tab:
         return source
     masked = dict(source)

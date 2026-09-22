@@ -856,7 +856,11 @@ def _observed_pane_agent(
     if reading is None:
         now = time.monotonic()
         cached_at = float(connection.get("agent_process_read_at") or 0.0)
-        if now - cached_at <= PANE_AGENT_READING_TTL_SECONDS:
+        # Strictly inside the window, so a TTL of zero reuses nothing. The
+        # clock this is read from is coarse -- `time.monotonic()` on Windows
+        # ticks every 15.6ms -- so two reads inside one tick are equal rather
+        # than ordered, and an "at the edge" reading has to be taken again.
+        if now - cached_at < PANE_AGENT_READING_TTL_SECONDS:
             return str(connection.get("agent_process_reading") or "")
         table = process_table()
         reading = (table, children_index(table))
@@ -955,6 +959,7 @@ def _reconcile_one_pane_agent(
     # Everything the pane announced before this belongs to whatever it was
     # doing, and the agent that is running has not been read as one until now.
     connection["agent_title_floor"] = 0.0
+    connection["agent_title_floor_exclusive"] = False
     connection["agent_prompt_absorb_until"] = 0.0
     # Watched from here like any other: the prompt that ends it retires it.
     _arm_agent_runtime(session_id, connection, _prompt_observation_mark(connection))
@@ -1159,7 +1164,11 @@ def _promote_pending_agent_relaunch(
     _forget_agent_conversation(connection)
     # The retargeting happened when the reader submitted the line, not now, so
     # a title this agent has already announced is its own and has to survive.
+    # This is the one floor raised *before* the titles it must not mask, so a
+    # stamp equal to it -- which is what a 15.6ms clock tick makes of a fast
+    # relaunch -- belongs to the agent arriving rather than the one that left.
     connection["agent_title_floor"] = float(pending.get("submitted_at") or 0.0)
+    connection["agent_title_floor_exclusive"] = True
     # This prompt was the retirement and it is already the mark, so nothing is
     # owed; a window left open by an earlier one would eat a real exit.
     connection["agent_prompt_absorb_until"] = 0.0
@@ -1708,6 +1717,7 @@ def agent_activity_snapshot() -> Dict[str, Dict[str, Any]]:
                 mask_agent_titles(
                     connection.get("agent_activity") or blank_agent_activity(),
                     float(connection.get("agent_title_floor") or 0.0),
+                    not connection.get("agent_title_floor_exclusive"),
                 ),
                 connection.get("agent_conversation"),
             )
@@ -2782,6 +2792,7 @@ def _mark_runtime_agent_exited(session_id: str, reason: str) -> bool:
     if connection is not None:
         _disarm_agent_runtime(connection)
         connection["agent_title_floor"] = time.time()
+        connection["agent_title_floor_exclusive"] = False
         # The shell is on its way back to a prompt, and a relaunch typed before
         # those bytes are read is promoted against a mark that cannot include
         # them. Let the watch under it absorb one prompt rather than retire an
