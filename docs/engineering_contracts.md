@@ -178,6 +178,17 @@ changing any field that survives restart; it owns the complete save/restore flow
   backlog inside the budget is written exactly as an undeferred one — which is
   what keeps an agent CLI on a promptly-fitted pane detecting the terminal's
   colours at all.
+- **The server judges a reply's true age.** The page can only time what it
+  held; it cannot see the socket, a main thread busy restoring a workspace, or
+  the trip back. `web/terminal_replies.py` keeps a per-connection ledger of the
+  queries the pump read (`_decoded_terminal_output`), and
+  `_sanitize_terminal_input` drops a reply matched to a query of its own kind
+  that is older than `REPLY_AGE_BUDGET_S` (75 ms, under Codex's ~100 ms colour
+  window measured through ConPTY). A reply is matched to the newest outstanding
+  query of its kind and consumes it; input shaped like a reply with nothing
+  outstanding (Shift+F3 is `CSI 1;2R`) passes, and an entry is forgotten after
+  `PENDING_QUERY_HORIZON_S`. The budget is timed from GridVibe's read, so an
+  SSH pane's network round trip is not counted against it.
 - The two owners of that list must agree. `TERMINAL_QUERY_SOURCES` filters the
   backlog the page writes late; `_TERMINAL_QUERY_RE` filters the buffer the
   server replays into a pane whose program has since changed. Neither may filter

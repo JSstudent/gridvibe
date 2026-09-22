@@ -86,9 +86,11 @@
 
     /* How long a backlog may sit before the queries inside it are treated as
        unanswerable. Comfortably above a prompt fit (a 60 ms debounce and a
-       frame) so the ordinary pane still answers, and comfortably below the
-       window an agent CLI waits on a colour query, so a pane that hit the fit
-       retry ladder never answers into a prompt. */
+       frame) so the ordinary pane still answers. It is *not* below every
+       asker's window -- Codex waits about 100 ms -- and it cannot see the
+       socket or a busy page either, so the reply's true age is judged by the
+       server (web/terminal_replies.py), which reads the query and receives
+       the answer on one clock. This budget only spares that gate the work. */
     const STALE_DEFERRAL_MS = 150;
 
     /* Only ever reached when a write never reports that it finished parsing.

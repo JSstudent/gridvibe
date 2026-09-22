@@ -97,6 +97,7 @@ from web.terminal_cwd import (
     shell_integration_arguments,
     shell_integration_environment,
 )
+from web.terminal_replies import ReplyLedger
 from web.workspaces import DEFAULT_WORKSPACE_ID, normalize_workspace_id, workspace_room
 
 try:
@@ -2558,6 +2559,7 @@ def _decoded_terminal_output(session_id, connection, data=b'', *, final=False):
     output = data if isinstance(data, str) else decoder.decode(data, final=final)
     _observe_terminal_output_cwd(session_id, connection, output)
     _observe_agent_activity(session_id, connection, output)
+    _reply_ledger(connection).note_output(output, time.monotonic())
     if connection.get('kind') == 'ssh':
         output = _scrub_ssh_startup_output(connection, output, force=final)
     _publish_ssh_terminal_output(session_id, output, connection)
@@ -2774,11 +2776,31 @@ def _local_shell_integration(
     return command + shell_integration_arguments(shell_kind), updated_environment
 
 
+def _reply_ledger(connection: Dict[str, Any]) -> ReplyLedger:
+    """The connection's own query ledger; `dict.setdefault` is atomic."""
+    ledger = connection.get("reply_ledger")
+    if ledger is None:
+        ledger = connection.setdefault("reply_ledger", ReplyLedger())
+    return ledger
+
+
 def _sanitize_terminal_input(connection: Dict[str, Any], input_data: Any) -> str:
-    """Drop Windows terminal capability replies that leak into cmd/PowerShell panes."""
+    """Drop terminal replies that can only be read as typing by now.
+
+    A reply whose query is older than the budget in `web/terminal_replies.py`
+    lands after the asker stopped waiting; Windows cmd/PowerShell panes also
+    lose ConPTY's device-attributes reply.
+    """
     text = str(input_data or "")
     if not text:
         return ""
+
+    filtered = _reply_ledger(connection).filter_input(text, time.monotonic())
+    if filtered != text:
+        logger.debug("Dropped %d chars of late terminal replies", len(text) - len(filtered))
+        text = filtered
+        if not text:
+            return ""
 
     if (
         connection.get("kind") == "local"
