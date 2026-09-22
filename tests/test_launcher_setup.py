@@ -202,8 +202,8 @@ exit /b 0
     def run_launcher(self, choice='2', repair=False, pip_status='0', voice_status='1'):
         calls = self.root / 'calls.txt'
         calls.write_text('')
-        command = 'GridVibe.bat' + (' --repair' if repair else '')
-        result = subprocess.run(['cmd.exe', '/d', '/c', command], cwd=self.root,
+        command = [str(self.root / 'GridVibe.bat')] + (['--repair'] if repair else [])
+        result = subprocess.run(['cmd.exe', '/d', '/c', *command], cwd=self.root,
                                 capture_output=True, text=True, timeout=10,
                                 env={**os.environ, 'GRIDVIBE_TEST_CHOICE': choice,
                                      'GRIDVIBE_TEST_PIP_STATUS': pip_status,
