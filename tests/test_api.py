@@ -15363,9 +15363,10 @@ class ApiRoutesTestCase(unittest.TestCase):
         # leading parameters rather than the whole signature, which grew a
         # third when a split gained a description of the pane it creates.
         self.assertIn("async function splitTerminalPane(index, axis", html)
-        # Each axis button enables independently from the per-axis candidates.
-        self.assertIn("candidates.includes('vertical'),", html)
-        self.assertIn("candidates.includes('horizontal'),", html)
+        # Each axis button enables independently, off the per-axis reading of
+        # the pane. Which axes that reading offers, and which rule refuses the
+        # others, is executed in `tests/test_split_geometry.py` rather than
+        # matched here.
         # The old single-axis auto-picker is gone.
         self.assertNotIn("function chooseSplitAxis", html)
         self.assertNotIn("grid?.classList.contains('layout-2-vertical')", html)
@@ -15389,10 +15390,13 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("splitBridge: host.GridVibeSplitBridge || null", intent)
         self.assertNotIn("window.GridVibeSplitBridge =", launcher)
 
-    def test_terminals_page_explains_axis_specific_split_minimums(self):
+    def test_terminals_page_ships_every_split_refusal_sentence(self):
+        """Delivery, not behaviour: a disabled split button says which rule
+        refused it, and all three sentences have to reach the page for it to.
+        Which one a given pane gets is executed in
+        `tests/test_split_geometry.py`, against the real function."""
         response = self.client.get("/terminals")
         html = self._page_html(response)
-        self.assertIn("function getSplitDisabledReason(axis)", html)
         self.assertIn(
             "Stacked split needs at least ${MIN_SPLIT_ROWS} rows below each terminal header",
             html,
@@ -15401,8 +15405,16 @@ class ApiRoutesTestCase(unittest.TestCase):
             "Side-by-side split needs at least ${MIN_SPLIT_COLS} columns in each terminal",
             html,
         )
-        self.assertIn("getSplitDisabledReason('vertical')", html)
-        self.assertIn("getSplitDisabledReason('horizontal')", html)
+        # The refusal a restored pane with no grid space left used to be
+        # denied: it was told the column floor, which it was nowhere near.
+        self.assertIn(
+            "This pane has no grid space left to place another pane beside it",
+            html,
+        )
+        self.assertIn(
+            "This pane has no grid space left to stack another pane below it",
+            html,
+        )
 
     def test_terminals_page_base_layout_leaves_room_for_stacked_splits(self):
         response = self.client.get("/terminals")

@@ -36,6 +36,11 @@
    `floor(span / 2)` would have been, and never at the price of a neighbour
    jumping.
 
+   The same file also owns the one question a *restored* layout asks before any
+   of that: the grid it was saved on is not necessarily the grid this build
+   draws, and a layout written at a coarser base cell reaches the integer floor
+   several halvings early. That migration is `planSnapshotRescale()` below.
+
    DOM-free and require()-able from Node: the arithmetic is executed by tests
    rather than asserted as source text. */
 (function (root, factory) {
@@ -200,11 +205,181 @@
         return { firstSpan, weights: rewritten, even: true };
     }
 
+    /* ── A snapshot laid out on a coarser grid ──────────────────────────────
+
+       A saved layout keeps the coordinates it was saved with, and the base cell
+       has not always been the same size: before 2026-07-24 a layout was written
+       at 2 grid units per cell rather than 8. One split already took such a
+       pane to a span of 1 — the floor of an integer grid, where a half cannot
+       be written down at all — so it could never be split side by side again,
+       in that session or any session restored from it, however wide the window
+       was. The refusal was permanent and invisible: the layout renders normally
+       and the pane can still be stacked.
+
+       A split subdivides one rectangle and never grows the box around it, so a
+       snapshot's box is still the base layout's own size in cells times the
+       unit it was laid out at, and dividing names that unit. The base's size in
+       cells is the caller's to state, because the layout class a record was
+       built under is not part of the record — every shape the pane count could
+       have been built from is offered, and a box that fits more than one of
+       them is left alone rather than guessed at.
+
+       Rescaling is a uniform multiplication, so it cannot reproportion the
+       window: it changes how finely the same arrangement is addressed and
+       nothing else. Each track becomes `factor` tracks of the *same* weight
+       rather than a `factor`-th of it — `fr` is relative to the axis total, so
+       repeating preserves every pane's share of the axis exactly, while
+       dividing would walk a dragged weight down past the floor a save clamps it
+       to and bring it back as a different layout. The one thing the finer grid
+       cannot reproduce to the pixel is a divider somebody had dragged: it
+       carries `factor` times as many gap lines, and a pane whose weight share
+       differs from its track share pays a few of those pixels once. A layout
+       nobody has dragged is exact. */
+
+    function isPositiveInteger(value) {
+        return Number.isInteger(value) && value > 0;
+    }
+
+    /* The grid a rectangle list occupies — the same `max(x + w - 1)` the page
+       publishes as `--split-grid-columns` — or null when any rectangle is not
+       whole and positive. All-or-nothing, like the server's own reading of a
+       stored record (`web/session_presentation.py`): a list holding one
+       unreadable rectangle is not a layout this can reason about. */
+    function snapshotGridBox(rects) {
+        if (!Array.isArray(rects) || rects.length === 0) {
+            return null;
+        }
+        let columns = 0;
+        let rows = 0;
+        for (const rect of rects) {
+            const x = Number(rect?.x);
+            const y = Number(rect?.y);
+            const w = Number(rect?.w);
+            const h = Number(rect?.h);
+            if (![x, y, w, h].every(isPositiveInteger)) {
+                return null;
+            }
+            columns = Math.max(columns, x + w - 1);
+            rows = Math.max(rows, y + h - 1);
+        }
+        return { columns, rows };
+    }
+
+    /* The base-cell unit a snapshot was laid out at, or 0 when its box does not
+       divide by exactly one of the base shapes it could have been built from.
+       Two shapes answering differently is an ambiguous record, and so is a box
+       that divides by none — both are left at 0, which asks the caller to
+       change nothing. `cellShapes` are `{ columns, rows }` in cells. */
+    function inferSnapshotUnit(rects, cellShapes) {
+        const box = snapshotGridBox(rects);
+        if (!box) {
+            return 0;
+        }
+        const units = new Set();
+        (Array.isArray(cellShapes) ? cellShapes : []).forEach(shape => {
+            const columns = Number(shape?.columns);
+            const rows = Number(shape?.rows);
+            if (!isPositiveInteger(columns) || !isPositiveInteger(rows)) {
+                return;
+            }
+            if (box.columns % columns !== 0 || box.rows % rows !== 0) {
+                return;
+            }
+            const unit = box.columns / columns;
+            if (unit === box.rows / rows) {
+                units.add(unit);
+            }
+        });
+        return units.size === 1 ? Array.from(units)[0] : 0;
+    }
+
+    /* One track per `factor`, carrying the weight the original track carried.
+       A caller holding no weights at all gets null back and normalizes the new
+       track count to ones itself, which is the same layout: an axis nobody has
+       dragged is uniform whatever its resolution. */
+    function expandTrackWeights(weights, count, factor) {
+        if (!Array.isArray(weights)) {
+            return null;
+        }
+        const expanded = [];
+        for (let index = 0; index < count; index++) {
+            const value = Number(weights[index]);
+            const weight = Number.isFinite(value) && value > 0 ? value : 1;
+            for (let copy = 0; copy < factor; copy++) {
+                expanded.push(weight);
+            }
+        }
+        return expanded;
+    }
+
+    /* The whole migration, or null when there is nothing to do — a snapshot
+       already at `unit`, a unit that cannot be read off the box, or one whose
+       rescaled box would not survive the trip to disk.
+
+         · `rects`                 the snapshot's rectangles.
+         · `columnWeights`/`rowWeights`  its stored track weights, or null.
+         · `cellShapes`            the base shapes this pane count could have
+                                   been built from, in cells.
+         · `unit`                  the grid units per base cell this build lays
+                                   out at.
+         · `maxGridLine`           the persisted coordinate ceiling, or 0 for
+                                   no ceiling. `_normalize_workspace_layout()`
+                                   drops a geometry record all-or-nothing, so a
+                                   rescale that overshot the bound would cost
+                                   the layout entirely on the next save — it is
+                                   declined here instead. */
+    function planSnapshotRescale({
+        rects,
+        columnWeights = null,
+        rowWeights = null,
+        cellShapes = [],
+        unit,
+        maxGridLine = 0
+    } = {}) {
+        const target = Number(unit);
+        const box = snapshotGridBox(rects);
+        if (!isPositiveInteger(target) || !box) {
+            return null;
+        }
+        const inferred = inferSnapshotUnit(rects, cellShapes);
+        if (!inferred || inferred >= target || target % inferred !== 0) {
+            return null;
+        }
+
+        const factor = target / inferred;
+        const columns = box.columns * factor;
+        const rows = box.rows * factor;
+        const ceiling = Number(maxGridLine) || 0;
+        if (ceiling > 0 && (columns > ceiling || rows > ceiling)) {
+            return null;
+        }
+
+        return {
+            unit: inferred,
+            factor,
+            columns,
+            rows,
+            rects: rects.map(rect => ({
+                ...rect,
+                x: (rect.x - 1) * factor + 1,
+                y: (rect.y - 1) * factor + 1,
+                w: rect.w * factor,
+                h: rect.h * factor,
+            })),
+            columnWeights: expandTrackWeights(columnWeights, box.columns, factor),
+            rowWeights: expandTrackWeights(rowWeights, box.rows, factor),
+        };
+    }
+
     return {
         MIN_TRACK_WEIGHT,
         MAX_TRACK_WEIGHT,
         trackSpan,
         foreignEdgeOffsets,
-        planSplit
+        planSplit,
+        snapshotGridBox,
+        inferSnapshotUnit,
+        expandTrackWeights,
+        planSnapshotRescale
     };
 }));

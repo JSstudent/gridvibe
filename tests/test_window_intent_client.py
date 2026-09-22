@@ -54,8 +54,8 @@ function runtime(options = {}) {
                 ? ['vertical', 'horizontal']
                 : options.candidates;
         },
-        disabledReason(axis) {
-            splitCalls.reasons.push(axis);
+        disabledReason(axis, sessionId) {
+            splitCalls.reasons.push({ axis, sessionId });
             return options.disabledReason
                 || 'Side-by-side split needs at least 8 columns in each terminal';
         },
@@ -262,7 +262,8 @@ const out = {};
         await poll.tick();
         out.splitRefused = {
             performed: splitCalls.performed.length,
-            results: calls.results
+            results: calls.results,
+            asked: splitCalls.reasons
         };
     }
 
@@ -452,6 +453,11 @@ class SplitIntentClientTestCase(WindowIntentClientTestCase):
         self.assertEqual(refused["performed"], 0)
         self.assertEqual(refused["results"][0]["outcome"], "refused")
         self.assertIn("stacked split would work", refused["results"][0]["detail"])
+        # The sentence is the *pane's* — which of the split rules refused is a
+        # fact about that rectangle, not about the axis.
+        self.assertEqual(
+            refused["asked"], [{"axis": "vertical", "sessionId": "pane-1"}]
+        )
 
     def test_a_pane_that_cannot_be_split_at_all_says_that_instead(self):
         detail = self.out["splitNoAxis"][0]["detail"]

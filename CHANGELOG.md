@@ -4,6 +4,12 @@ All notable changes to GridVibe will be documented in this file.
 
 ## Unreleased
 
+- **(fix) Workspaces saved before 1.4.0 can be split side by side again, and a split button that refuses now names the rule that refused it.** A saved layout keeps the grid coordinates it was saved with, and layouts written before 1.4.0 were laid out at a quarter of the resolution GridVibe draws today. One split already took such a pane to the finest coordinate its grid could express, so it could never be halved again — in that workspace or any workspace restored from it, however wide the window was — while the layout rendered normally and the pane could still be stacked. Opening one of those workspaces now rewrites its layout once onto the current resolution: the same arrangement, addressed finely enough to halve, so a restored pane carries the same splitting headroom as one built today.
+
+  The rewrite is uniform and one-way. Every pane keeps its share of the window, an older GridVibe still renders the newer save, and a layout whose original resolution cannot be read off with certainty is left exactly as it was rather than guessed at. A divider that had been dragged can settle about a percent of the window from where it was, once, on the first open. The rule lives in `web/static/js/split-geometry.js` and runs on restore, before anything captures or saves the coordinates.
+
+  **The refusal is honest.** Two independent rules gate a split: the pane can be out of grid space to halve, or too small on screen for two terminals. Only the second was ever reported, so a pane many times wider than the character minimum was told it needed more columns, permanently and with no way to act on it. The greyed-out button's tooltip, the refusal a split returns and the sentence the `split_pane` agent tool relays now each name the rule that applies to that pane.
+
 ## 1.12.0 - 2026-09-21
 
 - **(fix) Codex conversation names and directory downloads remain reliable under retries, limits, and resumes.** Codex `/rename` now reuses identities learned from terminal announcements as well as `codex resume` commands, invalidates the shared stale-name cache, and queues command and rename lookups that encounter the resolver ceiling. Local App Server probes enforce their output limit per read even when no newline arrives, while explicit thread names and the established thread-preview fallback continue to label panes and dashboard rows.

@@ -741,6 +741,28 @@ unless the task explicitly changes this contract.
 - `MAX_STORED_SESSION_PANES` is the immutable schema ceiling (64).
   `runtime_config.max_sessions` applies only at launch/split through
   `capacity_refusal()`, which never rewrites a stored preset/snapshot.
+- A stored split geometry is read back onto the grid this build draws. Base cells
+  have not always been `SPLIT_CELL_UNIT` wide, and a layout written at a coarser
+  unit reaches the integer floor several halvings early, so
+  `applyWorkspaceLayoutSnapshot()` runs `planSnapshotRescale()`
+  (`split-geometry.js`) once, on restore, before anything clones, captures or
+  saves the coordinates — one session never holds a mix of resolutions. The unit
+  is read off the record itself: a split never grows the box around it, so the
+  box is the base layout's size in cells times its unit, and the candidate cell
+  shapes come from `baseLayoutCellShapes()` against
+  `original_split_slot_count` — the base the layout was built from, not the panes
+  it holds now. The class it was built under is not part of the record, so every
+  shape that count could have used is offered and a box fitting more than one is
+  left alone. Rescaling is a uniform multiplication with each track repeated
+  `factor` times at its own weight, so every pane keeps its share of the axis and
+  no stored weight moves toward the floor a save clamps it to; dividing the
+  weights instead would come back off disk as a different layout. Decline — leave
+  the record untouched — whenever the unit cannot be read, a rectangle is not
+  whole and positive, or the rescaled box would pass `MAX_STORED_SPLIT_GRID_LINE`,
+  which mirrors the server's `MAX_STORED_SESSION_PANES * 8` and is pinned to it.
+  Nothing is written back on its own: the finer record reaches disk with the next
+  ordinary presentation save, so a stored read may still answer with the coarse
+  one.
 
 ## Workspace lifecycle and windows
 
@@ -1455,6 +1477,18 @@ in `README.md`; state the rules a change has to keep.
   goes to the nearest line instead. Keep `terminals.js` a caller: it measures the
   live grid and publishes one weight generation, and the split button and the
   sidecar's `split_pane` intent must keep reaching it through the same handler.
+  A layout restored from a coarser grid is made finer before any of this, under
+  [Presentation persistence](#presentation-persistence).
+- A refusal names the rule that refused. `getSplitBlockers()` is the one
+  per-axis reading of a pane and answers which rule it broke — the integer grid
+  (no line left to halve, which no window size fixes), the character floor
+  (which a wider window or smaller font does), or the page-wide narrow-screen
+  and pane-cap refusals. `getSplitDisabledReason(axis, blocker)` turns that into
+  the sentence, and the disabled tooltip, the `splitTerminalPane()` refusal and
+  the split bridge's `disabledReason(axis, sessionId)` all carry the same one, so
+  the sidecar relays GridVibe's own words rather than the likeliest guess. The
+  grid is tested before the measurement: a pane with no line left to halve has
+  no halves to measure.
 
 - `agent-dashboard.css` dresses one dialog on two pages and states no page's
   palette: no `color-scheme`, no `body` rule, no full-height frame. It reads the

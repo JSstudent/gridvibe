@@ -1,5 +1,5 @@
 # GridVibe Testing Issues
-Last updated: 2026-09-21
+Last updated: 2026-09-22
 
 ## Open Issues
 
@@ -79,73 +79,3 @@ Make a stated path authoritative, so the MCP surface can perform the re-root its
 Tests: in `tests/test_api.py`, over the agent mode-switch route — a stated directory above a derived root is applied; a stated directory wins over an observed cwd; a stated path that does not exist still answers `400`; a terminal pane given only a new directory relaunches there; and the no-directory call still opens on the observed cwd, so the header toggle's behaviour is pinned against this change. One dispatcher case that a stated `directory` does not set `refresh_cwd` (`gridvibe_mcp/server.py`), and one SSH case that a stated remote path is normalized through `sftp` and refused when missing.
 
 Edge cases: the live explorer's own containment (`web/explorer_fs.py:255`, and `_resolve_explorer_paths()` for every browse/read/transfer route) must not move — this changes only the re-root transition, not what a Files pane can walk into. A root restored from a saved session is replayed verbatim and must stay `explorer_root_configured: True`, so a re-root that drops the root has to write that flag rather than leave a stale `True` behind. A stated path on the wrong machine must be refused rather than silently resolved against the GridVibe host: the local branch's `os.path.isdir()` runs where GridVibe runs, which is correct for a Local Repo pane and wrong for an SSH one, so the remote branch owns its own check.
-
-### Issue ID: ISSUE-2026-055
-- Title: Restored pre-2026-07-24 split layouts can never be split side-by-side again
-- Priority: Medium
-- Status: Open
-- Area: `web/static/js/terminals.js`, `web/session_presentation.py`
-- Assignee: Unassigned
-- Tags: `terminal`, `session`, `layout`, `persistence`, `tests`
-- Reported: 2026-09-16
-
-Description:
-A saved workspace keeps the grid coordinates it was saved with, and nothing rescales them on restore. Layouts saved before `SPLIT_CELL_UNIT` was introduced (commit `adbabfa`, 2026-07-24) were laid out at **2 grid units per base cell** instead of today's 8, so one vertical split already takes a pane to `w: 1` — the floor of the integer grid. Such a pane can never be split side by side again, in that session or any session restored from it, no matter how wide the window is. The refusal is permanent and invisible: the layout renders normally and the pane can still be stacked, so the reader sees one greyed-out button with a tooltip that names a rule the pane is not actually breaking.
-
-Live example from a restored workspace (`saved-session-session-20260628-205544`, saved 2026-06-28):
-
-```
-grid: columns 6, rows 4
-pane acd1ae0d  rect {x:1, y:1, w:5, h:4}   relative_area 0.5788
-pane 99cc5cba  rect {x:6, y:1, w:1, h:2}   relative_area 0.2106
-pane 800b371e  rect {x:6, y:3, w:1, h:2}   relative_area 0.2106
-```
-
-The two right-hand panes hold 42% of the window width between them — far more than the 8-column character floor needs — yet neither can be split side by side. A 6×4 bounding box is exactly `getGridMetrics(6)` (3 columns × 2 rows, `web/static/js/shared.js:302`) at the **old** unit of 2; the same six-pane base built today is 24×16, where the same cell would still have three halvings left.
-
-Steps to reproduce:
-1. Restore any workspace saved before 2026-07-24 whose layout was split at least once (or synthesize one: save a six-pane split workspace, then divide every `x`/`y`/`w`/`h` in its stored `split_slot_rects` by 4 so the bounding box becomes 6×4, and split the right-hand cell vertically once).
-2. Open the workspace so the saved layout is restored, and confirm a pane reports `w: 1` via `GET /api/dashboard` or the `list_panes` MCP tool.
-3. Widen or maximise the GridVibe window so the pane is plainly wide enough to halve.
-4. Hover the side-by-side split button on that pane.
-
-Expected behavior:
-A restored layout should carry the same splitting headroom as one built today, so a pane that is physically wide enough to halve can be split side by side. Where a split genuinely cannot happen, the disabled tooltip should name the rule that actually refused.
-
-Actual behavior / logs:
-`getSplitCandidates()` (`web/static/js/terminals.js:4038`) tests the integer grid before it measures anything:
-
-```js
-if (rect.w >= 2 && vertical.cols >= MIN_SPLIT_COLS && vertical.rows >= MIN_SPLIT_ROWS) {
-    candidates.push('vertical');
-}
-```
-
-With `rect.w === 1` the axis is dropped before `estimatePaneCharacters()` is consulted, so the character floor never gets a say. `getSplitDisabledReason('vertical')` (`:4422`) takes only the axis and returns a fixed sentence:
-
-> Side-by-side split needs at least 8 columns in each terminal
-
-That names `MIN_SPLIT_COLS`, which is not the rule that refused — the pane has roughly five times that many columns. The same sentence is returned by `splitTerminalPane()` at `:6969`, so it is also what the MCP `split_pane` tool relays as "GridVibe's own reason" (`gridvibe_mcp/splits.py`), giving an agent a false explanation of a permanent refusal.
-
-Nothing rescales a restored rect. `applyWorkspaceLayoutSnapshot()` (`:3975`) maps stored `x`/`y`/`w`/`h` straight through; `normalizeSplitRectMetadata()` (`:3770`) only attaches split-ancestry fields and does not touch the coordinates; the close-reflow restore at `:7851` clones them as-is. Server side, `_normalize_workspace_layout()` (`web/session_presentation.py:640`) only bounds-checks against `MAX_STORED_SESSION_PANES * 8` (= 512 grid lines) and accepts `w: 1` as valid — it never migrates a record.
-
-`split-geometry.js` already names this class of layout in its header ("spans reach odd widths … through layouts saved before the base cell had room to halve") and compensates for odd spans of 3 or more, but `planSplit()` returns its fallback for any span below 2, so a span of exactly 1 is outside what it can rescue.
-
-### Proposed solution:
-Rescale a coarse snapshot once, on restore, in `applyWorkspaceLayoutSnapshot()` (`web/static/js/terminals.js:3966`):
-
-- Infer the snapshot's base-cell unit from its own bounding box and `original_split_slot_count`, using `getBaseLayoutSlots()`/`getGridMetrics()` — `unit_old = gridColumns / base.columns`, cross-checked against `gridRows / base.rows`.
-- When `unit_old < SPLIT_CELL_UNIT`, multiply every rect by `k = SPLIT_CELL_UNIT / unit_old`: `x' = (x - 1) * k + 1`, `w' = w * k` (same on the other axis). Expand each track weight into `k` tracks of `weight / k` so the rendered proportions are preserved exactly and no divider appears to move.
-- Leave the record untouched when the unit cannot be inferred cleanly (bounding box not divisible by the base dimensions, `original_split_slot_count` missing or inconsistent) rather than guessing — a wrong factor silently reproportions the window.
-- Clamp so `max(x + w - 1) * k` stays within the persisted ceiling of `MAX_STORED_SESSION_PANES * 8` (512). `_normalize_workspace_layout()` rejects a geometry record all-or-nothing, so overshooting the bound would drop the whole layout on the next save rather than degrade it. A six-pane base at unit 8 is 24×16, so real layouts have ample headroom; the clamp is for hand-edited or malformed records.
-- Verify the rescale runs before any capture path (`cloneSplitSlotRects` at `:1230`, the save at `:2253`) so a session never persists a mix of resolutions, and confirm `originalSplitSlotCount` survives it. The close-reflow restore at `:7851` and the group cache at `:1288` clone live rects and should need no change.
-- Note in the change that this is a one-way migration: the rewritten coordinates are finer, not structurally different, so an older GridVibe reading the newer save still renders it.
-
-Separately, make the refusal honest. `getSplitCandidates()` (`:4030`) already evaluates the grid-resolution condition and the character-size condition independently — have it report *which* one failed per axis, and thread that through `applySplitButtonState()` (`:4462`) and the `splitTerminalPane()` refusal (`:6969`) so the tooltip and the MCP `split_pane` detail distinguish "this pane has no grid room left to halve" from "this pane is too small on screen". This is worth doing even after the rescale, since a pane can still bottom out after three splits at the current unit.
-
-Tests (extend `tests/test_split_geometry.py`, or a sibling Node test for the restore path):
-- A unit-2 six-pane snapshot rescales to a 24×16 box, and every pane's rendered fraction is unchanged (per-span weight sums preserved).
-- A restored `w: 1` rect becomes `w: 8`, and `getSplitCandidates()` then offers `vertical`.
-- A snapshot already at unit 8 passes through byte-identically (the rescale is idempotent).
-- A snapshot whose box would exceed 512 after scaling, and one whose box is not divisible by its base dimensions, are both left untouched rather than clamped into a different layout.
-- The disabled-button tooltip and the `splitTerminalPane()` refusal name the grid-resolution rule for a `w: 1` pane and the character rule for a genuinely tiny one.

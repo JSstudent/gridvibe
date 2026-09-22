@@ -24,10 +24,21 @@ and measures the panes, so what is pinned is rendered width, never a formula:
 - **Unmeasured is unchanged.** With no track sizes to reason about, the answer
   is the middle track line and untouched weights: exactly what the page did
   before this module existed.
+- **A layout is restored onto the grid this build draws.** A snapshot written
+  when the base cell was two grid units wide reached the integer floor after one
+  split, and a pane there could never be halved again however wide the window
+  got. Its own box still names the unit it was written at, so the migration is a
+  uniform multiplication — the same arrangement, addressed finely enough to
+  halve. Every way the unit cannot be read off is left alone instead.
+- **A refusal names the rule that refused.** The integer grid and the character
+  floor are different problems with different answers, and the pane above was
+  told the one it was nowhere near breaking.
 
-The page's own half is executed too: `planSplitSlotGeometry` and `splitSlotRect`
-are lifted whole out of `terminals.js` and run against a stub grid, so what is
-pinned there is the wiring — the plan is made against the live measurements, its
+The page's own half is executed too. `planSplitSlotGeometry` and `splitSlotRect`
+are lifted whole out of `terminals.js` and run against a stub grid, and so are
+the restore and the two split rules — `applyWorkspaceLayoutSnapshot` is handed a
+real saved snapshot and the rectangles it publishes are what the split buttons
+are then asked about. What is pinned there is the wiring — the plan is made against the live measurements, its
 weights are published as one generation of the axis, its offset is the one the
 rectangles are spliced at, and a page that somehow reached the planner before it
 loaded falls back instead of throwing with a card already appended.
@@ -44,6 +55,7 @@ from tempfile import TemporaryDirectory
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SPLIT_GEOMETRY_JS = REPO_ROOT / "web" / "static" / "js" / "split-geometry.js"
 TERMINALS_JS = REPO_ROOT / "web" / "static" / "js" / "terminals.js"
+SHARED_JS = REPO_ROOT / "web" / "static" / "js" / "shared.js"
 TERMINALS_HTML = REPO_ROOT / "templates" / "terminals.html"
 
 NODE = shutil.which("node")
@@ -378,6 +390,200 @@ class SplitGeometryTestCase(unittest.TestCase):
             scripts.index("split-geometry.js"), scripts.index("terminals.js")
         )
 
+    def test_a_layout_from_a_coarser_grid_is_rescaled_to_this_builds_unit(self):
+        """A six-pane base laid out at two grid units per cell, with one cell
+        split once: the split pane's span of 1 is the floor of the integer
+        grid, and rescaling it to this build's unit gives it room to halve
+        again. The box a split never grows is what names the old unit."""
+        result = self._run_node(
+            """
+            const rects = [
+                { x: 1, y: 1, w: 2, h: 2 }, { x: 3, y: 1, w: 2, h: 2 },
+                { x: 5, y: 1, w: 2, h: 2 }, { x: 1, y: 3, w: 2, h: 2 },
+                { x: 3, y: 3, w: 2, h: 2 }, { x: 5, y: 3, w: 1, h: 2 },
+                { x: 6, y: 3, w: 1, h: 2 }
+            ];
+            const plan = geometry.planSnapshotRescale({
+                rects,
+                columnWeights: [1, 1, 1, 1, 1, 1],
+                rowWeights: [1, 1, 1, 1],
+                cellShapes: [{ columns: 3, rows: 2 }],
+                unit: 8,
+                maxGridLine: 512
+            });
+            report({
+                unit: plan.unit,
+                factor: plan.factor,
+                box: { columns: plan.columns, rows: plan.rows },
+                split: plan.rects.slice(5),
+                first: plan.rects[0],
+                columns: plan.columnWeights.length,
+                rows: plan.rowWeights.length
+            });
+            """
+        )
+        self.assertEqual(result["unit"], 2)
+        self.assertEqual(result["factor"], 4)
+        self.assertEqual(result["box"], {"columns": 24, "rows": 16})
+        self.assertEqual(result["first"], {"x": 1, "y": 1, "w": 8, "h": 8})
+        # The pane that was stuck at a span of 1: three halvings back.
+        self.assertEqual(
+            result["split"],
+            [{"x": 17, "y": 9, "w": 4, "h": 8}, {"x": 21, "y": 9, "w": 4, "h": 8}],
+        )
+        self.assertEqual(result["columns"], 24)
+        self.assertEqual(result["rows"], 16)
+
+    def test_a_rescaled_layout_nobody_dragged_renders_pixel_for_pixel(self):
+        """The finer grid carries four times as many gap lines, and a pane that
+        spans them absorbs exactly the track space those gaps took away. On a
+        grid nobody has dragged the two cancel to the pixel."""
+        result = self._run_node(
+            """
+            const rects = [{ x: 1, y: 1, w: 5, h: 4 }, { x: 6, y: 1, w: 1, h: 4 }];
+            const weights = [1, 1, 1, 1, 1, 1];
+            const plan = geometry.planSnapshotRescale({
+                rects,
+                columnWeights: weights,
+                rowWeights: [1, 1, 1, 1],
+                cellShapes: [{ columns: 3, rows: 2 }],
+                unit: 8,
+                maxGridLine: 512
+            });
+            const before = paneSizes(
+                rects.map(rect => ({ start: rect.x, span: rect.w })), weights, 1900, 8
+            );
+            const after = paneSizes(
+                plan.rects.map(rect => ({ start: rect.x, span: rect.w })),
+                plan.columnWeights, 1900, 8
+            );
+            report({ before, after });
+            """
+        )
+        for before, after in zip(result["before"], result["after"]):
+            self.assertAlmostEqual(before, after, places=6)
+
+    def test_a_dragged_divider_keeps_its_share_of_the_axis_exactly(self):
+        """Tracks are repeated rather than divided, so a dragged pane keeps its
+        share of the axis total to the last decimal and no stored weight moves
+        toward the floor a save clamps it to. The pixels the extra gap lines
+        redistribute are what a share cannot express: bounded here, paid once,
+        on the one restore that migrates the record."""
+        result = self._run_node(
+            """
+            const rects = [{ x: 1, y: 1, w: 5, h: 4 }, { x: 6, y: 1, w: 1, h: 4 }];
+            const weights = [1.5, 1.5, 1.5, 0.5, 0.5, 0.5];
+            const plan = geometry.planSnapshotRescale({
+                rects,
+                columnWeights: weights,
+                rowWeights: [1, 1, 1, 1],
+                cellShapes: [{ columns: 3, rows: 2 }],
+                unit: 8,
+                maxGridLine: 512
+            });
+            const share = (rectList, axisWeights) => {
+                const total = axisWeights.reduce((sum, weight) => sum + weight, 0);
+                return rectList.map(rect => {
+                    let held = 0;
+                    for (let offset = 0; offset < rect.w; offset++) {
+                        held += axisWeights[rect.x - 1 + offset];
+                    }
+                    return held / total;
+                });
+            };
+            const before = paneSizes(
+                rects.map(rect => ({ start: rect.x, span: rect.w })), weights, 1900, 8
+            );
+            const after = paneSizes(
+                plan.rects.map(rect => ({ start: rect.x, span: rect.w })),
+                plan.columnWeights, 1900, 8
+            );
+            report({
+                shareBefore: share(rects, weights),
+                shareAfter: share(plan.rects, plan.columnWeights),
+                floor: Math.min(...plan.columnWeights),
+                drift: before.map((size, index) => Math.abs(size - after[index]) / 1900)
+            });
+            """
+        )
+        for before, after in zip(result["shareBefore"], result["shareAfter"]):
+            self.assertAlmostEqual(before, after, places=12)
+        # Dividing by the factor would have walked this toward 0.01, where a
+        # save clamps it and hands back a different layout.
+        self.assertGreaterEqual(result["floor"], 0.5)
+        for drift in result["drift"]:
+            self.assertLess(drift, 0.02)
+
+    def test_a_snapshot_already_at_this_unit_is_not_touched(self):
+        """The migration is one-way and idempotent: a layout written at the
+        current unit infers it, and a factor of one is nothing to do."""
+        result = self._run_node(
+            """
+            const rects = [
+                { x: 1, y: 1, w: 8, h: 16 }, { x: 9, y: 1, w: 8, h: 16 },
+                { x: 17, y: 1, w: 8, h: 8 }, { x: 17, y: 9, w: 4, h: 8 },
+                { x: 21, y: 9, w: 4, h: 8 }
+            ];
+            report({
+                unit: geometry.inferSnapshotUnit(rects, [{ columns: 3, rows: 2 }]),
+                plan: geometry.planSnapshotRescale({
+                    rects, cellShapes: [{ columns: 3, rows: 2 }], unit: 8, maxGridLine: 512
+                })
+            });
+            """
+        )
+        self.assertEqual(result["unit"], 8)
+        self.assertIsNone(result["plan"])
+
+    def test_a_record_the_unit_cannot_be_read_off_is_left_alone(self):
+        """Every way the reading fails, and all of them answer the same way:
+        change nothing. A wrong factor is a layout nobody saved."""
+        result = self._run_node(
+            """
+            const shapes = [{ columns: 3, rows: 2 }];
+            report({
+                /* A box that divides by neither offered shape. */
+                indivisible: geometry.inferSnapshotUnit(
+                    [{ x: 1, y: 1, w: 5, h: 4 }], shapes
+                ),
+                /* Two shapes that both divide it, answering differently. */
+                ambiguous: geometry.inferSnapshotUnit(
+                    [{ x: 1, y: 1, w: 4, h: 4 }],
+                    [{ columns: 2, rows: 2 }, { columns: 4, rows: 4 }]
+                ),
+                /* No shape offered at all. */
+                unstated: geometry.inferSnapshotUnit([{ x: 1, y: 1, w: 6, h: 4 }], []),
+                /* One unreadable rectangle, so the whole record is unread. */
+                malformed: geometry.snapshotGridBox(
+                    [{ x: 1, y: 1, w: 2, h: 2 }, { x: 3, y: 1, w: 0, h: 2 }]
+                ),
+                fractional: geometry.snapshotGridBox([{ x: 1, y: 1, w: 2.5, h: 2 }]),
+                /* Scaling this would overshoot the ceiling a save enforces, and
+                   the server drops a geometry record all-or-nothing. */
+                ceiling: geometry.planSnapshotRescale({
+                    rects: [{ x: 1, y: 1, w: 200, h: 4 }],
+                    cellShapes: [{ columns: 100, rows: 2 }],
+                    unit: 8,
+                    maxGridLine: 512
+                }),
+                /* The same record with no ceiling stated does rescale, so the
+                   case above is the bound talking and not the arithmetic. */
+                unbounded: geometry.planSnapshotRescale({
+                    rects: [{ x: 1, y: 1, w: 200, h: 4 }],
+                    cellShapes: [{ columns: 100, rows: 2 }],
+                    unit: 8
+                }) !== null
+            });
+            """
+        )
+        self.assertEqual(result["indivisible"], 0)
+        self.assertEqual(result["ambiguous"], 0)
+        self.assertEqual(result["unstated"], 0)
+        self.assertIsNone(result["malformed"])
+        self.assertIsNone(result["fractional"])
+        self.assertIsNone(result["ceiling"])
+        self.assertTrue(result["unbounded"])
+
 
 
 def _js_function_source(script: str, name: str) -> str:
@@ -604,6 +810,359 @@ class PageSplitTestCase(unittest.TestCase):
         self.assertFalse(result["rewrote"])
         self.assertEqual(result["spans"], [{"x": 1, "w": 8}, {"x": 9, "w": 8}])
         self.assertTrue(result["weightsUntouched"])
+
+def _js_const_source(script: str, *names: str) -> str:
+    """The page's own `const NAME = ...;` lines, so a case executes the real
+    numbers rather than a copy of them that could drift from them."""
+    lines = []
+    for name in names:
+        match = re.search(rf"^\s*(const {re.escape(name)} = .+;)$", script, re.M)
+        if match is None:
+            raise AssertionError(f"no const {name} in terminals.js")
+        lines.append(match.group(1))
+    return "\n".join(lines)
+
+
+# The restore path and the two rules that gate a split, lifted whole. The base
+# shapes come from the page's own layout tables, so a case that builds a layout
+# and a case that reads one back are talking about the same grid.
+RESTORE_SOURCE = "\n\n".join(
+    [
+        _js_function_source(SHARED_JS.read_text(encoding="utf-8"), "getGridMetrics"),
+        _js_const_source(
+            TERMINALS_JS.read_text(encoding="utf-8"),
+            "MIN_SPLIT_COLS",
+            "MIN_SPLIT_ROWS",
+            "SPLIT_CELL_UNIT",
+            "MAX_STORED_SPLIT_GRID_LINE",
+            "SPLIT_BLOCKED_BY_WINDOW",
+            "SPLIT_BLOCKED_BY_GRID",
+            "SPLIT_BLOCKED_BY_SIZE",
+        ),
+    ]
+    + [
+        _js_function_source(TERMINALS_JS.read_text(encoding="utf-8"), name)
+        for name in (
+            "cloneSplitRect",
+            "cloneSplitAncestors",
+            "makeSplitRectId",
+            "normalizeSplitRectMetadata",
+            "makeSplitLeaf",
+            "normalizeSplitTrackWeights",
+            "getSplitGridSize",
+            "cloneSplitSlotRects",
+            "getBaseLayoutSlots",
+            "baseLayoutCellShapes",
+            "fixedLayoutSlotRects",
+            "rescaleCoarseLayoutSnapshot",
+            "applyWorkspaceLayoutSnapshot",
+            "getSplitBlockers",
+            "getSplitCandidates",
+            "getSplitDisabledReason",
+        )
+    ]
+)
+
+# Everything the restore reaches for that is not geometry: the page globals it
+# publishes into, the one measurement it takes off a live terminal, and the
+# paint at the end of it. The measurement is a stub because a case here is about
+# which rule answered, and the character rule is the one that needs a real
+# terminal to answer at all.
+RESTORE_STUBS = r"""
+var splitSlotRects = null;
+var splitColumnWeights = null;
+var splitRowWeights = null;
+var originalSplitSlotCount = 0;
+var terminals = [];
+/* `Math.min(16, MAX_SESSIONS)` on the page, off a template global. No case here
+   comes near it; the cap has its own refusal and its own sentence. */
+const MAX_SPLIT_TERMINALS = 16;
+
+var window = globalThis;
+window.innerWidth = 1600;
+const document = { getElementById: () => null };
+
+var paneCharacters = { cols: 120, rows: 40 };
+function estimatePaneCharacters() {
+    return paneCharacters;
+}
+
+var painted = 0;
+function applySplitSlotGeometry() {
+    painted += 1;
+    return true;
+}
+
+function boxOf(rects) {
+    return {
+        columns: Math.max(...rects.map(rect => rect.x + rect.w - 1)),
+        rows: Math.max(...rects.map(rect => rect.y + rect.h - 1))
+    };
+}
+
+function plainRects(rects) {
+    return rects.map(rect => ({ x: rect.x, y: rect.y, w: rect.w, h: rect.h }));
+}
+
+/* A six-pane base at the old two-units-per-cell resolution, its last cell split
+   side by side once. Both halves of that cell are a single grid line wide,
+   which is the floor: the layout renders, and neither can ever be halved. */
+function coarseSnapshot() {
+    return {
+        split_slot_rects: [
+            { originSlot: 0, x: 1, y: 1, w: 2, h: 2 },
+            { originSlot: 1, x: 3, y: 1, w: 2, h: 2 },
+            { originSlot: 2, x: 5, y: 1, w: 2, h: 2 },
+            { originSlot: 3, x: 1, y: 3, w: 2, h: 2 },
+            { originSlot: 4, x: 3, y: 3, w: 2, h: 2 },
+            { originSlot: 5, x: 5, y: 3, w: 1, h: 2 },
+            { originSlot: 5, x: 6, y: 3, w: 1, h: 2 }
+        ],
+        split_column_weights: [1, 1, 1, 1, 1, 1],
+        split_row_weights: [1, 1, 1, 1],
+        original_split_slot_count: 6
+    };
+}
+
+function report(value) { process.stdout.write(JSON.stringify(value)); }
+"""
+
+
+@unittest.skipUnless(NODE, "Node.js is required for the split geometry tests")
+class RestoredLayoutTestCase(unittest.TestCase):
+    """A layout saved on a coarser grid, restored: the page's own
+    `applyWorkspaceLayoutSnapshot` and the two rules that decide whether a pane
+    can be split, executed against the rectangles it publishes."""
+
+    def _run_node(self, body: str, *, load_module: bool = True):
+        script = "\n".join(
+            ([SPLIT_GEOMETRY_JS.read_text(encoding="utf-8")] if load_module else [])
+            + [RESTORE_SOURCE, RESTORE_STUBS, body, ""]
+        )
+        with TemporaryDirectory() as script_dir:
+            script_path = Path(script_dir) / "harness.js"
+            script_path.write_text(script, encoding="utf-8")
+            completed = subprocess.run(
+                [NODE, str(script_path)],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                check=False,
+            )
+        if completed.returncode != 0:
+            self.fail(f"node harness failed:\n{completed.stderr}")
+        return json.loads(completed.stdout)
+
+    def test_a_layout_saved_before_the_base_cell_grew_is_made_finer_on_restore(self):
+        """The whole restore, as the page runs it: the snapshot's own box names
+        the unit it was written at, every rectangle is multiplied by the same
+        factor, and each axis gets that many tracks back."""
+        result = self._run_node(
+            """
+            const restored = applyWorkspaceLayoutSnapshot(coarseSnapshot(), 7);
+            report({
+                restored,
+                painted,
+                box: boxOf(splitSlotRects),
+                rects: plainRects(splitSlotRects),
+                columns: splitColumnWeights.length,
+                rows: splitRowWeights.length,
+                originSlots: splitSlotRects.map(rect => rect.originSlot),
+                baseCount: originalSplitSlotCount
+            });
+            """
+        )
+        self.assertTrue(result["restored"])
+        self.assertEqual(result["painted"], 1)
+        self.assertEqual(result["box"], {"columns": 24, "rows": 16})
+        self.assertEqual(result["rects"][0], {"x": 1, "y": 1, "w": 8, "h": 8})
+        self.assertEqual(
+            result["rects"][5:],
+            [
+                {"x": 17, "y": 9, "w": 4, "h": 8},
+                {"x": 21, "y": 9, "w": 4, "h": 8},
+            ],
+        )
+        self.assertEqual(result["columns"], 24)
+        self.assertEqual(result["rows"], 16)
+        # The migration moves coordinates and nothing else: every pane still
+        # answers for the slot it was restored into.
+        self.assertEqual(result["originSlots"], [0, 1, 2, 3, 4, 5, 5])
+        self.assertEqual(result["baseCount"], 6)
+
+    def test_the_pane_that_could_never_be_split_side_by_side_can_be_again(self):
+        """The bug as the reader met it, then the same pane after the restore.
+        The measurement is deliberately generous throughout, so nothing here is
+        the character floor talking."""
+        result = self._run_node(
+            """
+            terminals = Array.from({ length: 7 }, () => ({}));
+            const stored = coarseSnapshot().split_slot_rects[5];
+            const before = {
+                blockers: getSplitBlockers(5, stored),
+                candidates: getSplitCandidates(5, stored)
+            };
+            before.reason = getSplitDisabledReason('vertical', before.blockers.vertical);
+
+            applyWorkspaceLayoutSnapshot(coarseSnapshot(), 7);
+            const rect = splitSlotRects[5];
+            report({
+                before,
+                after: {
+                    blockers: getSplitBlockers(5, rect),
+                    candidates: getSplitCandidates(5, rect),
+                    width: rect.w
+                }
+            });
+            """
+        )
+        self.assertEqual(result["before"]["blockers"]["vertical"], "grid")
+        self.assertEqual(result["before"]["candidates"], ["horizontal"])
+        # The sentence the reader used to get named the column floor, which the
+        # pane was nowhere near; it names the rule that actually refused.
+        self.assertIn("grid space", result["before"]["reason"])
+        self.assertNotIn("columns", result["before"]["reason"])
+        self.assertEqual(result["after"]["blockers"], {"vertical": "", "horizontal": ""})
+        self.assertEqual(result["after"]["candidates"], ["vertical", "horizontal"])
+        self.assertGreaterEqual(result["after"]["width"], 2)
+
+    def test_a_pane_that_is_genuinely_too_small_still_names_the_character_floor(self):
+        """The other rule, unchanged: a pane with all the grid space in the
+        world but no room on screen is refused for its size, and says so."""
+        result = self._run_node(
+            """
+            terminals = Array.from({ length: 2 }, () => ({}));
+            paneCharacters = { cols: 4, rows: 2 };
+            const rect = { x: 1, y: 1, w: 8, h: 8 };
+            const blockers = getSplitBlockers(0, rect);
+            report({
+                blockers,
+                candidates: getSplitCandidates(0, rect),
+                vertical: getSplitDisabledReason('vertical', blockers.vertical),
+                horizontal: getSplitDisabledReason('horizontal', blockers.horizontal)
+            });
+            """
+        )
+        self.assertEqual(result["blockers"], {"vertical": "size", "horizontal": "size"})
+        self.assertEqual(result["candidates"], [])
+        self.assertIn("8 columns", result["vertical"])
+        self.assertIn("4 rows", result["horizontal"])
+
+    def test_a_layout_already_at_this_resolution_is_restored_untouched(self):
+        """Idempotence, through the page rather than the module: a snapshot
+        written by this build comes back exactly as it was stored, so a restore
+        is not a slow way of growing a layout."""
+        result = self._run_node(
+            """
+            const snapshot = {
+                split_slot_rects: [
+                    { originSlot: 0, x: 1, y: 1, w: 8, h: 16 },
+                    { originSlot: 1, x: 9, y: 1, w: 8, h: 16 },
+                    { originSlot: 2, x: 17, y: 1, w: 8, h: 8 },
+                    { originSlot: 3, x: 17, y: 9, w: 4, h: 8 },
+                    { originSlot: 4, x: 21, y: 9, w: 4, h: 8 }
+                ],
+                split_column_weights: Array.from({ length: 24 }, (_v, i) => (i < 8 ? 1.4 : 0.9)),
+                split_row_weights: Array.from({ length: 16 }, () => 1),
+                original_split_slot_count: 6
+            };
+            applyWorkspaceLayoutSnapshot(snapshot, 5);
+            report({
+                rects: plainRects(splitSlotRects),
+                stored: plainRects(snapshot.split_slot_rects),
+                weights: splitColumnWeights,
+                storedWeights: snapshot.split_column_weights
+            });
+            """
+        )
+        self.assertEqual(result["rects"], result["stored"])
+        self.assertEqual(result["weights"], result["storedWeights"])
+
+    def test_the_base_shapes_are_the_layouts_the_page_actually_builds(self):
+        """The one thing the inference depends on: that the shapes a snapshot is
+        read against are the shapes `fixedLayoutSlotRects()` lays out. Every
+        count and every class the page can produce is built here and read back,
+        so a layout this build writes is never mistaken for an older one."""
+        result = self._run_node(
+            """
+            const planner = window.GridVibeSplitGeometry;
+            const classesFor = count => {
+                if (count === 1) return ['layout-single'];
+                if (count === 2) return ['layout-2-vertical', 'layout-2-horizontal'];
+                if (count === 3) {
+                    return ['layout-3-vertical', 'layout-3-horizontal', 'layout-3-split'];
+                }
+                return ['layout-grid'];
+            };
+            const rows = [];
+            for (let count = 1; count <= 16; count++) {
+                classesFor(count).forEach(layoutClass => {
+                    const rects = fixedLayoutSlotRects(count, layoutClass);
+                    const box = boxOf(rects);
+                    const shapes = baseLayoutCellShapes(count);
+                    rows.push({
+                        count,
+                        layoutClass,
+                        cells: {
+                            columns: box.columns / SPLIT_CELL_UNIT,
+                            rows: box.rows / SPLIT_CELL_UNIT
+                        },
+                        offered: shapes,
+                        unit: planner.inferSnapshotUnit(rects, shapes),
+                        rescale: planner.planSnapshotRescale({
+                            rects,
+                            cellShapes: shapes,
+                            unit: SPLIT_CELL_UNIT,
+                            maxGridLine: MAX_STORED_SPLIT_GRID_LINE
+                        })
+                    });
+                });
+            }
+            report(rows);
+            """
+        )
+        self.assertEqual(len(result), 19)
+        for row in result:
+            where = f"{row['count']} panes, {row['layoutClass']}"
+            self.assertIn(row["cells"], row["offered"], where)
+            self.assertEqual(row["unit"], 8, where)
+            self.assertIsNone(row["rescale"], where)
+
+    def test_a_page_that_reached_the_restore_without_the_module_keeps_its_record(self):
+        """Load order again: the restore asks the planner for the migration and
+        takes the coordinates it was given when there is nobody to ask. An old
+        layout stays unsplittable, which is where it already was — it does not
+        cost the reader the layout."""
+        result = self._run_node(
+            """
+            const restored = applyWorkspaceLayoutSnapshot(coarseSnapshot(), 7);
+            report({
+                planner: typeof window.GridVibeSplitGeometry,
+                restored,
+                box: boxOf(splitSlotRects),
+                rects: plainRects(splitSlotRects).slice(5)
+            });
+            """,
+            load_module=False,
+        )
+        self.assertEqual(result["planner"], "undefined")
+        self.assertTrue(result["restored"])
+        self.assertEqual(result["box"], {"columns": 6, "rows": 4})
+        self.assertEqual(
+            result["rects"],
+            [{"x": 5, "y": 3, "w": 1, "h": 2}, {"x": 6, "y": 3, "w": 1, "h": 2}],
+        )
+
+    def test_the_restore_declines_at_the_ceiling_the_server_enforces(self):
+        """The client's own bound is the server's: `_normalize_workspace_layout`
+        drops a geometry record all-or-nothing, so a rescale that overshot it
+        would cost the whole layout on the next save."""
+        from web.session_presentation import MAX_STORED_SESSION_PANES
+
+        source = TERMINALS_JS.read_text(encoding="utf-8")
+        ceiling = re.search(r"const MAX_STORED_SPLIT_GRID_LINE = (\d+);", source)
+        self.assertIsNotNone(ceiling)
+        self.assertEqual(int(ceiling.group(1)), MAX_STORED_SESSION_PANES * 8)
 
 
 if __name__ == "__main__":
