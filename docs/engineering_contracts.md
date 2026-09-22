@@ -271,6 +271,84 @@ changing any field that survives restart; it owns the complete save/restore flow
   mark. It checks registry-entry identity exactly as `_publish_observed_cwd()`
   does, so a retiring pump cannot demote the relaunch that replaced it.
   Arming survives a swallowed prompt: a pane stays watched until it is retired.
+- **A submitted command is a reconstruction, and the OS reading is the
+  observation.** `_track_current_terminal_agent_input()` rebuilds the command
+  line from keystrokes with escape sequences stripped, so a command recalled
+  from history (Up, Enter), completed with Tab, or edited in place is one it
+  never sees — and since only a submitted command promotes a pane, such a pane
+  ran an agent while calling itself a terminal, permanently.
+  `reconcile_pane_agents()` asks the OS instead, on a watcher thread every
+  `PANE_AGENT_RECHECK_SECONDS`, taking **one process snapshot for the whole
+  machine per pass** however many panes there are. `web/pane_processes.py` owns
+  the reading: the walk starts at the pane's *own shell pid* and never searches
+  the table by name, because agents run outside GridVibe too; it is bounded in
+  depth and visited nodes, because a reused pid can make a parent map cyclic;
+  and every failure is an empty table.
+- **The OS reading may only promote.** It cannot see into a WSL distribution or
+  onto a remote host, so an empty answer means "cannot see", never "no agent" —
+  and a reading that retired on it would retire agents that are running. A
+  reader recovers those panes through the pane header's relaunch dropdown, which
+  writes the metadata directly. Retirement stays `_note_shell_prompt()`'s
+  everywhere; the reading's only other use is the refusal below.
+- **A prompt does not retire an agent the OS says is still running.** Where the
+  pane can be read, a prompt drawn while its agent is still there is not the
+  shell taking the terminal back, so it is spent (the mark is raised) rather
+  than retiring a pane that is working. The ask is throttled per pane by
+  `PANE_AGENT_READING_TTL_SECONDS`, so a shell drawing prompts in a loop cannot
+  buy a snapshot for each; a pane the OS will not answer for is retired by its
+  prompt exactly as before.
+- **`initial_command` is not a label, and only a line a shell was seen to run
+  may reach it.** It is persisted (`web/runtime_state.py`; a saved preset
+  derives its whole startup mode from `initial_command_mode`) and it is *typed
+  verbatim at the shell* on restore — `_compose_agent_startup_command()` returns
+  it as its base, and returns it unchanged whenever it is not exactly the
+  agent's own binary. So a promotion that *infers* the agent, from a held line
+  or from the process table, writes the registered binary and never the
+  reader's text: otherwise a sentence said to an agent is saved as the pane's
+  startup command and executed when the workspace comes back.
+  `_agent_promotion_updates()` is the one owner of that rule, and it also
+  refuses to replace a startup command the pane already has — a pane opened with
+  `npm run dev` that is observed running an agent is relabelled and still comes
+  back running `npm run dev`. `_mark_runtime_agent_exited()` matches it: it
+  clears the launch line only when `initial_command_mode` is `agent`, so
+  retirement takes the agent's own command and never the pane's.
+- **A held relaunch requires the gesture that ends an agent.** A line whose
+  first word names a registered CLI is an invocation and a sentence alike
+  ("claude can you double check this"), so a hold is only taken when the reader
+  asked this agent to end within `AGENT_END_GESTURE_WINDOW_SECONDS` — Ctrl+C,
+  Ctrl+D, or a submitted `AGENT_END_COMMANDS` line. `_note_agent_end_gesture()`
+  records the *gesture* on every pane, which is not the same as the keystroke
+  *decision*: where the prompt is observed the guesses still stand down, and
+  this changes nothing about who retires a pane. A prompt spent by the
+  still-running check also retires the hold, because that prompt is the answer
+  it was waiting on — the agent is still there, so the line was said to it.
+- **A relaunch does not fall between the two threads that observe it.** The
+  prompt that ends an agent is read on the pane's pump thread and the command
+  that starts the next one on the Socket.IO handler's, and nothing orders them:
+  quit an agent and retype it straight away and either can land first. Two
+  readings in `_note_shell_prompt()` keep the pane on the agent the reader asked
+  for. A line naming a registered agent that arrives while the pane still reads
+  as one is **held** rather than dropped (`_note_pending_agent_relaunch()`,
+  bounded by `AGENT_RELAUNCH_PENDING_SECONDS` and retired by any other submitted
+  line), and the prompt that proves the shell had the terminal is what applies
+  it (`_promote_pending_agent_relaunch()`) — so the pane changes agent instead
+  of demoting into a terminal that nothing will ever promote back. Only a prompt
+  may apply one: the keystroke guesses cannot tell a quit from an interrupted
+  turn and must not promote on top of that reading. And a prompt the retired
+  agent's own exit had already bought is **absorbed once** rather than spent
+  retiring the agent that has just started (`_absorb_retired_agents_prompt()`,
+  bounded by `AGENT_RETIRED_PROMPT_ABSORB_SECONDS`, opened only by a
+  retirement), which raises the mark to that prompt and shuts the window. The
+  one cost is that a *relaunch* which fails instantly stays labelled until the
+  pane's next prompt; a first launch opens no window and is still retired at
+  once.
+- **A relaunch's title floor is the moment the command was submitted**, not the
+  moment the prompt was read. The floor a demotion raises is too late for a pane
+  that has already been relaunched, and it masked the new agent's own
+  announcement as though the agent that left had written it.
+  `_promote_pending_agent_relaunch()` raises the floor to the held line's own
+  timestamp instead, so everything the previous agent said stays masked and
+  everything this one has said survives.
 - **The mark is only meaningful at a moment when nothing of GridVibe's own is
   in flight, and `_run_startup_sequence()` is not such a moment.** It runs
   *before* the pump, so the prompts its own `cd`/hook/marker lines draw are
