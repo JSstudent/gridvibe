@@ -293,10 +293,12 @@ changing any field that survives restart; it owns the complete save/restore flow
 - **A prompt does not retire an agent the OS says is still running.** Where the
   pane can be read, a prompt drawn while its agent is still there is not the
   shell taking the terminal back, so it is spent (the mark is raised) rather
-  than retiring a pane that is working. The ask is throttled per pane by
-  `PANE_AGENT_READING_TTL_SECONDS`, so a shell drawing prompts in a loop cannot
-  buy a snapshot for each; a pane the OS will not answer for is retired by its
-  prompt exactly as before.
+  than retiring a pane that is working. Every new prompt gets a fresh process
+  reading: a positive answer cannot be cached into the only prompt a shell may
+  draw after that process exits. The snapshot stays outside the registry lock,
+  then connection identity is revalidated before the prompt may change metadata,
+  so a retiring pump cannot act on a relaunch that replaced it during the read.
+  A pane the OS will not answer for is retired by its prompt exactly as before.
 - **`initial_command` is not a label, and only a line a shell was seen to run
   may reach it.** It is persisted (`web/runtime_state.py`; a saved preset
   derives its whole startup mode from `initial_command_mode`) and it is *typed

@@ -764,7 +764,14 @@ def _note_shell_prompt(session_id: str, connection: Dict[str, Any]) -> bool:
         return False
     if _absorb_retired_agents_prompt(connection, prompts):
         return False
-    if _pane_agent_is_still_running(session_id, connection):
+    agent_is_still_running = _pane_agent_is_still_running(session_id, connection)
+    # The process-table snapshot above is deliberately outside the registry
+    # lock. It can take long enough for a relaunch to replace this connection,
+    # so prove ownership again before this retired pump changes either the
+    # replacement's metadata or even its own prompt bookkeeping.
+    if not _connection_is_current(session_id, connection):
+        return False
+    if agent_is_still_running:
         # The shell drew a prompt and the agent is running under it anyway, so
         # the prompt was not the shell taking the terminal back. Spend it --
         # the agent's own exit will draw another.
@@ -786,16 +793,6 @@ def _note_shell_prompt(session_id: str, connection: Dict[str, Any]) -> bool:
 #: rather than a minute -- and one pass costs one process snapshot for the whole
 #: machine however many panes there are, which is what makes that affordable.
 PANE_AGENT_RECHECK_SECONDS = 5.0
-
-#: How long one pane's reading is reused before the OS is asked again.
-#:
-#: The prompt path asks outside the reconcile pass, and a shell drawing prompts
-#: in a loop must not buy a snapshot for each one. Deliberately about as short
-#: as a throttle can be: while it holds, a *positive* reading is reused, so an
-#: agent that exits inside the window can have its retirement deferred by the
-#: prompts drawn in it -- and the next prompt after it retires the pane.
-PANE_AGENT_READING_TTL_SECONDS = 1.0
-
 
 def _agent_binaries() -> Dict[str, str]:
     """``{executable name: agent key}`` for every registered CLI.
@@ -846,40 +843,29 @@ def _observed_pane_agent(
 
     ``reading`` is a table and its child index, taken once and shared by a whole
     reconcile pass. A caller with none of its own (the prompt path) gets a fresh
-    one, throttled per pane so a shell drawing prompts in a loop cannot buy a
-    snapshot for each.
+    one. A positive answer cannot be reused across prompts: the next prompt may
+    be the only one the shell draws after that process exits.
     """
     shell_pid = _pane_shell_pid(connection)
     if not shell_pid:
         return ""
     binaries = _agent_binaries()
     if reading is None:
-        now = time.monotonic()
-        cached_at = float(connection.get("agent_process_read_at") or 0.0)
-        # Strictly inside the window, so a TTL of zero reuses nothing. The
-        # clock this is read from is coarse -- `time.monotonic()` on Windows
-        # ticks every 15.6ms -- so two reads inside one tick are equal rather
-        # than ordered, and an "at the edge" reading has to be taken again.
-        if now - cached_at < PANE_AGENT_READING_TTL_SECONDS:
-            return str(connection.get("agent_process_reading") or "")
         table = process_table()
         reading = (table, children_index(table))
-        connection["agent_process_read_at"] = now
     table, children = reading
     found = descendant_binary(table, children, shell_pid, binaries.keys())
-    agent_key = binaries.get(found, "")
-    connection["agent_process_reading"] = agent_key
-    return agent_key
+    return binaries.get(found, "")
 
 
 def _pane_agent_is_still_running(session_id: str, connection: Dict[str, Any]) -> bool:
     """Is the agent this pane is labelled with actually still there?
 
-    Asked only where a prompt is about to retire one, which is at most once per
-    agent, so the snapshot is paid for by an event the reader caused. A pane
-    the OS cannot answer for is *not* still running as far as this is concerned
-    -- the prompt is the only reading those panes have, and it must keep
-    retiring them.
+    Asked only where a prompt is about to retire one, so every snapshot is paid
+    for by an event the reader caused. Each prompt gets its own answer because
+    the process may have exited since the previous one. A pane the OS cannot
+    answer for is *not* still running as far as this is concerned -- the prompt
+    is the only reading those panes have, and it must keep retiring them.
     """
     session = session_manager.get_session(session_id)
     if session is None or getattr(session, "startup_mode", "") != "agent":
@@ -945,7 +931,6 @@ def _reconcile_one_pane_agent(
     if _is_explorer_session(session) or _is_browser_session(session):
         return False
 
-    connection["agent_process_read_at"] = time.monotonic()
     agent_selection = _observed_pane_agent(connection, reading)
     if not agent_selection:
         return False

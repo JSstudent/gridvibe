@@ -148,16 +148,12 @@ class AgentRuntimeExitTestCase(unittest.TestCase):
     def machine(self, table):
         """What the OS says is running, for the rest of this test.
 
-        The per-pane throttle is switched off with it: it is a ceiling on how
-        often the OS is asked, not part of any answer, and one test pins it on
-        its own.
+        Prompt retirement takes a fresh reading every time, while the watcher
+        still shares one table across its whole reconcile pass.
         """
-        for context in [
-            patch.object(terminal, "process_table", return_value=table),
-            patch.object(terminal, "PANE_AGENT_READING_TTL_SECONDS", 0.0),
-        ]:
-            context.start()
-            self.addCleanup(context.stop)
+        context = patch.object(terminal, "process_table", return_value=table)
+        context.start()
+        self.addCleanup(context.stop)
 
     def announce(self, title):
         """Push one OSC 0 title through the observer, exactly as the pump does."""
@@ -246,6 +242,26 @@ class AgentRuntimeExitTestCase(unittest.TestCase):
         retired, self.connection = self.connection, {"kind": "local", "shell_kind": "cmd"}
         self.registry["pane"] = self.connection
         self.output(PROMPT, connection=retired)
+        self.assertIsAgent()
+
+    def test_a_pump_replaced_during_the_process_read_cannot_retire_its_replacement(self):
+        self.output(PROMPT)
+        self.give_the_pane_a_shell()
+        self.send("codex\r")
+        retired = self.connection
+
+        def replace_while_reading(*_args):
+            self.connection = {"kind": "local", "shell_kind": "cmd"}
+            self.registry["pane"] = self.connection
+            return False
+
+        with patch.object(
+            terminal,
+            "_pane_agent_is_still_running",
+            side_effect=replace_while_reading,
+        ):
+            self.output(PROMPT, connection=retired)
+
         self.assertIsAgent()
 
     def test_a_launched_pane_is_not_armed_by_its_own_startup(self):
@@ -732,17 +748,20 @@ class AgentRuntimeExitTestCase(unittest.TestCase):
         self.output(PROMPT)
         self.assertIsAgent(False)
 
-    def test_one_panes_reading_is_not_bought_twice_in_a_row(self):
-        """A shell drawing prompts in a loop may not buy a snapshot for each."""
+    def test_each_new_prompt_gets_a_fresh_process_reading(self):
+        """A positive result cannot outlive the process into its exit prompt."""
         self.output(PROMPT)
         self.give_the_pane_a_shell()
         self.send("codex\r")
-        with patch.object(terminal, "process_table", return_value=AGENT_TABLE) as table:
+        with patch.object(
+            terminal,
+            "process_table",
+            side_effect=[AGENT_TABLE, IDLE_TABLE],
+        ) as table:
             self.output(PROMPT)
             self.output(PROMPT)
-            self.output(PROMPT)
-        self.assertEqual(table.call_count, 1)
-        self.assertIsAgent()
+        self.assertEqual(table.call_count, 2)
+        self.assertIsAgent(False)
 
     def test_the_title_an_exited_agent_left_stops_being_published(self):
         self.output(PROMPT)
