@@ -21854,6 +21854,37 @@ class SettingsLauncherConfigTestCase(unittest.TestCase):
         self.assertTrue(api.runtime_config.workspace_minimize_cascade)
         self.assertTrue(api.load_config()["workspace"]["minimize_cascade"])
 
+    def test_agent_conversation_restore_defaults_off_and_round_trips(self):
+        payload = self.client.get("/api/app-config").get_json()
+        # Experimental: off unless the reader opts in from App Settings.
+        self.assertFalse(payload["workspace"]["agent_conversation_restore"])
+
+        response = self.client.post(
+            "/api/app-config",
+            json={"workspace": {"agent_conversation_restore": True}},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.get_json()["workspace"]["agent_conversation_restore"])
+        self.assertTrue(api.runtime_config.workspace_agent_conversation_restore)
+        self.assertTrue(api.load_config()["workspace"]["agent_conversation_restore"])
+
+        refused = self.client.post(
+            "/api/app-config",
+            json={"workspace": {"agent_conversation_restore": "yes"}},
+        )
+        self.assertTrue(refused.get_json()["workspace"]["agent_conversation_restore"])
+
+    def test_the_agents_section_carries_the_experimental_restore_switch(self):
+        page = self.client.get("/terminals").get_data(as_text=True)
+        agents = page[
+            page.index('<div class="settings-section-title">Agents</div>'):
+            page.index('<div class="settings-section-title">Terminal</div>')
+        ]
+        self.assertIn('id="appAgentSidebarSide"', agents)
+        self.assertIn('id="appAgentConversationRestore"', agents)
+        self.assertIn("Experimental!", agents)
+
     def test_a_save_that_omits_the_cascade_leaves_it_where_it_was(self):
         # The dialog omits the key whenever the field is not shown (a browser
         # window), so a save from there must never write a native setting off.

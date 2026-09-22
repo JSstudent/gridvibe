@@ -39,6 +39,25 @@ OTHER_ID = "01a041fa-3a1a-71e3-8827-b75ec6aefe6f"
 TOKEN = "pane-token-for-tests"
 
 
+def setUpModule():
+    # The hook belongs to the experimental conversation restore, off by
+    # default; these cases run with its switch on, and the `*switch_off*`
+    # cases turn it back off.
+    patcher = patch.object(
+        terminal.runtime_config, "workspace_agent_conversation_restore", True
+    )
+    patcher.start()
+    unittest.addModuleCleanup(patcher.stop)
+
+
+def switch_restore_off(test_case):
+    patcher = patch.object(
+        terminal.runtime_config, "workspace_agent_conversation_restore", False
+    )
+    patcher.start()
+    test_case.addCleanup(patcher.stop)
+
+
 def claude_fields(**updates):
     fields = {
         "host": "local",
@@ -285,6 +304,16 @@ class ReportRouteTestCase(unittest.TestCase):
             self.session.agent_conversation_id,
             self.session.agent_conversation_resume,
         )
+
+    def test_with_the_switch_off_the_route_records_nothing(self):
+        switch_restore_off(self)
+
+        response = self.post(
+            {"provider": "claude", "conversation_id": RESUMED_ID, "source": "resume"}
+        )
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(self.identity(), ("claude", ORIGINAL_ID, True))
 
     def test_the_owning_connection_replaces_the_identity_without_echoing_it(self):
         response = self.post(
@@ -552,6 +581,14 @@ class LocalSpawnTokenTestCase(unittest.TestCase):
         second_env, _ = self.spawn()
         self.assertNotEqual(second_env[hooks.PANE_TOKEN_VARIABLE], token)
 
+    def test_with_the_switch_off_no_pane_carries_a_token(self):
+        switch_restore_off(self)
+
+        environment, connection = self.spawn()
+
+        self.assertNotIn(hooks.PANE_TOKEN_VARIABLE, environment)
+        self.assertNotIn("conversation_report_token", connection)
+
     def test_a_wsl_pane_is_not_handed_a_route_it_cannot_reach(self):
         environment, connection = self.spawn(use_wsl=True, distribution="Ubuntu")
 
@@ -597,6 +634,14 @@ class StartupSequenceTestCase(unittest.TestCase):
             self.delivered_line({"conversation_report_token": TOKEN}),
         )
         self.assertNotIn("--settings", self.delivered_line({}))
+
+    def test_with_the_switch_off_claude_launches_without_the_hook(self):
+        switch_restore_off(self)
+
+        line = self.delivered_line({"conversation_report_token": TOKEN})
+
+        self.assertNotIn("--settings", line)
+        self.assertNotIn("--resume", line)
 
 
 if __name__ == "__main__":

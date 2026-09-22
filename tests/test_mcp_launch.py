@@ -302,10 +302,23 @@ class PaneIdentityEnvironmentTestCase(unittest.TestCase):
 
     def test_the_spawn_carries_no_gridvibe_variable_the_list_omits(self):
         """The real connector's environment, at the real spawn."""
-        environment = self._spawn_environment()
+        with patch.object(
+            terminal.runtime_config, "workspace_agent_conversation_restore", False
+        ):
+            environment = self._spawn_environment()
+
+        self.assertEqual(
+            {name for name in environment if name.startswith("GRIDVIBE_")},
+            set(IDENTITY_VARIABLES),
+        )
 
         # The one addition is named rather than tolerated: the session-hook
-        # token is read by `utils/agent_session_hook.py`, never the sidecar.
+        # token is read by `utils/agent_session_hook.py`, never the sidecar,
+        # and only the experimental conversation restore hands it out.
+        with patch.object(
+            terminal.runtime_config, "workspace_agent_conversation_restore", True
+        ):
+            environment = self._spawn_environment()
         self.assertEqual(
             {name for name in environment if name.startswith("GRIDVIBE_")},
             set(IDENTITY_VARIABLES) | {PANE_TOKEN_VARIABLE},

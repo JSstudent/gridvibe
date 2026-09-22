@@ -45,6 +45,7 @@ from web.agent_conversations import (
     command_resumes_conversation,
     command_thread_id,
     conversation_restore_capability,
+    conversation_restore_enabled,
     conversation_switch_verb,
     conversation_thread_id,
     is_conversation_prompt,
@@ -1272,6 +1273,9 @@ def _publish_runtime_conversation_identity(
     its first prompt (`_mark_agent_conversation_saved`). Only a saved
     conversation is resumable, so only a saved one reaches a snapshot. The same
     id announced again never loses a saved reading it already had.
+
+    With the experimental restore off, the ownership answer is still given --
+    the Codex name resolver reads it -- but nothing is recorded on the pane.
     """
     provider = _normalize_agent_key(provider)
     conversation_id = normalize_conversation_id(conversation_id)
@@ -1280,6 +1284,7 @@ def _publish_runtime_conversation_identity(
         or not conversation_restore_capability(AGENT_REGISTRY, provider)
     ):
         return False
+    record = conversation_restore_enabled()
     changed = False
     with connection_lock:
         if connection.get("retired") or ssh_connections.get(session_id) is not connection:
@@ -1295,6 +1300,8 @@ def _publish_runtime_conversation_identity(
                 != provider
             ):
                 return False
+            if not record:
+                return True
             same = (
                 getattr(session, CONVERSATION_PROVIDER_FIELD, "") == provider
                 and getattr(session, CONVERSATION_ID_FIELD, "") == conversation_id
@@ -1361,6 +1368,8 @@ def _mark_agent_conversation_saved(
     moment -- a relaunch before any prompt may create the same id again -- and
     a Codex thread announced at startup is not resumable either until this.
     """
+    if not conversation_restore_enabled():
+        return False
     changed = False
     with connection_lock:
         if connection.get("retired") or ssh_connections.get(session_id) is not connection:
@@ -1405,8 +1414,11 @@ def report_agent_conversation(
     replaced shell is refused exactly like one that never had a token. Parsing
     happens before any lock; the commit is the same exact-connection publish a
     Codex title uses. Returns ``(payload, status)``; the payload never carries
-    the id.
+    the id. With the experimental restore off there is nothing to record, and
+    no pane is handed the hook or a token in the first place.
     """
+    if not conversation_restore_enabled():
+        return {"error": "Agent conversation restore is off"}, 404
     with connection_lock:
         connection = ssh_connections.get(session_id)
         expected = (
@@ -1558,6 +1570,10 @@ def _note_agent_conversation_switch(
     if not connection:
         return
     provider = _normalize_agent_key(getattr(session, "agent_selection", ""))
+    if provider != CONVERSATION_PROVIDER_CODEX and not conversation_restore_enabled():
+        # Only the experimental restore watches another provider's switches;
+        # Codex's are read for its conversation name either way.
+        return
     words = str(submitted_line or "").strip().split()
     verb = words[0].lower() if words else ""
     switch = conversation_switch_verb(provider, submitted_line)
@@ -2438,10 +2454,12 @@ def _run_startup_sequence(connection: Dict[str, Any], session: Any):
         # have to duplicate that predicate to decide whether to bother.
         identity=_pane_identity_for(session_id, session) if session_id else None,
         # Only a connection that carries a report token can have its hook
-        # heard, so only that connection is handed the hook at all.
+        # heard, so only that connection is handed the hook at all -- and
+        # only while the experimental conversation restore is on.
         session_hook_settings=(
             available_claude_settings_path()
             if connection.get("conversation_report_token")
+            and conversation_restore_enabled()
             else ""
         ),
     )
@@ -3357,10 +3375,11 @@ def _connect_local_session(session_id: str, session: Any):
         # turns it off would otherwise get panes whose agents cannot tell what
         # workspace they are in, with no error anywhere.
         identity = _pane_identity_for(session_id, session)
-        if shell_kind != "wsl":
+        if shell_kind != "wsl" and conversation_restore_enabled():
             # A shell native to this machine can reach its loopback, so its
             # agent's session hook can report home. The token belongs to this
-            # one connection -- see `report_agent_conversation`.
+            # one connection -- see `report_agent_conversation`. Only the
+            # experimental conversation restore listens for it.
             token = new_pane_token()
             connection["conversation_report_token"] = token
             identity[PANE_TOKEN_VARIABLE] = token

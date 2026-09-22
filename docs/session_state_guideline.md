@@ -81,6 +81,16 @@ published. Multi-field readers still take one `runtime_config.snapshot()`.
 `explorer_root_configured`. The allowlist is `_SESSION_SNAPSHOT_FIELDS` in
 `web/runtime_state.py`.
 
+**Agent conversation identity** — `agent_conversation_provider` and
+`agent_conversation_id` — is launchable shape of the **snapshot only**, and
+only while the experimental `workspace.agent_conversation_restore` switch is
+on. It is the same pane coming back, so a preset never carries it and
+saved-preset normalization strips it. The live `agent_conversation_resume`
+decision is never serialised; it gates the pair instead, so an id the provider
+has not saved yet (no prompt sent) is captured as absent. With the switch off
+the pair is neither captured nor validated on read. The whole rule set is
+[Agent conversation restore](engineering_contracts.md#agent-conversation-restore).
+
 The four path fields have **one reader**, `web/pane_paths.py`, and every
 surface that saves a pane goes through it — the runtime snapshot, the
 exit/dashboard preset builder, and saved-preset normalization. They used to
@@ -277,6 +287,11 @@ server state.**
   credential cannot be mapped keeps its captured shape and falls into its
   normal per-pane authentication error and Retry — the shape is never
   substituted or collapsed to make a credential fit.
+- **A restore is the only launch that resumes an agent conversation.**
+  `_restore_group_request()` marks each captured pair resume, and
+  `prepare_conversation_launch_fields()` refuses a pair on any other launch. A
+  conversation the provider no longer has shows the CLI's own error; it is
+  never retried as a new one.
 - A restore is claimed atomically per workspace id (`already_restoring`), and a
   workspace that already has groups is refused (`already_live`) rather than
   duplicating every tab. The slot's exact id is reused, so the next autosave
@@ -413,6 +428,11 @@ that then *types* its `initial_command` at the prompt.
   derive a root and the restored one that does not, the startup command that is
   not run in a folder that has gone, and the real page builders executed in
   Node.
+- `tests/test_agent_conversation_restore.py` and
+  `tests/test_agent_session_hooks.py` — the experimental conversation restore:
+  provider planning, the snapshot pair and its validation, preset stripping,
+  exact-connection publication, the Claude hook round trip, and the switch
+  turned off.
 - `tests/test_saved_session_store.py` — preset and encryption-key durability.
 - `tests/test_config_transactions.py` — malformed config recovery, backup
   preservation, refused writes/refreshes, and two real processes merging

@@ -61,6 +61,7 @@ from web.agent_conversations import (
     CONVERSATION_ID_FIELD,
     CONVERSATION_PROVIDER_FIELD,
     ConversationIdentityError,
+    conversation_restore_enabled,
     validate_conversation_identity,
 )
 from web.pane_paths import capture_pane_paths
@@ -257,6 +258,10 @@ def _snapshot_session(session: Any) -> Dict[str, Any]:
         else session.to_dict(include_conversation=True)
     )
     snapshot = {key: data.get(key) for key in _SESSION_SNAPSHOT_FIELDS}
+    if not conversation_restore_enabled():
+        # The experimental restore is off: no conversation id is made durable.
+        snapshot[CONVERSATION_PROVIDER_FIELD] = ""
+        snapshot[CONVERSATION_ID_FIELD] = ""
     snapshot.update(capture_pane_paths(data))
     return snapshot
 
@@ -355,6 +360,15 @@ def _validate_session(session: Any) -> Optional[Dict[str, Any]]:
     if not isinstance(session, dict):
         return None
     validated = {key: session.get(key) for key in _SESSION_SNAPSHOT_FIELDS}
+    if not conversation_restore_enabled():
+        # The experimental restore is off: a carried pair is dropped rather
+        # than validated, so the pane still restores -- into a fresh
+        # conversation, exactly as before the feature existed.
+        session = {
+            **session,
+            CONVERSATION_PROVIDER_FIELD: "",
+            CONVERSATION_ID_FIELD: "",
+        }
     try:
         # Local import keeps the registry owner out of this module's import
         # cycle while still making registry metadata the durable-state gate.

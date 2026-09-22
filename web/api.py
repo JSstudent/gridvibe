@@ -472,6 +472,7 @@ def _public_app_config() -> Dict[str, Any]:
             "autosave_interval_minutes": settings.workspace_autosave_interval_minutes,
             "multi_workspace_enabled": settings.multi_workspace_enabled,
             "minimize_cascade": settings.workspace_minimize_cascade,
+            "agent_conversation_restore": settings.workspace_agent_conversation_restore,
         },
         "ssh": {
             "host_key_policy": settings.ssh_host_key_policy,
@@ -558,6 +559,12 @@ def _normalize_app_config_update(data: Any, settings=None) -> Dict[str, Any]:
     )
     if not isinstance(minimize_cascade, bool):
         minimize_cascade = settings.workspace_minimize_cascade
+    agent_conversation_restore = workspace.get(
+        "agent_conversation_restore",
+        settings.workspace_agent_conversation_restore,
+    )
+    if not isinstance(agent_conversation_restore, bool):
+        agent_conversation_restore = settings.workspace_agent_conversation_restore
     try:
         autosave_interval_minutes = int(
             workspace.get(
@@ -635,6 +642,7 @@ def _normalize_app_config_update(data: Any, settings=None) -> Dict[str, Any]:
             "autosave_interval_minutes": autosave_interval_minutes,
             "multi_workspace_enabled": multi_workspace_enabled,
             "minimize_cascade": minimize_cascade,
+            "agent_conversation_restore": agent_conversation_restore,
         },
         "ssh": {
             "host_key_policy": host_key_policy,

@@ -1,6 +1,13 @@
 # Agent Conversation Restore — Phase 1 Implementation Plan
 
-Status: proposed; not implemented.
+Status: Phase 1 shipped for Claude Code and OpenAI Codex CLI only, behind the
+experimental `workspace.agent_conversation_restore` setting (off by default).
+GitHub Copilot CLI and Grok Build remain proposed. This plan is historical; the
+maintained rules are
+[Agent conversation restore](engineering_contracts.md#agent-conversation-restore).
+One addition the plan did not foresee: a Claude `SessionStart` hook reports the
+live session after an in-TUI switch, so Claude identity is recovered rather than
+left unknown.
 
 This plan adds exact conversation restoration for the four agent CLIs whose
 identity can be obtained without searching a provider's state directory:

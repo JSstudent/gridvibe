@@ -26,7 +26,8 @@
     "agent_sidebar_side": "left",
     "autosave_interval_minutes": 5,
     "multi_workspace_enabled": false,
-    "minimize_cascade": false
+    "minimize_cascade": false,
+    "agent_conversation_restore": false
   },
   "explorer_search": {
     "max_files": 2000,

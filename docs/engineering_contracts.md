@@ -20,6 +20,7 @@ Regression history and audit narratives do not belong in this reference.
 - [Presentation persistence](#presentation-persistence)
 - [Workspace lifecycle and windows](#workspace-lifecycle-and-windows)
 - [Agent dashboard](#agent-dashboard)
+- [Agent conversation restore](#agent-conversation-restore)
 - [Agent tools (MCP)](#agent-tools-mcp)
 - [Architecture and extraction boundaries](#architecture-and-extraction-boundaries)
 - [UI and styling](#ui-and-styling)
@@ -47,6 +48,10 @@ Regression history and audit narratives do not belong in this reference.
   `.encryption_key` creation is exclusive and atomic so concurrent processes
   converge on one complete key. Never put credentials into new state files,
   responses, logs, or browser storage. Flag any intended weakening explicitly.
+- `POST /api/sessions/<id>/agent-conversation` is the one route an agent's own
+  process calls without a page. It is authorised by a per-connection pane token
+  rather than by origin; see
+  [Agent conversation restore](#agent-conversation-restore) for its gates.
 
 ## Concurrency and resource ownership
 
@@ -1274,6 +1279,89 @@ unless the task explicitly changes this contract.
   comparison; structural changes rebuild the tree while restoring scroll and
   focus. A failed read leaves the last good tree on screen behind a stated retry
   notice, and an action failure survives successful polls.
+
+## Agent conversation restore
+
+A restored agent pane reopens the exact provider conversation it was in. The
+identity belongs to the workspace snapshot alone; a reusable preset is a
+template and always starts fresh.
+
+- **Experimental and off by default.** `workspace.agent_conversation_restore`
+  (App Settings ▸ Agents) gates the whole feature through one predicate,
+  `conversation_restore_enabled()` in `web/agent_conversations.py`, read per
+  operation. Off, no id is planned, composed, observed, reported or captured;
+  no pane receives the session hook or a pane token; and a snapshot that
+  carries a pair restores its pane fresh — the pair is dropped, never validated.
+  The one thing still answered off is connection ownership, which the Codex
+  name resolver reads. A new consumer checks the same predicate rather than
+  reading the setting itself.
+- **The registry advertises; the allowlist executes.** A provider is
+  restorable only when its `agent_registry.json` `conversation_restore` block
+  equals `_CONVERSATION_RESTORE_CAPABILITIES` exactly. Claude Code is
+  `assigned_uuid` (`claude --session-id <id>` to create, `--resume <id>` to
+  resume); Codex is `osc_uuid` (identity read from a whole-title UUID or a
+  typed `codex resume <id>`; `codex resume <id>` to resume). A hand-edited
+  registry cannot turn a string into a launch template.
+- **Only the untouched built-in command is rewritten.** Planning and
+  composition apply only when `startup_mode`, `initial_command_mode`,
+  `agent_selection` and `initial_command` all name the provider and there is no
+  `custom_agent`. Custom commands launch verbatim; a typed exact
+  `claude --resume|--session-id <uuid>` or `codex resume <uuid>` is accepted as
+  durable identity only when it matches the stored pair.
+- **An id is canonical data, never text.** Every id is parsed with `uuid` and
+  re-serialised, capped at `CONVERSATION_ID_MAX_LENGTH`, and quoted through the
+  target shell family. It never appears in a public `to_dict()`, a dashboard
+  payload, a route response or a log line.
+- **Known is not resumable.** `agent_conversation_resume` is live-only and
+  never serialised. Both CLIs save a conversation on its first turn, so a pair
+  reaches the snapshot only once the provider has it on disk: the first
+  submitted non-slash line, a hook source of `resume`/`compact`/`fork`, a Codex
+  id announced after `/resume` or `/fork`, or a typed resume command. A pane
+  launched and saved before any prompt restores fresh.
+- **Durable shape.** `agent_conversation_provider` and `agent_conversation_id`
+  are in `_SESSION_SNAPSHOT_FIELDS`. With the switch on, a wholly absent pair is
+  the backward-compatible fresh shape; a partial, mistyped, unsupported,
+  provider-mismatched or command-contradicted pair makes the pane unrestorable
+  rather than silently fresh. Saved-preset normalization strips all three
+  fields.
+- **Only a restore resumes.** `_restore_group_request()` marks a captured pair
+  resume; `prepare_conversation_launch_fields()` refuses a pair on any launch
+  that is not a restore. A relaunch from the pane header, any mode change, agent
+  exit, runtime agent promotion and a switch to browser mode clear the triple;
+  a relaunch that picks a built-in Claude plans a new id
+  (`fresh_conversation_fields`). A resume whose conversation is gone shows the
+  CLI's own error; GridVibe never retries it as a new conversation.
+- **An in-TUI switch forgets before it learns.** A submitted Codex `/new`,
+  `/resume`, `/fork` or Claude `/clear`, `/resume` clears the identity at once;
+  only a later authoritative reading (a Codex title UUID or the Claude hook)
+  sets the next one. Saving in between restores fresh, which is safer than
+  resuming the conversation the reader left.
+- **Publication is owned by one connection.** Every write goes through
+  `_publish_runtime_conversation_identity()` / `_mark_agent_conversation_saved()`
+  in `web/terminal_io.py`: `connection_lock` then `SessionManager.lock`, and only
+  while that exact connection is the pane's current, unretired transport and
+  the pane still runs the same provider. A retired pump cannot label its
+  replacement.
+- **The Claude session hook is how an in-TUI switch is read back.**
+  `web/agent_session_hooks.py` writes `.gridvibe_claude_settings.json` on every
+  start (`GRIDVIBE_CLAUDE_SETTINGS_PATH` overrides it; test mode refuses the
+  production file) registering one exec-form `SessionStart` hook that runs this
+  install's interpreter against `utils/agent_session_hook.py`. A built-in Claude
+  launch receives `--settings "<path>"` only on a connection holding a report
+  token, and only when the path needs no quoting beyond double quotes. The
+  script is stdlib-only, prints nothing, always exits 0, ignores subagent
+  sessions, never uses a proxy and bounds its request to 3 s. Codex is never
+  handed a hook: its hooks wait on the reader's trust review, and its title
+  already says the id.
+- **Reports are gated by a per-connection token.** A native local connection
+  (not WSL, not SSH — neither can reach this machine's loopback) gets a fresh
+  `GRIDVIBE_PANE_TOKEN`, kept on the connection. The report route compares the
+  `X-GridVibe-Pane-Token` header in constant time against the pane's *current*
+  connection, parses the body into a canonical id before any lock, and answers
+  `404` (no live connection or switch off), `403` (token), `400` (malformed or
+  unknown source) or `409` (the pane moved on). The response never echoes the
+  id. The token is the only `GRIDVIBE_*` variable outside the sidecar's
+  identity list.
 
 ## Agent tools (MCP)
 

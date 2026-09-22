@@ -77,6 +77,7 @@ from collections import OrderedDict
 from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
 from web.agent_activity import normalize_agent_title
+from web.config import runtime_config
 from web.process_bounds import new_process_group, terminate_process_tree
 
 logger = logging.getLogger(__name__)
@@ -195,6 +196,21 @@ class ConversationIdentityError(ValueError):
     """A stored or requested conversation identity is not safely launchable."""
 
 
+def conversation_restore_enabled(settings: Any = None) -> bool:
+    """Whether the experimental conversation restore is switched on.
+
+    ``workspace.agent_conversation_restore`` (App Settings -> Agents, off by
+    default) gates the whole feature: planning an id at launch, composing a
+    create/resume flag, the Claude session hook and its pane token, observing
+    a conversation, and carrying the pair through the runtime snapshot. Off,
+    an agent pane launches and restores exactly as it did before the feature
+    existed -- a fresh conversation every time. A caller already holding a
+    captured generation passes it in.
+    """
+    settings = settings if settings is not None else runtime_config.snapshot()
+    return bool(getattr(settings, "workspace_agent_conversation_restore", False))
+
+
 def normalize_conversation_id(value: Any) -> str:
     """Return one canonical UUID, or ``""`` for anything else."""
     if not isinstance(value, str):
@@ -287,7 +303,14 @@ def prepare_conversation_launch_fields(
     *,
     restore: bool = False,
 ) -> Dict[str, Any]:
-    """Plan identity for one launcher or server-side restore pane."""
+    """Plan identity for one launcher or server-side restore pane.
+
+    With the feature off, every pane plans no identity at all -- a carried
+    pair is dropped rather than validated, so an old snapshot still restores
+    its pane, only into a fresh conversation.
+    """
+    if not conversation_restore_enabled():
+        return dict(EMPTY_CONVERSATION_FIELDS)
     provider, conversation_id = validate_conversation_identity(config, registry)
     if provider:
         if not restore:
@@ -347,10 +370,16 @@ def compose_conversation_command(
     shell_family: str,
     registry: Mapping[str, Any],
 ) -> str:
-    """Compose one allowlisted provider create/resume command."""
+    """Compose one allowlisted provider create/resume command.
+
+    Gated again here, not only at planning: a pane planned while the feature
+    was on and relaunched after it was switched off launches bare.
+    """
     base = str(base_command or "").strip()
     selected = str(provider or "").strip().lower()
     if not base or base.lower() != selected:
+        return base
+    if not conversation_restore_enabled():
         return base
     canonical_id = normalize_conversation_id(conversation_id)
     capability = conversation_restore_capability(registry, selected)

@@ -23,6 +23,17 @@ CLAUDE_ID = "019d2e46-065b-7b22-aa9e-51bb915be2ff"
 CODEX_ID = "01a041fa-3a1a-71e3-8827-b75ec6aefe6f"
 
 
+def setUpModule():
+    # The feature is experimental and off by default. These cases exercise it,
+    # so the module runs with its App Settings switch on;
+    # `RestoreSwitchOffTestCase` turns it back off.
+    patcher = patch.object(
+        conversations.runtime_config, "workspace_agent_conversation_restore", True
+    )
+    patcher.start()
+    unittest.addModuleCleanup(patcher.stop)
+
+
 def agent_config(provider: str, **updates):
     config = {
         "host": "local",
@@ -645,6 +656,119 @@ class OwnershipAndLifecycleTestCase(unittest.TestCase):
         self.assertNotEqual(same["agent_conversation_id"], CLAUDE_ID)
         self.assertFalse(same["agent_conversation_resume"])
         self.assertEqual(other, conversations.EMPTY_CONVERSATION_FIELDS)
+
+
+
+class RestoreSwitchOffTestCase(unittest.TestCase):
+    """With the App Settings switch off, the whole feature is absent."""
+
+    def setUp(self):
+        patcher = patch.object(
+            conversations.runtime_config, "workspace_agent_conversation_restore", False
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.manager = SessionManager()
+        self.registry = {}
+        for name, value in (
+            ("session_manager", self.manager),
+            ("ssh_connections", self.registry),
+        ):
+            patcher = patch.object(terminal, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def test_the_switch_defaults_off(self):
+        from web.config import _build_runtime_state
+
+        self.assertFalse(
+            conversations.conversation_restore_enabled(_build_runtime_state({}))
+        )
+        self.assertTrue(
+            conversations.conversation_restore_enabled(
+                _build_runtime_state(
+                    {"workspace": {"agent_conversation_restore": True}}
+                )
+            )
+        )
+
+    def test_no_launch_plans_or_composes_an_identity(self):
+        self.assertEqual(
+            conversations.prepare_conversation_launch_fields(
+                agent_config("claude"), AGENT_REGISTRY
+            ),
+            conversations.EMPTY_CONVERSATION_FIELDS,
+        )
+        restored = agent_config(
+            "claude",
+            agent_conversation_provider="claude",
+            agent_conversation_id=CLAUDE_ID,
+        )
+        self.assertEqual(
+            conversations.prepare_conversation_launch_fields(
+                restored, AGENT_REGISTRY, restore=True
+            ),
+            conversations.EMPTY_CONVERSATION_FIELDS,
+        )
+        # A pane planned while the switch was on launches bare once it is off.
+        session = launch_session(
+            "claude",
+            agent_conversation_provider="claude",
+            agent_conversation_id=CLAUDE_ID,
+            agent_conversation_resume=True,
+        )
+        self.assertEqual(_compose_agent_startup_command(session, "claude"), "claude")
+
+    def test_no_identity_is_captured_and_a_carried_one_restores_fresh(self):
+        session = launch_session(
+            "claude",
+            agent_conversation_provider="claude",
+            agent_conversation_id=CLAUDE_ID,
+            agent_conversation_resume=True,
+        )
+        snapshot = runtime_state._snapshot_session(session)
+        self.assertEqual(snapshot["agent_conversation_provider"], "")
+        self.assertEqual(snapshot["agent_conversation_id"], "")
+
+        # A snapshot written while the switch was on -- even a pair that would
+        # be refused -- keeps its pane, only without the conversation.
+        for fields in (
+            {"agent_conversation_provider": "claude", "agent_conversation_id": CLAUDE_ID},
+            {"agent_conversation_provider": "claude", "agent_conversation_id": "bad"},
+        ):
+            with self.subTest(fields=fields):
+                validated = runtime_state._validate_session(
+                    agent_config("claude", **fields)
+                )
+                self.assertIsNotNone(validated)
+                self.assertEqual(validated["agent_conversation_provider"], "")
+                self.assertEqual(validated["agent_conversation_id"], "")
+
+    def test_nothing_is_observed_but_ownership_is_still_answered(self):
+        session = self.manager.create_session(
+            "group",
+            **{
+                key: value
+                for key, value in agent_config("codex").items()
+                if key not in {"session_id", "group_id"}
+            },
+        )
+        connection = {"agent_activity": blank_agent_activity()}
+        self.registry[session.session_id] = connection
+
+        # The Codex name resolver still reads the ownership answer.
+        self.assertTrue(
+            terminal._publish_runtime_conversation_identity(
+                session.session_id, connection, "codex", CODEX_ID, saved=True
+            )
+        )
+        self.assertEqual(session.agent_conversation_id, "")
+        session.agent_conversation_provider = "codex"
+        session.agent_conversation_id = CODEX_ID
+        self.assertFalse(
+            terminal._mark_agent_conversation_saved(session.session_id, connection)
+        )
+        self.assertFalse(session.agent_conversation_resume)
 
 
 if __name__ == "__main__":
