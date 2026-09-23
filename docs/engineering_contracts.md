@@ -254,6 +254,15 @@ changing any field that survives restart; it owns the complete save/restore flow
   this host would be answering about another filesystem. Nothing is rewritten:
   the pane keeps the directory it recorded, so a save still stores what was
   asked for.
+- **An agent's launch line clears its own echo.** The shell echoes the line
+  before it runs it, and agents that draw inline rather than on the alternate
+  screen (Claude Code, Codex) would otherwise start under it. For an
+  `initial_command_mode` of `agent`, `_agent_launch_line()` leads the *same*
+  line with the shell's clear (`cls &` for cmd, `Clear-Host;` for PowerShell,
+  a `printf` of the erase sequences for every POSIX shell, since `clear` needs
+  terminfo). Leading the same line is what orders it after the echo and before
+  the agent's first frame. A plain startup command keeps its echo, and
+  `_note_agent_conversation_command()` is handed the line without the clear.
 - Local prompt hooks arrive at spawn: cmd `PROMPT`, bash `PROMPT_COMMAND` (forwarded
   to WSL through `WSLENV`), PowerShell startup arguments wrapping the user's
   prompt. Only SSH receives a typed integration command. Disabling

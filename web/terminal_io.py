@@ -2362,6 +2362,33 @@ def _unreachable_local_startup_directory(
     return "" if os.path.isdir(os.path.expanduser(candidate)) else candidate
 
 
+# Typed ahead of an agent's launch line, on that same line. The shell has to
+# echo what it was typed before it runs it, and a composed agent line is long
+# -- MCP overrides, identity, settings -- so without this it sits above the
+# agent's first frame. Claude Code and Codex draw inline rather than on the
+# alternate screen, so it stays there until a resize makes them repaint. Being
+# the first command of the line is what orders it: after the echo, before the
+# agent draws. `printf` rather than `clear`, which needs terminfo and is not
+# installed on every host an SSH pane reaches.
+_AGENT_LAUNCH_CLEAR = {
+    "cmd": "cls & ",
+    "powershell": "Clear-Host; ",
+}
+_POSIX_AGENT_LAUNCH_CLEAR = "printf '\\033[H\\033[2J\\033[3J'; "
+
+
+def _agent_launch_line(session: Any, shell_kind: str, startup_command: str) -> str:
+    """Prefix an agent's launch line with the shell's own clear.
+
+    Only an agent pane: a plain startup command's echo is the reader's only
+    record of what the pane was told to run.
+    """
+    if str(getattr(session, "initial_command_mode", "") or "") != "agent":
+        return startup_command
+    prefix = _AGENT_LAUNCH_CLEAR.get(shell_kind, _POSIX_AGENT_LAUNCH_CLEAR)
+    return f"{prefix}{startup_command}"
+
+
 def _run_startup_sequence(connection: Dict[str, Any], session: Any):
     """Change into the target directory and optionally run an initial command."""
     shell_kind = connection.get("shell_kind")
@@ -2481,10 +2508,14 @@ def _run_startup_sequence(connection: Dict[str, Any], session: Any):
                 connection,
             )
         else:
-            _send_connection_input(connection, f"{startup_command}{newline}")
+            _send_connection_input(
+                connection,
+                f"{_agent_launch_line(session, shell_kind, startup_command)}{newline}",
+            )
             # The line that was actually run, which is where a resumed pane's
             # conversation is named -- the pane itself will announce only its
-            # project. Nothing is waited on: the lookup is its own thread.
+            # project. Nothing is waited on: the lookup is its own thread. The
+            # clear is not part of it, so it is not handed over.
             _note_agent_conversation_command(session_id, connection, startup_command)
 
     # Deliberately not the moment to arm an agent pane's retirement watch.
