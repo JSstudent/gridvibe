@@ -511,6 +511,43 @@ class ResumeSaveRestoreTestCase(unittest.TestCase):
         self.assertEqual(snapshot["agent_conversation_provider"], "claude")
         self.assertEqual(snapshot["agent_conversation_id"], RESUMED_ID)
 
+    def clear_then_report(self, *lines):
+        session = self.manager.create_session(
+            "group",
+            **claude_fields(
+                agent_conversation_provider="claude",
+                agent_conversation_id=ORIGINAL_ID,
+                agent_conversation_resume=True,
+            ),
+        )
+        connection = {"kind": "local", "conversation_report_token": TOKEN}
+        self.registry[session.session_id] = connection
+        for line in lines:
+            terminal._track_current_terminal_agent_input(
+                session.session_id, connection, f"{line}\r"
+            )
+        response = self.client.post(
+            f"/api/sessions/{session.session_id}/agent-conversation",
+            json={"provider": "claude", "conversation_id": RESUMED_ID, "source": "clear"},
+            headers={hooks.PANE_TOKEN_HEADER: TOKEN},
+        )
+        self.assertEqual(response.status_code, 200)
+        return runtime_state._snapshot_session(session)
+
+    def test_a_prompt_typed_before_the_clear_hook_reports_keeps_the_new_id(self):
+        # Claude runs the /clear hook in the background and the reader can
+        # type at once: the first prompt lands before the new id does, so the
+        # id arrives into a conversation that is already on disk.
+        snapshot = self.clear_then_report("/clear", "explain this repo")
+
+        self.assertEqual(snapshot["agent_conversation_provider"], "claude")
+        self.assertEqual(snapshot["agent_conversation_id"], RESUMED_ID)
+
+    def test_a_prompt_before_a_second_clear_does_not_save_the_third_conversation(self):
+        snapshot = self.clear_then_report("/clear", "explain this repo", "/clear")
+
+        self.assertEqual(snapshot["agent_conversation_id"], "")
+
     def test_without_a_report_the_switch_still_restores_fresh_not_stale(self):
         session = self.manager.create_session(
             "group",

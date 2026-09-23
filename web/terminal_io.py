@@ -1254,6 +1254,11 @@ _conversation_resolver_pending: Dict[
 ] = {}
 _conversation_resolver_lock = threading.Lock()
 
+#: Connection key: the pane's current, not-yet-identified conversation has
+#: had a prompt. Set and consumed under ``connection_lock``; dropped with the
+#: rest of a conversation's identity by `_forget_agent_conversation`.
+_CONVERSATION_PROMPTED_KEY = "agent_conversation_prompted"
+
 
 def _publish_runtime_conversation_identity(
     session_id: str,
@@ -1272,7 +1277,9 @@ def _publish_runtime_conversation_identity(
     -- a resumed, picked or forked one does, a brand-new one does not until
     its first prompt (`_mark_agent_conversation_saved`). Only a saved
     conversation is resumable, so only a saved one reaches a snapshot. The same
-    id announced again never loses a saved reading it already had.
+    id announced again never loses a saved reading it already had, and an id
+    that arrives after its conversation's first prompt -- Claude's ``/clear``
+    hook runs in the background while the reader types -- arrives saved.
 
     With the experimental restore off, the ownership answer is still given --
     the Codex name resolver reads it -- but nothing is recorded on the pane.
@@ -1306,7 +1313,8 @@ def _publish_runtime_conversation_identity(
                 getattr(session, CONVERSATION_PROVIDER_FIELD, "") == provider
                 and getattr(session, CONVERSATION_ID_FIELD, "") == conversation_id
             )
-            resume = bool(saved) or (
+            prompted = bool(connection.pop(_CONVERSATION_PROMPTED_KEY, False))
+            resume = bool(saved) or prompted or (
                 same and bool(getattr(session, CONVERSATION_RESUME_FIELD, False))
             )
             changed = not same or resume != bool(
@@ -1367,6 +1375,10 @@ def _mark_agent_conversation_saved(
     CLI's "no saved session" error. So delivering ``--session-id`` is not the
     moment -- a relaunch before any prompt may create the same id again -- and
     a Codex thread announced at startup is not resumable either until this.
+
+    A prompt into a conversation whose id has not been announced yet -- the
+    reader typing straight after ``/clear`` or ``/new`` -- has nothing to mark,
+    so the connection remembers it and the id that follows is published saved.
     """
     if not conversation_restore_enabled():
         return False
@@ -1377,6 +1389,14 @@ def _mark_agent_conversation_saved(
         with session_manager.lock:
             session = session_manager.sessions.get(session_id)
             if session is None:
+                return False
+            selected = _normalize_agent_key(getattr(session, "agent_selection", ""))
+            if (
+                not getattr(session, CONVERSATION_ID_FIELD, "")
+                and str(getattr(session, "startup_mode", "") or "") == "agent"
+                and conversation_restore_capability(AGENT_REGISTRY, selected)
+            ):
+                connection[_CONVERSATION_PROMPTED_KEY] = True
                 return False
             provider = _normalize_agent_key(
                 getattr(session, CONVERSATION_PROVIDER_FIELD, "")
@@ -1918,6 +1938,7 @@ def _forget_agent_conversation(
         connection.pop("agent_conversation", None)
         if forget_command:
             connection.pop("agent_conversation_command", None)
+            connection.pop(_CONVERSATION_PROMPTED_KEY, None)
 
 
 def agent_activity_snapshot() -> Dict[str, Dict[str, Any]]:
