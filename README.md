@@ -179,7 +179,7 @@ See **every session in every workspace**, agents first. Open the dashboard dialo
 - **Put it on the side you want** — **App Settings ▸ Agents ▸ Agent Dashboard Side** docks the sidebar left or right, and every open window moves as soon as you save. The handle, its marks and the rows are the same either way.
 - **Three levels** — a workspace is a titled band, a session tab is a card inside it drawn in that tab's own colour, and each agent is one row inside the card.
 - **Every agent on one line** — a leading status dot, the agent's mark, its chat title, and `MCP` when the agent has GridVibe tools. The dialog also draws the agent's name and `auto` when it was launched with auto-approval.
-- **The state is the dot's colour** — green working, amber idle, red unreachable. Point at a dot for the words: how long it has been idle, or what went wrong.
+- **The state is the leading mark** — a spinning green ring while working, amber z's while idle, a red dot when unreachable. Point at it for the words: how long it has been idle, or what went wrong.
 - **The rest is one hover away** — pointing at a row gives the full chat title, where the pane is, and what it runs on (`SSH`, `WSL`, `PowerShell`, `cmd`).
 - **A badge that means something** — the button counts the agents **working right now**, not how many you have open. No badge means every agent is sitting at a prompt.
 - **Click anything to go there** — a row, its session, or its workspace opens or focuses that window at that tab.

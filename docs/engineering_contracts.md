@@ -1262,13 +1262,17 @@ unless the task explicitly changes this contract.
   the card exists so the reader can go there — and gives up only the weight
   that was drawing the eye to the agents, so it cannot read as disabled. An
   empty tree means nothing is running at all, not that nothing agentic is.
-- An agent row's state is its **leading** column and one 8px dot: the card is
-  scanned for "is anything still going", and a colour answers that before any
-  column after it is read. The word the dot replaced is not drawn, is carried
-  verbatim on the indicator's own hover, and stays in the markup out of flow
-  so the row's accessible name still states it. The progress bar is the
-  trailing column and a separate reading: only the agents that speak the
-  progress sequence have one, so it must never widen the dot's column.
+- An agent row's state is its **leading** column, one fixed 16×14px slot that
+  every state draws inside: the card is scanned for "is anything still going",
+  and colour and shape answer that before any column after it is read. Working
+  is a turning ring and idle is three rising z's, so neither is the same shape
+  as another state; error and unknown stay plain dots. Under reduced motion
+  both hold still and keep their shapes. The word the mark replaced is not
+  drawn, is carried verbatim on the indicator's own hover, and stays in the
+  markup out of flow so the row's accessible name still states it. The
+  progress bar is the trailing column and a separate reading: only the agents
+  that speak the progress sequence have one, so it must never widen the
+  state's column.
 - The drawn row is therefore the dot, the agent's mark and name, the chat
   title, `MCP` and `auto` — the two chips left on it, and both say what this
   agent may *do*, which is what a reader choosing a row to instruct is deciding

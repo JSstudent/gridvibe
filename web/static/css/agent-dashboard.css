@@ -522,13 +522,18 @@
 }
 
 /* ── The activity reading ──
-   One dot, at the head of the row, and the word it used to be drawn beside. */
+   One mark, at the head of the row, and the word it used to be drawn beside.
+   The slot is a fixed box whatever the state draws inside it, so a spinner, a
+   snooze and a plain dot all leave the agent's mark in the same column. */
 
 .dash-activity {
     position: relative;
     display: flex;
     align-items: center;
+    justify-content: center;
     flex: 0 0 auto;
+    width: 16px;
+    height: 14px;
 }
 
 /* Kept, and not drawn. The colour is the reading for anyone looking at the row,
@@ -536,7 +541,7 @@
    the same sentence for a reader who is hearing the button rather than seeing
    it, and dropping it would leave the row's accessible name the one place in
    the app that does not state the pane's state. Out of flow, so the column it
-   sits in stays one dot wide. */
+   sits in stays one mark wide. */
 .dash-state-word {
     position: absolute;
     width: 1px;
@@ -556,22 +561,78 @@
     background: var(--gv-dialog-muted);
 }
 
+/* Working is the one state a reader scans a card for, so it is the one that
+   moves: a ring turning on a faint track of its own hue, with a soft glow so it
+   still reads at the sidebar's size. A pulse only dimmed and brightened a dot
+   the same shape as every other state's. */
 .dash-state-working .dash-state-dot {
-    background: var(--gv-success);
-    animation: dash-pulse 1.4s ease-in-out infinite;
+    box-sizing: border-box;
+    width: 12px;
+    height: 12px;
+    background: none;
+    border: 2px solid color-mix(in srgb, var(--gv-success) 22%, transparent);
+    border-top-color: var(--gv-success);
+    border-right-color: var(--gv-success);
+    box-shadow: 0 0 6px color-mix(in srgb, var(--gv-success) 45%, transparent);
+    animation: dash-spin .8s linear infinite;
 }
 
+/* Idle is asleep: three z's climbing in size, each breathing in turn. Three
+   glyphs from two owners, because the dot has only two pseudo-elements; the
+   third is the slot's own, which is the same box in this state. */
 .dash-state-idle .dash-state-dot {
-    background: var(--gv-warning);
+    position: absolute;
+    inset: 0;
+    width: auto;
+    height: auto;
+    border-radius: 0;
+    background: none;
+}
+
+.dash-state-idle .dash-state-dot::before,
+.dash-state-idle .dash-state-dot::after,
+.dash-activity.dash-state-idle::after {
+    position: absolute;
+    font-weight: 800;
+    line-height: 1;
+    color: var(--gv-warning);
+    animation: dash-snooze 2.1s ease-in-out infinite;
+}
+
+.dash-state-idle .dash-state-dot::before {
+    content: "z";
+    left: 0;
+    bottom: 0;
+    font-size: 6px;
+}
+
+.dash-state-idle .dash-state-dot::after {
+    content: "z";
+    left: 4px;
+    bottom: 3px;
+    font-size: 8px;
+    animation-delay: .35s;
+}
+
+.dash-activity.dash-state-idle::after {
+    content: "Z";
+    right: 0;
+    top: -1px;
+    font-size: 10px;
+    animation-delay: .7s;
 }
 
 .dash-state-error .dash-state-dot {
     background: var(--gv-danger);
 }
 
-@keyframes dash-pulse {
-    0%, 100% { opacity: 1; }
-    50% { opacity: .28; }
+@keyframes dash-spin {
+    to { transform: rotate(360deg); }
+}
+
+@keyframes dash-snooze {
+    0%, 100% { opacity: .3; transform: translateY(1px); }
+    40% { opacity: 1; transform: translateY(-1px); }
 }
 
 .dash-progress {
@@ -619,7 +680,14 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-    .dash-state-working .dash-state-dot { animation: none; }
+    /* Still, and still distinct: an open ring and three z's, not a dot. */
+    .dash-state-working .dash-state-dot,
+    .dash-state-idle .dash-state-dot::before,
+    .dash-state-idle .dash-state-dot::after,
+    .dash-activity.dash-state-idle::after { animation: none; }
+    .dash-state-idle .dash-state-dot::before,
+    .dash-state-idle .dash-state-dot::after,
+    .dash-activity.dash-state-idle::after { opacity: 1; }
     .dash-progress-fill.is-indeterminate { animation: none; }
 }
 
