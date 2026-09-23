@@ -696,6 +696,44 @@ class AgentRuntimeExitTestCase(unittest.TestCase):
                 self.assertEqual(terminal.reconcile_pane_agents(), 0)
                 self.assertIsAgent(False)
 
+    def test_a_relaunch_during_the_reading_keeps_the_old_shells_agent_off_the_pane(self):
+        """The reading is about the connection that was walked, not the pane.
+
+        A relaunch that replaces the connection while its shell is being read
+        leaves an answer about a shell that is going away; committing it would
+        label the replacement with an agent it is not running.
+        """
+        self.output(PROMPT)
+        self.give_the_pane_a_shell()
+        self.machine(AGENT_TABLE)
+        old = self.connection
+        real_walk = terminal.descendant_binary
+
+        def relaunch_during_walk(*args, **kwargs):
+            old["retired"] = True
+            self.registry["pane"] = {"kind": "local", "shell_kind": "cmd"}
+            return real_walk(*args, **kwargs)
+
+        with patch.object(terminal, "descendant_binary", side_effect=relaunch_during_walk):
+            self.assertEqual(terminal.reconcile_pane_agents(), 0)
+        self.assertIsAgent(False)
+        self.assertNotIn("agent_runtime_armed", old)
+
+    def test_a_pane_relabelled_during_the_reading_is_not_promoted_over(self):
+        self.output(PROMPT)
+        self.give_the_pane_a_shell()
+        self.machine(AGENT_TABLE)
+        real_walk = terminal.descendant_binary
+
+        def switch_mode_during_walk(*args, **kwargs):
+            self.session.startup_mode = "explorer"
+            return real_walk(*args, **kwargs)
+
+        with patch.object(terminal, "descendant_binary", side_effect=switch_mode_during_walk):
+            self.assertEqual(terminal.reconcile_pane_agents(), 0)
+        self.assertEqual(self.session.startup_mode, "explorer")
+        self.assertEqual(self.session.agent_selection, "")
+
     def test_the_pass_leaves_a_pane_that_is_not_a_terminal_alone(self):
         self.give_the_pane_a_shell()
         self.machine(AGENT_TABLE)

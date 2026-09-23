@@ -956,10 +956,20 @@ def _reconcile_one_pane_agent(
     if not agent_selection:
         return False
 
-    updated = session_manager.update_session_metadata(
-        session_id,
-        **_agent_promotion_updates(session, agent_selection),
-    )
+    # The reading belongs to this connection's shell. A relaunch or mode switch
+    # during it may have replaced the connection or relabelled the pane, and
+    # the old shell's agent is not a fact about the replacement -- so the
+    # commit re-checks both under the lock that orders them.
+    with connection_lock:
+        if connection.get("retired") or not _connection_is_current(session_id, connection):
+            return False
+        current = session_manager.get_session(session_id)
+        if current is not session or str(getattr(current, "startup_mode", "") or "") != "terminal":
+            return False
+        updated = session_manager.update_session_metadata(
+            session_id,
+            **_agent_promotion_updates(current, agent_selection),
+        )
     if not updated:
         return False
     # Everything the pane announced before this belongs to whatever it was
