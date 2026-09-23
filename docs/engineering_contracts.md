@@ -1018,7 +1018,11 @@ unless the task explicitly changes this contract.
   part of the rule — a remote pane's tools arrive over the reverse forward on
   its own SSH transport, so `pane_can_run_the_sidecar()` picks the *shape* of
   the answer (local config file against tunnelled URL) and never whether there
-  is one. The tag is its own value and is never folded into `paneDisplayTitle()`
+  is one. The dashboard draws the tag as an `MCP` chip; the pane header draws
+  the same reading as a frame around the agent's mark (`data-mcp` on the icon,
+  written by `syncPaneAgentIcon()`), with `MCP_TAG_TITLE` on the mark's hover,
+  because the header has no width to spare for a word. The tag is its own value
+  and is never folded into `paneDisplayTitle()`
   or `paneChatLine()`: a title is also what the reader typed, and a chip
   concatenated into one would be indistinguishable from a name and would reach
   the typed-title comparison as though somebody had chosen it. `agent_mcp`
@@ -1487,7 +1491,7 @@ in `README.md`; state the rules a change has to keep.
   overrides in `web/api.py`, `apply_pane_shell_change` in `web/session_shell.py`,
   and `_establish_mcp_tunnel` last, which is the only one with a cost attached —
   such a pane opens no port, mints no token and writes no remote file. The pane
-  header's **MCP** tag paints off the flag, so the tag is honest for free.
+  header's MCP frame paints off the flag, so the frame is honest for free.
 - **`pane_can_run_the_sidecar()` picks the *shape* of the answer, never whether
   there is one.** A local pane gets the generated config; a remote pane gets a
   URL. The predicate is held there rather than at the launcher checkbox because a
@@ -1646,6 +1650,22 @@ in `README.md`; state the rules a change has to keep.
   foregrounds are retained in both themes, with contrasting backgrounds for
   white/yellow names on light surfaces and near-black OpenCode names. Runtime
   agent changes update both the title's brand key and its icon in place.
+- A pane header's title line gives up width in a fixed order, so no width
+  squeezes every label into an ellipsis at once. `updatePaneHeaderLayout()`
+  measures with the actions inline and the name printed, then folds the actions
+  into ⋯ if they overflow. After that, an agent pane whose name would still
+  ellipsise drops the name (`name-folded`). The agent's mark then names the
+  pane, and its hover carries the agent's name. A pane with no mark keeps its
+  ellipsised name, because nothing else would name it. The name shrinks well
+  before the host does, and any change to the name or the mark re-measures the
+  header. The host line prints `paneHeaderHostLabel()` from `agent-identity.js`.
+  That rule abbreviates only a shell family's long name (`PowerShell` → `PS`),
+  and only on the header, with the full label kept as the hover. The stored
+  host, the dashboard's transport word and the relaunch menu keep the full
+  name. The connection state is the status dot alone, placed after the close
+  button, and its word is the dot's hover and accessible name. The mark and the
+  host line are filled by the same syncs that a status broadcast runs, so a
+  freshly built header and a repainted one cannot disagree.
 - A split is two halves. `split-geometry.js` is the DOM-free, Node-tested rule
   for where the cut lands and what the axis track weights become: the offset is
   chosen by measured width, not by track count, so an odd span and a span whose

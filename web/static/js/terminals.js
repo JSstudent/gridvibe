@@ -718,19 +718,51 @@
         return window.GridVibeAgentGlyphs.agentGlyphMarkup(identity.agentKeyForSession(session));
     }
 
+    /* The agent's mark, framed while the agent runs with GridVibe tools. The
+       frame replaced a separate "MCP" chip that cost a header already short of
+       width a whole word. The chip's sentence moved to the mark's hover, beside
+       the agent's name, because a narrow header drops the printed name first
+       and the mark is then the only thing left saying which agent this is. */
     function syncPaneAgentIcon(icon, session) {
         if (!icon) return;
         const html = paneAgentIconHtml(session);
         if (icon.innerHTML !== html) icon.innerHTML = html;
         icon.hidden = !html;
+        const mcp = Boolean(html && paneMcpTag(session));
+        if (mcp !== ('mcp' in icon.dataset)) {
+            if (mcp) icon.dataset.mcp = 'on';
+            else delete icon.dataset.mcp;
+        }
+        const identity = window.GridVibeAgentIdentity;
+        const name = html
+            ? identity.agentDisplayName(session, typeof AGENT_OPTIONS === 'undefined' ? [] : AGENT_OPTIONS)
+            : '';
+        const label = [name, mcp ? identity.MCP_TAG_TITLE : ''].filter(Boolean).join('\n');
+        if (icon.title !== label) icon.title = label;
     }
 
-    /* Whether this pane says it is running with GridVibe's own tools, and what
-       it says — agent-identity.js's rule, shared with the dashboard row for the
-       same reason the name is. Empty for every pane that is not, which is what
-       hides the chip rather than drawing a blank one. */
+    /* Whether this pane says it is running with GridVibe's own tools —
+       agent-identity.js's rule, shared with the dashboard row for the same
+       reason the name is. Empty for every pane that is not, which is what
+       leaves the agent's mark unframed. */
     function paneMcpTag(session) {
         return window.GridVibeAgentIdentity.paneAgentMcpTag(session);
+    }
+
+    /* What the header's host line prints: the host label with a shell
+       family's long name shortened (agent-identity.js's rule). The full label
+       stays on the line's hover. */
+    function paneHeaderHostLabel(session) {
+        return window.GridVibeAgentIdentity.paneHeaderHostLabel(session?.host);
+    }
+
+    function syncPaneHostLabel(hostLabel, session) {
+        if (!hostLabel) return;
+        const label = paneHeaderHostLabel(session);
+        if (hostLabel.textContent.trim() !== label) hostLabel.textContent = label;
+        const full = String(session?.host || '').trim();
+        const hover = full !== label ? full : '';
+        if ((hostLabel.title || '') !== hover) hostLabel.title = hover;
     }
 
     function getSessionApiPath(groupId = activeGroupId) {
@@ -894,12 +926,16 @@
        The header fields that read from the session record, and nothing else:
        the reset control's affordance is decided by the transport rather than by
        what is running in it, and syncing the shell controls here would close a
-       menu the user has open. The GridVibe-tools chip is one of these fields
-       for exactly the reason the name is — a relaunch can take a pane off the
-       tools without moving it — so it is written here rather than only built,
-       and by the same skip-if-unchanged comparison. */
+       menu the user has open. The GridVibe-tools frame on the agent's mark is
+       one of these fields for exactly the reason the name is — a relaunch can
+       take a pane off the tools without moving it — so it is written here
+       rather than only built, and by the same skip-if-unchanged comparison.
+       A changed name or mark re-measures the header, since whether the name
+       still fits beside the actions is only known once it is printed. */
     function syncPaneIdentityChrome(index, session) {
-        syncPaneAgentIcon(document.getElementById(`ticon-${index}`), session);
+        const icon = document.getElementById(`ticon-${index}`);
+        const iconWasHidden = icon ? icon.hidden : true;
+        syncPaneAgentIcon(icon, session);
         const nameLabel = document.getElementById(`tname-${index}`);
         if (nameLabel) {
             const identity = window.GridVibeAgentIdentity;
@@ -909,21 +945,14 @@
             else if (!key && nameLabel.dataset.agent) delete nameLabel.dataset.agent;
         }
         const title = paneDisplayTitle(session, index);
+        let remeasure = Boolean(icon) && icon.hidden !== iconWasHidden;
         if (nameLabel && nameLabel.textContent.trim() !== title) {
             nameLabel.textContent = title;
+            remeasure = true;
         }
-        const hostLabel = document.getElementById(`thost-${index}`);
-        const host = String(session.host || '');
-        if (hostLabel && hostLabel.textContent.trim() !== host) {
-            hostLabel.textContent = host;
-        }
-        const mcpTag = document.getElementById(`tmcp-${index}`);
-        if (mcpTag) {
-            const tag = paneMcpTag(session);
-            if (mcpTag.textContent.trim() !== tag) {
-                mcpTag.textContent = tag;
-            }
-            mcpTag.hidden = !tag;
+        syncPaneHostLabel(document.getElementById(`thost-${index}`), session);
+        if (remeasure) {
+            updatePaneHeaderLayout(index);
         }
     }
 
@@ -5483,7 +5512,12 @@
     /* Fold every header action except close into the overflow menu when the
        inline row no longer fits — the "buttons clip when the pane is tiny" fix.
        Measured against the header's own width so it tracks the real pixel size
-       of each pane (a pane below ~1/8 of the surface collapses first). */
+       of each pane (a pane below ~1/8 of the surface collapses first).
+
+       An agent pane then drops its printed name once the name would ellipsise:
+       the agent's mark already says which agent it is (and says its name on
+       hover), and a clipped "OpenAI …" only crowded the host out. A pane with
+       no mark keeps its ellipsised name, since nothing else would name it. */
     function updatePaneHeaderLayout(index) {
         const card = document.getElementById(`tc-${index}`);
         if (!card) {
@@ -5494,15 +5528,21 @@
         if (!header || !actions) {
             return;
         }
-        /* Measure with the actions inline; the class is re-applied synchronously
-           in the same frame so the intermediate state never paints. */
-        card.classList.remove('actions-collapsed');
+        /* Measure with the actions inline and the name printed; the classes are
+           re-applied synchronously in the same frame so the intermediate state
+           never paints. */
+        card.classList.remove('actions-collapsed', 'name-folded');
         const overflowing = header.scrollWidth - header.clientWidth > 1;
         card.classList.toggle('actions-collapsed', overflowing);
         if (!overflowing && card.classList.contains('actions-open')) {
             card.classList.remove('actions-open');
             card.querySelector('.terminal-actions-more-btn')?.setAttribute('aria-expanded', 'false');
         }
+        const icon = card.querySelector('.terminal-agent-icon');
+        const name = card.querySelector('.terminal-name');
+        const nameClipped = Boolean(icon && !icon.hidden && name)
+            && name.scrollWidth - name.clientWidth > 1;
+        card.classList.toggle('name-folded', nameClipped);
     }
 
     function buildGrid(sessions, layout) {
@@ -5622,35 +5662,22 @@
             // case where a saved-dark pane rendered light under global light).
             card.dataset.explorerTheme = resolvedTheme.theme;
         }
-        const mcpTag = paneMcpTag(session);
         const sessionColour = tabColourForGroup(activeGroupId);
         card.style.setProperty('--session-color', sessionColour);
         card.style.setProperty('--session-color-dim', hexToRgba(sessionColour, 0.45));
+        /* The mark and the host line are filled by their syncs below, the same
+           ones a status broadcast runs, so a built header and a repainted one
+           cannot disagree about the frame, the hover or the abbreviation. */
         card.innerHTML = `
                 <div class="terminal-header">
                     <div class="terminal-info">
-                        <span class="terminal-agent-icon" id="ticon-${i}" aria-hidden="true" ${session.startup_mode === 'agent' ? '' : 'hidden'}>${paneAgentIconHtml(session)}</span>
+                        <span class="terminal-agent-icon" id="ticon-${i}" role="img" hidden></span>
                         <span class="terminal-name" id="tname-${i}" ${window.GridVibeAgentIdentity.paneKindForSession(session) === 'agent' ? `data-agent="${window.GridVibeAgentGlyphs.agentGlyphKey(window.GridVibeAgentIdentity.agentKeyForSession(session))}"` : ''}>
                             ${escHtml(paneDisplayTitle(session, i))}
                         </span>
-                        <span class="terminal-host" id="thost-${i}">
-                            ${escHtml(session.host || '')}
-                        </span>
-                        <!-- Built for every pane and shown by the sync above, so
-                             a relaunch on or off the tools needs no DOM surgery
-                             on the header it happens in. -->
-                        <span
-                            class="terminal-mcp-tag"
-                            id="tmcp-${i}"
-                            title="${escHtml(window.GridVibeAgentIdentity.MCP_TAG_TITLE)}"
-                            ${mcpTag ? '' : 'hidden'}
-                        >${escHtml(mcpTag)}</span>
+                        <span class="terminal-host" id="thost-${i}"></span>
                     </div>
                     <div class="terminal-meta">
-                        <div class="terminal-status">
-                            <div class="status-dot pending" id="tdot-${i}"></div>
-                            <span id="tlabel-${i}">Pending</span>
-                        </div>
                         <div class="terminal-actions" id="tactions-${i}">
                             ${paneResetButtonHtml(i, session)}
                             ${!isBrowser ? `
@@ -5723,6 +5750,9 @@
                         >
                             ×
                         </button>
+                        <div class="terminal-status">
+                            <div class="status-dot pending" id="tdot-${i}" role="img" title="Pending" aria-label="Pending"></div>
+                        </div>
                         ${paneShellMenuHtml(i)}
                     </div>
                 </div>
@@ -5764,6 +5794,8 @@
                     </div>
                 </div>
             `;
+        syncPaneAgentIcon(card.querySelector(`#ticon-${i}`), session);
+        syncPaneHostLabel(card.querySelector(`#thost-${i}`), session);
         return card;
     }
 
@@ -6233,7 +6265,7 @@
         }
 
         const card = sourceCard.cloneNode(true);
-        card.classList.remove('dragging', 'drag-target', 'explorer-pane', 'browser-pane', 'actions-collapsed', 'actions-open');
+        card.classList.remove('dragging', 'drag-target', 'explorer-pane', 'browser-pane', 'actions-collapsed', 'actions-open', 'name-folded');
         card.id = `tc-${targetIndex}`;
         card.dataset.slot = String(targetIndex);
         delete card.dataset.explorerThemeKey;
@@ -6252,18 +6284,8 @@
         if (name) {
             name.textContent = paneDisplayTitle(session, targetIndex);
         }
-        const host = card.querySelector(`#thost-${targetIndex}`);
-        if (host) {
-            host.textContent = session.host || '';
-        }
-        const dot = card.querySelector(`#tdot-${targetIndex}`);
-        if (dot) {
-            dot.className = `status-dot ${session.status || 'pending'}`;
-        }
-        const label = card.querySelector(`#tlabel-${targetIndex}`);
-        if (label) {
-            label.textContent = session.status === 'connected' ? 'Connected' : 'Pending';
-        }
+        syncPaneHostLabel(card.querySelector(`#thost-${targetIndex}`), session);
+        applyStatusDot(card.querySelector(`#tdot-${targetIndex}`), session.status || 'pending');
         card.querySelectorAll(`#tsplitv-${targetIndex}, #tsplith-${targetIndex}`).forEach(button => {
             button.disabled = false;
         });
@@ -7883,21 +7905,26 @@
     /* ─────────────────────────────────────────────
        Update status badge for a single terminal
     ───────────────────────────────────────────── */
+    const PANE_STATUS_LABELS = Object.freeze({
+        pending      : 'Pending',
+        connecting   : 'Connecting…',
+        connected    : 'Connected',
+        disconnected : 'Disconnected',
+        error        : 'Error'
+    });
+
+    /* The header states a pane's connection as its dot alone, at the far
+       right; the word it replaced is the dot's hover and accessible name. */
+    function applyStatusDot(dot, status) {
+        if (!dot) return;
+        const label = PANE_STATUS_LABELS[status] || status;
+        dot.className = `status-dot ${status}`;
+        dot.title = label;
+        dot.setAttribute('aria-label', label);
+    }
+
     function setStatus(index, status) {
-        const dot   = document.getElementById(`tdot-${index}`);
-        const label = document.getElementById(`tlabel-${index}`);
-        if (!dot || !label) return;
-
-        const map = {
-            pending      : 'Pending',
-            connecting   : 'Connecting…',
-            connected    : 'Connected',
-            disconnected : 'Disconnected',
-            error        : 'Error'
-        };
-
-        dot.className   = `status-dot ${status}`;
-        label.textContent = map[status] || status;
+        applyStatusDot(document.getElementById(`tdot-${index}`), status);
     }
 
     /* ─────────────────────────────────────────────

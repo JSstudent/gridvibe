@@ -275,6 +275,18 @@ class AgentIdentityTestCase(unittest.TestCase):
             self._labels("[{ mode: 'SSH', use_powershell: true }]"), ["SSH"]
         )
 
+    def test_the_header_shortens_powershell_and_nothing_else(self):
+        """The header's host line is the narrowest place a shell is named; a
+        host or distro is where the pane is and is printed as given."""
+        labels = self._run_node(
+            "report(['PowerShell', ' PowerShell ', 'cmd', 'WSL (Ubuntu)',"
+            " '10.0.0.5', 'powershell', '', null]"
+            ".map(host => identity.paneHeaderHostLabel(host)));"
+        )
+        self.assertEqual(
+            labels, ["PS", "PS", "cmd", "WSL (Ubuntu)", "10.0.0.5", "powershell", "", ""]
+        )
+
     # ── Whether the pane has GridVibe's own tools ──
     # The one fact both surfaces held no reading of at all: the flag was
     # visible only inside one pane's reset dropdown, so two panes that differ

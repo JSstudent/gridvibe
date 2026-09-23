@@ -184,9 +184,9 @@ class DashboardComposerTestCase(unittest.TestCase):
 
         `agent_mcp` is durable -- the launcher checkbox writes it, presets and
         restored snapshots carry it, the relaunch route preserves it -- and
-        `agent-identity.js` is what turns it into the `MCP` chip the pane header
-        and the dashboard row both wear. Dropping it from the list would take
-        that chip off every row with nothing failing here.
+        `agent-identity.js` is what turns it into the `MCP` chip the dashboard
+        row wears and the frame the pane header draws. Dropping it from the list
+        would take that chip off every row with nothing failing here.
         """
         panes = self._compose(
             sessions_by_group={

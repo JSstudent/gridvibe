@@ -444,7 +444,7 @@ const document = {
 /* Counts writes as well as answering them, so "an unchanged reading touches
    nothing" is a fact about the field rather than about the string. */
 function makeField(id, text) {
-    const field = { id, writes: 0, _text: '', dataset: {} };
+    const field = { id, writes: 0, _text: '', dataset: {}, title: '' };
     Object.defineProperty(field, 'textContent', {
         get() { return this._text; },
         set(value) { this._text = value; this.writes += 1; }
@@ -469,7 +469,10 @@ PANE_IDENTITY_SOURCE = "\n".join(
         "paneAgentIconHtml",
         "syncPaneAgentIcon",
         "paneMcpTag",
+        "paneHeaderHostLabel",
+        "syncPaneHostLabel",
         "syncPaneIdentityChrome",
+        "updatePaneHeaderLayout",
     )
 )
 
@@ -506,7 +509,7 @@ class PaneIdentityChromeTestCase(NodeHarnessTestCase):
     def test_icons_follow_agent_switches_and_disappear_for_plain_panes(self):
         result = self._run(
             """
-            const icon = { innerHTML: '', hidden: true };
+            const icon = { innerHTML: '', hidden: true, dataset: {}, title: '' };
             const name = makeField('tname-0', '');
             fields.set('ticon-0', icon);
             const captures = [];
@@ -563,7 +566,8 @@ class PaneIdentityChromeTestCase(NodeHarnessTestCase):
         result = self._run(
             """
             const name = makeField('tname-0', 'Claude Code');
-            const host = makeField('thost-0', 'PowerShell');
+            const host = makeField('thost-0', 'PS');
+            host.title = 'PowerShell';
             const session = {
                 title: 'Terminal 1', host: 'PowerShell', startup_mode: 'agent',
                 agent_selection: 'claude', custom_agent: ''
@@ -579,20 +583,21 @@ class PaneIdentityChromeTestCase(NodeHarnessTestCase):
         )
         self.assertEqual(result, {"nameWrites": 0, "hostWrites": 0})
 
-    def test_the_gridvibe_tools_chip_follows_a_relaunch_without_a_rebuild(self):
+    def test_the_gridvibe_tools_frame_follows_a_relaunch_without_a_rebuild(self):
         """A pane can be taken on and off the tools where it stands.
 
         The header dropdown relaunches a pane onto an agent with GridVibe tools
-        and back off them again, and the pane never moves -- so the chip is
-        written by the same sync the name is, and a pane that came back as a
-        plain shell must drop it however the flag was left in the record.
+        and back off them again, and the pane never moves -- so the frame on
+        the agent's mark is written by the same sync the name is, and a pane
+        that came back as a plain shell must drop it however the flag was left
+        in the record. The sentence the old chip carried is the mark's hover.
         """
         result = self._run(
             """
             makeField('tname-0', 'Claude Code');
             makeField('thost-0', 'PowerShell');
-            const chip = makeField('tmcp-0', '');
-            chip.hidden = true;
+            const icon = { innerHTML: '', hidden: true, dataset: {}, title: '' };
+            fields.set('ticon-0', icon);
             const captures = [];
             for (const session of [
                 { startup_mode: 'agent', agent_selection: 'claude', agent_mcp: true },
@@ -601,38 +606,117 @@ class PaneIdentityChromeTestCase(NodeHarnessTestCase):
                 { mode: 'ssh', startup_mode: 'agent', agent_selection: 'claude', agent_mcp: true }
             ]) {
                 syncPaneIdentityChrome(0, Object.assign({ title: 'Terminal 1', host: '' }, session));
-                captures.push({ text: chip.textContent, hidden: chip.hidden });
+                captures.push({ framed: 'mcp' in icon.dataset, title: icon.title });
+            }
+            report({ captures, sentence: window.GridVibeAgentIdentity.MCP_TAG_TITLE });
+            """
+        )
+        with_tools = "Claude Code\n" + result["sentence"]
+        self.assertEqual(result["captures"], [
+            {"framed": True, "title": with_tools},
+            {"framed": False, "title": "Claude Code"},
+            {"framed": False, "title": ""},
+            # A remote pane's tools ride its own transport home, so its mark is
+            # framed exactly as a local pane's is.
+            {"framed": True, "title": with_tools},
+        ])
+
+    def test_the_header_prints_ps_and_keeps_the_full_name_on_hover(self):
+        result = self._run(
+            """
+            makeField('tname-0', 'Terminal 1');
+            const host = makeField('thost-0', '');
+            const captures = [];
+            for (const name of ['PowerShell', 'cmd', '10.0.0.5', 'PowerShell']) {
+                syncPaneIdentityChrome(0, {
+                    title: 'Terminal 1', host: name, startup_mode: 'terminal'
+                });
+                captures.push({ text: host.textContent, title: host.title });
             }
             report(captures);
             """
         )
         self.assertEqual(result, [
-            {"text": "MCP", "hidden": False},
-            {"text": "", "hidden": True},
-            {"text": "", "hidden": True},
-            # A remote pane's tools ride its own transport home, so it wears the
-            # chip exactly as a local pane does.
-            {"text": "MCP", "hidden": False},
+            {"text": "PS", "title": "PowerShell"},
+            {"text": "cmd", "title": ""},
+            {"text": "10.0.0.5", "title": ""},
+            {"text": "PS", "title": "PowerShell"},
         ])
 
-    def test_an_unchanged_chip_is_not_rewritten_either(self):
+    def test_an_unchanged_reading_rewrites_neither_the_frame_nor_the_host(self):
         result = self._run(
             """
             makeField('tname-0', 'Claude Code');
-            makeField('thost-0', '');
-            const chip = makeField('tmcp-0', 'MCP');
-            chip.hidden = false;
+            const host = makeField('thost-0', 'PS');
+            host.title = 'PowerShell';
+            let frameWrites = 0;
+            const dataset = {};
+            const icon = {
+                innerHTML: '', hidden: true, title: '',
+                dataset: new Proxy(dataset, {
+                    set(target, key, value) { frameWrites += 1; target[key] = value; return true; },
+                    deleteProperty(target, key) { frameWrites += 1; delete target[key]; return true; }
+                })
+            };
+            fields.set('ticon-0', icon);
             const session = {
-                title: 'Terminal 1', host: '', startup_mode: 'agent',
+                title: 'Terminal 1', host: 'PowerShell', startup_mode: 'agent',
                 agent_selection: 'claude', custom_agent: '', agent_mcp: true
             };
-            const before = chip.writes;
+            syncPaneIdentityChrome(0, session);
+            const before = { frame: frameWrites, host: host.writes };
             syncPaneIdentityChrome(0, session);
             syncPaneIdentityChrome(0, session);
-            report({ writes: chip.writes - before, text: chip.textContent });
+            report({
+                frameWrites: frameWrites - before.frame,
+                hostWrites: host.writes - before.host,
+                framed: 'mcp' in icon.dataset
+            });
             """
         )
-        self.assertEqual(result, {"writes": 0, "text": "MCP"})
+        self.assertEqual(result, {"frameWrites": 0, "hostWrites": 0, "framed": True})
+
+    def test_an_agent_pane_drops_its_name_once_it_would_ellipsise(self):
+        """A clipped "OpenAI ..." crowded the host out of a narrow header; the
+        mark already says which agent it is. A pane with no mark keeps its
+        clipped name, because nothing else on the header would name it."""
+        result = self._run(
+            """
+            function fakeCard({ iconHidden, nameClipped }) {
+                const classes = new Set(['name-folded']);
+                const parts = {
+                    '.terminal-header': { scrollWidth: 300, clientWidth: 300 },
+                    '.terminal-actions': {},
+                    '.terminal-agent-icon': { hidden: iconHidden },
+                    '.terminal-name': { scrollWidth: nameClipped ? 120 : 80, clientWidth: 80 },
+                    '.terminal-actions-more-btn': null
+                };
+                return {
+                    classList: {
+                        add: (...names) => names.forEach(name => classes.add(name)),
+                        remove: (...names) => names.forEach(name => classes.delete(name)),
+                        contains: name => classes.has(name),
+                        toggle: (name, on) => (on ? classes.add(name) : classes.delete(name))
+                    },
+                    querySelector: selector => parts[selector],
+                    folded: () => classes.has('name-folded')
+                };
+            }
+            const captures = [];
+            for (const shape of [
+                { iconHidden: false, nameClipped: true },
+                { iconHidden: false, nameClipped: false },
+                { iconHidden: true, nameClipped: true }
+            ]) {
+                const card = fakeCard(shape);
+                fields.set('tc-0', card);
+                updatePaneHeaderLayout(0);
+                captures.push(card.folded());
+            }
+            report(captures);
+            """
+        )
+        self.assertEqual(result, [True, False, False])
 
     def test_a_pane_with_no_header_yet_is_left_alone(self):
         result = self._run(
