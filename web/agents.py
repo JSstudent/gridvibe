@@ -22,6 +22,7 @@ from web.agent_conversations import (
     CONVERSATION_ID_FIELD,
     CONVERSATION_PROVIDER_FIELD,
     CONVERSATION_RESUME_FIELD,
+    EMPTY_CONVERSATION_FIELDS,
     compose_conversation_command,
 )
 from web.agent_session_hooks import claude_settings_fragment
@@ -1332,9 +1333,7 @@ def _clear_agent_launch_identity(session: Dict[str, Any]) -> None:
     session["custom_agent"] = ""
     session["agent_auto_mode"] = False
     session["agent_mcp"] = False
-    session[CONVERSATION_PROVIDER_FIELD] = ""
-    session[CONVERSATION_ID_FIELD] = ""
-    session[CONVERSATION_RESUME_FIELD] = False
+    session.update(EMPTY_CONVERSATION_FIELDS)
 
 
 def _sanitize_agent_launch_commands(connection_mode: str, sessions: List[Dict[str, Any]]) -> List[str]:

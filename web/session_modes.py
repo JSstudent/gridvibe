@@ -25,6 +25,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict
 
 from sessions.manager import SessionStatus
+from web.agent_conversations import EMPTY_CONVERSATION_FIELDS
 from web.app import session_manager
 from web.explorer import (
     _acquire_ssh_sftp,
@@ -248,9 +249,7 @@ def apply_pane_mode_change(
                 explorer_root_configured=False,
                 initial_command="",
                 startup_mode="explorer",
-                agent_conversation_provider="",
-                agent_conversation_id="",
-                agent_conversation_resume=False,
+                **EMPTY_CONVERSATION_FIELDS,
             )
         else:
             if requested_directory:
@@ -276,9 +275,7 @@ def apply_pane_mode_change(
                 password=None,
                 initial_command="",
                 startup_mode="explorer",
-                agent_conversation_provider="",
-                agent_conversation_id="",
-                agent_conversation_resume=False,
+                **EMPTY_CONVERSATION_FIELDS,
                 browser_tabs=[],
                 browser_active_tab=0,
             )
@@ -356,9 +353,7 @@ def apply_pane_mode_change(
         "initial_command": "",
         "initial_command_mode": "command",
         "startup_mode": "terminal",
-        "agent_conversation_provider": "",
-        "agent_conversation_id": "",
-        "agent_conversation_resume": False,
+        **EMPTY_CONVERSATION_FIELDS,
         # A pane leaving browser mode drops its tab strip; a stale strip would
         # otherwise be re-persisted and reopen browser tabs on a shell pane.
         "browser_tabs": [],

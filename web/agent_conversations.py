@@ -417,11 +417,6 @@ _CONVERSATION_SWITCH_COMMANDS = {
 }
 
 
-def is_conversation_switch_command(provider: Any, submitted_line: Any) -> bool:
-    """True when a complete submitted TUI line makes identity unknown."""
-    return bool(conversation_switch_verb(provider, submitted_line))
-
-
 def conversation_switch_verb(provider: Any, submitted_line: Any) -> str:
     """The switch command a submitted line is, or ``""``."""
     selected = str(provider or "").strip().lower()

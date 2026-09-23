@@ -39,6 +39,7 @@ from web.agent_conversations import (
     CONVERSATION_PROVIDER_CODEX,
     CONVERSATION_PROVIDER_FIELD,
     CONVERSATION_RESUME_FIELD,
+    EMPTY_CONVERSATION_FIELDS,
     ConversationNameCache,
     cache_key,
     command_conversation_identity,
@@ -3062,9 +3063,7 @@ def _track_current_terminal_agent_input(
             agent_selection=agent_selection,
             custom_agent="",
             initial_command=initial_command,
-            agent_conversation_provider="",
-            agent_conversation_id="",
-            agent_conversation_resume=False,
+            **EMPTY_CONVERSATION_FIELDS,
             **promotion_updates,
         )
         if updated:

@@ -200,7 +200,9 @@ class PersistenceTestCase(unittest.TestCase):
         self.assertEqual(snapshot["agent_conversation_id"], CLAUDE_ID)
         self.assertNotIn("agent_conversation_resume", snapshot)
 
-    def test_restore_marks_a_valid_pair_resume_only(self):
+    def test_restore_request_carries_the_pair_for_launch_to_resume(self):
+        # The request only carries the pair and the restore flag; whether the
+        # pane resumes is decided at launch, by prepare_conversation_launch_fields.
         snapshot = agent_config(
             "codex",
             agent_conversation_provider="codex",
@@ -218,7 +220,13 @@ class PersistenceTestCase(unittest.TestCase):
 
         self.assertEqual(warning, "")
         self.assertTrue(body["restore"])
-        self.assertTrue(body["sessions"][0]["agent_conversation_resume"])
+        self.assertEqual(
+            (
+                body["sessions"][0]["agent_conversation_provider"],
+                body["sessions"][0]["agent_conversation_id"],
+            ),
+            ("codex", CODEX_ID),
+        )
 
     def test_old_snapshots_still_validate_as_fresh_agents(self):
         validated = runtime_state._validate_session(agent_config("claude"))

@@ -1351,11 +1351,6 @@ def _restore_group_request(
         for session in (snapshot_group.get("sessions") or [])
         if isinstance(session, dict)
     ]
-    for session in snapshot_sessions:
-        if session.get("agent_conversation_provider") and session.get(
-            "agent_conversation_id"
-        ):
-            session["agent_conversation_resume"] = True
     body = {
         "sessions": snapshot_sessions,
         "connection_mode": snapshot_group.get("connection_mode"),
