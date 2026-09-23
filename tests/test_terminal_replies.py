@@ -684,7 +684,10 @@ class ServerReplyAgeGateTestCase(unittest.TestCase):
         from web import terminal_replies
 
         self.replies = terminal_replies
-        self.budget = terminal_replies.REPLY_AGE_BUDGET_S
+        # The tightest and the loosest of the per-kind budgets: under the one
+        # every kind answers, past the other none does.
+        self.prompt = terminal_replies.COLOUR_REPLY_AGE_BUDGET_S / 2
+        self.late = terminal_replies.REPLY_AGE_BUDGET_S + 0.05
 
     def ledger(self):
         return self.replies.ReplyLedger()
@@ -694,7 +697,7 @@ class ServerReplyAgeGateTestCase(unittest.TestCase):
             with self.subTest(name):
                 ledger = self.ledger()
                 ledger.note_output("before" + query + "after", 100.0)
-                self.assertEqual(ledger.filter_input(reply, 100.0 + self.budget / 2), reply)
+                self.assertEqual(ledger.filter_input(reply, 100.0 + self.prompt), reply)
 
     def test_a_late_reply_is_removed_and_the_typing_around_it_kept(self):
         for name, (query, reply) in QUERY_REPLY_PAIRS.items():
@@ -702,9 +705,44 @@ class ServerReplyAgeGateTestCase(unittest.TestCase):
                 ledger = self.ledger()
                 ledger.note_output(query, 100.0)
                 self.assertEqual(
-                    ledger.filter_input("ab" + reply + "cd", 100.0 + self.budget + 0.05),
+                    ledger.filter_input("ab" + reply + "cd", 100.0 + self.late),
                     "abcd",
                 )
+
+    def test_only_colour_replies_have_the_tight_budget(self):
+        """The 75 ms edge was measured on Codex's colour query and nothing else.
+
+        crossterm waits 2 s for a cursor report at startup and fails without
+        one, so a report 150 ms late is an answer, not garbage.
+        """
+        at = 100.0 + 0.15
+        colour = ESC + "]11;rgb:0d0d/0d0d/0d0d" + ST
+        ledger = self.ledger()
+        ledger.note_output(ESC + "]11;?" + ST, 100.0)
+        self.assertEqual(ledger.filter_input(colour, at), "")
+
+        for name, (query, reply) in QUERY_REPLY_PAIRS.items():
+            kind = self.replies._query_kind(self.replies._QUERY_RE.search(query))
+            with self.subTest(name):
+                ledger = self.ledger()
+                ledger.note_output(query, 100.0)
+                expected = "" if self.replies.reply_age_budget(kind) < 0.15 else reply
+                self.assertEqual(ledger.filter_input(reply, at), expected)
+
+        report = ESC + "[12;40R"
+        ledger = self.ledger()
+        ledger.note_output(ESC + "[6n", 100.0)
+        self.assertEqual(ledger.filter_input(report, at), report)
+
+    def test_the_colour_kinds_are_exactly_the_colour_queries(self):
+        budget = self.replies.reply_age_budget
+        tight = self.replies.COLOUR_REPLY_AGE_BUDGET_S
+        for kind in ["osc10", "osc11", "osc12", "osc4;1", "osc4;255", "osc5;0"]:
+            with self.subTest(kind):
+                self.assertEqual(budget(kind), tight)
+        for kind in ["osc52", "cpr", "xcpr", "da1", "dsr5", "winops14", "decrqm2026"]:
+            with self.subTest(kind):
+                self.assertEqual(budget(kind), self.replies.REPLY_AGE_BUDGET_S)
 
     def test_codex_restore_pair_is_removed_whole(self):
         ledger = self.ledger()
@@ -732,7 +770,7 @@ class ServerReplyAgeGateTestCase(unittest.TestCase):
         ledger.note_output(ESC + "]11;?" + ST, 100.0)  # stripped by the page
         ledger.note_output(ESC + "]11;?" + ST, 105.0)
         reply = ESC + "]11;rgb:0d0d/0d0d/0d0d" + ST
-        self.assertEqual(ledger.filter_input(reply, 105.0 + self.budget / 2), reply)
+        self.assertEqual(ledger.filter_input(reply, 105.0 + self.prompt), reply)
 
     def test_a_reply_does_not_match_a_query_of_another_kind(self):
         ledger = self.ledger()

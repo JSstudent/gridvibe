@@ -86,8 +86,9 @@ from web.hostkeys import _apply_host_key_policy
 from web.mcp_launch import apply_pane_identity, pane_identity_environment
 from web.pane_processes import (
     children_index,
-    descendant_binary,
+    descendant_process,
     normalize_binary,
+    process_started_at,
     process_table,
 )
 from web.terminal_cwd import (
@@ -597,6 +598,13 @@ AGENT_RETIRED_PROMPT_ABSORB_SECONDS = 2.0
 #: it is held for this long, and any other submitted line retires it.
 AGENT_RELAUNCH_PENDING_SECONDS = 5.0
 
+#: How much earlier than the held line a process may appear to start and still
+#: be the one that line launched. It absorbs clock granularity between the
+#: wall clock stamped on the line and the start time the OS reports -- and it
+#: is far below the time it takes to quit an agent and type its name again, so
+#: the agent that was asked to quit can never fall inside it.
+AGENT_RELAUNCH_START_SLACK_SECONDS = 0.25
+
 
 def _observe_terminal_output_cwd(
     session_id: str,
@@ -869,16 +877,25 @@ def _observed_pane_agent(
     one. A positive answer cannot be reused across prompts: the next prompt may
     be the only one the shell draws after that process exits.
     """
+    return _observed_pane_agent_process(connection, reading)[0]
+
+
+def _observed_pane_agent_process(
+    connection: Dict[str, Any],
+    reading: Optional[Tuple[Dict[str, Any], Dict[str, Any]]] = None,
+) -> Tuple[str, Optional[float]]:
+    """:func:`_observed_pane_agent`, with when that process started (or ``None``)."""
     shell_pid = _pane_shell_pid(connection)
     if not shell_pid:
-        return ""
+        return "", None
     binaries = _agent_binaries()
     if reading is None:
         table = process_table()
         reading = (table, children_index(table))
     table, children = reading
-    found = descendant_binary(table, children, shell_pid, binaries.keys())
-    return binaries.get(found, "")
+    found, pid = descendant_process(table, children, shell_pid, binaries.keys())
+    agent = binaries.get(found, "")
+    return agent, (process_started_at(table, pid) if agent else None)
 
 
 def _pane_agent_is_still_running(session_id: str, connection: Dict[str, Any]) -> bool:
@@ -889,6 +906,11 @@ def _pane_agent_is_still_running(session_id: str, connection: Dict[str, Any]) ->
     the process may have exited since the previous one. A pane the OS cannot
     answer for is *not* still running as far as this is concerned -- the prompt
     is the only reading those panes have, and it must keep retiring them.
+
+    The same binary started by a held relaunch line is not "still there": it is
+    the agent the reader typed after quitting this one, and the prompt between
+    them is exactly the retirement the held line was waiting for. Only a start
+    time the OS reports can say so; where it cannot, the answer is as before.
     """
     session = session_manager.get_session(session_id)
     if session is None or getattr(session, "startup_mode", "") != "agent":
@@ -896,7 +918,27 @@ def _pane_agent_is_still_running(session_id: str, connection: Dict[str, Any]) ->
     labelled = _normalize_agent_key(getattr(session, "agent_selection", ""))
     if not labelled:
         return False
-    return _observed_pane_agent(connection) == labelled
+    observed, started_at = _observed_pane_agent_process(connection)
+    if observed != labelled:
+        return False
+    return not _started_by_pending_relaunch(connection, labelled, started_at)
+
+
+def _started_by_pending_relaunch(
+    connection: Dict[str, Any],
+    agent_selection: str,
+    started_at: Optional[float],
+) -> bool:
+    """Did the held relaunch line start the ``agent_selection`` process seen now?"""
+    pending = connection.get("agent_relaunch_pending")
+    if not pending or started_at is None:
+        return False
+    if str(pending.get("agent_selection") or "") != agent_selection:
+        return False
+    if (time.monotonic() - float(pending.get("at") or 0.0)) > AGENT_RELAUNCH_PENDING_SECONDS:
+        return False
+    submitted_at = float(pending.get("submitted_at") or 0.0)
+    return bool(submitted_at) and started_at >= submitted_at - AGENT_RELAUNCH_START_SLACK_SECONDS
 
 
 def reconcile_pane_agents() -> int:

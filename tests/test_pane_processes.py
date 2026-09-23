@@ -19,6 +19,9 @@ What is pinned:
   by a reused pid terminates.
 - **Executable names are compared in one spelling**, so `codex.exe`, a full
   path and `CODEX` are one answer.
+- **A child is younger than its parent.** An orphan whose recorded parent pid
+  was reused by a pane's shell started before that shell, and is not its child.
+  Where a start time is unknown the edge is followed as before.
 - **A failure is an empty table**, never an exception into a pump thread.
 """
 
@@ -34,9 +37,12 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from web import pane_processes  # noqa: E402
 from web.pane_processes import (  # noqa: E402
+    ProcessTable,
     children_index,
     descendant_binary,
+    descendant_process,
     normalize_binary,
+    process_started_at,
     process_table,
 )
 
@@ -130,6 +136,71 @@ class PaneProcessWalkTestCase(unittest.TestCase):
             self.assertEqual(descendant_binary(table, children, 2000, AGENTS), "")
 
 
+class ReusedParentPidTestCase(unittest.TestCase):
+    """Windows keeps an orphan's parent pid, and a new pane's shell can reuse it.
+
+    Claude Desktop's own `claude.exe`, left running after its launcher exited,
+    named pid 100 as its parent; pid 100 is now this pane's `cmd`. Only the
+    start times can tell the orphan from a child.
+    """
+
+    SHELL_STARTED = 5000.0
+
+    def table(self, orphan_started, starts=None):
+        entries = {
+            1: (0, "explorer"),
+            100: (1, "cmd"),
+            150: (100, "claude"),
+        }
+        known = {1: 1.0, 100: self.SHELL_STARTED, 150: orphan_started}
+        known.update(starts or {})
+        return ProcessTable(entries, known.get)
+
+    def walk(self, table):
+        return descendant_process(table, children_index(table), 100, AGENTS)
+
+    def test_an_orphan_older_than_the_shell_is_not_its_child(self):
+        self.assertEqual(self.walk(self.table(self.SHELL_STARTED - 60)), ("", 0))
+
+    def test_a_process_the_shell_started_is_found_with_its_pid(self):
+        self.assertEqual(self.walk(self.table(self.SHELL_STARTED + 1)), ("claude", 150))
+        # Started in the same clock tick as its parent is still its child.
+        self.assertEqual(self.walk(self.table(self.SHELL_STARTED)), ("claude", 150))
+
+    def test_nothing_below_an_orphan_is_the_panes_either(self):
+        table = ProcessTable(
+            {100: (1, "cmd"), 140: (100, "node"), 150: (140, "claude")},
+            {100: self.SHELL_STARTED, 140: self.SHELL_STARTED - 60, 150: self.SHELL_STARTED + 5}.get,
+        )
+        self.assertEqual(self.walk(table), ("", 0))
+
+    def test_an_unknown_start_is_followed_as_before(self):
+        for starts in [{150: None}, {100: None}]:
+            with self.subTest(starts=starts):
+                self.assertEqual(
+                    self.walk(self.table(self.SHELL_STARTED - 60, starts)), ("claude", 150)
+                )
+        plain = {100: (1, "cmd"), 150: (100, "claude")}
+        self.assertEqual(self.walk(plain), ("claude", 150))
+        self.assertIsNone(process_started_at(plain, 150))
+
+    def test_a_start_time_is_read_once_and_a_failure_is_unknown(self):
+        calls = []
+
+        def reader(pid):
+            calls.append(pid)
+            if pid == 2:
+                raise OSError("access denied")
+            return 10.0
+
+        table = ProcessTable({1: (0, "a"), 2: (1, "b")}, reader)
+        self.assertEqual(table.started_at(1), 10.0)
+        self.assertEqual(table.started_at(1), 10.0)
+        self.assertIsNone(table.started_at(2))
+        self.assertIsNone(table.started_at(2))
+        self.assertEqual(calls, [1, 2])
+
+
 class ExecutableNameTestCase(unittest.TestCase):
     def test_one_spelling(self):
         for value in [
@@ -176,6 +247,19 @@ class ProcessTableTestCase(unittest.TestCase):
         self.assertEqual(
             descendant_binary(table, children_index(table), parent, [name]), name
         )
+
+    def test_the_machines_own_start_times_order_a_child_after_its_parent(self):
+        import time
+
+        table = process_table()
+        started = process_started_at(table, os.getpid())
+        self.assertIsNotNone(started, "the OS should say when this process started")
+        self.assertLessEqual(started, time.time() + 1)
+        parent = table[os.getpid()][0]
+        parent_started = process_started_at(table, parent) if parent in table else None
+        if parent_started is None:
+            self.skipTest("this process's parent has already exited")
+        self.assertGreaterEqual(started, parent_started)
 
     def test_an_os_that_will_not_answer_is_an_empty_table(self):
         reader = "_windows_process_table" if os.name == "nt" else "_posix_process_table"

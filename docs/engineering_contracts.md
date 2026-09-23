@@ -188,8 +188,11 @@ changing any field that survives restart; it owns the complete save/restore flow
   the trip back. `web/terminal_replies.py` keeps a per-connection ledger of the
   queries the pump read (`_decoded_terminal_output`), and
   `_sanitize_terminal_input` drops a reply matched to a query of its own kind
-  that is older than `REPLY_AGE_BUDGET_S` (75 ms, under Codex's ~100 ms colour
-  window measured through ConPTY). A reply is matched to the newest outstanding
+  that is older than its kind's budget (`reply_age_budget()`): 75 ms for the
+  colour queries (`COLOUR_REPLY_AGE_BUDGET_S`, under Codex's ~100 ms colour
+  window measured through ConPTY) and `REPLY_AGE_BUDGET_S` (2 s) for every other
+  kind, because those askers wait far longer and crossterm fails outright
+  without a cursor report it waited 2 s for. A reply is matched to the newest outstanding
   query of its kind and consumes it; input shaped like a reply with nothing
   outstanding (Shift+F3 is `CSI 1;2R`) passes, and an entry is forgotten after
   `PENDING_QUERY_HORIZON_S`. The budget is timed from GridVibe's read, so an
@@ -308,7 +311,10 @@ changing any field that survives restart; it owns the complete save/restore flow
   the reading: the walk starts at the pane's *own shell pid* and never searches
   the table by name, because agents run outside GridVibe too; it is bounded in
   depth and visited nodes, because a reused pid can make a parent map cyclic;
-  and every failure is an empty table.
+  it does not follow an edge whose child started before its parent, because
+  Windows keeps an orphan's parent pid and a new pane's shell can reuse it (an
+  unknown start time follows the edge as before); and every failure is an empty
+  table.
 - **The OS reading may only promote.** It cannot see into a WSL distribution or
   onto a remote host, so an empty answer means "cannot see", never "no agent" —
   and a reading that retired on it would retire agents that are running. A
@@ -324,6 +330,10 @@ changing any field that survives restart; it owns the complete save/restore flow
   then connection identity is revalidated before the prompt may change metadata,
   so a retiring pump cannot act on a relaunch that replaced it during the read.
   A pane the OS will not answer for is retired by its prompt exactly as before.
+  The one exception is a held relaunch of the same agent whose process the OS
+  says started after the held line (less `AGENT_RELAUNCH_START_SLACK_SECONDS`):
+  that is the new agent, so the prompt applies the hold and the quit
+  conversation is forgotten instead of being kept for restore.
 - **`initial_command` is not a label, and only a line a shell was seen to run
   may reach it.** It is persisted (`web/runtime_state.py`; a saved preset
   derives its whole startup mode from `initial_command_mode`) and it is *typed

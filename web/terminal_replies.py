@@ -16,7 +16,9 @@ those are exactly what make a restored pane's reply late. The server can: it
 reads the query off the pty and receives the answer, on one clock. So each
 connection keeps a small ledger of the queries it has read, and a reply that
 arrives more than `REPLY_AGE_BUDGET_S` after its query is dropped from the
-input instead of being typed into the pane.
+input instead of being typed into the pane. The budget is per kind
+(`reply_age_budget`): tight for the colour queries it was measured on, and
+generous for the rest, whose askers wait seconds rather than milliseconds.
 
 A reply is matched only against a query of its own kind that is still in the
 ledger. Input that merely looks like a reply -- Shift+F3 is ``ESC [ 1 ; 2 R``,
@@ -32,10 +34,20 @@ from typing import List, Optional, Tuple
 
 #: Measured against Codex under ConPTY: a colour reply 80 ms after GridVibe
 #: read the query was accepted, one at 100 ms was typed into the composer. The
-#: budget sits below that edge, because a reply dropped a little early costs a
-#: program only its default guess, and one let through a little late costs the
-#: reader a line of garbage in the prompt they are typing into.
-REPLY_AGE_BUDGET_S = 0.075
+#: budget sits below that edge, because a colour reply dropped a little early
+#: costs a program only its default guess, and one let through a little late
+#: costs the reader a line of garbage in the prompt they are typing into.
+COLOUR_REPLY_AGE_BUDGET_S = 0.075
+
+#: Every other kind. Askers wait far longer for these, and a dropped answer is
+#: not a harmless default: crossterm (Codex's terminal library) waits 2 s for a
+#: cursor report at startup and fails outright without one. So a reply is only
+#: dropped once no known asker can still be waiting for it.
+REPLY_AGE_BUDGET_S = 2.0
+
+#: The colour queries the tight budget was measured on: OSC 10/11/12 and the
+#: palette (OSC 4) and special colours (OSC 5). Not OSC 52, the clipboard.
+_COLOUR_KIND_PATTERN = re.compile(r"osc(?:1[012]|[45];[0-9]+)")
 
 #: A query the page stripped is never answered, so its entry would otherwise
 #: stay forever and wait for a matching key. Past this age it is forgotten.
@@ -131,6 +143,13 @@ def _reply_kind(match: "re.Match[str]") -> str:
     return _DCS_KINDS[groups["dcs"]]
 
 
+def reply_age_budget(kind: str) -> float:
+    """How long after its query a reply of ``kind`` may still be delivered."""
+    if _COLOUR_KIND_PATTERN.fullmatch(kind):
+        return COLOUR_REPLY_AGE_BUDGET_S
+    return REPLY_AGE_BUDGET_S
+
+
 def split_trailing_sequence(text: str) -> Tuple[str, str]:
     """Split off a trailing escape sequence that has not finished arriving.
 
@@ -196,8 +215,9 @@ class ReplyLedger:
             kept: List[str] = []
             cursor = 0
             for match in _REPLY_RE.finditer(text):
-                asked_at = self._take(_reply_kind(match))
-                if asked_at is None or now - asked_at <= REPLY_AGE_BUDGET_S:
+                kind = _reply_kind(match)
+                asked_at = self._take(kind)
+                if asked_at is None or now - asked_at <= reply_age_budget(kind):
                     continue
                 kept.append(text[cursor:match.start()])
                 cursor = match.end()
