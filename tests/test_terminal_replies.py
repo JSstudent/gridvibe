@@ -657,6 +657,16 @@ QUERY_REPLY_PAIRS = {
     "DECXCPR": (ESC + "[?6n", ESC + "[?12;40;1R"),
     "XTVERSION": (ESC + "[>0q", ESC + "P>|xterm.js(5.5.0)" + ST),
     "DECRQM private": (ESC + "[?2026$p", ESC + "[?2026;2$y"),
+    "OSC 52 clipboard read": (ESC + "]52;c;?" + ST, ESC + "]52;c;aGVsbG8=" + ST),
+    "XTWINOPS window state": (ESC + "[11t", ESC + "[1t"),
+    "XTWINOPS window position": (ESC + "[13t", ESC + "[3;0;0t"),
+    "XTWINOPS pixel size": (ESC + "[14t", ESC + "[4;600;800t"),
+    "XTWINOPS screen pixel size": (ESC + "[15t", ESC + "[5;1080;1920t"),
+    "XTWINOPS cell size": (ESC + "[16t", ESC + "[6;17;9t"),
+    "XTWINOPS text area size": (ESC + "[18t", ESC + "[8;24;80t"),
+    "XTWINOPS screen size": (ESC + "[19t", ESC + "[9;60;200t"),
+    "XTWINOPS icon label": (ESC + "[20t", ESC + "]Lgridvibe" + ST),
+    "XTWINOPS window title": (ESC + "[21t", ESC + "]lgridvibe" + ST),
     "XTGETTCAP": (ESC + "P+q544e" + ST, ESC + "P1+r544e=787465726d" + ST),
     "DECRQSS": (ESC + "P$qm" + ST, ESC + "P1$r0m" + ST),
 }
@@ -729,6 +739,16 @@ class ServerReplyAgeGateTestCase(unittest.TestCase):
         ledger.note_output(ESC + "]10;?" + ST, 100.0)
         reply = ESC + "]11;rgb:0d0d/0d0d/0d0d" + ST
         self.assertEqual(ledger.filter_input(reply, 101.0), reply)
+
+    def test_each_reply_is_matched_only_to_its_own_query(self):
+        for asked, (query, _reply) in QUERY_REPLY_PAIRS.items():
+            for answered, (_query, reply) in QUERY_REPLY_PAIRS.items():
+                if asked == answered:
+                    continue
+                with self.subTest(asked=asked, answered=answered):
+                    ledger = self.ledger()
+                    ledger.note_output(query, 100.0)
+                    self.assertEqual(ledger.filter_input(reply, 105.0), reply)
 
     def test_a_query_split_across_reads_is_recorded(self):
         query = ESC + "]11;?" + ST

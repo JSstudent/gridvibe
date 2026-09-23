@@ -47,23 +47,31 @@ MAX_PENDING_QUERIES = 64
 #: are short; anything longer is some other sequence's payload.
 MAX_QUERY_RESIDUE = 256
 
+#: Every query the page strips (`TERMINAL_QUERY_SOURCES` in
+#: web/static/js/terminal-replies.js) that a terminal answers. XTWINOPS 22/23
+#: push and pop the title stack and are never queries.
 _QUERY_RE = re.compile(
     r"\x1b\](?P<osc>1[012]|[45];[0-9]+);\?(?:\x07|\x1b\\)"
+    r"|\x1b\]52;[a-zA-Z]*;\?(?:\x07|\x1b\\)(?P<osc52>)"
     r"|\x1b\[(?P<da>[>=]?)0?c"
     r"|\x1b\[(?P<dsr>\??[56])n"
     r"|\x1b\[>0?q(?P<xtversion>)"
     r"|\x1b\[(?P<decrqm>\??[0-9]{1,5})\$p"
+    r"|\x1b\[(?P<winops>1[1345689]|2[01])(?:;[0-9]+)*t"
     r"|\x1bP(?P<dcs>[+$])q[^\x1b\x07]*(?:\x07|\x1b\\)"
 )
 
 _REPLY_RE = re.compile(
     r"\x1b\](?P<osc>1[012]|[45];[0-9]+);(?!\?)[^\x07\x1b]*(?:\x07|\x1b\\)"
+    r"|\x1b\]52;[a-zA-Z]*;(?!\?)[^\x07\x1b]*(?:\x07|\x1b\\)(?P<osc52>)"
+    r"|\x1b\](?P<winops_label>[Ll])[^\x07\x1b]*(?:\x07|\x1b\\)"
     r"|\x1b\[(?P<da>[?>])[0-9;]*c"
     r"|\x1bP!\|[0-9A-Fa-f]*\x1b\\(?P<da3>)"
     r"|\x1b\[[03]n(?P<dsr5>)"
     r"|\x1b\[(?P<cpr>\??)[0-9]{1,5};[0-9]{1,5}(?:;[0-9]{1,5})?R"
     r"|\x1bP>\|[^\x1b\x07]*(?:\x07|\x1b\\)(?P<xtversion>)"
     r"|\x1b\[(?P<decrpm>\??[0-9]{1,5});[0-9]\$y"
+    r"|\x1b\[(?P<winops>[1-689])(?:;[0-9]+)*t"
     r"|\x1bP[01](?P<dcs>[+$])r[^\x1b\x07]*(?:\x07|\x1b\\)"
 )
 
@@ -71,11 +79,23 @@ _DA_QUERY_KINDS = {"": "da1", ">": "da2", "=": "da3"}
 _DA_REPLY_KINDS = {"?": "da1", ">": "da2"}
 _DCS_KINDS = {"+": "xtgettcap", "$": "decrqss"}
 
+#: XTWINOPS answers by the query's number less ten -- 14t is answered 4;h;wt
+#: -- except the window state (11t), answered 1t or 2t, and the icon label and
+#: title (20t, 21t), answered as OSC L and OSC l.
+_WINOPS_REPLY_KINDS = {
+    "1": "11", "2": "11", "3": "13", "4": "14", "5": "15",
+    "6": "16", "8": "18", "9": "19", "L": "20", "l": "21",
+}
+
 
 def _query_kind(match: "re.Match[str]") -> str:
     groups = match.groupdict()
     if groups["osc"] is not None:
         return "osc" + groups["osc"]
+    if groups["osc52"] is not None:
+        return "osc52"
+    if groups["winops"] is not None:
+        return "winops" + groups["winops"]
     if groups["da"] is not None:
         return _DA_QUERY_KINDS[groups["da"]]
     if groups["dsr"] is not None:
@@ -91,6 +111,11 @@ def _reply_kind(match: "re.Match[str]") -> str:
     groups = match.groupdict()
     if groups["osc"] is not None:
         return "osc" + groups["osc"]
+    if groups["osc52"] is not None:
+        return "osc52"
+    winops = groups["winops"] or groups["winops_label"]
+    if winops is not None:
+        return "winops" + _WINOPS_REPLY_KINDS[winops]
     if groups["da"] is not None:
         return _DA_REPLY_KINDS[groups["da"]]
     if groups["da3"] is not None:
