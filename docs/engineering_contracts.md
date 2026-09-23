@@ -197,9 +197,12 @@ changing any field that survives restart; it owns the complete save/restore flow
   outstanding (Shift+F3 is `CSI 1;2R`) passes, and an entry is forgotten after
   `PENDING_QUERY_HORIZON_S`. The budget is timed from GridVibe's read, so an
   SSH pane's network round trip is not counted against it.
-- The two owners of that list must agree. `TERMINAL_QUERY_SOURCES` filters the
+- The owners of that list must agree. `TERMINAL_QUERY_SOURCES` filters the
   backlog the page writes late; `_TERMINAL_QUERY_RE` filters the buffer the
-  server replays into a pane whose program has since changed. Neither may filter
+  server replays into a pane whose program has since changed; and
+  `web/terminal_replies.py` ledgers every query the page strips (OSC 52 and the
+  XTWINOPS reports included) and matches each reply only to its own kind.
+  Neither filter may touch
   a sequence that renders or sets state — a rejoin to a pane whose TUI is still
   running has to restore that program's modes, and the title stack (`CSI 22/23
   t`) and DECSCUSR sit beside query shapes the list does match.
@@ -314,7 +317,10 @@ changing any field that survives restart; it owns the complete save/restore flow
   it does not follow an edge whose child started before its parent, because
   Windows keeps an orphan's parent pid and a new pane's shell can reuse it (an
   unknown start time follows the edge as before); and every failure is an empty
-  table.
+  table. The reading belongs to the shell it was taken from, so its promotion
+  commits under `connection_lock` only while that connection is still current
+  and unretired and the pane is still the same `terminal`-mode session; a
+  relaunch or mode switch during the read discards it.
 - **The OS reading may only promote.** It cannot see into a WSL distribution or
   onto a remote host, so an empty answer means "cannot see", never "no agent" —
   and a reading that retired on it would retire agents that are running. A
@@ -1345,16 +1351,20 @@ template and always starts fresh.
   reaches the snapshot only once the provider has it on disk: the first
   submitted non-slash line, a hook source of `resume`/`compact`/`fork`, a Codex
   id announced after `/resume` or `/fork`, or a typed resume command. A pane
-  launched and saved before any prompt restores fresh.
+  launched and saved before any prompt restores fresh. A prompt submitted
+  before the new id is known (typing straight after `/clear` or `/new`, while
+  the hook or title is still on its way) is remembered on the connection, and
+  the id that follows is published already saved.
 - **Durable shape.** `agent_conversation_provider` and `agent_conversation_id`
   are in `_SESSION_SNAPSHOT_FIELDS`. With the switch on, a wholly absent pair is
   the backward-compatible fresh shape; a partial, mistyped, unsupported,
   provider-mismatched or command-contradicted pair makes the pane unrestorable
   rather than silently fresh. Saved-preset normalization strips all three
   fields.
-- **Only a restore resumes.** `_restore_group_request()` marks a captured pair
-  resume; `prepare_conversation_launch_fields()` refuses a pair on any launch
-  that is not a restore. A relaunch from the pane header, any mode change, agent
+- **Only a restore resumes.** `_restore_group_request()` sends the snapshot with
+  `restore: True`, and `prepare_conversation_launch_fields(restore=True)` is the
+  one place a captured pair is accepted and marked resume; it refuses a pair on
+  any other launch. A relaunch from the pane header, any mode change, agent
   exit, runtime agent promotion and a switch to browser mode clear the triple;
   a relaunch that picks a built-in Claude plans a new id
   (`fresh_conversation_fields`). A resume whose conversation is gone shows the

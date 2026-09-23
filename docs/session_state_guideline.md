@@ -288,8 +288,9 @@ server state.**
   normal per-pane authentication error and Retry — the shape is never
   substituted or collapsed to make a credential fit.
 - **A restore is the only launch that resumes an agent conversation.**
-  `_restore_group_request()` marks each captured pair resume, and
-  `prepare_conversation_launch_fields()` refuses a pair on any other launch. A
+  `_restore_group_request()` launches with `restore: True`, and only then does
+  `prepare_conversation_launch_fields()` accept a captured pair and mark it
+  resume; it refuses a pair on any other launch. A
   conversation the provider no longer has shows the CLI's own error; it is
   never retried as a new one.
 - A restore is claimed atomically per workspace id (`already_restoring`), and a
