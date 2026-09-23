@@ -1,23 +1,16 @@
-"""The name a conversation has, when the pane is only announcing its id.
+"""Codex conversation names and identities from its terminal title.
 
-``web/agent_activity.py`` reads what a pane *says about itself*, and for Codex
-that is the OSC title its ``tui.terminal_title=['thread-title']`` override asks
-for. The override is honest and the reading is correct, and between them they
-still lose the one thing the dashboard row is for: a thread the reader has
-named "Review OCR delegation" can announce nothing but
-``019d2e46-065b-7b22-aa9e-51bb915be2ff``, because the thread's *title* and the
-thread's *name* are two fields and only one of them travels over OSC. The row
-then says ``New session`` about a conversation Codex's own resume picker lists
-by name -- and rightly so, because an id is not a name and
-``isOpaqueIdentifierTitle`` refuses to paint one as though it were.
+``web/agent_activity.py`` reads the OSC title Codex emits under GridVibe's
+``tui.terminal_title=['thread-title']`` override. An unnamed thread can
+announce only its UUID, so this module resolves that id through Codex's
+app server before the dashboard paints a name. A named thread can announce its
+name instead. After an in-TUI ``/resume``, a single bounded list lookup accepts
+that name as identity only when exactly one stored thread matches it.
 
-So a whole-title UUID is read here as neither: not a display title, and not
-proof that the thread is unnamed. It is *identity to resolve*, and this module
-is the resolving half.
-
-A pane announces that UUID only while the ``thread-title`` override is in
-force, and GridVibe applies that override to exactly one command: the built-in
-``codex``. Somebody who types ``codex resume <uuid>`` at the prompt -- which is
+A pane announces a UUID only while the ``thread-title`` override is in force
+and the thread is unnamed. GridVibe applies that override to exactly one
+command: the built-in ``codex``. Somebody who types ``codex resume <uuid>`` at
+the prompt -- which is
 how a reader actually returns to a conversation -- gets Codex's *default*
 title instead, which names the project, so the pane says ``gridvibe_colab``
 about every thread in that repo and never says which one. Rewriting what the
@@ -123,6 +116,7 @@ APP_SERVER_SUBCOMMAND = "app-server"
 APP_SERVER_METHOD_INITIALIZE = "initialize"
 APP_SERVER_METHOD_INITIALIZED = "initialized"
 APP_SERVER_METHOD_THREAD_READ = "thread/read"
+APP_SERVER_METHOD_THREAD_LIST = "thread/list"
 
 #: Fixed request ids, so the reader can recognise its own answer among the
 #: notifications the server volunteers on the same stream.
@@ -635,6 +629,31 @@ def thread_read_request_text(thread_id: str) -> str:
     return "".join(json.dumps(line, separators=(",", ":")) + "\n" for line in lines)
 
 
+def thread_list_request_text(title: str) -> str:
+    """Ask Codex for one bounded page matching an announced thread name."""
+    lines = [
+        {
+            "jsonrpc": "2.0",
+            "id": APP_SERVER_INITIALIZE_ID,
+            "method": APP_SERVER_METHOD_INITIALIZE,
+            "params": {
+                "clientInfo": {
+                    "name": APP_SERVER_CLIENT_NAME,
+                    "version": APP_SERVER_CLIENT_VERSION,
+                }
+            },
+        },
+        {"jsonrpc": "2.0", "method": APP_SERVER_METHOD_INITIALIZED, "params": {}},
+        {
+            "jsonrpc": "2.0",
+            "id": APP_SERVER_THREAD_READ_ID,
+            "method": APP_SERVER_METHOD_THREAD_LIST,
+            "params": {"searchTerm": title, "limit": 100},
+        },
+    ]
+    return "".join(json.dumps(line, separators=(",", ":")) + "\n" for line in lines)
+
+
 class ThreadReadReader:
     """Fold one app server's output lines into a single settled answer.
 
@@ -698,6 +717,50 @@ class ThreadReadReader:
 
     def answer(self) -> Tuple[str, str]:
         return self.outcome, self.name
+
+
+class ThreadListReader:
+    """Accept only one exact name match in a complete bounded result page."""
+
+    def __init__(self, title: str):
+        self.title = normalize_conversation_name(title)
+        self.outcome = LOOKUP_UNAVAILABLE
+        self.thread_id = ""
+
+    @property
+    def settled(self) -> bool:
+        return self.outcome != LOOKUP_UNAVAILABLE
+
+    def feed_line(self, line: str) -> bool:
+        if self.settled:
+            return True
+        try:
+            message = json.loads(str(line or "").strip())
+        except (TypeError, ValueError):
+            return False
+        if not isinstance(message, dict) or message.get("id") != APP_SERVER_THREAD_READ_ID:
+            return False
+        self.outcome = LOOKUP_UNKNOWN
+        result = message.get("result")
+        if not isinstance(result, dict) or not isinstance(result.get("data"), list):
+            return True
+        # Another page may contain the same name. Ambiguity must leave the
+        # pane fresh rather than capture the wrong conversation.
+        if result.get("nextCursor"):
+            return True
+        matches = [
+            conversation_thread_id(thread.get("id"))
+            for thread in result["data"]
+            if isinstance(thread, dict)
+            and normalize_conversation_name(thread.get("name")) == self.title
+        ]
+        if len(matches) == 1 and matches[0]:
+            self.outcome = LOOKUP_NAMED
+            self.thread_id = matches[0]
+        return True
+
+    def answer(self) -> Tuple[str, str]:
+        return self.outcome, self.thread_id
 
 
 def parse_thread_read_output(output: Any, thread_id: str) -> Tuple[str, str]:
@@ -874,6 +937,7 @@ def run_local_probe(
     *,
     timeout: float = CONVERSATION_PROBE_TIMEOUT_SECONDS,
     max_output_bytes: int = CONVERSATION_PROBE_MAX_OUTPUT_BYTES,
+    reader: Optional[Any] = None,
 ) -> Tuple[str, str]:
     """Ask a local (or WSL) app server, bounded in time, output and process tree.
 
@@ -884,7 +948,7 @@ def run_local_probe(
     holding the pipe on behalf of something else (Guardrail 4, the same rule
     ``web/process_bounds.py`` was written for).
     """
-    reader = ThreadReadReader(thread_id)
+    reader = reader or ThreadReadReader(thread_id)
     settled = threading.Event()
     try:
         process = subprocess.Popen(
@@ -956,6 +1020,7 @@ def run_remote_probe(
     *,
     timeout: float = CONVERSATION_PROBE_TIMEOUT_SECONDS,
     max_output_bytes: int = CONVERSATION_PROBE_MAX_OUTPUT_BYTES,
+    reader: Optional[Any] = None,
 ) -> Tuple[str, str]:
     """Ask a remote app server over a second channel on the pane's own transport.
 
@@ -966,7 +1031,7 @@ def run_remote_probe(
     called -- the server would be within its rights to exit on stdin EOF, and
     the answer is what the exchange is for.
     """
-    reader = ThreadReadReader(thread_id)
+    reader = reader or ThreadReadReader(thread_id)
     if transport is None or not getattr(transport, "is_active", lambda: False)():
         return LOOKUP_UNAVAILABLE, ""
     channel = None
@@ -1037,3 +1102,30 @@ def probe_conversation_name(
         timeout=timeout,
         max_output_bytes=max_output_bytes,
     )
+
+
+def probe_conversation_id_by_title(
+    target: Dict[str, Any], title: str
+) -> str:
+    """Resolve a named Codex title only when one complete list proves its id."""
+    name = normalize_conversation_name(title)
+    if not target or not name or conversation_thread_id(name):
+        return ""
+    reader = ThreadListReader(name)
+    request_text = thread_list_request_text(name)
+    if target.get("kind") == "ssh":
+        outcome, thread_id = run_remote_probe(
+            target.get("transport"),
+            str(target.get("command") or ""),
+            request_text,
+            "",
+            reader=reader,
+        )
+    else:
+        argv = list(target.get("argv") or [])
+        if not argv:
+            return ""
+        outcome, thread_id = run_local_probe(
+            argv, request_text, "", reader=reader
+        )
+    return thread_id if outcome == LOOKUP_NAMED else ""

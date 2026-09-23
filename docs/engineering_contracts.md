@@ -1316,8 +1316,9 @@ template and always starts fresh.
   restorable only when its `agent_registry.json` `conversation_restore` block
   equals `_CONVERSATION_RESTORE_CAPABILITIES` exactly. Claude Code is
   `assigned_uuid` (`claude --session-id <id>` to create, `--resume <id>` to
-  resume); Codex is `osc_uuid` (identity read from a whole-title UUID or a
-  typed `codex resume <id>`; `codex resume <id>` to resume). A hand-edited
+  resume); Codex is `osc_uuid` (identity read from a whole-title UUID, a
+  uniquely matched named title after in-TUI `/resume`, or a typed
+  `codex resume <id>`; `codex resume <id>` to resume). A hand-edited
   registry cannot turn a string into a launch template.
 - **Only the untouched built-in command is rewritten.** Planning and
   composition apply only when `startup_mode`, `initial_command_mode`,
@@ -1349,10 +1350,13 @@ template and always starts fresh.
   (`fresh_conversation_fields`). A resume whose conversation is gone shows the
   CLI's own error; GridVibe never retries it as a new conversation.
 - **An in-TUI switch forgets before it learns.** A submitted Codex `/new`,
-  `/resume`, `/fork` or Claude `/clear`, `/resume` clears the identity at once;
-  only a later authoritative reading (a Codex title UUID or the Claude hook)
-  sets the next one. Saving in between restores fresh, which is safer than
-  resuming the conversation the reader left.
+  `/resume`, `/fork` or Claude `/clear`, `/resume` clears the identity at once.
+  Codex's next whole-title UUID or the Claude hook sets the next one. After a
+  Codex `/resume` whose title is a name, one bounded `thread/list` query may
+  set the id only when a complete result page has exactly one thread with that
+  exact name. An unavailable, truncated or ambiguous name leaves the pane
+  unidentified. Saving before a new id is known restores fresh, which is safer
+  than resuming the conversation the reader left.
 - **Publication is owned by one connection.** Every write goes through
   `_publish_runtime_conversation_identity()` / `_mark_agent_conversation_saved()`
   in `web/terminal_io.py`: `connection_lock` then `SessionManager.lock`, and only

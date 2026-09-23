@@ -53,6 +53,7 @@ from web.agent_conversations import (
     local_probe_target,
     normalize_conversation_id,
     observed_conversation_identity,
+    probe_conversation_id_by_title,
     probe_conversation_name,
     remote_probe_target,
     retry_delay,
@@ -1277,6 +1278,10 @@ def _publish_runtime_conversation_identity(
     provider: str,
     conversation_id: str,
     saved: bool = False,
+    *,
+    expected_title: Optional[str] = None,
+    expected_switch: str = "",
+    cancel_event: Optional[threading.Event] = None,
 ) -> bool:
     """Publish identity only to the pane still owned by this connection.
 
@@ -1307,6 +1312,13 @@ def _publish_runtime_conversation_identity(
     with connection_lock:
         if connection.get("retired") or ssh_connections.get(session_id) is not connection:
             return False
+        if cancel_event is not None and cancel_event.is_set():
+            return False
+        if expected_title is not None and (
+            announced_agent_title(connection.get("agent_activity")) != expected_title
+            or connection.get("agent_conversation_switch") != expected_switch
+        ):
+            return False
         with session_manager.lock:
             session = session_manager.get_session(session_id)
             if (
@@ -1335,6 +1347,8 @@ def _publish_runtime_conversation_identity(
                 setattr(session, CONVERSATION_PROVIDER_FIELD, provider)
                 setattr(session, CONVERSATION_ID_FIELD, conversation_id)
                 setattr(session, CONVERSATION_RESUME_FIELD, resume)
+            if expected_title is not None:
+                connection.pop("agent_conversation_switch", None)
     if changed:
         logger.debug(
             "Observed agent conversation for session %s provider=%s saved=%s",
@@ -1518,6 +1532,18 @@ def _note_agent_conversation(
     if not provider or not _publish_runtime_conversation_identity(
         session_id, connection, provider, thread_id, saved=saved
     ):
+        if (
+            conversation_restore_enabled()
+            and connection.get("agent_conversation_switch") == "/resume"
+            and title
+            and _normalize_agent_key(
+                getattr(session_manager.get_session(session_id), "agent_selection", "")
+            ) == CONVERSATION_PROVIDER_CODEX
+        ):
+            if not _start_conversation_resolver(session_id, connection, title, ""):
+                connection["agent_conversation_deferred_until"] = (
+                    time.time() + CONVERSATION_RESOLVER_DEFER_SECONDS
+                )
         return
     connection.pop("agent_conversation_switch", None)
     if not _start_conversation_resolver(session_id, connection, title, thread_id):
@@ -1849,8 +1875,28 @@ def _resolve_agent_conversation(
         session = session_manager.get_session(session_id)
         if session is None:
             return
+        if not thread_id and _normalize_agent_key(
+            getattr(session, "agent_selection", "")
+        ) != CONVERSATION_PROVIDER_CODEX:
+            return
         target = _conversation_probe_target(session, connection)
         if not target:
+            return
+        if not thread_id:
+            # A resumed named thread announces its name, not its UUID. The
+            # app-server list is accepted only for one exact, unique match.
+            resolved_id = probe_conversation_id_by_title(target, title or "")
+            if resolved_id:
+                _publish_runtime_conversation_identity(
+                    session_id,
+                    connection,
+                    CONVERSATION_PROVIDER_CODEX,
+                    resolved_id,
+                    saved=True,
+                    expected_title=title,
+                    expected_switch="/resume",
+                    cancel_event=cancellation,
+                )
             return
         key = cache_key(CONVERSATION_PROVIDER_CODEX, target, thread_id)
         known = conversation_names.resolved_name(key)

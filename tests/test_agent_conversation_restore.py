@@ -546,6 +546,63 @@ class OwnershipAndLifecycleTestCase(unittest.TestCase):
             (new, False),
         )
 
+    def test_a_named_codex_resume_pick_resolves_one_exact_thread(self):
+        session = self.add_session("codex")
+        connection = {"agent_activity": blank_agent_activity()}
+        self.registry[session.session_id] = connection
+        terminal._note_agent_conversation_switch(
+            session.session_id, connection, session, "/resume"
+        )
+        title = "Review parser"
+        connection["agent_activity"] = {"title": title, "title_at": 2.0}
+
+        with patch.object(terminal, "_start_conversation_resolver", return_value=True) as start:
+            terminal._note_agent_conversation(
+                session.session_id, connection, connection["agent_activity"]
+            )
+        start.assert_called_once_with(session.session_id, connection, title, "")
+
+        with (
+            patch.object(terminal, "_conversation_probe_target", return_value={"argv": ["codex"]}),
+            patch.object(terminal, "probe_conversation_id_by_title", return_value=CODEX_ID),
+        ):
+            terminal._resolve_agent_conversation(session.session_id, connection, title, "")
+
+        self.assertEqual(
+            (session.agent_conversation_id, session.agent_conversation_resume),
+            (CODEX_ID, True),
+        )
+        self.assertEqual(
+            runtime_state._snapshot_session(session)["agent_conversation_id"], CODEX_ID
+        )
+
+    def test_named_resume_result_cannot_relabel_a_later_switch(self):
+        session = self.add_session("codex")
+        connection = {"agent_activity": {"title": "Review parser", "title_at": 2.0}}
+        self.registry[session.session_id] = connection
+        terminal._note_agent_conversation_switch(
+            session.session_id, connection, session, "/resume"
+        )
+
+        def switched_while_looking_up(_target, _title):
+            terminal._note_agent_conversation_switch(
+                session.session_id, connection, session, "/new"
+            )
+            return CODEX_ID
+
+        with (
+            patch.object(terminal, "_conversation_probe_target", return_value={"argv": ["codex"]}),
+            patch.object(
+                terminal, "probe_conversation_id_by_title", side_effect=switched_while_looking_up
+            ),
+        ):
+            terminal._resolve_agent_conversation(
+                session.session_id, connection, "Review parser", ""
+            )
+
+        self.assertEqual(session.agent_conversation_id, "")
+        self.assertEqual(connection["agent_conversation_switch"], "/new")
+
     def test_a_restored_codex_resume_stays_resumable_when_it_announces_itself(self):
         session = self.add_session(
             "codex",
@@ -777,6 +834,19 @@ class RestoreSwitchOffTestCase(unittest.TestCase):
             terminal._mark_agent_conversation_saved(session.session_id, connection)
         )
         self.assertFalse(session.agent_conversation_resume)
+
+    def test_named_codex_resume_lookup_stays_off_with_the_setting(self):
+        session = self.manager.create_session("group", **agent_config("codex"))
+        connection = {"agent_activity": {"title": "Review parser", "title_at": 2.0}}
+        self.registry[session.session_id] = connection
+        terminal._note_agent_conversation_switch(
+            session.session_id, connection, session, "/resume"
+        )
+        with patch.object(terminal, "_start_conversation_resolver") as start:
+            terminal._note_agent_conversation(
+                session.session_id, connection, connection["agent_activity"]
+            )
+        start.assert_not_called()
 
 
 if __name__ == "__main__":
