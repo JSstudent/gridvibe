@@ -92,6 +92,13 @@ class TerminalSession:
     # Whether this pane's agent CLI is started with the GridVibe MCP
     # sidecar registered. A launch option, never a live toggle.
     agent_mcp: bool = False
+    # Exact provider conversation identity. The pair is durable only in the
+    # runtime workspace snapshot; reusable presets never carry it. Resume is a
+    # live delivery decision: a new assigned UUID starts in create mode and
+    # flips after its command reaches the exact current connection.
+    agent_conversation_provider: str = ""
+    agent_conversation_id: str = ""
+    agent_conversation_resume: bool = False
     # How many generations of agent-launched panes stand behind this
     # one. 0 for a pane a person launched. Runtime lineage, read by the
     # sidecar's own depth budget -- see gridvibe_mcp/identity.py.
@@ -169,9 +176,16 @@ class TerminalSession:
                 str(self.explorer_root_directory or "").strip()
             ) and self.startup_mode == "explorer"
 
-    def to_dict(self) -> dict:
-        """Convert to dictionary."""
-        return {
+    def to_dict(self, *, include_conversation: bool = False) -> dict:
+        """Convert to a public dictionary, optionally adding durable identity.
+
+        Conversation UUIDs are launch metadata, not ordinary session status.
+        Runtime capture opts in; HTTP/Socket.IO callers keep the safe default.
+        The live-only create/resume decision is never serialized, but it gates
+        the pair: an id the provider has not saved yet (no prompt sent) is not
+        restorable, so it is written as absent and restore starts fresh.
+        """
+        payload = {
             "session_id": self.session_id,
             "group_id": self.group_id,
             "host": self.host,
@@ -225,6 +239,19 @@ class TerminalSession:
             "connected_at": self.connected_at,
             "error_message": self.error_message
         }
+        if include_conversation:
+            restorable = bool(self.agent_conversation_resume)
+            payload.update(
+                {
+                    "agent_conversation_provider": (
+                        self.agent_conversation_provider if restorable else ""
+                    ),
+                    "agent_conversation_id": (
+                        self.agent_conversation_id if restorable else ""
+                    ),
+                }
+            )
+        return payload
 
 
 @dataclass
@@ -976,6 +1003,15 @@ class SessionManager:
             "custom_agent": str(config.get("custom_agent") or ""),
             "agent_auto_mode": bool(config.get("agent_auto_mode")),
             "agent_mcp": bool(config.get("agent_mcp")),
+            "agent_conversation_provider": str(
+                config.get("agent_conversation_provider") or ""
+            ),
+            "agent_conversation_id": str(config.get("agent_conversation_id") or ""),
+            "agent_conversation_resume": (
+                config.get("agent_conversation_resume")
+                if isinstance(config.get("agent_conversation_resume"), bool)
+                else False
+            ),
             "agent_depth": _normalize_agent_depth(config.get("agent_depth")),
             "created_by_session_id": str(config.get("created_by_session_id") or ""),
             "title": config.get("title"),
@@ -1173,6 +1209,9 @@ class SessionManager:
             "custom_agent",
             "agent_auto_mode",
             "agent_mcp",
+            "agent_conversation_provider",
+            "agent_conversation_id",
+            "agent_conversation_resume",
             "agent_depth",
             "created_by_session_id",
             "title",
@@ -1269,6 +1308,9 @@ class SessionManager:
             session.initial_command = resolved_url
             session.initial_command_mode = "browser"
             session.startup_mode = "browser"
+            session.agent_conversation_provider = ""
+            session.agent_conversation_id = ""
+            session.agent_conversation_resume = False
             session.browser_tabs = browser_tabs
             session.browser_active_tab = active_tab
             return session.to_dict()
@@ -1636,7 +1678,7 @@ class SessionManager:
                 groups = []
                 for group in self.get_workspace_groups(workspace.workspace_id):
                     sessions = [
-                        session.to_dict()
+                        session.to_dict(include_conversation=True)
                         for session in self.get_group_sessions(group.group_id)
                     ]
                     if not sessions:

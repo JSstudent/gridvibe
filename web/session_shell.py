@@ -39,6 +39,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional
 
 from sessions.manager import SessionStatus, _normalize_agent_depth
+from web.agent_conversations import fresh_conversation_fields
 from web.agents import (
     AGENT_REGISTRY,
     _agent_absent_reason,
@@ -298,6 +299,22 @@ def _agent_updates(session: Any, agent_key: str) -> Dict[str, Any]:
     }
 
 
+def _relaunched_shape(session: Any, updates: Dict[str, Any]) -> Dict[str, Any]:
+    """The launch fields the pane will carry once ``updates`` are applied."""
+    shape = {
+        field: getattr(session, field, "")
+        for field in (
+            "startup_mode",
+            "initial_command_mode",
+            "initial_command",
+            "agent_selection",
+            "custom_agent",
+        )
+    }
+    shape.update({field: updates[field] for field in shape if field in updates})
+    return shape
+
+
 def apply_pane_shell_change(
     session_id: str,
     payload: Dict[str, Any],
@@ -391,6 +408,13 @@ def apply_pane_shell_change(
 
     if metadata_overrides:
         updates.update(metadata_overrides)
+    # Every relaunch from here replaces the process, and a new process starts a
+    # new conversation -- picking the agent the pane already runs included. Only
+    # a workspace restore resumes one. Planned against the pane as it will be,
+    # so a built-in Claude gets its fresh id and anything else gets none.
+    updates.update(
+        fresh_conversation_fields(_relaunched_shape(session, updates), AGENT_REGISTRY)
+    )
     if updates:
         session_manager.update_session_metadata(session_id, **updates)
     logger.info(

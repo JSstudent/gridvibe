@@ -160,6 +160,7 @@ Browser mode is the most reliable for microphone permissions. Settings apply liv
 - **Session tabs** — keep related panes together in draggable tabs. `Alt+1`–`Alt+9` switches, middle-click closes, and broadcast typing sends your keystrokes to every pane in the active tab.
 - **Saved sessions** — save a setup as a reusable preset and import it later; re-saving one records where each pane is working now, not where the preset was created. Stored SSH passwords are encrypted, and are never written to a workspace snapshot.
 - **Save & restore** — GridVibe autosaves, and **Save Workspace** saves on demand. A restart brings back tabs, layouts, commands, the active group, and explorer presentation, with each pane reopening in the directory it was *working in*.
+- **Resume agent conversations** *(experimental, off by default)* — turn on **App Settings ▸ Agents ▸ Resume agent conversations on restore** and a restored Claude Code or Codex pane reopens the conversation it was in, once that conversation has had a prompt, rather than a new one. Saved presets and a relaunch from the pane's 🔄 dropdown always start fresh.
 - **Close & restart** — voluntary close, manual restart, and update restart share one in-page choice: continue without saving, save every workspace, or save every preset and then every workspace. A failed save leaves the app open.
 - **Multiple workspaces** — optionally keep separate projects in separate windows, move tabs between them without restarting terminals, and switch with `Alt+W` / `Alt+Shift+W`.
 - **The launcher follows you** — opening it from a workspace (`Alt+Q`) brings its window up on that workspace's screen, with the next launch already aimed at that workspace. The caret beside **Launch** picks any other destination, and a launcher already on that screen stays where you put it.
@@ -175,10 +176,10 @@ See **every session in every workspace**, agents first. Open the dashboard dialo
 
 - **Keep the overview beside your work** — the docked sidebar stays open as you work or switch windows. Each workspace remembers whether it is open.
 - **Widen it when you need more room** — drag the sidebar's inner edge from its default width up to twice that width. The chosen scale is saved with the workspace and adapts to the window size.
-- **Put it on the side you want** — **App Settings ▸ Agent Dashboard Side** docks the sidebar left or right, and every open window moves as soon as you save. The handle, its marks and the rows are the same either way.
+- **Put it on the side you want** — **App Settings ▸ Agents ▸ Agent Dashboard Side** docks the sidebar left or right, and every open window moves as soon as you save. The handle, its marks and the rows are the same either way.
 - **Three levels** — a workspace is a titled band, a session tab is a card inside it drawn in that tab's own colour, and each agent is one row inside the card.
 - **Every agent on one line** — a leading status dot, the agent's mark, its chat title, and `MCP` when the agent has GridVibe tools. The dialog also draws the agent's name and `auto` when it was launched with auto-approval.
-- **The state is the dot's colour** — green working, amber idle, red unreachable. Point at a dot for the words: how long it has been idle, or what went wrong.
+- **The state is the leading mark** — a spinning green ring while working, amber z's while idle, a red dot when unreachable. Point at it for the words: how long it has been idle, or what went wrong.
 - **The rest is one hover away** — pointing at a row gives the full chat title, where the pane is, and what it runs on (`SSH`, `WSL`, `PowerShell`, `cmd`).
 - **A badge that means something** — the button counts the agents **working right now**, not how many you have open. No badge means every agent is sitting at a prompt.
 - **Click anything to go there** — a row, its session, or its workspace opens or focuses that window at that tab.
@@ -227,7 +228,7 @@ Launched a pane in cmd and wanted PowerShell — or Codex in WSL? Click the pane
 - **Pick a shell** — a Local Repo terminal on Windows lists **Command Prompt**, **PowerShell**, **WSL**, and every detected distro. The pane restarts in place, same slot, same title, in the directory the old shell was sitting in.
 - **Pick an agent** — each shell row's chevron opens **Plain shell** plus every agent, so "this pane, but Codex in WSL" is one click. SSH panes and non-Windows hosts get that list flat.
 - **Give it GridVibe tools** — agents that support MCP carry an **MCP** button beside their row: the row starts the agent plainly, the button starts it with GridVibe's own tools. Works on SSH panes as well as local ones.
-- **The pane says which it is** — a pane running with GridVibe tools wears a small **MCP** tag in its header, and keeps it across a save and restore. Relaunching it plainly takes the tag off.
+- **The pane says which it is** — a pane running with GridVibe tools draws a frame around the agent's icon in its header, and keeps it across a save and restore. Relaunching it plainly takes the frame off.
 - **Plain shell** drops a running agent and comes back to an ordinary prompt. Picking whatever is already checked relaunches it too.
 - **A missing agent never touches your pane** — GridVibe runs the same install check against that row's own target, and answers with a message (*OpenAI Codex CLI is missing in WSL Ubuntu.*) instead of relaunching.
 - **Auto mode and GridVibe tools follow the agent**, not the pane: relaunch the same agent under another shell and they stay on; move to a different agent and they start from its plain launch.
@@ -293,6 +294,9 @@ The one configurable chord in GridVibe is voice push-to-talk, set in App Setting
 | 🌙 ⇄ ☀️ | Toggle an explorer pane between dark and light |
 | ⋯ | Overflow menu, shown when the pane is too narrow for the full row |
 | ✖️ | Close the pane (confirms first — it's a live session) |
+| 🟢 | Connection status, at the far right; hover it for the word |
+
+On a narrow pane, an agent pane hides its name and keeps just the agent's icon. Hover the icon for the name.
 
 **Explorer bar:**
 
@@ -312,7 +316,7 @@ The one configurable chord in GridVibe is voice push-to-talk, set in App Setting
 
 ## Configuration
 
-Everything lives in **App Settings** — the same dialog from the gear on the launcher *or* a session window. It covers theme, surface mode, which side the agent dashboard sidebar docks to, terminal font and size, max sessions, shell integration, autosave interval, SSH host-key policy, all voice options, and, in the native window, whether minimizing one GridVibe window minimizes them all. The one exception is **Multiple workspaces**, whose switch sits in the launcher's Workspaces card because it changes what every launch does.
+Everything lives in **App Settings** — the same dialog from the gear on the launcher *or* a session window. It covers theme, surface mode, the **Agents** section (which side the agent dashboard sidebar docks to, and the experimental agent conversation restore), terminal font and size, max sessions, shell integration, autosave interval, SSH host-key policy, all voice options, and, in the native window, whether minimizing one GridVibe window minimizes them all. The one exception is **Multiple workspaces**, whose switch sits in the launcher's Workspaces card because it changes what every launch does.
 
 On disk, settings load from `config.json` (git-ignored) falling back to `default_config.json`:
 
@@ -321,7 +325,7 @@ On disk, settings load from `config.json` (git-ignored) falling back to `default
   "server": { "host": "127.0.0.1", "port": 5050 },
   "appearance": { "theme": "dark" },
   "terminal": { "max_sessions": 16, "font_size": 14, "shell_integration": true },
-  "workspace": { "surface_mode": "normal", "agent_sidebar_side": "left", "autosave_interval_minutes": 5, "multi_workspace_enabled": false, "minimize_cascade": false },
+  "workspace": { "surface_mode": "normal", "agent_sidebar_side": "left", "autosave_interval_minutes": 5, "multi_workspace_enabled": false, "minimize_cascade": false, "agent_conversation_restore": false },
   "ssh": { "host_key_policy": "auto-add" },
   "explorer_search": { "max_files": 2000, "max_matches": 5000, "timeout_seconds": 20 }
 }
@@ -375,6 +379,7 @@ Created at runtime, never committed:
 | `.known_hosts` | Persisted SSH host keys |
 | `.encryption_key` | Fernet key for password encryption |
 | `.gridvibe_mcp.json` | Generated MCP config, rewritten on every start |
+| `.gridvibe_claude_settings.json` | Generated Claude Code session hook for the experimental conversation restore, rewritten on every start |
 | `logs/gridvibe.log` | Main rotating log file |
 
 All three JSON state files are written the same careful way: one change at a time under an OS-level lock, committed through an atomic replace, with the previous version kept as `<file>.bak`. A file GridVibe cannot read is moved aside as `<file>.corrupt-<timestamp>` and the backup is loaded in its place. The developer-facing contract is [`docs/session_state_guideline.md`](docs/session_state_guideline.md).

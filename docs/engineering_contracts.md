@@ -20,6 +20,7 @@ Regression history and audit narratives do not belong in this reference.
 - [Presentation persistence](#presentation-persistence)
 - [Workspace lifecycle and windows](#workspace-lifecycle-and-windows)
 - [Agent dashboard](#agent-dashboard)
+- [Agent conversation restore](#agent-conversation-restore)
 - [Agent tools (MCP)](#agent-tools-mcp)
 - [Architecture and extraction boundaries](#architecture-and-extraction-boundaries)
 - [UI and styling](#ui-and-styling)
@@ -47,6 +48,10 @@ Regression history and audit narratives do not belong in this reference.
   `.encryption_key` creation is exclusive and atomic so concurrent processes
   converge on one complete key. Never put credentials into new state files,
   responses, logs, or browser storage. Flag any intended weakening explicitly.
+- `POST /api/sessions/<id>/agent-conversation` is the one route an agent's own
+  process calls without a page. It is authorised by a per-connection pane token
+  rather than by origin; see
+  [Agent conversation restore](#agent-conversation-restore) for its gates.
 
 ## Concurrency and resource ownership
 
@@ -178,9 +183,26 @@ changing any field that survives restart; it owns the complete save/restore flow
   backlog inside the budget is written exactly as an undeferred one — which is
   what keeps an agent CLI on a promptly-fitted pane detecting the terminal's
   colours at all.
-- The two owners of that list must agree. `TERMINAL_QUERY_SOURCES` filters the
+- **The server judges a reply's true age.** The page can only time what it
+  held; it cannot see the socket, a main thread busy restoring a workspace, or
+  the trip back. `web/terminal_replies.py` keeps a per-connection ledger of the
+  queries the pump read (`_decoded_terminal_output`), and
+  `_sanitize_terminal_input` drops a reply matched to a query of its own kind
+  that is older than its kind's budget (`reply_age_budget()`): 75 ms for the
+  colour queries (`COLOUR_REPLY_AGE_BUDGET_S`, under Codex's ~100 ms colour
+  window measured through ConPTY) and `REPLY_AGE_BUDGET_S` (2 s) for every other
+  kind, because those askers wait far longer and crossterm fails outright
+  without a cursor report it waited 2 s for. A reply is matched to the newest outstanding
+  query of its kind and consumes it; input shaped like a reply with nothing
+  outstanding (Shift+F3 is `CSI 1;2R`) passes, and an entry is forgotten after
+  `PENDING_QUERY_HORIZON_S`. The budget is timed from GridVibe's read, so an
+  SSH pane's network round trip is not counted against it.
+- The owners of that list must agree. `TERMINAL_QUERY_SOURCES` filters the
   backlog the page writes late; `_TERMINAL_QUERY_RE` filters the buffer the
-  server replays into a pane whose program has since changed. Neither may filter
+  server replays into a pane whose program has since changed; and
+  `web/terminal_replies.py` ledgers every query the page strips (OSC 52 and the
+  XTWINOPS reports included) and matches each reply only to its own kind.
+  Neither filter may touch
   a sequence that renders or sets state — a rejoin to a pane whose TUI is still
   running has to restore that program's modes, and the title stack (`CSI 22/23
   t`) and DECSCUSR sit beside query shapes the list does match.
@@ -238,6 +260,15 @@ changing any field that survives restart; it owns the complete save/restore flow
   this host would be answering about another filesystem. Nothing is rewritten:
   the pane keeps the directory it recorded, so a save still stores what was
   asked for.
+- **An agent's launch line clears its own echo.** The shell echoes the line
+  before it runs it, and agents that draw inline rather than on the alternate
+  screen (Claude Code, Codex) would otherwise start under it. For an
+  `initial_command_mode` of `agent`, `_agent_launch_line()` leads the *same*
+  line with the shell's clear (`cls &` for cmd, `Clear-Host;` for PowerShell,
+  a `printf` of the erase sequences for every POSIX shell, since `clear` needs
+  terminfo). Leading the same line is what orders it after the echo and before
+  the agent's first frame. A plain startup command keeps its echo, and
+  `_note_agent_conversation_command()` is handed the line without the clear.
 - Local prompt hooks arrive at spawn: cmd `PROMPT`, bash `PROMPT_COMMAND` (forwarded
   to WSL through `WSLENV`), PowerShell startup arguments wrapping the user's
   prompt. Only SSH receives a typed integration command. Disabling
@@ -283,7 +314,13 @@ changing any field that survives restart; it owns the complete save/restore flow
   the reading: the walk starts at the pane's *own shell pid* and never searches
   the table by name, because agents run outside GridVibe too; it is bounded in
   depth and visited nodes, because a reused pid can make a parent map cyclic;
-  and every failure is an empty table.
+  it does not follow an edge whose child started before its parent, because
+  Windows keeps an orphan's parent pid and a new pane's shell can reuse it (an
+  unknown start time follows the edge as before); and every failure is an empty
+  table. The reading belongs to the shell it was taken from, so its promotion
+  commits under `connection_lock` only while that connection is still current
+  and unretired and the pane is still the same `terminal`-mode session; a
+  relaunch or mode switch during the read discards it.
 - **The OS reading may only promote.** It cannot see into a WSL distribution or
   onto a remote host, so an empty answer means "cannot see", never "no agent" —
   and a reading that retired on it would retire agents that are running. A
@@ -299,6 +336,10 @@ changing any field that survives restart; it owns the complete save/restore flow
   then connection identity is revalidated before the prompt may change metadata,
   so a retiring pump cannot act on a relaunch that replaced it during the read.
   A pane the OS will not answer for is retired by its prompt exactly as before.
+  The one exception is a held relaunch of the same agent whose process the OS
+  says started after the held line (less `AGENT_RELAUNCH_START_SLACK_SECONDS`):
+  that is the new agent, so the prompt applies the hold and the quit
+  conversation is forgotten instead of being kept for restore.
 - **`initial_command` is not a label, and only a line a shell was seen to run
   may reach it.** It is persisted (`web/runtime_state.py`; a saved preset
   derives its whole startup mode from `initial_command_mode`) and it is *typed
@@ -1002,7 +1043,11 @@ unless the task explicitly changes this contract.
   part of the rule — a remote pane's tools arrive over the reverse forward on
   its own SSH transport, so `pane_can_run_the_sidecar()` picks the *shape* of
   the answer (local config file against tunnelled URL) and never whether there
-  is one. The tag is its own value and is never folded into `paneDisplayTitle()`
+  is one. The dashboard draws the tag as an `MCP` chip; the pane header draws
+  the same reading as a frame around the agent's mark (`data-mcp` on the icon,
+  written by `syncPaneAgentIcon()`), with `MCP_TAG_TITLE` on the mark's hover,
+  because the header has no width to spare for a word. The tag is its own value
+  and is never folded into `paneDisplayTitle()`
   or `paneChatLine()`: a title is also what the reader typed, and a chip
   concatenated into one would be indistinguishable from a name and would reach
   the typed-title comparison as though somebody had chosen it. `agent_mcp`
@@ -1233,13 +1278,17 @@ unless the task explicitly changes this contract.
   the card exists so the reader can go there — and gives up only the weight
   that was drawing the eye to the agents, so it cannot read as disabled. An
   empty tree means nothing is running at all, not that nothing agentic is.
-- An agent row's state is its **leading** column and one 8px dot: the card is
-  scanned for "is anything still going", and a colour answers that before any
-  column after it is read. The word the dot replaced is not drawn, is carried
-  verbatim on the indicator's own hover, and stays in the markup out of flow
-  so the row's accessible name still states it. The progress bar is the
-  trailing column and a separate reading: only the agents that speak the
-  progress sequence have one, so it must never widen the dot's column.
+- An agent row's state is its **leading** column, one fixed 16×14px slot that
+  every state draws inside: the card is scanned for "is anything still going",
+  and colour and shape answer that before any column after it is read. Working
+  is a turning ring and idle is three rising z's, so neither is the same shape
+  as another state; error and unknown stay plain dots. Under reduced motion
+  both hold still and keep their shapes. The word the mark replaced is not
+  drawn, is carried verbatim on the indicator's own hover, and stays in the
+  markup out of flow so the row's accessible name still states it. The
+  progress bar is the trailing column and a separate reading: only the agents
+  that speak the progress sequence have one, so it must never widen the
+  state's column.
 - The drawn row is therefore the dot, the agent's mark and name, the chat
   title, `MCP` and `auto` — the two chips left on it, and both say what this
   agent may *do*, which is what a reader choosing a row to instruct is deciding
@@ -1263,6 +1312,97 @@ unless the task explicitly changes this contract.
   comparison; structural changes rebuild the tree while restoring scroll and
   focus. A failed read leaves the last good tree on screen behind a stated retry
   notice, and an action failure survives successful polls.
+
+## Agent conversation restore
+
+A restored agent pane reopens the exact provider conversation it was in. The
+identity belongs to the workspace snapshot alone; a reusable preset is a
+template and always starts fresh.
+
+- **Experimental and off by default.** `workspace.agent_conversation_restore`
+  (App Settings ▸ Agents) gates the whole feature through one predicate,
+  `conversation_restore_enabled()` in `web/agent_conversations.py`, read per
+  operation. Off, no id is planned, composed, observed, reported or captured;
+  no pane receives the session hook or a pane token; and a snapshot that
+  carries a pair restores its pane fresh — the pair is dropped, never validated.
+  The one thing still answered off is connection ownership, which the Codex
+  name resolver reads. A new consumer checks the same predicate rather than
+  reading the setting itself.
+- **The registry advertises; the allowlist executes.** A provider is
+  restorable only when its `agent_registry.json` `conversation_restore` block
+  equals `_CONVERSATION_RESTORE_CAPABILITIES` exactly. Claude Code is
+  `assigned_uuid` (`claude --session-id <id>` to create, `--resume <id>` to
+  resume); Codex is `osc_uuid` (identity read from a whole-title UUID, a
+  uniquely matched named title after in-TUI `/resume`, or a typed
+  `codex resume <id>`; `codex resume <id>` to resume). A hand-edited
+  registry cannot turn a string into a launch template.
+- **Only the untouched built-in command is rewritten.** Planning and
+  composition apply only when `startup_mode`, `initial_command_mode`,
+  `agent_selection` and `initial_command` all name the provider and there is no
+  `custom_agent`. Custom commands launch verbatim; a typed exact
+  `claude --resume|--session-id <uuid>` or `codex resume <uuid>` is accepted as
+  durable identity only when it matches the stored pair.
+- **An id is canonical data, never text.** Every id is parsed with `uuid` and
+  re-serialised, capped at `CONVERSATION_ID_MAX_LENGTH`, and quoted through the
+  target shell family. It never appears in a public `to_dict()`, a dashboard
+  payload, a route response or a log line.
+- **Known is not resumable.** `agent_conversation_resume` is live-only and
+  never serialised. Both CLIs save a conversation on its first turn, so a pair
+  reaches the snapshot only once the provider has it on disk: the first
+  submitted non-slash line, a hook source of `resume`/`compact`/`fork`, a Codex
+  id announced after `/resume` or `/fork`, or a typed resume command. A pane
+  launched and saved before any prompt restores fresh. A prompt submitted
+  before the new id is known (typing straight after `/clear` or `/new`, while
+  the hook or title is still on its way) is remembered on the connection, and
+  the id that follows is published already saved.
+- **Durable shape.** `agent_conversation_provider` and `agent_conversation_id`
+  are in `_SESSION_SNAPSHOT_FIELDS`. With the switch on, a wholly absent pair is
+  the backward-compatible fresh shape; a partial, mistyped, unsupported,
+  provider-mismatched or command-contradicted pair makes the pane unrestorable
+  rather than silently fresh. Saved-preset normalization strips all three
+  fields.
+- **Only a restore resumes.** `_restore_group_request()` sends the snapshot with
+  `restore: True`, and `prepare_conversation_launch_fields(restore=True)` is the
+  one place a captured pair is accepted and marked resume; it refuses a pair on
+  any other launch. A relaunch from the pane header, any mode change, agent
+  exit, runtime agent promotion and a switch to browser mode clear the triple;
+  a relaunch that picks a built-in Claude plans a new id
+  (`fresh_conversation_fields`). A resume whose conversation is gone shows the
+  CLI's own error; GridVibe never retries it as a new conversation.
+- **An in-TUI switch forgets before it learns.** A submitted Codex `/new`,
+  `/resume`, `/fork` or Claude `/clear`, `/resume` clears the identity at once.
+  Codex's next whole-title UUID or the Claude hook sets the next one. After a
+  Codex `/resume` whose title is a name, one bounded `thread/list` query may
+  set the id only when a complete result page has exactly one thread with that
+  exact name. An unavailable, truncated or ambiguous name leaves the pane
+  unidentified. Saving before a new id is known restores fresh, which is safer
+  than resuming the conversation the reader left.
+- **Publication is owned by one connection.** Every write goes through
+  `_publish_runtime_conversation_identity()` / `_mark_agent_conversation_saved()`
+  in `web/terminal_io.py`: `connection_lock` then `SessionManager.lock`, and only
+  while that exact connection is the pane's current, unretired transport and
+  the pane still runs the same provider. A retired pump cannot label its
+  replacement.
+- **The Claude session hook is how an in-TUI switch is read back.**
+  `web/agent_session_hooks.py` writes `.gridvibe_claude_settings.json` on every
+  start (`GRIDVIBE_CLAUDE_SETTINGS_PATH` overrides it; test mode refuses the
+  production file) registering one exec-form `SessionStart` hook that runs this
+  install's interpreter against `utils/agent_session_hook.py`. A built-in Claude
+  launch receives `--settings "<path>"` only on a connection holding a report
+  token, and only when the path needs no quoting beyond double quotes. The
+  script is stdlib-only, prints nothing, always exits 0, ignores subagent
+  sessions, never uses a proxy and bounds its request to 3 s. Codex is never
+  handed a hook: its hooks wait on the reader's trust review, and its title
+  already says the id.
+- **Reports are gated by a per-connection token.** A native local connection
+  (not WSL, not SSH — neither can reach this machine's loopback) gets a fresh
+  `GRIDVIBE_PANE_TOKEN`, kept on the connection. The report route compares the
+  `X-GridVibe-Pane-Token` header in constant time against the pane's *current*
+  connection, parses the body into a canonical id before any lock, and answers
+  `404` (no live connection or switch off), `403` (token), `400` (malformed or
+  unknown source) or `409` (the pane moved on). The response never echoes the
+  id. The token is the only `GRIDVIBE_*` variable outside the sidecar's
+  identity list.
 
 ## Agent tools (MCP)
 
@@ -1388,7 +1528,7 @@ in `README.md`; state the rules a change has to keep.
   overrides in `web/api.py`, `apply_pane_shell_change` in `web/session_shell.py`,
   and `_establish_mcp_tunnel` last, which is the only one with a cost attached —
   such a pane opens no port, mints no token and writes no remote file. The pane
-  header's **MCP** tag paints off the flag, so the tag is honest for free.
+  header's MCP frame paints off the flag, so the frame is honest for free.
 - **`pane_can_run_the_sidecar()` picks the *shape* of the answer, never whether
   there is one.** A local pane gets the generated config; a remote pane gets a
   URL. The predicate is held there rather than at the launcher checkbox because a
@@ -1547,6 +1687,22 @@ in `README.md`; state the rules a change has to keep.
   foregrounds are retained in both themes, with contrasting backgrounds for
   white/yellow names on light surfaces and near-black OpenCode names. Runtime
   agent changes update both the title's brand key and its icon in place.
+- A pane header's title line gives up width in a fixed order, so no width
+  squeezes every label into an ellipsis at once. `updatePaneHeaderLayout()`
+  measures with the actions inline and the name printed, then folds the actions
+  into ⋯ if they overflow. After that, an agent pane whose name would still
+  ellipsise drops the name (`name-folded`). The agent's mark then names the
+  pane, and its hover carries the agent's name. A pane with no mark keeps its
+  ellipsised name, because nothing else would name it. The name shrinks well
+  before the host does, and any change to the name or the mark re-measures the
+  header. The host line prints `paneHeaderHostLabel()` from `agent-identity.js`.
+  That rule abbreviates only a shell family's long name (`PowerShell` → `PS`),
+  and only on the header, with the full label kept as the hover. The stored
+  host, the dashboard's transport word and the relaunch menu keep the full
+  name. The connection state is the status dot alone, placed after the close
+  button, and its word is the dot's hover and accessible name. The mark and the
+  host line are filled by the same syncs that a status broadcast runs, so a
+  freshly built header and a repainted one cannot disagree.
 - A split is two halves. `split-geometry.js` is the DOM-free, Node-tested rule
   for where the cut lands and what the axis track weights become: the offset is
   chosen by measured width, not by track count, so an odd span and a span whose

@@ -35,15 +35,37 @@ from web.agent_activity import (
     parse_agent_events,
 )
 from web.agent_conversations import (
+    CONVERSATION_ID_FIELD,
     CONVERSATION_PROVIDER_CODEX,
+    CONVERSATION_PROVIDER_FIELD,
+    CONVERSATION_RESUME_FIELD,
+    EMPTY_CONVERSATION_FIELDS,
     ConversationNameCache,
     cache_key,
+    command_conversation_identity,
+    command_resumes_conversation,
     command_thread_id,
+    conversation_restore_capability,
+    conversation_restore_enabled,
+    conversation_switch_verb,
     conversation_thread_id,
+    is_conversation_prompt,
     local_probe_target,
+    normalize_conversation_id,
+    observed_conversation_identity,
+    probe_conversation_id_by_title,
     probe_conversation_name,
     remote_probe_target,
     retry_delay,
+    switch_lands_on_saved_conversation,
+)
+from web.agent_session_hooks import (
+    PANE_TOKEN_VARIABLE,
+    SessionReportError,
+    available_claude_settings_path,
+    new_pane_token,
+    parse_session_report,
+    token_matches,
 )
 from web.agents import (
     AGENT_REGISTRY,
@@ -64,8 +86,9 @@ from web.hostkeys import _apply_host_key_policy
 from web.mcp_launch import apply_pane_identity, pane_identity_environment
 from web.pane_processes import (
     children_index,
-    descendant_binary,
+    descendant_process,
     normalize_binary,
+    process_started_at,
     process_table,
 )
 from web.terminal_cwd import (
@@ -78,6 +101,7 @@ from web.terminal_cwd import (
     shell_integration_arguments,
     shell_integration_environment,
 )
+from web.terminal_replies import ReplyLedger
 from web.workspaces import DEFAULT_WORKSPACE_ID, normalize_workspace_id, workspace_room
 
 try:
@@ -574,6 +598,13 @@ AGENT_RETIRED_PROMPT_ABSORB_SECONDS = 2.0
 #: it is held for this long, and any other submitted line retires it.
 AGENT_RELAUNCH_PENDING_SECONDS = 5.0
 
+#: How much earlier than the held line a process may appear to start and still
+#: be the one that line launched. It absorbs clock granularity between the
+#: wall clock stamped on the line and the start time the OS reports -- and it
+#: is far below the time it takes to quit an agent and type its name again, so
+#: the agent that was asked to quit can never fall inside it.
+AGENT_RELAUNCH_START_SLACK_SECONDS = 0.25
+
 
 def _observe_terminal_output_cwd(
     session_id: str,
@@ -846,16 +877,25 @@ def _observed_pane_agent(
     one. A positive answer cannot be reused across prompts: the next prompt may
     be the only one the shell draws after that process exits.
     """
+    return _observed_pane_agent_process(connection, reading)[0]
+
+
+def _observed_pane_agent_process(
+    connection: Dict[str, Any],
+    reading: Optional[Tuple[Dict[str, Any], Dict[str, Any]]] = None,
+) -> Tuple[str, Optional[float]]:
+    """:func:`_observed_pane_agent`, with when that process started (or ``None``)."""
     shell_pid = _pane_shell_pid(connection)
     if not shell_pid:
-        return ""
+        return "", None
     binaries = _agent_binaries()
     if reading is None:
         table = process_table()
         reading = (table, children_index(table))
     table, children = reading
-    found = descendant_binary(table, children, shell_pid, binaries.keys())
-    return binaries.get(found, "")
+    found, pid = descendant_process(table, children, shell_pid, binaries.keys())
+    agent = binaries.get(found, "")
+    return agent, (process_started_at(table, pid) if agent else None)
 
 
 def _pane_agent_is_still_running(session_id: str, connection: Dict[str, Any]) -> bool:
@@ -866,6 +906,11 @@ def _pane_agent_is_still_running(session_id: str, connection: Dict[str, Any]) ->
     the process may have exited since the previous one. A pane the OS cannot
     answer for is *not* still running as far as this is concerned -- the prompt
     is the only reading those panes have, and it must keep retiring them.
+
+    The same binary started by a held relaunch line is not "still there": it is
+    the agent the reader typed after quitting this one, and the prompt between
+    them is exactly the retirement the held line was waiting for. Only a start
+    time the OS reports can say so; where it cannot, the answer is as before.
     """
     session = session_manager.get_session(session_id)
     if session is None or getattr(session, "startup_mode", "") != "agent":
@@ -873,7 +918,27 @@ def _pane_agent_is_still_running(session_id: str, connection: Dict[str, Any]) ->
     labelled = _normalize_agent_key(getattr(session, "agent_selection", ""))
     if not labelled:
         return False
-    return _observed_pane_agent(connection) == labelled
+    observed, started_at = _observed_pane_agent_process(connection)
+    if observed != labelled:
+        return False
+    return not _started_by_pending_relaunch(connection, labelled, started_at)
+
+
+def _started_by_pending_relaunch(
+    connection: Dict[str, Any],
+    agent_selection: str,
+    started_at: Optional[float],
+) -> bool:
+    """Did the held relaunch line start the ``agent_selection`` process seen now?"""
+    pending = connection.get("agent_relaunch_pending")
+    if not pending or started_at is None:
+        return False
+    if str(pending.get("agent_selection") or "") != agent_selection:
+        return False
+    if (time.monotonic() - float(pending.get("at") or 0.0)) > AGENT_RELAUNCH_PENDING_SECONDS:
+        return False
+    submitted_at = float(pending.get("submitted_at") or 0.0)
+    return bool(submitted_at) and started_at >= submitted_at - AGENT_RELAUNCH_START_SLACK_SECONDS
 
 
 def reconcile_pane_agents() -> int:
@@ -935,10 +1000,20 @@ def _reconcile_one_pane_agent(
     if not agent_selection:
         return False
 
-    updated = session_manager.update_session_metadata(
-        session_id,
-        **_agent_promotion_updates(session, agent_selection),
-    )
+    # The reading belongs to this connection's shell. A relaunch or mode switch
+    # during it may have replaced the connection or relabelled the pane, and
+    # the old shell's agent is not a fact about the replacement -- so the
+    # commit re-checks both under the lock that orders them.
+    with connection_lock:
+        if connection.get("retired") or not _connection_is_current(session_id, connection):
+            return False
+        current = session_manager.get_session(session_id)
+        if current is not session or str(getattr(current, "startup_mode", "") or "") != "terminal":
+            return False
+        updated = session_manager.update_session_metadata(
+            session_id,
+            **_agent_promotion_updates(current, agent_selection),
+        )
     if not updated:
         return False
     # Everything the pane announced before this belongs to whatever it was
@@ -1043,6 +1118,9 @@ def _agent_promotion_updates(
         "startup_mode": "agent",
         "agent_selection": agent_selection,
         "custom_agent": "",
+        CONVERSATION_PROVIDER_FIELD: "",
+        CONVERSATION_ID_FIELD: "",
+        CONVERSATION_RESUME_FIELD: False,
     }
     existing = str(getattr(session, "initial_command", "") or "").strip()
     existing_mode = str(getattr(session, "initial_command_mode", "") or "")
@@ -1230,6 +1308,232 @@ _conversation_resolver_pending: Dict[
 ] = {}
 _conversation_resolver_lock = threading.Lock()
 
+#: Connection key: the pane's current, not-yet-identified conversation has
+#: had a prompt. Set and consumed under ``connection_lock``; dropped with the
+#: rest of a conversation's identity by `_forget_agent_conversation`.
+_CONVERSATION_PROMPTED_KEY = "agent_conversation_prompted"
+
+
+def _publish_runtime_conversation_identity(
+    session_id: str,
+    connection: Dict[str, Any],
+    provider: str,
+    conversation_id: str,
+    saved: bool = False,
+    *,
+    expected_title: Optional[str] = None,
+    expected_switch: str = "",
+    cancel_event: Optional[threading.Event] = None,
+) -> bool:
+    """Publish identity only to the pane still owned by this connection.
+
+    Parsing happens before this function. The commit follows the same exact
+    registry-entry gate as cwd publication and agent retirement, in the global
+    lock order; the status broadcast follows both lock releases.
+
+    ``saved`` says whether the provider already has this conversation on disk
+    -- a resumed, picked or forked one does, a brand-new one does not until
+    its first prompt (`_mark_agent_conversation_saved`). Only a saved
+    conversation is resumable, so only a saved one reaches a snapshot. The same
+    id announced again never loses a saved reading it already had, and an id
+    that arrives after its conversation's first prompt -- Claude's ``/clear``
+    hook runs in the background while the reader types -- arrives saved.
+
+    With the experimental restore off, the ownership answer is still given --
+    the Codex name resolver reads it -- but nothing is recorded on the pane.
+    """
+    provider = _normalize_agent_key(provider)
+    conversation_id = normalize_conversation_id(conversation_id)
+    if (
+        not conversation_id
+        or not conversation_restore_capability(AGENT_REGISTRY, provider)
+    ):
+        return False
+    record = conversation_restore_enabled()
+    changed = False
+    with connection_lock:
+        if connection.get("retired") or ssh_connections.get(session_id) is not connection:
+            return False
+        if cancel_event is not None and cancel_event.is_set():
+            return False
+        if expected_title is not None and (
+            announced_agent_title(connection.get("agent_activity")) != expected_title
+            or connection.get("agent_conversation_switch") != expected_switch
+        ):
+            return False
+        with session_manager.lock:
+            session = session_manager.get_session(session_id)
+            if (
+                session is None
+                or str(getattr(session, "startup_mode", "") or "") != "agent"
+                or _normalize_agent_key(
+                    getattr(session, "agent_selection", "")
+                )
+                != provider
+            ):
+                return False
+            if not record:
+                return True
+            same = (
+                getattr(session, CONVERSATION_PROVIDER_FIELD, "") == provider
+                and getattr(session, CONVERSATION_ID_FIELD, "") == conversation_id
+            )
+            prompted = bool(connection.pop(_CONVERSATION_PROMPTED_KEY, False))
+            resume = bool(saved) or prompted or (
+                same and bool(getattr(session, CONVERSATION_RESUME_FIELD, False))
+            )
+            changed = not same or resume != bool(
+                getattr(session, CONVERSATION_RESUME_FIELD, False)
+            )
+            if changed:
+                setattr(session, CONVERSATION_PROVIDER_FIELD, provider)
+                setattr(session, CONVERSATION_ID_FIELD, conversation_id)
+                setattr(session, CONVERSATION_RESUME_FIELD, resume)
+            if expected_title is not None:
+                connection.pop("agent_conversation_switch", None)
+    if changed:
+        logger.debug(
+            "Observed agent conversation for session %s provider=%s saved=%s",
+            session_id,
+            provider,
+            resume,
+        )
+    return True
+
+
+def _clear_runtime_conversation_identity(
+    session_id: str,
+    connection: Optional[Dict[str, Any]] = None,
+) -> bool:
+    """Clear a known identity, optionally gated to one exact connection."""
+    changed = False
+    with connection_lock:
+        if connection is not None and (
+            connection.get("retired")
+            or ssh_connections.get(session_id) is not connection
+        ):
+            return False
+        with session_manager.lock:
+            session = session_manager.sessions.get(session_id)
+            if session is None:
+                return False
+            changed = bool(
+                getattr(session, CONVERSATION_PROVIDER_FIELD, "")
+                or getattr(session, CONVERSATION_ID_FIELD, "")
+                or getattr(session, CONVERSATION_RESUME_FIELD, False)
+            )
+            if changed:
+                setattr(session, CONVERSATION_PROVIDER_FIELD, "")
+                setattr(session, CONVERSATION_ID_FIELD, "")
+                setattr(session, CONVERSATION_RESUME_FIELD, False)
+    if changed:
+        logger.debug("Cleared resumable agent conversation for session %s", session_id)
+    return changed
+
+
+def _mark_agent_conversation_saved(
+    session_id: str,
+    connection: Dict[str, Any],
+) -> bool:
+    """Turn a known conversation resumable once its first prompt is sent.
+
+    Claude and Codex both write a conversation to disk on its first turn and
+    not before: resuming an id that was only ever launched fails with the
+    CLI's "no saved session" error. So delivering ``--session-id`` is not the
+    moment -- a relaunch before any prompt may create the same id again -- and
+    a Codex thread announced at startup is not resumable either until this.
+
+    A prompt into a conversation whose id has not been announced yet -- the
+    reader typing straight after ``/clear`` or ``/new`` -- has nothing to mark,
+    so the connection remembers it and the id that follows is published saved.
+    """
+    if not conversation_restore_enabled():
+        return False
+    changed = False
+    with connection_lock:
+        if connection.get("retired") or ssh_connections.get(session_id) is not connection:
+            return False
+        with session_manager.lock:
+            session = session_manager.sessions.get(session_id)
+            if session is None:
+                return False
+            selected = _normalize_agent_key(getattr(session, "agent_selection", ""))
+            if (
+                not getattr(session, CONVERSATION_ID_FIELD, "")
+                and str(getattr(session, "startup_mode", "") or "") == "agent"
+                and conversation_restore_capability(AGENT_REGISTRY, selected)
+            ):
+                connection[_CONVERSATION_PROMPTED_KEY] = True
+                return False
+            provider = _normalize_agent_key(
+                getattr(session, CONVERSATION_PROVIDER_FIELD, "")
+            )
+            if (
+                not conversation_restore_capability(AGENT_REGISTRY, provider)
+                or str(getattr(session, "startup_mode", "") or "") != "agent"
+                or _normalize_agent_key(getattr(session, "agent_selection", ""))
+                != provider
+                or not getattr(session, CONVERSATION_ID_FIELD, "")
+                or bool(getattr(session, CONVERSATION_RESUME_FIELD, False))
+            ):
+                return False
+            setattr(session, CONVERSATION_RESUME_FIELD, True)
+            changed = True
+    if changed:
+        logger.debug(
+            "Agent conversation saved by its first prompt for session %s provider=%s",
+            session_id,
+            provider,
+        )
+    return changed
+
+
+def report_agent_conversation(
+    session_id: str,
+    presented_token: Any,
+    payload: Any,
+) -> Tuple[Dict[str, Any], int]:
+    """Accept one agent session hook's report for the pane that ran it.
+
+    The hook is the only authoritative reading of a Claude conversation after
+    an in-TUI switch (``web/agent_session_hooks.py``). The token is read off
+    the pane's *current* connection and compared there, so a report from a
+    replaced shell is refused exactly like one that never had a token. Parsing
+    happens before any lock; the commit is the same exact-connection publish a
+    Codex title uses. Returns ``(payload, status)``; the payload never carries
+    the id. With the experimental restore off there is nothing to record, and
+    no pane is handed the hook or a token in the first place.
+    """
+    if not conversation_restore_enabled():
+        return {"error": "Agent conversation restore is off"}, 404
+    with connection_lock:
+        connection = ssh_connections.get(session_id)
+        expected = (
+            connection.get("conversation_report_token")
+            if connection is not None and not connection.get("retired")
+            else None
+        )
+    if connection is None or expected is None:
+        return {"error": "Session has no live connection"}, 404
+    if not token_matches(expected, presented_token):
+        return {"error": "Report token rejected"}, 403
+    try:
+        provider, conversation_id, saved = parse_session_report(payload)
+    except SessionReportError as exc:
+        return {"error": str(exc)}, 400
+    if not _publish_runtime_conversation_identity(
+        session_id, connection, provider, conversation_id, saved=saved
+    ):
+        # The pane moved on -- another agent, another mode, another transport
+        # -- between the hook firing and this commit. Not an error of the hook.
+        return {"accepted": False}, 409
+    logger.debug(
+        "Agent session hook reported conversation for session %s provider=%s",
+        session_id,
+        provider,
+    )
+    return {"accepted": True}, 200
+
 
 def _note_agent_conversation(
     session_id: str,
@@ -1255,14 +1559,35 @@ def _note_agent_conversation(
             return
     connection["agent_conversation_title"] = title
     connection["agent_conversation_deferred_until"] = 0.0
-    thread_id = conversation_thread_id(title)
-    if not thread_id:
+    provider, thread_id = observed_conversation_identity(
+        CONVERSATION_PROVIDER_CODEX,
+        title,
+        AGENT_REGISTRY,
+    )
+    # A thread announced after `/resume` or `/fork` is one Codex already
+    # saved; one announced at launch or after `/new` is not, yet. A thread
+    # that announces a name rather than its id leaves the pane unidentified,
+    # and restore starts it fresh.
+    saved = switch_lands_on_saved_conversation(
+        connection.get("agent_conversation_switch")
+    )
+    if not provider or not _publish_runtime_conversation_identity(
+        session_id, connection, provider, thread_id, saved=saved
+    ):
+        if (
+            conversation_restore_enabled()
+            and connection.get("agent_conversation_switch") == "/resume"
+            and title
+            and _normalize_agent_key(
+                getattr(session_manager.get_session(session_id), "agent_selection", "")
+            ) == CONVERSATION_PROVIDER_CODEX
+        ):
+            if not _start_conversation_resolver(session_id, connection, title, ""):
+                connection["agent_conversation_deferred_until"] = (
+                    time.time() + CONVERSATION_RESOLVER_DEFER_SECONDS
+                )
         return
-    session = session_manager.get_session(session_id)
-    if session is None or getattr(session, "startup_mode", "") != "agent":
-        return
-    if _normalize_agent_key(getattr(session, "agent_selection", "")) != CONVERSATION_PROVIDER_CODEX:
-        return
+    connection.pop("agent_conversation_switch", None)
     if not _start_conversation_resolver(session_id, connection, title, thread_id):
         connection["agent_conversation_deferred_until"] = (
             time.time() + CONVERSATION_RESOLVER_DEFER_SECONDS
@@ -1302,6 +1627,15 @@ def _note_agent_conversation_command(
     if connection is None:
         return
     line = str(command or "")
+    provider, observed_id = command_conversation_identity(line)
+    if provider:
+        _publish_runtime_conversation_identity(
+            session_id,
+            connection,
+            provider,
+            observed_id,
+            saved=command_resumes_conversation(line),
+        )
     thread_id = command_thread_id(line)
     if not thread_id:
         return
@@ -1334,13 +1668,23 @@ def _note_agent_conversation_switch(
     """
     if not connection:
         return
-    if _normalize_agent_key(getattr(session, "agent_selection", "")) != CONVERSATION_PROVIDER_CODEX:
+    provider = _normalize_agent_key(getattr(session, "agent_selection", ""))
+    if provider != CONVERSATION_PROVIDER_CODEX and not conversation_restore_enabled():
+        # Only the experimental restore watches another provider's switches;
+        # Codex's are read for its conversation name either way.
         return
     words = str(submitted_line or "").strip().split()
     verb = words[0].lower() if words else ""
-    if verb in CONVERSATION_SWITCH_COMMANDS:
+    switch = conversation_switch_verb(provider, submitted_line)
+    if switch:
         _cancel_conversation_resolver(session_id)
+        _clear_runtime_conversation_identity(session_id, connection)
         _forget_agent_conversation(connection)
+        # Read by the next id announcement: whether the conversation it names
+        # is one the provider has already saved.
+        connection["agent_conversation_switch"] = switch
+        return
+    if provider != CONVERSATION_PROVIDER_CODEX:
         return
     if verb not in CONVERSATION_RENAME_COMMANDS:
         return
@@ -1573,8 +1917,28 @@ def _resolve_agent_conversation(
         session = session_manager.get_session(session_id)
         if session is None:
             return
+        if not thread_id and _normalize_agent_key(
+            getattr(session, "agent_selection", "")
+        ) != CONVERSATION_PROVIDER_CODEX:
+            return
         target = _conversation_probe_target(session, connection)
         if not target:
+            return
+        if not thread_id:
+            # A resumed named thread announces its name, not its UUID. The
+            # app-server list is accepted only for one exact, unique match.
+            resolved_id = probe_conversation_id_by_title(target, title or "")
+            if resolved_id:
+                _publish_runtime_conversation_identity(
+                    session_id,
+                    connection,
+                    CONVERSATION_PROVIDER_CODEX,
+                    resolved_id,
+                    saved=True,
+                    expected_title=title,
+                    expected_switch="/resume",
+                    cancel_event=cancellation,
+                )
             return
         key = cache_key(CONVERSATION_PROVIDER_CODEX, target, thread_id)
         known = conversation_names.resolved_name(key)
@@ -1673,6 +2037,7 @@ def _forget_agent_conversation(
         connection.pop("agent_conversation", None)
         if forget_command:
             connection.pop("agent_conversation_command", None)
+            connection.pop(_CONVERSATION_PROMPTED_KEY, None)
 
 
 def agent_activity_snapshot() -> Dict[str, Dict[str, Any]]:
@@ -2117,6 +2482,33 @@ def _unreachable_local_startup_directory(
     return "" if os.path.isdir(os.path.expanduser(candidate)) else candidate
 
 
+# Typed ahead of an agent's launch line, on that same line. The shell has to
+# echo what it was typed before it runs it, and a composed agent line is long
+# -- MCP overrides, identity, settings -- so without this it sits above the
+# agent's first frame. Claude Code and Codex draw inline rather than on the
+# alternate screen, so it stays there until a resize makes them repaint. Being
+# the first command of the line is what orders it: after the echo, before the
+# agent draws. `printf` rather than `clear`, which needs terminfo and is not
+# installed on every host an SSH pane reaches.
+_AGENT_LAUNCH_CLEAR = {
+    "cmd": "cls & ",
+    "powershell": "Clear-Host; ",
+}
+_POSIX_AGENT_LAUNCH_CLEAR = "printf '\\033[H\\033[2J\\033[3J'; "
+
+
+def _agent_launch_line(session: Any, shell_kind: str, startup_command: str) -> str:
+    """Prefix an agent's launch line with the shell's own clear.
+
+    Only an agent pane: a plain startup command's echo is the reader's only
+    record of what the pane was told to run.
+    """
+    if str(getattr(session, "initial_command_mode", "") or "") != "agent":
+        return startup_command
+    prefix = _AGENT_LAUNCH_CLEAR.get(shell_kind, _POSIX_AGENT_LAUNCH_CLEAR)
+    return f"{prefix}{startup_command}"
+
+
 def _run_startup_sequence(connection: Dict[str, Any], session: Any):
     """Change into the target directory and optionally run an initial command."""
     shell_kind = connection.get("shell_kind")
@@ -2208,6 +2600,15 @@ def _run_startup_sequence(connection: Dict[str, Any], session: Any):
         # gated on `pane_can_run_the_sidecar` here, so this call site does not
         # have to duplicate that predicate to decide whether to bother.
         identity=_pane_identity_for(session_id, session) if session_id else None,
+        # Only a connection that carries a report token can have its hook
+        # heard, so only that connection is handed the hook at all -- and
+        # only while the experimental conversation restore is on.
+        session_hook_settings=(
+            available_claude_settings_path()
+            if connection.get("conversation_report_token")
+            and conversation_restore_enabled()
+            else ""
+        ),
     )
     if startup_command:
         if unreachable_directory:
@@ -2227,10 +2628,14 @@ def _run_startup_sequence(connection: Dict[str, Any], session: Any):
                 connection,
             )
         else:
-            _send_connection_input(connection, f"{startup_command}{newline}")
+            _send_connection_input(
+                connection,
+                f"{_agent_launch_line(session, shell_kind, startup_command)}{newline}",
+            )
             # The line that was actually run, which is where a resumed pane's
             # conversation is named -- the pane itself will announce only its
-            # project. Nothing is waited on: the lookup is its own thread.
+            # project. Nothing is waited on: the lookup is its own thread. The
+            # clear is not part of it, so it is not handed over.
             _note_agent_conversation_command(session_id, connection, startup_command)
 
     # Deliberately not the moment to arm an agent pane's retirement watch.
@@ -2323,6 +2728,7 @@ def _decoded_terminal_output(session_id, connection, data=b'', *, final=False):
     output = data if isinstance(data, str) else decoder.decode(data, final=final)
     _observe_terminal_output_cwd(session_id, connection, output)
     _observe_agent_activity(session_id, connection, output)
+    _reply_ledger(connection).note_output(output, time.monotonic())
     if connection.get('kind') == 'ssh':
         output = _scrub_ssh_startup_output(connection, output, force=final)
     _publish_ssh_terminal_output(session_id, output, connection)
@@ -2539,11 +2945,31 @@ def _local_shell_integration(
     return command + shell_integration_arguments(shell_kind), updated_environment
 
 
+def _reply_ledger(connection: Dict[str, Any]) -> ReplyLedger:
+    """The connection's own query ledger; `dict.setdefault` is atomic."""
+    ledger = connection.get("reply_ledger")
+    if ledger is None:
+        ledger = connection.setdefault("reply_ledger", ReplyLedger())
+    return ledger
+
+
 def _sanitize_terminal_input(connection: Dict[str, Any], input_data: Any) -> str:
-    """Drop Windows terminal capability replies that leak into cmd/PowerShell panes."""
+    """Drop terminal replies that can only be read as typing by now.
+
+    A reply whose query is older than the budget in `web/terminal_replies.py`
+    lands after the asker stopped waiting; Windows cmd/PowerShell panes also
+    lose ConPTY's device-attributes reply.
+    """
     text = str(input_data or "")
     if not text:
         return ""
+
+    filtered = _reply_ledger(connection).filter_input(text, time.monotonic())
+    if filtered != text:
+        logger.debug("Dropped %d chars of late terminal replies", len(text) - len(filtered))
+        text = filtered
+        if not text:
+            return ""
 
     if (
         connection.get("kind") == "local"
@@ -2693,6 +3119,8 @@ def _track_current_terminal_agent_input(
         # of the two it was.
         if session and session.startup_mode == "agent" and session.agent_selection:
             _note_agent_conversation_switch(session_id, connection, session, submitted_line)
+            if is_conversation_prompt(submitted_line):
+                _mark_agent_conversation_saved(session_id, connection)
             _note_pending_agent_relaunch(connection, submitted_line)
             continue
         detected = _agent_from_terminal_command(submitted_line)
@@ -2723,6 +3151,7 @@ def _track_current_terminal_agent_input(
             agent_selection=agent_selection,
             custom_agent="",
             initial_command=initial_command,
+            **EMPTY_CONVERSATION_FIELDS,
             **promotion_updates,
         )
         if updated:
@@ -2760,6 +3189,9 @@ def _mark_runtime_agent_exited(session_id: str, reason: str) -> bool:
         "startup_mode": "terminal",
         "agent_selection": "",
         "custom_agent": "",
+        CONVERSATION_PROVIDER_FIELD: "",
+        CONVERSATION_ID_FIELD: "",
+        CONVERSATION_RESUME_FIELD: False,
     }
     if str(getattr(session, "initial_command_mode", "") or "") == "agent":
         # The agent's own launch line, which goes with it. A pane labelled from
@@ -3091,9 +3523,18 @@ def _connect_local_session(session_id: str, session: Any):
         # switch for the prompt hook -- nothing to do with MCP. A user who
         # turns it off would otherwise get panes whose agents cannot tell what
         # workspace they are in, with no error anywhere.
+        identity = _pane_identity_for(session_id, session)
+        if shell_kind != "wsl" and conversation_restore_enabled():
+            # A shell native to this machine can reach its loopback, so its
+            # agent's session hook can report home. The token belongs to this
+            # one connection -- see `report_agent_conversation`. Only the
+            # experimental conversation restore listens for it.
+            token = new_pane_token()
+            connection["conversation_report_token"] = token
+            identity[PANE_TOKEN_VARIABLE] = token
         shell_environment = apply_pane_identity(
             dict(os.environ),
-            _pane_identity_for(session_id, session),
+            identity,
             shell_kind=shell_kind,
         )
         command, shell_environment = _local_shell_integration(

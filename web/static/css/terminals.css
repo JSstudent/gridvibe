@@ -1402,7 +1402,12 @@
             text-overflow: ellipsis;
             white-space: nowrap;
         }
-        .terminal-name { font-weight: 600; color: var(--agent-brand, var(--t-accent)); font-size: .88rem; }
+        /* The name gives up width well before the host does: the host is the
+           only thing saying where the pane is, and an agent pane drops its
+           printed name altogether once it would ellipsise (`name-folded`,
+           decided by updatePaneHeaderLayout) because its mark already names it. */
+        .terminal-name { flex: 0 10 auto; font-weight: 600; color: var(--agent-brand, var(--t-accent)); font-size: .88rem; }
+        .terminal-container.name-folded .terminal-name { display: none; }
         .terminal-agent-icon {
             display: inline-flex;
             align-items: center;
@@ -1414,28 +1419,18 @@
         }
         .terminal-agent-icon[hidden] { display: none; }
         .terminal-agent-icon .dash-agent-glyph { width: 18px; height: 18px; }
-        .terminal-host { color: var(--t-text-muted); font-size: .78rem; }
+        .terminal-host { flex: 0 1 auto; color: var(--t-text-muted); font-size: .78rem; }
 
-        /* The GridVibe-tools chip. It never shrinks and never ellipsises: it is
-           three characters, and the two labels before it are the ones that give
-           up width on a narrow pane. Deliberately the same accent outline the
+        /* GridVibe tools: a frame around the agent's mark rather than a chip
+           beside the name, so it costs the header no width. Drawn as an
+           outline so switching it on or off moves nothing. The same accent the
            reset dropdown's own MCP button wears while it is checked, so the
            header states what that menu would confirm. */
-        .terminal-mcp-tag {
-            display: inline-flex;
-            align-items: center;
-            flex: 0 0 auto;
-            padding: 0 5px;
-            border: 1px solid color-mix(in srgb, var(--t-accent) 55%, transparent);
-            border-radius: 5px;
-            color: var(--t-accent);
-            font-size: .6rem;
-            font-weight: 700;
-            letter-spacing: .06em;
-            line-height: 1.5;
+        .terminal-agent-icon[data-mcp] {
+            border-radius: 4px;
+            outline: 1.5px solid var(--t-accent);
+            outline-offset: 1.5px;
         }
-
-        .terminal-mcp-tag[hidden] { display: none; }
 
         .terminal-meta {
             display: flex;
@@ -1445,7 +1440,7 @@
             position: relative;
         }
 
-        .terminal-status { display: flex; align-items: center; gap: 6px; font-size: .78rem; }
+        .terminal-status { display: flex; align-items: center; }
 
         /* Inline row of foldable header actions (everything except close). */
         .terminal-actions {
@@ -1495,10 +1490,6 @@
         .terminal-container.actions-collapsed .terminal-actions .voice-control .terminal-action-btn {
             width: 100%;
         }
-
-        /* Free header space on tiny panes by dropping the status label text
-           (the coloured status dot still shows). */
-        .terminal-container.actions-collapsed .terminal-status span { display: none; }
 
         /* Panes whose reset button opens the shell picker get a caret hint. Drawn
            in CSS rather than as markup so the busy-state innerHTML swap in
@@ -2231,8 +2222,7 @@
             font-size: .78rem;
         }
 
-        body.surface-max .terminal-host,
-        body.surface-max .terminal-status {
+        body.surface-max .terminal-host {
             font-size: .68rem;
         }
 

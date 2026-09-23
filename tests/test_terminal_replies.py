@@ -642,5 +642,190 @@ class PaneInputGateTestCase(TerminalRepliesNodeTestCase):
         self.assertEqual(result["replacement"]["broadcastIndex"], 0)
 
 
+# What xterm types back for each query it answers. A reply is dropped only
+# when it is matched to a query of its own kind that the server read too long
+# ago, so every pair here must match -- and must not match any other kind.
+QUERY_REPLY_PAIRS = {
+    "OSC 10 foreground": (ESC + "]10;?" + ST, ESC + "]10;rgb:e0e0/e0e0/e0e0" + ST),
+    "OSC 11 background (BEL)": (ESC + "]11;?" + BEL, ESC + "]11;rgb:0d0d/0d0d/0d0d" + BEL),
+    "OSC 12 cursor colour": (ESC + "]12;?" + ST, ESC + "]12;rgb:ffff/ffff/ffff" + ST),
+    "OSC 4 indexed palette": (ESC + "]4;1;?" + ST, ESC + "]4;1;rgb:cdcd/0000/0000" + ST),
+    "DA1": (ESC + "[c", ESC + "[?1;2c"),
+    "DA2": (ESC + "[>c", ESC + "[>0;276;0c"),
+    "DSR device status": (ESC + "[5n", ESC + "[0n"),
+    "DSR cursor position": (ESC + "[6n", ESC + "[12;40R"),
+    "DECXCPR": (ESC + "[?6n", ESC + "[?12;40;1R"),
+    "XTVERSION": (ESC + "[>0q", ESC + "P>|xterm.js(5.5.0)" + ST),
+    "DECRQM private": (ESC + "[?2026$p", ESC + "[?2026;2$y"),
+    "OSC 52 clipboard read": (ESC + "]52;c;?" + ST, ESC + "]52;c;aGVsbG8=" + ST),
+    "XTWINOPS window state": (ESC + "[11t", ESC + "[1t"),
+    "XTWINOPS window position": (ESC + "[13t", ESC + "[3;0;0t"),
+    "XTWINOPS pixel size": (ESC + "[14t", ESC + "[4;600;800t"),
+    "XTWINOPS screen pixel size": (ESC + "[15t", ESC + "[5;1080;1920t"),
+    "XTWINOPS cell size": (ESC + "[16t", ESC + "[6;17;9t"),
+    "XTWINOPS text area size": (ESC + "[18t", ESC + "[8;24;80t"),
+    "XTWINOPS screen size": (ESC + "[19t", ESC + "[9;60;200t"),
+    "XTWINOPS icon label": (ESC + "[20t", ESC + "]Lgridvibe" + ST),
+    "XTWINOPS window title": (ESC + "[21t", ESC + "]lgridvibe" + ST),
+    "XTGETTCAP": (ESC + "P+q544e" + ST, ESC + "P1+r544e=787465726d" + ST),
+    "DECRQSS": (ESC + "P$qm" + ST, ESC + "P1$r0m" + ST),
+}
+
+
+class ServerReplyAgeGateTestCase(unittest.TestCase):
+    """A reply is refused by the server once its query is older than the budget.
+
+    The page can only time what it held; the server reads the query off the pty
+    and receives the answer, on one clock, so it sees the socket and a busy
+    restoring page too. Codex waits about 100 ms for a colour reply.
+    """
+
+    def setUp(self):
+        from web import terminal_replies
+
+        self.replies = terminal_replies
+        # The tightest and the loosest of the per-kind budgets: under the one
+        # every kind answers, past the other none does.
+        self.prompt = terminal_replies.COLOUR_REPLY_AGE_BUDGET_S / 2
+        self.late = terminal_replies.REPLY_AGE_BUDGET_S + 0.05
+
+    def ledger(self):
+        return self.replies.ReplyLedger()
+
+    def test_a_prompt_reply_reaches_the_program(self):
+        for name, (query, reply) in QUERY_REPLY_PAIRS.items():
+            with self.subTest(name):
+                ledger = self.ledger()
+                ledger.note_output("before" + query + "after", 100.0)
+                self.assertEqual(ledger.filter_input(reply, 100.0 + self.prompt), reply)
+
+    def test_a_late_reply_is_removed_and_the_typing_around_it_kept(self):
+        for name, (query, reply) in QUERY_REPLY_PAIRS.items():
+            with self.subTest(name):
+                ledger = self.ledger()
+                ledger.note_output(query, 100.0)
+                self.assertEqual(
+                    ledger.filter_input("ab" + reply + "cd", 100.0 + self.late),
+                    "abcd",
+                )
+
+    def test_only_colour_replies_have_the_tight_budget(self):
+        """The 75 ms edge was measured on Codex's colour query and nothing else.
+
+        crossterm waits 2 s for a cursor report at startup and fails without
+        one, so a report 150 ms late is an answer, not garbage.
+        """
+        at = 100.0 + 0.15
+        colour = ESC + "]11;rgb:0d0d/0d0d/0d0d" + ST
+        ledger = self.ledger()
+        ledger.note_output(ESC + "]11;?" + ST, 100.0)
+        self.assertEqual(ledger.filter_input(colour, at), "")
+
+        for name, (query, reply) in QUERY_REPLY_PAIRS.items():
+            kind = self.replies._query_kind(self.replies._QUERY_RE.search(query))
+            with self.subTest(name):
+                ledger = self.ledger()
+                ledger.note_output(query, 100.0)
+                expected = "" if self.replies.reply_age_budget(kind) < 0.15 else reply
+                self.assertEqual(ledger.filter_input(reply, at), expected)
+
+        report = ESC + "[12;40R"
+        ledger = self.ledger()
+        ledger.note_output(ESC + "[6n", 100.0)
+        self.assertEqual(ledger.filter_input(report, at), report)
+
+    def test_the_colour_kinds_are_exactly_the_colour_queries(self):
+        budget = self.replies.reply_age_budget
+        tight = self.replies.COLOUR_REPLY_AGE_BUDGET_S
+        for kind in ["osc10", "osc11", "osc12", "osc4;1", "osc4;255", "osc5;0"]:
+            with self.subTest(kind):
+                self.assertEqual(budget(kind), tight)
+        for kind in ["osc52", "cpr", "xcpr", "da1", "dsr5", "winops14", "decrqm2026"]:
+            with self.subTest(kind):
+                self.assertEqual(budget(kind), self.replies.REPLY_AGE_BUDGET_S)
+
+    def test_codex_restore_pair_is_removed_whole(self):
+        ledger = self.ledger()
+        ledger.note_output(ESC + "]10;?" + ST + ESC + "]11;?" + ST, 100.0)
+        late = ESC + "]10;rgb:e0e0/e0e0/e0e0" + ST + ESC + "]11;rgb:0d0d/0d0d/0d0d" + ST
+        self.assertEqual(ledger.filter_input(late, 100.3), "")
+
+    def test_a_reply_shaped_key_with_no_query_outstanding_passes(self):
+        ledger = self.ledger()
+        shift_f3 = ESC + "[1;2R"
+        self.assertEqual(ledger.filter_input(shift_f3, 100.0), shift_f3)
+        ledger.note_output(ESC + "]11;?" + ST, 100.0)
+        self.assertEqual(ledger.filter_input(shift_f3, 105.0), shift_f3)
+
+    def test_each_query_answers_once(self):
+        ledger = self.ledger()
+        ledger.note_output(ESC + "[6n", 100.0)
+        report = ESC + "[1;2R"
+        self.assertEqual(ledger.filter_input(report, 105.0), "")
+        # The same bytes again are a keystroke now: nothing is outstanding.
+        self.assertEqual(ledger.filter_input(report, 105.1), report)
+
+    def test_an_unanswered_old_query_does_not_make_a_fresh_reply_late(self):
+        ledger = self.ledger()
+        ledger.note_output(ESC + "]11;?" + ST, 100.0)  # stripped by the page
+        ledger.note_output(ESC + "]11;?" + ST, 105.0)
+        reply = ESC + "]11;rgb:0d0d/0d0d/0d0d" + ST
+        self.assertEqual(ledger.filter_input(reply, 105.0 + self.prompt), reply)
+
+    def test_a_reply_does_not_match_a_query_of_another_kind(self):
+        ledger = self.ledger()
+        ledger.note_output(ESC + "]10;?" + ST, 100.0)
+        reply = ESC + "]11;rgb:0d0d/0d0d/0d0d" + ST
+        self.assertEqual(ledger.filter_input(reply, 101.0), reply)
+
+    def test_each_reply_is_matched_only_to_its_own_query(self):
+        for asked, (query, _reply) in QUERY_REPLY_PAIRS.items():
+            for answered, (_query, reply) in QUERY_REPLY_PAIRS.items():
+                if asked == answered:
+                    continue
+                with self.subTest(asked=asked, answered=answered):
+                    ledger = self.ledger()
+                    ledger.note_output(query, 100.0)
+                    self.assertEqual(ledger.filter_input(reply, 105.0), reply)
+
+    def test_a_query_split_across_reads_is_recorded(self):
+        query = ESC + "]11;?" + ST
+        for cut in range(1, len(query)):
+            with self.subTest(cut=cut):
+                ledger = self.ledger()
+                ledger.note_output("out" + query[:cut], 100.0)
+                ledger.note_output(query[cut:] + "more", 100.0)
+                reply = ESC + "]11;rgb:0d0d/0d0d/0d0d" + ST
+                self.assertEqual(ledger.filter_input(reply, 101.0), "")
+
+    def test_a_forgotten_query_no_longer_holds_back_a_key(self):
+        ledger = self.ledger()
+        ledger.note_output(ESC + "[6n", 100.0)
+        later = 100.0 + self.replies.PENDING_QUERY_HORIZON_S + 1
+        report = ESC + "[1;2R"
+        self.assertEqual(ledger.filter_input(report, later), report)
+
+    def test_rendering_output_records_nothing(self):
+        ledger = self.ledger()
+        ledger.note_output("".join(ACTION_FIXTURES.values()), 100.0)
+        for name, (_query, reply) in QUERY_REPLY_PAIRS.items():
+            with self.subTest(name):
+                self.assertEqual(ledger.filter_input(reply, 105.0), reply)
+
+    def test_the_pane_pump_and_input_path_share_the_ledger(self):
+        from unittest import mock
+
+        import web.terminal_io as terminal_io
+
+        connection = {"kind": "local"}
+        with mock.patch.object(terminal_io.time, "monotonic", return_value=100.0):
+            terminal_io._decoded_terminal_output(
+                "gate0001", connection, ESC + "]11;?" + ST
+            )
+        late = "x" + ESC + "]11;rgb:0d0d/0d0d/0d0d" + ST + "y"
+        with mock.patch.object(terminal_io.time, "monotonic", return_value=100.5):
+            self.assertEqual(terminal_io._sanitize_terminal_input(connection, late), "xy")
+
+
 if __name__ == "__main__":
     unittest.main()

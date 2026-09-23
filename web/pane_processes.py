@@ -30,6 +30,12 @@ Four properties keep it affordable and honest:
 * **The walk is bounded.** Depth and visited-node ceilings, so a deep or
   cyclic parent chain (pids are reused, and a reused pid can close a loop)
   costs a fixed amount rather than hanging the caller that asked.
+* **A child is younger than its parent.** Windows keeps a process's recorded
+  parent pid after that parent exits, and pids are reused quickly, so an
+  orphan -- a desktop app's agent whose launcher has gone -- can name a new
+  pane's shell as its parent. The kernel reparents orphans on Linux; on Windows
+  only the start times can tell, so an edge whose child started before its
+  parent is not followed.
 * **It never answers for a pane it cannot see.** A WSL pane's processes live in
   another kernel's table and a remote pane's on another machine, so neither is
   answered here at all. An empty answer is "no idea", never "no agent" -- which
@@ -41,9 +47,11 @@ Pure functions over a pid table with no imports from ``web``, so
 rather than against whatever happens to be running on the machine.
 """
 
+import functools
 import os
 import re
-from typing import Dict, Iterable, List, Optional, Tuple
+import time
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 #: How far below a pane's shell an agent may be found. Codex is two levels down
 #: on Windows (``cmd.exe`` -> ``node.exe`` -> ``codex.exe``) and a wrapper
@@ -79,17 +87,58 @@ def normalize_binary(name: object) -> str:
     return _EXECUTABLE_SUFFIX_PATTERN.sub("", candidate)
 
 
+class ProcessTable(dict):
+    """``{pid: (parent pid, executable name)}`` that can also say when a pid started.
+
+    Start times are read lazily and cached, because only the handful of
+    processes a walk visits ever need one, and a snapshot of the whole machine
+    must stay single-digit milliseconds. A plain ``dict`` is still a valid
+    table: it simply cannot answer :meth:`started_at`, and every caller treats
+    that as "unknown" rather than as a reason to refuse.
+    """
+
+    def __init__(
+        self,
+        entries: Dict[int, Tuple[int, str]],
+        started_at: Optional[Callable[[int], Optional[float]]] = None,
+    ) -> None:
+        super().__init__(entries)
+        self._read_start = started_at
+        self._starts: Dict[int, Optional[float]] = {}
+
+    def started_at(self, pid: int) -> Optional[float]:
+        """Seconds since the epoch that ``pid`` started, or ``None`` if unknown."""
+        if self._read_start is None:
+            return None
+        pid = int(pid)
+        if pid not in self._starts:
+            try:
+                self._starts[pid] = self._read_start(pid)
+            except Exception:
+                # The same rule as the table itself: an observation that fails
+                # is "unknown", never an exception into the caller.
+                self._starts[pid] = None
+        return self._starts[pid]
+
+
+def process_started_at(table: Dict[int, Tuple[int, str]], pid: int) -> Optional[float]:
+    """When ``pid`` started, if ``table`` can say; ``None`` for a plain dict."""
+    reader = getattr(table, "started_at", None)
+    return reader(pid) if reader is not None else None
+
+
 def process_table() -> Dict[int, Tuple[int, str]]:
     """Return ``{pid: (parent pid, executable name)}``, or ``{}`` for no answer.
 
     ``{}`` is what every failure returns -- an OS that will not say, a platform
     with no table to read, a snapshot that could not be taken. The caller's rule
     is the same for all of them: an answer that is not there promotes nothing.
+    A non-empty answer is a :class:`ProcessTable`.
     """
     try:
         if os.name == "nt":
-            return _windows_process_table()
-        return _posix_process_table()
+            return ProcessTable(_windows_process_table(), _windows_start_time)
+        return ProcessTable(_posix_process_table(), _posix_start_reader())
     except Exception:
         # Reading the process table is an observation, and an observation that
         # fails costs its caller nothing. There is no partial answer worth
@@ -150,6 +199,75 @@ def _windows_process_table() -> Dict[int, Tuple[int, str]]:
     return table
 
 
+#: 100 ns intervals between 1601-01-01 (FILETIME) and 1970-01-01 (Unix epoch).
+_FILETIME_UNIX_EPOCH = 116444736000000000
+
+
+@functools.lru_cache(maxsize=1)
+def _windows_start_time_api() -> Any:
+    """kernel32 bound once: a walk may ask for a start time per visited node."""
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.GetProcessTimes.argtypes = [wintypes.HANDLE] + [ctypes.POINTER(wintypes.FILETIME)] * 4
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    return kernel32
+
+
+def _windows_start_time(pid: int) -> Optional[float]:
+    """The creation time GetProcessTimes reports, or ``None`` if it will not say."""
+    import ctypes
+    from ctypes import wintypes
+
+    process_query_limited_information = 0x1000
+    kernel32 = _windows_start_time_api()
+    handle = kernel32.OpenProcess(process_query_limited_information, False, int(pid))
+    if not handle:
+        return None
+    try:
+        created, exited, kernel, user = (wintypes.FILETIME() for _ in range(4))
+        if not kernel32.GetProcessTimes(
+            handle, ctypes.byref(created), ctypes.byref(exited), ctypes.byref(kernel), ctypes.byref(user)
+        ):
+            return None
+        ticks = (created.dwHighDateTime << 32) | created.dwLowDateTime
+        return (ticks - _FILETIME_UNIX_EPOCH) / 1e7 if ticks else None
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def _posix_start_reader() -> Callable[[int], Optional[float]]:
+    """A start-time reader for one table, anchored to one reading of the clock.
+
+    ``/proc/<pid>/stat`` gives a start in clock ticks since boot. Converting
+    every pid with the same boot anchor keeps two starts exactly comparable,
+    which is what the parent/child check needs.
+    """
+    try:
+        with open("/proc/uptime", encoding="ascii") as handle:
+            booted_at = time.time() - float(handle.read().split()[0])
+        ticks_per_second = os.sysconf("SC_CLK_TCK")
+    except (OSError, ValueError, IndexError):
+        return lambda pid: None
+
+    def started_at(pid: int) -> Optional[float]:
+        try:
+            with open(f"/proc/{int(pid)}/stat", encoding="utf-8", errors="replace") as handle:
+                line = handle.read(4096)
+        except OSError:
+            return None
+        # Fields after the last `)` start at field 3 (state); starttime is 22.
+        fields = line[line.rfind(")") + 1:].split()
+        if len(fields) < 20 or not fields[19].isdigit():
+            return None
+        return booted_at + int(fields[19]) / ticks_per_second
+
+    return started_at
+
+
 def _posix_process_table() -> Dict[int, Tuple[int, str]]:
     """Read `/proc/<pid>/stat`, skipping whatever exits while it is being read."""
     table: Dict[int, Tuple[int, str]] = {}
@@ -183,9 +301,23 @@ def _posix_process_table() -> Dict[int, Tuple[int, str]]:
 def children_index(table: Dict[int, Tuple[int, str]]) -> Dict[int, List[int]]:
     """Invert a parent map once, so each pane's walk is lookups rather than a scan."""
     children: Dict[int, List[int]] = {}
-    for pid, (parent, _name) in table.items():
-        children.setdefault(parent, []).append(pid)
+    for pid, entry in table.items():
+        children.setdefault(entry[0], []).append(pid)
     return children
+
+
+def _is_real_child(table: Dict[int, Tuple[int, str]], parent: int, child: int) -> bool:
+    """Is ``child`` younger than ``parent``, as far as the table can say?
+
+    A child that started before its recorded parent is an orphan whose parent
+    pid was reused. Where either start is unknown the edge is followed, exactly
+    as it was before start times were read.
+    """
+    child_start = process_started_at(table, child)
+    if child_start is None:
+        return True
+    parent_start = process_started_at(table, parent)
+    return parent_start is None or child_start >= parent_start
 
 
 def descendant_binary(
@@ -200,10 +332,20 @@ def descendant_binary(
     a pane whose shell is somehow named like an agent is still a pane running a
     shell. What is being asked is what the shell has started.
     """
+    return descendant_process(table, children, root_pid, binaries)[0]
+
+
+def descendant_process(
+    table: Dict[int, Tuple[int, str]],
+    children: Dict[int, List[int]],
+    root_pid: Optional[int],
+    binaries: Iterable[str],
+) -> Tuple[str, int]:
+    """:func:`descendant_binary`, with the pid it found (``("", 0)`` for none)."""
     wanted = {normalize_binary(name) for name in binaries}
     wanted.discard("")
     if not wanted or not table or not root_pid or int(root_pid) not in table:
-        return ""
+        return "", 0
 
     visited = {int(root_pid)}
     frontier = [(int(root_pid), 0)]
@@ -216,14 +358,18 @@ def descendant_binary(
                 # Checked here and not only around the level, or a process with
                 # thousands of direct children is walked in full whatever the
                 # ceiling says.
-                return ""
+                return "", 0
             if child in visited:
                 # Pids are reused, so a parent map can close a loop. Whatever
                 # this edge means, it is not a new process.
                 continue
             visited.add(child)
+            if not _is_real_child(table, pid, child):
+                # An orphan naming a reused pid as its parent: somebody else's
+                # process, and nothing below it is this pane's either.
+                continue
             name = table.get(child, (0, ""))[1]
             if name in wanted:
-                return name
+                return name, child
             frontier.append((child, depth + 1))
-    return ""
+    return "", 0

@@ -1,23 +1,16 @@
-"""The name a conversation has, when the pane is only announcing its id.
+"""Codex conversation names and identities from its terminal title.
 
-``web/agent_activity.py`` reads what a pane *says about itself*, and for Codex
-that is the OSC title its ``tui.terminal_title=['thread-title']`` override asks
-for. The override is honest and the reading is correct, and between them they
-still lose the one thing the dashboard row is for: a thread the reader has
-named "Review OCR delegation" can announce nothing but
-``019d2e46-065b-7b22-aa9e-51bb915be2ff``, because the thread's *title* and the
-thread's *name* are two fields and only one of them travels over OSC. The row
-then says ``New session`` about a conversation Codex's own resume picker lists
-by name -- and rightly so, because an id is not a name and
-``isOpaqueIdentifierTitle`` refuses to paint one as though it were.
+``web/agent_activity.py`` reads the OSC title Codex emits under GridVibe's
+``tui.terminal_title=['thread-title']`` override. An unnamed thread can
+announce only its UUID, so this module resolves that id through Codex's
+app server before the dashboard paints a name. A named thread can announce its
+name instead. After an in-TUI ``/resume``, a single bounded list lookup accepts
+that name as identity only when exactly one stored thread matches it.
 
-So a whole-title UUID is read here as neither: not a display title, and not
-proof that the thread is unnamed. It is *identity to resolve*, and this module
-is the resolving half.
-
-A pane announces that UUID only while the ``thread-title`` override is in
-force, and GridVibe applies that override to exactly one command: the built-in
-``codex``. Somebody who types ``codex resume <uuid>`` at the prompt -- which is
+A pane announces a UUID only while the ``thread-title`` override is in force
+and the thread is unnamed. GridVibe applies that override to exactly one
+command: the built-in ``codex``. Somebody who types ``codex resume <uuid>`` at
+the prompt -- which is
 how a reader actually returns to a conversation -- gets Codex's *default*
 title instead, which names the project, so the pane says ``gridvibe_colab``
 about every thread in that repo and never says which one. Rewriting what the
@@ -74,9 +67,10 @@ import threading
 import time
 import uuid
 from collections import OrderedDict
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
 from web.agent_activity import normalize_agent_title
+from web.config import runtime_config
 from web.process_bounds import new_process_group, terminate_process_tree
 
 logger = logging.getLogger(__name__)
@@ -85,6 +79,34 @@ logger = logging.getLogger(__name__)
 #: because the cache key carries it: another CLI's thread id is not a Codex
 #: thread id even when the two happen to be the same UUID.
 CONVERSATION_PROVIDER_CODEX = "codex"
+CONVERSATION_PROVIDER_CLAUDE = "claude"
+
+#: Conversation identity is deliberately narrower than the registry.  The
+#: JSON advertises a capability, while this allowlist remains the executable
+#: policy: a hand-edited registry can never turn an arbitrary string into a
+#: shell template.
+_CONVERSATION_RESTORE_CAPABILITIES = {
+    CONVERSATION_PROVIDER_CLAUDE: {
+        "strategy": "assigned_uuid",
+        "create_style": "flag",
+        "resume_style": "flag",
+    },
+    CONVERSATION_PROVIDER_CODEX: {
+        "strategy": "osc_uuid",
+        "resume_style": "subcommand",
+    },
+}
+
+CONVERSATION_PROVIDER_FIELD = "agent_conversation_provider"
+CONVERSATION_ID_FIELD = "agent_conversation_id"
+CONVERSATION_RESUME_FIELD = "agent_conversation_resume"
+CONVERSATION_ID_MAX_LENGTH = 64
+
+EMPTY_CONVERSATION_FIELDS = {
+    CONVERSATION_PROVIDER_FIELD: "",
+    CONVERSATION_ID_FIELD: "",
+    CONVERSATION_RESUME_FIELD: False,
+}
 
 #: The subcommand and the method. Codex's app server is the supported way to
 #: read a stored thread's metadata without resuming it; the alternative is
@@ -94,6 +116,7 @@ APP_SERVER_SUBCOMMAND = "app-server"
 APP_SERVER_METHOD_INITIALIZE = "initialize"
 APP_SERVER_METHOD_INITIALIZED = "initialized"
 APP_SERVER_METHOD_THREAD_READ = "thread/read"
+APP_SERVER_METHOD_THREAD_LIST = "thread/list"
 
 #: Fixed request ids, so the reader can recognise its own answer among the
 #: notifications the server volunteers on the same stream.
@@ -163,6 +186,244 @@ _VALUE_TAKING_OPTIONS = frozenset({"-c", "--config"})
 _BINARY_SUFFIX_PATTERN = re.compile(r"\.(?:bat|cmd|exe)$", re.IGNORECASE)
 
 
+class ConversationIdentityError(ValueError):
+    """A stored or requested conversation identity is not safely launchable."""
+
+
+def conversation_restore_enabled(settings: Any = None) -> bool:
+    """Whether the experimental conversation restore is switched on.
+
+    ``workspace.agent_conversation_restore`` (App Settings -> Agents, off by
+    default) gates the whole feature: planning an id at launch, composing a
+    create/resume flag, the Claude session hook and its pane token, observing
+    a conversation, and carrying the pair through the runtime snapshot. Off,
+    an agent pane launches and restores exactly as it did before the feature
+    existed -- a fresh conversation every time. A caller already holding a
+    captured generation passes it in.
+    """
+    settings = settings if settings is not None else runtime_config.snapshot()
+    return bool(getattr(settings, "workspace_agent_conversation_restore", False))
+
+
+def normalize_conversation_id(value: Any) -> str:
+    """Return one canonical UUID, or ``""`` for anything else."""
+    if not isinstance(value, str):
+        return ""
+    candidate = value.strip()
+    if not candidate or len(candidate) > CONVERSATION_ID_MAX_LENGTH:
+        return ""
+    try:
+        return str(uuid.UUID(candidate))
+    except (AttributeError, TypeError, ValueError):
+        return ""
+
+
+def conversation_restore_capability(
+    registry: Mapping[str, Any], provider: Any
+) -> Dict[str, str]:
+    """Return a verified, allowlisted restore capability, or an empty dict."""
+    key = str(provider or "").strip().lower()
+    expected = _CONVERSATION_RESTORE_CAPABILITIES.get(key)
+    spec = registry.get(key) if isinstance(registry, Mapping) else None
+    capability = spec.get("conversation_restore") if isinstance(spec, dict) else None
+    if not expected or not isinstance(capability, dict):
+        return {}
+    normalized = {
+        field: str(capability.get(field) or "").strip().lower()
+        for field in expected
+    }
+    return dict(expected) if normalized == expected else {}
+
+
+def _built_in_agent_command(config: Mapping[str, Any], provider: str) -> bool:
+    """True when the launch is the provider's untouched built-in command."""
+    return (
+        str(config.get("startup_mode") or "").strip().lower() == "agent"
+        and str(config.get("initial_command_mode") or "").strip().lower() == "agent"
+        and str(config.get("agent_selection") or "").strip().lower() == provider
+        and not str(config.get("custom_agent") or "").strip()
+        and str(config.get("initial_command") or "").strip().lower() == provider
+    )
+
+
+def _identity_values(config: Mapping[str, Any]) -> Tuple[Any, Any]:
+    return config.get(CONVERSATION_PROVIDER_FIELD), config.get(CONVERSATION_ID_FIELD)
+
+
+def validate_conversation_identity(
+    config: Mapping[str, Any], registry: Mapping[str, Any]
+) -> Tuple[str, str]:
+    """Validate a durable provider/id pair and return its canonical values.
+
+    ``None``/``""`` on both fields is the backward-compatible absent shape.
+    Anything partially present, wrong-typed, unsupported, provider-mismatched,
+    or attached to a command that cannot honestly replay it is rejected.
+    """
+    raw_provider, raw_id = _identity_values(config)
+    provider_absent = raw_provider is None or raw_provider == ""
+    id_absent = raw_id is None or raw_id == ""
+    if provider_absent and id_absent:
+        return "", ""
+    if provider_absent != id_absent:
+        raise ConversationIdentityError("conversation identity is incomplete")
+    if not isinstance(raw_provider, str) or not isinstance(raw_id, str):
+        raise ConversationIdentityError("conversation identity must be text")
+
+    provider = raw_provider.strip().lower()
+    conversation_id = normalize_conversation_id(raw_id)
+    if not provider or not conversation_id:
+        raise ConversationIdentityError("conversation identity is invalid")
+    if not conversation_restore_capability(registry, provider):
+        raise ConversationIdentityError("conversation provider is not restorable")
+    if str(config.get("startup_mode") or "").strip().lower() != "agent":
+        raise ConversationIdentityError("conversation identity requires an agent pane")
+    if str(config.get("agent_selection") or "").strip().lower() != provider:
+        raise ConversationIdentityError("conversation provider does not match the pane")
+
+    if not _built_in_agent_command(config, provider):
+        command_provider, command_id = command_conversation_identity(
+            config.get("initial_command")
+        )
+        if (command_provider, command_id) != (provider, conversation_id):
+            raise ConversationIdentityError(
+                "conversation identity is not tied to the startup command"
+            )
+    return provider, conversation_id
+
+
+def prepare_conversation_launch_fields(
+    config: Mapping[str, Any],
+    registry: Mapping[str, Any],
+    *,
+    restore: bool = False,
+) -> Dict[str, Any]:
+    """Plan identity for one launcher or server-side restore pane.
+
+    With the feature off, every pane plans no identity at all -- a carried
+    pair is dropped rather than validated, so an old snapshot still restores
+    its pane, only into a fresh conversation.
+    """
+    if not conversation_restore_enabled():
+        return dict(EMPTY_CONVERSATION_FIELDS)
+    provider, conversation_id = validate_conversation_identity(config, registry)
+    if provider:
+        if not restore:
+            raise ConversationIdentityError(
+                "conversation identity is accepted only from workspace restore"
+            )
+        return {
+            CONVERSATION_PROVIDER_FIELD: provider,
+            CONVERSATION_ID_FIELD: conversation_id,
+            CONVERSATION_RESUME_FIELD: True,
+        }
+
+    selected = str(config.get("agent_selection") or "").strip().lower()
+    capability = conversation_restore_capability(registry, selected)
+    if _built_in_agent_command(config, selected) and capability.get("strategy") == "assigned_uuid":
+        return {
+            CONVERSATION_PROVIDER_FIELD: selected,
+            CONVERSATION_ID_FIELD: str(uuid.uuid4()),
+            CONVERSATION_RESUME_FIELD: False,
+        }
+    return dict(EMPTY_CONVERSATION_FIELDS)
+
+
+def fresh_conversation_fields(
+    config: Mapping[str, Any],
+    registry: Mapping[str, Any],
+) -> Dict[str, Any]:
+    """Plan a brand-new conversation for a pane about to be relaunched.
+
+    A relaunch from the pane header -- same agent or another one, another
+    shell, MCP toggled -- is a request for a *new* process, and a new process
+    starts a new conversation. Whatever identity the pane carried is dropped
+    rather than resumed; only a workspace restore resumes.
+    """
+    stripped = dict(config)
+    stripped[CONVERSATION_PROVIDER_FIELD] = ""
+    stripped[CONVERSATION_ID_FIELD] = ""
+    return prepare_conversation_launch_fields(stripped, registry)
+
+
+def _quote_conversation_id(value: str, shell_family: str) -> str:
+    """Pass a validated UUID through the target shell's quoting boundary."""
+    if shell_family == "powershell":
+        return "'" + value.replace("'", "''") + "'"
+    if shell_family == "cmd":
+        # Canonical UUIDs contain no cmd metacharacters. Single quotes would be
+        # literal there, unlike PowerShell and POSIX.
+        return value
+    return shlex.quote(value)
+
+
+def compose_conversation_command(
+    base_command: Any,
+    provider: Any,
+    conversation_id: Any,
+    resume: Any,
+    shell_family: str,
+    registry: Mapping[str, Any],
+) -> str:
+    """Compose one allowlisted provider create/resume command.
+
+    Gated again here, not only at planning: a pane planned while the feature
+    was on and relaunched after it was switched off launches bare.
+    """
+    base = str(base_command or "").strip()
+    selected = str(provider or "").strip().lower()
+    if not base or base.lower() != selected:
+        return base
+    if not conversation_restore_enabled():
+        return base
+    canonical_id = normalize_conversation_id(conversation_id)
+    capability = conversation_restore_capability(registry, selected)
+    if not canonical_id or not capability:
+        return base
+    quoted = _quote_conversation_id(canonical_id, shell_family)
+    if selected == CONVERSATION_PROVIDER_CLAUDE:
+        flag = "--resume" if bool(resume) else "--session-id"
+        return f"{base} {flag} {quoted}"
+    if selected == CONVERSATION_PROVIDER_CODEX and bool(resume):
+        return f"{base} resume {quoted}"
+    return base
+
+
+def observed_conversation_identity(
+    provider: Any, title: Any, registry: Mapping[str, Any]
+) -> Tuple[str, str]:
+    """Return the identity authoritatively announced by a provider title."""
+    selected = str(provider or "").strip().lower()
+    capability = conversation_restore_capability(registry, selected)
+    if capability.get("strategy") != "osc_uuid":
+        return "", ""
+    conversation_id = conversation_thread_id(title)
+    return (selected, conversation_id) if conversation_id else ("", "")
+
+
+#: Switch commands whose destination is a conversation the provider already
+#: saved: a picked or forked conversation resumes; a new or cleared one does
+#: not exist until its first prompt.
+_SAVED_DESTINATION_SWITCH_COMMANDS = frozenset({"/resume", "/fork"})
+
+_CONVERSATION_SWITCH_COMMANDS = {
+    CONVERSATION_PROVIDER_CODEX: frozenset({"/new", "/resume", "/fork"}),
+    CONVERSATION_PROVIDER_CLAUDE: frozenset({"/clear", "/resume"}),
+}
+
+
+def conversation_switch_verb(provider: Any, submitted_line: Any) -> str:
+    """The switch command a submitted line is, or ``""``."""
+    selected = str(provider or "").strip().lower()
+    words = str(submitted_line or "").strip().split()
+    verb = words[0].lower() if words else ""
+    return verb if verb in _CONVERSATION_SWITCH_COMMANDS.get(selected, ()) else ""
+
+
+def switch_lands_on_saved_conversation(verb: Any) -> bool:
+    """True when the conversation a switch lands on already exists on disk."""
+    return str(verb or "").strip().lower() in _SAVED_DESTINATION_SWITCH_COMMANDS
+
+
 def _command_positionals(tokens: List[str]) -> List[str]:
     """The words of a command line that are not options or option values."""
     positionals: List[str] = []
@@ -208,6 +469,86 @@ def command_thread_id(command: Any, binary: str = CONVERSATION_PROVIDER_CODEX) -
     if len(positionals) < 2 or positionals[0].lower() != CODEX_RESUME_SUBCOMMAND:
         return ""
     return conversation_thread_id(positionals[1])
+
+
+def command_conversation_identity(command: Any) -> Tuple[str, str]:
+    """Return an exact provider/id pair stated by a launch command.
+
+    This is the best-effort path for agents a reader starts at an ordinary
+    terminal prompt. A plain ``claude``/``codex`` line says no identity and is
+    never guessed; an explicit create/resume UUID is authoritative launch
+    metadata.
+    """
+    codex_id = command_thread_id(command)
+    if codex_id:
+        return CONVERSATION_PROVIDER_CODEX, codex_id
+
+    try:
+        tokens = shlex.split(str(command or "").strip(), posix=True)
+    except ValueError:
+        return "", ""
+    while tokens and tokens[0].lower() in _COMMAND_LEADERS:
+        tokens.pop(0)
+    if not tokens:
+        return "", ""
+    executable = re.split(r"[/\\]", tokens[0])[-1].lower()
+    executable = _BINARY_SUFFIX_PATTERN.sub("", executable)
+    if executable != CONVERSATION_PROVIDER_CLAUDE:
+        return "", ""
+    for index, token in enumerate(tokens[1:], start=1):
+        lowered = token.lower()
+        if lowered in {"--resume", "--session-id"} and index + 1 < len(tokens):
+            conversation_id = normalize_conversation_id(tokens[index + 1])
+            return (
+                (CONVERSATION_PROVIDER_CLAUDE, conversation_id)
+                if conversation_id
+                else ("", "")
+            )
+        if lowered.startswith(("--resume=", "--session-id=")):
+            conversation_id = normalize_conversation_id(token.split("=", 1)[1])
+            return (
+                (CONVERSATION_PROVIDER_CLAUDE, conversation_id)
+                if conversation_id
+                else ("", "")
+            )
+    return "", ""
+
+
+def command_resumes_conversation(command: Any) -> bool:
+    """True when a launch command resumes a conversation the provider saved.
+
+    ``codex resume <uuid>`` and ``claude --resume <uuid>`` name a conversation
+    that exists on disk; ``claude --session-id <uuid>`` names one that will
+    exist only once a prompt is sent.
+    """
+    provider, conversation_id = command_conversation_identity(command)
+    if not conversation_id:
+        return False
+    if provider == CONVERSATION_PROVIDER_CODEX:
+        return True
+    try:
+        tokens = shlex.split(str(command or "").strip(), posix=True)
+    except ValueError:
+        return False
+    return any(
+        token.lower() == "--resume" or token.lower().startswith("--resume=")
+        for token in tokens
+    )
+
+
+#: Submitted TUI lines that are commands to the agent rather than prompts: a
+#: slash command asks the TUI for something and saves no turn.
+_TUI_COMMAND_PREFIX = "/"
+
+
+def is_conversation_prompt(submitted_line: Any) -> bool:
+    """True when a submitted agent line is a turn the provider will save.
+
+    Codex and Claude both write a conversation to disk on its first turn and
+    not before, so an id is only resumable from the first prompt on.
+    """
+    line = str(submitted_line or "").strip()
+    return bool(line) and not line.startswith(_TUI_COMMAND_PREFIX)
 
 
 def conversation_thread_id(title: Any) -> str:
@@ -288,6 +629,31 @@ def thread_read_request_text(thread_id: str) -> str:
     return "".join(json.dumps(line, separators=(",", ":")) + "\n" for line in lines)
 
 
+def thread_list_request_text(title: str) -> str:
+    """Ask Codex for one bounded page matching an announced thread name."""
+    lines = [
+        {
+            "jsonrpc": "2.0",
+            "id": APP_SERVER_INITIALIZE_ID,
+            "method": APP_SERVER_METHOD_INITIALIZE,
+            "params": {
+                "clientInfo": {
+                    "name": APP_SERVER_CLIENT_NAME,
+                    "version": APP_SERVER_CLIENT_VERSION,
+                }
+            },
+        },
+        {"jsonrpc": "2.0", "method": APP_SERVER_METHOD_INITIALIZED, "params": {}},
+        {
+            "jsonrpc": "2.0",
+            "id": APP_SERVER_THREAD_READ_ID,
+            "method": APP_SERVER_METHOD_THREAD_LIST,
+            "params": {"searchTerm": title, "limit": 100},
+        },
+    ]
+    return "".join(json.dumps(line, separators=(",", ":")) + "\n" for line in lines)
+
+
 class ThreadReadReader:
     """Fold one app server's output lines into a single settled answer.
 
@@ -351,6 +717,50 @@ class ThreadReadReader:
 
     def answer(self) -> Tuple[str, str]:
         return self.outcome, self.name
+
+
+class ThreadListReader:
+    """Accept only one exact name match in a complete bounded result page."""
+
+    def __init__(self, title: str):
+        self.title = normalize_conversation_name(title)
+        self.outcome = LOOKUP_UNAVAILABLE
+        self.thread_id = ""
+
+    @property
+    def settled(self) -> bool:
+        return self.outcome != LOOKUP_UNAVAILABLE
+
+    def feed_line(self, line: str) -> bool:
+        if self.settled:
+            return True
+        try:
+            message = json.loads(str(line or "").strip())
+        except (TypeError, ValueError):
+            return False
+        if not isinstance(message, dict) or message.get("id") != APP_SERVER_THREAD_READ_ID:
+            return False
+        self.outcome = LOOKUP_UNKNOWN
+        result = message.get("result")
+        if not isinstance(result, dict) or not isinstance(result.get("data"), list):
+            return True
+        # Another page may contain the same name. Ambiguity must leave the
+        # pane fresh rather than capture the wrong conversation.
+        if result.get("nextCursor"):
+            return True
+        matches = [
+            conversation_thread_id(thread.get("id"))
+            for thread in result["data"]
+            if isinstance(thread, dict)
+            and normalize_conversation_name(thread.get("name")) == self.title
+        ]
+        if len(matches) == 1 and matches[0]:
+            self.outcome = LOOKUP_NAMED
+            self.thread_id = matches[0]
+        return True
+
+    def answer(self) -> Tuple[str, str]:
+        return self.outcome, self.thread_id
 
 
 def parse_thread_read_output(output: Any, thread_id: str) -> Tuple[str, str]:
@@ -527,6 +937,7 @@ def run_local_probe(
     *,
     timeout: float = CONVERSATION_PROBE_TIMEOUT_SECONDS,
     max_output_bytes: int = CONVERSATION_PROBE_MAX_OUTPUT_BYTES,
+    reader: Optional[Any] = None,
 ) -> Tuple[str, str]:
     """Ask a local (or WSL) app server, bounded in time, output and process tree.
 
@@ -537,7 +948,7 @@ def run_local_probe(
     holding the pipe on behalf of something else (Guardrail 4, the same rule
     ``web/process_bounds.py`` was written for).
     """
-    reader = ThreadReadReader(thread_id)
+    reader = reader or ThreadReadReader(thread_id)
     settled = threading.Event()
     try:
         process = subprocess.Popen(
@@ -609,6 +1020,7 @@ def run_remote_probe(
     *,
     timeout: float = CONVERSATION_PROBE_TIMEOUT_SECONDS,
     max_output_bytes: int = CONVERSATION_PROBE_MAX_OUTPUT_BYTES,
+    reader: Optional[Any] = None,
 ) -> Tuple[str, str]:
     """Ask a remote app server over a second channel on the pane's own transport.
 
@@ -619,7 +1031,7 @@ def run_remote_probe(
     called -- the server would be within its rights to exit on stdin EOF, and
     the answer is what the exchange is for.
     """
-    reader = ThreadReadReader(thread_id)
+    reader = reader or ThreadReadReader(thread_id)
     if transport is None or not getattr(transport, "is_active", lambda: False)():
         return LOOKUP_UNAVAILABLE, ""
     channel = None
@@ -690,3 +1102,30 @@ def probe_conversation_name(
         timeout=timeout,
         max_output_bytes=max_output_bytes,
     )
+
+
+def probe_conversation_id_by_title(
+    target: Dict[str, Any], title: str
+) -> str:
+    """Resolve a named Codex title only when one complete list proves its id."""
+    name = normalize_conversation_name(title)
+    if not target or not name or conversation_thread_id(name):
+        return ""
+    reader = ThreadListReader(name)
+    request_text = thread_list_request_text(name)
+    if target.get("kind") == "ssh":
+        outcome, thread_id = run_remote_probe(
+            target.get("transport"),
+            str(target.get("command") or ""),
+            request_text,
+            "",
+            reader=reader,
+        )
+    else:
+        argv = list(target.get("argv") or [])
+        if not argv:
+            return ""
+        outcome, thread_id = run_local_probe(
+            argv, request_text, "", reader=reader
+        )
+    return thread_id if outcome == LOOKUP_NAMED else ""

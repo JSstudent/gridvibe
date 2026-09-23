@@ -21854,6 +21854,37 @@ class SettingsLauncherConfigTestCase(unittest.TestCase):
         self.assertTrue(api.runtime_config.workspace_minimize_cascade)
         self.assertTrue(api.load_config()["workspace"]["minimize_cascade"])
 
+    def test_agent_conversation_restore_defaults_off_and_round_trips(self):
+        payload = self.client.get("/api/app-config").get_json()
+        # Experimental: off unless the reader opts in from App Settings.
+        self.assertFalse(payload["workspace"]["agent_conversation_restore"])
+
+        response = self.client.post(
+            "/api/app-config",
+            json={"workspace": {"agent_conversation_restore": True}},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.get_json()["workspace"]["agent_conversation_restore"])
+        self.assertTrue(api.runtime_config.workspace_agent_conversation_restore)
+        self.assertTrue(api.load_config()["workspace"]["agent_conversation_restore"])
+
+        refused = self.client.post(
+            "/api/app-config",
+            json={"workspace": {"agent_conversation_restore": "yes"}},
+        )
+        self.assertTrue(refused.get_json()["workspace"]["agent_conversation_restore"])
+
+    def test_the_agents_section_carries_the_experimental_restore_switch(self):
+        page = self.client.get("/terminals").get_data(as_text=True)
+        agents = page[
+            page.index('<div class="settings-section-title">Agents</div>'):
+            page.index('<div class="settings-section-title">Terminal</div>')
+        ]
+        self.assertIn('id="appAgentSidebarSide"', agents)
+        self.assertIn('id="appAgentConversationRestore"', agents)
+        self.assertIn("Experimental!", agents)
+
     def test_a_save_that_omits_the_cascade_leaves_it_where_it_was(self):
         # The dialog omits the key whenever the field is not shown (a browser
         # window), so a save from there must never write a native setting off.
@@ -22391,14 +22422,58 @@ class SettingsLauncherConfigTestCase(unittest.TestCase):
             web_config.runtime_config, "terminal_shell_integration", False
         ), patch.object(web_terminal_io, "_send_connection_input") as send:
             web_terminal_io._run_startup_sequence(connection, session)
-        send.assert_called_once_with(connection, "claude --permission-mode auto\n")
+        clear = "printf '\\033[H\\033[2J\\033[3J'; "
+        send.assert_called_once_with(connection, f"{clear}claude --permission-mode auto\n")
 
         session.agent_auto_mode = False
         with patch.object(
             web_config.runtime_config, "terminal_shell_integration", False
         ), patch.object(web_terminal_io, "_send_connection_input") as send:
             web_terminal_io._run_startup_sequence(connection, session)
-        send.assert_called_once_with(connection, "claude\n")
+        send.assert_called_once_with(connection, f"{clear}claude\n")
+
+    def test_agent_launch_line_clears_its_own_echo_in_each_shell(self):
+        """The shell's clear leads the agent's line, in that shell's own words.
+
+        Leading the same line is what orders it after the echo and before the
+        agent's first frame; a plain startup command keeps its echo.
+        """
+        expected = {
+            "cmd": "cls & codex\r",
+            "powershell": "Clear-Host; codex\r",
+            "wsl": "printf '\\033[H\\033[2J\\033[3J'; codex\r",
+        }
+        for shell_kind, line in expected.items():
+            connection = {
+                "kind": "local",
+                "pty_process": object(),
+                "shell_kind": shell_kind,
+                "launch_cwd_applied": True,
+            }
+            session = SimpleNamespace(
+                directory="",
+                initial_command="codex",
+                initial_command_mode="agent",
+                agent_selection="codex",
+            )
+            with self.subTest(shell_kind=shell_kind), \
+                    patch.object(api.os, "name", "nt"), \
+                    patch.object(web_terminal_io, "_compose_agent_startup_command", return_value="codex"), \
+                    patch.object(web_terminal_io, "_note_agent_conversation_command") as note, \
+                    patch.object(web_terminal_io, "_send_connection_input") as send, \
+                    patch.object(api.time, "sleep"):
+                web_terminal_io._run_startup_sequence(connection, session)
+            send.assert_called_once_with(connection, line)
+            # The conversation lookup reads the agent's line, not the clear.
+            self.assertEqual(note.call_args.args[2], "codex")
+
+        connection = {"kind": "local", "pty_process": object(), "shell_kind": "cmd",
+                      "launch_cwd_applied": True}
+        session = SimpleNamespace(directory="", initial_command="npm run dev")
+        with patch.object(api.os, "name", "nt"), \
+                patch.object(web_terminal_io, "_send_connection_input") as send:
+            web_terminal_io._run_startup_sequence(connection, session)
+        send.assert_called_once_with(connection, "npm run dev\r")
 
     def test_normalize_terminal_entries_gates_agent_auto_mode(self):
         normalized = web_saved_sessions._normalize_terminal_entries(

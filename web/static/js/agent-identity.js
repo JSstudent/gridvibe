@@ -175,6 +175,13 @@
     const TRANSPORT_LABEL_POWERSHELL = 'PowerShell';
     const TRANSPORT_LABEL_CMD = 'cmd';
 
+    /* The pane header's host line is the narrowest place a shell family is
+       named, and "PowerShell" was the longest word on it. Only the header
+       abbreviates; the full word stays the value and the header's hover. */
+    const HEADER_HOST_ABBREVIATIONS = Object.freeze({
+        [TRANSPORT_LABEL_POWERSHELL]: 'PS'
+    });
+
     /* What a pane running with GridVibe's own tools wears, and what that tag
        says when it is asked. Three characters because it goes beside a name on
        a line that is already ellipsising one; the sentence is the hover, which
@@ -432,6 +439,14 @@
         return session.use_powershell ? TRANSPORT_LABEL_POWERSHELL : TRANSPORT_LABEL_CMD;
     }
 
+    /* What the pane header prints on its host line: the server's host label,
+       with a shell family's long name shortened. An SSH host or a WSL distro
+       is printed as given -- it is the only thing naming where the pane is. */
+    function paneHeaderHostLabel(host) {
+        const label = text(host);
+        return HEADER_HOST_ABBREVIATIONS[label] || label;
+    }
+
     /* Whether this pane says it has GridVibe's tools, as the tag that says it —
        `''` for every pane that does not, so the caller draws nothing rather
        than an empty chip. See the module header for why the rule is an agent
@@ -470,6 +485,7 @@
         paneChatLine,
         paneChatTooltip,
         paneTransportLabel,
+        paneHeaderHostLabel,
         paneAgentMcpTag
     };
 }));

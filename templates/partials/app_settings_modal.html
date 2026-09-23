@@ -30,18 +30,6 @@
                     <option value="max">Max surface</option>
                 </select>
             </div>
-            {# Which edge the docked agent dashboard sits on. A global setting
-               rather than the workspace's own, so it is here beside the surface
-               mode: every open window applies it the moment this saves, and no
-               saved workspace carries it. The panel is otherwise unchanged --
-               the same one toggle wearing the same two marks. #}
-            <div class="field">
-                <label>Agent Dashboard Side</label>
-                <select id="appAgentSidebarSide" aria-label="Agent dashboard panel side">
-                    <option value="left">Left side</option>
-                    <option value="right">Right side</option>
-                </select>
-            </div>
             <div class="field">
                 <label>Auto-save workspace every <span id="appWorkspaceAutosaveIntervalValue">5</span> min</label>
                 <input id="appWorkspaceAutosaveInterval" type="range" min="1" max="15" step="1" value="5" oninput="syncAutosaveIntervalLabel()" aria-label="Workspace auto-save interval in minutes">
@@ -67,6 +55,32 @@
                     <option value="known-hosts">Known hosts (warn on new hosts)</option>
                     <option value="strict">Strict (reject unknown hosts)</option>
                 </select>
+            </div>
+            {# Machine-level agent settings. Neither is carried by a saved
+               workspace: every open window applies them the moment this saves. #}
+            <div class="settings-section compact-section">
+                <div class="settings-section-title">Agents</div>
+                <div class="settings-fields-inline">
+                    {# Which edge the docked agent dashboard sits on. The panel
+                       is otherwise unchanged -- the same one toggle wearing the
+                       same two marks. #}
+                    <div class="field">
+                        <label>Agent Dashboard Side</label>
+                        <select id="appAgentSidebarSide" aria-label="Agent dashboard panel side">
+                            <option value="left">Left side</option>
+                            <option value="right">Right side</option>
+                        </select>
+                    </div>
+                </div>
+                {# Experimental, off by default: web/agent_conversations.py
+                   conversation_restore_enabled() gates the whole feature. #}
+                <label class="check-field multiline-check">
+                    <input id="appAgentConversationRestore" type="checkbox">
+                    <span class="check-copy">
+                        <strong>Resume agent conversations on restore <span class="settings-experimental-badge">Experimental!</span></strong>
+                        <span>A restored Claude Code or Codex pane reopens the conversation it was in instead of starting a new one. Applies to agents launched after saving.</span>
+                    </span>
+                </label>
             </div>
             <div class="settings-section compact-section">
                 <div class="settings-section-title">Terminal</div>

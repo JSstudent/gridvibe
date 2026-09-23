@@ -353,6 +353,7 @@ class RuntimeConfigState:
     agent_sidebar_side: str
     multi_workspace_enabled: bool
     workspace_minimize_cascade: bool
+    workspace_agent_conversation_restore: bool
     workspace_autosave_interval_minutes: int
     explorer_search_max_files: int
     explorer_search_max_matches: int
@@ -429,6 +430,14 @@ def _build_runtime_state(app_config: Dict[str, Any]) -> RuntimeConfigState:
     workspace_minimize_cascade = workspace_config.get("minimize_cascade", False)
     if not isinstance(workspace_minimize_cascade, bool):
         workspace_minimize_cascade = False
+    # Experimental, off by default: an agent pane restored with its workspace
+    # resumes the exact conversation it was in (web/agent_conversations.py).
+    # Off, every restored agent starts a fresh conversation, as it always did.
+    workspace_agent_conversation_restore = workspace_config.get(
+        "agent_conversation_restore", False
+    )
+    if not isinstance(workspace_agent_conversation_restore, bool):
+        workspace_agent_conversation_restore = False
     try:
         workspace_autosave_interval_minutes = max(
             AUTOSAVE_INTERVAL_MINUTES_MIN,
@@ -476,6 +485,7 @@ def _build_runtime_state(app_config: Dict[str, Any]) -> RuntimeConfigState:
         ),
         multi_workspace_enabled=multi_workspace_enabled,
         workspace_minimize_cascade=workspace_minimize_cascade,
+        workspace_agent_conversation_restore=workspace_agent_conversation_restore,
         workspace_autosave_interval_minutes=workspace_autosave_interval_minutes,
         explorer_search_max_files=_clamped_int(
             search_config.get("max_files", EXPLORER_SEARCH_MAX_FILES_DEFAULT),

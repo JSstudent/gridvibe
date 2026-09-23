@@ -22,7 +22,8 @@
             agent_sidebar_side: 'left',
             autosave_interval_minutes: 5,
             multi_workspace_enabled: false,
-            minimize_cascade: false
+            minimize_cascade: false,
+            agent_conversation_restore: false
         }),
         ssh: Object.freeze({
             host_key_policy: 'auto-add'
@@ -188,6 +189,10 @@
         const minimizeCascadeInput = document.getElementById('appWorkspaceMinimizeCascade');
         if (minimizeCascadeInput) {
             minimizeCascadeInput.checked = workspace.minimize_cascade === true;
+        }
+        const conversationRestoreInput = document.getElementById('appAgentConversationRestore');
+        if (conversationRestoreInput) {
+            conversationRestoreInput.checked = workspace.agent_conversation_restore === true;
         }
         if (sshHostKeyPolicyInput) {
             sshHostKeyPolicyInput.value = ['auto-add', 'known-hosts', 'strict'].includes(ssh.host_key_policy)
@@ -572,6 +577,10 @@
         const minimizeCascadeInput = document.getElementById('appWorkspaceMinimizeCascade');
         if (minimizeCascadeInput && isNativeWindowModeAvailable()) {
             workspace.minimize_cascade = Boolean(minimizeCascadeInput.checked);
+        }
+        const conversationRestoreInput = document.getElementById('appAgentConversationRestore');
+        if (conversationRestoreInput) {
+            workspace.agent_conversation_restore = Boolean(conversationRestoreInput.checked);
         }
         return workspace;
     }

@@ -57,6 +57,13 @@ import threading
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from web.agent_conversations import (
+    CONVERSATION_ID_FIELD,
+    CONVERSATION_PROVIDER_FIELD,
+    ConversationIdentityError,
+    conversation_restore_enabled,
+    validate_conversation_identity,
+)
 from web.pane_paths import capture_pane_paths
 from web.paths import BASE_DIR
 from web.session_presentation import (
@@ -171,6 +178,10 @@ _SESSION_SNAPSHOT_FIELDS = (
     "custom_agent",
     "agent_auto_mode",
     "agent_mcp",
+    # Exact conversation identity belongs to this same-pane restore only.
+    # The create/resume decision is live and deliberately absent.
+    CONVERSATION_PROVIDER_FIELD,
+    CONVERSATION_ID_FIELD,
     # Runtime lineage: a restored agent pane comes back as deep as it
     # was, so the sidecar's spawn budget survives a restart.
     "agent_depth",
@@ -241,8 +252,16 @@ def _snapshot_session(session: Any) -> Dict[str, Any]:
     record the same location, and the two products drifted apart precisely
     because each decided separately.
     """
-    data = session if isinstance(session, dict) else session.to_dict()
+    data = (
+        session
+        if isinstance(session, dict)
+        else session.to_dict(include_conversation=True)
+    )
     snapshot = {key: data.get(key) for key in _SESSION_SNAPSHOT_FIELDS}
+    if not conversation_restore_enabled():
+        # The experimental restore is off: no conversation id is made durable.
+        snapshot[CONVERSATION_PROVIDER_FIELD] = ""
+        snapshot[CONVERSATION_ID_FIELD] = ""
     snapshot.update(capture_pane_paths(data))
     return snapshot
 
@@ -341,6 +360,28 @@ def _validate_session(session: Any) -> Optional[Dict[str, Any]]:
     if not isinstance(session, dict):
         return None
     validated = {key: session.get(key) for key in _SESSION_SNAPSHOT_FIELDS}
+    if not conversation_restore_enabled():
+        # The experimental restore is off: a carried pair is dropped rather
+        # than validated, so the pane still restores -- into a fresh
+        # conversation, exactly as before the feature existed.
+        session = {
+            **session,
+            CONVERSATION_PROVIDER_FIELD: "",
+            CONVERSATION_ID_FIELD: "",
+        }
+    try:
+        # Local import keeps the registry owner out of this module's import
+        # cycle while still making registry metadata the durable-state gate.
+        from web.agents import AGENT_REGISTRY
+
+        provider, conversation_id = validate_conversation_identity(
+            session, AGENT_REGISTRY
+        )
+    except ConversationIdentityError as exc:
+        logger.warning("Runtime-state pane is not restorable: %s", exc)
+        return None
+    validated[CONVERSATION_PROVIDER_FIELD] = provider
+    validated[CONVERSATION_ID_FIELD] = conversation_id
     try:
         validated.update(normalize_pane_presentation_fields(session))
     except PresentationValidationError as exc:

@@ -67,6 +67,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from web import terminal_io as terminal  # noqa: E402
 from web.agent_activity import AGENT_EVENT_TITLE, apply_agent_events  # noqa: E402
+from web.pane_processes import ProcessTable  # noqa: E402
 
 ESC = "\x1b"
 #: The pid of the pane's own shell in the tables below.
@@ -550,6 +551,65 @@ class AgentRuntimeExitTestCase(unittest.TestCase):
         self.output(PROMPT)
         self.assertIsAgent(False)
 
+    def quit_codex_with_a_conversation_and_retype_it(self):
+        """Codex in a conversation, quit, and relaunched before the prompt is read."""
+        self.output(PROMPT)
+        self.give_the_pane_a_shell()
+        self.send("codex\r")
+        self.session.agent_conversation_provider = "codex"
+        self.session.agent_conversation_id = "01a08612-11ad-7673-989b-4110ba7f8494"
+        self.send("\x03")
+        self.send("\x03")
+        self.send("codex\r")
+        return self.connection["agent_relaunch_pending"]["submitted_at"]
+
+    def test_a_relaunch_already_running_at_the_exit_prompt_is_a_new_conversation(self):
+        """The retyped agent started before the prompt that ended the old one was read.
+
+        It is the same binary, so the process reading said "still running" and
+        the pane kept the conversation the reader had just quit -- which a
+        restore would then reopen. A process that started after the relaunch
+        line is the relaunch, and the prompt is the retirement it was held for.
+        """
+        typed_at = self.quit_codex_with_a_conversation_and_retype_it()
+        starts = {SHELL_PID: typed_at - 600, 110: typed_at + 0.05, 120: typed_at + 0.1}
+        self.machine(ProcessTable(AGENT_TABLE, starts.get))
+        self.output(PROMPT)
+
+        self.assertIsAgent()
+        self.assertEqual(self.session.agent_conversation_id, "")
+        self.assertNotIn("agent_relaunch_pending", self.connection)
+        self.assertTrue(self.connection["agent_runtime_armed"])
+
+        # And it is watched: its own exit retires it.
+        self.machine(IDLE_TABLE)
+        self.output(PROMPT)
+        self.assertIsAgent(False)
+
+    def test_the_agent_that_was_already_running_keeps_its_conversation(self):
+        """Only a start the OS reports after the line makes it the relaunch."""
+        for description, starts in [
+            ("started before the line", {SHELL_PID: -600.0, 110: -300.0, 120: -300.0}),
+            ("start unknown", None),
+        ]:
+            with self.subTest(description):
+                self.setUp()
+                typed_at = self.quit_codex_with_a_conversation_and_retype_it()
+                if starts is None:
+                    table = AGENT_TABLE
+                else:
+                    table = ProcessTable(
+                        AGENT_TABLE, {pid: typed_at + at for pid, at in starts.items()}.get
+                    )
+                self.machine(table)
+                self.output(PROMPT)
+
+                self.assertIsAgent()
+                self.assertEqual(
+                    self.session.agent_conversation_id, "01a08612-11ad-7673-989b-4110ba7f8494"
+                )
+                self.assertNotIn("agent_relaunch_pending", self.connection)
+
     def test_only_a_prompt_applies_a_held_relaunch(self):
         """A guess cannot tell a quit from an interrupted turn, so it may not
         promote on top of one.
@@ -695,6 +755,44 @@ class AgentRuntimeExitTestCase(unittest.TestCase):
                 self.registry["pane"] = self.connection = dict(connection)
                 self.assertEqual(terminal.reconcile_pane_agents(), 0)
                 self.assertIsAgent(False)
+
+    def test_a_relaunch_during_the_reading_keeps_the_old_shells_agent_off_the_pane(self):
+        """The reading is about the connection that was walked, not the pane.
+
+        A relaunch that replaces the connection while its shell is being read
+        leaves an answer about a shell that is going away; committing it would
+        label the replacement with an agent it is not running.
+        """
+        self.output(PROMPT)
+        self.give_the_pane_a_shell()
+        self.machine(AGENT_TABLE)
+        old = self.connection
+        real_walk = terminal.descendant_process
+
+        def relaunch_during_walk(*args, **kwargs):
+            old["retired"] = True
+            self.registry["pane"] = {"kind": "local", "shell_kind": "cmd"}
+            return real_walk(*args, **kwargs)
+
+        with patch.object(terminal, "descendant_process", side_effect=relaunch_during_walk):
+            self.assertEqual(terminal.reconcile_pane_agents(), 0)
+        self.assertIsAgent(False)
+        self.assertNotIn("agent_runtime_armed", old)
+
+    def test_a_pane_relabelled_during_the_reading_is_not_promoted_over(self):
+        self.output(PROMPT)
+        self.give_the_pane_a_shell()
+        self.machine(AGENT_TABLE)
+        real_walk = terminal.descendant_process
+
+        def switch_mode_during_walk(*args, **kwargs):
+            self.session.startup_mode = "explorer"
+            return real_walk(*args, **kwargs)
+
+        with patch.object(terminal, "descendant_process", side_effect=switch_mode_during_walk):
+            self.assertEqual(terminal.reconcile_pane_agents(), 0)
+        self.assertEqual(self.session.startup_mode, "explorer")
+        self.assertEqual(self.session.agent_selection, "")
 
     def test_the_pass_leaves_a_pane_that_is_not_a_terminal_alone(self):
         self.give_the_pane_a_shell()

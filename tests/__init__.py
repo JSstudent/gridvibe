@@ -41,3 +41,12 @@ if not os.environ.get("GRIDVIBE_MCP_CONFIG_PATH"):
         _mcp_dir, ".gridvibe_mcp.json"
     )
     atexit.register(shutil.rmtree, _mcp_dir, ignore_errors=True)
+
+if not os.environ.get("GRIDVIBE_CLAUDE_SETTINGS_PATH"):
+    # The Claude session-hook settings are written by ``run_server`` the same
+    # way, with the same consequence for a run that reached the real file.
+    _claude_settings_dir = tempfile.mkdtemp(prefix="gridvibe-test-claude-")
+    os.environ["GRIDVIBE_CLAUDE_SETTINGS_PATH"] = os.path.join(
+        _claude_settings_dir, ".gridvibe_claude_settings.json"
+    )
+    atexit.register(shutil.rmtree, _claude_settings_dir, ignore_errors=True)

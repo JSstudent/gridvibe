@@ -140,6 +140,11 @@ for raw in sys.stdin:
         emit({"id": message["id"], "result": {"userAgent": "stand-in"}})
         emit({"method": "remoteControl/status/changed", "params": {"status": "disabled"}})
         continue
+    if method == "thread/list" and mode == "list":
+        emit({"id": message["id"], "result": {"data": [
+            {"id": "019d2e46-065b-7b22-aa9e-51bb915be2ff", "name": "Review OCR delegation"}
+        ], "nextCursor": None}})
+        beat_forever()
     if method != "thread/read":
         continue
     thread_id = message["params"]["threadId"]
@@ -265,6 +270,40 @@ class ThreadReadExchangeTestCase(unittest.TestCase):
         self.assertNotIn("includeTurns", lines[2]["params"])
         self.assertEqual(lines[2]["id"], conversations.APP_SERVER_THREAD_READ_ID)
         self.assertIsNone(lines[1].get("id"))
+
+    def test_named_resume_lookup_requires_one_exact_match_and_a_complete_page(self):
+        request = [
+            json.loads(line)
+            for line in conversations.thread_list_request_text("Review parser").splitlines()
+        ]
+        self.assertEqual(request[2]["method"], "thread/list")
+        self.assertEqual(
+            request[2]["params"], {"searchTerm": "Review parser", "limit": 100}
+        )
+
+        def answer(data, cursor=None):
+            reader = conversations.ThreadListReader("Review parser")
+            self.assertFalse(reader.feed_line('{"method":"noise"}'))
+            self.assertTrue(reader.feed_line(json.dumps({
+                "id": conversations.APP_SERVER_THREAD_READ_ID,
+                "result": {"data": data, "nextCursor": cursor},
+            })))
+            return reader.answer()
+
+        match = {"id": THREAD_ID, "name": "Review parser"}
+        self.assertEqual(
+            answer([{"id": OTHER_THREAD_ID, "name": "Review another parser"}, match]),
+            (conversations.LOOKUP_NAMED, THREAD_ID),
+        )
+        for rows, cursor in (
+            ([match, {"id": OTHER_THREAD_ID, "name": "Review parser"}], None),
+            ([match], "more"),
+            ([{"id": THREAD_ID, "name": "Different name"}], None),
+        ):
+            with self.subTest(rows=rows, cursor=cursor):
+                self.assertEqual(
+                    answer(rows, cursor), (conversations.LOOKUP_UNKNOWN, "")
+                )
 
     def test_a_named_thread_answers_with_its_name(self):
         self.assertEqual(
@@ -520,6 +559,25 @@ class LocalProbeRunnerTestCase(unittest.TestCase):
 
     def test_a_real_exchange_answers_with_the_thread_name(self):
         self.assertEqual(self._probe("named"), (conversations.LOOKUP_NAMED, THREAD_NAME))
+
+    def test_a_named_resume_lookup_uses_the_same_bounded_runner(self):
+        target = {"kind": "local", "argv": self._argv("list")}
+        self.assertEqual(
+            conversations.probe_conversation_id_by_title(target, THREAD_NAME), THREAD_ID
+        )
+
+    def test_a_named_resume_on_ssh_uses_that_panes_transport(self):
+        target = conversations.remote_probe_target(
+            object(), "codex", username="dev", host="box"
+        )
+        with patch.object(
+            conversations, "run_remote_probe", return_value=(conversations.LOOKUP_NAMED, THREAD_ID)
+        ) as probe:
+            self.assertEqual(
+                conversations.probe_conversation_id_by_title(target, THREAD_NAME), THREAD_ID
+            )
+        self.assertIs(probe.call_args.args[0], target["transport"])
+        self.assertIn('"method":"thread/list"', probe.call_args.args[2])
 
     def test_a_server_that_answers_and_stays_up_does_not_hold_the_lookup(self):
         """The real app server never exits; stopping at the answer is the rule."""

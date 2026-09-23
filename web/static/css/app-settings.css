@@ -314,6 +314,23 @@
     line-height: 1.35;
 }
 
+/* A setting whose feature may still change or misbehave. */
+#appSettingsModal .check-copy .settings-experimental-badge {
+    display: inline-block;
+    margin-left: 6px;
+    padding: 1px 6px;
+    border-radius: 999px;
+    border: 1px solid var(--gv-warning);
+    background: var(--gv-warning-soft);
+    color: var(--gv-warning);
+    font-size: 0.66rem;
+    font-weight: 700;
+    letter-spacing: 0.6px;
+    line-height: 1.4;
+    text-transform: uppercase;
+    vertical-align: middle;
+}
+
 /* Voice */
 #appSettingsModal .voice-settings-panel {
     grid-column: 1 / -1;
