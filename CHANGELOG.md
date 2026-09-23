@@ -4,6 +4,8 @@ All notable changes to GridVibe will be documented in this file.
 
 ## Unreleased
 
+## 1.13.0 - 2026-09-23
+
 - **(fix) Named Codex conversations selected with `/resume` can be restored with their workspace.** Codex can announce the selected thread's name instead of its UUID, which left a saved workspace without a conversation to resume. With experimental conversation restore enabled, GridVibe now asks Codex for that name once and records the id only when one exact match is returned. Ambiguous or unavailable matches still restore fresh.
 
 - **(fix) A pane relaunched while its processes are being read is no longer labelled with the old shell's agent.** The background check that notices an agent you started yourself reads the process list outside any lock. A relaunch or mode switch landing during that read could replace the pane's shell, and the reading from the old shell was still applied to the new one. The promotion now commits only while the same connection is current and the pane is still a plain terminal. The rule is in [Terminal transport](docs/engineering_contracts.md#terminal-transport-and-working-directories).
