@@ -13,6 +13,7 @@ through a shell. Pinned here:
 - **No log line names a path.**
 """
 
+import contextlib
 import os
 import stat
 import sys
@@ -22,7 +23,7 @@ import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
@@ -436,6 +437,105 @@ class TunnelTeardownTestCase(unittest.TestCase):
         self.assertEqual(written, "")
         self.assertEqual(sftp.files, {})
         self.assertNotIn("handoff_paths", record)
+
+    @contextlib.contextmanager
+    def _real_threads(self):
+        """Teardown as the close path meets it: its thread really runs later,
+        and is joined only once the block has returned."""
+        started = []
+        real_thread = threading.Thread
+
+        def _tracked(*args, **kwargs):
+            thread = real_thread(*args, **kwargs)
+            started.append(thread)
+            return thread
+
+        with patch.object(ssh_tunnel.threading, "Thread", _tracked):
+            yield
+        for thread in started:
+            thread.join(5)
+            self.assertFalse(thread.is_alive(), "teardown never finished")
+
+    def _events_client(self, events):
+        # Recorded rather than failed: this runs on the teardown's thread,
+        # where an assertion would never reach the test.
+        return SimpleNamespace(
+            close=lambda: events.append("<client closed>"),
+            get_transport=lambda: events.append("<forward cancel attempted>"),
+        )
+
+    def test_a_closing_client_outlives_the_remote_deletes(self):
+        """The close path hands the client over; it is closed after the files go."""
+        events = []
+        sftp = FakeSftp()
+        path = f"{RemoteWriterTestCase.DIRECTORY}/{HANDOFF_ID}.md"
+        sftp.files[path] = {"data": b"", "mode": 0o600, "mtime": 0}
+        real_remove = sftp.remove
+        sftp.remove = lambda target: (events.append(target), real_remove(target))
+        sftp.close = lambda: events.append("<channel closed>")
+        record = {**self._record(sftp), "handoff_paths": [path]}
+        client = self._events_client(events)
+
+        with self._real_threads():
+            ssh_tunnel.teardown(client, record, close_client=True)
+
+        self.assertNotIn(path, sftp.files)
+        self.assertEqual(events[-1], "<client closed>")
+        self.assertLess(events.index(path), events.index("<client closed>"))
+        self.assertEqual(events.count("<client closed>"), 1)
+
+    def test_the_client_is_closed_even_when_the_remote_host_fails(self):
+        events = []
+        sftp = MagicMock()
+        sftp.remove.side_effect = OSError("host gone")
+        record = {**self._record(sftp), "handoff_paths": ["/home/ubuntu/.gridvibe/handoffs/a.md"]}
+        client = self._events_client(events)
+
+        with self._real_threads():
+            ssh_tunnel.teardown(client, record, close_client=True)
+
+        # Each step bounded, so a wedged host cannot hold the transport open.
+        sftp.get_channel.return_value.settimeout.assert_called_once_with(
+            ssh_tunnel.TEARDOWN_STEP_TIMEOUT
+        )
+        self.assertEqual(events, ["<client closed>"])
+
+    def test_a_handed_over_client_with_no_tunnel_record_is_still_closed(self):
+        events = []
+
+        ssh_tunnel.teardown(self._events_client(events), None, close_client=True)
+
+        self.assertEqual(events, ["<client closed>"])
+
+    def test_the_close_path_leaves_the_client_to_the_teardown(self):
+        """`_shutdown_connection` used to close the client right behind the
+        thread it had just started, taking the SFTP deletes' transport."""
+        from web import terminal_io
+
+        events = []
+        sftp = FakeSftp()
+        path = f"{RemoteWriterTestCase.DIRECTORY}/{HANDOFF_ID}.md"
+        sftp.files[path] = {"data": b"", "mode": 0o600, "mtime": 0}
+        real_remove = sftp.remove
+        sftp.remove = lambda target: (events.append(target), real_remove(target))
+        sftp.close = lambda: None
+        client = self._events_client(events)
+        connection = {
+            "kind": "ssh",
+            "client": client,
+            "channel": MagicMock(),
+            "mcp_tunnel": {**self._record(sftp), "handoff_paths": [path]},
+        }
+
+        with self._real_threads():
+            terminal_io._shutdown_connection(connection)
+
+        self.assertNotIn(path, sftp.files)
+        self.assertEqual(
+            events,
+            ["/home/ubuntu/.gridvibe/mcp-p.json", path, "<client closed>"],
+        )
+        connection["channel"].close.assert_called_once_with()
 
     def test_no_tunnel_writes_nothing(self):
         self.assertEqual(ssh_tunnel.write_tunnel_handoff(None, lambda channel: "x"), "")

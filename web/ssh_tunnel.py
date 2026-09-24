@@ -63,6 +63,12 @@ MAX_BODY_BYTES = 1048576
 #: *reply* is not bounded by this -- two tools wait on a page for 25s.
 REQUEST_READ_TIMEOUT = 30.0
 
+#: Seconds each SFTP step of a teardown may wait on the remote host. A
+#: teardown that owns its client closes that client only after the remote
+#: files are gone, so this is what keeps a wedged host from holding the
+#: transport open for ever.
+TEARDOWN_STEP_TIMEOUT = 5.0
+
 #: Forwarded connections one tunnelled pane may have in flight at once. It is
 #: here because *anything* on the remote host can reach that pane's forwarded
 #: port, and every accepted connection costs a thread of this process for up to
@@ -764,7 +770,21 @@ def write_tunnel_handoff(record: Optional[Dict[str, Any]], write: Any) -> str:
         return path
 
 
-def teardown(client: Any, record: Optional[Dict[str, Any]]) -> None:
+def _close_quietly(resource: Any) -> None:
+    if resource is None:
+        return
+    try:
+        resource.close()
+    except Exception:
+        pass
+
+
+def teardown(
+    client: Any,
+    record: Optional[Dict[str, Any]],
+    *,
+    close_client: bool = False,
+) -> None:
     """Undo :func:`establish` without blocking the caller.
 
     Every step is a round trip to a host that may already be unreachable, and
@@ -773,11 +793,21 @@ def teardown(client: Any, record: Optional[Dict[str, Any]]) -> None:
     wedged transport can never deliver. So the remote work is handed to a
     short-lived daemon thread and the caller returns at once.
 
-    Nothing here is load-bearing: closing the transport cancels the forward
-    regardless, and the config file is named per pane and rewritten on that
-    pane's next connect, so a leftover is stale for nobody.
+    ``close_client`` hands that thread the client as well, for a caller that
+    is closing it anyway: the SFTP deletes need the transport, and a caller
+    closing the client right after this returns would pull it out from under
+    them -- leaving a handed-over task on the remote host. The thread closes
+    it once the files are gone, each step bounded by
+    ``TEARDOWN_STEP_TIMEOUT``, and skips `cancel_port_forward`: closing the
+    transport withdraws the listener itself, and that wait is unbounded.
+
+    The config file is not load-bearing -- it is named per pane and rewritten
+    on that pane's next connect. A task file is, which is why it is deleted
+    before the transport may go.
     """
     if not record:
+        if close_client:
+            _close_quietly(client)
         return
 
     sftp = record.get("sftp")
@@ -785,6 +815,20 @@ def teardown(client: Any, record: Optional[Dict[str, Any]]) -> None:
     remote_port = int(record.get("remote_port") or 0)
 
     def _release() -> None:
+        try:
+            _release_remote()
+        finally:
+            if close_client:
+                _close_quietly(client)
+
+    def _release_remote() -> None:
+        if close_client and sftp is not None:
+            # Set before the lock is taken, so a write still in flight on this
+            # channel is bounded too and cannot hold the client open.
+            try:
+                sftp.get_channel().settimeout(TEARDOWN_STEP_TIMEOUT)
+            except Exception:
+                logger.debug("Could not bound the teardown's SFTP channel", exc_info=True)
         # A handed-over task written on this host rode the same SFTP channel,
         # and belongs to the same connection -- so it goes in the same round
         # trip, before the channel closes under it. Read under the lock a
@@ -801,11 +845,9 @@ def teardown(client: Any, record: Optional[Dict[str, Any]]) -> None:
                 sftp.remove(handoff_path)
             except Exception:
                 logger.debug("Could not remove a remote handoff file", exc_info=True)
-        if sftp is not None:
-            try:
-                sftp.close()
-            except Exception:
-                pass
+        _close_quietly(sftp)
+        if close_client:
+            return
         transport = None
         try:
             transport = client.get_transport() if client is not None else None

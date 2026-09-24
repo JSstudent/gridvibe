@@ -1509,7 +1509,10 @@ in `README.md`; state the rules a change has to keep.
   with both directories and the file narrowed and read back like the MCP config,
   and removed by that tunnel's teardown. The write and its registration run
   under the lock teardown reads the paths under (`write_tunnel_handoff`), so a
-  close landing mid-write never leaves the file behind. Any failure, including a mode that cannot
+  close landing mid-write never leaves the file behind, and `_shutdown_connection`
+  hands that teardown the SSH client to close once the deletes are done (each
+  SFTP step bounded by `TEARDOWN_STEP_TIMEOUT`) rather than closing it under
+  them. Any failure, including a mode that cannot
   be proved owner-only, falls back to paged delivery — it costs the file, never
   the task. Crash leftovers are swept only when older than a day, because another
   install may share the directory.

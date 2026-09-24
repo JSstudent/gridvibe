@@ -389,15 +389,19 @@ def _shutdown_connection(connection: Optional[Dict[str, Any]]):
     stdin_handle = connection.get("stdin")
     stdout_handle = connection.get("stdout")
 
-    # Before the client closes, while its transport can still carry the
-    # cancel and the SFTP delete: a tunnel left behind is a remote listener
-    # naming a pane that has gone, and a config file naming a dead port.
+    # A tunnel left behind is a remote listener naming a pane that has gone,
+    # a config file naming a dead port and possibly a task file. Its teardown
+    # runs on its own thread and needs the transport for the SFTP deletes, so
+    # it is handed the client to close once they are done, rather than this
+    # closing it under them.
+    client_handed_to_tunnel = False
     tunnel = connection.pop("mcp_tunnel", None)
     if tunnel is not None:
         from web.ssh_tunnel import teardown as _teardown_mcp_tunnel
 
         try:
-            _teardown_mcp_tunnel(client, tunnel)
+            _teardown_mcp_tunnel(client, tunnel, close_client=True)
+            client_handed_to_tunnel = True
         except Exception:
             logger.debug("MCP tunnel teardown failed", exc_info=True)
 
@@ -408,7 +412,7 @@ def _shutdown_connection(connection: Optional[Dict[str, Any]]):
         pass
 
     try:
-        if client is not None:
+        if client is not None and not client_handed_to_tunnel:
             client.close()
     except Exception:
         pass
