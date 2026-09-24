@@ -60,6 +60,46 @@ PANE_FIELDS = (
     "use_wsl",
     "use_powershell",
     "distribution",
+    # Whether the agent this pane was handed a task for has fetched it --
+    # narrowed again by `HANDOFF_STATE_FIELDS`, so neither the text nor a file
+    # path can ride out on it.
+    "handoff",
+)
+
+#: A pane's handoff as other panes may see it: its state, how it travels, who
+#: wrote it and how long it is. Never the text, never a file path.
+HANDOFF_STATE_FIELDS = (
+    "state",
+    "delivery",
+    "from_session_id",
+    "chars",
+)
+
+#: What ``read_handoff`` answers the pane the task was handed to. The text (or
+#: the path of the file holding it) is published here and nowhere else.
+HANDOFF_FIELDS = (
+    "handoff",
+    "message",
+    "state",
+    "delivery",
+    "task",
+    "task_file",
+    "head",
+    "chars",
+    "offset",
+    "next_offset",
+    "from",
+    "created_at",
+    "note",
+    "instructions",
+)
+
+#: A gate refusal's structure, carried through with GridVibe's own sentence so
+#: a calling agent can ask the person before it ever sets ``override``.
+REFUSAL_FIELDS = (
+    "gate",
+    "waivable",
+    "confirm",
 )
 
 #: The dashboard's agent rows are already a published field list; the sidecar
@@ -157,18 +197,28 @@ class GridVibeError(Exception):
     """A typed failure from the loopback call, with GridVibe's own sentence.
 
     ``kind`` is one of ``unreachable``, ``timeout``, ``http`` or ``invalid``,
-    so a tool can report *why* without parsing the message.
+    so a tool can report *why* without parsing the message. ``details`` is a
+    gate refusal's structure (``REFUSAL_FIELDS``), when GridVibe sent one.
     """
 
-    def __init__(self, message: str, *, kind: str = "http", status: int = 0) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        kind: str = "http",
+        status: int = 0,
+        details: Optional[Mapping[str, Any]] = None,
+    ) -> None:
         super().__init__(str(message))
         self.kind = kind
         self.status = int(status or 0)
+        self.details = project(details or {}, REFUSAL_FIELDS)
 
     def to_dict(self) -> Dict[str, Any]:
         payload: Dict[str, Any] = {"error": str(self), "kind": self.kind}
         if self.status:
             payload["status"] = self.status
+        payload.update(self.details)
         return payload
 
 
@@ -198,6 +248,23 @@ def project_all(payloads: Any, fields: Iterable[str]) -> List[Dict[str, Any]]:
     if not isinstance(payloads, list):
         return []
     return [project(item, fields) for item in payloads]
+
+
+def project_pane(payload: Any) -> Dict[str, Any]:
+    """One pane, from ``PANE_FIELDS``, with its handoff narrowed to its state."""
+    pane = project(payload, PANE_FIELDS)
+    if "handoff" in pane:
+        handoff = pane.get("handoff")
+        pane["handoff"] = (
+            project(handoff, HANDOFF_STATE_FIELDS) if isinstance(handoff, Mapping) else None
+        )
+    return pane
+
+
+def project_panes(payloads: Any) -> List[Dict[str, Any]]:
+    if not isinstance(payloads, list):
+        return []
+    return [project_pane(item) for item in payloads]
 
 
 def _url_host(host: str) -> str:
@@ -319,18 +386,25 @@ class GridVibeClient:
 
     @staticmethod
     def _http_error(exc: urllib.error.HTTPError) -> GridVibeError:
-        """Carry GridVibe's own sentence through, never a paraphrase."""
+        """Carry GridVibe's own sentence through, never a paraphrase.
+
+        A gate refusal's structure -- which gate, whether ``override`` could
+        waive it, the question to ask the person -- comes through with it.
+        """
         message = ""
+        details: Dict[str, Any] = {}
         try:
             payload = json.loads(exc.read().decode("utf-8") or "null")
             if isinstance(payload, Mapping):
                 message = str(payload.get("error") or "").strip()
+                details = dict(payload)
         except Exception:  # noqa: BLE001 - an unparseable body is not the error
             message = ""
         return GridVibeError(
             message or f"GridVibe refused the request ({exc.code}).",
             kind="http",
             status=int(exc.code),
+            details=details,
         )
 
     # ---------------- read ----------------
@@ -378,7 +452,7 @@ class GridVibeClient:
             params["group_id"] = group_id
         payload = self.request("GET", "/api/sessions", params=params)
         raw = payload.get("sessions") if isinstance(payload, Mapping) else None
-        panes = project_all(raw, PANE_FIELDS)
+        panes = project_panes(raw)
 
         result: Dict[str, Any] = {"panes": panes, "count": len(panes)}
         resolved_group = str(position_group_id or group_id or "").strip()
@@ -442,7 +516,27 @@ class GridVibeClient:
 
     def pane(self, session_id: str) -> Dict[str, Any]:
         payload = self.request("GET", f"/api/sessions/{urllib.parse.quote(session_id)}")
-        return project(payload, PANE_FIELDS)
+        return project_pane(payload)
+
+    def read_handoff(self, session_id: str, offset: Optional[int] = None) -> Dict[str, Any]:
+        """The task handed to *this* pane, from ``HANDOFF_FIELDS`` only.
+
+        ``session_id`` is always the caller's own pane -- the tool takes no
+        pane argument -- so another pane's brief is not something a tool call
+        can name.
+        """
+        params: Dict[str, Any] = {}
+        if offset is not None:
+            params["offset"] = int(offset)
+        payload = self.request(
+            "GET",
+            f"/api/sessions/{urllib.parse.quote(session_id)}/handoff",
+            params=params,
+        )
+        result = project(payload, HANDOFF_FIELDS)
+        if isinstance(result.get("from"), Mapping):
+            result["from"] = project(result["from"], ("session_id", "title", "agent"))
+        return result
 
     def saved_layouts(self) -> Dict[str, Any]:
         """Every saved launcher preset, as shape and never as a connection.
@@ -563,7 +657,7 @@ class GridVibeClient:
             f"/api/sessions/{urllib.parse.quote(session_id)}/agent-relaunch",
             body=dict(body),
         )
-        return project(payload, PANE_FIELDS)
+        return project_pane(payload)
 
     def switch_pane_mode(
         self,
@@ -582,7 +676,7 @@ class GridVibeClient:
             f"/api/sessions/{urllib.parse.quote(session_id)}/agent-mode-switch",
             body=dict(body),
         )
-        return project(payload, PANE_FIELDS)
+        return project_pane(payload)
 
     def clear_pane(
         self,
@@ -609,7 +703,7 @@ class GridVibeClient:
         result: Dict[str, Any] = {
             "workspace_id": str(payload.get("workspace_id") or ""),
             "group_id": str(payload.get("group_id") or ""),
-            "panes": project_all(payload.get("sessions"), PANE_FIELDS),
+            "panes": project_panes(payload.get("sessions")),
         }
         result["count"] = len(result["panes"])
         warnings = payload.get("agent_warnings") or payload.get("warnings")

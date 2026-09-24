@@ -59,6 +59,16 @@ from web.agent_conversations import (
     retry_delay,
     switch_lands_on_saved_conversation,
 )
+from web.agent_handoff_files import (
+    handoff_document,
+    write_local_handoff,
+    write_remote_handoff,
+)
+from web.agent_handoffs import FILE as HANDOFF_FILE
+from web.agent_handoffs import INLINE as HANDOFF_INLINE
+from web.agent_handoffs import PAGED as HANDOFF_PAGED
+from web.agent_handoffs import HandoffView, planned_delivery
+from web.agent_handoffs import handoffs as agent_handoffs
 from web.agent_session_hooks import (
     PANE_TOKEN_VARIABLE,
     SessionReportError,
@@ -73,6 +83,8 @@ from web.agents import (
     _find_wsl_executable,
     _normalize_agent_key,
     _powershell_single_quote,
+    launch_line_carries_opening_prompt,
+    opening_prompt_gap,
 )
 from web.app import session_manager, socketio
 from web.config import runtime_config
@@ -348,6 +360,9 @@ def _close_ssh_connection(session_id: str, clear_buffer: bool = True, *, expecte
     # outlives the transport and is dropped only with the session itself.
     if session_manager.get_session(session_id) is None:
         _forget_terminal_size(session_id)
+        # And a task still waiting for this pane's agent goes with the pane:
+        # there is no connection left that could ever announce it.
+        agent_handoffs.forget_session(session_id)
     _evict_pooled_ssh_client(session_id)
 
 
@@ -356,6 +371,15 @@ def _shutdown_connection(connection: Optional[Dict[str, Any]]):
     if not connection:
         return
     connection['retired'] = True
+
+    # The task this connection's agent was told to fetch belongs to this
+    # connection and to nobody after it: a relaunch, an exit or a close all
+    # end it here, and its temporary file with it. A *bound* handoff that no
+    # connection has announced yet is not on this record, so a relaunch's new
+    # task survives the close of the connection it replaces.
+    handoff_id = connection.pop("handoff_id", None)
+    if handoff_id:
+        agent_handoffs.drop(handoff_id, "connection closed")
 
     channel = connection.get("channel")
     client = connection.get("client")
@@ -2509,6 +2533,91 @@ def _agent_launch_line(session: Any, shell_kind: str, startup_command: str) -> s
     return f"{prefix}{startup_command}"
 
 
+def _write_handoff_file(
+    connection: Dict[str, Any],
+    pending: HandoffView,
+    shell_kind: str,
+) -> Tuple[str, str, Any]:
+    """Decide how a task travels, writing its file where one is due.
+
+    Returns ``(delivery, task_file, cleanup)``. A small task is inline and
+    touches no disk. A large one is written on the *pane's* machine -- this
+    one for a local pane (named in its ``/mnt`` form for a WSL shell), the
+    remote host over the tunnel's own SFTP channel for an SSH pane -- and any
+    failure falls back to paged delivery, which costs the file and never the
+    task.
+    """
+    if planned_delivery(pending.chars) == HANDOFF_INLINE:
+        return HANDOFF_INLINE, "", None
+    document = handoff_document(pending)
+    if connection.get("kind") == "ssh":
+        tunnel = connection.get("mcp_tunnel") or {}
+        path = write_remote_handoff(tunnel.get("sftp"), pending.handoff_id, document)
+        if not path:
+            return HANDOFF_PAGED, "", None
+        # Removed by the tunnel's own teardown, on the same channel, when this
+        # connection closes -- see `web/ssh_tunnel.teardown`.
+        tunnel.setdefault("handoff_paths", []).append(path)
+        return HANDOFF_FILE, path, None
+    written = write_local_handoff(pending.handoff_id, document)
+    if written is None:
+        return HANDOFF_PAGED, "", None
+    path, cleanup = written
+    if shell_kind == "wsl":
+        path = _normalize_local_directory(path, "wsl")
+    return HANDOFF_FILE, path, cleanup
+
+
+def _deliver_pending_handoff(
+    connection: Dict[str, Any],
+    session: Any,
+    pending: HandoffView,
+    *,
+    shell_kind: str,
+    startup_command: str,
+    directory_unavailable: bool,
+) -> None:
+    """Announce a bound task on this connection, or say why it cannot be.
+
+    Runs before the launch line is typed, so the file exists and the store
+    answers ``read_handoff`` by the time the agent reads its first message. The
+    handoff is recorded on *this* connection under its gate: one already
+    retired leaves the task bound for the connection that replaces it.
+    """
+    session_id = str(getattr(session, "session_id", "") or "")
+    with _connection_gate(connection):
+        if connection.get("retired"):
+            return
+        connection["handoff_id"] = pending.handoff_id
+
+    reason = ""
+    if startup_command and directory_unavailable:
+        reason = "its starting directory is not available, so its agent was not started"
+    elif not launch_line_carries_opening_prompt(startup_command):
+        reason = opening_prompt_gap(
+            session, tunnelled=bool(connection.get("mcp_tunnel"))
+        )
+    if reason:
+        agent_handoffs.mark_undeliverable(pending.handoff_id, reason)
+        # The pane's *output*, never its input -- the same channel the
+        # "directory not available" notice uses.
+        _publish_ssh_terminal_output(
+            session_id,
+            "\r\n\x1b[33mGridVibe: This pane was handed a task, but "
+            f"{reason}, so the task was not delivered.\x1b[0m\r\n",
+            connection,
+        )
+        return
+
+    delivery, task_file, cleanup = _write_handoff_file(connection, pending, shell_kind)
+    agent_handoffs.announce(
+        pending.handoff_id,
+        delivery=delivery,
+        task_file=task_file,
+        cleanup=cleanup,
+    )
+
+
 def _run_startup_sequence(connection: Dict[str, Any], session: Any):
     """Change into the target directory and optionally run an initial command."""
     shell_kind = connection.get("shell_kind")
@@ -2591,6 +2700,10 @@ def _run_startup_sequence(connection: Dict[str, Any], session: Any):
     # where the line is actually typed.
     tunnel = connection.get("mcp_tunnel") or {}
     session_id = str(getattr(session, "session_id", "") or "")
+    # A task handed to this pane and not yet announced by any connection. Read
+    # before composing, because it is what asks the composer for the opening
+    # prompt -- a fact about this connection, never the pane record.
+    pending_handoff = agent_handoffs.pending_for(session_id) if session_id else None
     startup_command = _compose_agent_startup_command(
         session,
         remote_config_path=str(tunnel.get("remote_path") or ""),
@@ -2609,7 +2722,17 @@ def _run_startup_sequence(connection: Dict[str, Any], session: Any):
             and conversation_restore_enabled()
             else ""
         ),
+        opening_prompt=pending_handoff is not None,
     )
+    if pending_handoff is not None:
+        _deliver_pending_handoff(
+            connection,
+            session,
+            pending_handoff,
+            shell_kind=shell_kind,
+            startup_command=startup_command,
+            directory_unavailable=bool(unreachable_directory),
+        )
     if startup_command:
         if unreachable_directory:
             # The `cd` above could not land, so this shell is standing

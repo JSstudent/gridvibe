@@ -72,6 +72,31 @@ UNREADABLE_HINT = (
 )
 
 
+#: Said when a split carrying a task did not happen: the brief went nowhere,
+#: and the route that needs no page is named so the agent can offer it.
+TASK_NOT_HANDED_HINT = (
+    "The task was not handed to anyone: no pane was created to receive it. "
+    "launch_panes with a 'task' on an agent pane needs no open window, if a "
+    "new session group is acceptable."
+)
+
+
+def _handoff_state(intent: Mapping[str, Any], state: str) -> Optional[Dict[str, Any]]:
+    """What became of the task this split carried, if it carried one.
+
+    Only ever the state, the size and the delivery -- the same fields
+    ``list_panes`` publishes -- and never the text or the handle.
+    """
+    recorded = intent.get("handoff")
+    if not isinstance(recorded, Mapping):
+        return None
+    return {
+        "state": state,
+        "chars": recorded.get("chars"),
+        "delivery": recorded.get("delivery"),
+    }
+
+
 def split_pane(
     client: GridVibeClient,
     session_id: str,
@@ -140,9 +165,14 @@ def split_pane(
         }
         if result:
             payload["pane"] = result
+        # Bound to the new pane and waiting for its agent to start; list_panes
+        # says when that agent has read it.
+        handoff = _handoff_state(intent, "waiting")
+        if handoff is not None:
+            payload["handoff"] = handoff
         return payload
     if state == REFUSED:
-        return {
+        payload = {
             "status": REFUSED,
             "intent_id": intent_id,
             "axis": str(intent.get("axis") or axis),
@@ -151,17 +181,31 @@ def split_pane(
             # so the agent can offer that rather than calling again.
             "detail": detail or "GridVibe refused the split and gave no reason.",
         }
+        return _with_undelivered_task(payload, intent)
     if read_error:
         # The deadline was reached without a readable answer, so "untouched" is
         # not something this call knows. `NO_PAGE_HINT` states it as a fact, and
-        # it has to stay a fact wherever it is said.
+        # it has to stay a fact wherever it is said -- and so is "the task went
+        # nowhere", which is why an unreadable wait says nothing about it.
         return {
             "status": NO_WINDOW_AVAILABLE,
             "intent_id": intent_id,
             "detail": UNREADABLE_HINT.format(error=read_error),
         }
-    return {
-        "status": NO_WINDOW_AVAILABLE,
-        "intent_id": intent_id,
-        "detail": NO_PAGE_HINT,
-    }
+    return _with_undelivered_task(
+        {
+            "status": NO_WINDOW_AVAILABLE,
+            "intent_id": intent_id,
+            "detail": NO_PAGE_HINT,
+        },
+        intent,
+    )
+
+
+def _with_undelivered_task(payload: Dict[str, Any], intent: Mapping[str, Any]) -> Dict[str, Any]:
+    """Say that a split's task went nowhere, and which route needs no page."""
+    handoff = _handoff_state(intent, "not_handed_over")
+    if handoff is not None:
+        payload["handoff"] = handoff
+        payload["task_note"] = TASK_NOT_HANDED_HINT
+    return payload

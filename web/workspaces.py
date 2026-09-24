@@ -36,6 +36,12 @@ from contextlib import nullcontext
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from web.agent_conversations import prepare_conversation_launch_fields
+from web.agent_handoffs import (
+    HandoffError,
+    pane_description,
+    validate_task,
+)
+from web.agent_handoffs import handoffs as agent_handoffs
 from web.mcp_launch import LOCAL_PANE_MODE
 
 logger = logging.getLogger(__name__)
@@ -861,6 +867,90 @@ def _prepare_launch_sessions(
     return prepared_sessions
 
 
+def _pop_pane_tasks(sessions_config: List[Any]) -> Tuple[List[Any], Dict[int, str]]:
+    """Take each pane's ``task`` off its config, validated, before anything reads it.
+
+    Popped first so the text never reaches the pane normalizer, a saved preset
+    or ``runtime_state.json`` -- a handed-over task is a one-time brief for one
+    agent, not a property of the pane. Every refusal names the pane (1-based,
+    in request order) and happens before anything is launched. A task turns
+    on the tools it is fetched through; a stated ``agent_mcp: false`` beside it
+    is refused rather than overridden.
+    """
+    from web.agents import task_refusal
+
+    cleaned: List[Any] = []
+    tasks: Dict[int, str] = {}
+    for index, config in enumerate(sessions_config):
+        if not isinstance(config, dict) or config.get("task") is None:
+            if isinstance(config, dict) and "task" in config:
+                config = {key: value for key, value in config.items() if key != "task"}
+            cleaned.append(config)
+            continue
+        config = dict(config)
+        raw_task = config.pop("task")
+        try:
+            text = validate_task(raw_task)
+        except HandoffError as exc:
+            raise HandoffError(f"Pane {index + 1}: {exc.message}", exc.status_code) from exc
+        mode = str(config.get("startup_mode") or config.get("initial_command_mode") or "")
+        refusal = task_refusal(
+            "agent" if mode == "agent" else (mode or "terminal"),
+            config.get("agent_selection") or config.get("initial_command"),
+            config.get("agent_mcp"),
+        )
+        if refusal:
+            raise HandoffError(f"Pane {index + 1}: {refusal}")
+        config["agent_mcp"] = True
+        tasks[index] = text
+        cleaned.append(config)
+    return cleaned, tasks
+
+
+def _bind_pane_tasks(
+    tasks: Dict[int, str],
+    created_sessions: List[Any],
+    creator_session_id: str,
+    creator: Any,
+) -> List[str]:
+    """Bind each task to the pane it was written for. Returns warnings.
+
+    Bound before any connector starts, so each pane's startup sequence finds
+    its task waiting. A pane the agent preflight turned into a plain terminal
+    (its binary is not there) gets no handoff: nothing could ever fetch it, and
+    the launch says so rather than holding a brief for nobody.
+    """
+    from web.agents import _normalize_agent_key
+
+    warnings: List[str] = []
+    origin = pane_description(creator)
+    for index, text in sorted(tasks.items()):
+        if index >= len(created_sessions):
+            continue
+        session = created_sessions[index]
+        agent_key = _normalize_agent_key(getattr(session, "agent_selection", ""))
+        startable = (
+            str(getattr(session, "initial_command_mode", "") or "") == "agent"
+            and bool(agent_key)
+            and _normalize_agent_key(getattr(session, "initial_command", "")) == agent_key
+            and bool(getattr(session, "agent_mcp", False))
+        )
+        if not startable:
+            warnings.append(
+                f"{getattr(session, 'title', '') or f'Pane {index + 1}'}: its task "
+                "was not handed over, because no agent that can fetch it will "
+                "start there."
+            )
+            continue
+        agent_handoffs.create(
+            text,
+            source_session_id=creator_session_id,
+            session_id=session.session_id,
+            **origin,
+        )
+    return warnings
+
+
 def launch_session_group(
     data: Any,
     on_launch_options: Any = None,
@@ -921,6 +1011,14 @@ def launch_session_group(
                 "error": capacity_refusal(len(sessions_config), max_sessions)
             }, 400
 
+        # A task per pane, taken off before anything else reads a pane config.
+        try:
+            sessions_config, pane_tasks = _pop_pane_tasks(sessions_config)
+        except HandoffError as exc:
+            return {"error": exc.message}, exc.status_code
+        if pane_tasks and bool(data.get("restore")):
+            return {"error": "A restore carries no task: a handoff is never saved."}, 400
+
         # Where before what: a launch made from inside a pane opens on that
         # pane's own machine, and the body names the pane rather than carrying
         # a credential. A stated `connection_mode` is the fallback for a caller
@@ -947,6 +1045,19 @@ def launch_session_group(
         # ones a person made. Read from the live session rather than the body
         # so a caller cannot claim a pane that is not open.
         creator_session_id = _live_origin_session_id(data.get("origin_session_id"))
+        # Captured now: the facts a handoff records about who wrote it must
+        # not depend on that pane still being open once the group is built.
+        creator_pane = session_manager.get_session(creator_session_id) if creator_session_id else None
+        if pane_tasks and not creator_session_id:
+            # A task needs a calling pane: for its lineage, and because the
+            # one rule nothing waives -- a task runs on the caller's own
+            # machine -- is what the origin pane's connection guarantees here.
+            return {
+                "error": (
+                    "A task is handed from an agent in a GridVibe pane, and this "
+                    "launch names no open pane it came from. Nothing was launched."
+                )
+            }, 403
         if creator_session_id:
             sessions_config = [
                 {**config, "created_by_session_id": creator_session_id}
@@ -1058,6 +1169,13 @@ def launch_session_group(
         created_sessions = installation.sessions
         # Slow teardown, outside every shared lock (guardrail 2).
         _close_displaced_sessions(group.group_id, installation.displaced_session_ids)
+        if pane_tasks:
+            launch_warnings = list(launch_warnings) + _bind_pane_tasks(
+                pane_tasks,
+                created_sessions,
+                creator_session_id,
+                creator_pane,
+            )
         logger.info(
             "Created session group group_id=%s workspace_id=%s saved_session_id=%r "
             "name=%r mode=%s layout=%s terminal_count=%d",
@@ -1107,8 +1225,14 @@ def launch_session_group(
             workspace_id=group.workspace_id,
         )
 
+        handoff_states = agent_handoffs.public_states(
+            session.session_id for session in created_sessions
+        )
         return {
-            "sessions": [session.to_dict() for session in created_sessions],
+            "sessions": [
+                {**session.to_dict(), "handoff": handoff_states.get(session.session_id)}
+                for session in created_sessions
+            ],
             "count": len(created_sessions),
             "group_id": group.group_id,
             "workspace_id": group.workspace_id,

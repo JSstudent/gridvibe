@@ -22,10 +22,11 @@ canonical modules, and this module calls into them exactly as the route did.
 import logging
 import os
 from dataclasses import dataclass
-from typing import Any, Callable, Dict
+from typing import Any, Callable, Dict, Optional
 
 from sessions.manager import SessionStatus
 from web.agent_conversations import EMPTY_CONVERSATION_FIELDS
+from web.agent_handoffs import handoffs as agent_handoffs
 from web.app import session_manager
 from web.explorer import (
     _acquire_ssh_sftp,
@@ -47,10 +48,12 @@ from web.pane_gates import (
     MODE_GATE,
     GateWording,
     PaneGateRefusal,
+    attach_confirmation,
     check_caller,
     check_lineage,
     read_agent_request,
     refuse,
+    what_ends,
 )
 from web.saved_sessions import _normalize_startup_mode
 from web.session_presentation import DEFAULT_BROWSER_URL, _normalize_browser_url
@@ -71,10 +74,18 @@ class ModeTransitionError(Exception):
     Flask response looks like to refuse a transition.
     """
 
-    def __init__(self, message: str, status_code: int = 400):
+    def __init__(
+        self,
+        message: str,
+        status_code: int = 400,
+        details: Optional[Dict[str, Any]] = None,
+    ):
         super().__init__(message)
         self.message = message
         self.status_code = status_code
+        #: A gate refusal's structure -- which gate, whether `override` could
+        #: waive it, and the question to ask -- carried to the route's body.
+        self.details = dict(details or {})
 
 
 @dataclass(frozen=True)
@@ -196,6 +207,9 @@ def apply_pane_mode_change(
 
         session_manager.update_session_status(session_id, SessionStatus.CONNECTED)
         effects.close_connection(session_id, clear_buffer=True)
+        # No agent runs in an explorer or browser pane, so a brief still
+        # waiting for one has nobody left to read it.
+        agent_handoffs.drop_bound(session_id, "pane mode changed")
         effects.broadcast_status(session_id)
         return browser_snapshot
 
@@ -281,6 +295,9 @@ def apply_pane_mode_change(
             )
         session_manager.update_session_status(session_id, SessionStatus.CONNECTED)
         effects.close_connection(session_id, clear_buffer=True)
+        # No agent runs in an explorer or browser pane, so a brief still
+        # waiting for one has nobody left to read it.
+        agent_handoffs.drop_bound(session_id, "pane mode changed")
         effects.broadcast_status(session_id)
         payload = session_manager.get_session(session_id).to_dict()
         # Presentation paths are relative to the root they were captured under.
@@ -417,6 +434,23 @@ _AGENT_MODE_FIELDS = ("startup_mode", "directory", "url", "refresh_cwd")
 _AGENT_MODE_TARGETS = ("terminal", "explorer", "browser")
 
 
+#: What a mode switch turns a pane into, in the words a question uses.
+_MODE_TARGET_WORDS = {
+    "terminal": "a plain terminal",
+    "explorer": "a file explorer",
+    "browser": "a browser preview",
+}
+
+
+def _mode_switch_question(facts: Any, requested_mode: str) -> str:
+    """The question a calling agent puts to the person before an override."""
+    target = _MODE_TARGET_WORDS.get(requested_mode, "another kind of pane")
+    return (
+        f"Switching {facts.name} to {target} ends {what_ends(facts)}. "
+        f"Override {facts.name}?"
+    )
+
+
 def apply_agent_pane_mode_change(
     session_id: str,
     payload: Dict[str, Any],
@@ -433,6 +467,8 @@ def apply_agent_pane_mode_change(
     # One translation point for the whole gate sequence: every refusal below
     # is a `PaneGateRefusal` carrying the status the route should answer, and
     # this is where it becomes the one exception `web/api.py` maps.
+    session = None
+    requested_mode = ""
     try:
         request = read_agent_request(payload, MODE_SWITCH_WORDING)
 
@@ -459,6 +495,7 @@ def apply_agent_pane_mode_change(
                 "This pane is running an agent, and switching its mode would "
                 "end it. Split off a new pane instead, unless the user "
                 "explicitly asked to override this pane.",
+                waivable=True,
             )
 
         check_lineage(session, request, MODE_SWITCH_WORDING)
@@ -475,7 +512,14 @@ def apply_agent_pane_mode_change(
                 400,
             )
     except PaneGateRefusal as exc:
-        raise ModeTransitionError(exc.message, exc.status_code) from exc
+        attach_confirmation(
+            exc,
+            session,
+            lambda facts: _mode_switch_question(facts, requested_mode),
+        )
+        raise ModeTransitionError(
+            exc.message, exc.status_code, exc.details()
+        ) from exc
 
     change = {key: payload[key] for key in _AGENT_MODE_FIELDS if key in payload}
     logger.info(

@@ -77,6 +77,11 @@
       "flag": "--additional-mcp-config @{config}",
       "description": "Gives this agent tools to see and build GridVibe workspaces.",
       "verified": true
+    },
+    "opening_prompt": {
+      "flag": "-i {prompt}",
+      "description": "Starts interactive mode and sends this as the first message.",
+      "verified": true
     }
   },
   "codex": {
@@ -160,6 +165,11 @@
     "mcp": {
       "style": "inline_toml",
       "description": "Gives this agent tools to see and build GridVibe workspaces.",
+      "verified": true
+    },
+    "opening_prompt": {
+      "style": "positional",
+      "description": "An optional positional prompt that starts the interactive session.",
       "verified": true
     }
   },
@@ -378,6 +388,11 @@
     "mcp": {
       "flag": "--mcp-config {config}",
       "description": "Gives this agent tools to see and build GridVibe workspaces.",
+      "verified": true
+    },
+    "opening_prompt": {
+      "style": "positional",
+      "description": "An optional positional prompt; the session stays interactive.",
       "verified": true
     }
   },

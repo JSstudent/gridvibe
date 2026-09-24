@@ -1432,7 +1432,8 @@ in `README.md`; state the rules a change has to keep.
   case: the route it reads answers with a *decrypted* SSH password by design.
   Failures are typed and carry GridVibe's own sentence verbatim, unretried.
 - **Four tiers, and the destroy tier is absent from the build.** Read and create
-  only ever make something new; `set_pane_agent`/`set_pane_mode` replace what is
+  only ever make something new (`read_handoff` is a read: its only side effect
+  is a handoff's state); `set_pane_agent`/`set_pane_mode` replace what is
   behind an existing pane; `clear_pane` erases what one has drawn. Closing a
   pane, group or workspace, moving a group, and typing arbitrary input into a
   terminal are not written, not registered and not flag-gated — a tool that does
@@ -1453,12 +1454,60 @@ in `README.md`; state the rules a change has to keep.
   only while it is still open) are shared; the third gate is each transaction's
   own kind rule and lives in its own module, raised through the same `refuse()`
   factory so every refusal names which gate failed. `PaneGateRefusal` carries the
-  status; each transaction translates it into the one exception its route maps.
+  status; each transaction translates it into the one exception its route maps,
+  carrying `details()` with it so the route's body states `gate` and `waivable`
+  beside the sentence. A waivable refusal also carries `confirm` — the pane, what
+  the change ends and GridVibe's last activity reading, and the question to ask —
+  built by `attach_confirmation` from the live registry, never by the caller. A
+  refusal nothing can waive is raised before any that `override` can, so an agent
+  is never refused after the person already said yes.
 - **`override` is the user's word, never the tool's inference.** It waives
-  lineage and the "already running an agent" refusal; never self, and never the
-  kind gate's mode rule. It is forwarded because the calling agent stated it, is
-  logged with both pane ids, and the tool descriptions must keep saying that only
-  a person's words in that conversation justify it.
+  lineage and the "already running an agent" refusal; never self, never the kind
+  gate's mode rule, and never the machine rule a task carries. It is forwarded
+  because the calling agent stated it, is logged with both pane ids, and the tool
+  descriptions must keep saying that only a person's words in that conversation —
+  or a yes to the refusal's own `confirm.question` — justify it. GridVibe adds no
+  confirmation dialog of its own; that is a stated weakness, not an oversight.
+- **No byte a tool supplies reaches a launch line.** A handed-over task adds
+  exactly `HANDOFF_OPENING_PROMPT` (`web/agent_handoffs.py`), a constant whose
+  characters are pinned to `[A-Za-z0-9 .,_]`, and the agent fetches the task
+  through `read_handoff`. `_compose_agent_startup_command` is the one owner of its
+  place — directly after the binary, because a variadic option placed before it
+  would swallow it — and places it only beside a non-empty MCP fragment and never
+  beside a resume. A CLI takes a task only when its registry publishes both a
+  verified `opening_prompt` block and an MCP mechanism (`_agent_accepts_task`);
+  `task_refusal` is the one wording every route refuses with, and a task's
+  explicit `mcp: false` is refused rather than overridden.
+- **Only a handle rides in an intent, and a task stays on its caller's machine.**
+  Every polling page is shown a split intent's request, so the split route
+  `take`s an opaque `handoff_id` once, for its own source pane, after every other
+  refusal and before the append, and binds it before the connector starts. A
+  launch pops each pane's `task` before anything reads the config, so no preset,
+  snapshot or saved-session normalizer ever sees one. A task needs a live calling
+  pane on the same machine (`same_machine`: both local, or the same SSH host, user
+  and port); nothing waives that. A gated relaunch validates its task before any
+  gate and binds it through `ShellTransitionEffects.before_start` — after every
+  refusal, after the old connection closed, before the new one starts — so a
+  refused relaunch leaves nothing in the store and nothing on disk.
+- **A handoff is one brief for one agent, in memory, and logged by size.** The
+  store is capped for the unbound kind and TTL-bounded above a split's worst case;
+  a bound handoff waits for a connection that starts its pane's agent, is
+  announced once on that launch line, and is dropped — file included — in
+  `_shutdown_connection` of *that* connection. A relaunch or mode switch drops one
+  still waiting (`drop_bound`), a closed pane forgets its own, and nothing is
+  persisted. A pane whose agent starts without the tools is marked
+  `undeliverable` and told so on its output, never its input. Log lines carry ids,
+  a character count and a delivery — never the text, never a file path — and
+  `list_panes` publishes the state from a field list, never the text or path.
+- **A large task's file is GridVibe's own write, owner-only, and gone with its
+  handoff.** Written on the pane's machine and never through a shell: locally in
+  its own directory under the handoff root (`0700`/`0600` where modes exist, named
+  in its `/mnt` form for a WSL shell), remotely over the tunnel's own SFTP channel
+  with both directories and the file narrowed and read back like the MCP config,
+  and removed by that tunnel's teardown. Any failure, including a mode that cannot
+  be proved owner-only, falls back to paged delivery — it costs the file, never
+  the task. Crash leftovers are swept only when older than a day, because another
+  install may share the directory.
 - **Lineage is read from the live registry, never from the request body.**
   `created_by_session_id` is stamped from the pane a launch or split actually
   came from (`_live_session_id` / `_live_origin_session_id`), and is deliberately

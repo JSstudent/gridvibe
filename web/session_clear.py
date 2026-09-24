@@ -33,13 +33,14 @@ resolved by the route from the module the tests already patch.
 
 import logging
 from dataclasses import dataclass
-from typing import Any, Callable, Dict
+from typing import Any, Callable, Dict, Optional
 
 from web.app import session_manager
 from web.pane_gates import (
     MODE_GATE,
     GateWording,
     PaneGateRefusal,
+    attach_confirmation,
     check_caller,
     check_lineage,
     read_agent_request,
@@ -75,10 +76,18 @@ class ClearTransitionError(Exception):
     an error response and nothing else.
     """
 
-    def __init__(self, message: str, status_code: int = 400):
+    def __init__(
+        self,
+        message: str,
+        status_code: int = 400,
+        details: Optional[Dict[str, Any]] = None,
+    ):
         super().__init__(message)
         self.message = message
         self.status_code = status_code
+        #: A gate refusal's structure -- which gate, whether `override` could
+        #: waive it, and the question to ask -- carried to the route's body.
+        self.details = dict(details or {})
 
 
 @dataclass(frozen=True)
@@ -94,6 +103,20 @@ class ClearEffects:
     broadcast_cleared: Callable[[str], Any]
 
 
+def _clear_question(facts: Any) -> str:
+    """The question a calling agent puts to the person before an override."""
+    typed = (
+        f", and types GridVibe's clear command at the {facts.agent} agent's "
+        "own prompt"
+        if facts.agent
+        else ""
+    )
+    return (
+        f"Clearing {facts.name} erases its scrollback, which cannot be read "
+        f"back{typed}. Override {facts.name}?"
+    )
+
+
 def apply_agent_pane_clear(
     session_id: str,
     payload: Dict[str, Any],
@@ -107,6 +130,7 @@ def apply_agent_pane_clear(
     # One translation point for the whole gate sequence: every refusal below
     # is a `PaneGateRefusal` carrying the status the route should answer, and
     # this is where it becomes the one exception `web/api.py` maps.
+    session = None
     try:
         request = read_agent_request(payload, CLEAR_WORDING)
 
@@ -129,11 +153,15 @@ def apply_agent_pane_clear(
                 "This pane is running an agent, and a clear types at the "
                 "prompt -- which here is that agent's own input. Unless the "
                 "user explicitly asked to override this pane, leave it alone.",
+                waivable=True,
             )
 
         check_lineage(session, request, CLEAR_WORDING)
     except PaneGateRefusal as exc:
-        raise ClearTransitionError(exc.message, exc.status_code) from exc
+        attach_confirmation(exc, session, _clear_question)
+        raise ClearTransitionError(
+            exc.message, exc.status_code, exc.details()
+        ) from exc
 
     effects.purge_buffer(session_id)
     effects.broadcast_cleared(session_id)

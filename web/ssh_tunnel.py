@@ -547,7 +547,13 @@ def remote_mcp_document(url: str) -> Dict[str, Any]:
 FORBIDDEN_MODE_BITS = 0o077
 
 
-def _restricted_to_owner(sftp: Any, remote_path: str, mode: int) -> bool:
+def _restricted_to_owner(
+    sftp: Any,
+    remote_path: str,
+    mode: int,
+    *,
+    label: str = "",
+) -> bool:
     """Apply ``mode`` and read it back. False when it cannot be *proved*.
 
     Both halves refuse, and for the same reason: a ``chmod`` the remote host
@@ -555,27 +561,31 @@ def _restricted_to_owner(sftp: Any, remote_path: str, mode: int) -> bool:
     knows who can read this", and what is being written is a credential. A host
     whose SFTP implementation can do neither costs the pane its tools -- the
     price every other tunnel failure charges, and never its shell.
+
+    ``label`` replaces the path in every log line, for a file whose path is
+    itself not something to log -- a handed-over task's.
     """
+    named = label or remote_path
     try:
         sftp.chmod(remote_path, mode)
     except Exception as exc:
-        logger.warning("Could not restrict permissions on %s: %s", remote_path, exc)
+        logger.warning("Could not restrict permissions on %s: %s", named, exc)
         return False
     try:
         current = getattr(sftp.stat(remote_path), "st_mode", None)
     except Exception as exc:
-        logger.warning("Could not verify permissions on %s: %s", remote_path, exc)
+        logger.warning("Could not verify permissions on %s: %s", named, exc)
         return False
     try:
         bits = int(current)
     except (TypeError, ValueError):
-        logger.warning("The remote host reported no mode for %s", remote_path)
+        logger.warning("The remote host reported no mode for %s", named)
         return False
     if bits & FORBIDDEN_MODE_BITS:
         logger.warning(
             "%s is still reachable by other accounts on the remote host "
             "(mode %o), so it was not left there",
-            remote_path,
+            named,
             bits & 0o777,
         )
         return False
@@ -746,9 +756,18 @@ def teardown(client: Any, record: Optional[Dict[str, Any]]) -> None:
     sftp = record.get("sftp")
     remote_path = str(record.get("remote_path") or "")
     remote_port = int(record.get("remote_port") or 0)
+    # A handed-over task written on this host rode the same SFTP channel, and
+    # belongs to the same connection -- so it goes in the same round trip,
+    # before the channel closes under it.
+    handoff_paths = [str(path) for path in record.get("handoff_paths") or () if path]
 
     def _release() -> None:
         remove_remote_config(sftp, remote_path)
+        for handoff_path in handoff_paths:
+            try:
+                sftp.remove(handoff_path)
+            except Exception:
+                logger.debug("Could not remove a remote handoff file", exc_info=True)
         if sftp is not None:
             try:
                 sftp.close()
