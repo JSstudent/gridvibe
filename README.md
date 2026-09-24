@@ -1,5 +1,3 @@
-https://github.com/user-attachments/assets/90cc03b2-16d8-4b8b-b3a4-80630340e937
-
 <h1 align="center">GridVibe</h1>
 
 <p align="center">
@@ -33,6 +31,8 @@ https://github.com/user-attachments/assets/90cc03b2-16d8-4b8b-b3a4-80630340e937
 | Launcher | Agents| Terminal Workspace | Browser | Agents Dashboard |
 | --- | --- | --- | --- | --- |
 | ![GridVibe launcher with terminal count, layout, connection, and per-terminal setup controls](docs/images/screenshots/launcher.png) | ![Preset agent setup from a saved configuration](docs/images/screenshots/Agents.png) | ![GridVibe terminal workspace showing a four-pane SSH session group](docs/images/screenshots/workspace.png) | ![GridVibe app browser terminal mode with tabs](docs/images/screenshots/browser_view.png) | ![GridVibe agent dashboard for agent work overview](docs/images/screenshots/dashboard.png) |
+
+https://github.com/user-attachments/assets/90cc03b2-16d8-4b8b-b3a4-80630340e937
 
 ## Quick Start
 
