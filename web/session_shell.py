@@ -40,24 +40,36 @@ from typing import Any, Callable, Dict, Optional
 
 from sessions.manager import SessionStatus, _normalize_agent_depth
 from web.agent_conversations import fresh_conversation_fields
+from web.agent_handoffs import (
+    HandoffError,
+    machine_refusal,
+    pane_description,
+    same_machine,
+    validate_task,
+)
+from web.agent_handoffs import handoffs as agent_handoffs
 from web.agents import (
     AGENT_REGISTRY,
     _agent_absent_reason,
     _agent_supports_mcp,
     _normalize_agent_key,
+    task_refusal,
 )
 from web.app import session_manager
 from web.explorer import _is_browser_session, _is_explorer_session
 from web.pane_gates import (  # noqa: F401 - LINEAGE_GATE/SELF_GATE re-exported
     LINEAGE_GATE,
+    MACHINE_GATE,
     MODE_GATE,
     SELF_GATE,
     GateWording,
     PaneGateRefusal,
+    attach_confirmation,
     check_caller,
     check_lineage,
     read_agent_request,
     refuse,
+    what_ends,
 )
 from web.terminal_io import (
     LOCAL_SHELL_KINDS,
@@ -77,28 +89,43 @@ class ShellTransitionError(Exception):
     """One pane relaunch refused, with the status the route answers.
 
     Narrow on purpose, exactly as ``ModeTransitionError`` is: the route maps
-    ``message`` and ``status_code`` onto an error response and nothing else.
+    ``message``, ``status_code`` and the refusal's structured ``details``
+    (which gate, whether it is waivable, the question to ask) onto an error
+    response and nothing else.
     """
 
-    def __init__(self, message: str, status_code: int = 400):
+    def __init__(
+        self,
+        message: str,
+        status_code: int = 400,
+        details: Optional[Dict[str, Any]] = None,
+    ):
         super().__init__(message)
         self.message = message
         self.status_code = status_code
+        self.details = dict(details or {})
 
 
 @dataclass(frozen=True)
 class ShellTransitionEffects:
-    """The three side effects the transaction cannot own itself.
+    """The side effects the transaction cannot own itself.
 
     Passed in rather than imported because they belong to the Socket.IO server
     and the connection registry ``web/api.py`` holds. Resolving them in the
     route body is also what keeps them as patchable as they were before the
     move.
+
+    ``before_start`` runs after every refusal and after the old connection has
+    closed, immediately before the replacement shell starts -- the one point
+    where something that belongs to the *new* connection can be attached
+    without a refused relaunch leaving it behind. A relaunch carrying a task
+    binds its handoff there.
     """
 
     close_connection: Callable[..., Any]
     broadcast_status: Callable[[str], Any]
     start_connector: Callable[[str], Any]
+    before_start: Optional[Callable[[str], Any]] = None
 
 
 def _requested_shell(payload: Dict[str, Any]) -> Optional[str]:
@@ -426,8 +453,16 @@ def apply_pane_shell_change(
         updates.get("directory", session.directory),
     )
     effects.close_connection(session_id, clear_buffer=True)
+    # A brief belongs to the agent it was handed to. The close above dropped
+    # an announced one with its connection; one still waiting for an agent
+    # that never started goes too, so the replacement is never handed a task
+    # meant for something else. A relaunch carrying its own binds it below.
+    agent_handoffs.drop_bound(session_id, "pane relaunched")
     session_manager.update_session_status(session_id, SessionStatus.PENDING)
     effects.broadcast_status(session_id)
+    before_start = getattr(effects, "before_start", None)
+    if before_start is not None:
+        before_start(session_id)
     effects.start_connector(session_id)
 
     return session_manager.get_session(session_id).to_dict()
@@ -483,6 +518,40 @@ RELAUNCH_WORDING = GateWording(
 )
 
 
+def _relaunch_question(facts: Any, agent_key: str, has_task: bool) -> str:
+    """The question a calling agent puts to the person before an override."""
+    if has_task:
+        starts = f"a new {agent_key} with this task"
+    else:
+        starts = agent_key or "a plain shell"
+    return (
+        f"Relaunching {facts.name} ends {what_ends(facts)}, and starts "
+        f"{starts}. Override {facts.name}?"
+    )
+
+
+def _requested_task(payload: Dict[str, Any]) -> Optional[str]:
+    """The task a relaunch carries, validated before any gate runs, or None.
+
+    Refused rather than repaired, and for the same reasons a new pane's task
+    is: an agent that cannot fetch it, an ``mcp: false`` beside it, a control
+    character, or a size past the ceiling.
+    """
+    if payload.get("task") is None:
+        return None
+    try:
+        text = validate_task(payload.get("task"))
+    except HandoffError as exc:
+        raise PaneGateRefusal(exc.message, exc.status_code) from exc
+    agent_key = _normalize_agent_key(payload.get("agent"))
+    refusal = task_refusal("agent", agent_key, payload.get("mcp"))
+    if refusal:
+        raise PaneGateRefusal(refusal, 400)
+    return text
+
+
+
+
 def apply_agent_pane_relaunch(
     session_id: str,
     payload: Dict[str, Any],
@@ -497,8 +566,13 @@ def apply_agent_pane_relaunch(
     # One translation point for the whole gate sequence: every refusal below
     # is a `PaneGateRefusal` carrying the status the route should answer, and
     # this is where it becomes the one exception `web/api.py` maps.
+    session = None
+    task: Optional[str] = None
     try:
         request = read_agent_request(payload, RELAUNCH_WORDING)
+        # Before any gate: a task that could never be delivered is refused
+        # for what it is, not for where it was aimed.
+        task = _requested_task(payload)
 
         session = session_manager.get_session(session_id)
         if not session:
@@ -515,12 +589,20 @@ def apply_agent_pane_relaunch(
                 "plain terminal pane is relaunched by a tool; split off a new "
                 "pane instead.",
             )
+        if task is not None:
+            # Every refusal nothing can waive comes before the ones `override`
+            # can: an agent that asked the person, got a yes and retried must
+            # not then meet a refusal it could have been told about first.
+            caller_pane = session_manager.get_session(request.caller_session_id)
+            if not same_machine(caller_pane, session):
+                raise refuse(MACHINE_GATE, machine_refusal(caller_pane, session))
         if already_agent and not request.override:
             raise refuse(
                 MODE_GATE,
                 "This pane is already running an agent. Only a plain terminal "
                 "pane is relaunched by a tool; split off a new pane instead, "
                 "unless the user explicitly asked to override this pane.",
+                waivable=True,
             )
 
         check_lineage(session, request, RELAUNCH_WORDING)
@@ -539,7 +621,15 @@ def apply_agent_pane_relaunch(
                 "replacement agent should inherit.",
             )
     except PaneGateRefusal as exc:
-        raise ShellTransitionError(exc.message, exc.status_code) from exc
+        requested_agent = _normalize_agent_key(payload.get("agent"))
+        attach_confirmation(
+            exc,
+            session,
+            lambda facts: _relaunch_question(facts, requested_agent, task is not None),
+        )
+        raise ShellTransitionError(
+            exc.message, exc.status_code, exc.details()
+        ) from exc
 
     # Past the gates this is the ordinary relaunch, with the ordinary refusals:
     # an unknown agent key, a binary that is not installed, a pane with no shell.
@@ -549,7 +639,12 @@ def apply_agent_pane_relaunch(
         key: payload[key] for key in ("shell", "agent", "mcp", "distribution")
         if key in payload
     }
-    return apply_pane_shell_change(
+    if task is not None:
+        # A task is fetched through GridVibe's tools, so it turns them on --
+        # an explicit `mcp: false` beside it was already refused above.
+        relaunch["mcp"] = True
+        effects = _with_task_binding(effects, task, caller)
+    result = apply_pane_shell_change(
         session_id,
         relaunch,
         effects,
@@ -559,4 +654,42 @@ def apply_agent_pane_relaunch(
         # it this is the one write path that could persist a depth past
         # `_MAX_AGENT_DEPTH` into `runtime_state.json`.
         {"agent_depth": _normalize_agent_depth(int(getattr(caller, "agent_depth", 0)) + 1)},
+    )
+    if task is not None:
+        result["handoff"] = agent_handoffs.public_state(session_id)
+    return result
+
+
+def _with_task_binding(
+    effects: ShellTransitionEffects,
+    task: str,
+    caller: Any,
+) -> ShellTransitionEffects:
+    """The same effects, plus binding the task just before the new shell starts.
+
+    Bound after every refusal -- the gates above and the ordinary relaunch's
+    own (an unknown agent, a binary that is not there) -- so a refused
+    relaunch leaves nothing in the store and nothing on disk. Bound after the
+    old connection closed, so that close drops only the *old* agent's handoff;
+    this one is bound but not yet announced, and survives it by construction.
+    """
+    earlier = getattr(effects, "before_start", None)
+    origin = pane_description(caller)
+    caller_session_id = str(getattr(caller, "session_id", "") or "")
+
+    def bind(pane_session_id: str) -> None:
+        if earlier is not None:
+            earlier(pane_session_id)
+        agent_handoffs.create(
+            task,
+            source_session_id=caller_session_id,
+            session_id=pane_session_id,
+            **origin,
+        )
+
+    return ShellTransitionEffects(
+        close_connection=effects.close_connection,
+        broadcast_status=effects.broadcast_status,
+        start_connector=effects.start_connector,
+        before_start=bind,
     )

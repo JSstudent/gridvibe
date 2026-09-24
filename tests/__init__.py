@@ -50,3 +50,12 @@ if not os.environ.get("GRIDVIBE_CLAUDE_SETTINGS_PATH"):
         _claude_settings_dir, ".gridvibe_claude_settings.json"
     )
     atexit.register(shutil.rmtree, _claude_settings_dir, ignore_errors=True)
+
+if not os.environ.get("GRIDVIBE_HANDOFF_DIR"):
+    # Handed-over task files are written under the system temp directory, and
+    # ``run_server`` sweeps that directory at start. A suite that reached the
+    # real one would write into, and sweep, a directory another GridVibe on
+    # this machine may be using.
+    _handoff_dir = tempfile.mkdtemp(prefix="gridvibe-test-handoffs-")
+    os.environ["GRIDVIBE_HANDOFF_DIR"] = _handoff_dir
+    atexit.register(shutil.rmtree, _handoff_dir, ignore_errors=True)

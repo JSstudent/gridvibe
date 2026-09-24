@@ -44,6 +44,7 @@ function escHtml(value) {
 }
 function _clearAgentStatusClasses() {}
 function _resetAgentOptionLabels() {}
+function syncStartupModePicker() {}
 
 function stubElement(extra) {
     const classes = new Set();

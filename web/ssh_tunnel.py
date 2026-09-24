@@ -63,6 +63,12 @@ MAX_BODY_BYTES = 1048576
 #: *reply* is not bounded by this -- two tools wait on a page for 25s.
 REQUEST_READ_TIMEOUT = 30.0
 
+#: Seconds each SFTP step of a teardown may wait on the remote host. A
+#: teardown that owns its client closes that client only after the remote
+#: files are gone, so this is what keeps a wedged host from holding the
+#: transport open for ever.
+TEARDOWN_STEP_TIMEOUT = 5.0
+
 #: Forwarded connections one tunnelled pane may have in flight at once. It is
 #: here because *anything* on the remote host can reach that pane's forwarded
 #: port, and every accepted connection costs a thread of this process for up to
@@ -547,7 +553,13 @@ def remote_mcp_document(url: str) -> Dict[str, Any]:
 FORBIDDEN_MODE_BITS = 0o077
 
 
-def _restricted_to_owner(sftp: Any, remote_path: str, mode: int) -> bool:
+def _restricted_to_owner(
+    sftp: Any,
+    remote_path: str,
+    mode: int,
+    *,
+    label: str = "",
+) -> bool:
     """Apply ``mode`` and read it back. False when it cannot be *proved*.
 
     Both halves refuse, and for the same reason: a ``chmod`` the remote host
@@ -555,27 +567,31 @@ def _restricted_to_owner(sftp: Any, remote_path: str, mode: int) -> bool:
     knows who can read this", and what is being written is a credential. A host
     whose SFTP implementation can do neither costs the pane its tools -- the
     price every other tunnel failure charges, and never its shell.
+
+    ``label`` replaces the path in every log line, for a file whose path is
+    itself not something to log -- a handed-over task's.
     """
+    named = label or remote_path
     try:
         sftp.chmod(remote_path, mode)
     except Exception as exc:
-        logger.warning("Could not restrict permissions on %s: %s", remote_path, exc)
+        logger.warning("Could not restrict permissions on %s: %s", named, exc)
         return False
     try:
         current = getattr(sftp.stat(remote_path), "st_mode", None)
     except Exception as exc:
-        logger.warning("Could not verify permissions on %s: %s", remote_path, exc)
+        logger.warning("Could not verify permissions on %s: %s", named, exc)
         return False
     try:
         bits = int(current)
     except (TypeError, ValueError):
-        logger.warning("The remote host reported no mode for %s", remote_path)
+        logger.warning("The remote host reported no mode for %s", named)
         return False
     if bits & FORBIDDEN_MODE_BITS:
         logger.warning(
             "%s is still reachable by other accounts on the remote host "
             "(mode %o), so it was not left there",
-            remote_path,
+            named,
             bits & 0o777,
         )
         return False
@@ -724,10 +740,51 @@ def establish(
         "remote_path": remote_path,
         "url": url,
         "sftp": sftp,
+        "handoff_lock": threading.Lock(),
     }
 
 
-def teardown(client: Any, record: Optional[Dict[str, Any]]) -> None:
+def _handoff_lock(record: Dict[str, Any]) -> Any:
+    """The lock a handoff file's write and this tunnel's teardown share."""
+    return record.setdefault("handoff_lock", threading.Lock())
+
+
+def write_tunnel_handoff(record: Optional[Dict[str, Any]], write: Any) -> str:
+    """Write a task file over this tunnel's SFTP channel and register it.
+
+    ``write(sftp)`` returns the path it wrote, or ``""``. The write and the
+    registration happen under the lock teardown takes before it reads the
+    paths, so a close landing mid-write can never miss the file: either the
+    path is recorded before teardown copies the list, or teardown has already
+    closed the record and nothing is written at all. Returns ``""`` for a
+    tunnel that is gone, which sends the task to paged delivery.
+    """
+    if not record:
+        return ""
+    with _handoff_lock(record):
+        if record.get("closed"):
+            return ""
+        path = str(write(record.get("sftp")) or "")
+        if path:
+            record.setdefault("handoff_paths", []).append(path)
+        return path
+
+
+def _close_quietly(resource: Any) -> None:
+    if resource is None:
+        return
+    try:
+        resource.close()
+    except Exception:
+        pass
+
+
+def teardown(
+    client: Any,
+    record: Optional[Dict[str, Any]],
+    *,
+    close_client: bool = False,
+) -> None:
     """Undo :func:`establish` without blocking the caller.
 
     Every step is a round trip to a host that may already be unreachable, and
@@ -736,11 +793,21 @@ def teardown(client: Any, record: Optional[Dict[str, Any]]) -> None:
     wedged transport can never deliver. So the remote work is handed to a
     short-lived daemon thread and the caller returns at once.
 
-    Nothing here is load-bearing: closing the transport cancels the forward
-    regardless, and the config file is named per pane and rewritten on that
-    pane's next connect, so a leftover is stale for nobody.
+    ``close_client`` hands that thread the client as well, for a caller that
+    is closing it anyway: the SFTP deletes need the transport, and a caller
+    closing the client right after this returns would pull it out from under
+    them -- leaving a handed-over task on the remote host. The thread closes
+    it once the files are gone, each step bounded by
+    ``TEARDOWN_STEP_TIMEOUT``, and skips `cancel_port_forward`: closing the
+    transport withdraws the listener itself, and that wait is unbounded.
+
+    The config file is not load-bearing -- it is named per pane and rewritten
+    on that pane's next connect. A task file is, which is why it is deleted
+    before the transport may go.
     """
     if not record:
+        if close_client:
+            _close_quietly(client)
         return
 
     sftp = record.get("sftp")
@@ -748,12 +815,39 @@ def teardown(client: Any, record: Optional[Dict[str, Any]]) -> None:
     remote_port = int(record.get("remote_port") or 0)
 
     def _release() -> None:
-        remove_remote_config(sftp, remote_path)
-        if sftp is not None:
+        try:
+            _release_remote()
+        finally:
+            if close_client:
+                _close_quietly(client)
+
+    def _release_remote() -> None:
+        if close_client and sftp is not None:
+            # Set before the lock is taken, so a write still in flight on this
+            # channel is bounded too and cannot hold the client open.
             try:
-                sftp.close()
+                sftp.get_channel().settimeout(TEARDOWN_STEP_TIMEOUT)
             except Exception:
-                pass
+                logger.debug("Could not bound the teardown's SFTP channel", exc_info=True)
+        # A handed-over task written on this host rode the same SFTP channel,
+        # and belongs to the same connection -- so it goes in the same round
+        # trip, before the channel closes under it. Read under the lock a
+        # write in flight holds (`write_tunnel_handoff`), and taken here on the
+        # daemon thread so waiting for that write never blocks the close.
+        with _handoff_lock(record):
+            record["closed"] = True
+            handoff_paths = [
+                str(path) for path in record.get("handoff_paths") or () if path
+            ]
+        remove_remote_config(sftp, remote_path)
+        for handoff_path in handoff_paths:
+            try:
+                sftp.remove(handoff_path)
+            except Exception:
+                logger.debug("Could not remove a remote handoff file", exc_info=True)
+        _close_quietly(sftp)
+        if close_client:
+            return
         transport = None
         try:
             transport = client.get_transport() if client is not None else None

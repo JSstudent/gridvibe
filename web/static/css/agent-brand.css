@@ -16,7 +16,16 @@
     --agent-brand-ground: var(--gv-agent-opencode);
 }
 
+/* The pane reset menu and the launcher's Startup Mode picker name an agent the
+   way its pane header will once it runs. */
+.pane-shell-menu-item[data-agent] .pane-shell-menu-label,
+.startup-mode-name[data-agent] {
+    color: var(--agent-brand, inherit);
+}
+
 .terminal-name[data-agent],
+.pane-shell-menu-item[data-agent] .pane-shell-menu-label,
+.startup-mode-name[data-agent],
 .dash-agent-name {
     background: var(--agent-brand-ground, transparent);
     border-radius: calc(var(--gv-radius-s) / 2);

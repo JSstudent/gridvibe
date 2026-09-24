@@ -172,10 +172,7 @@
 
         if (themeInput) themeInput.value = appearance.theme || DEFAULT_APP_SETTINGS.appearance.theme;
         if (surfaceModeInput) surfaceModeInput.value = workspace.surface_mode === 'max' ? 'max' : 'normal';
-        const agentSidebarSideInput = document.getElementById('appAgentSidebarSide');
-        if (agentSidebarSideInput) {
-            agentSidebarSideInput.value = workspace.agent_sidebar_side === 'right' ? 'right' : 'left';
-        }
+        writeAgentSidebarSideChoice(workspace.agent_sidebar_side);
         const autosaveIntervalInput = document.getElementById('appWorkspaceAutosaveInterval');
         if (autosaveIntervalInput) {
             const interval = Number(workspace.autosave_interval_minutes);
@@ -561,14 +558,31 @@
         return typeof window.pywebview?.api?.minimize_all_windows === 'function';
     }
 
+    /* Agent Dashboard Side is a radio group drawn as two layout cards, so its
+       value is whichever radio is checked. Anything but 'right' -- no group,
+       nothing checked, a value the page never offered -- is the left edge. */
+    function readAgentSidebarSideChoice() {
+        const checked = document.getElementById('appAgentSidebarSide')
+            ?.querySelector('input[type="radio"]:checked');
+        return checked?.value === 'right' ? 'right' : 'left';
+    }
+
+    function writeAgentSidebarSideChoice(side) {
+        const group = document.getElementById('appAgentSidebarSide');
+        if (!group) return;
+        const value = side === 'right' ? 'right' : 'left';
+        group.querySelectorAll('input[type="radio"]').forEach(radio => {
+            radio.checked = radio.value === value;
+        });
+    }
+
     /* The cascade key is omitted whenever the field is not shown, so a save
        from a browser window keeps whatever the native side already has —
        the same reason multi_workspace_enabled is absent below. */
     function collectWorkspaceSettingsForm() {
         const workspace = {
             surface_mode: document.getElementById('appSurfaceMode')?.value === 'max' ? 'max' : 'normal',
-            agent_sidebar_side:
-                document.getElementById('appAgentSidebarSide')?.value === 'right' ? 'right' : 'left',
+            agent_sidebar_side: readAgentSidebarSideChoice(),
             autosave_interval_minutes: Math.min(15, Math.max(1,
                 Number(document.getElementById('appWorkspaceAutosaveInterval')?.value)
                     || DEFAULT_APP_SETTINGS.workspace.autosave_interval_minutes

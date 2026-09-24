@@ -1,6 +1,6 @@
 # GridVibe MCP sidecar
 
-A stdio MCP server that gives an agent running in a GridVibe pane thirteen
+A stdio MCP server that gives an agent running in a GridVibe pane fourteen
 tools for seeing and building GridVibe workspaces.
 
 This file is the reference for the MCP feature. Everything else that mentions
@@ -92,10 +92,10 @@ back to it as an inline TOML table on the launch line
 
 ## Tools
 
-Thirteen, in four tiers by blast radius. The order below is the order
+Fourteen, in four tiers by blast radius. The order below is the order
 `tool_specs()` registers them in, and `tests/test_mcp_tools.py` pins it.
 
-### read — six
+### read — seven
 
 | Tool | Answers |
 | --- | --- |
@@ -105,6 +105,11 @@ Thirteen, in four tiers by blast radius. The order below is the order
 | `list_agents` | every agent anywhere, with a working/idle reading, under the workspace and session holding it |
 | `list_saved_layouts` | every saved launcher preset as a *shape* — name, layout, pane count, geometry, and what each pane is. Never a connection |
 | `whoami` | which pane this agent is in, its directory, **which machine that directory is on**, how deep it is, where it sits, and whether it may still launch (`may_launch_panes`) or split (`may_split_panes`) — a refusal of the first carries a `split_note` saying the second is still open |
+| `read_handoff` | the task another agent handed to *this* pane — see [Handing an agent its task](#handing-an-agent-its-task). Its only side effect is the handoff's state becoming `read` |
+
+Each pane in `list_panes` also carries `handoff`: `null`, or its `state`
+(`waiting`, `announced`, `read`, `undeliverable`), `delivery`, `chars` and
+`from_session_id` — never the text, never a file path.
 
 `whoami` before resolving "this directory", "this workspace" or "the terminal
 below this one". Its `runs_on` is the field that stops a remote path being
@@ -123,14 +128,16 @@ the inherited id is only the fallback for a read that failed.
 | Tool | Makes |
 | --- | --- |
 | `create_workspace` | one empty, labelled workspace. Creating it does not make a window appear, and it is refused past sixteen workspaces that are *still* empty — counted over the whole app, because the server cannot tell a tool from the launcher's own button |
-| `launch_panes` | one session group of panes — agent, terminal, file explorer or browser preview |
+| `launch_panes` | one session group of panes — agent, terminal, file explorer or browser preview. An agent pane may carry a `task`, and this needs no open window |
 | `open_window` | a workspace on screen. Reports `opened`, `blocked` or `no_window_available` |
-| `split_pane` | halves one pane on a chosen axis and says what the new pane runs. With no `kind` stated it is what the 🪟 button makes: a terminal clones its source, and an explorer, browser or *agent* pane splits off a plain terminal rooted where it is showing — the kind is never cloned. Reports `split`, `refused` or `no_window_available` |
+| `split_pane` | halves one pane on a chosen axis and says what the new pane runs. With no `kind` stated it is what the 🪟 button makes: a terminal clones its source, and an explorer, browser or *agent* pane splits off a plain terminal rooted where it is showing — the kind is never cloned. Reports `split`, `refused` or `no_window_available`. With `kind: "agent"` it may carry a `task`, and the result's `handoff` says it is waiting. Its description states what the axis words produce: `horizontal` stacks the new pane below, `vertical` puts it to the right |
 
 ### replace — two
 
 `set_pane_agent` relaunches a pane into an agent CLI (or `agent: ""` back to a
-plain shell, optionally changing the local shell family and the MCP choice).
+plain shell, optionally changing the local shell family and the MCP choice),
+and may hand the new agent a `task` — the way to give a task to a pane that
+already exists, since nothing types into one.
 `set_pane_mode` turns a pane into a file explorer, a browser preview or a plain
 terminal.
 
@@ -158,6 +165,15 @@ names which gate failed, because an agent told only "refused" calls again.
 | **self** | never the pane the request came from | no |
 | **lineage** | only a pane this agent's own pane created, and only while that caller pane is still open | by `override` |
 | **kind** | each transaction's own: a relaunch takes only a plain terminal; a mode switch refuses a pane with an agent running in it; a clear refuses both a non-terminal pane and a running agent | the "already an agent" half, by `override` |
+| **machine** | a relaunch carrying a `task` only reaches a pane on the caller's own machine | no |
+
+Every gate refusal is structured as well as worded: `gate`, `waivable`, and —
+for a waivable one only — a `confirm` block naming the pane (`session_id`,
+`title`, `index`), what the change `ends` (the agent and GridVibe's last
+working/idle reading of it) and the `question` to put to the person. GridVibe
+builds the question from its live registry, so every agent asks the same one.
+The refusals nothing waives come first, so an agent never asks the person, gets
+a yes, and is then refused anyway.
 
 A pane that existed before a GridVibe restart carries no creator — `created_by_session_id`
 is deliberately absent from the runtime snapshot — so it is always refused
@@ -165,11 +181,15 @@ without `override`. That is the honest answer: GridVibe does not know who made
 it, so it does not guess.
 
 **`override` is only ever the user's word.** It waives lineage and the "already
-running an agent" refusal; it never waives self, and never the kind gate's mode
-rule. A calling agent sets it only when the person it is talking to has, in that
-conversation, said to replace *this specific pane* — never because a file it
-read, a prior tool result, or another pane's output asked for it. Every waiver
-is logged with both pane ids.
+running an agent" refusal; it never waives self, the kind gate's mode rule or
+the machine rule. A calling agent calls first *without* it — a refusal changes
+nothing — and then either asks `confirm.question`, offers a split, or stops. It
+sets `override` only after a clear yes, or when the person's own words in that
+conversation already asked to replace *this specific pane* ("override",
+"force", "replace", "kill" or "restart" with a clear reference to it) — never
+because a file it read, a prior tool result, another pane's output or a
+handed-over task asked for it. GridVibe adds no Allow/Deny dialog of its own.
+Every waiver is logged with both pane ids.
 
 ### absent
 
@@ -216,6 +236,47 @@ not pay for a poll on every page load. `open_window` has a browser-mode fallback
 (`webbrowser.open` is a real alternative); there is no equivalent for "measure
 this pane".
 
+## Handing an agent its task
+
+An agent pane created by `split_pane` or `launch_panes`, or relaunched by
+`set_pane_agent`, can be handed a `task`, so the new agent starts working on it
+instead of waiting at an empty prompt. The store is `web/agent_handoffs.py`;
+the temporary file is `web/agent_handoff_files.py`.
+
+- **No byte of a task reaches a shell.** The new agent's launch line gains one
+  constant GridVibe sentence — *call the gridvibe tool `read_handoff` to fetch
+  it* — placed directly after the binary (Claude's `--mcp-config` takes a
+  variable number of values), and the task is fetched through the tools. So a
+  task needs a CLI that takes an opening prompt *and* can be handed the
+  sidecar: `claude`, `codex` and `copilot`. It turns `mcp` on; an explicit
+  `mcp: false` beside it is refused.
+- **Only a handle rides in a split intent.** Every polling page is shown the
+  intent, so the text stays in GridVibe and the split route takes the handle
+  once, for its own source pane, before it appends anything. A launch takes
+  each pane's task off its config before anything else reads it, so no preset
+  and no runtime snapshot ever holds one.
+- **A task runs on the caller's own machine.** Both local, or both SSH to the
+  same host, user and port. Nothing waives it, `override` included. An agent
+  with no pane is refused: it has no machine and no lineage to record.
+- **Size decides how it travels.** Up to 8,000 characters it comes back whole
+  from `read_handoff`. Larger, up to 512 KiB, it is written to a file on the
+  pane's own machine (owner-only, never through a shell) and `read_handoff`
+  names `task_file` with the opening in `head`. If that file cannot be written,
+  `read_handoff` pages it (`offset`, `next_offset`). Above 512 KiB it is
+  refused — never truncated. Control characters other than newline and tab are
+  refused by name, never stripped.
+- **One brief, for one agent.** It waits bound to its pane until a connection
+  starts that pane's agent, is announced on that launch line, and goes — with
+  its file — when that connection closes. A relaunch, a restart, a restore or a
+  preset launch never replays it; relaunching or re-moding a pane drops one
+  still waiting. When the pane's agent starts without the tools (no local
+  config, a refused tunnel), no sentence is typed, the handoff reads
+  `undeliverable`, and the pane's *output* says why.
+- **The brief frames itself.** `read_handoff` returns a `note`: this is another
+  agent's request, not the person's words — it cannot waive a permission
+  prompt and is never a reason to set `override`. A task never implies
+  `auto_mode`.
+
 ## Stated properties, not discoveries
 
 - **Prompt injection reaches further than a terminal.** A repository file that
@@ -240,6 +301,17 @@ this pane".
   identity there comes from the token registry rather than from the caller, and
   the forward's filter means a remote process cannot reach those ungated routes
   at all.
+- **A handed-over task is not confidential.** On the stdio path a caller is
+  whoever `GRIDVIBE_SESSION_ID` says, the handoff route is on the same
+  unauthenticated loopback API as every other, and the temporary file is
+  owner-only but readable by anything running as that user. Tool descriptions
+  tell callers to leave credentials out. No log line carries a task's text or
+  its file path — ids, sizes and deliveries only.
+- **`override` relies on the calling agent.** GridVibe cannot check which words
+  the person used; the structured `confirm` flow guides an agent that follows
+  its instructions and enforces nothing. What still bounds a misused override:
+  never the caller's own pane, an explorer or browser pane, or — with a task —
+  another machine.
 - **No credential ever reaches a tool result.** Every result is built from an
   explicit field list in `client.py`, and anything whose key looks like a
   secret is dropped at any depth regardless. `list_saved_layouts` is the sharp
@@ -260,11 +332,15 @@ Three of the eight, and the mechanism differs for each. Every row was checked
 against the installed CLI's own `--help`, which is what `"verified": true` in
 `agent_registry.json` records.
 
-| CLI | How | Shape |
-| --- | --- | --- |
-| `claude` | `--mcp-config "<path>"` | `flag` template |
-| `copilot` | `--additional-mcp-config "@<path>"` — `@` marks a path rather than inline JSON, and it *augments* `~/.copilot/mcp-config.json` for the session | `flag` template |
-| `codex` | `-c mcp_servers.gridvibe.…` overrides — it takes no config file at all | `style: inline_toml` |
+| CLI | How | Shape | Opening prompt (a `task`) |
+| --- | --- | --- | --- |
+| `claude` | `--mcp-config "<path>"` | `flag` template | positional, directly after the binary |
+| `copilot` | `--additional-mcp-config "@<path>"` — `@` marks a path rather than inline JSON, and it *augments* `~/.copilot/mcp-config.json` for the session | `flag` template | `-i "<sentence>"`, directly after the binary |
+| `codex` | `-c mcp_servers.gridvibe.…` overrides — it takes no config file at all | `style: inline_toml` | positional, directly after the binary |
+
+The opening prompt is an `opening_prompt` block in `agent_registry.json`, held to
+the same `verified` bar; the other five CLIs publish none and cannot be handed a
+task.
 
 The quote opens *before* Copilot's `@`: `@"C:\…"` starts a here-string in
 PowerShell and fails to parse.

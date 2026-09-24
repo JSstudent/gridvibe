@@ -54,11 +54,20 @@ bar. It is not "cannot".
 No Flask, no HTTP, and no error type of its own crossing a route boundary:
 `PaneGateRefusal` carries a message and the status the route should answer, and
 each transaction translates it into the error type its own route already maps.
+
+**A refusal is also a structure, so an agent can ask before it overrides.**
+Every gate refusal names its ``gate`` and whether ``override`` could ever
+``waive`` it. A waivable one carries a ``confirm`` block -- which pane, what is
+running there and GridVibe's last reading of it, and the question to put to the
+person, built here from the live registry so every agent asks the same question
+with the same facts. A refusal nothing can waive (self, an explorer or browser
+pane, another machine) carries no question: the only answers are a split or no.
 """
 
 import logging
+import time
 from dataclasses import dataclass
-from typing import Any, Mapping
+from typing import Any, Dict, Mapping, Optional
 
 from web.app import session_manager
 
@@ -69,6 +78,9 @@ logger = logging.getLogger(__name__)
 MODE_GATE = "mode"
 LINEAGE_GATE = "lineage"
 SELF_GATE = "self"
+#: Only a verb carrying a task meets this one: a task runs on the caller's own
+#: machine, and nothing -- `override` included -- waives that.
+MACHINE_GATE = "machine"
 
 #: Every waivable refusal ends with this, so an agent relaying one has been
 #: told what the escape hatch is and who has to ask for it.
@@ -108,13 +120,35 @@ class PaneGateRefusal(Exception):
 
     Deliberately not one of the transaction error types: this module is below
     all three of them, and each translates rather than re-raises so its own
-    route keeps mapping exactly one exception.
+    route keeps mapping exactly one exception -- carrying :meth:`details` with
+    it, so the structure survives the translation.
     """
 
-    def __init__(self, message: str, status_code: int = 403):
+    def __init__(
+        self,
+        message: str,
+        status_code: int = 403,
+        *,
+        gate: str = "",
+        waivable: bool = False,
+    ):
         super().__init__(message)
         self.message = message
         self.status_code = status_code
+        self.gate = gate
+        self.waivable = bool(waivable)
+        #: Filled in by the transaction that knows what it was asked to do,
+        #: for a waivable refusal only -- see :func:`confirmation`.
+        self.confirm: Optional[Dict[str, Any]] = None
+
+    def details(self) -> Dict[str, Any]:
+        """The structured half of a refusal, for the route's JSON body."""
+        if not self.gate:
+            return {}
+        payload: Dict[str, Any] = {"gate": self.gate, "waivable": self.waivable}
+        if self.waivable and self.confirm:
+            payload["confirm"] = self.confirm
+        return payload
 
 
 def refusal_text(gate: str, message: str) -> str:
@@ -122,14 +156,129 @@ def refusal_text(gate: str, message: str) -> str:
     return f"[{gate} gate] {message}"
 
 
-def refuse(gate: str, message: str) -> PaneGateRefusal:
+def refuse(gate: str, message: str, *, waivable: bool = False) -> PaneGateRefusal:
     """One gate's refusal, ready to raise. 403: it is a denial, not a mistake.
 
     Public because each transaction's own third gate raises it too, so every
     refusal a tool can meet -- shared or not -- comes out of one factory and
-    reads the same way.
+    reads the same way. ``waivable`` is true only where ``override`` would
+    actually change the answer.
     """
-    return PaneGateRefusal(refusal_text(gate, message), 403)
+    return PaneGateRefusal(refusal_text(gate, message), 403, gate=gate, waivable=waivable)
+
+
+# ---------------- the confirmation question ----------------
+
+
+@dataclass(frozen=True)
+class PaneFacts:
+    """What the person is asked about: which pane, and what runs in it."""
+
+    session_id: str
+    title: str
+    index: Optional[int]
+    agent: str
+    activity: str
+
+    @property
+    def name(self) -> str:
+        if self.title:
+            return self.title
+        return f"pane {self.index + 1}" if self.index is not None else "this pane"
+
+
+def _pane_agent(session: Any) -> str:
+    if str(getattr(session, "startup_mode", "") or "") != "agent":
+        return ""
+    return str(
+        getattr(session, "agent_selection", "")
+        or getattr(session, "custom_agent", "")
+        or ""
+    ).strip().lower()
+
+
+def _pane_activity(session_id: str) -> str:
+    """GridVibe's last working/idle reading of a pane, or ``""``.
+
+    Read from the same observation the dashboard publishes, and imported late:
+    this module sits below `web/terminal_io.py`'s users, and the snapshot takes
+    `connection_lock`, so it is read here with no manager lock held.
+    """
+    try:
+        from web.agent_activity import describe_agent_activity
+        from web.terminal_io import agent_activity_snapshot
+
+        record = agent_activity_snapshot().get(session_id)
+    except Exception:  # pragma: no cover - a reading is never worth a failure
+        return ""
+    if record is None:
+        return ""
+    return str(describe_agent_activity(record, time.time()).get("state") or "")
+
+
+def pane_facts(session: Any) -> PaneFacts:
+    """The facts a confirmation question states, read from the live registry."""
+    session_id = str(getattr(session, "session_id", "") or "")
+    index: Optional[int] = None
+    group_id = str(getattr(session, "group_id", "") or "")
+    if group_id:
+        ordered = [
+            str(getattr(item, "session_id", "") or "")
+            for item in session_manager.get_group_sessions(group_id)
+        ]
+        index = ordered.index(session_id) if session_id in ordered else None
+    agent = _pane_agent(session)
+    return PaneFacts(
+        session_id=session_id,
+        title=str(getattr(session, "title", "") or ""),
+        index=index,
+        agent=agent,
+        activity=_pane_activity(session_id) if agent else "",
+    )
+
+
+def what_ends(facts: PaneFacts) -> str:
+    """What a replacement ends, in the words the question uses."""
+    if not facts.agent:
+        return "the shell there and anything running in it"
+    reading = (
+        f", which GridVibe last read as {facts.activity},"
+        if facts.activity and facts.activity != "unknown"
+        else ""
+    )
+    return f"the {facts.agent} agent there{reading} and its conversation"
+
+
+def confirmation(facts: PaneFacts, question: str) -> Dict[str, Any]:
+    """The ``confirm`` block a waivable refusal carries."""
+    return {
+        "pane": {
+            "session_id": facts.session_id,
+            "title": facts.title,
+            "index": facts.index,
+        },
+        "ends": {
+            "agent": facts.agent or None,
+            "activity": facts.activity or None,
+        },
+        "question": question,
+    }
+
+
+def attach_confirmation(
+    refusal: PaneGateRefusal,
+    session: Any,
+    question_for: Any,
+) -> None:
+    """Give a waivable refusal its question. ``question_for(facts)`` words it.
+
+    A refusal nothing can waive gets none: offering a person a choice that
+    `override` cannot honour would be asking them for nothing.
+    """
+    if not refusal.waivable or session is None:
+        return
+    facts = pane_facts(session)
+    refusal.confirm = confirmation(facts, question_for(facts))
 
 
 def read_agent_request(
@@ -195,6 +344,7 @@ def check_lineage(
                 LINEAGE_GATE,
                 f"This pane was not created by an agent, so a tool does not "
                 f"{wording.act}. Split off a new pane instead, {OVERRIDE_TAIL}.",
+                waivable=True,
             )
         if creator != request.caller_session_id:
             raise refuse(
@@ -202,6 +352,7 @@ def check_lineage(
                 f"This pane was created by a different pane. An agent "
                 f"{wording.acts} only the panes it created itself, "
                 f"{OVERRIDE_TAIL}.",
+                waivable=True,
             )
         return
 

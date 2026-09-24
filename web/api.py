@@ -24,6 +24,15 @@ from sessions.manager import (  # noqa: F401 - re-exported for backwards compati
     _normalize_agent_depth,
 )
 from web import mcp_http
+from web.agent_handoff_files import sweep_local_handoffs
+from web.agent_handoffs import (
+    HandoffError,
+    machine_refusal,
+    pane_description,
+    same_machine,
+    validate_task,
+)
+from web.agent_handoffs import handoffs as agent_handoffs
 from web.agent_session_hooks import PANE_TOKEN_HEADER, write_claude_settings
 from web.agents import (  # noqa: F401 - re-exported for backwards compatibility
     AGENT_REGISTRY,
@@ -66,6 +75,7 @@ from web.agents import (  # noqa: F401 - re-exported for backwards compatibility
     _select_install_option,
     _shell_single_quote,
     _tcp_probe_target,
+    task_refusal,
 )
 from web.app import (  # noqa: F401 - re-exported for backwards compatibility
     _allowed_write_origin_netlocs,
@@ -202,7 +212,13 @@ from web.mcp_launch import (  # noqa: F401 - mcp_config_path re-exported for tes
     set_server_address,
     write_mcp_config,
 )
-from web.pane_gates import LINEAGE_GATE, PaneGateRefusal, refuse
+from web.pane_gates import (
+    LINEAGE_GATE,
+    MACHINE_GATE,
+    PaneGateRefusal,
+    refusal_text,
+    refuse,
+)
 from web.pane_geometry import compose_group_geometry
 from web.paths import BASE_DIR, install_kind
 from web.runtime_state import (  # noqa: F401 - re-exported for backwards compatibility
@@ -1061,6 +1077,13 @@ def get_sessions():
         return jsonify(
             workspace_missing_payload() if workspace_missing else {"error": error}
         ), 400
+    # A pane's handoff *state*, read outside the manager lock: whether the
+    # agent it was handed to has fetched it. Never the text, never a path.
+    handoff_states = agent_handoffs.public_states(
+        payload_item.get("session_id") for payload_item in session_payloads
+    )
+    for payload_item in session_payloads:
+        payload_item["handoff"] = handoff_states.get(str(payload_item.get("session_id") or ""))
     logger.debug(
         f"GET /api/sessions workspace={workspace_id} "
         f"group={group_id or 'all'} count={len(sessions)} "
@@ -3106,7 +3129,36 @@ def get_session(session_id: str):
     if not session:
         return jsonify({"error": "Session not found"}), 404
 
-    return jsonify(session.to_dict())
+    payload = session.to_dict()
+    payload["handoff"] = agent_handoffs.public_state(session_id)
+    return jsonify(payload)
+
+
+@app.route('/api/sessions/<session_id>/handoff', methods=['GET'])
+def read_session_handoff(session_id: str):
+    """The task handed to this pane's agent -- what ``read_handoff`` returns.
+
+    Read by the receiving agent's own sidecar, which names its own pane: the
+    stdio path from its inherited environment, the tunnel path from the token
+    registry. Like every loopback route it is not a confidentiality boundary
+    (``gridvibe_mcp/README.md`` states that), which is why a caller is told to
+    leave credentials out of a task. Its one side effect is the handoff's state
+    becoming ``read``. ``offset`` pages a task delivered in pages.
+    """
+    if session_manager.get_session(session_id) is None:
+        return jsonify({"error": "Session not found"}), 404
+    raw_offset = request.args.get("offset")
+    offset = None
+    if raw_offset not in (None, ""):
+        try:
+            offset = int(str(raw_offset).strip())
+        except ValueError:
+            return jsonify({"error": "'offset' must be a whole number."}), 400
+    try:
+        payload = agent_handoffs.read(session_id, offset)
+    except HandoffError as exc:
+        return jsonify({"error": exc.message}), exc.status_code
+    return jsonify(payload)
 
 
 @app.route('/api/panes/layout', methods=['GET'])
@@ -3344,6 +3396,41 @@ def _creator_stamp(value: Any, *, nothing_happened: str) -> str:
     return stamped
 
 
+def _validated_split_task(source, data: Dict[str, Any]) -> str:
+    """A split's task, validated, or a refusal naming why.
+
+    Decided before anything is recorded: the text itself, then whether the new
+    pane can fetch it (an agent that takes an opening prompt and GridVibe's
+    tools, with no ``mcp: false`` beside it), then who is asking -- a task
+    needs a calling pane, both for its lineage and for the one rule nothing
+    waives: **a task runs only on the caller's own machine.** Splitting a pane
+    the reader has open to another host is still allowed; handing the agent
+    started there a task is not.
+    """
+    task_text = validate_task(data.get("task"))
+    refusal = task_refusal(data.get("kind"), data.get("agent"), data.get("mcp"))
+    if refusal:
+        raise HandoffError(refusal)
+    origin_session_id = str(data.get("origin_session_id") or "").strip()
+    caller = session_manager.get_session(origin_session_id) if origin_session_id else None
+    if caller is None:
+        raise HandoffError(
+            "A task is handed from an agent in a GridVibe pane, and this "
+            "request names no open pane it came from. No split was recorded.",
+            403,
+        )
+    if not same_machine(caller, source):
+        raise HandoffError(
+            refusal_text(
+                MACHINE_GATE,
+                f"{machine_refusal(caller, source)} No split was recorded.",
+            ),
+            403,
+            {"gate": MACHINE_GATE, "waivable": False},
+        )
+    return task_text
+
+
 #: The two axes a split button offers. The server never computes a rectangle
 #: from either -- it records which one was asked for, and the page that can
 #: measure the pane performs the split.
@@ -3383,6 +3470,13 @@ def open_split_intent(session_id: str):
     except SplitRequestError as exc:
         return jsonify({"error": str(exc)}), 400
 
+    task_text = None
+    if data.get("task") is not None:
+        try:
+            task_text = _validated_split_task(source, data)
+        except HandoffError as exc:
+            return jsonify({"error": exc.message, **exc.details}), exc.status_code
+
     # The body the claiming page posts back, built here rather than by the page:
     # the creator stamp is read off the live registry in this process, so a
     # relaunch gate later cannot be handed a lineage the caller invented.
@@ -3400,6 +3494,27 @@ def open_split_intent(session_id: str):
     except PaneGateRefusal as exc:
         return jsonify({"error": exc.message}), exc.status_code
 
+    handoff = None
+    if task_text is not None:
+        # Only a handle rides in the intent: every polling page is shown its
+        # request, and the claiming page posts it back to `/split`. The text
+        # stays here, and the split route takes it exactly once, for this
+        # source pane, before it appends anything.
+        caller = session_manager.get_session(split_request["created_by_session_id"])
+        try:
+            handoff_id = agent_handoffs.create(
+                task_text,
+                source_session_id=session_id,
+                **pane_description(caller),
+            )
+        except HandoffError as exc:
+            return jsonify({"error": exc.message}), exc.status_code
+        split_request["handoff_id"] = handoff_id
+        # A task is fetched through the tools, so it turns them on; an
+        # explicit `mcp: false` beside it was refused above.
+        split_request["mcp"] = True
+        handoff = {"state": "waiting", "chars": len(task_text), "delivery": None}
+
     intent = window_intents.open_split(
         session_id,
         axis,
@@ -3415,6 +3530,8 @@ def open_split_intent(session_id: str):
         str(data.get("kind") or "terminal"),
         window_mode(),
     )
+    if handoff is not None:
+        intent = {**intent, "handoff": handoff}
     return jsonify(intent), 201
 
 
@@ -3513,6 +3630,24 @@ def split_session(session_id: str):
     except PaneGateRefusal as exc:
         return jsonify({"error": exc.message}), exc.status_code
 
+    # A task rides in as a handle recorded by the split intent. Taken here --
+    # after every other refusal and before the append -- so a replayed,
+    # expired or foreign handle refuses with the group untouched, and a taken
+    # handle cannot be spent twice.
+    handoff_id = str(request_data.get("handoff_id") or "").strip()
+    if handoff_id:
+        if overrides.get("startup_mode") != "agent" or not overrides.get("agent_mcp"):
+            return jsonify({
+                "error": (
+                    "A task is handed only to a new agent pane with GridVibe's "
+                    "tools. No pane was added."
+                )
+            }), 400
+        try:
+            agent_handoffs.take(handoff_id, source.session_id)
+        except HandoffError as exc:
+            return jsonify({"error": exc.message}), exc.status_code
+
     if overrides.get("startup_mode") == "explorer":
         # An explorer pane is confined to where the split is rooted, and that
         # boundary is chosen by the caller rather than derived from where a
@@ -3560,7 +3695,22 @@ def split_session(session_id: str):
         **fields,
     )
     if not new_session:
+        if handoff_id:
+            agent_handoffs.drop(handoff_id, "split found no group")
         return jsonify({"error": "Session group not found"}), 404
+    if handoff_id:
+        # Before the connector starts, so the startup sequence that types the
+        # new agent's launch line finds its task waiting. The source pane can
+        # close between the take and here, and its handoffs go with it; the
+        # pane is already appended, so that costs the task and not the split.
+        try:
+            agent_handoffs.bind(handoff_id, new_session.session_id)
+        except HandoffError:
+            logger.warning(
+                "Handoff %s went before it could be bound session=%s",
+                handoff_id,
+                new_session.session_id,
+            )
 
     logger.info(
         "Split session source_id=%s new_session_id=%s group_id=%s",
@@ -3575,9 +3725,11 @@ def split_session(session_id: str):
         workspace_id=group.workspace_id,
     )
 
+    session_payload = new_session.to_dict()
+    session_payload["handoff"] = agent_handoffs.public_state(new_session.session_id)
     return jsonify(
         {
-            "session": new_session.to_dict(),
+            "session": session_payload,
             "group_id": group.group_id,
             "group": group.to_dict(),
             "terminal_count": group.terminal_count,
@@ -3657,7 +3809,7 @@ def relaunch_session_as_agent(session_id: str):
             ),
         )
     except ShellTransitionError as exc:
-        return jsonify({"error": exc.message}), exc.status_code
+        return jsonify({"error": exc.message, **exc.details}), exc.status_code
     return jsonify(payload)
 
 
@@ -3729,7 +3881,7 @@ def switch_session_mode_for_agent(session_id: str):
             ),
         )
     except ModeTransitionError as exc:
-        return jsonify({"error": exc.message}), exc.status_code
+        return jsonify({"error": exc.message, **exc.details}), exc.status_code
     return jsonify(payload)
 
 
@@ -3754,7 +3906,7 @@ def clear_session_for_agent(session_id: str):
             ),
         )
     except ClearTransitionError as exc:
-        return jsonify({"error": exc.message}), exc.status_code
+        return jsonify({"error": exc.message, **exc.details}), exc.status_code
     return jsonify(payload)
 
 
@@ -4421,6 +4573,12 @@ def run_server(
     # Same reason, one file over: the Claude session hook names this
     # interpreter. The URL and the token reach it through the pane instead.
     write_claude_settings()
+    # A crash leaves handed-over task files behind. Swept off the start path,
+    # and only entries older than a day: another install may share the
+    # directory and still own newer ones.
+    threading.Thread(
+        target=sweep_local_handoffs, name="gridvibe-handoff-sweep", daemon=True
+    ).start()
     start_workspace_autosave()
     socketio.run(
         app,

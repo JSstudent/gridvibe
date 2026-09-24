@@ -15271,7 +15271,7 @@ class ApiRoutesTestCase(unittest.TestCase):
             '[data-theme="light"] .count-btn',
             '[data-theme="light"] .field input',
             '[data-theme="light"] .t-row',
-            '[data-theme="light"] .startup-mode-select',
+            '[data-theme="light"] .startup-mode-trigger',
             '[data-theme="light"] .check-field',
             '[data-theme="light"] .modal-card',
             '[data-theme="light"] .saved-session-item',
@@ -22972,6 +22972,7 @@ class WorkspacesImportHygieneTestCase(unittest.TestCase):
                 # Genuinely cycle-breaking: each of these reaches back here.
                 "sessions.manager",
                 "web.app",
+                "web.pane_gates",
                 "web.runtime_state",
                 "web.terminal_io",
                 # Deferred for late binding rather than for a cycle (docstring).

@@ -25,6 +25,7 @@ from web.agent_conversations import (
     EMPTY_CONVERSATION_FIELDS,
     compose_conversation_command,
 )
+from web.agent_handoffs import HANDOFF_OPENING_PROMPT
 from web.agent_session_hooks import claude_settings_fragment
 from web.config import _load_json_file, runtime_config
 from web.hostkeys import _apply_host_key_policy
@@ -193,6 +194,136 @@ def _agent_mcp_description(agent_key: Any) -> str:
     if not isinstance(mcp, dict):
         return ""
     return str(mcp.get("description") or "").strip()
+
+
+#: The one placeholder an opening-prompt flag template may carry. It is only
+#: ever substituted with :data:`HANDOFF_OPENING_PROMPT` -- a GridVibe constant,
+#: never a byte a tool supplied -- and the template is checked for shape exactly
+#: like the MCP one.
+_OPENING_PROMPT_PLACEHOLDER = "{prompt}"
+_OPENING_PROMPT_FLAG_TEMPLATE = re.compile(r"^--?[A-Za-z0-9][A-Za-z0-9_-]*\s\{prompt\}$")
+
+#: A positional prompt goes directly after the binary, before any option.
+_OPENING_PROMPT_STYLE_POSITIONAL = "positional"
+
+
+def _agent_opening_prompt_template(agent_key: Any) -> str:
+    """How this CLI takes an opening prompt: ``"{prompt}"``, a flag, or ``""``.
+
+    Only a block the registry marks ``verified`` counts -- the same bar the MCP
+    block holds -- and a flag that is not one plain option token followed by
+    the placeholder resolves to nothing rather than to something typed.
+    """
+    spec = AGENT_REGISTRY.get(_normalize_agent_key(agent_key))
+    if not isinstance(spec, dict):
+        return ""
+    block = spec.get("opening_prompt")
+    if not isinstance(block, dict) or block.get("verified") is not True:
+        return ""
+    if str(block.get("style") or "").strip() == _OPENING_PROMPT_STYLE_POSITIONAL:
+        return _OPENING_PROMPT_PLACEHOLDER
+    flag = str(block.get("flag") or "").strip()
+    return flag if _OPENING_PROMPT_FLAG_TEMPLATE.match(flag) else ""
+
+
+def _agent_accepts_task(agent_key: Any) -> bool:
+    """Whether a task can be handed to this CLI at launch.
+
+    Both halves, because the task is *fetched*: the opening prompt only tells
+    the agent to call ``read_handoff``, and an agent without GridVibe's tools
+    would be told to call a tool it does not have.
+    """
+    return bool(_agent_opening_prompt_template(agent_key)) and _agent_supports_mcp(agent_key)
+
+
+def task_capable_agents() -> List[str]:
+    """Every registered agent a task can be handed to, for refusal sentences."""
+    return sorted(key for key in AGENT_REGISTRY if _agent_accepts_task(key))
+
+
+def task_refusal(kind: Any, agent_key: Any, mcp: Any = None) -> str:
+    """Why a task cannot go to this new or relaunched pane, or ``""``.
+
+    The one owner of the rule, shared by the split intent, the launch and the
+    gated relaunch, so the three refuse in the same words. ``mcp`` is the
+    caller's *stated* choice: ``None`` means unstated, which a task turns on,
+    and an explicit ``False`` is refused rather than silently overridden.
+    """
+    if str(kind or "").strip().lower() != "agent":
+        return (
+            "A task is handed to an agent pane: set kind to 'agent' and name "
+            "the agent that should carry it out."
+        )
+    key = _normalize_agent_key(agent_key)
+    capable = ", ".join(task_capable_agents()) or "none"
+    if not key:
+        return (
+            "A task is handed to an agent: name the agent that should carry "
+            f"it out ({capable})."
+        )
+    if key not in AGENT_REGISTRY:
+        return f"'{key}' is not a known agent CLI. A task can be handed to: {capable}."
+    if not _agent_accepts_task(key):
+        missing = (
+            "publishes no verified way to take an opening prompt"
+            if not _agent_opening_prompt_template(key)
+            else "cannot be given GridVibe's tools, which is how a task is fetched"
+        )
+        return f"{key} cannot be handed a task: it {missing}. A task can be handed to: {capable}."
+    if mcp is not None and not isinstance(mcp, bool):
+        return "mcp must be true or false"
+    if mcp is False:
+        return (
+            "A task is fetched through GridVibe's tools, so the pane needs "
+            "them: leave 'mcp' out or set it to true."
+        )
+    return ""
+
+
+def _opening_prompt_fragment(agent_key: Any) -> str:
+    """The launch-line fragment carrying the constant sentence, or ``""``.
+
+    Double quotes read identically in cmd, PowerShell and POSIX shells here
+    because the sentence holds nothing any of them expands (pinned by test).
+    """
+    template = _agent_opening_prompt_template(agent_key)
+    if not template:
+        return ""
+    return template.replace(_OPENING_PROMPT_PLACEHOLDER, f'"{HANDOFF_OPENING_PROMPT}"')
+
+
+def launch_line_carries_opening_prompt(command: Any) -> bool:
+    """Whether a composed launch line tells its agent to fetch a handoff.
+
+    The startup sequence asks this of the line it is about to type, so a
+    handoff is marked announced only when the pointer sentence is really on it.
+    """
+    return f'"{HANDOFF_OPENING_PROMPT}"' in str(command or "")
+
+
+def opening_prompt_gap(session: Any, *, tunnelled: bool = False) -> str:
+    """Why a pane's launch line carries no opening prompt, in the pane's words.
+
+    Read only after composition left the prompt out, and written to the pane's
+    *output* by the startup sequence, never its input.
+    """
+    if str(getattr(session, "initial_command_mode", "") or "") != "agent":
+        return "this pane is no longer set to start an agent"
+    agent_key = _normalize_agent_key(getattr(session, "agent_selection", ""))
+    base = _normalize_agent_key(getattr(session, "initial_command", ""))
+    if not agent_key or base != agent_key:
+        return "this pane starts a custom command rather than a registered agent"
+    if not _agent_accepts_task(agent_key):
+        return f"{agent_key} cannot be handed a task"
+    if not bool(getattr(session, "agent_mcp", False)):
+        return f"{agent_key} was set to start without GridVibe's tools"
+    if bool(getattr(session, CONVERSATION_RESUME_FIELD, False)):
+        return f"{agent_key} resumed a saved conversation instead"
+    if pane_can_run_the_sidecar(session):
+        return "GridVibe's tool config for this machine was not found"
+    if not tunnelled:
+        return "the SSH tunnel that carries GridVibe's tools could not be opened"
+    return f"{agent_key} could not be given GridVibe's tools on this host"
 
 
 def _pane_shell_family(session: Any) -> str:
@@ -439,6 +570,9 @@ def _agent_options() -> List[Dict[str, str]]:
             # Codex supports MCP and publishes no flag string, because its
             # servers ride in as `-c` overrides composed at launch.
             "mcp_supported": _agent_supports_mcp(key),
+            # Whether a tool may hand this agent a task at launch: the same
+            # fact the tool descriptions state and the routes refuse on.
+            "opening_prompt_supported": _agent_accepts_task(key),
         }
         for key, spec in AGENT_REGISTRY.items()
     ]
@@ -453,6 +587,7 @@ def _agent_options() -> List[Dict[str, str]]:
             "mcp_flag": "",
             "mcp_description": "",
             "mcp_supported": False,
+            "opening_prompt_supported": False,
         }
     )
     return options
@@ -465,6 +600,7 @@ def _compose_agent_startup_command(
     *,
     identity: Optional[Mapping[str, str]] = None,
     session_hook_settings: str = "",
+    opening_prompt: bool = False,
 ) -> str:
     """Apply launch-only title settings and optional auto-mode flags.
 
@@ -483,6 +619,15 @@ def _compose_agent_startup_command(
     only for a connection whose token lets its session hook report home -- see
     ``web/agent_session_hooks.py``. Like the tunnel's pair it belongs to the
     connection, so it is passed rather than read here.
+
+    ``opening_prompt`` asks for :data:`HANDOFF_OPENING_PROMPT`, because this
+    connection's pane holds a handed-over task. It belongs to the connection
+    for the same reason -- a relaunch never replays it -- and it is placed only
+    beside a non-empty MCP fragment (an agent told to call a tool it does not
+    have is the outcome this prevents) and never beside a resume. It goes
+    directly after the binary: Claude's ``--mcp-config`` takes a variable
+    number of values, so a prompt appended at the end would be read as a
+    second config path.
     """
     base = str(getattr(session, "initial_command", "") or "").strip()
     if not base:
@@ -505,6 +650,11 @@ def _compose_agent_startup_command(
         shell_family,
         AGENT_REGISTRY,
     )
+    # Known from what was just composed rather than parsed back out of the
+    # finished line: a resume is exactly a changed line with the resume flag
+    # set (a fresh Claude `--session-id` is a create, and takes a prompt).
+    resumed = command != base and bool(getattr(session, CONVERSATION_RESUME_FIELD, False))
+    mcp_fragment_placed = False
     if agent_key == "codex":
         # Launch-only override: the CLI's default title contains the project,
         # while thread-title follows the active conversation and /rename.
@@ -546,6 +696,16 @@ def _compose_agent_startup_command(
             fragment = ""
         if fragment:
             command += f" {fragment}"
+            mcp_fragment_placed = True
+    if (
+        opening_prompt
+        and mcp_fragment_placed
+        and not resumed
+        and command.startswith(base)
+    ):
+        prompt = _opening_prompt_fragment(agent_key)
+        if prompt:
+            command = f"{base} {prompt}{command[len(base):]}"
     return command
 
 
