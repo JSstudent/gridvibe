@@ -60,18 +60,42 @@
                workspace: every open window applies them the moment this saves. #}
             <div class="settings-section compact-section">
                 <div class="settings-section-title">Agents</div>
-                <div class="settings-fields-inline">
-                    {# Which edge the docked agent dashboard sits on. The panel
-                       is otherwise unchanged -- the same one toggle wearing the
-                       same two marks. #}
-                    <div class="field">
-                        <label>Agent Dashboard Side</label>
-                        <select id="appAgentSidebarSide" aria-label="Agent dashboard panel side">
-                            <option value="left">Left side</option>
-                            <option value="right">Right side</option>
-                        </select>
+                {# Which edge the docked agent dashboard sits on. The panel
+                   is otherwise unchanged -- the same one toggle wearing the
+                   same two marks. Two radio cards, each drawing the workspace
+                   with the column on its edge, like the launcher's layout
+                   cards; the checked radio is the value app-settings.js reads. #}
+                <fieldset id="appAgentSidebarSide" class="side-choice-field">
+                    <legend>Agent Dashboard Side</legend>
+                    <div class="side-choice-grid">
+                        <label class="side-choice">
+                            <input type="radio" name="appAgentSidebarSide" value="left" checked>
+                            <span class="side-choice-body">
+                                <span class="side-preview" data-side="left" aria-hidden="true">
+                                    <span class="side-preview-panel"></span>
+                                    <span class="side-preview-panes"><span class="pane"></span><span class="pane"></span><span class="pane"></span><span class="pane"></span></span>
+                                </span>
+                                <span class="side-choice-copy">
+                                    <strong>Left side</strong>
+                                    <span>Opens along the left edge</span>
+                                </span>
+                            </span>
+                        </label>
+                        <label class="side-choice">
+                            <input type="radio" name="appAgentSidebarSide" value="right">
+                            <span class="side-choice-body">
+                                <span class="side-preview" data-side="right" aria-hidden="true">
+                                    <span class="side-preview-panes"><span class="pane"></span><span class="pane"></span><span class="pane"></span><span class="pane"></span></span>
+                                    <span class="side-preview-panel"></span>
+                                </span>
+                                <span class="side-choice-copy">
+                                    <strong>Right side</strong>
+                                    <span>Opens along the right edge</span>
+                                </span>
+                            </span>
+                        </label>
                     </div>
-                </div>
+                </fieldset>
                 {# Experimental, off by default: web/agent_conversations.py
                    conversation_restore_enabled() gates the whole feature. #}
                 <label class="check-field multiline-check">

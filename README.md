@@ -178,7 +178,7 @@ See **every session in every workspace**, agents first. Open the dashboard dialo
 
 - **Keep the overview beside your work** — the docked sidebar stays open as you work or switch windows. Each workspace remembers whether it is open.
 - **Widen it when you need more room** — drag the sidebar's inner edge from its default width up to twice that width. The chosen scale is saved with the workspace and adapts to the window size.
-- **Put it on the side you want** — **App Settings ▸ Agents ▸ Agent Dashboard Side** docks the sidebar left or right, and every open window moves as soon as you save. The handle, its marks and the rows are the same either way.
+- **Put it on the side you want** — **App Settings ▸ Agents ▸ Agent Dashboard Side** docks the sidebar left or right — pick the card that shows it on that edge — and every open window moves as soon as you save. The handle, its marks and the rows are the same either way.
 - **Three levels** — a workspace is a titled band, a session tab is a card inside it drawn in that tab's own colour, and each agent is one row inside the card.
 - **Every agent on one line** — a leading status dot, the agent's mark, its chat title, and `MCP` when the agent has GridVibe tools. The dialog also draws the agent's name and `auto` when it was launched with auto-approval.
 - **The state is the leading mark** — a spinning green ring while working, amber z's while idle, a red dot when unreachable. Point at it for the words: how long it has been idle, or what went wrong.

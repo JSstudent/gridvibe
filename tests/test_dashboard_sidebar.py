@@ -1762,23 +1762,129 @@ class DashboardSidebarSideSettingTestCase(unittest.TestCase):
         self.assertTrue(groups["agent_sidebar_open"])
         self.assertNotIn("agent_sidebar_side", groups)
 
-    def test_the_dialog_offers_the_two_sides_and_carries_the_choice(self):
-        """One select beside the surface mode, and the same delivery contract:
-        the collected form states it and the broadcast every open window reads
-        carries it."""
-        page = self.client.get("/terminals").get_data(as_text=True)
-        self.assertIn('id="appAgentSidebarSide"', page)
-        self.assertIn('<option value="left">Left side</option>', page)
-        self.assertIn('<option value="right">Right side</option>', page)
+    def test_the_dialog_offers_the_two_sides_as_drawn_cards(self):
+        """Two radio cards, like the launcher's layout cards: each draws the
+        workspace with the dashboard column on its own edge, so the thumbnail
+        is the answer and the words only confirm it. Both pages carry it."""
+        for path in ("/", "/terminals"):
+            with self.subTest(page=path):
+                page = self.client.get(path).get_data(as_text=True)
+                start = page.index('id="appAgentSidebarSide"')
+                group = page[start:page.index("</fieldset>", start)]
+                self.assertNotIn("<select", group)
+                self.assertIn("<legend>Agent Dashboard Side</legend>", group)
+                radios = re.findall(
+                    r'<input type="radio" name="appAgentSidebarSide" value="(\w+)"',
+                    group,
+                )
+                self.assertEqual(radios, ["left", "right"])
 
+                previews = re.findall(
+                    r'<span class="side-preview" data-side="(\w+)" aria-hidden="true">'
+                    r'\s*<span class="side-preview-(\w+)">',
+                    group,
+                )
+                # The column comes first on the left card and the panes come
+                # first on the right one, so the grid places each on its edge.
+                self.assertEqual(
+                    previews, [("left", "panel"), ("right", "panes")]
+                )
+                self.assertEqual(group.count('class="pane"'), 8)
+                self.assertIn("<strong>Left side</strong>", group)
+                self.assertIn("<strong>Right side</strong>", group)
+
+        css = self.client.get("/static/css/app-settings.css").get_data(as_text=True)
+        self.assertRegex(
+            css,
+            r'\.side-preview\[data-side="left"\] \{\s*grid-template-columns: 15px minmax\(0, 1fr\);',
+        )
+        self.assertRegex(
+            css,
+            r'\.side-preview\[data-side="right"\] \{\s*grid-template-columns: minmax\(0, 1fr\) 15px;',
+        )
+        self.assertIn(".side-choice input:checked + .side-choice-body", css)
+        self.assertIn(".side-choice input:focus-visible + .side-choice-body", css)
+
+    @unittest.skipUnless(NODE, "Node.js is required for the side-picker harness")
+    def test_the_checked_card_is_what_a_save_carries(self):
+        """The real read/write pair and the real collect, run against a stubbed
+        radio group: loading a side checks exactly its card, a save states the
+        checked one, and anything the page never offered reads as the left."""
+        app_settings = (STATIC_JS / "app-settings.js").read_text(encoding="utf-8")
+        functions = app_settings[
+            app_settings.index("    function isNativeWindowModeAvailable()"):
+            app_settings.index("    function syncAutosaveIntervalLabel(")
+        ]
+        harness = (
+            r"""
+            const DEFAULT_APP_SETTINGS = { workspace: { autosave_interval_minutes: 5 } };
+            const window = { pywebview: null };
+            const radios = ['left', 'right'].map(value => ({ value, checked: false }));
+            const group = {
+                querySelectorAll: selector =>
+                    selector === 'input[type="radio"]' ? radios : [],
+                querySelector: selector =>
+                    selector === 'input[type="radio"]:checked'
+                        ? radios.find(radio => radio.checked) || null
+                        : null
+            };
+            let present = true;
+            const elements = {
+                appSurfaceMode: { value: 'normal' },
+                appWorkspaceAutosaveInterval: { value: '5' }
+            };
+            const document = {
+                getElementById: id =>
+                    id === 'appAgentSidebarSide' ? (present ? group : null) : (elements[id] || null)
+            };
+            """
+            + functions
+            + r"""
+            const checked = () => radios.filter(r => r.checked).map(r => r.value);
+            const result = {};
+            result.nothingChecked = collectWorkspaceSettingsForm().agent_sidebar_side;
+            writeAgentSidebarSideChoice('right');
+            result.loadedRight = checked();
+            result.savedRight = collectWorkspaceSettingsForm().agent_sidebar_side;
+            writeAgentSidebarSideChoice('left');
+            result.loadedLeft = checked();
+            result.savedLeft = collectWorkspaceSettingsForm().agent_sidebar_side;
+            writeAgentSidebarSideChoice('top');
+            result.loadedBogus = checked();
+            radios[1].checked = true;
+            radios[0].checked = false;
+            result.clickedRight = readAgentSidebarSideChoice();
+            present = false;
+            writeAgentSidebarSideChoice('right');
+            result.noGroup = collectWorkspaceSettingsForm().agent_sidebar_side;
+            process.stdout.write(JSON.stringify(result));
+            """
+        )
+        with TemporaryDirectory() as script_dir:
+            script_path = Path(script_dir) / "harness.js"
+            script_path.write_text(harness, encoding="utf-8")
+            completed = subprocess.run(
+                [NODE, str(script_path)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        if completed.returncode != 0:
+            self.fail(f"node harness failed:\n{completed.stderr}")
+        result = json.loads(completed.stdout)
+        self.assertEqual(result["nothingChecked"], "left")
+        self.assertEqual(result["loadedRight"], ["right"])
+        self.assertEqual(result["savedRight"], "right")
+        self.assertEqual(result["loadedLeft"], ["left"])
+        self.assertEqual(result["savedLeft"], "left")
+        self.assertEqual(result["loadedBogus"], ["left"])
+        self.assertEqual(result["clickedRight"], "right")
+        self.assertEqual(result["noGroup"], "left")
+
+    def test_the_broadcast_every_open_window_reads_carries_the_side(self):
         app_settings = self.client.get("/static/js/app-settings.js").get_data(
             as_text=True
         )
-        collect = app_settings[
-            app_settings.index("function collectWorkspaceSettingsForm()"):
-            app_settings.index("function syncAutosaveIntervalLabel()")
-        ]
-        self.assertIn("appAgentSidebarSide", collect)
         notify = app_settings[
             app_settings.index("function notifyAppConfigUpdated(appSettings"):
             app_settings.index("async function loadAppSettings()")

@@ -331,6 +331,172 @@
     vertical-align: middle;
 }
 
+/* Agent Dashboard Side: two radio cards drawn like the launcher's layout
+   cards -- a thumbnail of the workspace with the dashboard column on its edge.
+   The radio itself is visually hidden but stays focusable, so arrow keys move
+   the choice and the card wears the focus ring. */
+#appSettingsModal .side-choice-field {
+    min-width: 0;
+    margin: 0;
+    padding: 0;
+    border: 0;
+    display: grid;
+    gap: 5px;
+}
+
+#appSettingsModal .side-choice-field legend {
+    padding: 0;
+    margin-bottom: 5px;
+    color: var(--gv-dialog-muted);
+    text-transform: uppercase;
+    letter-spacing: 1.2px;
+    font-size: 0.72rem;
+    font-weight: 700;
+}
+
+#appSettingsModal .side-choice-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+}
+
+#appSettingsModal .side-choice {
+    position: relative;
+    display: block;
+    cursor: pointer;
+}
+
+#appSettingsModal .side-choice input[type="radio"] {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: 0;
+    opacity: 0;
+    pointer-events: none;
+}
+
+#appSettingsModal .side-choice-body {
+    position: relative;
+    min-height: 58px;
+    padding: 10px 12px;
+    display: grid;
+    grid-template-columns: 64px minmax(0, 1fr);
+    gap: 12px;
+    align-items: center;
+    border: 1px solid var(--gv-dialog-border);
+    border-radius: var(--gv-radius-m);
+    background: var(--gv-dialog-field-bg);
+    transition: border-color 0.2s ease, background 0.2s ease, transform 0.15s ease, box-shadow 0.2s ease;
+}
+
+#appSettingsModal .side-choice:hover .side-choice-body {
+    border-color: color-mix(in srgb, var(--gv-accent) 50%, transparent);
+    transform: translateY(-1px);
+}
+
+#appSettingsModal .side-choice input:checked + .side-choice-body {
+    border-color: var(--gv-accent);
+    background: linear-gradient(180deg, var(--gv-accent-soft), color-mix(in srgb, var(--gv-accent) 6%, var(--gv-dialog-field-bg)));
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--gv-accent) 15%, transparent);
+}
+
+#appSettingsModal .side-choice input:focus-visible + .side-choice-body {
+    box-shadow: 0 0 0 3px var(--gv-accent-soft);
+    border-color: var(--gv-accent);
+}
+
+/* The launcher's check badge on the chosen card. */
+#appSettingsModal .side-choice input:checked + .side-choice-body::after {
+    content: "";
+    position: absolute;
+    top: -4px;
+    right: -4px;
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background: var(--gv-accent);
+}
+
+#appSettingsModal .side-choice input:checked + .side-choice-body::before {
+    content: "";
+    position: absolute;
+    top: 0;
+    right: 0;
+    z-index: 1;
+    width: 10px;
+    height: 10px;
+    background: var(--gv-dialog-field-bg);
+    -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='20 6 9 17 4 12'/%3E%3C/svg%3E") center / contain no-repeat;
+    mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23000' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='20 6 9 17 4 12'/%3E%3C/svg%3E") center / contain no-repeat;
+}
+
+/* The thumbnail: the dashboard column and a 2x2 grid of panes, in the order
+   the markup gives them, so each card draws its own edge. */
+#appSettingsModal .side-preview {
+    width: 64px;
+    height: 40px;
+    display: grid;
+    gap: 3px;
+    padding: 3px;
+    border-radius: 7px;
+    border: 1px solid color-mix(in srgb, var(--gv-accent) 22%, transparent);
+    background: var(--gv-dialog-panel-soft);
+}
+
+#appSettingsModal .side-preview[data-side="left"] {
+    grid-template-columns: 15px minmax(0, 1fr);
+}
+
+#appSettingsModal .side-preview[data-side="right"] {
+    grid-template-columns: minmax(0, 1fr) 15px;
+}
+
+#appSettingsModal .side-preview-panel {
+    border-radius: 3px;
+    background:
+        linear-gradient(var(--gv-dialog-field-bg), var(--gv-dialog-field-bg)) center 5px / 9px 2px no-repeat,
+        linear-gradient(var(--gv-dialog-field-bg), var(--gv-dialog-field-bg)) center 10px / 9px 2px no-repeat,
+        linear-gradient(var(--gv-dialog-field-bg), var(--gv-dialog-field-bg)) center 15px / 9px 2px no-repeat,
+        var(--gv-accent);
+    opacity: 0.9;
+}
+
+#appSettingsModal .side-preview-panes {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    grid-template-rows: 1fr 1fr;
+    gap: 2px;
+    min-width: 0;
+}
+
+#appSettingsModal .side-preview .pane {
+    border-radius: 3px;
+    background: color-mix(in srgb, var(--gv-accent) 16%, transparent);
+    border: 1px solid color-mix(in srgb, var(--gv-accent) 45%, transparent);
+}
+
+#appSettingsModal .side-choice input:not(:checked) + .side-choice-body .side-preview-panel {
+    opacity: 0.55;
+}
+
+#appSettingsModal .side-choice-copy {
+    display: grid;
+    gap: 2px;
+    min-width: 0;
+}
+
+#appSettingsModal .side-choice-copy strong {
+    color: var(--gv-dialog-text);
+    font-size: 0.84rem;
+    font-weight: 600;
+}
+
+#appSettingsModal .side-choice-copy span {
+    color: var(--gv-dialog-muted);
+    font-size: 0.72rem;
+    line-height: 1.35;
+}
+
 /* Voice */
 #appSettingsModal .voice-settings-panel {
     grid-column: 1 / -1;
@@ -456,6 +622,12 @@
 
 @media (max-width: 640px) {
     #appSettingsModal .voice-availability {
+        grid-template-columns: minmax(0, 1fr);
+    }
+}
+
+@media (max-width: 480px) {
+    #appSettingsModal .side-choice-grid {
         grid-template-columns: minmax(0, 1fr);
     }
 }

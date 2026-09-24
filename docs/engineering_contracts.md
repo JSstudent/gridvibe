@@ -1208,7 +1208,10 @@ unless the task explicitly changes this contract.
   grid (never `row-reverse`, which would also swap the empty state sharing that
   row) and flips the frame border and the resizer's end. Markup, the single
   toggle and its two marks, the open/shut state and the width are identical on
-  both sides.
+  both sides. App Settings offers it as the radio group `#appAgentSidebarSide`:
+  two cards, each a thumbnail with the column drawn on its own edge, like the
+  launcher's layout cards. The checked radio is the value, and anything that is
+  not `right` (nothing checked, no group on the page) is collected as `left`.
 - Sidebar width is `calc(var(--agent-sidebar-width) *
   var(--agent-sidebar-scale, 1))`, with the base owned solely by the CSS clamp
   `clamp(240px, 15%, 400px)`. Dragging measures the rendered border-box width
