@@ -3,6 +3,10 @@ https://github.com/user-attachments/assets/90cc03b2-16d8-4b8b-b3a4-80630340e937
 <h1 align="center">GridVibe</h1>
 
 <p align="center">
+  <img src="docs/images/GridVibe.png" alt="GridVibe logo" width="160">
+</p>
+
+<p align="center">
   <b>The vibe-coding cockpit.</b><br>
   Spin up a grid of AI agent CLIs and SSH terminals in seconds, talk to them out loud,<br>
   and keep your files, Git, and a live app preview in the same window.
