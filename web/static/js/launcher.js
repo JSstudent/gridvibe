@@ -597,29 +597,62 @@
         return parseStartupSelection(row?.querySelector('.startup-mode-select')?.value).agent;
     }
 
+    /* Each option names the glyph its row wears in the Startup Mode picker
+       (startup-mode-picker.js): a plain mode the icon its pane header's toggle
+       uses, an agent the mark and brand colour its pane header and dashboard
+       row will. Agents are listed by the registry's display name — the name
+       the pane will carry — with the command itself as the hint. */
     function renderStartupModeOptions(commandUi) {
         const mode = commandUi.mode;
         const agent = String(commandUi.agentSelection || '').trim().toLowerCase();
-        const agentOptions = AGENT_OPTIONS.map(option => `
+        const glyphs = window.GridVibeAgentGlyphs;
+        const agentOptions = AGENT_OPTIONS.map(option => {
+            const custom = option.value === 'other';
+            const name = custom ? 'Custom agent' : (option.display_name || option.label || option.value);
+            return `
             <option
                 value="agent:${escHtml(option.value)}"
-                data-base-label="${escHtml(option.label)}"
+                data-base-label="${escHtml(name)}"
+                data-icon="agent"
+                data-agent="${escHtml(glyphs ? glyphs.agentGlyphKey(option.value) : '')}"
+                data-hint="${custom ? '' : escHtml(option.value)}"
                 ${mode === 'agent' && agent === option.value ? 'selected' : ''}
-            >${escHtml(option.label)}</option>
-        `).join('');
+            >${escHtml(name)}</option>
+        `;
+        }).join('');
         /* The hidden "agent:" placeholder exists so a draft saved in agent
            mode without a chosen agent still has an option to select; it is
            not offered in the open dropdown. */
         return `
-            <option value="terminal" ${mode === 'terminal' ? 'selected' : ''}>Terminal</option>
-            <option value="command" ${mode === 'command' ? 'selected' : ''}>Initial Command</option>
-            <option value="explorer" ${mode === 'explorer' ? 'selected' : ''}>File Explorer</option>
-            <option value="browser" ${mode === 'browser' ? 'selected' : ''} ${connectionMode === 'wsl' ? '' : 'disabled'}>Browser</option>
+            <option value="terminal" data-icon="terminal" ${mode === 'terminal' ? 'selected' : ''}>Terminal</option>
+            <option value="command" data-icon="command" ${mode === 'command' ? 'selected' : ''}>Initial Command</option>
+            <option value="explorer" data-icon="explorer" ${mode === 'explorer' ? 'selected' : ''}>File Explorer</option>
+            <option value="browser" data-icon="browser" ${mode === 'browser' ? 'selected' : ''} ${connectionMode === 'wsl' ? '' : 'disabled'}>Browser</option>
             <optgroup label="Agent">
-                <option value="agent:" hidden ${mode === 'agent' && !agent ? 'selected' : ''}>Select agent…</option>
+                <option value="agent:" data-icon="agent" hidden ${mode === 'agent' && !agent ? 'selected' : ''}>Select agent…</option>
                 ${agentOptions}
             </optgroup>
         `;
+    }
+
+    /* The glyph a Startup Mode row wears, keyed by its option's data-icon. The
+       plain modes reuse the pane header's own toggle icons (terminal-icons.js);
+       an initial command wears the boxed prompt an unrecognised agent does,
+       since both are "a terminal that starts something". */
+    function startupModeIconMarkup(entry) {
+        const glyphs = window.GridVibeAgentGlyphs;
+        switch (entry.icon) {
+        case 'terminal': return TERMINAL_PROMPT_ICON;
+        case 'explorer': return EXPLORER_MODE_FOLDER_ICON;
+        case 'browser': return BROWSER_MODE_GLOBE_ICON;
+        case 'command': return glyphs ? glyphs.agentGlyphMarkup('') : '';
+        case 'agent': return glyphs ? glyphs.agentGlyphMarkup(entry.agent) : '';
+        default: return '';
+        }
+    }
+
+    function syncStartupModePicker(select) {
+        window.GridVibeStartupModePicker?.sync(select);
     }
 
     function getTerminalCommandMode(row) {
@@ -1546,6 +1579,7 @@
             if (powershellCheckbox) powershellCheckbox.checked = false;
         }
         syncTerminalWslState(row);
+        syncStartupModePicker(startupModeSelect);
     }
 
     function syncTerminalAgentAutoModeState(row, commandMode, selectedAgent) {
@@ -1662,6 +1696,7 @@
         _resetAgentOptionLabels(select);
         if (select) {
             select.title = '';
+            syncStartupModePicker(select);
         }
         if (summary) {
             summary.className = 'agent-preflight-summary';
@@ -1754,6 +1789,7 @@
         if (selectedOption && selectedOption.dataset.baseLabel) {
             selectedOption.textContent = `${selectedOption.dataset.baseLabel} · ${label}`;
         }
+        syncStartupModePicker(select);
 
         summary.className = `agent-preflight-summary ${escHtml(status)}`.trim();
         summaryLabel.textContent = label;
@@ -1936,6 +1972,10 @@
             const distributionInput = row.querySelector('.t-distribution');
             const startupModeSelect = row.querySelector('.startup-mode-select');
 
+            window.GridVibeStartupModePicker?.enhance(startupModeSelect, {
+                label: 'Startup mode',
+                iconMarkup: startupModeIconMarkup
+            });
             startupModeSelect?.addEventListener('change', () => {
                 const nextMode = parseStartupSelection(startupModeSelect.value).mode;
                 resetTerminalCommandOnModeChange(row, nextMode);

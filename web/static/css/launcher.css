@@ -170,13 +170,7 @@
             background: rgba(8, 145, 178, 0.12);
         }
 
-        [data-theme="light"] .startup-mode-select {
-            border-color: rgba(75, 85, 99, 0.34);
-            background: rgba(255, 255, 255, 0.99);
-            color: #374151;
-        }
-
-        [data-theme="light"] .startup-mode-select:hover {
+        [data-theme="light"] .startup-mode-trigger:hover {
             border-color: rgba(8, 145, 178, 0.48);
         }
 
@@ -1229,61 +1223,194 @@
             word-break: break-word;
         }
 
-        .startup-mode-select {
-            padding-right: 36px;
-            color-scheme: dark;
-            background-image:
-                linear-gradient(45deg, transparent 50%, currentColor 50%),
-                linear-gradient(135deg, currentColor 50%, transparent 50%);
-            background-position:
-                calc(100% - 16px) calc(50% - 3px),
-                calc(100% - 11px) calc(50% - 3px);
-            background-size: 5px 5px, 5px 5px;
-            background-repeat: no-repeat;
+        /* Startup Mode picker (startup-mode-picker.js). The native select is
+           kept, hidden, as the value everything reads; this button stands in
+           its place so each row can wear its glyph and an agent its brand
+           colour. It borrows the field inputs' own frame. */
+        .startup-mode-select[hidden] {
+            display: none;
         }
 
-        [data-theme="light"] .startup-mode-select {
-            color-scheme: light;
+        .startup-mode-trigger {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            width: 100%;
+            min-width: 0;
+            padding: 10px 13px;
+            border-radius: 10px;
+            border: 1px solid var(--border-muted);
+            background: var(--bg-input);
+            color: var(--text);
+            font: inherit;
+            font-size: 0.88rem;
+            text-align: left;
+            cursor: pointer;
+            outline: none;
+            transition: border-color 0.2s ease, box-shadow 0.2s ease;
+        }
+
+        .startup-mode-trigger:hover {
+            border-color: rgba(0, 217, 255, 0.42);
+        }
+
+        .startup-mode-trigger:focus-visible,
+        .startup-mode-trigger[aria-expanded="true"] {
+            border-color: var(--border-active);
+            box-shadow: 0 0 0 3px rgba(0, 217, 255, 0.12);
+        }
+
+        [data-theme="light"] .startup-mode-trigger {
             background-color: #ffffff;
             color: #111827;
             border-color: rgba(75, 85, 99, 0.42);
             font-weight: 600;
         }
 
-        [data-theme="light"] .startup-mode-select option {
-            background: #ffffff;
-            color: #111827;
+        [data-theme="light"] .startup-mode-trigger:focus-visible,
+        [data-theme="light"] .startup-mode-trigger[aria-expanded="true"] {
+            border-color: rgba(14, 116, 144, 0.5);
+            box-shadow: 0 0 0 3px rgba(14, 116, 144, 0.12);
         }
 
-        /* Agent preflight status paints the control's frame only. A native
-           select hands its own background-color and color down to the popup
-           list, so tinting the closed control repainted every Startup Mode
-           option — Terminal, File Explorer, Browser — in the agent's status
-           colour. The frame carries the signal; the status word itself lives
-           in the selected option's " · Installed" suffix, the preflight
-           summary chip, and the select's title tooltip. Theme-aware tokens
-           replace this block's old per-theme literals. */
-        .startup-mode-select.status-installed {
-            border-color: var(--gv-success);
-            box-shadow: inset 0 0 0 1px var(--gv-success);
+        .startup-mode-icon {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            flex: 0 0 18px;
+            width: 18px;
+            height: 18px;
+            color: var(--muted);
         }
 
-        .startup-mode-select.status-missing,
-        .startup-mode-select.status-needs_manual_install {
-            border-color: var(--gv-warning);
-            box-shadow: inset 0 0 0 1px var(--gv-warning);
+        .startup-mode-icon svg,
+        .startup-mode-icon .dash-agent-glyph {
+            width: 16px;
+            height: 16px;
         }
 
-        .startup-mode-select.status-missing_prerequisite,
-        .startup-mode-select.status-check_failed,
-        .startup-mode-select.status-unsupported_here {
-            border-color: var(--gv-danger);
-            box-shadow: inset 0 0 0 1px var(--gv-danger);
+        .startup-mode-name {
+            flex: 0 1 auto;
+            min-width: 0;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            font-weight: 600;
         }
 
-        .startup-mode-select.status-target_incomplete {
-            border-color: var(--gv-accent);
-            box-shadow: inset 0 0 0 1px var(--gv-accent);
+        .startup-mode-hint {
+            flex: 0 0 auto;
+            margin-left: auto;
+            padding-left: 10px;
+            color: var(--muted);
+            font-family: Consolas, Monaco, "Courier New", monospace;
+            font-size: 0.72rem;
+            font-weight: 500;
+        }
+
+        .startup-mode-status {
+            flex: 0 0 auto;
+            margin-left: auto;
+            color: var(--startup-status, var(--muted));
+            font-size: 0.74rem;
+            font-weight: 600;
+        }
+
+        .startup-mode-caret {
+            display: inline-flex;
+            flex: 0 0 14px;
+            margin-left: auto;
+            color: var(--muted);
+        }
+
+        .startup-mode-status + .startup-mode-caret {
+            margin-left: 0;
+        }
+
+        .startup-mode-caret svg {
+            width: 14px;
+            height: 14px;
+            transition: transform 0.15s ease;
+        }
+
+        .startup-mode-trigger[aria-expanded="true"] .startup-mode-caret svg {
+            transform: rotate(180deg);
+        }
+
+        /* The open list lives on <body>, fixed off the button, so the
+           Terminal Setup card's scroll box cannot clip it. */
+        .startup-mode-list {
+            position: fixed;
+            z-index: 1200;
+            display: flex;
+            flex-direction: column;
+            gap: 1px;
+            max-width: calc(100vw - 16px);
+            padding: 5px;
+            overflow-y: auto;
+            border: 1px solid var(--line-strong);
+            border-radius: 10px;
+            background: var(--bg-deep);
+            box-shadow: var(--shadow);
+            outline: none;
+        }
+
+        .startup-mode-list[hidden] {
+            display: none;
+        }
+
+        .startup-mode-option {
+            display: flex;
+            align-items: center;
+            gap: 9px;
+            padding: 6px 9px;
+            border-radius: 7px;
+            color: var(--text);
+            font-size: 0.84rem;
+            cursor: pointer;
+            white-space: nowrap;
+        }
+
+        .startup-mode-option.is-active {
+            background: var(--accent-soft);
+        }
+
+        .startup-mode-option.is-selected {
+            box-shadow: inset 2px 0 0 var(--accent);
+        }
+
+        .startup-mode-option.is-disabled {
+            opacity: 0.42;
+            cursor: not-allowed;
+        }
+
+        .startup-mode-group {
+            margin-top: 4px;
+            padding: 6px 9px 3px;
+            border-top: 1px solid var(--line);
+            color: var(--muted);
+            font-size: 0.66rem;
+            font-weight: 700;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+        }
+
+        /* Agent preflight status paints the button's frame and its status
+           word; the list rows keep their own colours, since the status is
+           about the selected agent only. The same word stays in the selected
+           option's " · Installed" suffix, which is where the button reads it,
+           in the preflight summary chip, and in the tooltip. */
+        .startup-mode-trigger.status-installed { --startup-status: var(--gv-success); }
+        .startup-mode-trigger.status-missing,
+        .startup-mode-trigger.status-needs_manual_install { --startup-status: var(--gv-warning); }
+        .startup-mode-trigger.status-missing_prerequisite,
+        .startup-mode-trigger.status-check_failed,
+        .startup-mode-trigger.status-unsupported_here { --startup-status: var(--gv-danger); }
+        .startup-mode-trigger.status-target_incomplete { --startup-status: var(--gv-accent); }
+
+        .startup-mode-trigger[class*="status-"] {
+            border-color: var(--startup-status);
+            box-shadow: inset 0 0 0 1px var(--startup-status);
         }
 
         .agent-preflight-disclosure {
@@ -1835,7 +1962,9 @@
             min-width: 0;
         }
 
-        .startup-mode-select {
+        .startup-mode-trigger {
+            padding: 8px 11px;
+            font-size: 0.84rem;
             border-color: rgba(0, 217, 255, 0.22);
         }
 

@@ -83,7 +83,7 @@ python webview_launcher.py --mode browser|native
 
 ## Agent CLIs
 
-Pick an agent per pane in the launcher. GridVibe checks whether the binary is on `PATH` **in the target environment** (the remote host for SSH, the chosen distro for WSL, Windows for PowerShell/cmd) and shows install guidance when it isn't.
+Pick an agent per pane from the launcher's **Startup Mode** list, where each agent shows the icon and brand colour its pane will wear. GridVibe checks whether the binary is on `PATH` **in the target environment** (the remote host for SSH, the chosen distro for WSL, Windows for PowerShell/cmd) and shows install guidance when it isn't.
 
 | Agent | Binary | Auto mode | GridVibe tools |
 | --- | --- | --- | --- |
@@ -228,7 +228,7 @@ Cross-root transfers and Git checkout, pull, or merge are intentionally left to 
 Launched a pane in cmd and wanted PowerShell — or Codex in WSL? Click the pane's 🔄 button.
 
 - **Pick a shell** — a Local Repo terminal on Windows lists **Command Prompt**, **PowerShell**, **WSL**, and every detected distro. The pane restarts in place, same slot, same title, in the directory the old shell was sitting in.
-- **Pick an agent** — each shell row's chevron opens **Plain shell** plus every agent, so "this pane, but Codex in WSL" is one click. SSH panes and non-Windows hosts get that list flat.
+- **Pick an agent** — each shell row's chevron opens **Plain shell** plus every agent, each under its own icon and brand colour, so "this pane, but Codex in WSL" is one click. SSH panes and non-Windows hosts get that list flat.
 - **Give it GridVibe tools** — agents that support MCP carry an **MCP** button beside their row: the row starts the agent plainly, the button starts it with GridVibe's own tools. Works on SSH panes as well as local ones.
 - **The pane says which it is** — a pane running with GridVibe tools draws a frame around the agent's icon in its header, and keeps it across a save and restore. Relaunching it plainly takes the frame off.
 - **Plain shell** drops a running agent and comes back to an ordinary prompt. Picking whatever is already checked relaunches it too.

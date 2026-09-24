@@ -186,16 +186,32 @@
         return document.querySelector(`[data-pane-shell-menu="${index}"]`);
     }
 
-    function paneShellMenuItemHtml({ label, hint = '', active = false, attrs = '', classes = '' }) {
+    /* An agent row wears the same mark and brand colour the pane header and the
+       dashboard row paint that agent in, so the menu names an agent the way the
+       rest of the page already does. `data-agent` sits on the row rather than
+       on the label, which is what agent-brand.css keys the colour off. */
+    function paneShellAgentIconHtml(agentKey) {
+        const glyphs = typeof window !== 'undefined' ? window.GridVibeAgentGlyphs : undefined;
+        return glyphs ? glyphs.agentGlyphMarkup(agentKey) : '';
+    }
+
+    function paneShellAgentBrandKey(agentKey) {
+        const glyphs = typeof window !== 'undefined' ? window.GridVibeAgentGlyphs : undefined;
+        return glyphs ? glyphs.agentGlyphKey(agentKey) : '';
+    }
+
+    function paneShellMenuItemHtml({ label, hint = '', active = false, attrs = '', classes = '', icon = '', agent = '' }) {
         return `
             <button
                 type="button"
                 role="menuitemradio"
                 class="pane-shell-menu-item${active ? ' is-active' : ''}${classes ? ` ${classes}` : ''}"
                 aria-checked="${active ? 'true' : 'false'}"
+                ${agent ? `data-agent="${escHtml(agent)}"` : ''}
                 ${attrs}
             >
                 <span class="pane-shell-menu-mark">${active ? UI_CHECK_ICON : ''}</span>
+                ${icon ? `<span class="pane-shell-menu-icon">${icon}</span>` : ''}
                 <span class="pane-shell-menu-label">${escHtml(label)}</span>
                 ${hint ? `<span class="pane-shell-menu-hint">${escHtml(hint)}</span>` : ''}
             </button>
@@ -234,6 +250,7 @@
             paneShellMenuItemHtml({
                 label: 'Plain shell',
                 active: familyIsActive && !activeAgent,
+                icon: TERMINAL_PROMPT_ICON,
                 attrs: paneShellLaunchAttrs(shellKind, distribution, '', false)
             })
         ];
@@ -244,6 +261,8 @@
                 label,
                 hint: option.value,
                 active: isLive && !activeMcp,
+                icon: paneShellAgentIconHtml(option.value),
+                agent: paneShellAgentBrandKey(option.value),
                 attrs: paneShellLaunchAttrs(shellKind, distribution, option.value, false)
             });
             if (!paneAgentSupportsMcp(option)) {

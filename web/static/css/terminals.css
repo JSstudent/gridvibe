@@ -1659,6 +1659,21 @@
 
         .pane-shell-menu-mark svg { width: 14px; height: 14px; }
 
+        /* What the row starts: the agent's own mark (the one its pane header
+           and dashboard row wear), or the prompt glyph for a plain shell. */
+        .pane-shell-menu-icon {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            flex: 0 0 16px;
+            width: 16px;
+            height: 16px;
+            color: var(--t-text-muted);
+        }
+
+        .pane-shell-menu-icon svg,
+        .pane-shell-menu-icon .dash-agent-glyph { width: 16px; height: 16px; }
+
         .pane-shell-menu-label {
             flex: 1 1 auto;
             min-width: 0;

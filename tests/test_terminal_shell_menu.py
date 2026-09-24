@@ -74,6 +74,7 @@ var sessionIds = [];
 const TERMINAL_REFRESH_ICON = '<svg data-icon="refresh"></svg>';
 const UI_CHECK_ICON = '<svg data-icon="check"></svg>';
 const UI_CHEVRON_RIGHT_ICON = '<svg data-icon="chevron"></svg>';
+const TERMINAL_PROMPT_ICON = '<svg data-icon="prompt"></svg>';
 
 /* shared.js's own escaper, copied rather than neutered: the rows' values reach
    the parser below through it, so a stub that did not escape would let a distro
@@ -226,8 +227,10 @@ function parseRows(html) {
             }
         }
         const label = /<span class="pane-shell-menu-label">([\s\S]*?)<\/span>/.exec(match[2]);
+        const icon = /<span class="pane-shell-menu-icon">([\s\S]*?)<\/span>/.exec(match[2]);
         rows.push({
             dataset,
+            icon: icon ? icon[1].trim() : '',
             label: label ? label[1].trim() : (attrs['aria-label'] || ''),
             checked: attrs['aria-checked'] === 'true',
             expander: Object.prototype.hasOwnProperty.call(dataset, 'paneShellExpand'),
@@ -601,6 +604,55 @@ class PaneWithoutShellFamiliesTestCase(TerminalShellMenuTestCase):
             """
         )
         self.assertEqual(result["requests"][0]["body"], {"agent": "", "mcp": False})
+
+
+class AgentRowIdentityTestCase(TerminalShellMenuTestCase):
+    """An agent row names its agent the way the pane header will: its mark and
+    its brand colour, from the same glyph module the header paints from."""
+
+    def test_each_agent_row_wears_its_own_mark_and_brand_key(self):
+        result = self._run_node(
+            """
+            const rows = await openMenu(0, sshPane());
+            report(rows.filter(row => row.launch && !row.tools).map(row => ({
+                label: row.label,
+                agent: row.dataset.agent || '',
+                icon: row.icon
+            })));
+            """
+        )
+        by_label = {row["label"]: row for row in result}
+        self.assertEqual(by_label["Claude Code"]["agent"], "claude")
+        self.assertIn("/docs/images/agent/claude-code.svg", by_label["Claude Code"]["icon"])
+        self.assertEqual(by_label["OpenAI Codex CLI"]["agent"], "codex")
+        self.assertIn("/docs/images/agent/openai.svg", by_label["OpenAI Codex CLI"]["icon"])
+        self.assertIn("/docs/images/agent/kilocode.svg", by_label["Kilo CLI"]["icon"])
+        # A plain shell is no agent, so it takes no brand colour -- it wears the
+        # prompt glyph the pane header's terminal toggle uses.
+        self.assertEqual(by_label["Plain shell"]["agent"], "")
+        self.assertIn('data-icon="prompt"', by_label["Plain shell"]["icon"])
+
+    def test_the_mcp_button_and_the_shell_rows_carry_no_agent_mark(self):
+        result = self._run_node(
+            """
+            const opened = await openMenu(0, localPane());
+            await press(0, opened.find(row => row.dataset.paneShellExpand === 'powershell '));
+            const rows = rowsFor(0);
+            report({
+                tools: rows.filter(row => row.tools).map(row => row.icon + (row.dataset.agent || '')),
+                families: rows.filter(row => row.launch && !row.dataset.paneShellAgent
+                    && row.label !== 'Plain shell').map(row => row.label + '=' + row.icon)
+            });
+            """
+        )
+        # The MCP badge is a second target on its agent's row, not a second
+        # agent row: the mark and the colour belong to the row beside it.
+        self.assertEqual(result["tools"], ["", ""])
+        # A shell family is where an agent runs, not what it is.
+        self.assertEqual(
+            result["families"],
+            ["Command Prompt=", "PowerShell=", "WSL=", "WSL · Ubuntu="],
+        )
 
 
 class AgentToolsButtonTestCase(TerminalShellMenuTestCase):

@@ -1740,10 +1740,28 @@ in `README.md`; state the rules a change has to keep.
   wrapper for the stylesheet to tint. Known agents use the supplied SVG artwork
   in `docs/images/agent/` through local `<img>` elements; unknown agents fall
   back to the shared terminal SVG. Brand colors live in `tokens.css` and
-  `agent-brand.css` applies them to terminal titles and dashboard names. Exact
+  `agent-brand.css` applies them to terminal titles, dashboard names, the
+  relaunch menu's agent rows and the launcher's Startup Mode picker. Exact
   foregrounds are retained in both themes, with contrasting backgrounds for
   white/yellow names on light surfaces and near-black OpenCode names. Runtime
   agent changes update both the title's brand key and its icon in place.
+- An agent is named the same way wherever it can be chosen. The relaunch
+  menu's agent rows and the launcher's Startup Mode rows wear
+  `agentGlyphMarkup()` and carry `data-agent` from `agentGlyphKey()`; plain
+  modes reuse the pane header's toggle icons from `terminal-icons.js`, and an
+  initial command wears the undrawn-agent fallback. Launcher agents are
+  listed by registry `display_name` with the command as the hint.
+- `startup-mode-picker.js` draws over the launcher's Startup Mode `<select>`
+  and never replaces it: the select stays in the row, hidden, as the value
+  every reader, writer and saved draft uses. The open list is rebuilt from
+  the select's options on each open; a pick sets `select.value` and
+  dispatches `change`, and re-picking the current row dispatches nothing.
+  Code that changes the select programmatically (a reconciled mode, a
+  preflight status class, title or ` · <status>` suffix) calls
+  `syncStartupModePicker()` so the button repaints from it. The list is one
+  `fixed` element on `<body>` so the card's scroll box cannot clip it. It
+  closes on an outside press, an outside scroll, a resize or window blur,
+  and a pick whose select was rebuilt away writes nothing.
 - A pane header's title line gives up width in a fixed order, so no width
   squeezes every label into an ellipsis at once. `updatePaneHeaderLayout()`
   measures with the actions inline and the name printed, then folds the actions
