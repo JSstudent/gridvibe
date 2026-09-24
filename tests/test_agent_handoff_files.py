@@ -106,10 +106,12 @@ class LocalWriterTestCase(unittest.TestCase):
     def test_a_write_that_fails_leaves_nothing_behind(self):
         real_open = os.open
 
-        def failing_open(path, flags, mode=0o777):
+        # files.os is the real os module, so this stub also serves the cleanup's
+        # rmtree, which on POSIX walks with os.open(..., dir_fd=...).
+        def failing_open(path, flags, *args, **kwargs):
             if str(path).endswith(files.LOCAL_FILE_NAME):
                 raise PermissionError(13, "denied")
-            return real_open(path, flags, mode)
+            return real_open(path, flags, *args, **kwargs)
 
         with patch.object(files.os, "open", side_effect=failing_open):
             self.assertIsNone(files.write_local_handoff(HANDOFF_ID, "x", root=self.root))
