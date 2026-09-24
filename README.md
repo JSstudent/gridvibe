@@ -1,6 +1,4 @@
-<p align="center">
-  <img src="docs/images/GridVibe.png" alt="GridVibe logo" width="160">
-</p>
+https://github.com/user-attachments/assets/90cc03b2-16d8-4b8b-b3a4-80630340e937
 
 <h1 align="center">GridVibe</h1>
 

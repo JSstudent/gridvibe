@@ -85,6 +85,8 @@ htmlcov/
 docs/r&d/
 docs/archive/
 docs/release.md
+# Promo video project: screenshots of a local machine, node_modules, renders
+docs/images/remotion/
 
 # Distribution
 build/
