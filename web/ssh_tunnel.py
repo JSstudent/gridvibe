@@ -734,7 +734,34 @@ def establish(
         "remote_path": remote_path,
         "url": url,
         "sftp": sftp,
+        "handoff_lock": threading.Lock(),
     }
+
+
+def _handoff_lock(record: Dict[str, Any]) -> Any:
+    """The lock a handoff file's write and this tunnel's teardown share."""
+    return record.setdefault("handoff_lock", threading.Lock())
+
+
+def write_tunnel_handoff(record: Optional[Dict[str, Any]], write: Any) -> str:
+    """Write a task file over this tunnel's SFTP channel and register it.
+
+    ``write(sftp)`` returns the path it wrote, or ``""``. The write and the
+    registration happen under the lock teardown takes before it reads the
+    paths, so a close landing mid-write can never miss the file: either the
+    path is recorded before teardown copies the list, or teardown has already
+    closed the record and nothing is written at all. Returns ``""`` for a
+    tunnel that is gone, which sends the task to paged delivery.
+    """
+    if not record:
+        return ""
+    with _handoff_lock(record):
+        if record.get("closed"):
+            return ""
+        path = str(write(record.get("sftp")) or "")
+        if path:
+            record.setdefault("handoff_paths", []).append(path)
+        return path
 
 
 def teardown(client: Any, record: Optional[Dict[str, Any]]) -> None:
@@ -756,12 +783,18 @@ def teardown(client: Any, record: Optional[Dict[str, Any]]) -> None:
     sftp = record.get("sftp")
     remote_path = str(record.get("remote_path") or "")
     remote_port = int(record.get("remote_port") or 0)
-    # A handed-over task written on this host rode the same SFTP channel, and
-    # belongs to the same connection -- so it goes in the same round trip,
-    # before the channel closes under it.
-    handoff_paths = [str(path) for path in record.get("handoff_paths") or () if path]
 
     def _release() -> None:
+        # A handed-over task written on this host rode the same SFTP channel,
+        # and belongs to the same connection -- so it goes in the same round
+        # trip, before the channel closes under it. Read under the lock a
+        # write in flight holds (`write_tunnel_handoff`), and taken here on the
+        # daemon thread so waiting for that write never blocks the close.
+        with _handoff_lock(record):
+            record["closed"] = True
+            handoff_paths = [
+                str(path) for path in record.get("handoff_paths") or () if path
+            ]
         remove_remote_config(sftp, remote_path)
         for handoff_path in handoff_paths:
             try:

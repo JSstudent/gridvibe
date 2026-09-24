@@ -2551,13 +2551,17 @@ def _write_handoff_file(
         return HANDOFF_INLINE, "", None
     document = handoff_document(pending)
     if connection.get("kind") == "ssh":
-        tunnel = connection.get("mcp_tunnel") or {}
-        path = write_remote_handoff(tunnel.get("sftp"), pending.handoff_id, document)
+        from web.ssh_tunnel import write_tunnel_handoff
+
+        # Registered with the tunnel under the lock its teardown takes, so the
+        # file is removed on the same channel when this connection closes --
+        # even when that close lands while the write is still in flight.
+        path = write_tunnel_handoff(
+            connection.get("mcp_tunnel"),
+            lambda sftp: write_remote_handoff(sftp, pending.handoff_id, document),
+        )
         if not path:
             return HANDOFF_PAGED, "", None
-        # Removed by the tunnel's own teardown, on the same channel, when this
-        # connection closes -- see `web/ssh_tunnel.teardown`.
-        tunnel.setdefault("handoff_paths", []).append(path)
         return HANDOFF_FILE, path, None
     written = write_local_handoff(pending.handoff_id, document)
     if written is None:

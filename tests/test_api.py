@@ -22972,6 +22972,7 @@ class WorkspacesImportHygieneTestCase(unittest.TestCase):
                 # Genuinely cycle-breaking: each of these reaches back here.
                 "sessions.manager",
                 "web.app",
+                "web.pane_gates",
                 "web.runtime_state",
                 "web.terminal_io",
                 # Deferred for late binding rather than for a cycle (docstring).

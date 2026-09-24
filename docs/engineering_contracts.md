@@ -1485,7 +1485,10 @@ in `README.md`; state the rules a change has to keep.
   launch pops each pane's `task` before anything reads the config, so no preset,
   snapshot or saved-session normalizer ever sees one. A task needs a live calling
   pane on the same machine (`same_machine`: both local, or the same SSH host, user
-  and port); nothing waives that. A gated relaunch validates its task before any
+  and port); nothing waives that. A launch reads it off where each tasked pane is
+  about to open, after the origin's connection is applied — a local origin
+  supplies none, so the body's own `connection_mode` and host are what is
+  checked — and refuses before the destination is resolved. A gated relaunch validates its task before any
   gate and binds it through `ShellTransitionEffects.before_start` — after every
   refusal, after the old connection closed, before the new one starts — so a
   refused relaunch leaves nothing in the store and nothing on disk.
@@ -1504,7 +1507,9 @@ in `README.md`; state the rules a change has to keep.
   its own directory under the handoff root (`0700`/`0600` where modes exist, named
   in its `/mnt` form for a WSL shell), remotely over the tunnel's own SFTP channel
   with both directories and the file narrowed and read back like the MCP config,
-  and removed by that tunnel's teardown. Any failure, including a mode that cannot
+  and removed by that tunnel's teardown. The write and its registration run
+  under the lock teardown reads the paths under (`write_tunnel_handoff`), so a
+  close landing mid-write never leaves the file behind. Any failure, including a mode that cannot
   be proved owner-only, falls back to paged delivery — it costs the file, never
   the task. Crash leftovers are swept only when older than a day, because another
   install may share the directory.

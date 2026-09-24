@@ -17,6 +17,7 @@ import os
 import stat
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -364,6 +365,81 @@ class TunnelTeardownTestCase(unittest.TestCase):
             sftp.removed.index("/home/ubuntu/.gridvibe/handoffs/a.md"),
             sftp.removed.index("<channel closed>"),
         )
+
+    def _record(self, sftp):
+        return {
+            "sftp": sftp,
+            "remote_path": "/home/ubuntu/.gridvibe/mcp-p.json",
+            "remote_port": 0,
+        }
+
+    def test_a_close_landing_mid_write_still_removes_the_file(self):
+        """The write registers its path under the lock teardown reads it under."""
+        sftp = FakeSftp()
+        sftp.close = lambda: sftp.removed.append("<channel closed>")
+        record = self._record(sftp)
+        writing = threading.Event()
+        release = threading.Event()
+        path = f"{RemoteWriterTestCase.DIRECTORY}/{HANDOFF_ID}.md"
+
+        def _slow_write(channel):
+            written = files.write_remote_handoff(channel, HANDOFF_ID, "brief")
+            writing.set()
+            # The close lands here: the file exists, its path is not yet recorded.
+            self.assertTrue(release.wait(5))
+            return written
+
+        writer_result = []
+        writer = threading.Thread(
+            target=lambda: writer_result.append(ssh_tunnel.write_tunnel_handoff(record, _slow_write))
+        )
+        writer.start()
+        self.assertTrue(writing.wait(5))
+
+        started = []
+        real_thread = threading.Thread
+
+        def _tracked(*args, **kwargs):
+            thread = real_thread(*args, **kwargs)
+            started.append(thread)
+            return thread
+
+        with patch.object(ssh_tunnel.threading, "Thread", _tracked):
+            ssh_tunnel.teardown(None, record)
+        release.set()
+        writer.join(5)
+        for thread in started:
+            thread.join(5)
+
+        self.assertEqual(writer_result, [path])
+        self.assertNotIn(path, sftp.files)
+        self.assertLess(sftp.removed.index(path), sftp.removed.index("<channel closed>"))
+
+    def test_a_write_after_teardown_writes_nothing(self):
+        sftp = FakeSftp()
+        sftp.close = lambda: None
+        record = self._record(sftp)
+
+        class _Inline:
+            def __init__(self, target, **_kwargs):
+                self.target = target
+
+            def start(self):
+                self.target()
+
+        with patch.object(ssh_tunnel.threading, "Thread", _Inline):
+            ssh_tunnel.teardown(None, record)
+        written = ssh_tunnel.write_tunnel_handoff(
+            record, lambda channel: files.write_remote_handoff(channel, HANDOFF_ID, "x")
+        )
+
+        self.assertEqual(written, "")
+        self.assertEqual(sftp.files, {})
+        self.assertNotIn("handoff_paths", record)
+
+    def test_no_tunnel_writes_nothing(self):
+        self.assertEqual(ssh_tunnel.write_tunnel_handoff(None, lambda channel: "x"), "")
+        self.assertEqual(ssh_tunnel.write_tunnel_handoff({}, lambda channel: "x"), "")
 
 
 if __name__ == "__main__":

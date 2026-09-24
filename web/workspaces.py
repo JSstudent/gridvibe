@@ -11,14 +11,15 @@ module at import time, so every collaborator that leads back to the manager
 (``web.app``, ``web.terminal_io``, ``web.saved_sessions``) is imported lazily
 inside the functions that need it — the cycle only exists at import time.
 
-The 24 function-level imports were audited and every one targets an intra-app
+The 27 function-level imports were audited and every one targets an intra-app
 peer; **the standing rule is that nothing else may join them** — a stdlib or
-leaf-module import goes in this header, where a reader can see it. Fourteen are
+leaf-module import goes in this header, where a reader can see it. Fifteen are
 genuinely cycle-breaking, because their module reaches back here at import
 time: ``web.runtime_state`` (7 sites, imports this module directly),
-``web.terminal_io`` (4, likewise), ``web.app`` (2) and ``sessions.manager`` (1,
-the root of the cycle). The other ten — ``web.saved_sessions`` (7),
-``web.agents``, ``web.config`` and ``web.explorer`` (1 each) — are **not**:
+``web.terminal_io`` (4, likewise), ``web.app`` (2), ``web.pane_gates`` (1,
+through ``web.app``) and ``sessions.manager`` (1, the root of the cycle). The
+other twelve — ``web.saved_sessions`` (7), ``web.agents`` (3), ``web.config``
+and ``web.explorer`` (1 each) — are **not**:
 their transitive closure is leaf-ward (``config`` → ``paths``/``state_files``)
 and they could be hoisted. They stay deferred deliberately, because a module-level
 ``from web.saved_sessions import load_saved_sessions`` binds the function once
@@ -33,12 +34,15 @@ import threading
 import time
 import uuid
 from contextlib import nullcontext
+from types import SimpleNamespace
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from web.agent_conversations import prepare_conversation_launch_fields
 from web.agent_handoffs import (
     HandoffError,
+    machine_refusal,
     pane_description,
+    same_machine,
     validate_task,
 )
 from web.agent_handoffs import handoffs as agent_handoffs
@@ -907,6 +911,43 @@ def _pop_pane_tasks(sessions_config: List[Any]) -> Tuple[List[Any], Dict[int, st
     return cleaned, tasks
 
 
+def _refuse_tasks_for_another_machine(
+    tasks: Dict[int, str],
+    sessions_config: List[Any],
+    connection_mode: str,
+    creator: Any,
+) -> None:
+    """Refuse a task for a pane that would open off the caller's machine.
+
+    Read from where each pane is *about* to open, not from the origin alone:
+    a pane-local origin supplies no connection, so a body's own
+    ``connection_mode: ssh`` and host would otherwise carry a task from this
+    machine to another one. Nothing waives it, and it runs before the
+    destination is resolved, so a refusal leaves nothing behind.
+    """
+    from web.pane_gates import MACHINE_GATE, refusal_text
+
+    for index in sorted(tasks):
+        config = sessions_config[index] if index < len(sessions_config) else None
+        fields = config if isinstance(config, dict) else {}
+        target = SimpleNamespace(
+            mode=connection_mode,
+            host=fields.get("host", ""),
+            username=fields.get("username", ""),
+            port=fields.get("port", 22),
+        )
+        if not same_machine(creator, target):
+            raise HandoffError(
+                refusal_text(
+                    MACHINE_GATE,
+                    f"Pane {index + 1}: {machine_refusal(creator, target)} "
+                    "Nothing was launched.",
+                ),
+                403,
+                {"gate": MACHINE_GATE, "waivable": False},
+            )
+
+
 def _bind_pane_tasks(
     tasks: Dict[int, str],
     created_sessions: List[Any],
@@ -1058,6 +1099,13 @@ def launch_session_group(
                     "launch names no open pane it came from. Nothing was launched."
                 )
             }, 403
+        if pane_tasks:
+            try:
+                _refuse_tasks_for_another_machine(
+                    pane_tasks, sessions_config, connection_mode, creator_pane
+                )
+            except HandoffError as exc:
+                return {"error": exc.message, **exc.details}, exc.status_code
         if creator_session_id:
             sessions_config = [
                 {**config, "created_by_session_id": creator_session_id}

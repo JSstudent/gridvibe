@@ -457,6 +457,60 @@ class LaunchTaskTestCase(_RouteCase):
                 self.assertEqual(len(api.session_manager.get_all_groups()), groups_before)
                 self.assertEqual(store.count(), 0)
 
+    def test_a_local_caller_cannot_send_a_task_to_another_machine_by_stating_ssh(self):
+        """A local origin supplies no connection, so the body's own mode is read."""
+        caller = self._agent_pane()
+        groups_before = len(api.session_manager.get_all_groups())
+
+        status, payload = self._launch(
+            self._body(
+                caller,
+                [self._agent_config(host="example.com", username="ubuntu", port=22,
+                                    directory="/srv/app")],
+                connection_mode="ssh",
+            )
+        )
+
+        self.assertEqual(status, 403, payload)
+        self.assertTrue(payload["error"].startswith("[machine gate] Pane 1:"), payload)
+        self.assertIn("example.com over SSH", payload["error"])
+        self.assertIn("Nothing was launched", payload["error"])
+        self.assertEqual(payload["gate"], "machine")
+        self.assertFalse(payload["waivable"])
+        self.assertEqual(len(api.session_manager.get_all_groups()), groups_before)
+        self.assertEqual(store.count(), 0)
+
+    def test_the_same_body_without_a_task_still_opens_on_the_stated_host(self):
+        """The machine rule is a task's, not a launch's: the launcher's SSH path is untouched."""
+        caller = self._agent_pane()
+
+        status, payload = self._launch(
+            self._body(
+                caller,
+                [self._agent_config(task=None, host="example.com", username="ubuntu",
+                                    port=22, directory="/srv/app")],
+                connection_mode="ssh",
+            )
+        )
+
+        self.assertEqual(status, 201, payload)
+        self.assertEqual(payload["sessions"][0]["mode"], "ssh")
+
+    def test_an_ssh_caller_hands_a_task_to_a_pane_on_its_own_host(self):
+        """The origin's connection is applied first, so the stated mode cannot move it."""
+        caller = self._ssh_pane(startup_mode="agent", initial_command_mode="agent",
+                                initial_command="claude", agent_selection="claude",
+                                agent_mcp=True)
+
+        status, payload = self._launch(
+            self._body(caller, [self._agent_config(directory="/srv/app")], connection_mode="wsl")
+        )
+
+        self.assertEqual(status, 201, payload)
+        pane = payload["sessions"][0]
+        self.assertEqual((pane["mode"], pane["host"]), ("ssh", "example.com"))
+        self.assertEqual(pane["handoff"]["state"], WAITING)
+
     def test_a_pane_whose_agent_is_not_installed_holds_no_task_and_says_so(self):
         caller = self._agent_pane()
 
