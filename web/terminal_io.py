@@ -2610,14 +2610,15 @@ def _deliver_pending_handoff(
 
     Runs before the launch line is typed, so the file exists and the store
     answers ``read_handoff`` by the time the agent reads its first message. The
-    handoff is recorded on *this* connection under its gate: one already
-    retired leaves the task bound for the connection that replaces it.
+    handoff is recorded on *this* connection under its gate, in the same hold
+    that announces it: a connection retired before that -- including while its
+    file was being written -- leaves the task bound for the connection that
+    replaces it, because `_shutdown_connection` drops only what it finds here.
     """
     session_id = str(getattr(session, "session_id", "") or "")
     with _connection_gate(connection):
         if connection.get("retired"):
             return
-        connection["handoff_id"] = pending.handoff_id
 
     reason = ""
     if startup_command and directory_unavailable:
@@ -2627,6 +2628,10 @@ def _deliver_pending_handoff(
             session, tunnelled=bool(connection.get("mcp_tunnel"))
         )
     if reason:
+        with _connection_gate(connection):
+            if connection.get("retired"):
+                return
+            connection["handoff_id"] = pending.handoff_id
         agent_handoffs.mark_undeliverable(pending.handoff_id, reason)
         # The pane's *output*, never its input -- the same channel the
         # "directory not available" notice uses.
@@ -2638,13 +2643,30 @@ def _deliver_pending_handoff(
         )
         return
 
+    # The write can take SFTP round trips, and a replacement connection can
+    # retire this one meanwhile. Announcing and recording under one gate hold
+    # means retirement either comes first -- the task is still waiting, and the
+    # replacement announces it -- or finds the handoff here and drops it.
     delivery, task_file, cleanup = _write_handoff_file(connection, pending, shell_kind)
-    agent_handoffs.announce(
-        pending.handoff_id,
-        delivery=delivery,
-        task_file=task_file,
-        cleanup=cleanup,
-    )
+    with _connection_gate(connection):
+        retired = bool(connection.get("retired"))
+        if not retired and agent_handoffs.announce(
+            pending.handoff_id,
+            delivery=delivery,
+            task_file=task_file,
+            cleanup=cleanup,
+        ):
+            connection["handoff_id"] = pending.handoff_id
+    if retired:
+        # A remote file is the old tunnel's to remove: it was registered there.
+        if cleanup is not None:
+            cleanup()
+        logger.info(
+            "Handoff %s: session=%s connection retired before announcing it; "
+            "left waiting for its replacement",
+            pending.handoff_id,
+            session_id,
+        )
 
 
 def _run_startup_sequence(connection: Dict[str, Any], session: Any):

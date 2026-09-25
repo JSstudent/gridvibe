@@ -13,6 +13,9 @@ Pinned here against the store itself, with no Flask and no HTTP:
   be handed the task -- ends its assignment with the reason.
 - **A report is held to the rules a task is**, refused rather than repaired or
   truncated, and a refusal records nothing.
+- **Only the agent that read the task answers it.** A pane relaunched with a
+  new task keeps its id, so a report arriving before that task was fetched is
+  the replaced agent's, and it is refused.
 """
 
 import sys
@@ -36,6 +39,7 @@ from web.agent_results import (  # noqa: E402
     MAX_RESULT_CHARS,
     NOBODY_WAITING_MESSAGE,
     REPORTED,
+    UNREAD_TASK_MESSAGE,
     WORKING,
     ResultError,
     ResultStore,
@@ -48,6 +52,7 @@ WORKERS = ("worker-a", "worker-b", "worker-c")
 
 
 def _store_with(*workers, requester=REQUESTER):
+    """Each worker has fetched its task, as an agent that reports always has."""
     store = ResultStore()
     for index, worker in enumerate(workers):
         store.expect(
@@ -56,6 +61,7 @@ def _store_with(*workers, requester=REQUESTER):
             worker_session_id=worker,
             now=float(index),
         )
+        store.mark_read(f"h-{worker}")
     return store
 
 
@@ -114,9 +120,23 @@ class ReportAndCollectTestCase(unittest.TestCase):
         self.assertEqual(refused.exception.message, NOBODY_WAITING_MESSAGE)
         self.assertEqual(_rows(store.collect(REQUESTER))["worker-a"]["state"], WORKING)
 
+    def test_a_task_nobody_has_read_takes_no_report(self):
+        store = ResultStore()
+        store.expect("h-a", requester_session_id=REQUESTER, worker_session_id="worker-a")
+
+        with self.assertRaises(ResultError) as refused:
+            store.report("worker-a", "Done, supposedly.")
+
+        self.assertEqual(refused.exception.status_code, 409)
+        self.assertEqual(refused.exception.message, UNREAD_TASK_MESSAGE)
+        self.assertEqual(store.state_for("h-a"), WORKING)
+        self.assertTrue(store.mark_read("h-a"))
+        self.assertEqual(store.report("worker-a", "Done.")["revision"], 1)
+
     def test_another_requesters_reports_are_never_returned(self):
         store = _store_with("worker-a")
         store.expect("h-x", requester_session_id="someone-else", worker_session_id="worker-x")
+        store.mark_read("h-x")
         store.report("worker-x", "Not for you.")
 
         payload = store.collect(REQUESTER)
@@ -385,10 +405,16 @@ class HandoffStoreWiringTestCase(unittest.TestCase):
         self.results = ResultStore()
         self.handoffs = HandoffStore(results=self.results)
 
+    def _fetch(self, handoff_id, pane="worker-a"):
+        """The pane's agent starts and reads its task, as the launch line tells it to."""
+        self.handoffs.announce(handoff_id, delivery=INLINE)
+        return self.handoffs.read(pane)
+
     def test_a_handoff_bound_at_birth_is_expected_from_its_pane(self):
         handoff_id = self.handoffs.create("Review.", source_session_id=REQUESTER, session_id="worker-a")
 
         self.assertEqual(self.results.state_for(handoff_id), WORKING)
+        self._fetch(handoff_id)
         self.results.report("worker-a", "Reviewed.")
         self.assertEqual(_rows(self.results.collect(REQUESTER))["worker-a"]["result"], "Reviewed.")
 
@@ -399,6 +425,7 @@ class HandoffStoreWiringTestCase(unittest.TestCase):
         self.assertIsNone(self.results.state_for(handoff_id))
         self.handoffs.take(handoff_id, "neighbour")
         self.handoffs.bind(handoff_id, "worker-a")
+        self._fetch(handoff_id)
 
         self.results.report("worker-a", "Reviewed.")
 
@@ -466,9 +493,27 @@ class HandoffStoreWiringTestCase(unittest.TestCase):
     def test_a_replaced_task_takes_the_next_report(self):
         self.handoffs.create("First.", source_session_id=REQUESTER, session_id="worker-a", now=1.0)
         second = self.handoffs.create("Second.", source_session_id=REQUESTER, session_id="worker-a", now=2.0)
+        self._fetch(second)
 
         self.results.report("worker-a", "Did the second.")
 
+        self.assertEqual(self.results.state_for(second), REPORTED)
+
+    def test_the_agent_a_relaunch_replaced_cannot_answer_the_new_task(self):
+        """A relaunch keeps the pane's id, so the replaced agent's report --
+        still in flight when the new task was bound -- used to settle it."""
+        first = self.handoffs.create("First.", source_session_id=REQUESTER, session_id="worker-a", now=1.0)
+        self._fetch(first)
+        second = self.handoffs.create("Second.", source_session_id=REQUESTER, session_id="worker-a", now=2.0)
+
+        with self.assertRaises(ResultError) as refused:
+            self.results.report("worker-a", "Did the first.")
+
+        self.assertEqual(refused.exception.message, UNREAD_TASK_MESSAGE)
+        self.assertEqual(self.results.state_for(first), ENDED)
+        self.assertEqual(self.results.state_for(second), WORKING)
+        self.assertEqual(self._fetch(second)["task"], "Second.")
+        self.results.report("worker-a", "Did the second.")
         self.assertEqual(self.results.state_for(second), REPORTED)
 
     def test_the_brief_tells_its_reader_how_to_report_back(self):

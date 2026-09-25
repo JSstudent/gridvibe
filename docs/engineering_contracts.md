@@ -1525,7 +1525,10 @@ in `README.md`; state the rules a change has to keep.
   store is capped for the unbound kind and TTL-bounded above a split's worst case;
   a bound handoff waits for a connection that starts its pane's agent, is
   announced once on that launch line, and is dropped — file included — in
-  `_shutdown_connection` of *that* connection. A relaunch or mode switch drops one
+  `_shutdown_connection` of *that* connection. The announcement and its record on
+  the connection share one hold of the connection's gate, after the file is
+  written, so a connection retired before then — mid-write included — leaves the
+  task waiting for its replacement. A relaunch or mode switch drops one
   still waiting (`drop_bound`), a closed pane forgets its own, and nothing is
   persisted. A pane whose agent starts without the tools is marked
   `undeliverable` and told so on its output, never its input. Log lines carry ids,
@@ -1538,8 +1541,10 @@ in `README.md`; state the rules a change has to keep.
   the assignment it must end; a split records the calling pane (`requester_session_id`), not the pane
   it halved. `report_result` names no recipient — the caller's own pane is the
   path and the assignment's requester receives it — and `wait_for_results`
-  reads only what is owed to the caller's pane. Every way a handoff goes before
-  a report (connection closed, pane closed, relaunch, mode switch, replaced,
+  reads only what is owed to the caller's pane. A report settles an assignment
+  only once its handoff has been read: a relaunch keeps the pane's id, so the
+  replaced agent's in-flight report must not answer the new task. Every way a
+  handoff goes before a report (connection closed, pane closed, relaunch, mode switch, replaced,
   undeliverable) ends its assignment with the reason and stops it taking
   reports, so whatever the pane runs next cannot answer for it; a report
   outlives the worker's pane, and the requester's close drops its assignments. A wait blocks

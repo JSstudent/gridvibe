@@ -582,7 +582,8 @@ class HandoffStore:
     def read(self, session_id: str, offset: Any = None) -> Dict[str, Any]:
         """What ``read_handoff`` answers for this pane.
 
-        Its only side effect is the state becoming ``read``. Reading twice
+        Its only side effect is the state becoming ``read`` -- which is also
+        what lets the reader's report settle the assignment. Reading twice
         returns the same brief, for as long as the connection that announced it
         lives.
         """
@@ -599,6 +600,8 @@ class HandoffStore:
                 return self._nothing_to_read(record)
             payload = self._read_payload(record, offset)
             record.phase = READ
+            if self.results is not None:
+                self.results.mark_read(record.handoff_id)
             chars = record.chars
             delivery = record.delivery
         logger.info(

@@ -16,7 +16,10 @@ written to and neither is the requester's.
 The lifecycle of one assignment:
 
 * **Pending** -- recorded when the handoff is bound to its pane. The worker is
-  working, or has not started yet.
+  working, or has not started yet. A report is taken only once the worker has
+  fetched the task with ``read_handoff``: a pane relaunched with a new task
+  keeps its session id, so a report still in flight from the agent it
+  replaced -- which was never handed the new task -- must not settle it.
 * **Reported** -- the worker called ``report_result``. A second report replaces
   the first and makes it new again, so the requester reads the latest -- but
   only while the handoff is still live. Once it goes (the pane closed, was
@@ -99,6 +102,12 @@ NOBODY_WAITING_MESSAGE = (
     "No agent is waiting for a report from this pane: no task was handed to "
     "it through GridVibe, or the agent that handed it one has closed its pane. "
     "Nothing was recorded."
+)
+
+UNREAD_TASK_MESSAGE = (
+    "This pane's current task has not been fetched with read_handoff, so this "
+    "report cannot be answering it: the pane was handed a new task after this "
+    "agent's, or this agent has not read its task yet. Nothing was recorded."
 )
 
 NOTHING_HANDED_OUT_MESSAGE = (
@@ -242,6 +251,9 @@ class _Assignment:
     #: Separate from ``state`` because a reported assignment keeps its report
     #: after that -- it just stops taking new ones.
     accepting: bool = True
+    #: Whether the worker has fetched this task. Until it has, whatever calls
+    #: from the pane is not the agent the task was handed to.
+    read: bool = False
 
     @property
     def settled(self) -> bool:
@@ -326,6 +338,15 @@ class ResultStore:
         )
         return True
 
+    def mark_read(self, handoff_id: str) -> bool:
+        """The worker fetched its task: from now on a report can settle it."""
+        with self._changed:
+            record = self._records.get(str(handoff_id or ""))
+            if record is None:
+                return False
+            record.read = True
+            return True
+
     # ---------------- the worker ----------------
 
     def report(self, worker_session_id: str, text: Any, status: Any = None) -> Dict[str, Any]:
@@ -333,7 +354,9 @@ class ResultStore:
 
         Validated before anything is looked up, so a refused report changes
         nothing. Answers what the worker is told: who is waiting and whether
-        this replaced an earlier report.
+        this replaced an earlier report. An assignment whose task has not been
+        read is refused rather than settled: the pane's id is all a report
+        carries, and it names the agent a relaunch replaced as well.
         """
         body = validate_result(text)
         outcome = validate_status(status)
@@ -342,6 +365,8 @@ class ResultStore:
             record = self._live_for_worker_locked(worker)
             if record is None:
                 raise ResultError(NOBODY_WAITING_MESSAGE, 409)
+            if not record.read:
+                raise ResultError(UNREAD_TASK_MESSAGE, 409)
             replaced = record.state == REPORTED
             record.state = REPORTED
             record.status = outcome

@@ -12,6 +12,8 @@ reads all three. Pinned here through the real split-intent and split routes:
   *after* it reported keeps its report.
 - **The requester's pane closing drops what it was owed**, so a late report is
   told nobody is listening.
+- **A report settles only a task its agent has read**, so the agent a relaunch
+  replaced cannot answer for the new one.
 """
 
 import json
@@ -68,7 +70,16 @@ class _ResultRouteCase(_RouteCase):
         self.assertEqual(split.status_code, 201, split.get_json())
         return split.get_json()["session"]["session_id"]
 
+    def _fetch_task(self, pane_id):
+        """What the worker's agent does first: its launch line announces the
+        brief, and it reads it -- which is what lets its report settle it."""
+        pending = handoff_store.pending_for(pane_id)
+        if pending is not None:
+            handoff_store.announce(pending.handoff_id, delivery=INLINE)
+        return self.client.get(f"/api/sessions/{pane_id}/handoff")
+
     def _report(self, pane_id, result, status=None):
+        self._fetch_task(pane_id)
         body = {"result": result}
         if status is not None:
             body["status"] = status
@@ -120,6 +131,7 @@ class ThreeAgentsTestCase(_ResultRouteCase):
         caller = self._agent_pane()
         first, second = (self._split_agent(caller) for _ in range(2))
         self.assertEqual(self._report(first, "One done.").status_code, 200)
+        self._fetch_task(second)
         # A report through the store rather than a second test client call,
         # so the request under test is the only one in flight.
         timer = threading.Timer(0.2, result_store.report, args=(second, "Two done."))
@@ -218,6 +230,17 @@ class ReportRouteTestCase(_ResultRouteCase):
 
         self.assertEqual(response.status_code, 409)
         self.assertIn("No agent is waiting", response.get_json()["error"])
+
+    def test_a_report_before_its_task_was_read_is_refused(self):
+        caller = self._agent_pane()
+        worker = self._split_agent(caller)
+
+        response = self.client.post(f"/api/sessions/{worker}/handoff-report", json={"result": "Early."})
+
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("read_handoff", response.get_json()["error"])
+        self.assertEqual(self._wait(caller.session_id).get_json()["counts"][WORKING], 1)
+        self.assertEqual(self._report(worker, "Read it, then did it.").status_code, 200)
 
     def test_a_refused_report_records_nothing(self):
         caller = self._agent_pane()

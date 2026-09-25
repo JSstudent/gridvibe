@@ -305,7 +305,10 @@ handoff is bound and when one goes.
   or whose requester has closed, is told nobody is waiting and nothing is kept.
   Reporting again replaces the report and makes it new again, but only while
   the handoff lives: once the pane closes, is relaunched or is re-tasked, its
-  report stands and whatever the pane runs next cannot write over it.
+  report stands and whatever the pane runs next cannot write over it. A report
+  settles a task only once the task has been fetched with `read_handoff`: a
+  relaunched pane keeps its id, so a report sent before then is the replaced
+  agent's, and it is refused with nothing kept.
 - **Held to a task's rules, with a smaller ceiling.** Printable text, newlines
   and tabs; control characters refused by name; up to 16,000 characters,
   refused above that — never truncated. Anything longer goes in a file on the
