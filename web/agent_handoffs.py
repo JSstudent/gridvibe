@@ -33,9 +33,14 @@ The lifecycle, in the order a handoff meets it:
 Never persisted, never logged in full: every log line names ids, a character
 count and a delivery, and never the text or a file path.
 
-No Flask, no I/O, no import from the rest of ``web/``: the file writer is
-``web/agent_handoff_files.py`` and arrives here only as a cleanup callable, so
-the store is tested directly.
+Every handoff bound to a pane is also an *assignment* in
+``web/agent_results.py``: the agent that asked can wait for the new agent's
+report, and a handoff that goes before any report ends its assignment with the
+reason, so the one waiting is told rather than left waiting.
+
+No Flask, no I/O, and no import from the rest of ``web/`` but that equally pure
+results store: the file writer is ``web/agent_handoff_files.py`` and arrives
+here only as a cleanup callable, so the store is tested directly.
 """
 
 import datetime
@@ -47,6 +52,9 @@ import unicodedata
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Mapping, Optional
 
+from web.agent_results import MAX_RESULT_CHARS, ResultStore
+from web.agent_results import results as agent_results
+
 logger = logging.getLogger(__name__)
 
 #: The whole of what a task adds to a launch line. Restricted by test to
@@ -56,7 +64,8 @@ logger = logging.getLogger(__name__)
 #: CLIs takes as a subcommand.
 HANDOFF_OPENING_PROMPT = (
     "GridVibe handed this pane a task from another agent. Call the gridvibe "
-    "tool read_handoff to fetch it, then carry it out."
+    "tool read_handoff to fetch it, then carry it out. When done, call "
+    "report_result with the outcome."
 )
 
 #: A task at or under this many characters is returned whole by
@@ -234,6 +243,19 @@ def machine_refusal(caller: Any, target: Any) -> str:
     )
 
 
+def reply_instructions(from_title: str) -> str:
+    """How the receiving agent hands its outcome back, said with its brief."""
+    who = f"The agent in pane {from_title}" if from_title else "The agent that handed you this task"
+    return (
+        "When you have finished -- or cannot finish -- call the gridvibe tool "
+        f"report_result with your outcome. {who} is waiting for it. Put the "
+        "substance in the report itself: what you found, what you changed and "
+        "where, and what is left. Set status to 'failed' or 'blocked' when that "
+        f"is the truth. A report holds up to {MAX_RESULT_CHARS:,} characters; "
+        "for more, write a file on this machine and name it in the report."
+    )
+
+
 def handoff_note(from_title: str) -> str:
     """What the brief is, said to the agent that receives it."""
     where = f"pane {from_title}" if from_title else "another pane"
@@ -272,6 +294,7 @@ class _Handoff:
     created_at: str
     created_mono: float
     phase: str
+    requester_session_id: str = ""
     session_id: str = ""
     delivery: str = ""
     task_file: str = ""
@@ -319,9 +342,16 @@ class HandoffStore:
         *,
         unbound_ttl_seconds: float = HANDOFF_UNBOUND_TTL_SECONDS,
         max_handoffs: int = MAX_HANDOFFS,
+        results: Optional[ResultStore] = None,
     ) -> None:
         self.unbound_ttl_seconds = float(unbound_ttl_seconds)
         self.max_handoffs = max(1, int(max_handoffs))
+        # Told when a handoff is bound -- under this store's lock, so a drop
+        # can never overtake the assignment it has to end -- and when one
+        # goes. Lock order is this store's lock, then the results store's; the
+        # results store calls nothing back. None for a store that tracks no
+        # reports.
+        self.results = results
         self._lock = threading.Lock()
         self._records: Dict[str, _Handoff] = {}
 
@@ -335,6 +365,7 @@ class HandoffStore:
         from_title: str = "",
         from_agent: str = "",
         session_id: str = "",
+        requester_session_id: str = "",
         now: Optional[float] = None,
     ) -> str:
         """Record one validated task. Returns its ``handoff_id``.
@@ -342,6 +373,11 @@ class HandoffStore:
         With ``session_id`` the handoff is bound at once -- the launch and the
         relaunch paths, which know their pane. Without it, it waits unbound for
         the split route to :meth:`take` it.
+
+        ``requester_session_id`` is the pane whose agent will wait for the
+        report, when that is not ``source_session_id``: a split records the
+        pane being halved as its source, and the agent that asked may be
+        beside it.
         """
         moment = time.monotonic() if now is None else float(now)
         handoff_id = secrets.token_hex(16)
@@ -356,6 +392,7 @@ class HandoffStore:
             .isoformat(),
             created_mono=moment,
             phase=_UNBOUND,
+            requester_session_id=str(requester_session_id or source_session_id or ""),
         )
         cleanups: List[Callable[[], Any]] = []
         with self._lock:
@@ -431,7 +468,14 @@ class HandoffStore:
         logger.info("Handoff %s bound session=%s", handoff_id, session_id)
 
     def _bind_locked(self, record: _Handoff, session_id: str) -> List[Callable[[], Any]]:
-        """One handoff per pane: binding a new one drops whatever it held."""
+        """One handoff per pane: binding a new one drops whatever it held.
+
+        Returns the replaced handoffs' file cleanups, to run once the lock is
+        released. Their assignments are ended, and the new one recorded, here
+        under the lock and in that order: recorded after the lock was released,
+        a drop landing in between would end nothing and leave the requester
+        waiting on an assignment that could never be reported.
+        """
         cleanups: List[Callable[[], Any]] = []
         for other_id, other in list(self._records.items()):
             if other is record or other.session_id != session_id:
@@ -439,12 +483,26 @@ class HandoffStore:
             del self._records[other_id]
             if other.cleanup is not None:
                 cleanups.append(other.cleanup)
+            self._result_ending(other_id, "replaced")()
             logger.info(
                 "Handoff %s dropped session=%s reason=replaced", other_id, session_id
             )
         record.session_id = session_id
         record.phase = WAITING
+        if self.results is not None:
+            self.results.expect(
+                record.handoff_id,
+                requester_session_id=record.requester_session_id,
+                worker_session_id=session_id,
+            )
         return cleanups
+
+    def _result_ending(self, handoff_id: str, reason: str) -> Callable[[], Any]:
+        """The call that ends a handoff's assignment."""
+        results = self.results
+        if results is None:
+            return lambda: None
+        return lambda: results.end(handoff_id, reason)
 
     # ---------------- the startup sequence ----------------
 
@@ -504,6 +562,13 @@ class HandoffStore:
             record.phase = UNDELIVERABLE
             record.reason = str(reason or "")
             session_id = record.session_id
+        _run_cleanups([
+            self._result_ending(
+                str(handoff_id),
+                "its agent could not be handed the task: "
+                f"{reason or 'it started without GridVibe tools'}",
+            )
+        ])
         logger.warning(
             "Handoff %s undeliverable session=%s reason=%s",
             handoff_id,
@@ -584,6 +649,8 @@ class HandoffStore:
             "created_at": record.created_at,
             "note": handoff_note(record.from_title),
         }
+        if record.requester_session_id:
+            payload["reply"] = reply_instructions(record.from_title)
         if record.delivery != PAGED:
             if requested:
                 raise HandoffError(
@@ -629,6 +696,7 @@ class HandoffStore:
             return False
         if record.cleanup is not None:
             _run_cleanups([record.cleanup])
+        _run_cleanups([self._result_ending(record.handoff_id, reason)])
         logger.info(
             "Handoff %s dropped session=%s chars=%d reason=%s",
             record.handoff_id,
@@ -753,4 +821,4 @@ def pane_description(session: Any) -> Mapping[str, str]:
 
 
 #: The one store every route and the startup sequence read and write.
-handoffs = HandoffStore()
+handoffs = HandoffStore(results=agent_results)

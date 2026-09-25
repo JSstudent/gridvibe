@@ -3,7 +3,7 @@
 Four things are pinned here, and each is a property of the build rather than
 of a code path:
 
-- **The registered surface is exactly fourteen**, and the tiers that reach an
+- **The registered surface is exactly sixteen**, and the tiers that reach an
   existing pane hold exactly three -- two that replace what it is, one that
   erases what it has drawn. The destroy tier is *absent from the build*, not
   flag-gated: a tool that does not exist cannot be talked into running by a
@@ -36,6 +36,7 @@ from gridvibe_mcp.identity import read_identity  # noqa: E402
 from gridvibe_mcp.server import (  # noqa: E402
     CREATE_TOOLS,
     DISPLAY_TOOLS,
+    HANDBACK_TOOLS,
     LAYOUTS,
     PANE_MODES,
     READ_TOOLS,
@@ -90,22 +91,25 @@ class RefusingOpener:
 
 
 class ToolSurfaceTestCase(unittest.TestCase):
-    def test_the_registered_surface_is_exactly_fourteen(self):
-        """Seven read, four create, two that replace, one that erases.
+    def test_the_registered_surface_is_exactly_sixteen(self):
+        """Seven read, two hand back, four create, two replace, one erases.
 
         The last two tiers are the only things in this surface that end
         anything, and what bounds them is the gates on GridVibe's own routes
         rather than the tools themselves. `read_handoff` is a read: its only
-        side effect is a handoff's state becoming `read`.
+        side effect is a handoff's state becoming `read`. The hand-back pair
+        neither creates nor ends a pane: a report goes to whoever GridVibe
+        recorded as asking, and a wait reads only what is owed to the caller.
         """
         names = tool_names()
 
-        self.assertEqual(len(names), 14)
+        self.assertEqual(len(names), 16)
         self.assertEqual(names[:7], list(READ_TOOLS))
         self.assertEqual(READ_TOOLS[-1], "read_handoff")
-        self.assertEqual(names[7:11], list(CREATE_TOOLS))
-        self.assertEqual(names[11:13], list(RELAUNCH_TOOLS))
-        self.assertEqual(names[13:], list(DISPLAY_TOOLS))
+        self.assertEqual(names[7:9], list(HANDBACK_TOOLS))
+        self.assertEqual(names[9:13], list(CREATE_TOOLS))
+        self.assertEqual(names[13:15], list(RELAUNCH_TOOLS))
+        self.assertEqual(names[15:], list(DISPLAY_TOOLS))
 
     def test_the_layout_enum_is_the_set_gridvibe_actually_accepts(self):
         """`stack` was never a GridVibe layout, and the two that are were

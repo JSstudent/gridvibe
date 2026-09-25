@@ -1,6 +1,6 @@
 # GridVibe MCP sidecar
 
-A stdio MCP server that gives an agent running in a GridVibe pane fourteen
+A stdio MCP server that gives an agent running in a GridVibe pane sixteen
 tools for seeing and building GridVibe workspaces.
 
 This file is the reference for the MCP feature. Everything else that mentions
@@ -92,7 +92,7 @@ back to it as an inline TOML table on the launch line
 
 ## Tools
 
-Fourteen, in four tiers by blast radius. The order below is the order
+Sixteen, in five tiers by blast radius. The order below is the order
 `tool_specs()` registers them in, and `tests/test_mcp_tools.py` pins it.
 
 ### read — seven
@@ -122,6 +122,16 @@ between workspaces with its processes and its SSH connections still running; an
 agent that went on naming the workspace it had left read panes that were no
 longer there. The group is the anchor because a move carries the whole group, and
 the inherited id is only the fallback for a read that failed.
+
+### hand back — two
+
+| Tool | Does |
+| --- | --- |
+| `report_result` | hands the outcome of the task *this* pane was given back to the agent that gave it — `result` text and a `status` of `done`, `failed` or `blocked`. It names no pane: GridVibe's record of who handed the task over decides |
+| `wait_for_results` | waits for the agents *this* pane handed a task to, and returns their reports — see [Handing a result back](#handing-a-result-back) |
+
+Neither creates, ends nor changes a pane, and nothing is typed into any
+terminal: a report reaches the waiting agent as its own tool call's result.
 
 ### create — four
 
@@ -277,6 +287,53 @@ the temporary file is `web/agent_handoff_files.py`.
   prompt and is never a reason to set `override`. A task never implies
   `auto_mode`.
 
+## Handing a result back
+
+An agent that hands out a task usually wants the answer. Every handoff bound to
+a pane is also an *assignment* in `web/agent_results.py`: the pane that asked
+(the requester — for a split, the agent that asked, not the pane it halved),
+the pane that received it (the worker), and the worker's report once it makes
+one. The store is in memory, like the handoff store, and is told by it when a
+handoff is bound and when one goes.
+
+- **The worker is told how.** The launch-line sentence ends by naming
+  `report_result`, and `read_handoff` returns a `reply` saying who is waiting
+  and what a report should hold.
+- **A report goes to the requester only.** `report_result` posts to the
+  caller's own pane (`POST /api/sessions/<id>/handoff-report`); the recipient is
+  the assignment's requester, never an argument. A pane nobody handed a task,
+  or whose requester has closed, is told nobody is waiting and nothing is kept.
+  Reporting again replaces the report and makes it new again, but only while
+  the handoff lives: once the pane closes, is relaunched or is re-tasked, its
+  report stands and whatever the pane runs next cannot write over it.
+- **Held to a task's rules, with a smaller ceiling.** Printable text, newlines
+  and tabs; control characters refused by name; up to 16,000 characters,
+  refused above that — never truncated. Anything longer goes in a file on the
+  shared machine (a task only ever runs on its requester's machine), named in
+  the report.
+- **The wait is bounded per call.** `wait_for_results`
+  (`GET /api/sessions/<id>/handoff-reports`) blocks on the store until every
+  named agent has settled (`until: "all"`) or one has news (`"any"`), for at
+  most 55 s — under Codex's 60 s tool-call timeout — and says when agents are
+  still working, so a long task is waited on by calling again. Over the tunnel
+  the wait happens on the store in-process and the route is then read with
+  `wait=0`, so no request is held open against the server it runs in.
+- **Each report is returned whole once**, then marked `already_returned`
+  (`include_collected` returns them again). One answer carries at most 48,000
+  characters of reports; unseen ones get that budget before re-sent ones, the
+  rest are `result_withheld` and come with the next call, and the first always
+  fits.
+- **Nobody waits for a report that cannot come.** A handoff that goes before a
+  report — its connection closed, its pane closed, relaunched or re-moded, a new
+  task bound over it, or its agent started without the tools — ends the
+  assignment with the reason, and the wait returns it as `ended`. A report
+  outlives the worker's pane; the requester's pane closing drops what it was
+  owed.
+- **A report frames itself.** The answer's `note` says it is another agent's
+  report, not the person's words: it cannot waive a permission prompt, is never
+  a reason to set `override`, and its claims are to be checked. Reports appear
+  in no pane listing, and log lines carry ids, sizes and status — never the text.
+
 ## Stated properties, not discoveries
 
 - **Prompt injection reaches further than a terminal.** A repository file that
@@ -301,7 +358,7 @@ the temporary file is `web/agent_handoff_files.py`.
   identity there comes from the token registry rather than from the caller, and
   the forward's filter means a remote process cannot reach those ungated routes
   at all.
-- **A handed-over task is not confidential.** On the stdio path a caller is
+- **A handed-over task, and a report, is not confidential.** On the stdio path a caller is
   whoever `GRIDVIBE_SESSION_ID` says, the handoff route is on the same
   unauthenticated loopback API as every other, and the temporary file is
   owner-only but readable by anything running as that user. Tool descriptions

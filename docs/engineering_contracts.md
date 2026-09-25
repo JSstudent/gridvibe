@@ -1452,9 +1452,10 @@ in `README.md`; state the rules a change has to keep.
   secret at any depth regardless of the list. `list_saved_layouts` is the sharp
   case: the route it reads answers with a *decrypted* SSH password by design.
   Failures are typed and carry GridVibe's own sentence verbatim, unretried.
-- **Four tiers, and the destroy tier is absent from the build.** Read and create
+- **Five tiers, and the destroy tier is absent from the build.** Read and create
   only ever make something new (`read_handoff` is a read: its only side effect
-  is a handoff's state); `set_pane_agent`/`set_pane_mode` replace what is
+  is a handoff's state); `report_result`/`wait_for_results` carry a report back
+  and touch no pane; `set_pane_agent`/`set_pane_mode` replace what is
   behind an existing pane; `clear_pane` erases what one has drawn. Closing a
   pane, group or workspace, moving a group, and typing arbitrary input into a
   terminal are not written, not registered and not flag-gated — a tool that does
@@ -1523,6 +1524,25 @@ in `README.md`; state the rules a change has to keep.
   `undeliverable` and told so on its output, never its input. Log lines carry ids,
   a character count and a delivery — never the text, never a file path — and
   `list_panes` publishes the state from a field list, never the text or path.
+- **A report goes back only to the agent that asked, and nobody waits for one
+  that cannot come.** Every bound handoff is an assignment in
+  `web/agent_results.py`, recorded by `HandoffStore` under its own lock (the
+  results store's lock is a leaf taken after it) so a drop can never overtake
+  the assignment it must end; a split records the calling pane (`requester_session_id`), not the pane
+  it halved. `report_result` names no recipient — the caller's own pane is the
+  path and the assignment's requester receives it — and `wait_for_results`
+  reads only what is owed to the caller's pane. Every way a handoff goes before
+  a report (connection closed, pane closed, relaunch, mode switch, replaced,
+  undeliverable) ends its assignment with the reason and stops it taking
+  reports, so whatever the pane runs next cannot answer for it; a report
+  outlives the worker's pane, and the requester's close drops its assignments. A wait blocks
+  at most `MAX_WAIT_SECONDS` (under the shortest CLI tool-call timeout), and the
+  tunnelled path waits on the store in-process and reads the route with
+  `wait=0`, never a held loopback request. An answer's text budget goes to
+  unseen reports before re-sent ones. Reports are validated like tasks,
+  refused above `MAX_RESULT_CHARS` rather than truncated, framed by a `note` as
+  another agent's words, never published by a pane read, and logged by size
+  only. The sidecar's ceilings are pinned equal to the store's by test.
 - **A large task's file is GridVibe's own write, owner-only, and gone with its
   handoff.** Written on the pane's machine and never through a shell: locally in
   its own directory under the handoff root (`0700`/`0600` where modes exist, named

@@ -69,6 +69,7 @@ from web.agent_handoffs import INLINE as HANDOFF_INLINE
 from web.agent_handoffs import PAGED as HANDOFF_PAGED
 from web.agent_handoffs import HandoffView, planned_delivery
 from web.agent_handoffs import handoffs as agent_handoffs
+from web.agent_results import results as agent_results
 from web.agent_session_hooks import (
     PANE_TOKEN_VARIABLE,
     SessionReportError,
@@ -364,6 +365,10 @@ def _close_ssh_connection(session_id: str, clear_buffer: bool = True, *, expecte
         # And a task still waiting for this pane's agent goes with the pane:
         # there is no connection left that could ever announce it.
         agent_handoffs.forget_session(session_id)
+        # Reports this pane's agent was waiting for go too -- nobody is left
+        # to collect them -- while a report this pane made stays with the
+        # agent that asked for it.
+        agent_results.forget_session(session_id)
     _evict_pooled_ssh_client(session_id)
 
 
