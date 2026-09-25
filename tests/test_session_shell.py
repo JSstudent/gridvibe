@@ -37,6 +37,7 @@ from unittest.mock import MagicMock, patch
 
 import api
 from sessions.manager import _MAX_AGENT_DEPTH
+from web import agent_updates as web_agent_updates
 from web import agents as web_agents
 from web import config as web_config
 from web import runtime_state as web_runtime_state
@@ -854,6 +855,129 @@ class PaneMcpRelaunchTestCase(ShellTransitionTestCase):
         self.assertFalse(api.session_manager.get_session(session.session_id).agent_mcp)
 
 
+class PaneAgentUpdateTestCase(ShellTransitionTestCase):
+    """The agent row's update button: the same relaunch, update first.
+
+    What is pinned is where the request lives. It is owed to the replacement
+    connection and taken by its startup sequence, so it is never pane metadata
+    -- a save, a restore or a later reconnect launches the agent plainly.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.addCleanup(web_agent_updates._pending.clear)
+        web_agent_updates._pending.clear()
+
+    def test_an_update_relaunches_the_agent_and_owes_its_update_command(self):
+        session, _repo = self._local_pane()
+
+        response, close_connection, start_task = self._post_shell(
+            session.session_id,
+            {"shell": "powershell", "agent": "claude", "mcp": False, "update": True},
+        )
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        close_connection.assert_called_once_with(session.session_id, clear_buffer=True)
+        start_task.assert_called_once_with(api._connect_session, session.session_id)
+        updated = api.session_manager.get_session(session.session_id)
+        self.assertEqual(updated.agent_selection, "claude")
+        self.assertEqual(updated.initial_command, "claude")
+        self.assertNotIn("update", json.dumps(updated.to_dict()))
+        self.assertEqual(web_agent_updates.take_update(session.session_id), "claude update")
+        # Taken once: the next connection owes nothing.
+        self.assertEqual(web_agent_updates.take_update(session.session_id), "")
+
+    def test_an_ssh_pane_updates_its_agent_on_its_own_host(self):
+        session = self._ssh_pane()
+
+        response, _close, _start = self._post_shell(
+            session.session_id, {"agent": "opencode", "update": True}
+        )
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertEqual(
+            web_agent_updates.take_update(session.session_id), "opencode upgrade"
+        )
+
+    def test_a_relaunch_without_an_update_clears_one_left_untaken(self):
+        """A connection that never started must not hand its update on."""
+        session, _repo = self._local_pane()
+        web_agent_updates.request_update(session.session_id, "claude update")
+
+        response, _close, _start = self._post_shell(
+            session.session_id, {"agent": "claude", "mcp": False}
+        )
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertEqual(web_agent_updates.take_update(session.session_id), "")
+
+    def test_an_update_needs_the_agent_it_updates(self):
+        for body in (
+            {"update": True},
+            {"agent": "", "update": True},
+            {"shell": "cmd", "agent": "", "update": True},
+        ):
+            with self.subTest(body=body):
+                session, _repo = self._local_pane(
+                    startup_mode="agent",
+                    initial_command_mode="agent",
+                    agent_selection="claude",
+                    initial_command="claude",
+                )
+                before = _pane_state(session.session_id)
+
+                response, close_connection, start_task = self._post_shell(
+                    session.session_id, body
+                )
+
+                self.assertEqual(response.status_code, 400)
+                self.assertEqual(_pane_state(session.session_id), before)
+                close_connection.assert_not_called()
+                start_task.assert_not_called()
+                self.assertEqual(web_agent_updates.take_update(session.session_id), "")
+
+    def test_a_non_boolean_update_is_refused_without_moving_the_pane(self):
+        session, _repo = self._local_pane()
+        before = _pane_state(session.session_id)
+
+        response, close_connection, _start = self._post_shell(
+            session.session_id, {"agent": "claude", "update": "yes"}
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(_pane_state(session.session_id), before)
+        close_connection.assert_not_called()
+
+    def test_an_agent_that_publishes_no_update_command_is_refused(self):
+        session, _repo = self._local_pane()
+        before = _pane_state(session.session_id)
+        spec = dict(web_agents.AGENT_REGISTRY["kilo"])
+        spec.pop("update", None)
+
+        with patch.dict(web_agents.AGENT_REGISTRY, {"kilo": spec}):
+            response, close_connection, _start = self._post_shell(
+                session.session_id, {"agent": "kilo", "update": True}
+            )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("no update command", response.get_json()["error"])
+        self.assertEqual(_pane_state(session.session_id), before)
+        close_connection.assert_not_called()
+
+    def test_an_update_onto_a_missing_agent_is_refused_like_any_relaunch(self):
+        session, _repo = self._local_pane()
+
+        response, close_connection, _start = self._post_shell(
+            session.session_id,
+            {"agent": "claude", "update": True},
+            detection={"found": False},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        close_connection.assert_not_called()
+        self.assertEqual(web_agent_updates.take_update(session.session_id), "")
+
+
 class AgentRequestedRelaunchTestCase(ShellTransitionTestCase):
     """The gated twin: the same relaunch, asked for by an agent's own pane.
 
@@ -922,6 +1046,20 @@ class AgentRequestedRelaunchTestCase(ShellTransitionTestCase):
         return response, close_connection, start_task
 
     # ---------------- the pane that passes ----------------
+
+    def test_an_agent_cannot_ask_for_a_self_update(self):
+        """The update button is the person's; a tool's relaunch never carries it."""
+        caller, target = self._agent_pair()
+        self.addCleanup(web_agent_updates._pending.clear)
+
+        response, _close, start_task = self._relaunch(
+            target.session_id,
+            {"requested_by_session_id": caller.session_id, "agent": "claude", "update": True},
+        )
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        start_task.assert_called_once()
+        self.assertEqual(web_agent_updates.take_update(target.session_id), "")
 
     def test_a_pane_this_agent_created_is_relaunched_into_an_agent(self):
         caller, target = self._agent_pair()

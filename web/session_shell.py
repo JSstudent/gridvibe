@@ -26,6 +26,11 @@ environment the replacement shell will start in, and a binary that is not there
 refuses the relaunch. The pane in front of the reader is already running, so a
 refusal costs nothing -- unlike at launch, where there is no pane yet to keep.
 
+``update: true`` beside a stated agent is the menu's update button: the same
+relaunch, with the agent's own update command run before it starts. It is a
+one-shot owed to the replacement connection (``web/agent_updates.py``), never
+pane metadata.
+
 Nothing here imports ``web.api``: that would cycle, and the transaction has no
 business knowing what a Flask response looks like. The three effects it cannot
 own -- closing the pane's connection, broadcasting its status, starting the
@@ -48,10 +53,12 @@ from web.agent_handoffs import (
     validate_task,
 )
 from web.agent_handoffs import handoffs as agent_handoffs
+from web.agent_updates import request_update
 from web.agents import (
     AGENT_REGISTRY,
     _agent_absent_reason,
     _agent_supports_mcp,
+    _agent_update_command,
     _normalize_agent_key,
     task_refusal,
 )
@@ -174,6 +181,26 @@ def _requested_mcp(payload: Dict[str, Any]) -> Optional[bool]:
     if not isinstance(value, bool):
         raise ShellTransitionError("mcp must be true or false")
     return value
+
+
+def _requested_update(payload: Dict[str, Any], agent_key: Optional[str]) -> str:
+    """Return the update command to run before the agent starts, or ``""``.
+
+    Not a tri-state: an update is a one-shot action, so absent and ``false``
+    both mean "just relaunch". It updates the agent the same request starts,
+    so it needs a stated agent that publishes an update command.
+    """
+    value = payload.get("update")
+    if value is None or value is False:
+        return ""
+    if value is not True:
+        raise ShellTransitionError("update must be true or false")
+    if not agent_key:
+        raise ShellTransitionError("An update needs the agent it updates")
+    command = _agent_update_command(agent_key)
+    if not command:
+        raise ShellTransitionError(f"{agent_key} has no update command")
+    return command
 
 
 def _pane_agent_key(session: Any) -> str:
@@ -377,6 +404,7 @@ def apply_pane_shell_change(
     shell_kind = _requested_shell(payload)
     agent_key = _requested_agent(payload)
     mcp_enabled = _requested_mcp(payload)
+    update_command = _requested_update(payload, agent_key)
 
     if shell_kind is not None:
         if session.mode != "wsl":
@@ -460,6 +488,9 @@ def apply_pane_shell_change(
     agent_handoffs.drop_bound(session_id, "pane relaunched")
     session_manager.update_session_status(session_id, SessionStatus.PENDING)
     effects.broadcast_status(session_id)
+    # Owed to the replacement connection only, so every relaunch states it --
+    # one without an update clears what an earlier one left untaken.
+    request_update(session_id, update_command)
     before_start = getattr(effects, "before_start", None)
     if before_start is not None:
         before_start(session_id)

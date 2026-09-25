@@ -516,6 +516,24 @@ changing any field that survives restart; it owns the complete save/restore flow
   publishes no mechanism gets no button, exactly as a pane with no shell family
   gets no chevron; the two surfaces read the one registry field, never a
   second rule client-side.
+- **An agent's update button is the same relaunch with the registry's update
+  command run first, and the request belongs to one connection.** Every option
+  publishing `update_command` carries an icon button in the slot the row's
+  command-name hint used to take; it states the row's shell, distro and agent,
+  keeps `mcp` only when it is updating the agent the pane already runs with
+  tools, and adds `update: true`. The route accepts that only beside a stated
+  agent whose `update.command` passes `_agent_update_command()` — the agent's
+  own binary followed by plain subcommand words — and refuses it before any
+  mutation otherwise. The command is recorded in `web/agent_updates.py` just
+  before the replacement shell starts, and `_begin_connection()` moves it onto
+  the connection it creates, so it lives and dies with that connection: one
+  that fails or is retired before startup takes it along, and a reconnect's
+  connection owes nothing. The startup sequence types it after the shell's
+  clear and before the agent's line, joined unconditionally (`&` in cmd, `;`
+  elsewhere) so a failed update still starts the agent. It is never pane
+  metadata: saves and restores launch plainly, and every relaunch without it
+  clears one left untaken. The agent-requested relaunch forwards no `update`; it is the
+  person's control only.
 - **A pane is painted for a relaunch before the relaunch is requested, and no
   pane is left behind an overlay nothing removes.** The route starts the new
   transport while it is still writing its response — a local shell is marked

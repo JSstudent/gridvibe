@@ -27,6 +27,11 @@
        flyout, which is what keeps the menu inside the window on a pane docked
        against its right edge.
 
+       Every agent whose registry entry publishes an update command also
+       carries an update icon beside its row: the same relaunch, with the
+       agent's own update command run first, so one press updates it and then
+       starts it.
+
        All of them go out as POST /api/sessions/<id>/shell, whose payload
        states each dimension separately: a row that names no shell leaves the
        pane's shell alone, and every row states its agent *and* its MCP choice
@@ -231,6 +236,31 @@
         );
     }
 
+    /* The update button an agent row carries in place of its old command-name
+       hint: the same relaunch as the row, with the registry's update command
+       run first — update, then start, in one press. It keeps GridVibe tools
+       when it is updating the agent the pane already runs with them, so
+       updating is never also a way off the tools. An agent that publishes no
+       update command gets no button. */
+    function paneShellAgentUpdateHtml(option, label, shellKind, distribution, keepMcp) {
+        const command = String(option?.update_command || '').trim();
+        if (!command) {
+            return '';
+        }
+        const title = `Update ${label} (${command}), then start it`;
+        return `
+            <button
+                type="button"
+                role="menuitem"
+                class="pane-shell-menu-update"
+                title="${escHtml(title)}"
+                aria-label="${escHtml(title)}"
+                ${paneShellLaunchAttrs(shellKind, distribution, option.value, keepMcp)}
+                data-pane-shell-update="1"
+            >${AGENT_UPDATE_ICON}</button>
+        `;
+    }
+
     function paneShellRowKey(shellKind, distribution) {
         return `${shellKind} ${distribution}`;
     }
@@ -259,20 +289,25 @@
             const isLive = familyIsActive && activeAgent === option.value;
             const plainRow = paneShellMenuItemHtml({
                 label,
-                hint: option.value,
                 active: isLive && !activeMcp,
                 icon: paneShellAgentIconHtml(option.value),
                 agent: paneShellAgentBrandKey(option.value),
                 attrs: paneShellLaunchAttrs(shellKind, distribution, option.value, false)
             });
+            const updateButton = paneShellAgentUpdateHtml(
+                option, label, shellKind, distribution, isLive && activeMcp
+            );
             if (!paneAgentSupportsMcp(option)) {
-                rows.push(plainRow);
+                rows.push(updateButton
+                    ? `<div class="pane-shell-menu-row">${plainRow}${updateButton}</div>`
+                    : plainRow);
                 return;
             }
             const toolsLabel = `${label} with GridVibe tools`;
             rows.push(`
                 <div class="pane-shell-menu-row">
                     ${plainRow}
+                    ${updateButton}
                     <button
                         type="button"
                         role="menuitemradio"
@@ -511,7 +546,8 @@
                     shell: launch.dataset.paneShellKind || '',
                     distribution: launch.dataset.paneShellDistro || '',
                     agent: launch.dataset.paneShellAgent || '',
-                    mcp: launch.dataset.paneShellMcp === '1'
+                    mcp: launch.dataset.paneShellMcp === '1',
+                    update: launch.dataset.paneShellUpdate === '1'
                 });
                 return;
             }
@@ -573,7 +609,7 @@
        to a plain shell) changes what that header should say. The stored title
        is untouched either way — a name the user typed keeps winning, and the
        agent's name is still never persisted back. */
-    async function relaunchSessionShell(index, { shell = '', distribution = '', agent = '', mcp = false } = {}) {
+    async function relaunchSessionShell(index, { shell = '', distribution = '', agent = '', mcp = false, update = false } = {}) {
         const sessionId = sessionIds[index];
         const pane = terminals[index];
         const session = pane?._session;
@@ -585,6 +621,11 @@
             return;
         }
         const body = { agent, mcp: Boolean(agent) && Boolean(mcp) };
+        /* Only ever sent as true: an update is a one-shot action, and every
+           request that leaves it out is simply not asking for one. */
+        if (agent && update) {
+            body.update = true;
+        }
         if (shell) {
             body.shell = shell;
             body.distribution = distribution;

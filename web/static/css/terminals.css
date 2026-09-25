@@ -1648,6 +1648,34 @@
             color: var(--t-accent);
         }
 
+        /* The agent row's update target — run the agent's update command,
+           then start it. The chevron's footprint, in the slot the row's
+           command-name hint used to take. */
+        .pane-shell-menu-update {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            flex: 0 0 24px;
+            padding: 0;
+            border: 1px solid transparent;
+            border-radius: 6px;
+            background: transparent;
+            color: var(--t-text-muted);
+            cursor: pointer;
+            transition: background .18s, border-color .18s, color .18s;
+        }
+
+        .pane-shell-menu-update svg {
+            width: 14px;
+            height: 14px;
+        }
+
+        .pane-shell-menu-update:hover {
+            background: var(--t-btn-hover-bg);
+            border-color: var(--session-color, var(--t-accent));
+            color: var(--t-text);
+        }
+
         .pane-shell-menu-mark {
             display: inline-flex;
             align-items: center;

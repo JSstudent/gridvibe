@@ -75,6 +75,7 @@ const TERMINAL_REFRESH_ICON = '<svg data-icon="refresh"></svg>';
 const UI_CHECK_ICON = '<svg data-icon="check"></svg>';
 const UI_CHEVRON_RIGHT_ICON = '<svg data-icon="chevron"></svg>';
 const TERMINAL_PROMPT_ICON = '<svg data-icon="prompt"></svg>';
+const AGENT_UPDATE_ICON = '<svg data-icon="update"></svg>';
 
 /* shared.js's own escaper, copied rather than neutered: the rows' values reach
    the parser below through it, so a stub that did not escape would let a distro
@@ -237,7 +238,9 @@ function parseRows(html) {
             launch: Object.prototype.hasOwnProperty.call(dataset, 'paneShellLaunch'),
             /* The MCP button carries no label span -- its text is the badge --
                so it is told apart by the class the page styles it with. */
-            tools: /class="[^"]*pane-shell-menu-mcp/.test(match[1])
+            tools: /class="[^"]*pane-shell-menu-mcp/.test(match[1]),
+            /* The update button, likewise: an icon and an aria-label. */
+            update: /class="[^"]*pane-shell-menu-update/.test(match[1])
         });
     }
     return rows;
@@ -255,7 +258,7 @@ async function press(index, row) {
             /* The MCP button is a sibling control, not a menu item, so it is
                reachable only through the launch lookup above. */
             if (selector === '.pane-shell-menu-item') {
-                return row.expander || row.tools ? null : node;
+                return row.expander || row.tools || row.update ? null : node;
             }
             return null;
         }
@@ -755,6 +758,119 @@ class AgentToolsButtonTestCase(TerminalShellMenuTestCase):
         # No agent, no tools -- however a preset written before the pane was
         # sent back to a plain shell left the flag.
         self.assertEqual(result["plain"], ["Plain shell"])
+
+
+# The registry as it really is for updates: two agents publish a command and the
+# third is left without one, so "no command, no button" is exercised.
+WITH_UPDATE_COMMANDS = """
+AGENT_OPTIONS = AGENT_OPTIONS.map(option => Object.assign({}, option, {
+    update_command: { claude: 'claude update', kilo: 'kilo upgrade' }[option.value] || ''
+}));
+"""
+
+
+class AgentUpdateButtonTestCase(TerminalShellMenuTestCase):
+    """The update icon beside an agent row: update the agent, then start it.
+
+    It took the slot the row's grey command-name hint used to fill, and it is a
+    relaunch target like the MCP button: it states every dimension the row does
+    and asks for the update on top.
+    """
+
+    def test_the_command_name_hint_gave_way_to_an_update_button(self):
+        result = self._run_node(
+            WITH_UPDATE_COMMANDS
+            + """
+            const rows = await openMenu(0, sshPane());
+            report({
+                hints: (paneMenu(0).innerHTML.match(/pane-shell-menu-hint/g) || []).length,
+                updates: rows.filter(row => row.update).map(row => ({
+                    agent: row.dataset.paneShellAgent,
+                    label: row.label,
+                    icon: /data-icon="update"/.test(paneMenu(0).innerHTML)
+                }))
+            });
+            """
+        )
+        self.assertEqual(result["hints"], 0)
+        # Codex publishes no command in this fixture, so it has no button.
+        self.assertEqual(
+            result["updates"],
+            [
+                {"agent": "claude", "label": "Update Claude Code (claude update), then start it", "icon": True},
+                {"agent": "kilo", "label": "Update Kilo CLI (kilo upgrade), then start it", "icon": True},
+            ],
+        )
+
+    def test_the_button_updates_the_agent_under_the_family_it_was_opened_in(self):
+        result = self._run_node(
+            WITH_UPDATE_COMMANDS
+            + """
+            let rows = await openMenu(0, localPane());
+            await press(0, rows.find(row => row.dataset.paneShellExpand === 'wsl Ubuntu'));
+            rows = rowsFor(0);
+            await press(0, rows.find(row => row.update && row.dataset.paneShellAgent === 'kilo'));
+            report({ requests: calls.requests.filter(request => request.body) });
+            """
+        )
+        self.assertEqual(
+            result["requests"],
+            [{
+                "url": "/api/sessions/sess-1/shell",
+                "body": {
+                    "agent": "kilo", "mcp": False, "update": True,
+                    "shell": "wsl", "distribution": "Ubuntu",
+                },
+            }],
+        )
+
+    def test_the_row_itself_never_asks_for_an_update(self):
+        result = self._run_node(
+            WITH_UPDATE_COMMANDS
+            + """
+            let rows = await openMenu(0, sshPane());
+            await press(0, rows.find(row => !row.update && !row.tools && row.label === 'Claude Code'));
+            menus.clear();
+            rows = await openMenu(0, sshPane());
+            await press(0, rows.find(row => row.tools && row.dataset.paneShellAgent === 'claude'));
+            report({ bodies: calls.requests.filter(request => request.body).map(request => request.body) });
+            """
+        )
+        self.assertEqual(
+            result["bodies"],
+            [{"agent": "claude", "mcp": False}, {"agent": "claude", "mcp": True}],
+        )
+
+    def test_updating_the_running_agent_keeps_its_gridvibe_tools(self):
+        """Updating is never also the way off the tools."""
+        result = self._run_node(
+            WITH_UPDATE_COMMANDS
+            + """
+            const running = () => sshPane({
+                startup_mode: 'agent', agent_selection: 'claude', agent_mcp: true
+            });
+            let rows = await openMenu(0, running());
+            const checked = rows.filter(row => row.checked).map(row => row.label);
+            await press(0, rows.find(row => row.update && row.dataset.paneShellAgent === 'claude'));
+            menus.clear();
+            rows = await openMenu(0, running());
+            await press(0, rows.find(row => row.update && row.dataset.paneShellAgent === 'kilo'));
+            report({
+                bodies: calls.requests.filter(request => request.body).map(request => request.body),
+                checked
+            });
+            """
+        )
+        # Kilo is not what the pane runs, so it starts the way its row would.
+        self.assertEqual(
+            result["bodies"],
+            [
+                {"agent": "claude", "mcp": True, "update": True},
+                {"agent": "kilo", "mcp": False, "update": True},
+            ],
+        )
+        # An action, not a choice: the button never wears the check.
+        self.assertEqual(result["checked"], ["Claude Code with GridVibe tools"])
 
 
 class RelaunchedPaneHeaderTestCase(TerminalShellMenuTestCase):

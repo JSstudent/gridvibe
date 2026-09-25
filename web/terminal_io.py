@@ -77,6 +77,7 @@ from web.agent_session_hooks import (
     parse_session_report,
     token_matches,
 )
+from web.agent_updates import take_update
 from web.agents import (
     AGENT_REGISTRY,
     _compose_agent_startup_command,
@@ -2524,16 +2525,31 @@ _AGENT_LAUNCH_CLEAR = {
 }
 _POSIX_AGENT_LAUNCH_CLEAR = "printf '\\033[H\\033[2J\\033[3J'; "
 
+# Between an agent's update command and its launch, on the same line.
+# Unconditional on purpose: an update that fails -- offline, already current
+# with a non-zero exit -- still leaves a working agent to start.
+_AGENT_UPDATE_SEPARATOR = {
+    "cmd": " & ",
+    "powershell": "; ",
+}
+_POSIX_AGENT_UPDATE_SEPARATOR = "; "
 
-def _agent_launch_line(session: Any, shell_kind: str, startup_command: str) -> str:
+
+def _agent_launch_line(
+    session: Any, shell_kind: str, startup_command: str, update_command: str = ""
+) -> str:
     """Prefix an agent's launch line with the shell's own clear.
 
     Only an agent pane: a plain startup command's echo is the reader's only
-    record of what the pane was told to run.
+    record of what the pane was told to run. An update owed to this connection
+    runs after the clear, so its output stays above the agent's first frame.
     """
     if str(getattr(session, "initial_command_mode", "") or "") != "agent":
         return startup_command
     prefix = _AGENT_LAUNCH_CLEAR.get(shell_kind, _POSIX_AGENT_LAUNCH_CLEAR)
+    if update_command:
+        separator = _AGENT_UPDATE_SEPARATOR.get(shell_kind, _POSIX_AGENT_UPDATE_SEPARATOR)
+        prefix = f"{prefix}{update_command}{separator}"
     return f"{prefix}{startup_command}"
 
 
@@ -2712,6 +2728,8 @@ def _run_startup_sequence(connection: Dict[str, Any], session: Any):
     # before composing, because it is what asks the composer for the opening
     # prompt -- a fact about this connection, never the pane record.
     pending_handoff = agent_handoffs.pending_for(session_id) if session_id else None
+    # Bound to this connection by `_begin_connection`, so typed at most once.
+    update_command = str(connection.get("agent_update") or "")
     startup_command = _compose_agent_startup_command(
         session,
         remote_config_path=str(tunnel.get("remote_path") or ""),
@@ -2761,7 +2779,8 @@ def _run_startup_sequence(connection: Dict[str, Any], session: Any):
         else:
             _send_connection_input(
                 connection,
-                f"{_agent_launch_line(session, shell_kind, startup_command)}{newline}",
+                f"{_agent_launch_line(session, shell_kind, startup_command, update_command)}"
+                f"{newline}",
             )
             # The line that was actually run, which is where a resumed pane's
             # conversation is named -- the pane itself will announce only its
@@ -2800,7 +2819,14 @@ def _connection_status(session_id, connection, status, error_message=None):
 
 
 def _begin_connection(session_id):
-    connection = {'write_lock': threading.Lock(), 'ownership_lock': threading.RLock()}
+    connection = {
+        'write_lock': threading.Lock(),
+        'ownership_lock': threading.RLock(),
+        # Moved out of the store the moment a connection exists, so it lives
+        # and dies with this one: a connection that fails or is retired before
+        # its startup sequence takes it along, and a reconnect owes nothing.
+        'agent_update': take_update(session_id),
+    }
     while True:
         with connection_lock:
             session = session_manager.get_session(session_id)

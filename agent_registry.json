@@ -68,6 +68,9 @@
     "verify": [
       "copilot --version"
     ],
+    "update": {
+      "command": "copilot update"
+    },
     "post_install": "Run copilot and complete /login if prompted.",
     "auto_mode": {
       "flag": "--allow-all-tools",
@@ -157,6 +160,9 @@
     "verify": [
       "codex --version"
     ],
+    "update": {
+      "command": "codex update"
+    },
     "post_install": "Run codex once and complete sign-in.",
     "auto_mode": {
       "flag": "--sandbox workspace-write --ask-for-approval on-request",
@@ -242,6 +248,9 @@
     "verify": [
       "opencode --help"
     ],
+    "update": {
+      "command": "opencode upgrade"
+    },
     "post_install": "Run opencode and complete /connect."
   },
   "kilo": {
@@ -300,6 +309,9 @@
     "verify": [
       "kilo --version"
     ],
+    "update": {
+      "command": "kilo upgrade"
+    },
     "post_install": "Run kilo and complete /connect.",
     "auto_mode": {
       "flag": "--yolo",
@@ -380,6 +392,9 @@
     "verify": [
       "claude --version"
     ],
+    "update": {
+      "command": "claude update"
+    },
     "post_install": "Run claude once and complete browser sign-in.",
     "auto_mode": {
       "flag": "--permission-mode auto",
@@ -468,6 +483,9 @@
     "verify": [
       "kimi --version"
     ],
+    "update": {
+      "command": "kimi upgrade"
+    },
     "post_install": "Run kimi and complete /login if prompted.",
     "auto_mode": {
       "flag": "--auto-approve",
@@ -524,6 +542,9 @@
     "verify": [
       "grok --version"
     ],
+    "update": {
+      "command": "grok update"
+    },
     "post_install": "Run grok once and complete the browser sign-in, or set XAI_API_KEY on a target with no browser.",
     "auto_mode": {
       "flag": "--always-approve",
@@ -581,6 +602,9 @@
     "verify": [
       "hermes --version"
     ],
+    "update": {
+      "command": "hermes update"
+    },
     "post_install": "Run hermes setup --portal (or hermes model) to pick a provider, then hermes doctor to check the install.",
     "auto_mode": {
       "flag": "--yolo",
