@@ -4,17 +4,21 @@ import sys
 import unittest
 import uuid
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest.mock import Mock, patch
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+import tests  # noqa: E402,F401 - redirects durable state away from the real files
 from sessions.manager import SessionManager, TerminalSession  # noqa: E402
 from web import agent_conversations as conversations  # noqa: E402
-from web import runtime_state, session_shell  # noqa: E402
+from web import api, mcp_launch, runtime_state, session_shell  # noqa: E402
 from web import terminal_io as terminal  # noqa: E402
 from web.agent_activity import blank_agent_activity  # noqa: E402
+from web.agent_handoffs import HANDOFF_OPENING_PROMPT  # noqa: E402
+from web.agent_handoffs import handoffs as handoff_store  # noqa: E402
 from web.agents import AGENT_REGISTRY, _compose_agent_startup_command  # noqa: E402
 from web.saved_sessions import _normalize_terminal_entries  # noqa: E402
 from web.workspaces import _restore_group_request, launch_session_group  # noqa: E402
@@ -722,6 +726,212 @@ class OwnershipAndLifecycleTestCase(unittest.TestCase):
         self.assertFalse(same["agent_conversation_resume"])
         self.assertEqual(other, conversations.EMPTY_CONVERSATION_FIELDS)
 
+
+
+class HandedOverPaneTestCase(unittest.TestCase):
+    """The one agent pane nobody ever types into.
+
+    A pane an agent handed a task to has its first turn on its launch line, so
+    the provider writes the conversation to disk at startup. The input tracker
+    is where every other conversation is marked saved, and it only ever sees
+    the reader's keystrokes -- so a handed-over pane kept `resume` false for
+    its whole life, its pair never reached a snapshot, and restoring the
+    workspace started it fresh beside panes that resumed exactly.
+    """
+
+    BRIEF = "Findings: the retry loop never backs off. Proposed fix: cap it."
+    QUOTED = f'"{HANDOFF_OPENING_PROMPT}"'
+
+    def setUp(self):
+        self.manager = SessionManager()
+        self.registry = {}
+        for name, value in (
+            ("session_manager", self.manager),
+            ("ssh_connections", self.registry),
+        ):
+            patcher = patch.object(terminal, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        handoff_store.reset()
+        self.addCleanup(handoff_store.reset)
+        self.temp = TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        config_path = Path(self.temp.name) / ".gridvibe_mcp.json"
+        config_path.write_text(
+            '{"mcpServers": {"gridvibe": {"command": "python", "args": ["m.py"]}}}',
+            encoding="utf-8",
+        )
+        patcher = patch.object(mcp_launch, "mcp_config_path", lambda: str(config_path))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _pane(self, **updates):
+        fields = agent_config("claude", **updates)
+        fields.update({"mode": "wsl", "directory": "", "agent_mcp": True})
+        session = self.manager.create_session("group", **fields)
+        connection = {"kind": "local", "shell_kind": "cmd", "launch_cwd_applied": True}
+        self.registry[session.session_id] = connection
+        return session, connection
+
+    def _hand_over(self, session):
+        return handoff_store.create(
+            self.BRIEF,
+            source_session_id="pane-a",
+            session_id=session.session_id,
+            from_title="Claude 1",
+            from_agent="claude",
+        )
+
+    def _start(self, session, connection):
+        sent = []
+        with (
+            patch.object(
+                terminal,
+                "_send_connection_input",
+                side_effect=lambda conn, data: sent.append(data),
+            ),
+            patch.object(terminal.runtime_config, "terminal_shell_integration", False),
+            patch.object(terminal.time, "sleep"),
+        ):
+            terminal._run_startup_sequence(connection, session)
+        return sent
+
+    def test_the_opening_prompt_makes_a_planned_id_restorable(self):
+        session, connection = self._pane(
+            agent_conversation_provider="claude",
+            agent_conversation_id=CLAUDE_ID,
+            agent_conversation_resume=False,
+        )
+        self._hand_over(session)
+
+        sent = self._start(session, connection)
+
+        self.assertIn(self.QUOTED, sent[0])
+        self.assertIn(f"--session-id {CLAUDE_ID}", sent[0])
+        self.assertTrue(session.agent_conversation_resume)
+        self.assertEqual(
+            runtime_state._snapshot_session(session)["agent_conversation_id"],
+            CLAUDE_ID,
+        )
+
+    def test_an_id_that_arrives_after_the_opening_prompt_arrives_saved(self):
+        # The pane a session hook names rather than the launch line: nothing is
+        # known to mark at startup, so the turn is remembered on the connection
+        # and the id that follows is published already saved.
+        session, connection = self._pane()
+        self._hand_over(session)
+
+        sent = self._start(session, connection)
+
+        self.assertIn(self.QUOTED, sent[0])
+        self.assertNotIn("--session-id", sent[0])
+        self.assertEqual(session.agent_conversation_id, "")
+
+        self.assertTrue(
+            terminal._publish_runtime_conversation_identity(
+                session.session_id, connection, "claude", CLAUDE_ID
+            )
+        )
+        self.assertTrue(session.agent_conversation_resume)
+
+    def test_a_pane_with_no_task_still_waits_for_its_first_prompt(self):
+        session, connection = self._pane(
+            agent_conversation_provider="claude",
+            agent_conversation_id=CLAUDE_ID,
+            agent_conversation_resume=False,
+        )
+
+        sent = self._start(session, connection)
+
+        self.assertNotIn(self.QUOTED, sent[0])
+        self.assertFalse(session.agent_conversation_resume)
+        self.assertEqual(
+            runtime_state._snapshot_session(session)["agent_conversation_id"], ""
+        )
+
+
+class SplitCreatedPaneTestCase(unittest.TestCase):
+    """The second way an agent pane is born, and the one that named nothing.
+
+    `POST /api/sessions/<id>/split` builds its pane's launch fields itself, and
+    it is what an agent's own `split_pane` tool reaches. It planned no
+    conversation at all, so a split-created agent pane could only ever be
+    identified by a Claude session hook -- and a WSL or SSH pane, which is
+    handed no hook, was never restorable.
+    """
+
+    def setUp(self):
+        api.app.config["TESTING"] = True
+        self.client = api.app.test_client()
+        api.session_manager.reset_sessions()
+        self.addCleanup(api.session_manager.reset_sessions)
+        with api.connection_lock:
+            api.ssh_connections.clear()
+
+    def _pane(self):
+        group = api.session_manager.create_group(
+            name="Local", connection_mode="wsl", layout="single", terminal_count=1
+        )
+        session = api.session_manager.create_session(
+            group_id=group.group_id,
+            host="cmd",
+            directory="",
+            mode="wsl",
+            startup_mode="terminal",
+        )
+        api.session_manager.update_session_status(
+            session.session_id, api.SessionStatus.CONNECTED
+        )
+        return api.session_manager.get_session(session.session_id)
+
+    def _split(self, source, body):
+        with (
+            patch.object(api, "_agent_absent_reason", return_value=""),
+            patch.object(terminal, "_resolve_live_terminal_cwd", return_value=None),
+            patch.object(api.socketio, "start_background_task"),
+        ):
+            response = self.client.post(
+                f"/api/sessions/{source.session_id}/split", json=body
+            )
+        self.assertEqual(response.status_code, 201, response.get_json())
+        return response.get_json()["session"]
+
+    def test_a_split_into_a_built_in_claude_plans_its_own_conversation(self):
+        source = self._pane()
+
+        created = self._split(
+            source,
+            {"axis": "vertical", "kind": "agent", "agent": "claude", "mcp": True},
+        )
+        pane = api.session_manager.get_session(created["session_id"])
+
+        self.assertEqual(pane.agent_conversation_provider, "claude")
+        self.assertEqual(
+            str(uuid.UUID(pane.agent_conversation_id)), pane.agent_conversation_id
+        )
+        self.assertFalse(pane.agent_conversation_resume)
+        self.assertTrue(
+            _compose_agent_startup_command(pane).startswith(
+                f"claude --session-id {pane.agent_conversation_id}"
+            )
+        )
+        # Planned, never published: the id is data, not a payload field.
+        self.assertNotIn("agent_conversation_id", created)
+
+    def test_a_split_that_is_not_a_built_in_claude_plans_nothing(self):
+        source = self._pane()
+
+        for body in (
+            {"axis": "vertical"},
+            {"axis": "vertical", "kind": "agent", "agent": "codex"},
+        ):
+            with self.subTest(kind=body.get("kind", "clone")):
+                created = self._split(source, body)
+                pane = api.session_manager.get_session(created["session_id"])
+
+                self.assertEqual(pane.agent_conversation_provider, "")
+                self.assertEqual(pane.agent_conversation_id, "")
+                self.assertFalse(pane.agent_conversation_resume)
 
 
 class RestoreSwitchOffTestCase(unittest.TestCase):

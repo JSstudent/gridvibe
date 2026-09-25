@@ -1370,19 +1370,26 @@ template and always starts fresh.
 - **Known is not resumable.** `agent_conversation_resume` is live-only and
   never serialised. Both CLIs save a conversation on its first turn, so a pair
   reaches the snapshot only once the provider has it on disk: the first
-  submitted non-slash line, a hook source of `resume`/`compact`/`fork`, a Codex
-  id announced after `/resume` or `/fork`, or a typed resume command. A pane
-  launched and saved before any prompt restores fresh. A prompt submitted
-  before the new id is known (typing straight after `/clear` or `/new`, while
-  the hook or title is still on its way) is remembered on the connection, and
-  the id that follows is published already saved.
+  submitted non-slash line, the opening prompt a handed-over pane carries on
+  its own launch line, a hook source of `resume`/`compact`/`fork`, a Codex id
+  announced after `/resume` or `/fork`, or a typed resume command. The
+  handed-over line is the one first turn nobody types, so the startup sequence
+  marks it where it types it. A pane launched and saved before any prompt
+  restores fresh. A prompt submitted before the new id is known (typing
+  straight after `/clear` or `/new`, while the hook or title is still on its
+  way) is remembered on the connection, and the id that follows is published
+  already saved.
 - **Durable shape.** `agent_conversation_provider` and `agent_conversation_id`
   are in `_SESSION_SNAPSHOT_FIELDS`. With the switch on, a wholly absent pair is
   the backward-compatible fresh shape; a partial, mistyped, unsupported,
   provider-mismatched or command-contradicted pair makes the pane unrestorable
   rather than silently fresh. Saved-preset normalization strips all three
   fields.
-- **Only a restore resumes.** `_restore_group_request()` sends the snapshot with
+- **Every birth plans, and only a restore resumes.** The launcher, a server-side
+  restore, a pane relaunch and the split route each plan identity against the
+  pane as it will be, so a built-in Claude is named however it was created --
+  and a split, which never carries a pair, can only ever plan a fresh one.
+  `_restore_group_request()` sends the snapshot with
   `restore: True`, and `prepare_conversation_launch_fields(restore=True)` is the
   one place a captured pair is accepted and marked resume; it refuses a pair on
   any other launch. A relaunch from the pane header, any mode change, agent

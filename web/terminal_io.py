@@ -2792,6 +2792,18 @@ def _run_startup_sequence(connection: Dict[str, Any], session: Any):
             # project. Nothing is waited on: the lookup is its own thread. The
             # clear is not part of it, so it is not handed over.
             _note_agent_conversation_command(session_id, connection, startup_command)
+            if pending_handoff is not None and launch_line_carries_opening_prompt(
+                startup_command
+            ):
+                # A handed-over pane's first turn rides on the launch line, so
+                # its conversation is written to the provider's disk without
+                # anyone ever typing into the pane -- and the input tracker,
+                # which is where every other conversation is marked saved,
+                # only ever sees the reader's keystrokes. Without this a pane
+                # an agent handed a task kept `resume` false for its whole
+                # life, so the snapshot dropped its pair and the workspace
+                # restored it fresh, next to panes that resumed exactly.
+                _mark_agent_conversation_saved(session_id, connection)
 
     # Deliberately not the moment to arm an agent pane's retirement watch.
     # Nothing typed above has been *read* yet -- the pump only starts once this

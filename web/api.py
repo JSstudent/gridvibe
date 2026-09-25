@@ -24,6 +24,7 @@ from sessions.manager import (  # noqa: F401 - re-exported for backwards compati
     _normalize_agent_depth,
 )
 from web import mcp_http
+from web.agent_conversations import prepare_conversation_launch_fields
 from web.agent_handoff_files import sweep_local_handoffs
 from web.agent_handoffs import (
     HandoffError,
@@ -3773,6 +3774,14 @@ def split_session(session_id: str):
         if creator is not None
         else 0
     )
+    # The same planning the launcher and the pane relaunch do, against the
+    # pane as it will be: a split into a built-in Claude gets its own assigned
+    # id, and every other new pane gets none. Without it a split-created agent
+    # pane was the one agent pane GridVibe never named, so it could only ever
+    # be identified by a session hook -- and a WSL or SSH pane, which is handed
+    # no hook, was never restorable at all. A split never resumes: it carries
+    # no pair, so this only ever plans a fresh conversation.
+    fields.update(prepare_conversation_launch_fields(fields, AGENT_REGISTRY))
     new_session = session_manager.append_session_to_group(
         group_id=group.group_id,
         **fields,
