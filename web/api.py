@@ -24,6 +24,7 @@ from sessions.manager import (  # noqa: F401 - re-exported for backwards compati
     _normalize_agent_depth,
 )
 from web import mcp_http
+from web.agent_conversations import prepare_conversation_launch_fields
 from web.agent_handoff_files import sweep_local_handoffs
 from web.agent_handoffs import (
     HandoffError,
@@ -33,6 +34,8 @@ from web.agent_handoffs import (
     validate_task,
 )
 from web.agent_handoffs import handoffs as agent_handoffs
+from web.agent_results import ResultError, clamp_wait, validate_until
+from web.agent_results import results as agent_results
 from web.agent_session_hooks import PANE_TOKEN_HEADER, write_claude_settings
 from web.agents import (  # noqa: F401 - re-exported for backwards compatibility
     AGENT_REGISTRY,
@@ -3161,6 +3164,84 @@ def read_session_handoff(session_id: str):
     return jsonify(payload)
 
 
+@app.route('/api/sessions/<session_id>/handoff-report', methods=['POST'])
+def report_session_handoff(session_id: str):
+    """The agent in this pane hands back the outcome of its task.
+
+    What ``report_result`` posts. The pane is always the caller's own -- the
+    tool takes no pane argument -- and the report goes to whichever agent handed
+    this pane its task, never to a pane the caller names. The text is validated
+    before anything is looked up, and never logged.
+    """
+    if session_manager.get_session(session_id) is None:
+        return jsonify({"error": "Session not found"}), 404
+    data = request.get_json(silent=True) or {}
+    try:
+        payload = agent_results.report(session_id, data.get("result"), data.get("status"))
+    except ResultError as exc:
+        return jsonify({"error": exc.message}), exc.status_code
+    requester = session_manager.get_session(payload.pop("requester_session_id", ""))
+    payload["reported_to"] = {
+        "session_id": getattr(requester, "session_id", "") or "",
+        "title": str(getattr(requester, "title", "") or ""),
+    }
+    return jsonify(payload)
+
+
+def _truthy_query_flag(raw: Any) -> bool:
+    return str(raw or "").strip().lower() in ("1", "true", "yes")
+
+
+@app.route('/api/sessions/<session_id>/handoff-reports', methods=['GET'])
+def collect_session_handoff_reports(session_id: str):
+    """The reports of the agents this pane handed a task to -- ``wait_for_results``.
+
+    ``wait`` blocks this request on the results store until the named agents
+    have reported (``until=all``) or one has news (``until=any``), bounded by
+    ``MAX_WAIT_SECONDS``; ``wait=0`` answers at once. The tunnelled tools wait
+    on the store in-process and then ask with ``wait=0``, so a request never
+    waits on a loopback request back into this server. Like ``read_handoff``,
+    its one side effect is a bookmark: a report it returns is not returned
+    whole again unless ``include_collected`` asks.
+    """
+    if session_manager.get_session(session_id) is None:
+        return jsonify({"error": "Session not found"}), 404
+    worker_ids = [
+        item.strip()
+        for item in str(request.args.get("session_ids") or "").split(",")
+        if item.strip()
+    ]
+    try:
+        until = validate_until(request.args.get("until"))
+        wait_seconds = clamp_wait(request.args.get("wait"))
+    except ResultError as exc:
+        return jsonify({"error": exc.message}), exc.status_code
+    started = time.monotonic()
+    settled = agent_results.wait_until_settled(
+        session_id, worker_ids, until=until, timeout=wait_seconds
+    )
+    payload = agent_results.collect(
+        session_id,
+        worker_ids,
+        include_collected=_truthy_query_flag(request.args.get("include_collected")),
+    )
+    payload["timed_out"] = not settled
+    payload["waited_seconds"] = round(time.monotonic() - started, 1)
+    # Who each agent is, read live rather than captured: a pane can be renamed
+    # while its agent works, and one closed since reporting still has a report.
+    rows = payload.get("agents") or []
+    task_states = agent_handoffs.public_states(row["session_id"] for row in rows)
+    for row in rows:
+        worker = session_manager.get_session(row["session_id"])
+        described = pane_description(worker) if worker is not None else {}
+        row["title"] = described.get("from_title", "")
+        row["agent"] = described.get("from_agent", "")
+        row["pane_open"] = worker is not None
+        task_state = task_states.get(row["session_id"])
+        row["task_state"] = task_state.get("state") if task_state else None
+    return jsonify(payload)
+
+
 @app.route('/api/panes/layout', methods=['GET'])
 def get_pane_layout():
     """How one session group's panes are arranged, and which pane is next to which.
@@ -3505,6 +3586,9 @@ def open_split_intent(session_id: str):
             handoff_id = agent_handoffs.create(
                 task_text,
                 source_session_id=session_id,
+                # The agent that asked waits for the report, and it need not
+                # be in the pane being halved.
+                requester_session_id=split_request["created_by_session_id"],
                 **pane_description(caller),
             )
         except HandoffError as exc:
@@ -3690,6 +3774,14 @@ def split_session(session_id: str):
         if creator is not None
         else 0
     )
+    # The same planning the launcher and the pane relaunch do, against the
+    # pane as it will be: a split into a built-in Claude gets its own assigned
+    # id, and every other new pane gets none. Without it a split-created agent
+    # pane was the one agent pane GridVibe never named, so it could only ever
+    # be identified by a session hook -- and a WSL or SSH pane, which is handed
+    # no hook, was never restorable at all. A split never resumes: it carries
+    # no pair, so this only ever plans a fresh conversation.
+    fields.update(prepare_conversation_launch_fields(fields, AGENT_REGISTRY))
     new_session = session_manager.append_session_to_group(
         group_id=group.group_id,
         **fields,

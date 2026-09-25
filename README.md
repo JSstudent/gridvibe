@@ -1,8 +1,8 @@
+<h1 align="center">GridVibe</h1>
+
 <p align="center">
   <img src="docs/images/GridVibe.png" alt="GridVibe logo" width="160">
 </p>
-
-<h1 align="center">GridVibe</h1>
 
 <p align="center">
   <b>The vibe-coding cockpit.</b><br>
@@ -31,6 +31,8 @@
 | Launcher | Agents| Terminal Workspace | Browser | Agents Dashboard |
 | --- | --- | --- | --- | --- |
 | ![GridVibe launcher with terminal count, layout, connection, and per-terminal setup controls](docs/images/screenshots/launcher.png) | ![Preset agent setup from a saved configuration](docs/images/screenshots/Agents.png) | ![GridVibe terminal workspace showing a four-pane SSH session group](docs/images/screenshots/workspace.png) | ![GridVibe app browser terminal mode with tabs](docs/images/screenshots/browser_view.png) | ![GridVibe agent dashboard for agent work overview](docs/images/screenshots/dashboard.png) |
+
+https://github.com/user-attachments/assets/90cc03b2-16d8-4b8b-b3a4-80630340e937
 
 ## Quick Start
 
@@ -115,11 +117,12 @@ make mcp-status   # run this when an agent reports the server will not start
 
 Until it is installed the checkbox still appears and the agent simply finds no tools. `make mcp-status` walks the whole chain from the outside — the generated config, the interpreter, the entry point, the handshake — and names the link that is broken.
 
-### The fourteen tools
+### The sixteen tools
 
 | Tier | Tools | What the agent can do |
 | --- | --- | --- |
 | **Read** | `gridvibe_status` `list_workspaces` `list_panes` `list_agents` `list_saved_layouts` `whoami` `read_handoff` | See every workspace, every pane and where it sits in the grid, every agent and whether it is working, every saved preset, which pane it is itself in, and the task another agent handed it |
+| **Hand back** | `report_result` `wait_for_results` | Report the outcome of a handed-over task to the agent that asked for it, and wait for the reports of the agents it handed tasks to |
 | **Create** | `create_workspace` `launch_panes` `open_window` `split_pane` | Make a workspace, launch a group of panes into it, put it on screen, split any pane side-by-side or stacked, and hand a new agent its task |
 | **Replace** | `set_pane_agent` `set_pane_mode` | Relaunch a pane under a different agent (optionally with a task) or back to a plain shell, or turn it into a file explorer or a browser preview |
 | **Clear** | `clear_pane` | Clear one terminal pane and its replay buffer, exactly as the 🧹 button does |
@@ -127,6 +130,7 @@ Until it is installed the checkbox still appears and the agent simply finds no t
 - **Nothing closes and nothing types.** There is no tool for closing a pane, a tab, or a workspace, and none for sending keystrokes to a terminal. They are absent from the build, not switched off.
 - **An agent only touches panes it made.** The three tools that replace or clear a pane refuse the agent's own pane always, and refuse any pane it did not create — including every pane from before a restart — unless you tell it in that conversation to replace that particular one.
 - **Agents hand each other tasks.** An agent that splits off or launches a Claude Code, Codex or Copilot pane can give it a task, and the new agent starts on it rather than waiting — ask for *"hand the findings to a new Codex agent below this one."* The task never goes to another machine, and nothing is typed into an agent that is already running.
+- **Agents report back.** An agent handed a task reports its outcome to the agent that handed it over, which can wait for several at once — ask for *"hand this to three Codex agents beside this one and wait for their results."* A pane closed before it reported is reported as ended, so nothing waits forever.
 - **It asks before it replaces.** Refused a pane it did not make, an agent gets GridVibe's own question to put to you — which pane, and what it would end — and acts only on your yes.
 - **Agents launching agents is bounded.** A pane an agent creates counts one generation deeper than the pane that asked for it, and the chain stops after two.
 - **New panes open where the asking agent is.** A tool called from an SSH pane opens its panes on that same host over the same connection, and refuses rather than quietly falling back to this machine. They land in the workspace that agent's tab is in *now*, so moving a session between workspaces takes its agent with it.
@@ -230,6 +234,7 @@ Launched a pane in cmd and wanted PowerShell — or Codex in WSL? Click the pane
 - **Pick a shell** — a Local Repo terminal on Windows lists **Command Prompt**, **PowerShell**, **WSL**, and every detected distro. The pane restarts in place, same slot, same title, in the directory the old shell was sitting in.
 - **Pick an agent** — each shell row's chevron opens **Plain shell** plus every agent, each under its own icon and brand colour, so "this pane, but Codex in WSL" is one click. SSH panes and non-Windows hosts get that list flat.
 - **Give it GridVibe tools** — agents that support MCP carry an **MCP** button beside their row: the row starts the agent plainly, the button starts it with GridVibe's own tools. Works on SSH panes as well as local ones.
+- **Update an agent in one press** — the arrow icon beside each agent row runs that agent's own update command (`claude update`, `codex update`, `opencode upgrade`, …) in the pane, then starts the agent.
 - **The pane says which it is** — a pane running with GridVibe tools draws a frame around the agent's icon in its header, and keeps it across a save and restore. Relaunching it plainly takes the frame off.
 - **Plain shell** drops a running agent and comes back to an ordinary prompt. Picking whatever is already checked relaunches it too.
 - **A missing agent never touches your pane** — GridVibe runs the same install check against that row's own target, and answers with a message (*OpenAI Codex CLI is missing in WSL Ubuntu.*) instead of relaunching.

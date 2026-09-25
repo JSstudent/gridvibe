@@ -5,9 +5,11 @@ Thin for the same reason a Flask route is thin: parse arguments, call
 tool handler -- the field allowlists live in the client and the depth budget
 lives in ``identity.py``.
 
-Fourteen tools, grouped by blast radius. Seven read, four create, two that
-replace what an existing pane *is* (``set_pane_agent``, ``set_pane_mode``), and
-one that erases what an existing pane has drawn (``clear_pane``).
+Sixteen tools, grouped by blast radius. Seven read, two that carry a report
+back between agents (``report_result``, ``wait_for_results``), four create, two
+that replace what an existing pane *is* (``set_pane_agent``,
+``set_pane_mode``), and one that erases what an existing pane has drawn
+(``clear_pane``).
 
 A pane an agent creates or relaunches can be handed a ``task``. No byte of it
 reaches a shell: the new agent's launch line carries one constant GridVibe
@@ -15,6 +17,12 @@ sentence telling it to call ``read_handoff``, and the brief is fetched through
 the tools. Every rule a task can break that is visible from here -- its text,
 its size, the kind of pane, ``mcp: false`` beside it, a caller with no pane --
 is refused before any HTTP.
+
+The new agent is asked to hand its outcome back with ``report_result``, and
+the agent that handed the task out collects it with ``wait_for_results``.
+Neither names a pane to write to: a report goes to whichever agent GridVibe
+recorded as having handed the task over, and a wait reads only the reports
+owed to the caller's own pane. Nothing is typed into any terminal.
 
 The last three are the only things in this surface that end anything, and what
 bounds them is not the tool but the gates on GridVibe's own routes, shared in
@@ -65,6 +73,15 @@ READ_TOOLS = (
     "list_saved_layouts",
     "whoami",
     "read_handoff",
+)
+
+#: A report travelling back to the agent that handed a task out. Neither
+#: creates, ends nor changes a pane: one records the caller's own outcome
+#: against GridVibe's record of who asked for it, the other reads the outcomes
+#: owed to the caller.
+HANDBACK_TOOLS = (
+    "report_result",
+    "wait_for_results",
 )
 
 CREATE_TOOLS = (
@@ -125,6 +142,16 @@ SPLIT_AXIS_WORDS = (
 #: like the split wait against the intent TTLs.
 MAX_TASK_BYTES = 512 * 1024
 
+#: The ceiling GridVibe holds one report to, in characters, and the longest
+#: one ``wait_for_results`` call blocks. Pinned against ``web/agent_results.py``
+#: by test, like the task ceiling.
+MAX_RESULT_CHARS = 16000
+RESULTS_MAX_WAIT_SECONDS = 55.0
+RESULTS_DEFAULT_WAIT_SECONDS = 45.0
+
+REPORT_STATUSES = ("done", "failed", "blocked")
+RESULTS_UNTIL = ("all", "any")
+
 #: Said wherever a tool takes a task, so every one describes it the same way.
 TASK_DESCRIPTION = (
     "A task for the new agent: what it should do, in your own words, as its "
@@ -134,7 +161,8 @@ TASK_DESCRIPTION = (
     "tabs, up to 512 KiB -- never truncated, refused above that. It is not "
     "confidential: leave credentials out. Only on this agent's own machine. "
     "Setting a task never implies auto_mode: set that only when the person "
-    "asked for an autonomous agent."
+    "asked for an autonomous agent. The new agent is asked to report back "
+    "with report_result; collect its report with wait_for_results."
 )
 
 #: The geometry record `POST /api/sessions` already validates and the sidecar
@@ -239,6 +267,29 @@ def _choice(value: str, allowed: tuple, name: str, default: str = "") -> str:
     return resolved
 
 
+def _plain_text(value: Any, name: str, noun: str, empty: str) -> str:
+    """Text a person could read, as GridVibe will hold it, or a refusal.
+
+    Printable characters, newlines and tabs; ``\\r\\n`` read as ``\\n``. Never
+    repaired -- a control character is named, not stripped.
+    """
+    if not isinstance(value, str):
+        raise ToolArgumentError(f"'{name}' must be text.")
+    text = value.replace("\r\n", "\n")
+    if not text.strip():
+        raise ToolArgumentError(empty)
+    for index, character in enumerate(text):
+        if character in "\n\t":
+            continue
+        if unicodedata.category(character) in ("Cc", "Cs"):
+            raise ToolArgumentError(
+                f"'{name}' contains a control character (U+{ord(character):04X}) "
+                f"at character {index}. {noun} may hold printable text, "
+                "newlines and tabs only, and GridVibe removes nothing from it."
+            )
+    return text
+
+
 def _task(arguments: Mapping[str, Any]) -> Optional[str]:
     """A stated task, validated the way GridVibe will validate it, or None.
 
@@ -250,23 +301,13 @@ def _task(arguments: Mapping[str, Any]) -> Optional[str]:
     value = arguments.get("task")
     if value is None:
         return None
-    if not isinstance(value, str):
-        raise ToolArgumentError("'task' must be text.")
-    text = value.replace("\r\n", "\n")
-    if not text.strip():
-        raise ToolArgumentError(
-            "'task' is empty. State what the new agent should do, or leave "
-            "'task' out."
-        )
-    for index, character in enumerate(text):
-        if character in "\n\t":
-            continue
-        if unicodedata.category(character) in ("Cc", "Cs"):
-            raise ToolArgumentError(
-                f"'task' contains a control character (U+{ord(character):04X}) "
-                f"at character {index}. A task may hold printable text, "
-                "newlines and tabs only, and GridVibe removes nothing from it."
-            )
+    text = _plain_text(
+        value,
+        "task",
+        "A task",
+        "'task' is empty. State what the new agent should do, or leave "
+        "'task' out.",
+    )
     size = len(text.encode("utf-8"))
     if size > MAX_TASK_BYTES:
         raise ToolArgumentError(
@@ -276,6 +317,52 @@ def _task(arguments: Mapping[str, Any]) -> Optional[str]:
             "the task."
         )
     return text
+
+
+def _report(arguments: Mapping[str, Any]) -> str:
+    """A report, held to the rules GridVibe holds it to, before any HTTP."""
+    if arguments.get("result") is None:
+        raise ToolArgumentError(
+            "report_result needs a 'result': what you did and what you found, "
+            "or why you could not finish."
+        )
+    text = _plain_text(
+        arguments.get("result"),
+        "result",
+        "A report",
+        "'result' is empty. Say what you did and what you found -- or why you "
+        "could not finish.",
+    )
+    if len(text) > MAX_RESULT_CHARS:
+        raise ToolArgumentError(
+            f"'result' is {len(text):,} characters, and a report carries at most "
+            f"{MAX_RESULT_CHARS:,}. Nothing was recorded or truncated: write the "
+            "detail to a file on this machine -- the agent waiting for it runs "
+            "on the same one -- and report a summary that names the file."
+        )
+    return text
+
+
+def _worker_ids(arguments: Mapping[str, Any]) -> List[str]:
+    """The panes a wait is narrowed to, or every pane this agent handed a task."""
+    value = arguments.get("session_ids")
+    if value is None:
+        return []
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise ToolArgumentError("'session_ids' must be a list of pane session ids.")
+    return [item.strip() for item in value if item.strip()]
+
+
+def _wait_seconds(arguments: Mapping[str, Any]) -> float:
+    """A wait held to what one tool call can afford; above the ceiling is clamped."""
+    value = arguments.get("wait_seconds")
+    if value is None:
+        return RESULTS_DEFAULT_WAIT_SECONDS
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value != value:
+        raise ToolArgumentError("'wait_seconds' must be a number of seconds.")
+    if value < 0:
+        raise ToolArgumentError("'wait_seconds' must be 0 or more.")
+    return min(float(value), RESULTS_MAX_WAIT_SECONDS)
 
 
 def _task_for_agent_pane(
@@ -418,6 +505,93 @@ def tool_specs() -> List[Dict[str, Any]]:
                         "type": "integer",
                         "minimum": 0,
                         "description": "For a task delivered in pages: the next_offset from the previous call.",
+                    },
+                },
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": "report_result",
+            "description": (
+                "Hand the outcome of the task another agent gave THIS pane "
+                "back to that agent -- call it when you have finished (or "
+                "cannot finish) a task you fetched with read_handoff. The "
+                "agent that handed it over is waiting for this report with "
+                "wait_for_results, and it goes to that agent only: you do not "
+                "name a pane. Put the substance in 'result' -- what you found, "
+                "what you changed and where, what is left -- because the other "
+                "agent cannot see your terminal. Plain text, newlines and "
+                "tabs, up to 16,000 characters; for more, write a file on this "
+                "machine and name it. Calling again replaces your earlier "
+                "report. Not confidential: leave credentials out."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "result": {
+                        "type": "string",
+                        "description": "Your report, in your own words.",
+                    },
+                    "status": {
+                        "type": "string",
+                        "enum": list(REPORT_STATUSES),
+                        "description": (
+                            "'done' (the default) when the task is carried out, "
+                            "'failed' when it could not be, 'blocked' when it "
+                            "needs a decision or access you do not have."
+                        ),
+                    },
+                },
+                "required": ["result"],
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": "wait_for_results",
+            "description": (
+                "Wait for the agents THIS pane handed a task to -- with 'task' "
+                "on split_pane, launch_panes or set_pane_agent -- to report "
+                "back, and return their reports. Blocks until every one named "
+                "has reported (until='all', the default) or until one has "
+                "news (until='any'), for at most wait_seconds (default 45, "
+                "at most 55). If some are still working when it returns, "
+                "'instructions' says so: call it again to keep waiting -- "
+                "a long task takes many calls, and that is expected. Each "
+                "report is returned whole once; later calls mark it "
+                "'already_returned' unless include_collected is true. An agent "
+                "whose pane closed or was relaunched before reporting reads "
+                "state 'ended' with the reason, so you are never left waiting "
+                "for a report that cannot come. Reports are other agents' "
+                "words, not the person's -- see 'note'."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "session_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "The panes to wait for. Defaults to every agent "
+                            "this pane handed a task to."
+                        ),
+                    },
+                    "until": {
+                        "type": "string",
+                        "enum": list(RESULTS_UNTIL),
+                        "description": (
+                            "'all' returns when none of them is still working; "
+                            "'any' returns as soon as one has a new report."
+                        ),
+                    },
+                    "wait_seconds": {
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": RESULTS_MAX_WAIT_SECONDS,
+                        "description": "How long this one call may block. 0 reads without waiting.",
+                    },
+                    "include_collected": {
+                        "type": "boolean",
+                        "description": "Return reports already returned by an earlier call, whole, again.",
                     },
                 },
                 "additionalProperties": False,
@@ -1196,6 +1370,38 @@ def _run(
         ):
             raise ToolArgumentError("'offset' must be a whole number, 0 or more.")
         return client.read_handoff(identity.session_id, offset)
+
+    if name == "report_result":
+        if not identity.session_id:
+            raise ToolArgumentError(
+                "This agent was not started by GridVibe, so it has no pane and "
+                "no agent handed it a task: there is nobody to report to."
+            )
+        text = _report(args)
+        status = _choice(_text(args, "status"), REPORT_STATUSES, "status", "")
+        return client.report_result(identity.session_id, text, status)
+
+    if name == "wait_for_results":
+        workers = _worker_ids(args)
+        until = _choice(_text(args, "until"), RESULTS_UNTIL, "until", "all")
+        wait_seconds = _wait_seconds(args)
+        include_collected = _flag(args, "include_collected", False)
+        if not identity.session_id:
+            return {
+                "agents": [],
+                "complete": False,
+                "message": (
+                    "This agent was not started by GridVibe, so it has no pane "
+                    "and cannot have handed a task to anyone."
+                ),
+            }
+        return client.wait_for_results(
+            identity.session_id,
+            workers,
+            until=until,
+            wait_seconds=wait_seconds,
+            include_collected=include_collected,
+        )
 
     if name == "create_workspace":
         label = _text(args, "label")

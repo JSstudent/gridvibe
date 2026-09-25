@@ -69,6 +69,7 @@ from web.agent_handoffs import INLINE as HANDOFF_INLINE
 from web.agent_handoffs import PAGED as HANDOFF_PAGED
 from web.agent_handoffs import HandoffView, planned_delivery
 from web.agent_handoffs import handoffs as agent_handoffs
+from web.agent_results import results as agent_results
 from web.agent_session_hooks import (
     PANE_TOKEN_VARIABLE,
     SessionReportError,
@@ -77,6 +78,7 @@ from web.agent_session_hooks import (
     parse_session_report,
     token_matches,
 )
+from web.agent_updates import take_update
 from web.agents import (
     AGENT_REGISTRY,
     _compose_agent_startup_command,
@@ -363,6 +365,10 @@ def _close_ssh_connection(session_id: str, clear_buffer: bool = True, *, expecte
         # And a task still waiting for this pane's agent goes with the pane:
         # there is no connection left that could ever announce it.
         agent_handoffs.forget_session(session_id)
+        # Reports this pane's agent was waiting for go too -- nobody is left
+        # to collect them -- while a report this pane made stays with the
+        # agent that asked for it.
+        agent_results.forget_session(session_id)
     _evict_pooled_ssh_client(session_id)
 
 
@@ -2524,16 +2530,31 @@ _AGENT_LAUNCH_CLEAR = {
 }
 _POSIX_AGENT_LAUNCH_CLEAR = "printf '\\033[H\\033[2J\\033[3J'; "
 
+# Between an agent's update command and its launch, on the same line.
+# Unconditional on purpose: an update that fails -- offline, already current
+# with a non-zero exit -- still leaves a working agent to start.
+_AGENT_UPDATE_SEPARATOR = {
+    "cmd": " & ",
+    "powershell": "; ",
+}
+_POSIX_AGENT_UPDATE_SEPARATOR = "; "
 
-def _agent_launch_line(session: Any, shell_kind: str, startup_command: str) -> str:
+
+def _agent_launch_line(
+    session: Any, shell_kind: str, startup_command: str, update_command: str = ""
+) -> str:
     """Prefix an agent's launch line with the shell's own clear.
 
     Only an agent pane: a plain startup command's echo is the reader's only
-    record of what the pane was told to run.
+    record of what the pane was told to run. An update owed to this connection
+    runs after the clear, so its output stays above the agent's first frame.
     """
     if str(getattr(session, "initial_command_mode", "") or "") != "agent":
         return startup_command
     prefix = _AGENT_LAUNCH_CLEAR.get(shell_kind, _POSIX_AGENT_LAUNCH_CLEAR)
+    if update_command:
+        separator = _AGENT_UPDATE_SEPARATOR.get(shell_kind, _POSIX_AGENT_UPDATE_SEPARATOR)
+        prefix = f"{prefix}{update_command}{separator}"
     return f"{prefix}{startup_command}"
 
 
@@ -2589,14 +2610,15 @@ def _deliver_pending_handoff(
 
     Runs before the launch line is typed, so the file exists and the store
     answers ``read_handoff`` by the time the agent reads its first message. The
-    handoff is recorded on *this* connection under its gate: one already
-    retired leaves the task bound for the connection that replaces it.
+    handoff is recorded on *this* connection under its gate, in the same hold
+    that announces it: a connection retired before that -- including while its
+    file was being written -- leaves the task bound for the connection that
+    replaces it, because `_shutdown_connection` drops only what it finds here.
     """
     session_id = str(getattr(session, "session_id", "") or "")
     with _connection_gate(connection):
         if connection.get("retired"):
             return
-        connection["handoff_id"] = pending.handoff_id
 
     reason = ""
     if startup_command and directory_unavailable:
@@ -2606,6 +2628,10 @@ def _deliver_pending_handoff(
             session, tunnelled=bool(connection.get("mcp_tunnel"))
         )
     if reason:
+        with _connection_gate(connection):
+            if connection.get("retired"):
+                return
+            connection["handoff_id"] = pending.handoff_id
         agent_handoffs.mark_undeliverable(pending.handoff_id, reason)
         # The pane's *output*, never its input -- the same channel the
         # "directory not available" notice uses.
@@ -2617,13 +2643,30 @@ def _deliver_pending_handoff(
         )
         return
 
+    # The write can take SFTP round trips, and a replacement connection can
+    # retire this one meanwhile. Announcing and recording under one gate hold
+    # means retirement either comes first -- the task is still waiting, and the
+    # replacement announces it -- or finds the handoff here and drops it.
     delivery, task_file, cleanup = _write_handoff_file(connection, pending, shell_kind)
-    agent_handoffs.announce(
-        pending.handoff_id,
-        delivery=delivery,
-        task_file=task_file,
-        cleanup=cleanup,
-    )
+    with _connection_gate(connection):
+        retired = bool(connection.get("retired"))
+        if not retired and agent_handoffs.announce(
+            pending.handoff_id,
+            delivery=delivery,
+            task_file=task_file,
+            cleanup=cleanup,
+        ):
+            connection["handoff_id"] = pending.handoff_id
+    if retired:
+        # A remote file is the old tunnel's to remove: it was registered there.
+        if cleanup is not None:
+            cleanup()
+        logger.info(
+            "Handoff %s: session=%s connection retired before announcing it; "
+            "left waiting for its replacement",
+            pending.handoff_id,
+            session_id,
+        )
 
 
 def _run_startup_sequence(connection: Dict[str, Any], session: Any):
@@ -2712,6 +2755,8 @@ def _run_startup_sequence(connection: Dict[str, Any], session: Any):
     # before composing, because it is what asks the composer for the opening
     # prompt -- a fact about this connection, never the pane record.
     pending_handoff = agent_handoffs.pending_for(session_id) if session_id else None
+    # Bound to this connection by `_begin_connection`, so typed at most once.
+    update_command = str(connection.get("agent_update") or "")
     startup_command = _compose_agent_startup_command(
         session,
         remote_config_path=str(tunnel.get("remote_path") or ""),
@@ -2761,13 +2806,26 @@ def _run_startup_sequence(connection: Dict[str, Any], session: Any):
         else:
             _send_connection_input(
                 connection,
-                f"{_agent_launch_line(session, shell_kind, startup_command)}{newline}",
+                f"{_agent_launch_line(session, shell_kind, startup_command, update_command)}"
+                f"{newline}",
             )
             # The line that was actually run, which is where a resumed pane's
             # conversation is named -- the pane itself will announce only its
             # project. Nothing is waited on: the lookup is its own thread. The
             # clear is not part of it, so it is not handed over.
             _note_agent_conversation_command(session_id, connection, startup_command)
+            if pending_handoff is not None and launch_line_carries_opening_prompt(
+                startup_command
+            ):
+                # A handed-over pane's first turn rides on the launch line, so
+                # its conversation is written to the provider's disk without
+                # anyone ever typing into the pane -- and the input tracker,
+                # which is where every other conversation is marked saved,
+                # only ever sees the reader's keystrokes. Without this a pane
+                # an agent handed a task kept `resume` false for its whole
+                # life, so the snapshot dropped its pair and the workspace
+                # restored it fresh, next to panes that resumed exactly.
+                _mark_agent_conversation_saved(session_id, connection)
 
     # Deliberately not the moment to arm an agent pane's retirement watch.
     # Nothing typed above has been *read* yet -- the pump only starts once this
@@ -2800,7 +2858,14 @@ def _connection_status(session_id, connection, status, error_message=None):
 
 
 def _begin_connection(session_id):
-    connection = {'write_lock': threading.Lock(), 'ownership_lock': threading.RLock()}
+    connection = {
+        'write_lock': threading.Lock(),
+        'ownership_lock': threading.RLock(),
+        # Moved out of the store the moment a connection exists, so it lives
+        # and dies with this one: a connection that fails or is retired before
+        # its startup sequence takes it along, and a reconnect owes nothing.
+        'agent_update': take_update(session_id),
+    }
     while True:
         with connection_lock:
             session = session_manager.get_session(session_id)

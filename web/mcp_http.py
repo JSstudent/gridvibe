@@ -29,7 +29,9 @@ worker cap or a different async mode would have turned into a deadlock against
 itself. The intent store is in this process, so the poll waits on it directly
 (:meth:`~web.window_intents.WindowIntentStore.wait_for_settled`) and answers
 exactly what the route would have answered. One thread, no re-entrancy, and the
-tools are still the sidecar's own.
+tools are still the sidecar's own. ``wait_for_results`` is the same case: it
+waits on the results store (``web/agent_results.py``) here, then reads the
+route with ``wait=0``.
 
 **Identity arrives by token, because inheritance cannot reach.** A local pane's
 sidecar learns which pane it is from five inherited environment variables. A
@@ -56,8 +58,10 @@ import logging
 import secrets
 import threading
 import time
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Iterable, Optional, Tuple
 
+from web.agent_results import UNTIL_ALL
+from web.agent_results import results as agent_results
 from web.window_intents import (
     CLAIM_TTL_SECONDS,
     INTENT_TTL_SECONDS,
@@ -223,6 +227,38 @@ def _in_process_client_type():
     class _InProcessClient(GridVibeClient):
         def read_window_intent(self, intent_id: str) -> Dict[str, Any]:
             return window_intents.wait_for_settled(intent_id, INTENT_WAIT_SECONDS)
+
+        def wait_for_results(
+            self,
+            session_id: str,
+            worker_session_ids: Iterable[str] = (),
+            *,
+            until: str = "",
+            wait_seconds: float = 0.0,
+            include_collected: bool = False,
+        ) -> Dict[str, Any]:
+            # The wait happens here, on the results store, and the route is
+            # then asked with `wait=0` -- one quick loopback read, like every
+            # other tool's, rather than a request held open against the
+            # server this handler is already running in.
+            workers = list(worker_session_ids or ())
+            started = time.monotonic()
+            agent_results.wait_until_settled(
+                session_id,
+                workers,
+                until=until or UNTIL_ALL,
+                timeout=wait_seconds,
+            )
+            payload = super().wait_for_results(
+                session_id,
+                workers,
+                until=until,
+                wait_seconds=0.0,
+                include_collected=include_collected,
+            )
+            if "waited_seconds" in payload:
+                payload["waited_seconds"] = round(time.monotonic() - started, 1)
+            return payload
 
     return _InProcessClient
 

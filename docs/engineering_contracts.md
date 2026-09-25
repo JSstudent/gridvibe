@@ -516,6 +516,24 @@ changing any field that survives restart; it owns the complete save/restore flow
   publishes no mechanism gets no button, exactly as a pane with no shell family
   gets no chevron; the two surfaces read the one registry field, never a
   second rule client-side.
+- **An agent's update button is the same relaunch with the registry's update
+  command run first, and the request belongs to one connection.** Every option
+  publishing `update_command` carries an icon button in the slot the row's
+  command-name hint used to take; it states the row's shell, distro and agent,
+  keeps `mcp` only when it is updating the agent the pane already runs with
+  tools, and adds `update: true`. The route accepts that only beside a stated
+  agent whose `update.command` passes `_agent_update_command()` — the agent's
+  own binary followed by plain subcommand words — and refuses it before any
+  mutation otherwise. The command is recorded in `web/agent_updates.py` just
+  before the replacement shell starts, and `_begin_connection()` moves it onto
+  the connection it creates, so it lives and dies with that connection: one
+  that fails or is retired before startup takes it along, and a reconnect's
+  connection owes nothing. The startup sequence types it after the shell's
+  clear and before the agent's line, joined unconditionally (`&` in cmd, `;`
+  elsewhere) so a failed update still starts the agent. It is never pane
+  metadata: saves and restores launch plainly, and every relaunch without it
+  clears one left untaken. The agent-requested relaunch forwards no `update`; it is the
+  person's control only.
 - **A pane is painted for a relaunch before the relaunch is requested, and no
   pane is left behind an overlay nothing removes.** The route starts the new
   transport while it is still writing its response — a local shell is marked
@@ -1352,19 +1370,26 @@ template and always starts fresh.
 - **Known is not resumable.** `agent_conversation_resume` is live-only and
   never serialised. Both CLIs save a conversation on its first turn, so a pair
   reaches the snapshot only once the provider has it on disk: the first
-  submitted non-slash line, a hook source of `resume`/`compact`/`fork`, a Codex
-  id announced after `/resume` or `/fork`, or a typed resume command. A pane
-  launched and saved before any prompt restores fresh. A prompt submitted
-  before the new id is known (typing straight after `/clear` or `/new`, while
-  the hook or title is still on its way) is remembered on the connection, and
-  the id that follows is published already saved.
+  submitted non-slash line, the opening prompt a handed-over pane carries on
+  its own launch line, a hook source of `resume`/`compact`/`fork`, a Codex id
+  announced after `/resume` or `/fork`, or a typed resume command. The
+  handed-over line is the one first turn nobody types, so the startup sequence
+  marks it where it types it. A pane launched and saved before any prompt
+  restores fresh. A prompt submitted before the new id is known (typing
+  straight after `/clear` or `/new`, while the hook or title is still on its
+  way) is remembered on the connection, and the id that follows is published
+  already saved.
 - **Durable shape.** `agent_conversation_provider` and `agent_conversation_id`
   are in `_SESSION_SNAPSHOT_FIELDS`. With the switch on, a wholly absent pair is
   the backward-compatible fresh shape; a partial, mistyped, unsupported,
   provider-mismatched or command-contradicted pair makes the pane unrestorable
   rather than silently fresh. Saved-preset normalization strips all three
   fields.
-- **Only a restore resumes.** `_restore_group_request()` sends the snapshot with
+- **Every birth plans, and only a restore resumes.** The launcher, a server-side
+  restore, a pane relaunch and the split route each plan identity against the
+  pane as it will be, so a built-in Claude is named however it was created --
+  and a split, which never carries a pair, can only ever plan a fresh one.
+  `_restore_group_request()` sends the snapshot with
   `restore: True`, and `prepare_conversation_launch_fields(restore=True)` is the
   one place a captured pair is accepted and marked resume; it refuses a pair on
   any other launch. A relaunch from the pane header, any mode change, agent
@@ -1434,9 +1459,10 @@ in `README.md`; state the rules a change has to keep.
   secret at any depth regardless of the list. `list_saved_layouts` is the sharp
   case: the route it reads answers with a *decrypted* SSH password by design.
   Failures are typed and carry GridVibe's own sentence verbatim, unretried.
-- **Four tiers, and the destroy tier is absent from the build.** Read and create
+- **Five tiers, and the destroy tier is absent from the build.** Read and create
   only ever make something new (`read_handoff` is a read: its only side effect
-  is a handoff's state); `set_pane_agent`/`set_pane_mode` replace what is
+  is a handoff's state); `report_result`/`wait_for_results` carry a report back
+  and touch no pane; `set_pane_agent`/`set_pane_mode` replace what is
   behind an existing pane; `clear_pane` erases what one has drawn. Closing a
   pane, group or workspace, moving a group, and typing arbitrary input into a
   terminal are not written, not registered and not flag-gated — a tool that does
@@ -1499,12 +1525,36 @@ in `README.md`; state the rules a change has to keep.
   store is capped for the unbound kind and TTL-bounded above a split's worst case;
   a bound handoff waits for a connection that starts its pane's agent, is
   announced once on that launch line, and is dropped — file included — in
-  `_shutdown_connection` of *that* connection. A relaunch or mode switch drops one
+  `_shutdown_connection` of *that* connection. The announcement and its record on
+  the connection share one hold of the connection's gate, after the file is
+  written, so a connection retired before then — mid-write included — leaves the
+  task waiting for its replacement. A relaunch or mode switch drops one
   still waiting (`drop_bound`), a closed pane forgets its own, and nothing is
   persisted. A pane whose agent starts without the tools is marked
   `undeliverable` and told so on its output, never its input. Log lines carry ids,
   a character count and a delivery — never the text, never a file path — and
   `list_panes` publishes the state from a field list, never the text or path.
+- **A report goes back only to the agent that asked, and nobody waits for one
+  that cannot come.** Every bound handoff is an assignment in
+  `web/agent_results.py`, recorded by `HandoffStore` under its own lock (the
+  results store's lock is a leaf taken after it) so a drop can never overtake
+  the assignment it must end; a split records the calling pane (`requester_session_id`), not the pane
+  it halved. `report_result` names no recipient — the caller's own pane is the
+  path and the assignment's requester receives it — and `wait_for_results`
+  reads only what is owed to the caller's pane. A report settles an assignment
+  only once its handoff has been read: a relaunch keeps the pane's id, so the
+  replaced agent's in-flight report must not answer the new task. Every way a
+  handoff goes before a report (connection closed, pane closed, relaunch, mode switch, replaced,
+  undeliverable) ends its assignment with the reason and stops it taking
+  reports, so whatever the pane runs next cannot answer for it; a report
+  outlives the worker's pane, and the requester's close drops its assignments. A wait blocks
+  at most `MAX_WAIT_SECONDS` (under the shortest CLI tool-call timeout), and the
+  tunnelled path waits on the store in-process and reads the route with
+  `wait=0`, never a held loopback request. An answer's text budget goes to
+  unseen reports before re-sent ones. Reports are validated like tasks,
+  refused above `MAX_RESULT_CHARS` rather than truncated, framed by a `note` as
+  another agent's words, never published by a pane read, and logged by size
+  only. The sidecar's ceilings are pinned equal to the store's by test.
 - **A large task's file is GridVibe's own write, owner-only, and gone with its
   handoff.** Written on the pane's machine and never through a shell: locally in
   its own directory under the handoff root (`0700`/`0600` where modes exist, named

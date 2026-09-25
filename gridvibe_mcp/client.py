@@ -92,7 +92,57 @@ HANDOFF_FIELDS = (
     "created_at",
     "note",
     "instructions",
+    "reply",
 )
+
+#: What ``report_result`` answers the agent that reported: that it was
+#: recorded, whether it replaced an earlier report, and which pane it went to.
+REPORT_FIELDS = (
+    "recorded",
+    "replaced_earlier_report",
+    "revision",
+    "status",
+    "chars",
+    "reported_to",
+)
+
+#: What ``wait_for_results`` answers the agent that handed the tasks out.
+RESULTS_FIELDS = (
+    "complete",
+    "timed_out",
+    "waited_seconds",
+    "counts",
+    "agents",
+    "unknown",
+    "message",
+    "instructions",
+    "note",
+)
+
+#: One agent's row in that answer. ``result`` is the report's text, published
+#: here to the requester and nowhere else.
+RESULT_ROW_FIELDS = (
+    "session_id",
+    "title",
+    "agent",
+    "pane_open",
+    "state",
+    "task_state",
+    "status",
+    "result",
+    "result_withheld",
+    "already_returned",
+    "reason",
+    "chars",
+    "revision",
+    "handed_at",
+    "reported_at",
+)
+
+#: How much longer than the wait it asks for a ``wait_for_results`` request is
+#: given to answer, so a wait that runs its full length is never reported as
+#: GridVibe not answering.
+RESULTS_WAIT_MARGIN_SECONDS = 15.0
 
 #: A gate refusal's structure, carried through with GridVibe's own sentence so
 #: a calling agent can ask the person before it ever sets ``override``.
@@ -537,6 +587,70 @@ class GridVibeClient:
         if isinstance(result.get("from"), Mapping):
             result["from"] = project(result["from"], ("session_id", "title", "agent"))
         return result
+
+    def report_result(
+        self,
+        session_id: str,
+        result: str,
+        status: str = "",
+    ) -> Dict[str, Any]:
+        """Hand this pane's outcome back to the agent that gave it its task.
+
+        ``session_id`` is always the caller's own pane, exactly as for
+        ``read_handoff``: which agent receives the report is GridVibe's record
+        of who handed the task over, never an argument.
+        """
+        body: Dict[str, Any] = {"result": result}
+        if status:
+            body["status"] = status
+        payload = self.request(
+            "POST",
+            f"/api/sessions/{urllib.parse.quote(session_id)}/handoff-report",
+            body=body,
+        )
+        report = project(payload, REPORT_FIELDS)
+        if isinstance(report.get("reported_to"), Mapping):
+            report["reported_to"] = project(report["reported_to"], ("session_id", "title"))
+        return report
+
+    def wait_for_results(
+        self,
+        session_id: str,
+        worker_session_ids: Iterable[str] = (),
+        *,
+        until: str = "",
+        wait_seconds: float = 0.0,
+        include_collected: bool = False,
+    ) -> Dict[str, Any]:
+        """The reports of the agents this pane handed a task to.
+
+        GridVibe holds the request until they are in or ``wait_seconds`` runs
+        out, so the request itself is given that long plus a margin.
+        """
+        params: Dict[str, Any] = {
+            "wait": f"{max(0.0, float(wait_seconds)):g}",
+            "until": until,
+            "session_ids": ",".join(str(item) for item in worker_session_ids or ()),
+        }
+        if include_collected:
+            params["include_collected"] = "1"
+        payload = self.request(
+            "GET",
+            f"/api/sessions/{urllib.parse.quote(session_id)}/handoff-reports",
+            params=params,
+            timeout=max(self.timeout, float(wait_seconds) + RESULTS_WAIT_MARGIN_SECONDS),
+        )
+        results = project(payload, RESULTS_FIELDS)
+        if "agents" in results:
+            results["agents"] = project_all(results.get("agents"), RESULT_ROW_FIELDS)
+        if "counts" in results:
+            counts = results.get("counts")
+            results["counts"] = (
+                project(counts, ("working", "reported", "ended"))
+                if isinstance(counts, Mapping)
+                else {}
+            )
+        return results
 
     def saved_layouts(self) -> Dict[str, Any]:
         """Every saved launcher preset, as shape and never as a connection.

@@ -768,6 +768,35 @@ class StartupAnnouncementTestCase(_RouteCase):
         self.assertIn(QUOTED, sent[0])
         self.assertEqual(store.public_state("pane-b")["state"], ANNOUNCED)
 
+    def test_a_connection_replaced_while_its_file_is_written_leaves_the_task(self):
+        """The connection used to record the task before writing its file, so a
+        replacement arriving mid-write dropped a task nobody had announced."""
+        handoff_id = self._bind("w" * (INLINE_TASK_MAX_CHARS + 1))
+        first = {"kind": "local", "shell_kind": "cmd", "launch_cwd_applied": True}
+        real_write = web_terminal_io.write_local_handoff
+        written = []
+
+        def replaced_mid_write(handoff_id, document):
+            result = real_write(handoff_id, document)
+            written.append(result[0])
+            # What `_begin_connection` does to the connection it replaces.
+            first["retired"] = True
+            web_terminal_io._shutdown_connection(first)
+            return result
+
+        with patch.object(web_terminal_io, "write_local_handoff", side_effect=replaced_mid_write):
+            self._run(self._session(), first)
+
+        self.assertNotIn("handoff_id", first)
+        self.assertEqual(store.public_state("pane-b")["state"], WAITING)
+        self.assertFalse(Path(written[0]).exists())
+        second, sent, _published = self._run(self._session())
+        self.assertIn(QUOTED, sent[0])
+        self.assertEqual(second["handoff_id"], handoff_id)
+        result = store.read("pane-b")
+        self.assertEqual(result["delivery"], FILE)
+        self.assertTrue(Path(result["task_file"]).is_file())
+
     def test_a_relaunched_connection_does_not_replay_an_announced_task(self):
         self._bind()
         first, _sent, _published = self._run(self._session())

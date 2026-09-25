@@ -107,6 +107,37 @@ def _agent_auto_mode_description(agent_key: Any) -> str:
     return str(auto_mode.get("description") or "").strip()
 
 
+#: One word of an update command: a subcommand, never an option value, a path
+#: or anything a shell would read as a second command.
+_UPDATE_COMMAND_TOKEN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+
+def _agent_update_command(agent_key: Any) -> str:
+    """Return the registry-defined self-update command for one agent, or "".
+
+    The command is typed into the pane's shell ahead of the agent's own launch
+    line, so it gets the auto-mode flag's guard and one more: it must start
+    with the agent's own binary and continue with plain subcommand words. A
+    registry entry that names another program, or carries a shell
+    metacharacter, resolves to no command -- and so to no update button.
+    """
+    key = _normalize_agent_key(agent_key)
+    spec = AGENT_REGISTRY.get(key)
+    if not isinstance(spec, dict):
+        return ""
+    update = spec.get("update")
+    if not isinstance(update, dict):
+        return ""
+    command = str(update.get("command") or "").strip()
+    tokens = command.split(" ")
+    binary = str(spec.get("binary") or key).strip()
+    if len(tokens) < 2 or tokens[0] != binary:
+        return ""
+    if not all(_UPDATE_COMMAND_TOKEN.match(token) for token in tokens):
+        return ""
+    return command
+
+
 #: The one placeholder an MCP flag template may carry: the absolute path of the
 #: generated sidecar config. Substituted (and quoted) at compose time, because
 #: the path is per-install and the registry is committed.
@@ -573,6 +604,9 @@ def _agent_options() -> List[Dict[str, str]]:
             # Whether a tool may hand this agent a task at launch: the same
             # fact the tool descriptions state and the routes refuse on.
             "opening_prompt_supported": _agent_accepts_task(key),
+            # The pane menu's update button runs this ahead of the agent; an
+            # agent that publishes none gets no button.
+            "update_command": _agent_update_command(key),
         }
         for key, spec in AGENT_REGISTRY.items()
     ]
@@ -588,6 +622,7 @@ def _agent_options() -> List[Dict[str, str]]:
             "mcp_description": "",
             "mcp_supported": False,
             "opening_prompt_supported": False,
+            "update_command": "",
         }
     )
     return options
