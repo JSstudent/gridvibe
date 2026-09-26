@@ -117,18 +117,22 @@ make mcp-status   # run this when an agent reports the server will not start
 
 Until it is installed the checkbox still appears and the agent simply finds no tools. `make mcp-status` walks the whole chain from the outside — the generated config, the interpreter, the entry point, the handshake — and names the link that is broken.
 
-### The sixteen tools
+### The twenty tools
 
 | Tier | Tools | What the agent can do |
 | --- | --- | --- |
-| **Read** | `gridvibe_status` `list_workspaces` `list_panes` `list_agents` `list_saved_layouts` `whoami` `read_handoff` | See every workspace, every pane and where it sits in the grid, every agent and whether it is working, every saved preset, which pane it is itself in, and the task another agent handed it |
+| **Read** | `gridvibe_status` `list_workspaces` `list_panes` `list_agents` `list_agent_types` `list_saved_layouts` `whoami` `read_handoff` | See every workspace and the session tabs in it, every pane and where it sits in the grid, every agent and whether it is working, which agent CLIs it can start, every saved preset, which pane it is itself in, and the task another agent handed it |
 | **Hand back** | `report_result` `wait_for_results` | Report the outcome of a handed-over task to the agent that asked for it, and wait for the reports of the agents it handed tasks to |
 | **Create** | `create_workspace` `launch_panes` `open_window` `split_pane` | Make a workspace, launch a group of panes into it, put it on screen, split any pane side-by-side or stacked, and hand a new agent its task |
 | **Replace** | `set_pane_agent` `set_pane_mode` | Relaunch a pane under a different agent (optionally with a task) or back to a plain shell, or turn it into a file explorer or a browser preview |
 | **Clear** | `clear_pane` | Clear one terminal pane and its replay buffer, exactly as the 🧹 button does |
+| **Navigate** | `focus_session` `focus_pane` `move_session` | Bring a session tab or a single pane to the foreground, and move a session with its running panes to another workspace |
 
 - **Nothing closes and nothing types.** There is no tool for closing a pane, a tab, or a workspace, and none for sending keystrokes to a terminal. They are absent from the build, not switched off.
-- **An agent only touches panes it made.** The three tools that replace or clear a pane refuse the agent's own pane always, and refuse any pane it did not create — including every pane from before a restart — unless you tell it in that conversation to replace that particular one.
+- **Sessions by the name on their tab.** Ask for *"bring the gridvibe_main session forward"* or *"move test_session to the gridvibe_2 workspace and show it"*. Two tabs with the same name are never guessed between, and the agent only reports a tab as shown once the window confirms it.
+- **New panes start where you say.** A stated folder is checked on the pane's own machine and wins over where the pane is standing, including a folder above the one a Files pane is showing.
+- **Every installed agent, not just the MCP ones.** An agent can list which agent CLIs are available and launch any of them. A missing agent is refused rather than quietly opened as a plain terminal.
+- **An agent only touches panes it made.** The three tools that replace or clear a pane refuse the agent's own pane always, and refuse any pane it did not create — including every pane from before a restart — unless you tell it in that conversation to replace that particular one. Moving a session it did not make needs your word the same way.
 - **Agents hand each other tasks.** An agent that splits off or launches a Claude Code, Codex or Copilot pane can give it a task, and the new agent starts on it rather than waiting — ask for *"hand the findings to a new Codex agent below this one."* The task never goes to another machine, and nothing is typed into an agent that is already running.
 - **Agents report back.** An agent handed a task reports its outcome to the agent that handed it over, which can wait for several at once — ask for *"hand this to three Codex agents beside this one and wait for their results."* A pane closed before it reported is reported as ended, so nothing waits forever.
 - **It asks before it replaces.** Refused a pane it did not make, an agent gets GridVibe's own question to put to you — which pane, and what it would end — and acts only on your yes.

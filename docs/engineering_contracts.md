@@ -466,6 +466,16 @@ changing any field that survives restart; it owns the complete save/restore flow
   agent. An arbitrary startup command is not an agent. Only a shell-family
   change retargets the directory; agent-only relaunch preserves the observed
   cwd. Reselecting the current choice is a no-op on both sides.
+- **A tool's stated directory is its own input, never the page's.** The gated
+  mode switch and the split carry it as `stated_directory`, beside and never in
+  place of the header's `directory`, and `web/pane_directory.resolve_stated_directory`
+  checks it on the pane's own machine before any mutation — a proven absence is a
+  `400` naming path and machine, a check that could not run is not an absence.
+  A stated path beats the observed cwd, is not clamped to a root the pane
+  derived for itself, keeps a configured root only when it lies inside it, and
+  drops a split clone's inherited root. A terminal given only a stated directory
+  relaunches there. The header toggle's containment is unchanged: only a tool's
+  stated path skips it.
 - **MCP is resolved last and cannot outlive its agent.** An unstated `mcp`
   follows the agent, which is the rule auto mode already has: carried forward
   when the agent is unchanged, dropped when it changes, because a mechanism
@@ -581,7 +591,8 @@ changing any field that survives restart; it owns the complete save/restore flow
   `explorer_root_directory` with `explorer_root_configured`, computed against the
   root actually stored. Derived roots must not become configured across restart;
   only configured roots retarget an outgoing explorer/browser terminal directory
-  and are inherited by a split clone. Legacy unstated flags default to configured
+  and are inherited by a split clone — a tool's stated directory aside, which
+  wins over both (above). Legacy unstated flags default to configured
   for explorer panes only. A root restored from a snapshot or preset is replayed
   exactly and never re-derived — and never pins the next explicit switch either.
 
@@ -1459,16 +1470,28 @@ in `README.md`; state the rules a change has to keep.
   secret at any depth regardless of the list. `list_saved_layouts` is the sharp
   case: the route it reads answers with a *decrypted* SSH password by design.
   Failures are typed and carry GridVibe's own sentence verbatim, unretried.
-- **Five tiers, and the destroy tier is absent from the build.** Read and create
+- **Six tiers, and the destroy tier is absent from the build.** Read and create
   only ever make something new (`read_handoff` is a read: its only side effect
   is a handoff's state); `report_result`/`wait_for_results` carry a report back
   and touch no pane; `set_pane_agent`/`set_pane_mode` replace what is
-  behind an existing pane; `clear_pane` erases what one has drawn. Closing a
-  pane, group or workspace, moving a group, and typing arbitrary input into a
-  terminal are not written, not registered and not flag-gated — a tool that does
-  not exist cannot be talked into running by a file an agent reads. `clear_pane`
-  is not `send_input`: the only thing reaching stdin is GridVibe's own clear
-  command, chosen by the window that knows the pane's shell family.
+  behind an existing pane; `clear_pane` erases what one has drawn;
+  `focus_session`/`focus_pane`/`move_session` change what is shown where and
+  create or end nothing. Closing a pane, session or workspace, and typing
+  arbitrary input into a terminal, are not written, not registered and not
+  flag-gated — a tool that does not exist cannot be talked into running by a
+  file an agent reads. `clear_pane` is not `send_input`: the only thing reaching
+  stdin is GridVibe's own clear command, chosen by the window that knows the
+  pane's shell family.
+- **The tool surface says workspace, session and pane, one meaning each.** A
+  session is a session tab (a group), named by the text its tab shows
+  (`session_name_of`: the group's name, else its id — the tab strip's own
+  fallback) and by `group_id`; a pane is `pane_id`. The routes' historical
+  "session" for a pane never crosses the surface: `dispatch` publishes every
+  result through `PUBLISHED_KEYS` at every depth, explicitly rather than by
+  substring (`saved_session_id` names a preset), and every argument naming a
+  pane is `pane_id`. A tool that resolves a session by name matches exactly,
+  then case-insensitively, then as an id, and never guesses between two matches:
+  an ambiguous name is refused with the candidates and nothing is changed.
 - **Every create verb is bounded by something.** `launch_panes` by
   `terminal.max_sessions` and the depth budget, `split_pane` by the group cap, and
   `create_workspace` by `MAX_EMPTY_WORKSPACES` — counted over workspaces that are
@@ -1592,6 +1615,38 @@ in `README.md`; state the rules a change has to keep.
   instead: browser mode on a remote pane, a `startup_mode` outside
   `_AGENT_MODE_TARGETS`, a browser pane in a group opening on another host. Being
   handed a plain terminal labelled a success is the one answer a tool must not get.
+  A tool launch (`tool_launch: true`, or any body with an `origin_session_id`) is
+  therefore validated whole before any workspace, group or pane exists: an
+  unknown or proven-absent agent, `mcp: true` on a CLI with no mechanism, a task
+  for a CLI that cannot take one, and a stated local shell the origin cannot run
+  are each refused naming every offending pane. `check_failed` is not an
+  absence — that pane keeps its agent, identity and task, with a warning. The
+  launcher and restore keep opening an absent agent as a terminal with a
+  warning; the refusal is the tool path's alone. `list_agent_types` answers from
+  the same preflight (`agent_availability_target`, `agent_type_rows`) for the
+  same place a launch would open, on the shared bounded preflight pool, and keeps
+  `available`, `mcp_supported` and `task_supported` separate. A gated re-root
+  that changes nothing answers `changed: false`, never a pane payload.
+- **Navigation is page-confirmed and resolved from the live registry.**
+  `focus_session`/`focus_pane` record an `activate` intent only after
+  `web/navigation.resolve_view_target` has checked that pane, group and
+  workspace still belong together (`409` stale, `404` closed, nothing recorded).
+  Only the workspace page whose focus bridge holds that group claims it; the
+  bridge refuses without a dialog on unsaved explorer work or an active copy or
+  delete, and reports focus read back from the document, never assumed.
+  `opened` with `group_activated` is the page's word only; a raised window that
+  did not switch is `blocked`. A pane's session and workspace are read from the
+  live group, never the spawn-time identity.
+- **A tool moves a session only through the gated twin of the launcher's move.**
+  `POST /api/session-groups/<id>/agent-move` (`move_group_for_agent`) lets the
+  caller's own group move, and a group whose every pane the caller created;
+  anything else is a waivable lineage refusal whose `confirm` names the group,
+  its pane count and both workspaces. A closed caller is refused unwaivably, and
+  a missing destination is a `400`, never the default workspace. The gate is run
+  again under `SessionManager.lock` in the same hold as the move
+  (`move_group_to_workspace(..., guard=...)`) with the source workspace compared,
+  and a refusal there rolls back a workspace the move created. Showing the
+  destination afterwards is a separate answer (`shown`) and never fails a move.
 - **A launch from inside a pane opens on that pane's machine.** The body names
   `origin_session_id` and `workspaces.resolve_origin_connection` reads the host,
   user, port and password off that live session in this process; none of it
@@ -1732,7 +1787,8 @@ in `README.md`; state the rules a change has to keep.
   answers `no_window_available` with the sentence that says so and names
   `list_panes`, never the one claiming nothing happened.
 - **Three honest outcomes per intent verb** (`opened`/`blocked`/`no_window_available`,
-  `split`/`refused`/`no_window_available`), never a retry and never a pretended
+  `split`/`refused`/`no_window_available`, and an activation's
+  `activated`/`blocked`), never a retry and never a pretended
   result. Browser mode answers `no_window_available` for a split because the
   intent poll runs in a native window only; `open_window` has a browser fallback
   because `webbrowser.open` is a real alternative and there is no equivalent for

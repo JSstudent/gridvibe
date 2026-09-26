@@ -1,7 +1,7 @@
 # GridVibe MCP sidecar
 
-A stdio MCP server that gives an agent running in a GridVibe pane sixteen
-tools for seeing and building GridVibe workspaces.
+A stdio MCP server that gives an agent running in a GridVibe pane twenty
+tools for seeing, building and navigating GridVibe workspaces.
 
 This file is the reference for the MCP feature. Everything else that mentions
 it — `README.md`, `CLAUDE.md`, `docs/engineering_contracts.md` — says what it
@@ -75,15 +75,16 @@ process, so the pane's environment is already its environment:
 | Variable | Value |
 | --- | --- |
 | `GRIDVIBE_URL` | `http://<bound host>:<port>`, an IPv6 literal bracketed |
-| `GRIDVIBE_SESSION_ID` | the pane id |
-| `GRIDVIBE_GROUP_ID` | the group (tab) id |
+| `GRIDVIBE_SESSION_ID` | the pane id (GridVibe's own routes call a pane a session) |
+| `GRIDVIBE_GROUP_ID` | the session (tab) id |
 | `GRIDVIBE_WORKSPACE_ID` | the workspace id |
 | `GRIDVIBE_AGENT_DEPTH` | `0`, or the launching agent's depth + 1 |
 
 An agent started by hand outside GridVibe inherits none of them, and `whoami`
 says so rather than guessing. The read tools still work, and a launch still
-works if it names a workspace; the three gated tools are refused outright,
-because the lineage gate compares against a calling pane there is none of.
+works if it names a workspace; the three gated pane tools and `move_session`
+are refused outright, because the lineage gate compares against a calling pane
+there is none of.
 
 Codex is the exception that proves the rule: its own spawn of an MCP server does
 not forward the pane's environment, so GridVibe states the same five variables
@@ -92,28 +93,48 @@ back to it as an inline TOML table on the launch line
 
 ## Tools
 
-Sixteen, in five tiers by blast radius. The order below is the order
+Twenty, in six tiers by blast radius. The order below is the order
 `tool_specs()` registers them in, and `tests/test_mcp_tools.py` pins it.
 
-### read — seven
+**Three nouns, one meaning each.** A *workspace* is a window. A *session* is a
+session tab in a workspace — what a person names when they say "bring the
+gridvibe_main session forward". A *pane* is one terminal, agent, explorer or
+browser inside a session. Every tool takes and returns a session by its tab
+name (`session_name`, exactly the text the tab shows) and its id (`group_id`),
+and a pane by `pane_id`. GridVibe's HTTP routes call a pane a "session" for
+historical reasons; that word never crosses this surface meaning a pane.
+`dispatch` renames the route's keys on the way out (`PUBLISHED_KEYS` in
+`server.py`: `session_id` → `pane_id`, `from_session_id` → `from_pane_id`,
+`group_name` → `session_name`, and so on, at every depth), and every argument
+that names a pane is called `pane_id`.
+
+A session named by `session_name` is matched as its tab shows it: exactly,
+then ignoring case, then as a group id. Two open tabs that match are refused
+as `ambiguous` with the `candidates`, and nothing happens until one is named by
+`group_id` or `workspace_id`. A name no open tab has is refused as `not_found`
+with the tabs that are open, and says so when a saved preset of that name exists
+but is not open.
+
+### read — eight
 
 | Tool | Answers |
 | --- | --- |
 | `gridvibe_status` | is GridVibe running, which version, how many workspaces |
-| `list_workspaces` | every live workspace, with its label and group count |
-| `list_panes` | the panes in one workspace or group: what each is, where it points, what it runs on, and where it sits — `index`, `rect`, `relative_area`, and the `neighbours` above, below, left and right |
+| `list_workspaces` | every live workspace (window) and the sessions open in it — each tab's `session_name`, `group_id`, `pane_count`, and whether it is the tab the window shows (`active`) |
+| `list_panes` | the panes in one workspace or one session: what each is, where it points, what it runs on, which session it is in (`session_name`), and where it sits — `index`, `rect`, `relative_area`, and the `neighbours` above, below, left and right. Narrowed by `session_name`, it finds that tab in any workspace |
 | `list_agents` | every agent anywhere, with a working/idle reading, under the workspace and session holding it |
+| `list_agent_types` | every agent CLI in the registry, and whether each can start where a launch or split from this pane would put it — see [Which agents a tool can start](#which-agents-a-tool-can-start) |
 | `list_saved_layouts` | every saved launcher preset as a *shape* — name, layout, pane count, geometry, and what each pane is. Never a connection |
-| `whoami` | which pane this agent is in, its directory, **which machine that directory is on**, how deep it is, where it sits, and whether it may still launch (`may_launch_panes`) or split (`may_split_panes`) — a refusal of the first carries a `split_note` saying the second is still open |
+| `whoami` | which pane this agent is in (`pane_id`), the session it is in (`session_name`, `group_id`), its directory, **which machine that directory is on**, how deep it is, where it sits, and whether it may still launch (`may_launch_panes`) or split (`may_split_panes`) — a refusal of the first carries a `split_note` saying the second is still open |
 | `read_handoff` | the task another agent handed to *this* pane — see [Handing an agent its task](#handing-an-agent-its-task). Its only side effect is the handoff's state becoming `read` |
 
 Each pane in `list_panes` also carries `handoff`: `null`, or its `state`
 (`waiting`, `announced`, `read`, `undeliverable`), `delivery`, `chars` and
-`from_session_id` — never the text, never a file path.
+`from_pane_id` — never the text, never a file path.
 
-`whoami` before resolving "this directory", "this workspace" or "the terminal
-below this one". Its `runs_on` is the field that stops a remote path being
-handed to a pane opened on the wrong machine.
+`whoami` before resolving "this directory", "this session", "this workspace" or
+"the terminal below this one". Its `runs_on` is the field that stops a remote
+path being handed to a pane opened on the wrong machine.
 
 Its `workspace_id` — and the workspace `list_panes` defaults to — is the one the
 pane's *group* is in now, not the one the pane was started in. Identity is
@@ -138,9 +159,9 @@ terminal: a report reaches the waiting agent as its own tool call's result.
 | Tool | Makes |
 | --- | --- |
 | `create_workspace` | one empty, labelled workspace. Creating it does not make a window appear, and it is refused past sixteen workspaces that are *still* empty — counted over the whole app, because the server cannot tell a tool from the launcher's own button |
-| `launch_panes` | one session group of panes — agent, terminal, file explorer or browser preview. An agent pane may carry a `task`, and this needs no open window |
-| `open_window` | a workspace on screen. Reports `opened`, `blocked` or `no_window_available` |
-| `split_pane` | halves one pane on a chosen axis and says what the new pane runs. With no `kind` stated it is what the 🪟 button makes: a terminal clones its source, and an explorer, browser or *agent* pane splits off a plain terminal rooted where it is showing — the kind is never cloned. Reports `split`, `refused` or `no_window_available`. With `kind: "agent"` it may carry a `task`, and the result's `handoff` says it is waiting. Its description states what the axis words produce: `horizontal` stacks the new pane below, `vertical` puts it to the right |
+| `launch_panes` | one session (a new tab) of panes — agent, terminal, file explorer or browser preview. An agent pane may carry a `task`, and this needs no open window. The result's `session_name` is the name the tab actually got: a repeated scratch name is suffixed. The whole request is validated before anything exists — see [Where a launched pane opens](#where-a-launched-pane-opens) |
+| `open_window` | a workspace window on screen, whichever tab it shows. Reports `opened`, `blocked` or `no_window_available`. A named session is `focus_session`'s job |
+| `split_pane` | halves one pane on a chosen axis and says what the new pane runs. With no `kind` stated it is what the 🪟 button makes: a terminal clones its source, and an explorer, browser or *agent* pane splits off a plain terminal rooted where it is showing — the kind is never cloned. A stated `directory` wins over where the source is standing. Reports `split`, `refused` or `no_window_available`. With `kind: "agent"` it may carry a `task`, and the result's `handoff` says it is waiting. Its description states what the axis words produce: `horizontal` stacks the new pane below, `vertical` puts it to the right |
 
 ### replace — two
 
@@ -149,7 +170,9 @@ plain shell, optionally changing the local shell family and the MCP choice),
 and may hand the new agent a `task` — the way to give a task to a pane that
 already exists, since nothing types into one.
 `set_pane_mode` turns a pane into a file explorer, a browser preview or a plain
-terminal.
+terminal, and with a stated `directory` re-roots it there — see
+[A stated directory](#a-stated-directory). A call that changes nothing answers
+`changed: false` with a `note`, never a pane payload dressed as a change.
 
 Both **end what is running in that pane**, so both are gated — see below.
 
@@ -165,10 +188,42 @@ pane's shell family; a tool never supplies a byte of it. The result keeps the
 two halves apart on purpose — `buffer_purged` is a fact, `display_reset_requested`
 is a request, and a pane nobody has open resets nothing.
 
-### The gates on the last three
+### navigate — three
+
+| Tool | Does |
+| --- | --- |
+| `focus_session` | brings one session to the foreground: raises its workspace window and switches it to that tab. Named by `session_name` (or `group_id`); the workspace is found from the session, and `workspace_id` only narrows a name two workspaces share |
+| `focus_pane` | brings one pane into view: raises its window, switches to its session and gives the pane focus. The session and workspace are read from the pane itself, as they are *now* |
+| `move_session` | moves one open session — the tab and all its panes — to another workspace, named by `target_workspace_label`, `target_workspace_id`, or `new_workspace` (exactly one). With `show` the destination window is then raised on that tab |
+
+None creates, ends or types anything. A moved session keeps its pane ids,
+processes, SSH connections, handoffs and result assignments; the only thing
+these verbs change is what the person sees where.
+
+`focus_session` and `focus_pane` answer from the page, not from the window:
+`opened` with `session_activated: true` (and, for a pane, `pane_visible` and
+`focused`) only once the workspace page has switched and read focus back —
+see [Showing a session or a pane](#showing-a-session-or-a-pane). A window that
+was raised but would not switch is `blocked` with `window_raised: true` and the
+page's reason. `focused` is reported as it is: an explorer or browser pane can
+be visible without taking keyboard focus, and the answer's `note` says so.
+
+`move_session` moves the caller's own session, or one whose panes the caller
+all created, without asking. Any other session is refused through the lineage
+gate below with a `confirm.question` naming the session, its pane count, and
+both workspaces. Moving a session to the workspace it is already in answers
+`moved: false` and creates nothing. `show` is reported separately under `shown`
+and never turns a move into a failure: a window that would not switch tabs is
+not a session that did not move. A destination label two workspaces share is
+refused as `ambiguous`; a missing one is `not_found` and suggests
+`new_workspace`.
+
+### The gates on the replace and display tools
 
 Shared in `web/pane_gates.py`, so all three refuse in the same words. A refusal
 names which gate failed, because an agent told only "refused" calls again.
+`move_session` passes the same lineage gate widened to a whole session
+(`web/navigation.py`), with the same `override` rule.
 
 | Gate | Rule | Waivable |
 | --- | --- | --- |
@@ -178,7 +233,7 @@ names which gate failed, because an agent told only "refused" calls again.
 | **machine** | a relaunch carrying a `task` only reaches a pane on the caller's own machine | no |
 
 Every gate refusal is structured as well as worded: `gate`, `waivable`, and —
-for a waivable one only — a `confirm` block naming the pane (`session_id`,
+for a waivable one only — a `confirm` block naming the pane (`pane_id`,
 `title`, `index`), what the change `ends` (the agent and GridVibe's last
 working/idle reading of it) and the `question` to put to the person. GridVibe
 builds the question from its live registry, so every agent asks the same one.
@@ -203,20 +258,23 @@ Every waiver is logged with both pane ids.
 
 ### absent
 
-Closing a pane, a group or a workspace; moving a group; typing arbitrary input
-into a terminal. These are not written, not registered, and not flag-gated. A
-tool that does not exist cannot be talked into running by a file an agent reads.
+Closing a pane, a session or a workspace; typing arbitrary input into a
+terminal. These are not written, not registered, and not flag-gated. A tool
+that does not exist cannot be talked into running by a file an agent reads.
 
-## Splitting and opening windows need a page
+## Splitting, showing and opening windows need a page
 
-Two things GridVibe cannot do from outside a browser page, and the same
-mechanism answers both (`web/window_intents.py`, `web/static/js/window-intent.js`):
+Three things GridVibe cannot do from outside a browser page, and the same
+mechanism answers all of them (`web/window_intents.py`,
+`web/static/js/window-intent.js`):
 
 - **Open a window.** Nothing outside a page can open a pywebview window.
 - **Split a pane.** The axis never reaches the server. The page computes the new
   rectangles, and its refusals — the minimum columns and rows below a terminal
   header, the narrow-viewport rule, the pane cap — are measured off the live
   terminal. A process that cannot measure a pane cannot place one.
+- **Show a session or a pane.** Raising a window is not proof that its tab
+  changed; only the page that holds the tab can switch it and say so.
 
 So the sidecar records an *intent*, exactly one open page claims it, that page
 runs the split button's own handler, and reports back. The sidecar waits 40s,
@@ -245,6 +303,29 @@ intent poll runs in a native GridVibe window only, because a browser tab must
 not pay for a poll on every page load. `open_window` has a browser-mode fallback
 (`webbrowser.open` is a real alternative); there is no equivalent for "measure
 this pane".
+
+### Showing a session or a pane
+
+`focus_session` and `focus_pane` are two steps, each with its own answer. The
+window step is `open_window`'s; once it answers `opened`, an *activate* intent
+is recorded (`POST /api/windows/activate`). GridVibe checks the live registry
+before recording it — a pane names its session, a session names its workspace,
+a stated id that disagrees is a `409` stale read and a closed one a `404` — so a
+page is never asked to switch to a tab another window now holds. Nothing is
+recorded on a refusal.
+
+Only the workspace page that holds that session claims the intent; the launcher
+has no focus bridge and never does. The page refuses without prompting when an
+explorer editor has unsaved work or a copy or delete is running, and answers
+`blocked` with that reason. Otherwise it runs the tab strip's own switch, waits
+for the session to paint, lands on the pane, and reads focus back from the
+document rather than assuming it. `activated` means the requested tab is the
+active one and, when a pane was named, that pane is visible.
+
+Each step is bounded by its own intent TTL, so the worst case is about 70 s. A
+hidden or minimised native page polls nothing and the answer is
+`no_window_available`. In browser mode the tab is opened by URL and the answer
+says `verified: false`: no page confirms it.
 
 ## Handing an agent its task
 
@@ -432,6 +513,26 @@ which is why it is absent rather than pending.
 The launcher and the pane header's 🔄 dropdown both read one registry field,
 `mcp_supported`, so neither surface can offer a checkbox the other does not.
 
+### Which agents a tool can start
+
+Every one the registry holds and the target machine has installed — being
+handed the sidecar or a task is a separate question. `list_agent_types`
+(`GET /api/agent-types`) answers all three per CLI, for the place a launch or
+split from the asking pane would open: that pane's own machine (the SSH host for
+a remote pane) under its shell family, or a stated local `shell`.
+
+| Field | Means |
+| --- | --- |
+| `available` | `true` installed, `false` missing or unsupported there (the reason in `message`), `null` the check could not run — a launch still tries |
+| `mcp_supported` | the CLI can be given GridVibe's tools |
+| `task_supported` | the CLI can be handed a `task` (`claude`, `codex`, `copilot`) |
+| `auto_mode_supported` | the CLI has an auto-approval flag |
+
+Preflights run on a shared, bounded four-worker pool, and the sidecar gives
+this read a 50 s deadline, under the CLIs' tool-call timeouts. No binary path or
+credential leaves the route. A stated `shell` is refused from an SSH pane, and
+PowerShell or cmd from a WSL pane, exactly as a launch would refuse it.
+
 ## SSH panes
 
 A remote pane's agent cannot run the sidecar: its host has no copy of it, no
@@ -553,6 +654,51 @@ The same read also stamps `created_by_session_id` on the panes it makes, which
 is what the lineage gate later reads. A `split_pane` that names an origin pane
 which is no longer open is refused by that gate when the split is *recorded*,
 not silently recorded as a pane nobody created.
+
+A launch from a tool is **validated whole** before any workspace, session or
+pane exists. It is refused, naming every offending pane in one sentence, when a
+pane names an unknown CLI or one whose preflight proves it absent, states
+`mcp: true` for a CLI with no MCP mechanism, carries a `task` for a CLI that
+cannot take one (the answer lists the three that can), or states a local
+`shell` the asking pane cannot honour — any family from an SSH pane, PowerShell
+or cmd from a WSL pane, any family on a non-Windows host. An agent is never
+quietly opened as a plain terminal for a tool. A preflight that *could not run*
+is not an absence: that pane keeps its agent, its identity and its task, and
+gets a warning. The launcher and restore keep their own behaviour, where an
+absent agent opens as a terminal with a warning. `split_pane` refuses an
+unavailable agent and an unsupported `mcp: true` the same way.
+
+## A stated directory
+
+`split_pane` and `set_pane_mode` take a `directory`, and a stated one is a
+decision, not a hint (`web/pane_directory.py`, `resolve_stated_directory`).
+
+- **It is checked on the machine the pane runs on**, before anything is recorded
+  or relaunched: over SFTP on an SSH pane's own host; for a WSL pane, Windows
+  and `/mnt/<drive>` paths on this host's filesystem and other Linux paths
+  through a bounded `wsl --exec test -d`; otherwise on this machine. A refusal
+  names the path and the machine and says nothing was changed. Only a proven
+  absence refuses: a WSL check that could not run accepts the path, and the
+  shell's own `cd` reports it.
+- **It wins over where the pane is standing.** For a split it is recorded under
+  its own key (`stated_directory`), separate from the folder an explorer page
+  is browsing, is checked again when the page performs the split, and drops the
+  root the clone would have inherited; with `kind: "explorer"` it becomes the new
+  pane's configured root. For `set_pane_mode` it beats the observed cwd.
+- **It is not clamped to an explorer's root.** A root the pane derived for
+  itself is where a live Files pane browses, not a limit on where a tool may
+  re-root the pane — so "one directory above this repository" works. A
+  configured root survives an explorer → terminal switch only when the new path
+  is inside it. The header's own toggle still keeps explorer containment.
+- **A directory-only change is a real change.** A terminal pane given only a new
+  directory is relaunched there; an agent pane, with `override`, becomes a
+  plain terminal there. A call that would change nothing answers
+  `changed: false` with a `note`.
+
+A mode switch keeps the pane's stored shell family, so "make that Files pane a
+PowerShell terminal one level up" is `set_pane_mode` followed by
+`set_pane_agent(shell="powershell", agent="")` when the pane's family was
+another.
 
 ## Checking the surface without a running GridVibe
 
