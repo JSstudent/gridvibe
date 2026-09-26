@@ -80,7 +80,7 @@ class SurfaceTestCase(unittest.TestCase):
 
         self.assertEqual(set(report["properties"]), {"result", "status"})
         self.assertEqual(report["required"], ["result"])
-        self.assertNotIn("session_id", wait["properties"])
+        self.assertEqual(set(wait["properties"]) & {"session_id", "session_ids"}, set())
         self.assertIn("you do not name a pane", _spec("report_result")["description"])
 
     def test_the_descriptions_say_how_to_keep_waiting_and_what_a_report_is(self):
@@ -141,8 +141,8 @@ class WaitRefusalTestCase(unittest.TestCase):
 
     def test_bad_arguments_are_refused_before_any_http(self):
         for arguments in (
-            {"session_ids": "pane-2"},
-            {"session_ids": [2]},
+            {"pane_ids": "pane-2"},
+            {"pane_ids": [2]},
             {"until": "most"},
             {"wait_seconds": -1},
             {"wait_seconds": True},
@@ -185,7 +185,8 @@ class WireTestCase(unittest.TestCase):
             json.loads(request.data),
             {"result": "Broke.\n", "status": "failed"},
         )
-        self.assertEqual(result["reported_to"], {"session_id": "pane-0", "title": "Claude 1"})
+        # A pane leaves as a pane: GridVibe's route calls it a session.
+        self.assertEqual(result["reported_to"], {"pane_id": "pane-0", "title": "Claude 1"})
         self.assertNotIn("requester_session_id", result)
 
     def test_a_route_refusal_is_gridvibes_own_sentence(self):
@@ -217,7 +218,7 @@ class WireTestCase(unittest.TestCase):
 
         result = dispatch(
             "wait_for_results",
-            {"session_ids": ["pane-2", "pane-3"], "until": "any", "wait_seconds": 30,
+            {"pane_ids": ["pane-2", "pane-3"], "until": "any", "wait_seconds": 30,
              "include_collected": True},
             client=client_for(opener),
             identity=read_identity(INSIDE_PANE),
@@ -231,7 +232,7 @@ class WireTestCase(unittest.TestCase):
             {"wait": "30", "until": "any", "session_ids": "pane-2,pane-3", "include_collected": "1"},
         )
         self.assertEqual(opener.timeouts[0], 30 + RESULTS_WAIT_MARGIN_SECONDS)
-        self.assertEqual(result["agents"][0], {"session_id": "pane-2", "state": "reported", "result": "Found it."})
+        self.assertEqual(result["agents"][0], {"pane_id": "pane-2", "state": "reported", "result": "Found it."})
         self.assertEqual(result["counts"], {"working": 1, "reported": 1, "ended": 0})
         self.assertNotIn("requester_session_id", result)
 

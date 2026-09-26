@@ -67,7 +67,7 @@ NO_PAGE_HINT = (
 UNREADABLE_HINT = (
     "GridVibe could not be reached while waiting for the split to settle "
     "({error}), so what happened is not known here: the request was recorded, "
-    "and a page may have performed it. Read the group with list_panes before "
+    "and a page may have performed it. Read the session with list_panes before "
     "asking for the split again."
 )
 
@@ -77,7 +77,7 @@ UNREADABLE_HINT = (
 TASK_NOT_HANDED_HINT = (
     "The task was not handed to anyone: no pane was created to receive it. "
     "launch_panes with a 'task' on an agent pane needs no open window, if a "
-    "new session group is acceptable."
+    "new session (tab) is acceptable."
 )
 
 

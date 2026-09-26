@@ -354,6 +354,33 @@ def project_panes(payloads: Any) -> List[Dict[str, Any]]:
     return [project_pane(item) for item in payloads]
 
 
+def session_name_of(group: Mapping[str, Any]) -> str:
+    """The name a session tab shows: its group's name, else its id.
+
+    The same fallback the tab strip draws (``group.name || group.group_id``),
+    so the name an agent reads is always the text the person sees.
+    """
+    return str(group.get("name") or "").strip() or str(group.get("group_id") or "")
+
+
+def session_tab(
+    group: Mapping[str, Any],
+    workspace_id: str,
+    workspace_label: str,
+    active_group_id: str = "",
+) -> Dict[str, Any]:
+    """One session tab, named the way the tab strip names it."""
+    group_id = str(group.get("group_id") or "")
+    return {
+        "session_name": session_name_of(group),
+        "group_id": group_id,
+        "workspace_id": workspace_id,
+        "workspace_label": workspace_label,
+        "pane_count": group.get("terminal_count"),
+        "active": bool(group_id) and group_id == active_group_id,
+    }
+
+
 def _url_host(host: str) -> str:
     """An IPv6 literal wears brackets; every other host is itself.
 
@@ -610,6 +637,31 @@ class GridVibeClient:
         )
         raw = payload.get("groups") if isinstance(payload, Mapping) else None
         return project_all(raw, GROUP_FIELDS)
+
+    def workspace_sessions(self) -> List[Dict[str, Any]]:
+        """Every live workspace, each with the session tabs it holds.
+
+        A *session* in GridVibe's own words is a session tab -- what the
+        person names when they say "the gridvibe_main session". Every live tab
+        has a name, saved or not: a scratch launch is named after its target
+        or its launch time, and a save renames the live tab. So the name is
+        read from the live group, exactly as the tab draws it, and never
+        inferred from a saved preset's id.
+        """
+        rows: List[Dict[str, Any]] = []
+        for workspace in self.workspaces():
+            workspace_id = str(workspace.get("workspace_id") or "")
+            if not workspace_id:
+                continue
+            active = str(workspace.get("active_group_id") or "")
+            label = str(workspace.get("label") or "")
+            sessions = [
+                session_tab(group, workspace_id, label, active)
+                for group in self.groups(workspace_id)
+                if group.get("group_id")
+            ]
+            rows.append({**workspace, "sessions": sessions})
+        return rows
 
     def pane(self, session_id: str) -> Dict[str, Any]:
         payload = self.request("GET", f"/api/sessions/{urllib.parse.quote(session_id)}")
@@ -906,6 +958,11 @@ class GridVibeClient:
             "group_id": str(payload.get("group_id") or ""),
             "panes": project_panes(payload.get("sessions")),
         }
+        group = payload.get("group")
+        if isinstance(group, Mapping):
+            # The name the new tab actually got: a repeated scratch name is
+            # suffixed ("gridvibe (1)"), so the requested one may not be it.
+            result["session_name"] = session_name_of(group)
         result["count"] = len(result["panes"])
         warnings = payload.get("agent_warnings") or payload.get("warnings")
         if isinstance(warnings, list) and warnings:

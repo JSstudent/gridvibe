@@ -92,9 +92,9 @@ class RefusingOpener:
 
 
 class ToolSurfaceTestCase(unittest.TestCase):
-    def test_the_registered_surface_is_exactly_nineteen(self):
+    def test_the_registered_surface_is_exactly_twenty(self):
         """Eight read, two hand back, four create, two replace, one erases,
-        two navigate.
+        three navigate.
 
         The last two tiers are the only things in this surface that end
         anything, and what bounds them is the gates on GridVibe's own routes
@@ -105,7 +105,7 @@ class ToolSurfaceTestCase(unittest.TestCase):
         """
         names = tool_names()
 
-        self.assertEqual(len(names), 19)
+        self.assertEqual(len(names), 20)
         self.assertEqual(names[:8], list(READ_TOOLS))
         self.assertEqual(READ_TOOLS[-1], "read_handoff")
         self.assertEqual(names[8:10], list(HANDBACK_TOOLS))
@@ -498,7 +498,8 @@ class WhoamiTestCase(unittest.TestCase):
         )
 
         self.assertTrue(result["inside_gridvibe"])
-        self.assertEqual(result["session_id"], "pane-1")
+        self.assertEqual(result["pane_id"], "pane-1")
+        self.assertNotIn("session_id", result)
         self.assertEqual(result["workspace_id"], "ws-1")
         # Where the pane is *now*, which is what "this directory" means.
         self.assertEqual(result["directory"], "C:/project/src")
@@ -905,8 +906,11 @@ class PanePositionTestCase(unittest.TestCase):
 
         self.assertIsNone(result["panes"][0]["index"])
         self.assertNotIn("layout", result)
-        # One request: nothing was asked about an arrangement nobody named.
-        self.assertEqual(len(opener.requests), 1)
+        # Nothing was asked about an arrangement nobody named; the only other
+        # read is the workspace's tab names.
+        urls = [request.full_url for request in opener.requests]
+        self.assertFalse(any("/api/panes/layout" in url for url in urls))
+        self.assertTrue(urls[1].endswith("/api/session-groups?workspace_id=ws-9"))
 
     def test_a_geometry_read_that_failed_still_answers_with_the_panes(self):
         """An agent asking what is open gets the panes, minus what was not read.
@@ -1234,20 +1238,20 @@ class SplitPaneTestCase(unittest.TestCase):
         return result, recorded
 
     def test_an_axis_that_is_not_stated_defaults_to_side_by_side(self):
-        _result, recorded = self.split({"session_id": "pane-4"})
+        _result, recorded = self.split({"pane_id": "pane-4"})
 
         self.assertEqual(recorded["axis"], "vertical")
         self.assertEqual(recorded["pane"], {})
 
     def test_the_split_names_the_pane_that_asked_for_it(self):
         """The lineage stamp the relaunch gate later reads."""
-        _result, recorded = self.split({"session_id": "pane-4", "axis": "horizontal"})
+        _result, recorded = self.split({"pane_id": "pane-4", "axis": "horizontal"})
 
         self.assertEqual(recorded["origin_session_id"], "pane-1")
 
     def test_a_split_can_say_what_the_new_pane_runs(self):
         _result, recorded = self.split({
-            "session_id": "pane-4",
+            "pane_id": "pane-4",
             "axis": "horizontal",
             "kind": "agent",
             "agent": "codex",
@@ -1263,14 +1267,14 @@ class SplitPaneTestCase(unittest.TestCase):
         """Not the same as a stated plain terminal: an explorer pane splits off
         a terminal rooted where it is browsing, and only an absent kind means
         "do what the button does"."""
-        _result, recorded = self.split({"session_id": "pane-4"})
+        _result, recorded = self.split({"pane_id": "pane-4"})
 
         self.assertNotIn("kind", recorded["pane"])
 
     def test_an_agent_named_without_the_kind_is_refused(self):
         result = dispatch(
             "split_pane",
-            {"session_id": "pane-4", "agent": "claude"},
+            {"pane_id": "pane-4", "agent": "claude"},
             client=client_for(RefusingOpener(self)),
             identity=read_identity(INSIDE_PANE),
             pane_splitter=lambda *args, **kwargs: self.fail("reached the splitter"),
@@ -1281,7 +1285,7 @@ class SplitPaneTestCase(unittest.TestCase):
     def test_an_agent_pane_with_no_agent_is_refused_before_any_intent(self):
         result = dispatch(
             "split_pane",
-            {"session_id": "pane-4", "kind": "agent"},
+            {"pane_id": "pane-4", "kind": "agent"},
             client=client_for(RefusingOpener(self)),
             identity=read_identity(INSIDE_PANE),
             pane_splitter=lambda *args, **kwargs: self.fail("reached the splitter"),
@@ -1292,7 +1296,7 @@ class SplitPaneTestCase(unittest.TestCase):
     def test_an_axis_that_is_not_one_of_the_two_is_refused(self):
         result = dispatch(
             "split_pane",
-            {"session_id": "pane-4", "axis": "diagonal"},
+            {"pane_id": "pane-4", "axis": "diagonal"},
             client=client_for(RefusingOpener(self)),
             identity=read_identity(INSIDE_PANE),
             pane_splitter=lambda *args, **kwargs: self.fail("reached the splitter"),
@@ -1302,7 +1306,7 @@ class SplitPaneTestCase(unittest.TestCase):
 
     def test_an_agent_at_the_limit_cannot_split_off_another_agent(self):
         result, recorded = self.split(
-            {"session_id": "pane-4", "kind": "agent", "agent": "claude"},
+            {"pane_id": "pane-4", "kind": "agent", "agent": "claude"},
             environ={**INSIDE_PANE, "GRIDVIBE_AGENT_DEPTH": "2"},
         )
 
@@ -1312,7 +1316,7 @@ class SplitPaneTestCase(unittest.TestCase):
     def test_an_agent_at_the_limit_may_still_split_off_a_plain_terminal(self):
         """The budget bounds agents, not panes."""
         result, recorded = self.split(
-            {"session_id": "pane-4"},
+            {"pane_id": "pane-4"},
             environ={**INSIDE_PANE, "GRIDVIBE_AGENT_DEPTH": "2"},
         )
 
@@ -1423,7 +1427,7 @@ class DroppedPollTestCase(unittest.TestCase):
 
         result = dispatch(
             "split_pane",
-            {"session_id": "pane-4"},
+            {"pane_id": "pane-4"},
             client=client_for(opener),
             identity=read_identity(INSIDE_PANE),
             pane_splitter=lambda client, session_id, axis, pane, **kwargs: split_pane(
@@ -1531,7 +1535,7 @@ class SplitIntentPollTestCase(unittest.TestCase):
 
         result = dispatch(
             "split_pane",
-            {"session_id": "pane-4", "kind": "agent", "agent": "nope"},
+            {"pane_id": "pane-4", "kind": "agent", "agent": "nope"},
             client=client_for(opener),
             identity=read_identity(INSIDE_PANE),
         )
@@ -1545,7 +1549,7 @@ class SplitIntentPollTestCase(unittest.TestCase):
 
         result = dispatch(
             "split_pane",
-            {"session_id": "pane-gone"},
+            {"pane_id": "pane-gone"},
             client=client_for(opener),
             identity=read_identity(INSIDE_PANE),
         )
@@ -1662,7 +1666,7 @@ class SetPaneAgentTestCase(unittest.TestCase):
         return result, opener
 
     def test_the_request_names_the_pane_asking_and_the_agent(self):
-        result, opener = self.relaunch({"session_id": "pane-4", "agent": "claude"})
+        result, opener = self.relaunch({"pane_id": "pane-4", "agent": "claude"})
 
         body = json.loads(opener.requests[0].data.decode("utf-8"))
         self.assertEqual(body["requested_by_session_id"], "pane-1")
@@ -1674,7 +1678,7 @@ class SetPaneAgentTestCase(unittest.TestCase):
 
     def test_an_unstated_mcp_or_shell_is_left_out_of_the_body(self):
         """Each dimension is a tri-state, exactly as the route reads it."""
-        _result, opener = self.relaunch({"session_id": "pane-4", "agent": "claude"})
+        _result, opener = self.relaunch({"pane_id": "pane-4", "agent": "claude"})
 
         body = json.loads(opener.requests[0].data.decode("utf-8"))
         self.assertNotIn("mcp", body)
@@ -1682,7 +1686,7 @@ class SetPaneAgentTestCase(unittest.TestCase):
 
     def test_a_stated_mcp_and_shell_travel(self):
         _result, opener = self.relaunch({
-            "session_id": "pane-4", "agent": "claude", "mcp": True, "shell": "wsl",
+            "pane_id": "pane-4", "agent": "claude", "mcp": True, "shell": "wsl",
         })
 
         body = json.loads(opener.requests[0].data.decode("utf-8"))
@@ -1691,14 +1695,14 @@ class SetPaneAgentTestCase(unittest.TestCase):
 
     def test_an_unstated_override_is_left_out_of_the_body(self):
         """Absent, not `False` -- the server's own default is the same thing."""
-        _result, opener = self.relaunch({"session_id": "pane-4", "agent": "claude"})
+        _result, opener = self.relaunch({"pane_id": "pane-4", "agent": "claude"})
 
         body = json.loads(opener.requests[0].data.decode("utf-8"))
         self.assertNotIn("override", body)
 
     def test_a_stated_override_travels(self):
         _result, opener = self.relaunch({
-            "session_id": "pane-4", "agent": "claude", "override": True,
+            "pane_id": "pane-4", "agent": "claude", "override": True,
         })
 
         body = json.loads(opener.requests[0].data.decode("utf-8"))
@@ -1708,7 +1712,7 @@ class SetPaneAgentTestCase(unittest.TestCase):
         """The lineage gate compares against a caller, and there is none."""
         result = dispatch(
             "set_pane_agent",
-            {"session_id": "pane-4", "agent": "claude"},
+            {"pane_id": "pane-4", "agent": "claude"},
             client=client_for(RefusingOpener(self)),
             identity=read_identity({"GRIDVIBE_URL": "http://127.0.0.1:5050"}),
         )
@@ -1719,7 +1723,7 @@ class SetPaneAgentTestCase(unittest.TestCase):
     def test_a_request_with_no_agent_is_refused_before_any_http(self):
         result = dispatch(
             "set_pane_agent",
-            {"session_id": "pane-4"},
+            {"pane_id": "pane-4"},
             client=client_for(RefusingOpener(self)),
             identity=read_identity(INSIDE_PANE),
         )
@@ -1729,7 +1733,7 @@ class SetPaneAgentTestCase(unittest.TestCase):
     def test_an_agent_at_the_limit_cannot_relaunch_a_pane_into_an_agent(self):
         result = dispatch(
             "set_pane_agent",
-            {"session_id": "pane-4", "agent": "claude"},
+            {"pane_id": "pane-4", "agent": "claude"},
             client=client_for(RefusingOpener(self)),
             identity=read_identity({**INSIDE_PANE, "GRIDVIBE_AGENT_DEPTH": "2"}),
         )
@@ -1745,7 +1749,7 @@ class SetPaneAgentTestCase(unittest.TestCase):
 
         result = dispatch(
             "set_pane_agent",
-            {"session_id": "pane-4", "agent": "claude"},
+            {"pane_id": "pane-4", "agent": "claude"},
             client=client_for(opener),
             identity=read_identity(INSIDE_PANE),
         )
@@ -1775,7 +1779,7 @@ class SetPaneModeTestCase(unittest.TestCase):
         return result, opener
 
     def test_the_request_names_the_pane_asking_and_the_mode(self):
-        result, opener = self.switch({"session_id": "pane-4", "mode": "explorer"})
+        result, opener = self.switch({"pane_id": "pane-4", "mode": "explorer"})
 
         body = json.loads(opener.requests[0].data.decode("utf-8"))
         self.assertEqual(body["requested_by_session_id"], "pane-1")
@@ -1787,7 +1791,7 @@ class SetPaneModeTestCase(unittest.TestCase):
 
     def test_an_explorer_with_no_directory_asks_where_the_pane_is_standing(self):
         """What the header's own toggle asks for, stated rather than assumed."""
-        _result, opener = self.switch({"session_id": "pane-4", "mode": "explorer"})
+        _result, opener = self.switch({"pane_id": "pane-4", "mode": "explorer"})
 
         body = json.loads(opener.requests[0].data.decode("utf-8"))
         self.assertTrue(body["refresh_cwd"])
@@ -1796,7 +1800,7 @@ class SetPaneModeTestCase(unittest.TestCase):
     def test_a_stated_directory_replaces_the_probe(self):
         """A caller that named a root has already answered the question."""
         _result, opener = self.switch({
-            "session_id": "pane-4", "mode": "explorer", "directory": "/srv/app/web",
+            "pane_id": "pane-4", "mode": "explorer", "directory": "/srv/app/web",
         })
 
         body = json.loads(opener.requests[0].data.decode("utf-8"))
@@ -1805,14 +1809,14 @@ class SetPaneModeTestCase(unittest.TestCase):
 
     def test_a_terminal_switch_probes_nothing(self):
         """Leaving explorer mode reads the browsed folder, not the shell."""
-        _result, opener = self.switch({"session_id": "pane-4", "mode": "terminal"})
+        _result, opener = self.switch({"pane_id": "pane-4", "mode": "terminal"})
 
         body = json.loads(opener.requests[0].data.decode("utf-8"))
         self.assertNotIn("refresh_cwd", body)
 
     def test_a_browser_pane_carries_its_url(self):
         _result, opener = self.switch({
-            "session_id": "pane-4", "mode": "browser", "url": "http://localhost:5050",
+            "pane_id": "pane-4", "mode": "browser", "url": "http://localhost:5050",
         })
 
         body = json.loads(opener.requests[0].data.decode("utf-8"))
@@ -1821,7 +1825,7 @@ class SetPaneModeTestCase(unittest.TestCase):
     def test_a_browser_pane_with_no_url_is_refused_before_any_http(self):
         result = dispatch(
             "set_pane_mode",
-            {"session_id": "pane-4", "mode": "browser"},
+            {"pane_id": "pane-4", "mode": "browser"},
             client=client_for(RefusingOpener(self)),
             identity=read_identity(INSIDE_PANE),
         )
@@ -1833,7 +1837,7 @@ class SetPaneModeTestCase(unittest.TestCase):
         """Silently dropping it would open an explorer and report success."""
         result = dispatch(
             "set_pane_mode",
-            {"session_id": "pane-4", "mode": "explorer", "url": "http://x"},
+            {"pane_id": "pane-4", "mode": "explorer", "url": "http://x"},
             client=client_for(RefusingOpener(self)),
             identity=read_identity(INSIDE_PANE),
         )
@@ -1844,7 +1848,7 @@ class SetPaneModeTestCase(unittest.TestCase):
     def test_an_unknown_mode_is_refused_before_any_http(self):
         result = dispatch(
             "set_pane_mode",
-            {"session_id": "pane-4", "mode": "agent"},
+            {"pane_id": "pane-4", "mode": "agent"},
             client=client_for(RefusingOpener(self)),
             identity=read_identity(INSIDE_PANE),
         )
@@ -1856,7 +1860,7 @@ class SetPaneModeTestCase(unittest.TestCase):
     def test_a_missing_mode_is_refused_before_any_http(self):
         result = dispatch(
             "set_pane_mode",
-            {"session_id": "pane-4"},
+            {"pane_id": "pane-4"},
             client=client_for(RefusingOpener(self)),
             identity=read_identity(INSIDE_PANE),
         )
@@ -1864,14 +1868,14 @@ class SetPaneModeTestCase(unittest.TestCase):
         self.assertEqual(result["kind"], "invalid_arguments")
 
     def test_an_unstated_override_is_left_out_of_the_body(self):
-        _result, opener = self.switch({"session_id": "pane-4", "mode": "explorer"})
+        _result, opener = self.switch({"pane_id": "pane-4", "mode": "explorer"})
 
         body = json.loads(opener.requests[0].data.decode("utf-8"))
         self.assertNotIn("override", body)
 
     def test_a_stated_override_travels(self):
         _result, opener = self.switch({
-            "session_id": "pane-4", "mode": "explorer", "override": True,
+            "pane_id": "pane-4", "mode": "explorer", "override": True,
         })
 
         body = json.loads(opener.requests[0].data.decode("utf-8"))
@@ -1883,7 +1887,7 @@ class SetPaneModeTestCase(unittest.TestCase):
 
         result = dispatch(
             "set_pane_mode",
-            {"session_id": "pane-4", "mode": "explorer"},
+            {"pane_id": "pane-4", "mode": "explorer"},
             client=client_for(opener),
             identity=read_identity({**INSIDE_PANE, "GRIDVIBE_AGENT_DEPTH": "2"}),
         )
@@ -1894,7 +1898,7 @@ class SetPaneModeTestCase(unittest.TestCase):
     def test_an_agent_outside_gridvibe_owns_no_panes_and_is_refused(self):
         result = dispatch(
             "set_pane_mode",
-            {"session_id": "pane-4", "mode": "explorer"},
+            {"pane_id": "pane-4", "mode": "explorer"},
             client=client_for(RefusingOpener(self)),
             identity=read_identity({"GRIDVIBE_URL": "http://127.0.0.1:5050"}),
         )
@@ -1912,7 +1916,7 @@ class SetPaneModeTestCase(unittest.TestCase):
 
         result = dispatch(
             "set_pane_mode",
-            {"session_id": "pane-4", "mode": "explorer"},
+            {"pane_id": "pane-4", "mode": "explorer"},
             client=client_for(opener),
             identity=read_identity(INSIDE_PANE),
         )
@@ -1941,7 +1945,7 @@ class ClearPaneTestCase(unittest.TestCase):
         return result, opener
 
     def test_the_request_names_the_pane_asking_and_nothing_else(self):
-        result, opener = self.clear({"session_id": "pane-4"})
+        result, opener = self.clear({"pane_id": "pane-4"})
 
         body = json.loads(opener.requests[0].data.decode("utf-8"))
         self.assertEqual(body, {"requested_by_session_id": "pane-1"})
@@ -1950,7 +1954,7 @@ class ClearPaneTestCase(unittest.TestCase):
 
     def test_the_answer_keeps_the_purge_and_the_request_apart(self):
         """One is a fact about GridVibe, the other is what windows were told."""
-        result, _opener = self.clear({"session_id": "pane-4"})
+        result, _opener = self.clear({"pane_id": "pane-4"})
 
         self.assertTrue(result["buffer_purged"])
         self.assertTrue(result["display_reset_requested"])
@@ -1969,13 +1973,13 @@ class ClearPaneTestCase(unittest.TestCase):
         self.assertEqual(result["kind"], "invalid_arguments")
 
     def test_an_unstated_override_is_left_out_of_the_body(self):
-        _result, opener = self.clear({"session_id": "pane-4"})
+        _result, opener = self.clear({"pane_id": "pane-4"})
 
         body = json.loads(opener.requests[0].data.decode("utf-8"))
         self.assertNotIn("override", body)
 
     def test_a_stated_override_travels(self):
-        _result, opener = self.clear({"session_id": "pane-4", "override": True})
+        _result, opener = self.clear({"pane_id": "pane-4", "override": True})
 
         body = json.loads(opener.requests[0].data.decode("utf-8"))
         self.assertTrue(body["override"])
@@ -1983,7 +1987,7 @@ class ClearPaneTestCase(unittest.TestCase):
     def test_an_agent_outside_gridvibe_owns_no_panes_and_is_refused(self):
         result = dispatch(
             "clear_pane",
-            {"session_id": "pane-4"},
+            {"pane_id": "pane-4"},
             client=client_for(RefusingOpener(self)),
             identity=read_identity({"GRIDVIBE_URL": "http://127.0.0.1:5050"}),
         )
@@ -2000,7 +2004,7 @@ class ClearPaneTestCase(unittest.TestCase):
 
         result = dispatch(
             "clear_pane",
-            {"session_id": "pane-4"},
+            {"pane_id": "pane-4"},
             client=client_for(opener),
             identity=read_identity(INSIDE_PANE),
         )

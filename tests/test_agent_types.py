@@ -357,7 +357,7 @@ class SetPaneModeChangedTestCase(unittest.TestCase):
                               "directory": "/srv/app", "changed": False}])
 
         result = dispatch("set_pane_mode",
-                          {"session_id": "pane-4", "mode": "terminal", "directory": "/srv/app"},
+                          {"pane_id": "pane-4", "mode": "terminal", "directory": "/srv/app"},
                           client=client_for(opener), identity=read_identity(INSIDE_PANE))
 
         self.assertIs(result["changed"], False)
@@ -371,7 +371,7 @@ class SetPaneModeChangedTestCase(unittest.TestCase):
                               "directory": "/srv", "changed": True}])
 
         result = dispatch("set_pane_mode",
-                          {"session_id": "pane-4", "mode": "terminal", "directory": "/srv"},
+                          {"pane_id": "pane-4", "mode": "terminal", "directory": "/srv"},
                           client=client_for(opener), identity=read_identity(INSIDE_PANE))
 
         self.assertIs(result["changed"], True)
