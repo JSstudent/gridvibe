@@ -745,6 +745,130 @@ def resolve_origin_connection(origin_session_id: Any) -> Tuple[str, Dict[str, An
     }
 
 
+def _stated_shell_family(config: Dict[str, Any]) -> str:
+    """The local shell family a pane config *states*, or ``""`` for none.
+
+    Stated means present: a tool writes ``use_powershell``/``use_wsl`` only
+    when its caller named a shell, and ``cmd`` is both of them false.
+    """
+    if "use_powershell" not in config and "use_wsl" not in config:
+        return ""
+    if config.get("use_wsl"):
+        return "wsl"
+    return "powershell" if config.get("use_powershell") else "cmd"
+
+
+def refuse_shell_families_the_origin_cannot_run(
+    sessions_config: List[Any],
+    origin_session_id: Any,
+) -> None:
+    """Refuse a stated local shell family a launch from this pane cannot honour.
+
+    Only a launch from inside a pane asks this, and it asks before anything is
+    resolved or created. Three cases would otherwise be silent: an SSH pane's
+    group opens on its own host, where a local family names nothing and is
+    dropped; a WSL pane's paths are Linux paths, and a PowerShell or cmd pane
+    would open on the Windows host that cannot read them; and a host that is
+    not Windows runs its login shell whatever the family says. Each is
+    refused, naming the pane and what to do instead -- never a pane started
+    on another machine or under another family than the one asked for.
+    """
+    origin_id = str(origin_session_id or "").strip()
+    if not origin_id:
+        return
+    origin = _manager().get_session(origin_id)
+    if origin is None:
+        # The connection half refuses a closed origin with its own sentence.
+        return
+    remote = str(getattr(origin, "mode", "") or "") != LOCAL_PANE_MODE
+    origin_wsl = not remote and bool(getattr(origin, "use_wsl", False))
+    for index, config in enumerate(sessions_config):
+        if not isinstance(config, dict):
+            continue
+        family = _stated_shell_family(config)
+        if not family:
+            continue
+        title = str(config.get("title") or "").strip() or f"Pane {index + 1}"
+        if remote:
+            reason = (
+                f"this launch opens on {getattr(origin, 'host', '') or 'the remote host'} "
+                "over SSH, the machine the asking pane runs on, and a local shell "
+                "family does not apply there"
+            )
+        elif os.name != "nt":
+            reason = (
+                "shell families are a Windows choice, and GridVibe's machine "
+                "runs every local pane in its login shell"
+            )
+        elif origin_wsl and family != "wsl":
+            reason = (
+                "the asking pane runs in WSL, and a "
+                f"{'PowerShell' if family == 'powershell' else 'cmd'} pane would "
+                "open on the Windows host instead, where that pane's Linux "
+                "paths do not exist"
+            )
+        else:
+            continue
+        raise ValueError(
+            f"{title}: shell '{family}' was refused because {reason}. Leave "
+            "'shell' out to use the asking pane's own shell. Nothing was launched."
+        )
+
+
+#: The shell a stated family names, as the pane config fields a launch uses.
+_SHELL_FAMILY_FIELDS = {
+    "powershell": {"use_powershell": True, "use_wsl": False},
+    "cmd": {"use_powershell": False, "use_wsl": False},
+    "wsl": {"use_powershell": False, "use_wsl": True},
+}
+
+
+def agent_availability_target(
+    origin_session_id: Any,
+    shell: Any = "",
+) -> Tuple[str, Dict[str, Any], str]:
+    """Where a launch from ``origin_session_id`` would start its agents.
+
+    Returns ``(connection_mode, pane_config, description)`` for the agent
+    preflight: the origin pane's own machine (its SSH host, or this machine),
+    under the stated local ``shell`` or else the origin pane's own family --
+    exactly what ``launch_panes`` from that pane would start. With no origin
+    it is this machine under GridVibe's default family. A family the launch
+    would refuse is refused here in the same words, and a closed origin is a
+    ``ValueError`` like the launch's own.
+    """
+    family = str(shell or "").strip().lower()
+    if family and family not in _SHELL_FAMILY_FIELDS:
+        raise ValueError(f"shell must be one of: {', '.join(_SHELL_FAMILY_FIELDS)}")
+    stated = dict(_SHELL_FAMILY_FIELDS.get(family, {}))
+    if stated:
+        refuse_shell_families_the_origin_cannot_run(
+            [{"title": "This request", **stated}], origin_session_id
+        )
+    connection_mode, connection = resolve_origin_connection(origin_session_id)
+    if connection_mode == "ssh":
+        host = str(connection.get("host") or "the remote host")
+        return "ssh", dict(connection), f"{host} over SSH"
+
+    origin = _manager().get_session(str(origin_session_id or "").strip())
+    config: Dict[str, Any] = {
+        "use_powershell": bool(getattr(origin, "use_powershell", False)),
+        "use_wsl": bool(getattr(origin, "use_wsl", False)),
+        "distribution": str(getattr(origin, "distribution", "") or ""),
+    }
+    if stated:
+        config.update(stated)
+        if not stated["use_wsl"]:
+            config["distribution"] = ""
+    if os.name != "nt":
+        described = "its login shell"
+    elif config["use_wsl"]:
+        described = f"WSL{' (' + config['distribution'] + ')' if config['distribution'] else ''}"
+    else:
+        described = "PowerShell" if config["use_powershell"] else "cmd"
+    return LOCAL_PANE_MODE, config, f"GridVibe's own machine, {described}"
+
+
 def _refuse_panes_that_cannot_leave_this_machine(
     sessions_config: List[Dict[str, Any]],
     host: str,
@@ -881,10 +1005,14 @@ def _pop_pane_tasks(sessions_config: List[Any]) -> Tuple[List[Any], Dict[int, st
     on the tools it is fetched through; a stated ``agent_mcp: false`` beside it
     is refused rather than overridden.
     """
-    from web.agents import task_refusal
+    from web.agents import task_capable_agents, task_refusal
 
     cleaned: List[Any] = []
     tasks: Dict[int, str] = {}
+    # Every pane whose agent cannot take a task, named together: a launch that
+    # tasked five agents and learned of one refusal at a time would take five
+    # attempts to find which of them can be tasked at all.
+    refused: List[str] = []
     for index, config in enumerate(sessions_config):
         if not isinstance(config, dict) or config.get("task") is None:
             if isinstance(config, dict) and "task" in config:
@@ -904,10 +1032,20 @@ def _pop_pane_tasks(sessions_config: List[Any]) -> Tuple[List[Any], Dict[int, st
             config.get("agent_mcp"),
         )
         if refusal:
-            raise HandoffError(f"Pane {index + 1}: {refusal}")
+            refused.append(f"Pane {index + 1}: {refusal}")
+            continue
         config["agent_mcp"] = True
         tasks[index] = text
         cleaned.append(config)
+    if len(refused) == 1:
+        raise HandoffError(refused[0])
+    if refused:
+        capable = ", ".join(task_capable_agents()) or "none"
+        raise HandoffError(
+            " ".join(refused)
+            + f" Nothing was launched. Only {capable} can be handed a task: "
+            "launch those with it, and the others without one."
+        )
     return cleaned, tasks
 
 
@@ -1005,7 +1143,11 @@ def launch_session_group(
     Returns ``(payload, status)``; the caller only serializes it.
     """
     from sessions.manager import SessionStatus
-    from web.agents import AGENT_REGISTRY, _sanitize_agent_launch_commands
+    from web.agents import (
+        AGENT_REGISTRY,
+        _sanitize_agent_launch_commands,
+        refuse_unsupported_mcp,
+    )
     from web.app import socketio
     from web.config import runtime_config
     from web.explorer import _is_browser_session, _is_explorer_session
@@ -1067,6 +1209,11 @@ def launch_session_group(
         origin_mode, origin_connection = resolve_origin_connection(
             data.get("origin_session_id")
         )
+        # Before the origin's connection overwrites the families it cannot
+        # carry, so a stated one is still visible to refuse.
+        refuse_shell_families_the_origin_cannot_run(
+            sessions_config, data.get("origin_session_id")
+        )
         connection_mode = origin_mode or _normalize_connection_mode(
             data.get("connection_mode")
         )
@@ -1117,6 +1264,25 @@ def launch_session_group(
         workspace_layout = _normalize_workspace_layout(
             data.get("workspace_layout"), len(sessions_config)
         )
+        is_restore = bool(data.get("restore"))
+        # Pure: no pane, group or workspace exists yet, so its refusals -- and
+        # a tool launch's agent refusal below -- cost nothing to take back.
+        prepared_sessions = _prepare_launch_sessions(sessions_config, connection_mode)
+        # A launch a tool asked for from inside a pane is validated whole
+        # before a destination is resolved: an agent that cannot start there
+        # refuses the launch rather than opening as the shell the launcher
+        # would quietly hand a person. The launcher and restore keep theirs.
+        tool_launch = (
+            bool(str(data.get("origin_session_id") or "").strip())
+            or data.get("tool_launch") is True
+        ) and not is_restore
+        launch_warnings: List[str] = []
+        if tool_launch:
+            refuse_unsupported_mcp(prepared_sessions)
+            launch_warnings = _sanitize_agent_launch_commands(
+                connection_mode, prepared_sessions, refuse_absent=True
+            )
+
         session_name = str(data.get("session_name") or "").strip()
         saved_session_id = _normalize_launch_session_id(data.get("saved_session_id"))
         # The built-in "Default Session" is a blank *form*, not a stored preset,
@@ -1150,19 +1316,16 @@ def launch_session_group(
             rollback_created_workspace(created_workspace_id)
             return conflict, 409
 
-        is_restore = bool(data.get("restore"))
-        prepared_sessions = _prepare_launch_sessions(sessions_config, connection_mode)
-
         # A restore replays a workspace the user already had running; a cold
         # post-restart agent probe (status "check_failed") must not silently
         # clear its startup command, which would drop the agent and its
         # auto-mode flag. Skip preflight-clearing on restore and let the pane
-        # surface any real launch error itself.
-        launch_warnings = (
-            []
-            if is_restore
-            else _sanitize_agent_launch_commands(connection_mode, prepared_sessions)
-        )
+        # surface any real launch error itself. A tool launch was answered
+        # above, before the destination.
+        if not is_restore and not tool_launch:
+            launch_warnings = _sanitize_agent_launch_commands(
+                connection_mode, prepared_sessions
+            )
         for prepared in prepared_sessions:
             prepared.update(
                 prepare_conversation_launch_fields(

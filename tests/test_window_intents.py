@@ -10,7 +10,9 @@ intent nobody claimed is not worth remembering, and an unknown id reads
 exception.
 """
 
+import os
 import sys
+import tempfile
 import threading
 import time
 import unittest
@@ -581,6 +583,8 @@ class SplitIntentRouteTestCase(unittest.TestCase):
         """Built here, so the page forwards a validated body rather than one
         it composed."""
         _group, pane = self._pane()
+        stated = tempfile.mkdtemp()
+        self.addCleanup(os.rmdir, stated)
 
         payload = self.client.post(
             f"/api/sessions/{pane.session_id}/split-intent",
@@ -588,7 +592,7 @@ class SplitIntentRouteTestCase(unittest.TestCase):
                 "axis": "vertical",
                 "kind": "terminal",
                 "title": "Scratch",
-                "directory": "C:/repo/src",
+                "directory": stated,
             },
         ).get_json()
 
@@ -596,7 +600,10 @@ class SplitIntentRouteTestCase(unittest.TestCase):
         self.assertEqual(request_body["axis"], "vertical")
         self.assertEqual(request_body["kind"], "terminal")
         self.assertEqual(request_body["title"], "Scratch")
-        self.assertEqual(request_body["directory"], "C:/repo/src")
+        # Under its own key: the page adds `directory` itself for an explorer
+        # source, and a caller's stated path must not be read as that.
+        self.assertEqual(request_body["stated_directory"], stated)
+        self.assertNotIn("directory", request_body)
 
     def test_a_split_intent_appears_in_the_same_pending_list_as_a_window(self):
         _group, pane = self._pane()

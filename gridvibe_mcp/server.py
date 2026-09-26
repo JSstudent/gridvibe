@@ -70,6 +70,7 @@ READ_TOOLS = (
     "list_workspaces",
     "list_panes",
     "list_agents",
+    "list_agent_types",
     "list_saved_layouts",
     "whoami",
     "read_handoff",
@@ -160,6 +161,14 @@ REPORT_STATUSES = ("done", "failed", "blocked")
 RESULTS_UNTIL = ("all", "any")
 
 #: Said wherever a tool takes a task, so every one describes it the same way.
+#: Any registry CLI, not only the three that take a task: list_agent_types says
+#: which of them can start here, and a launch refuses one that cannot.
+AGENT_KEY_DESCRIPTION = (
+    "Agent CLI key for kind='agent', e.g. 'claude' -- any key list_agent_types "
+    "reports available on this pane's machine. One that is not available there "
+    "is refused, never opened as a plain terminal."
+)
+
 TASK_DESCRIPTION = (
     "A task for the new agent: what it should do, in your own words, as its "
     "first instruction. Only for an agent pane, and only an agent GridVibe can "
@@ -222,19 +231,25 @@ NEW_PANE_PROPERTIES = {
             "rooted where it is working. State kind='agent' to get an agent."
         ),
     },
-    "agent": {"type": "string", "description": "Agent CLI key for kind='agent', e.g. 'claude'."},
+    "agent": {"type": "string", "description": AGENT_KEY_DESCRIPTION},
     "auto_mode": {"type": "boolean"},
     "mcp": {
         "type": "boolean",
-        "description": "Give the new pane's agent these same GridVibe tools.",
+        "description": (
+            "Give the new pane's agent these same GridVibe tools. Only for an "
+            "agent list_agent_types reports mcp_supported; refused otherwise."
+        ),
     },
     "title": {"type": "string"},
     "url": {"type": "string", "description": "For kind='browser'."},
     "directory": {
         "type": "string",
         "description": (
-            "Where the new pane starts. Defaults to where the source pane is "
-            "standing now."
+            "Where the new pane starts: an absolute path on the machine the "
+            "pane being split runs on. A stated path wins over where the "
+            "source pane is standing; one that does not exist there is "
+            "refused before anything is split. Defaults to where the source "
+            "pane is standing now."
         ),
     },
     "task": {"type": "string", "description": TASK_DESCRIPTION},
@@ -467,6 +482,40 @@ def tool_specs() -> List[Dict[str, Any]]:
             "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
         },
         {
+            "name": "list_agent_types",
+            "description": (
+                "Every agent CLI GridVibe knows (its registry), and whether "
+                "each can start where launch_panes or split_pane from this "
+                "pane would put it: this pane's own machine -- the SSH host "
+                "for a remote pane -- under this pane's shell family, or the "
+                "stated 'shell'. 'available' is true (installed), false "
+                "(missing or unsupported there, named in 'message') or null "
+                "(the check could not run; a launch still tries). Starting is "
+                "not the same as being given GridVibe's tools "
+                "('mcp_supported') or a task ('task_supported'): only agents "
+                "with task_supported may carry a 'task'. Call this before "
+                "launching 'every available agent'. A launch naming an agent "
+                "that is not available here is refused whole, never turned "
+                "into a plain terminal."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "shell": {
+                        "type": "string",
+                        "enum": list(SHELL_KINDS),
+                        "description": (
+                            "Ask about this local shell family instead of "
+                            "this pane's own. Refused from an SSH pane, and "
+                            "for PowerShell or cmd from a WSL pane, exactly "
+                            "as launch_panes would refuse it."
+                        ),
+                    },
+                },
+                "additionalProperties": False,
+            },
+        },
+        {
             "name": "list_saved_layouts",
             "description": (
                 "Every saved launcher preset, as a shape: its name, layout, "
@@ -659,12 +708,17 @@ def tool_specs() -> List[Dict[str, Any]]:
                                 },
                                 "agent": {
                                     "type": "string",
-                                    "description": "Agent CLI key for kind='agent', e.g. 'claude'.",
+                                    "description": AGENT_KEY_DESCRIPTION,
                                 },
                                 "auto_mode": {"type": "boolean"},
                                 "mcp": {
                                     "type": "boolean",
-                                    "description": "Give the launched agent these same GridVibe tools.",
+                                    "description": (
+                                        "Give the launched agent these same "
+                                        "GridVibe tools. Only for an agent "
+                                        "list_agent_types reports "
+                                        "mcp_supported; refused otherwise."
+                                    ),
                                 },
                                 "shell": {
                                     "type": "string",
@@ -882,9 +936,16 @@ def tool_specs() -> List[Dict[str, Any]]:
                     "directory": {
                         "type": "string",
                         "description": (
-                            "Where the explorer roots, or where the terminal "
-                            "starts. Omit to use where the pane is standing "
-                            "now -- which is what GridVibe's own button does."
+                            "An absolute path on the pane's own machine. A "
+                            "stated path re-roots the pane: the explorer opens "
+                            "there, or the terminal starts there -- a terminal "
+                            "pane given only a new directory is relaunched in "
+                            "it. It wins over where the pane's shell is "
+                            "standing and is not limited to the explorer's "
+                            "current root. A path that does not exist there "
+                            "is refused and nothing changes. Omit to use where "
+                            "the pane is standing now -- which is what "
+                            "GridVibe's own button does."
                         ),
                     },
                     "override": {
@@ -1288,6 +1349,10 @@ def build_launch_request(
     body: Dict[str, Any] = {
         "connection_mode": LOCAL_CONNECTION_MODE,
         "sessions": sessions,
+        # A tool's launch is validated whole: an agent that cannot start is a
+        # refusal, where the launcher would open a plain terminal for a person
+        # who can see the row's warning. Stated for an agent with no pane too.
+        "tool_launch": True,
     }
     if identity.session_id:
         # Where, not what -- and, for a caller that named no destination,
@@ -1500,6 +1565,12 @@ def _run(
 
     if name == "list_agents":
         return client.agents()
+
+    if name == "list_agent_types":
+        shell = _choice(_text(args, "shell"), SHELL_KINDS, "shell", "")
+        # Asked about this agent's own pane's machine -- where launch_panes and
+        # split_pane from here would start the agents -- never assumed local.
+        return client.agent_types(identity.session_id, shell)
 
     if name == "list_saved_layouts":
         return client.saved_layouts()
@@ -1768,7 +1839,17 @@ def _run(
             # and never a decision this dispatcher makes on its own -- it only
             # forwards what the calling agent stated.
             body["override"] = True
-        return {"pane": client.switch_pane_mode(session_id, body)}
+        pane = client.switch_pane_mode(session_id, body)
+        result: Dict[str, Any] = {"pane": pane}
+        if "changed" in pane:
+            result["changed"] = pane.pop("changed")
+            if not result["changed"]:
+                result["note"] = (
+                    "Nothing was changed: the pane is already "
+                    f"{'a terminal' if mode == 'terminal' else 'in that mode'}"
+                    + (" in that directory." if directory else ".")
+                )
+        return result
 
     if name == "clear_pane":
         session_id = _text(args, "session_id")

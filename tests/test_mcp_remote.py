@@ -1554,8 +1554,8 @@ class AgentLaunchDestinationTestCase(unittest.TestCase):
         body.update(overrides)
         return body
 
-    def _agent_pane(self, directory, title="Claude 1"):
-        return {
+    def _agent_pane(self, directory, title="Claude 1", shell=None):
+        pane = {
             "title": title,
             "directory": directory,
             "startup_mode": "agent",
@@ -1564,11 +1564,13 @@ class AgentLaunchDestinationTestCase(unittest.TestCase):
             "agent_selection": "claude",
             "agent_mcp": True,
             "agent_depth": 1,
-            # What the sidecar stamps on every pane it cannot ask about: a
-            # local shell family, chosen by a default rather than by anybody.
-            "use_powershell": True,
-            "use_wsl": False,
         }
+        if shell is not None:
+            # Only what a caller stated: the sidecar writes a local shell
+            # family onto a pane when its caller named one, and not otherwise.
+            pane["use_powershell"] = shell == "powershell"
+            pane["use_wsl"] = shell == "wsl"
+        return pane
 
     def test_panes_open_on_the_machine_the_agent_is_already_on(self):
         origin = self._origin()
@@ -1640,9 +1642,17 @@ class AgentLaunchDestinationTestCase(unittest.TestCase):
         )
 
         status, body = self._launch(
-            self._sidecar_body(origin.session_id, [self._agent_pane("C:/project")])
+            self._sidecar_body(
+                origin.session_id, [self._agent_pane("C:/project", shell="powershell")]
+            )
         )
 
+        if os.name != "nt":
+            # A stated family is refused where the host runs no families at
+            # all, rather than dropped into a pane nobody asked for.
+            self.assertEqual(status, 400)
+            self.assertIn("shell 'powershell' was refused", body["error"])
+            return
         self.assertEqual(status, 201)
         self.assertEqual(body["connection_mode"], "wsl")
         pane = self.api.session_manager.get_session(body["sessions"][0]["session_id"])
@@ -1667,6 +1677,29 @@ class AgentLaunchDestinationTestCase(unittest.TestCase):
 
         self.assertEqual(status, 201)
         self.assertEqual(body["connection_mode"], "wsl")
+
+    def test_a_stated_local_shell_is_refused_from_an_ssh_pane(self):
+        """Dropping it would start the panes under a shell nobody asked for;
+        honouring it would start them on the wrong machine."""
+        origin = self._origin()
+
+        status, body = self._launch(
+            self._sidecar_body(
+                origin.session_id,
+                [
+                    self._agent_pane("/srv/app"),
+                    self._agent_pane("/srv/app", title="Claude 2", shell="powershell"),
+                ],
+            )
+        )
+
+        self.assertEqual(status, 400)
+        self.assertIn("Claude 2: shell 'powershell' was refused", body["error"])
+        self.assertIn("saso-workstation over SSH", body["error"])
+        self.assertIn("Nothing was launched", body["error"])
+        # Only the origin: no pane, no group and no new workspace was made.
+        self.assertEqual(len(self.api.session_manager.get_all_sessions()), 1)
+        self.assertEqual(len(self.api.session_manager.get_all_groups()), 1)
 
     def test_an_origin_pane_that_has_closed_is_refused_rather_than_opened_here(self):
         """Falling back to local is the one wrong answer: it invents a machine."""

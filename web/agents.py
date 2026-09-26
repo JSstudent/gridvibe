@@ -16,6 +16,7 @@ import socket
 import subprocess
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from web.agent_conversations import (
@@ -1531,7 +1532,105 @@ def _clear_agent_launch_identity(session: Dict[str, Any]) -> None:
     session.update(EMPTY_CONVERSATION_FIELDS)
 
 
-def _sanitize_agent_launch_commands(connection_mode: str, sessions: List[Dict[str, Any]]) -> List[str]:
+#: How many agent preflights run at once. A launch or an availability read asks
+#: about every agent pane together, and one probe can take seconds (a cold WSL
+#: distribution, an SSH round trip), so in sequence eight of them outlast a
+#: tool's request. Bounded, and shared by every caller rather than per request.
+_PREFLIGHT_WORKERS = 4
+_preflight_pool: Optional[ThreadPoolExecutor] = None
+_preflight_pool_lock = threading.Lock()
+
+
+def _preflight_executor() -> ThreadPoolExecutor:
+    global _preflight_pool
+    with _preflight_pool_lock:
+        if _preflight_pool is None:
+            _preflight_pool = ThreadPoolExecutor(
+                max_workers=_PREFLIGHT_WORKERS,
+                thread_name_prefix="agent-preflight",
+            )
+        return _preflight_pool
+
+
+def _preflight_many(requests: List[Tuple[str, Dict[str, Any]]]) -> List[Dict[str, Any]]:
+    """Run ``_agent_preflight_payload`` for each ``(agent_key, request)``, in order.
+
+    One request runs inline, so the common single-agent launch starts no
+    thread. A probe that raises answers ``check_failed`` -- the check did not
+    run -- rather than failing its neighbours.
+    """
+
+    def run(item: Tuple[str, Dict[str, Any]]) -> Dict[str, Any]:
+        agent_key, payload = item
+        try:
+            return _agent_preflight_payload(agent_key, payload)
+        except Exception as exc:  # noqa: BLE001 - a broken probe is a failed check
+            logger.warning("Agent preflight raised agent=%s: %s", agent_key, exc)
+            return {
+                "agent": agent_key,
+                "status": "check_failed",
+                "status_label": _agent_status_label("check_failed"),
+                "message": f"The preflight check for {agent_key} failed.",
+            }
+
+    if len(requests) <= 1:
+        return [run(item) for item in requests]
+    return list(_preflight_executor().map(run, requests))
+
+
+class AgentUnavailableError(ValueError):
+    """A launch refused whole, because a pane names an agent that cannot start."""
+
+
+def mcp_refusal(agent_key: Any) -> str:
+    """Why a stated ``mcp: true`` cannot be honoured for this agent, or ``""``.
+
+    The routes a person reaches drop the flag for a CLI that publishes no way
+    to be handed the sidecar, because their checkbox is never shown for one. A
+    tool asked for it by name, so it is told instead of handed an agent
+    without the tools it expects.
+    """
+    key = _normalize_agent_key(agent_key)
+    if not key or key not in AGENT_REGISTRY or _agent_supports_mcp(key):
+        return ""
+    capable = ", ".join(sorted(k for k in AGENT_REGISTRY if _agent_supports_mcp(k))) or "none"
+    return (
+        f"{key} cannot be given GridVibe's tools: it publishes no way to be "
+        f"handed them at launch. Leave 'mcp' out for {key}; the agents that "
+        f"take them are: {capable}."
+    )
+
+
+def refuse_unsupported_mcp(sessions: List[Dict[str, Any]]) -> None:
+    """Refuse a tool launch that asks for the tools on an agent that cannot have them."""
+    refused = [
+        f"Pane {index + 1}: {reason}"
+        for index, session in enumerate(sessions)
+        if session.get("agent_mcp") is True
+        for reason in [mcp_refusal(_pane_agent_request(session))]
+        if reason
+    ]
+    if refused:
+        raise AgentUnavailableError(" ".join(refused) + " Nothing was launched.")
+
+
+def _pane_agent_request(session: Dict[str, Any]) -> str:
+    """The registry key an agent pane asks for, or ``""`` for any other pane."""
+    if str(session.get("startup_mode") or "") != "agent" and str(
+        session.get("initial_command_mode") or ""
+    ) != "agent":
+        return ""
+    return _normalize_agent_key(
+        session.get("agent_selection") or session.get("initial_command")
+    )
+
+
+def _sanitize_agent_launch_commands(
+    connection_mode: str,
+    sessions: List[Dict[str, Any]],
+    *,
+    refuse_absent: bool = False,
+) -> List[str]:
     """Answer the preflight before the pane opens, on two separate questions.
 
     **Can the check run?** ``check_failed`` means it could not, so the command
@@ -1550,25 +1649,81 @@ def _sanitize_agent_launch_commands(connection_mode: str, sessions: List[Dict[st
     Either way the identity goes as one unit. Leaving it behind produced a pane
     that opened a plain shell and was still *called* Codex -- the same defect as
     an agent pane that outlives its agent, arriving before the pane has started.
+
+    ``refuse_absent`` is a tool's launch, where a pane turned into a shell
+    would be handed back as an agent the caller asked for and never got. There
+    an agent pane naming an unknown CLI, or one whose binary is not there,
+    refuses the **whole** launch -- every such pane named in one sentence --
+    before any pane is touched. ``check_failed`` still proceeds, as above.
     """
     normalized_mode = _normalize_connection_mode(connection_mode)
     warnings: List[str] = []
+    checked: List[Tuple[int, str]] = []
+    unknown: List[str] = []
     for index, session in enumerate(sessions):
         initial_command = str(session.get("initial_command") or "").strip()
         agent_key = _normalize_agent_key(initial_command)
         if agent_key not in AGENT_REGISTRY:
+            requested = _pane_agent_request(session)
+            if refuse_absent and requested and requested not in AGENT_REGISTRY:
+                unknown.append(f"Pane {index + 1}: '{requested}' is not a known agent CLI.")
             continue
+        checked.append((index, agent_key))
 
-        preflight = _agent_preflight_payload(
-            agent_key,
-            _build_agent_preflight_request(agent_key, normalized_mode, session),
+    if unknown:
+        raise AgentUnavailableError(
+            " ".join(unknown)
+            + f" Known agents: {', '.join(sorted(AGENT_REGISTRY))}. Nothing was launched."
         )
+
+    preflights = _preflight_many(
+        [
+            (
+                agent_key,
+                _build_agent_preflight_request(agent_key, normalized_mode, sessions[index]),
+            )
+            for index, agent_key in checked
+        ]
+    )
+
+    if refuse_absent:
+        absent = [
+            f"Pane {index + 1} ({agent_key}): "
+            + str(preflight.get("message") or f"{agent_key} is not available here.")
+            for (index, agent_key), preflight in zip(checked, preflights)
+            if str(preflight.get("status") or "") in AGENT_PREFLIGHT_ABSENT_STATUSES
+        ]
+        if absent:
+            raise AgentUnavailableError(
+                " ".join(absent)
+                + " Nothing was launched: launch those panes as plain "
+                "terminals or leave them out (list_agent_types shows what "
+                "can start here)."
+            )
+
+    for (index, agent_key), preflight in zip(checked, preflights):
+        session = sessions[index]
         status = str(preflight.get("status") or "")
         if status not in AGENT_PREFLIGHT_ABSENT_STATUSES and status != "check_failed":
             continue
 
         title = str(session.get("title") or f"Terminal {index + 1}").strip() or f"Terminal {index + 1}"
         message = str(preflight.get("message") or "Agent preflight failed.")
+        if refuse_absent:
+            # Only `check_failed` reaches here: an absence was refused above.
+            # A tool asked for this agent, and a check that did not run proves
+            # nothing about it -- so the pane starts it, exactly as a split or
+            # a relaunch does, and the pane's own output says whether it is
+            # there. Clearing it would answer "launched" with a plain shell,
+            # and drop any task bound for it.
+            warning = (
+                f"{title}: {message} Started {agent_key} anyway: the check "
+                "could not run, so the pane's own output will show whether it "
+                "is there."
+            )
+            logger.warning("Agent preflight could not run for a tool launch: %s", warning)
+            warnings.append(warning)
+            continue
         if status == "check_failed":
             warning = f"{title}: {message} Startup command cleared."
             logger.warning("Clearing startup command because agent preflight failed: %s", warning)
@@ -1701,6 +1856,59 @@ def _agent_preflight_payload(agent_key: str, payload: Dict[str, Any]) -> Dict[st
 
     response["status_label"] = _agent_status_label(response["status"])
     return response
+
+
+def agent_type_rows(connection_mode: str, session_config: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Every registry agent, with whether it can start in one environment.
+
+    The read behind ``list_agent_types``: what an agent may put in a launch
+    before it asks for one. ``available`` is ``True`` for an installed binary,
+    ``False`` for a preflight that proved it absent or unsupported there, and
+    ``None`` when the check could not answer -- a launch then proceeds, as the
+    launcher's own row does. MCP and a task are separate facts from the same
+    registry fields the routes refuse on, because a CLI that can run is not
+    thereby one that can be handed GridVibe's tools or a task.
+
+    ``session_config`` is a launch pane's shape (host, credential, shell
+    family); nothing of it is copied into a row.
+    """
+    normalized_mode = _normalize_connection_mode(connection_mode)
+    keys = sorted(
+        AGENT_REGISTRY,
+        key=lambda key: str(AGENT_REGISTRY[key].get("label") or key),
+    )
+    preflights = _preflight_many(
+        [
+            (key, _build_agent_preflight_request(key, normalized_mode, session_config))
+            for key in keys
+        ]
+    )
+    rows: List[Dict[str, Any]] = []
+    for key, preflight in zip(keys, preflights):
+        spec = AGENT_REGISTRY[key]
+        status = str(preflight.get("status") or "")
+        if status == "installed":
+            available: Optional[bool] = True
+        elif status in AGENT_PREFLIGHT_ABSENT_STATUSES:
+            available = False
+        else:
+            available = None
+        target = preflight.get("target") if isinstance(preflight.get("target"), dict) else {}
+        rows.append(
+            {
+                "key": key,
+                "display_name": str(spec.get("display_name") or spec.get("label") or key),
+                "available": available,
+                "status": status,
+                "status_label": str(preflight.get("status_label") or _agent_status_label(status)),
+                "message": str(preflight.get("message") or ""),
+                "target": str(target.get("label") or ""),
+                "mcp_supported": _agent_supports_mcp(key),
+                "task_supported": _agent_accepts_task(key),
+                "auto_mode_supported": bool(_agent_auto_mode_flag(key)),
+            }
+        )
+    return rows
 
 
 def _find_wsl_executable() -> Optional[str]:

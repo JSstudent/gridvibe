@@ -3,7 +3,7 @@
 Four things are pinned here, and each is a property of the build rather than
 of a code path:
 
-- **The registered surface is exactly eighteen**, and the tiers that reach an
+- **The registered surface is exactly nineteen**, and the tiers that reach an
   existing pane hold exactly three -- two that replace what it is, one that
   erases what it has drawn -- beside two that only change where something is
   shown or held. The destroy tier is *absent from the build*, not
@@ -92,8 +92,8 @@ class RefusingOpener:
 
 
 class ToolSurfaceTestCase(unittest.TestCase):
-    def test_the_registered_surface_is_exactly_eighteen(self):
-        """Seven read, two hand back, four create, two replace, one erases,
+    def test_the_registered_surface_is_exactly_nineteen(self):
+        """Eight read, two hand back, four create, two replace, one erases,
         two navigate.
 
         The last two tiers are the only things in this surface that end
@@ -105,14 +105,14 @@ class ToolSurfaceTestCase(unittest.TestCase):
         """
         names = tool_names()
 
-        self.assertEqual(len(names), 18)
-        self.assertEqual(names[:7], list(READ_TOOLS))
+        self.assertEqual(len(names), 19)
+        self.assertEqual(names[:8], list(READ_TOOLS))
         self.assertEqual(READ_TOOLS[-1], "read_handoff")
-        self.assertEqual(names[7:9], list(HANDBACK_TOOLS))
-        self.assertEqual(names[9:13], list(CREATE_TOOLS))
-        self.assertEqual(names[13:15], list(RELAUNCH_TOOLS))
-        self.assertEqual(names[15:16], list(DISPLAY_TOOLS))
-        self.assertEqual(names[16:], list(NAVIGATION_TOOLS))
+        self.assertEqual(names[8:10], list(HANDBACK_TOOLS))
+        self.assertEqual(names[10:14], list(CREATE_TOOLS))
+        self.assertEqual(names[14:16], list(RELAUNCH_TOOLS))
+        self.assertEqual(names[16:17], list(DISPLAY_TOOLS))
+        self.assertEqual(names[17:], list(NAVIGATION_TOOLS))
 
     def test_the_layout_enum_is_the_set_gridvibe_actually_accepts(self):
         """`stack` was never a GridVibe layout, and the two that are were

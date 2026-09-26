@@ -78,6 +78,8 @@ from web.agents import (  # noqa: F401 - re-exported for backwards compatibility
     _select_install_option,
     _shell_single_quote,
     _tcp_probe_target,
+    agent_type_rows,
+    mcp_refusal,
     task_refusal,
 )
 from web.app import (  # noqa: F401 - re-exported for backwards compatibility
@@ -216,6 +218,7 @@ from web.mcp_launch import (  # noqa: F401 - mcp_config_path re-exported for tes
     write_mcp_config,
 )
 from web.navigation import NavigationRefusal, move_group_for_agent, resolve_view_target
+from web.pane_directory import resolve_stated_directory
 from web.pane_gates import (
     LINEAGE_GATE,
     MACHINE_GATE,
@@ -407,6 +410,7 @@ from web.workspaces import (
     DEFAULT_WORKSPACE_ID,
     WorkspaceRequestError,
     _redacted_launch_summary,
+    agent_availability_target,
     capacity_refusal,
     close_extra_workspaces,
     close_live_workspace,
@@ -2997,6 +3001,27 @@ def agent_preflight():
         return jsonify({"error": str(exc)}), 400
 
 
+@app.route('/api/agent-types', methods=['GET'])
+def get_agent_types():
+    """Every registry agent, and whether it can start where a launch would put it.
+
+    The read behind the ``list_agent_types`` tool. ``origin_session_id`` names
+    the asking pane, whose machine and shell family a launch from it uses;
+    ``shell`` states another local family, refused exactly as the launch would
+    refuse it. Thin: the target is resolved by `web/workspaces.py` and the
+    rows are built by `web/agents.py`. No credential reaches the response.
+    """
+    try:
+        connection_mode, config, described = agent_availability_target(
+            request.args.get("origin_session_id"),
+            request.args.get("shell"),
+        )
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    rows = agent_type_rows(connection_mode, config)
+    return jsonify({"agents": rows, "count": len(rows), "target": described})
+
+
 @app.route('/api/session-targets', methods=['GET'])
 def get_session_targets():
     """Return the distinct connection targets the saved presets already use.
@@ -3483,6 +3508,11 @@ def _split_pane_overrides(source, data: Dict[str, Any]) -> Dict[str, Any]:
         raise SplitRequestError("auto_mode must be true or false")
     if mcp is not None and not isinstance(mcp, bool):
         raise SplitRequestError("mcp must be true or false")
+    # Refused, not dropped: only a tool states `mcp` on a split, and an agent
+    # it asked to have the tools must not start without them unannounced.
+    mcp_reason = mcp_refusal(agent_key) if mcp is True else ""
+    if mcp_reason:
+        raise SplitRequestError(f"{mcp_reason} No pane was added.")
     overrides.update(
         {
             "startup_mode": "agent",
@@ -3614,6 +3644,18 @@ def open_split_intent(session_id: str):
     except SplitRequestError as exc:
         return jsonify({"error": str(exc)}), 400
 
+    # A stated directory is checked on the source pane's machine now, so a
+    # missing path costs the caller nothing -- and again by the split itself,
+    # because the directory can go while the intent waits for a page.
+    stated_directory = str(data.get("directory") or "").strip()
+    if stated_directory:
+        try:
+            resolve_stated_directory(source, stated_directory)
+        except ValueError as exc:
+            return jsonify({"error": f"{exc} No split was recorded."}), 400
+        except _sftp_request_error_types() as exc:
+            return jsonify({"error": f"{exc} No split was recorded."}), 500
+
     task_text = None
     if data.get("task") is not None:
         try:
@@ -3626,9 +3668,14 @@ def open_split_intent(session_id: str):
     # relaunch gate later cannot be handed a lineage the caller invented.
     split_request = {
         key: data[key]
-        for key in ("kind", "agent", "auto_mode", "mcp", "title", "url", "directory")
+        for key in ("kind", "agent", "auto_mode", "mcp", "title", "url")
         if key in data
     }
+    # Under its own key: the page adds `directory` itself for an explorer
+    # source (the folder the reader is browsing, which stays inside that
+    # explorer's root), and a caller's stated path must not be read as that.
+    if stated_directory:
+        split_request["stated_directory"] = stated_directory
     split_request["axis"] = axis
     try:
         split_request["created_by_session_id"] = _creator_stamp(
@@ -3737,16 +3784,32 @@ def split_session(session_id: str):
         # stated `kind` replaces this anyway, and always has.
         startup_mode = "terminal"
 
-    if _is_explorer_session(source) or _is_browser_session(source):
+    # A directory a caller *stated* wins over where the source is standing,
+    # and is resolved on its own merits on the source's machine -- not through
+    # an explorer source's root, which bounds what that pane browses and says
+    # nothing about where a new pane may start. The root a clone would have
+    # inherited describes the source's place, so a stated path drops it.
+    stated_directory = str(request_data.get("stated_directory") or "").strip()
+    if stated_directory:
         try:
-            directory, root_directory = _resolve_pane_terminal_directory(
-                source,
-                request_data.get("directory", ""),
-            )
+            directory = resolve_stated_directory(source, stated_directory)
         except ValueError as exc:
-            return jsonify({"error": str(exc)}), 400
+            return jsonify({"error": f"{exc} No pane was added."}), 400
         except _sftp_request_error_types() as exc:
-            return jsonify({"error": str(exc)}), 500
+            return jsonify({"error": f"{exc} No pane was added."}), 500
+        root_directory = ""
+
+    if _is_explorer_session(source) or _is_browser_session(source):
+        if not stated_directory:
+            try:
+                directory, root_directory = _resolve_pane_terminal_directory(
+                    source,
+                    request_data.get("directory", ""),
+                )
+            except ValueError as exc:
+                return jsonify({"error": str(exc)}), 400
+            except _sftp_request_error_types() as exc:
+                return jsonify({"error": str(exc)}), 500
         startup_mode = "terminal"
         if source.mode == "wsl":
             # The pane's host label reads "File Explorer"/browser chrome; the new
@@ -3798,7 +3861,7 @@ def split_session(session_id: str):
     if overrides.get("startup_mode") == "explorer":
         # An explorer pane is confined to where the split is rooted, and that
         # boundary is chosen by the caller rather than derived from where a
-        # terminal happened to be standing.
+        # terminal happened to be standing. A stated directory is that choice.
         root_directory = root_directory or directory
 
     title = f"Terminal {len(group_sessions) + 1}"

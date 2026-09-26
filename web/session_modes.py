@@ -30,20 +30,24 @@ from web.agent_handoffs import handoffs as agent_handoffs
 from web.app import session_manager
 from web.explorer import (
     _acquire_ssh_sftp,
+    _configured_explorer_root_directory,
     _explorer_cwd_repo_root,
     _is_browser_session,
     _is_explorer_session,
+    _local_path_inside,
     _LocalExplorerBackend,
     _relative_explorer_path,
     _relative_remote_explorer_path,
     _release_ssh_sftp,
     _remote_is_directory,
     _remote_path_clean,
+    _remote_path_inside,
     _resolve_explorer_open_root,
     _resolve_pane_terminal_directory,
     _sftp_request_error_types,
     _SftpExplorerBackend,
 )
+from web.pane_directory import StatedDirectoryError, resolve_stated_directory
 from web.pane_gates import (
     MODE_GATE,
     GateWording,
@@ -146,10 +150,91 @@ def _refresh_pane_cwd(session_id: str, session: Any, requested: bool) -> Dict[st
     return outcome
 
 
+def _stated_root_kept(session: Any, next_directory: str) -> str:
+    """The configured root, when a stated directory still lies inside it.
+
+    A root somebody chose survives a re-root that stays under it; one the pane
+    derived for itself never does, and neither survives a stated path above
+    it -- the pane leaves with no root and ``explorer_root_configured: False``,
+    the same state a derived root produces.
+    """
+    configured = _configured_explorer_root_directory(session)
+    if not configured:
+        return ""
+    if getattr(session, "mode", "") == "ssh":
+        return configured if _remote_path_inside(configured, next_directory) else ""
+    root = os.path.realpath(os.path.abspath(os.path.expanduser(configured)))
+    candidate = os.path.realpath(os.path.abspath(os.path.expanduser(next_directory)))
+    return configured if _local_path_inside(root, candidate) else ""
+
+
+def _same_directory(session: Any, left: str, right: str) -> bool:
+    """Whether two directories name the same place for this pane's shell."""
+    left = str(left or "").strip()
+    right = str(right or "").strip()
+    if not left or not right:
+        return False
+    if getattr(session, "mode", "") == "ssh" or left.startswith("/"):
+        return left.replace("\\", "/").rstrip("/") == right.replace("\\", "/").rstrip("/")
+    return os.path.normcase(os.path.normpath(left)) == os.path.normcase(
+        os.path.normpath(right)
+    )
+
+
+def _relaunch_terminal_at(
+    session_id: str,
+    session: Any,
+    directory: str,
+    effects: "ModeTransitionEffects",
+) -> Dict[str, Any]:
+    """Start this terminal or agent pane's shell again, at ``directory``.
+
+    The one transition a directory alone asks for. A plain terminal keeps
+    everything but its place; an agent pane becomes the plain terminal the mode
+    switch names, because the agent is what ends. Everything fallible was
+    decided by the caller, so from here on nothing refuses.
+    """
+    updates: Dict[str, Any] = {
+        "directory": directory,
+        # The shell being replaced reported where *it* was; the new one starts
+        # at `directory`, and its own report will follow.
+        "current_directory": None,
+    }
+    if str(getattr(session, "startup_mode", "") or "") == "agent":
+        updates.update(
+            {
+                "startup_mode": "terminal",
+                "initial_command": "",
+                "initial_command_mode": "command",
+                "agent_selection": "",
+                "custom_agent": "",
+                "agent_auto_mode": False,
+                "agent_mcp": False,
+                **EMPTY_CONVERSATION_FIELDS,
+            }
+        )
+    session_manager.update_session_metadata(session_id, **updates)
+    logger.info(
+        "Pane relaunched at a stated directory session_id=%s directory=%s",
+        session_id,
+        directory,
+    )
+    effects.close_connection(session_id, clear_buffer=True)
+    # Whatever brief was still waiting was meant for the process that ends.
+    agent_handoffs.drop_bound(session_id, "pane relaunched")
+    session_manager.update_session_status(session_id, SessionStatus.PENDING)
+    effects.broadcast_status(session_id)
+    effects.start_connector(session_id)
+    return session_manager.get_session(session_id).to_dict()
+
+
 def apply_pane_mode_change(
     session_id: str,
     data: Dict[str, Any],
     effects: "ModeTransitionEffects",
+    *,
+    stated_directory: str = "",
+    report_change: bool = False,
 ) -> Dict[str, Any]:
     """Switch one pane between terminal, file explorer, and browser modes.
 
@@ -162,7 +247,16 @@ def apply_pane_mode_change(
     The three side effects arrive in `effects` rather than being imported here,
     because `web/api.py` is what owns the Socket.IO server and the connection
     registry the route already reaches through.
+
+    ``stated_directory`` is a path a *caller* named, which is not the same as
+    the ``directory`` the header's toggle sends (the folder a live explorer is
+    showing, which stays inside that explorer's root). A stated path wins over
+    an observed cwd, is resolved on the pane's own machine rather than through
+    a root the pane derived for itself, and on a terminal or agent pane asked
+    to be a terminal relaunches it there. ``report_change`` adds ``changed``
+    to the payload, for a caller that must not read a no-op as a success.
     """
+    stated_directory = str(stated_directory or "").strip()
     session = session_manager.get_session(session_id)
     if not session:
         raise ModeTransitionError("Session not found", 404)
@@ -211,13 +305,42 @@ def apply_pane_mode_change(
         # waiting for one has nobody left to read it.
         agent_handoffs.drop_bound(session_id, "pane mode changed")
         effects.broadcast_status(session_id)
+        if report_change:
+            browser_snapshot = {**browser_snapshot, "changed": True}
         return browser_snapshot
 
     if target_mode == "explorer":
-        requested_directory = data.get("directory")
-        cwd_probe = _refresh_pane_cwd(session_id, session, bool(data.get("refresh_cwd")))
-        if cwd_probe["directory"]:
+        requested_directory = stated_directory or data.get("directory")
+        refresh_requested = bool(data.get("refresh_cwd"))
+        cwd_probe = _refresh_pane_cwd(session_id, session, refresh_requested)
+        # A path the caller named outranks where the shell was last seen; only
+        # an explicit refresh asks the pane instead. With nothing stated this
+        # is the header toggle's rule: root where the shell is standing.
+        if cwd_probe["directory"] and (not stated_directory or refresh_requested):
             requested_directory = cwd_probe["directory"]
+        if stated_directory and requested_directory == stated_directory:
+            if session.mode == "ssh":
+                try:
+                    requested_directory = resolve_stated_directory(
+                        session, stated_directory
+                    )
+                except ValueError as exc:
+                    raise ModeTransitionError(
+                        f"{exc} Nothing was changed.", 400
+                    ) from exc
+                except _sftp_request_error_types() as exc:
+                    raise ModeTransitionError(str(exc), 500) from exc
+            else:
+                # A Files pane browses GridVibe's own filesystem, whatever
+                # shell family the pane ran, so that is where this is checked.
+                local = os.path.abspath(os.path.expanduser(stated_directory))
+                if not os.path.isdir(local):
+                    raise ModeTransitionError(
+                        f"The directory {stated_directory} does not exist on "
+                        "GridVibe's own machine, where a Files pane browses. "
+                        "Nothing was changed.",
+                        400,
+                    )
         next_directory = session.directory
         root_directory = ""
         open_path = ""
@@ -324,16 +447,49 @@ def apply_pane_mode_change(
                 "reason": cwd_probe["reason"],
                 "directory": next_directory,
             }
+        if report_change:
+            payload["changed"] = True
         return payload
 
     if not (_is_explorer_session(session) or _is_browser_session(session)):
-        return session.to_dict()
+        # Already a shell. Nothing stated is nothing to do, and says so to a
+        # caller that asked; a stated directory is a relaunch there, unless
+        # the pane is a plain terminal already standing in it.
+        unchanged = session.to_dict()
+        if report_change:
+            unchanged["changed"] = False
+        if not stated_directory:
+            return unchanged
+        try:
+            next_directory = resolve_stated_directory(session, stated_directory)
+        except ValueError as exc:
+            raise ModeTransitionError(f"{exc} Nothing was changed.", 400) from exc
+        except _sftp_request_error_types() as exc:
+            raise ModeTransitionError(str(exc), 500) from exc
+        if str(getattr(session, "startup_mode", "") or "") != "agent":
+            current, _source = effective_directory(session_id, session)
+            if _same_directory(session, current or session.directory, next_directory):
+                return unchanged
+        payload = _relaunch_terminal_at(session_id, session, next_directory, effects)
+        if report_change:
+            payload["changed"] = True
+        return payload
 
     try:
-        next_directory, root_path = _resolve_pane_terminal_directory(
-            session,
-            data.get("directory", ""),
-        )
+        if stated_directory:
+            # Resolved on its own merits, where the new shell will run. The
+            # explorer's root bounds what that pane browses; it is not a limit
+            # on where the pane may be re-rooted, least of all a root it
+            # derived for itself.
+            next_directory = resolve_stated_directory(session, stated_directory)
+            root_path = _stated_root_kept(session, next_directory)
+        else:
+            next_directory, root_path = _resolve_pane_terminal_directory(
+                session,
+                data.get("directory", ""),
+            )
+    except StatedDirectoryError as exc:
+        raise ModeTransitionError(f"{exc} Nothing was changed.", 400) from exc
     except ValueError as exc:
         raise ModeTransitionError(str(exc), 400) from exc
     except _sftp_request_error_types() as exc:
@@ -386,7 +542,10 @@ def apply_pane_mode_change(
     session_manager.update_session_status(session_id, SessionStatus.PENDING)
     effects.broadcast_status(session_id)
     effects.start_connector(session_id)
-    return session_manager.get_session(session_id).to_dict()
+    payload = session_manager.get_session(session_id).to_dict()
+    if report_change:
+        payload["changed"] = True
+    return payload
 
 
 # ==================== The gated half: a mode switch asked for by an agent =====
@@ -522,12 +681,22 @@ def apply_agent_pane_mode_change(
         ) from exc
 
     change = {key: payload[key] for key in _AGENT_MODE_FIELDS if key in payload}
+    # A tool's `directory` is always a path the caller named, never the folder
+    # a live explorer is showing -- so it travels as the stated one.
+    stated_directory = str(change.pop("directory", "") or "").strip()
     logger.info(
         "Agent-requested pane mode switch session_id=%s startup_mode=%s "
-        "requested_by_session_id=%s override=%s",
+        "requested_by_session_id=%s override=%s directory_stated=%s",
         session_id,
         str(change.get("startup_mode") or "-"),
         request.caller_session_id,
         request.override,
+        bool(stated_directory),
     )
-    return apply_pane_mode_change(session_id, change, effects)
+    return apply_pane_mode_change(
+        session_id,
+        change,
+        effects,
+        stated_directory=stated_directory,
+        report_change=True,
+    )

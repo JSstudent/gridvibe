@@ -511,18 +511,39 @@ class LaunchTaskTestCase(_RouteCase):
         self.assertEqual((pane["mode"], pane["host"]), ("ssh", "example.com"))
         self.assertEqual(pane["handoff"]["state"], WAITING)
 
-    def test_a_pane_whose_agent_is_not_installed_holds_no_task_and_says_so(self):
+    def test_a_pane_whose_agent_is_not_installed_refuses_the_whole_launch(self):
+        """A tool's launch is never handed a plain shell for the agent it named."""
         caller = self._agent_pane()
+        groups_before = len(api.session_manager.get_all_groups())
 
         status, payload = self._launch(
             self._body(caller, [self._agent_config()]),
             preflight={"status": "missing", "message": "codex is not installed."},
         )
 
-        self.assertEqual(status, 201, payload)
-        self.assertIsNone(payload["sessions"][0]["handoff"])
+        self.assertEqual(status, 400, payload)
+        self.assertIn("Pane 1 (codex): codex is not installed.", payload["error"])
+        self.assertIn("Nothing was launched", payload["error"])
+        self.assertEqual(len(api.session_manager.get_all_groups()), groups_before)
         self.assertEqual(store.count(), 0)
-        self.assertTrue(any("was not handed over" in item for item in payload["warnings"]))
+
+    def test_a_pane_whose_check_failed_still_starts_its_agent_with_its_task(self):
+        """A check that did not run proves nothing: a tool's launch starts the
+        agent it asked for -- never a plain shell in its place -- keeps its
+        task waiting for it, and says the check could not run."""
+        caller = self._agent_pane()
+
+        status, payload = self._launch(
+            self._body(caller, [self._agent_config()]),
+            preflight={"status": "check_failed", "message": "probe broke."},
+        )
+
+        self.assertEqual(status, 201, payload)
+        pane = payload["sessions"][0]
+        self.assertEqual((pane["startup_mode"], pane["agent_selection"]), ("agent", "codex"))
+        self.assertEqual(pane["initial_command"], "codex")
+        self.assertEqual(pane["handoff"]["state"], WAITING)
+        self.assertTrue(any("could not run" in item for item in payload["warnings"]))
 
 
 # ==================== the handoff route ====================

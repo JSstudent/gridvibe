@@ -42,6 +42,26 @@ GROUP_FIELDS = (
     "terminal_count",
 )
 
+#: One registry agent as ``list_agent_types`` reports it: whether it can start
+#: on the target, and -- separately -- whether it can be given GridVibe's tools
+#: or a task. Never the binary's path, never the target's credential.
+AGENT_TYPE_FIELDS = (
+    "key",
+    "display_name",
+    "available",
+    "status",
+    "status_label",
+    "message",
+    "mcp_supported",
+    "task_supported",
+    "auto_mode_supported",
+)
+
+#: A binary probe per registry agent, on a machine that may be a cold WSL
+#: distribution or an SSH host -- the one read that is not sub-second. Kept
+#: under the shortest agent CLI tool-call timeout, like `wait_for_results`.
+AGENT_TYPES_TIMEOUT_SECONDS = 50.0
+
 #: What a pane is, where it points, and what it runs on.
 PANE_FIELDS = (
     "session_id",
@@ -757,6 +777,27 @@ class GridVibeClient:
                     rows.append(row)
         return {"agents": rows, "count": len(rows)}
 
+    def agent_types(self, origin_session_id: str = "", shell: str = "") -> Dict[str, Any]:
+        """Every registry agent, and whether it can start where a launch would.
+
+        Given a longer deadline than an ordinary read: GridVibe probes each
+        CLI's binary on the target machine, and a cold WSL distribution or an
+        SSH host answers in seconds rather than milliseconds.
+        """
+        payload = self.request(
+            "GET",
+            "/api/agent-types",
+            params={"origin_session_id": origin_session_id, "shell": shell},
+            timeout=max(self.timeout, AGENT_TYPES_TIMEOUT_SECONDS),
+        )
+        rows = payload.get("agents") if isinstance(payload, Mapping) else None
+        agents = [project(row, AGENT_TYPE_FIELDS) for row in rows or [] if isinstance(row, Mapping)]
+        return {
+            "agent_types": agents,
+            "count": len(agents),
+            "target": str((payload or {}).get("target") or "") if isinstance(payload, Mapping) else "",
+        }
+
     # ---------------- create ----------------
 
     def create_workspace(self, label: str) -> Dict[str, Any]:
@@ -817,7 +858,12 @@ class GridVibeClient:
             f"/api/sessions/{urllib.parse.quote(session_id)}/agent-mode-switch",
             body=dict(body),
         )
-        return project_pane(payload)
+        pane = project_pane(payload)
+        # Whether anything happened: a pane already in the asked-for state
+        # answers with its unchanged record, which must not read as a switch.
+        if isinstance(payload, Mapping) and "changed" in payload:
+            pane["changed"] = bool(payload["changed"])
+        return pane
 
     def clear_pane(
         self,
