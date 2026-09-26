@@ -1317,12 +1317,21 @@ def launch_session_group(
 # ==================== Group moves ====================
 
 
-def move_group_to_workspace(group_id: str, data: Dict[str, Any]) -> Tuple[Dict[str, Any], int]:
+def move_group_to_workspace(
+    group_id: str,
+    data: Dict[str, Any],
+    guard: Optional[Callable[[], Optional[Tuple[Dict[str, Any], int]]]] = None,
+) -> Tuple[Dict[str, Any], int]:
     """Move one live group to an existing or new workspace.
 
     The move is pure ownership + ordering: terminal sessions keep their ids,
     processes, SSH connections, replay buffers, and per-session Socket.IO
     rooms. Both affected windows are notified after every lock is released.
+
+    ``guard`` is a caller's precondition, run under the manager lock in the
+    same hold as the move itself, so what it checked is still true when the
+    group changes hands. It must be in-memory only; a refusal is returned as
+    ``(payload, status)`` and nothing moves.
     """
     from web.terminal_io import _broadcast_session_groups_updated
 
@@ -1359,7 +1368,16 @@ def move_group_to_workspace(group_id: str, data: Dict[str, Any]) -> Tuple[Dict[s
             }, 200
 
         try:
-            moved_group = session_manager.move_group(normalized_group_id, target_workspace_id)
+            with session_manager.lock:
+                refusal = guard() if guard is not None else None
+                moved_group = (
+                    None
+                    if refusal is not None
+                    else session_manager.move_group(normalized_group_id, target_workspace_id)
+                )
+            if refusal is not None:
+                rollback_created_workspace(created_workspace_id)
+                return refusal
         except ValueError as exc:
             rollback_created_workspace(created_workspace_id)
             return {"error": str(exc)}, 400

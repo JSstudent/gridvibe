@@ -150,6 +150,9 @@ REFUSAL_FIELDS = (
     "gate",
     "waivable",
     "confirm",
+    # Stated by the navigation routes on every refusal: nothing moved and
+    # nothing was shown, so a caller can say so rather than infer it.
+    "changed",
 )
 
 #: The dashboard's agent rows are already a published field list; the sidecar
@@ -231,6 +234,20 @@ GEOMETRY_FIELDS = (
 #: windows showing the pane have been *told* to reset their display. A pane
 #: nobody has open resets nothing, and this list is what stops the result from
 #: pretending otherwise.
+#: What a tool is told about a group move: both ends, whether it happened, and
+#: where the group is now. Never the two workspaces' full group lists the
+#: transaction hands its windows.
+MOVE_FIELDS = (
+    "moved",
+    "group_id",
+    "group_name",
+    "workspace_id",
+    "source_workspace_id",
+    "current_workspace_id",
+    "workspace_created",
+    "source_workspace_pruned",
+)
+
 CLEAR_FIELDS = (
     "session_id",
     "buffer_purged",
@@ -564,6 +581,16 @@ class GridVibeClient:
             return {}
         return payload if isinstance(payload, Mapping) else {}
 
+    def groups(self, workspace_id: str) -> List[Dict[str, Any]]:
+        """The live session groups (tabs) in one workspace."""
+        payload = self.request(
+            "GET",
+            "/api/session-groups",
+            params={"workspace_id": workspace_id},
+        )
+        raw = payload.get("groups") if isinstance(payload, Mapping) else None
+        return project_all(raw, GROUP_FIELDS)
+
     def pane(self, session_id: str) -> Dict[str, Any]:
         payload = self.request("GET", f"/api/sessions/{urllib.parse.quote(session_id)}")
         return project_pane(payload)
@@ -810,6 +837,20 @@ class GridVibeClient:
         )
         return project(payload, CLEAR_FIELDS)
 
+    def move_group(self, group_id: str, body: Mapping[str, Any]) -> Dict[str, Any]:
+        """Move one live group, through the gated twin of the launcher's route.
+
+        Not ``/move``: that route checks nobody, because the person dragging a
+        tab is looking at it. ``/agent-move`` names the pane asking and passes
+        GridVibe's own gates before the same transaction runs.
+        """
+        payload = self.request(
+            "POST",
+            f"/api/session-groups/{urllib.parse.quote(group_id)}/agent-move",
+            body=dict(body),
+        )
+        return project(payload, MOVE_FIELDS)
+
     @staticmethod
     def _launch_result(payload: Any) -> Dict[str, Any]:
         if not isinstance(payload, Mapping):
@@ -832,6 +873,19 @@ class GridVibeClient:
         if group_id:
             body["group_id"] = group_id
         payload = self.request("POST", "/api/windows/open", body=body)
+        return payload if isinstance(payload, dict) else {}
+
+    def activate_intent(
+        self,
+        workspace_id: str,
+        group_id: str,
+        session_id: str = "",
+    ) -> Dict[str, Any]:
+        """Ask the page holding a group to show it, and focus one of its panes."""
+        body: Dict[str, Any] = {"workspace_id": workspace_id, "group_id": group_id}
+        if session_id:
+            body["session_id"] = session_id
+        payload = self.request("POST", "/api/windows/activate", body=body)
         return payload if isinstance(payload, dict) else {}
 
     def read_window_intent(self, intent_id: str) -> Dict[str, Any]:

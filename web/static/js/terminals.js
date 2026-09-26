@@ -7351,6 +7351,95 @@
     window.GridVibeSplitBridge = splitBridge;
 
     /* ─────────────────────────────────────────────
+       Focus bridge — the page half of an activation intent
+    ─────────────────────────────────────────────
+       Raising a native window that is already open does not change which tab
+       it shows, so a tool asking to *see* a session is answered here: the
+       same `switchGroup` a tab click runs, then the dashboard's own pane
+       landing. It reports what the page now shows, never what it was asked.
+
+       Where a click would ask the person (unsaved editor changes), a tool's
+       request is refused instead: switching discards them, and discarding
+       someone's work is not something a tool gets to be told yes to by a
+       dialog nobody may be looking at. */
+    const FOCUS_BRIDGE_SETTLE_MS = 5000;
+    const FOCUS_BRIDGE_POLL_MS = 100;
+
+    function focusBridgeBlocker() {
+        if (hasActiveExplorerFilesystemOperationForSessions(sessionIds)) {
+            return 'A copy or delete is still running in this window, so it did not switch sessions. Try again shortly.';
+        }
+        if (hasAnyDirtyExplorerEdit()) {
+            return 'An open file in this window has unsaved changes, and switching sessions would discard them. Save or discard them first.';
+        }
+        return '';
+    }
+
+    async function waitForVisiblePane(groupId, sessionId) {
+        const deadline = Date.now() + FOCUS_BRIDGE_SETTLE_MS;
+        while (true) {
+            if (visibleGroupId === groupId) {
+                const resolved = sessionId ? resolveSessionTarget(sessionId) : null;
+                if (!sessionId || (resolved && resolved.active && resolved.groupId === groupId)) {
+                    return resolved;
+                }
+            }
+            if (Date.now() >= deadline) return null;
+            await new Promise(resolve => setTimeout(resolve, FOCUS_BRIDGE_POLL_MS));
+        }
+    }
+
+    const focusBridge = {
+        /* Whether this is the workspace page holding that tab right now. */
+        holds(workspaceId, groupId) {
+            return String(workspaceId || '') === currentWorkspaceId
+                && sessionGroups.some(group => group.group_id === String(groupId || ''));
+        },
+
+        activeGroupId() {
+            return activeGroupId;
+        },
+
+        async activate(groupId, sessionId = '') {
+            const targetGroupId = String(groupId || '');
+            const targetSessionId = String(sessionId || '');
+            if (!sessionGroups.some(group => group.group_id === targetGroupId)) {
+                return { ok: false, activeGroupId, error: 'That session is not in this window.' };
+            }
+            if (targetGroupId !== activeGroupId) {
+                const blocker = focusBridgeBlocker();
+                if (blocker) {
+                    return { ok: false, activeGroupId, error: blocker };
+                }
+                await switchGroup(targetGroupId);
+            }
+            if (activeGroupId !== targetGroupId) {
+                return { ok: false, activeGroupId, error: 'This window did not switch to that session.' };
+            }
+            const resolved = await waitForVisiblePane(targetGroupId, targetSessionId);
+            if (visibleGroupId !== targetGroupId) {
+                return { ok: false, activeGroupId, error: 'The session did not finish loading in this window.' };
+            }
+            if (!targetSessionId) {
+                return { ok: true, activeGroupId, paneVisible: false, focused: false };
+            }
+            if (!resolved) {
+                return { ok: false, activeGroupId, error: 'That pane is not in this session any more.' };
+            }
+            focusPaneForArrival(resolved.index);
+            /* Read back, never assumed: the landing swallows a terminal that
+               would not take focus, and an explorer or browser card is not
+               focusable at all. The pane is on screen either way. */
+            const card = document.getElementById(`tc-${resolved.index}`);
+            const focused = Boolean(
+                card && document.activeElement && card.contains(document.activeElement)
+            );
+            return { ok: true, activeGroupId, paneVisible: true, focused };
+        }
+    };
+    window.GridVibeFocusBridge = focusBridge;
+
+    /* ─────────────────────────────────────────────
        Clipboard helpers (copy / paste)
     ───────────────────────────────────────────── */
     /* Fire-and-forget wrapper over the shared writer: every caller here is a

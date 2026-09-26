@@ -3,9 +3,10 @@
 Four things are pinned here, and each is a property of the build rather than
 of a code path:
 
-- **The registered surface is exactly sixteen**, and the tiers that reach an
+- **The registered surface is exactly eighteen**, and the tiers that reach an
   existing pane hold exactly three -- two that replace what it is, one that
-  erases what it has drawn. The destroy tier is *absent from the build*, not
+  erases what it has drawn -- beside two that only change where something is
+  shown or held. The destroy tier is *absent from the build*, not
   flag-gated: a tool that does not exist cannot be talked into running by a
   file an agent reads. The test names those tools so that adding one has to be
   a deliberate edit here too.
@@ -38,6 +39,7 @@ from gridvibe_mcp.server import (  # noqa: E402
     DISPLAY_TOOLS,
     HANDBACK_TOOLS,
     LAYOUTS,
+    NAVIGATION_TOOLS,
     PANE_MODES,
     READ_TOOLS,
     RELAUNCH_TOOLS,
@@ -63,7 +65,6 @@ ABSENT_TOOLS = (
     "close_group",
     "close_workspace",
     "set_pane_shell",
-    "move_group",
     # `clear_pane` is not this one wearing a different name: the only bytes it
     # puts on a shell's stdin are GridVibe's own clear command, chosen by the
     # window that knows the pane's shell family, and no tool argument reaches
@@ -91,8 +92,9 @@ class RefusingOpener:
 
 
 class ToolSurfaceTestCase(unittest.TestCase):
-    def test_the_registered_surface_is_exactly_sixteen(self):
-        """Seven read, two hand back, four create, two replace, one erases.
+    def test_the_registered_surface_is_exactly_eighteen(self):
+        """Seven read, two hand back, four create, two replace, one erases,
+        two navigate.
 
         The last two tiers are the only things in this surface that end
         anything, and what bounds them is the gates on GridVibe's own routes
@@ -103,13 +105,14 @@ class ToolSurfaceTestCase(unittest.TestCase):
         """
         names = tool_names()
 
-        self.assertEqual(len(names), 16)
+        self.assertEqual(len(names), 18)
         self.assertEqual(names[:7], list(READ_TOOLS))
         self.assertEqual(READ_TOOLS[-1], "read_handoff")
         self.assertEqual(names[7:9], list(HANDBACK_TOOLS))
         self.assertEqual(names[9:13], list(CREATE_TOOLS))
         self.assertEqual(names[13:15], list(RELAUNCH_TOOLS))
-        self.assertEqual(names[15:], list(DISPLAY_TOOLS))
+        self.assertEqual(names[15:16], list(DISPLAY_TOOLS))
+        self.assertEqual(names[16:], list(NAVIGATION_TOOLS))
 
     def test_the_layout_enum_is_the_set_gridvibe_actually_accepts(self):
         """`stack` was never a GridVibe layout, and the two that are were
@@ -642,10 +645,11 @@ class WindowModeTestCase(unittest.TestCase):
         ])
         slept = []
 
+        # No group: with one, a second step asks the page to show it, which
+        # `NativeActivationTestCase` pins.
         result = open_window(
             client_for(opener),
             "ws-2",
-            "g-2",
             sleep=slept.append,
             monotonic=lambda: 0.0,
         )

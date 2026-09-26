@@ -10,6 +10,10 @@
      rows below a terminal header, the narrow-viewport rule, the pane cap — are
      measured off the live terminal. A process that cannot measure a pane
      cannot place one.
+   - **Show a session tab.** Raising a window does not change which tab it
+     shows. Only the workspace page holding the group can switch to it, under
+     its own refusals (an unsaved editor, a copy in flight), and focus the
+     pane that was named.
 
    So the MCP sidecar leaves an *intent* on the server and whichever GridVibe
    page can act on it picks it up.
@@ -29,12 +33,14 @@
      window (or one new pane) rather than two. A page that loses the claim does
      nothing at all.
    - **Only the page that can act, claims.** A split intent names a pane, and
-     only the window holding that pane may take it. The launcher holds no
-     panes and therefore never claims a split.
+     only the window holding that pane may take it. An activation names a
+     group, and only the workspace page holding that group may take it. The
+     launcher holds neither and therefore never claims either.
    - **Report once, honestly.** `opened`/`blocked` for a window, `split`/
-     `refused` for a split — the page never retries, never reports an outcome
-     it did not observe, and never silently splits the other way when the
-     asked-for axis will not fit.
+     `refused` for a split, `activated`/`blocked` for a tab — the page never
+     retries, never reports an outcome it did not observe, never silently
+     splits the other way when the asked-for axis will not fit, and never
+     discards unsaved work to switch a tab a tool asked for.
    - **Suspend on a hidden page.** Established practice here: a background tab
      polls nothing. */
 (function (root, factory) {
@@ -53,9 +59,11 @@
     const BLOCKED = 'blocked';
     const SPLIT = 'split';
     const REFUSED = 'refused';
+    const ACTIVATED = 'activated';
 
     const WINDOW_KIND = 'window';
     const SPLIT_KIND = 'split';
+    const ACTIVATE_KIND = 'activate';
 
     /* What a stacked or side-by-side split is called in a sentence, so a
        refusal can name the axis that *would* have worked in the words the
@@ -81,7 +89,7 @@
            holds none, and a second workspace window holding a different group
            holds not this one. `owns` is the page's own answer to that, and a
            page with no way to split at all passes none. */
-        actionable(intents, owns = null) {
+        actionable(intents, owns = null, holdsGroup = null) {
             if (!Array.isArray(intents)) return [];
             return intents.filter(intent => {
                 if (!intent || typeof intent !== 'object') return false;
@@ -90,6 +98,17 @@
                 if (policy.kind(intent) === SPLIT_KIND) {
                     const sessionId = String(intent.session_id || '').trim();
                     return Boolean(sessionId && owns && owns(sessionId));
+                }
+                if (policy.kind(intent) === ACTIVATE_KIND) {
+                    /* Only the workspace page that holds the group. A page
+                       whose group list has not loaded yet does not hold it
+                       yet, and claims it on a later tick instead. */
+                    const workspaceId = String(intent.workspace_id || '').trim();
+                    const groupId = String(intent.group_id || '').trim();
+                    return Boolean(
+                        workspaceId && groupId && holdsGroup
+                        && holdsGroup(workspaceId, groupId)
+                    );
                 }
                 return Boolean(String(intent.workspace_id || '').trim());
             });
@@ -135,6 +154,39 @@
             return `${sentence.replace(/\.$/, '')}. ${tail}`;
         },
 
+        /* What a tab switch reports back, from what the page says it now
+           shows rather than what it was asked to show. Activated only when
+           the group asked for is the one on screen and — when a pane was
+           named — that pane is in it. Whether the pane also took keyboard
+           focus is reported as the page read it back, never assumed: an
+           explorer or browser pane is shown but cannot hold focus. */
+        activation(requested, shown) {
+            const groupId = String(requested?.group_id || '');
+            const sessionId = String(requested?.session_id || '');
+            const activeGroupId = String(shown?.activeGroupId || '');
+            const paneVisible = Boolean(sessionId && shown?.paneVisible);
+            const focused = Boolean(paneVisible && shown?.focused);
+            const onTab = Boolean(groupId && activeGroupId === groupId);
+            const ok = Boolean(shown?.ok) && onTab && (!sessionId || paneVisible);
+            let detail = '';
+            if (!ok) {
+                detail = String(shown?.error || '').trim()
+                    || (onTab
+                        ? 'The session is showing, but that pane is not in it.'
+                        : 'This window did not switch to that session.');
+            }
+            return {
+                outcome: ok ? ACTIVATED : BLOCKED,
+                detail,
+                result: {
+                    active_group_id: activeGroupId,
+                    session_id: sessionId,
+                    pane_visible: paneVisible,
+                    focused
+                }
+            };
+        },
+
         /* The pane a settled split reports back, as a field list rather than
            whatever the session payload happened to carry. */
         splitResult(result) {
@@ -159,6 +211,8 @@
             /* The page's split half, absent on the launcher — which is exactly
                what stops the launcher from claiming a split it cannot do. */
             splitBridge = null,
+            /* The page's tab-switch half, present only on a workspace page. */
+            focusBridge = null,
             setInterval: schedule,
             clearInterval: unschedule,
             isVisible = () => true,
@@ -188,9 +242,34 @@
             }
             if (!policy.claimed(claim)) return false;
 
-            return policy.kind(intent) === SPLIT_KIND
-                ? deliverSplit(intentId, intent)
-                : deliverWindow(intentId, intent);
+            const kind = policy.kind(intent);
+            if (kind === SPLIT_KIND) return deliverSplit(intentId, intent);
+            if (kind === ACTIVATE_KIND) return deliverActivation(intentId, intent);
+            return deliverWindow(intentId, intent);
+        }
+
+        async function deliverActivation(intentId, intent) {
+            let shown = null;
+            try {
+                shown = await focusBridge.activate(
+                    String(intent.group_id || ''),
+                    String(intent.session_id || '')
+                );
+            } catch (error) {
+                onError(error);
+                shown = {
+                    ok: false,
+                    activeGroupId: focusBridge?.activeGroupId?.() || '',
+                    error: `The tab switch failed in this window: ${error.message}`
+                };
+            }
+            const settled = policy.activation(intent, shown);
+            try {
+                await reportResult(intentId, settled.outcome, settled.detail, settled.result);
+            } catch (error) {
+                onError(error);
+            }
+            return settled.outcome === ACTIVATED;
         }
 
         async function deliverWindow(intentId, intent) {
@@ -269,7 +348,10 @@
             try {
                 const intents = policy.actionable(
                     await listIntents(),
-                    splitBridge ? sessionId => splitBridge.owns(sessionId) : null
+                    splitBridge ? sessionId => splitBridge.owns(sessionId) : null,
+                    focusBridge
+                        ? (workspaceId, groupId) => focusBridge.holds(workspaceId, groupId)
+                        : null
                 );
                 for (const intent of intents) {
                     await deliver(intent);
@@ -358,6 +440,8 @@
                is the whole ownership rule: a page with no panes never claims a
                split intent. */
             splitBridge: host.GridVibeSplitBridge || null,
+            /* Same rule: the launcher holds no tabs, so it never claims one. */
+            focusBridge: host.GridVibeFocusBridge || null,
             setInterval: (handler, interval) => host.setInterval(handler, interval),
             clearInterval: handle => host.clearInterval(handle),
             isVisible: () => host.document?.visibilityState !== 'hidden',
@@ -379,8 +463,10 @@
         BLOCKED,
         SPLIT,
         REFUSED,
+        ACTIVATED,
         WINDOW_KIND,
         SPLIT_KIND,
+        ACTIVATE_KIND,
         policy,
         create,
         bootstrap

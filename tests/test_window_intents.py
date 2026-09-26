@@ -235,9 +235,9 @@ class WindowIntentRouteTestCase(unittest.TestCase):
         self.assertIn(payload["window_mode"], ("browser", "native"))
 
     def test_an_intent_round_trips_through_the_routes(self):
-        created = self.client.post(
-            "/api/windows/open", json={"workspace_id": "ws-1", "group_id": "g-1"}
-        )
+        # No group: a named group is checked against the live registry, which
+        # `tests/test_navigation.py` pins.
+        created = self.client.post("/api/windows/open", json={"workspace_id": "ws-1"})
         self.assertEqual(created.status_code, 201)
         intent_id = created.get_json()["intent_id"]
 

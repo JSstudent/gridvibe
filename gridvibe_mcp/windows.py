@@ -18,18 +18,33 @@ Three honest outcomes, and the tool reports which: ``opened``, ``blocked``
 ``no_window_available`` (the intent expired with no page to claim it, or the
 wait ended with GridVibe unreadable -- a dropped poll is not a failed open, so
 it degrades and the deadline answers). It never retries and it never pretends.
+
+**A named group is a second step, and a page has to confirm it.** Raising a
+native window that is already open does not change which tab it shows, so a
+raise is not proof the group is on screen. Once the window step answers
+``opened``, an *activate* intent is recorded, and only the workspace page
+holding that group claims it: it switches tabs under its own refusals (an
+unsaved editor, a copy in flight), focuses the named pane, and reports what it
+now shows. ``opened`` with ``group_activated: true`` is that page's word; a
+refusal is ``blocked`` with its reason and ``window_raised: true``; nobody
+answering is ``no_window_available``, never a success. Browser mode has no
+page to ask, so it says the tab it opened is ``verified: false``.
 """
 
 import time
 import urllib.parse
 import webbrowser
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, Optional, Tuple
 
 from gridvibe_mcp.client import GridVibeClient, GridVibeError
 
 OPENED = "opened"
 BLOCKED = "blocked"
 NO_WINDOW_AVAILABLE = "no_window_available"
+
+#: The page's own word for "this group is the tab I now show". Only an
+#: activation settles with it; it is never this module's outcome.
+ACTIVATED = "activated"
 
 #: How long the sidecar waits for a page to claim an intent and report back.
 #: Longer than the store's own worst case, which is not its 15s claim window
@@ -59,6 +74,7 @@ def open_window(
     workspace_id: str,
     group_id: str = "",
     *,
+    session_id: str = "",
     window_mode: str = "",
     wait_seconds: float = DEFAULT_WAIT_SECONDS,
     poll_seconds: float = DEFAULT_POLL_SECONDS,
@@ -78,22 +94,41 @@ def open_window(
         except GridVibeError:
             mode = ""
 
+    resolved_group_id = str(group_id or "").strip()
+    resolved_session_id = str(session_id or "").strip()
     if mode == "native":
-        return _open_native(
+        timing = {
+            "wait_seconds": wait_seconds,
+            "poll_seconds": poll_seconds,
+            "sleep": sleep or time.sleep,
+            "monotonic": monotonic or time.monotonic,
+        }
+        opened = _open_native(client, resolved_workspace_id, resolved_group_id, **timing)
+        if opened.get("status") != OPENED or not resolved_group_id:
+            return opened
+        return _activate_native(
             client,
             resolved_workspace_id,
-            group_id,
-            wait_seconds=wait_seconds,
-            poll_seconds=poll_seconds,
-            sleep=sleep or time.sleep,
-            monotonic=monotonic or time.monotonic,
+            resolved_group_id,
+            resolved_session_id,
+            **timing,
         )
-    return _open_browser(
+    result = _open_browser(
         client,
         resolved_workspace_id,
-        group_id,
+        resolved_group_id,
         browser_opener=browser_opener or _default_browser_opener,
     )
+    if result.get("status") == OPENED and resolved_group_id:
+        # A URL handed to the OS browser is a tab asked for, not one a page
+        # has confirmed showing -- and nothing in it focuses a pane.
+        result["verified"] = False
+        result["note"] = (
+            "Browser mode: a tab was opened at this session, but no GridVibe "
+            "page confirms which tab it shows"
+            + (" or focuses the pane." if resolved_session_id else ".")
+        )
+    return result
 
 
 def _default_browser_opener(url: str) -> bool:
@@ -146,31 +181,15 @@ def _open_native(
             "detail": f"GridVibe did not record the request. {FALLBACK_HINT}",
         }
 
-    deadline = monotonic() + max(0.0, float(wait_seconds))
-    state = "pending"
-    detail = ""
-    read_error = ""
-    while True:
-        try:
-            record = client.read_window_intent(intent_id)
-            read_error = ""
-        except GridVibeError as exc:
-            # A failed *poll* is not a failed open. The intent is recorded and a
-            # page may be claiming it this second, so one dropped read must not
-            # become "the call failed" about a window that then appears. The
-            # read degrades and the deadline decides; the last failure is kept
-            # so the answer can say it never found out rather than that nothing
-            # happened.
-            record = {}
-            read_error = str(exc)
-        state = str(record.get("state") or "").strip() or "pending"
-        detail = str(record.get("detail") or "").strip()
-        if state in {OPENED, BLOCKED, "expired"}:
-            break
-        if monotonic() >= deadline:
-            state = "expired"
-            break
-        sleep(max(0.05, float(poll_seconds)))
+    state, detail, _result, read_error = _wait_for_intent(
+        client,
+        intent_id,
+        (OPENED, BLOCKED),
+        wait_seconds=wait_seconds,
+        poll_seconds=poll_seconds,
+        sleep=sleep,
+        monotonic=monotonic,
+    )
 
     if state == OPENED:
         return {"status": OPENED, "window_mode": "native", "intent_id": intent_id}
@@ -198,5 +217,151 @@ def _open_native(
         "intent_id": intent_id,
         "detail": (
             "No GridVibe window was open to hand the request to. " + FALLBACK_HINT
+        ),
+    }
+
+
+def _wait_for_intent(
+    client: GridVibeClient,
+    intent_id: str,
+    settled: Tuple[str, ...],
+    *,
+    wait_seconds: float,
+    poll_seconds: float,
+    sleep: Callable[[float], None],
+    monotonic: Callable[[], float],
+) -> Tuple[str, str, Dict[str, Any], str]:
+    """Poll one intent until it settles, goes, or the wait runs out.
+
+    Returns ``(state, detail, result, read_error)``; a wait that ran out reads
+    ``expired``.
+    """
+    deadline = monotonic() + max(0.0, float(wait_seconds))
+    state = "pending"
+    detail = ""
+    result: Dict[str, Any] = {}
+    read_error = ""
+    while True:
+        try:
+            record = client.read_window_intent(intent_id)
+            read_error = ""
+        except GridVibeError as exc:
+            # A failed *poll* is not a failed open. The intent is recorded and a
+            # page may be claiming it this second, so one dropped read must not
+            # become "the call failed" about a window that then appears. The
+            # read degrades and the deadline decides; the last failure is kept
+            # so the answer can say it never found out rather than that nothing
+            # happened.
+            record = {}
+            read_error = str(exc)
+        state = str(record.get("state") or "").strip() or "pending"
+        detail = str(record.get("detail") or "").strip()
+        raw_result = record.get("result")
+        result = dict(raw_result) if isinstance(raw_result, dict) else {}
+        if state in settled or state == "expired":
+            break
+        if monotonic() >= deadline:
+            state = "expired"
+            break
+        sleep(max(0.05, float(poll_seconds)))
+    return state, detail, result, read_error
+
+
+def _activate_native(
+    client: GridVibeClient,
+    workspace_id: str,
+    group_id: str,
+    session_id: str,
+    *,
+    wait_seconds: float,
+    poll_seconds: float,
+    sleep: Callable[[float], None],
+    monotonic: Callable[[], float],
+) -> Dict[str, Any]:
+    """Ask the page holding the group to show it, and report what it said.
+
+    Runs only after the window step answered ``opened``, so every answer here
+    says ``window_raised: true`` -- the window is up whatever the tab does.
+    """
+    base: Dict[str, Any] = {
+        "window_mode": "native",
+        "workspace_id": workspace_id,
+        "group_id": group_id,
+        "window_raised": True,
+    }
+    if session_id:
+        base["session_id"] = session_id
+    try:
+        intent = client.activate_intent(workspace_id, group_id, session_id)
+    except GridVibeError as exc:
+        # The group or pane moved or closed after the window step read it.
+        return {
+            **base,
+            "status": BLOCKED,
+            "group_activated": False,
+            "detail": f"The window was raised, but the tab was not switched: {exc}",
+        }
+    intent_id = str(intent.get("intent_id") or "").strip()
+    if not intent_id:
+        return {
+            **base,
+            "status": NO_WINDOW_AVAILABLE,
+            "group_activated": False,
+            "detail": (
+                "The window was raised, but GridVibe did not record the "
+                "request to show that session."
+            ),
+        }
+    base["intent_id"] = intent_id
+
+    state, detail, result, read_error = _wait_for_intent(
+        client,
+        intent_id,
+        (ACTIVATED, BLOCKED),
+        wait_seconds=wait_seconds,
+        poll_seconds=poll_seconds,
+        sleep=sleep,
+        monotonic=monotonic,
+    )
+    active_group_id = str(result.get("active_group_id") or "")
+    if active_group_id:
+        base["active_group_id"] = active_group_id
+    activated = bool(active_group_id) and active_group_id == group_id
+    if state == ACTIVATED and activated:
+        answer = {**base, "status": OPENED, "group_activated": True}
+        if session_id:
+            answer["pane_visible"] = bool(result.get("pane_visible"))
+            answer["focused"] = bool(result.get("focused"))
+            if not answer["focused"]:
+                answer["note"] = (
+                    "The pane is on screen in its session tab but did not take "
+                    "keyboard focus -- an explorer or browser pane cannot hold it."
+                )
+        return answer
+    if state in (ACTIVATED, BLOCKED):
+        return {
+            **base,
+            "status": BLOCKED,
+            "group_activated": activated,
+            "detail": detail or "The GridVibe window did not switch to that session.",
+        }
+    if read_error:
+        return {
+            **base,
+            "status": NO_WINDOW_AVAILABLE,
+            "group_activated": False,
+            "detail": (
+                "The window was raised, but GridVibe could not be reached while "
+                f"waiting for it to show that session ({read_error}), so which "
+                "tab it shows is not known here."
+            ),
+        }
+    return {
+        **base,
+        "status": NO_WINDOW_AVAILABLE,
+        "group_activated": False,
+        "detail": (
+            "The window was raised, but no GridVibe page holding that session "
+            "confirmed switching to it, so which tab it shows is not known."
         ),
     }

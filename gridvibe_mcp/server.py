@@ -105,6 +105,13 @@ RELAUNCH_TOOLS = ("set_pane_agent", "set_pane_mode")
 #: thing it destroys -- a pane's scrollback -- is not recoverable either.
 DISPLAY_TOOLS = ("clear_pane",)
 
+#: Change where something is shown or which workspace holds it; create nothing
+#: and end nothing. A moved group keeps its pane ids, processes, connections and
+#: handoffs, so the only thing either verb changes is what the person sees
+#: where. `move_group` still passes a lineage gate on GridVibe's own route,
+#: because the tab it moves may be one the person is working in.
+NAVIGATION_TOOLS = ("focus_pane", "move_group")
+
 PANE_KINDS = ("agent", "terminal", "explorer", "browser")
 SHELL_KINDS = ("powershell", "cmd", "wsl")
 
@@ -700,14 +707,28 @@ def tool_specs() -> List[Dict[str, Any]]:
         {
             "name": "open_window",
             "description": (
-                "Make a workspace appear on screen. Reports opened, blocked, or "
-                "no_window_available -- it never retries and never pretends."
+                "Make a workspace appear on screen, and with 'group_id' switch "
+                "it to that session tab. Reports opened, blocked, or "
+                "no_window_available -- it never retries and never pretends. "
+                "With a group, 'opened' in a native window means the page "
+                "confirmed the tab ('group_activated': true); a window that was "
+                "raised but did not switch (an unsaved editor, a copy in "
+                "flight) is 'blocked' with its reason and 'window_raised': "
+                "true. In browser mode the tab is opened but 'verified' is "
+                "false: no page confirms it."
             ),
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "workspace_id": {"type": "string"},
-                    "group_id": {"type": "string", "description": "Open with this session group active."},
+                    "group_id": {
+                        "type": "string",
+                        "description": (
+                            "Show this session group (tab). It must be in "
+                            "workspace_id now; list_workspaces/list_panes "
+                            "resolve it."
+                        ),
+                    },
                 },
                 "required": ["workspace_id"],
                 "additionalProperties": False,
@@ -917,6 +938,92 @@ def tool_specs() -> List[Dict[str, Any]]:
                     },
                 },
                 "required": ["session_id"],
+                "additionalProperties": False,
+            },
+        },
+    ] + _navigation_specs()
+
+
+def _navigation_specs() -> List[Dict[str, Any]]:
+    return [
+        {
+            "name": "focus_pane",
+            "description": (
+                "Bring one pane into view: raise its workspace window, switch "
+                "to its session tab and give the pane focus -- e.g. after "
+                "split_pane or launch_panes made it. The workspace and group "
+                "are read from the pane itself. Reports opened (with "
+                "'focused'), blocked with the window's reason (an unsaved "
+                "editor or a copy in flight blocks a tab switch), or "
+                "no_window_available. Nothing is typed into the pane and "
+                "nothing is started or ended. In browser mode the tab is "
+                "opened but the focus is not verified."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "session_id": {
+                        "type": "string",
+                        "description": "The pane to show. Use list_panes or whoami to resolve it.",
+                    },
+                },
+                "required": ["session_id"],
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": "move_group",
+            "description": (
+                "Move one live session group (a tab and all its panes) to "
+                "another workspace. Nothing restarts: pane ids, running "
+                "agents, SSH connections and handoffs stay as they are. Name "
+                "the group by 'group_id', or by 'session_name' when exactly "
+                "one live group has that name -- two or more is refused with "
+                "the candidates, and nothing moves until one is named. This "
+                "agent's own group, or a group whose panes this agent "
+                "created, moves freely; any other group is refused with a "
+                "'confirm.question' to ask the person first. Moving a group "
+                "to the workspace it is already in answers 'moved': false. "
+                "With 'show' the destination window is raised on that tab "
+                "afterwards; its result is reported separately in 'shown' and "
+                "never turns a move into a failure."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "group_id": {"type": "string"},
+                    "session_name": {
+                        "type": "string",
+                        "description": "The group's tab name, when group_id is not known.",
+                    },
+                    "target_workspace_id": {
+                        "type": "string",
+                        "description": "Destination workspace. Use list_workspaces to resolve it.",
+                    },
+                    "new_workspace": {
+                        "type": "boolean",
+                        "description": "Move into a new workspace instead.",
+                    },
+                    "workspace_label": {
+                        "type": "string",
+                        "description": "Name for the new workspace.",
+                    },
+                    "show": {
+                        "type": "boolean",
+                        "description": "Afterwards, raise the destination window on this tab.",
+                    },
+                    "override": {
+                        "type": "boolean",
+                        "description": (
+                            "Waive the rule that a tool moves only this "
+                            "agent's own or created groups. Only true when "
+                            "the person explicitly asked, in this "
+                            "conversation, to move this group to this "
+                            "destination, or answered yes to the refusal's "
+                            "confirm.question."
+                        ),
+                    },
+                },
                 "additionalProperties": False,
             },
         },
@@ -1203,6 +1310,107 @@ def build_launch_request(
     return body
 
 
+# ---------------- navigation ----------------
+
+
+def _group_candidates(client: GridVibeClient, session_name: str) -> List[Dict[str, Any]]:
+    """Every live group whose tab name is ``session_name``, with its workspace."""
+    wanted = session_name.strip()
+    candidates: List[Dict[str, Any]] = []
+    for workspace in client.workspaces():
+        workspace_id = str(workspace.get("workspace_id") or "")
+        if not workspace_id:
+            continue
+        for group in client.groups(workspace_id):
+            if str(group.get("name") or "").strip() != wanted:
+                continue
+            candidates.append({
+                "group_id": str(group.get("group_id") or ""),
+                "name": str(group.get("name") or ""),
+                "workspace_id": workspace_id,
+                "workspace_label": str(workspace.get("label") or ""),
+                "terminal_count": group.get("terminal_count"),
+            })
+    return candidates
+
+
+def _move_group(
+    args: Mapping[str, Any],
+    *,
+    client: GridVibeClient,
+    identity: PaneIdentity,
+    window_opener: Callable[..., Dict[str, Any]],
+) -> Dict[str, Any]:
+    group_id = _text(args, "group_id")
+    session_name = _text(args, "session_name")
+    if group_id and session_name:
+        raise ToolArgumentError("Name the group by 'group_id' or 'session_name', not both.")
+    if not group_id and not session_name:
+        raise ToolArgumentError("move_group needs a 'group_id' or a 'session_name'.")
+    target_workspace_id = _text(args, "target_workspace_id")
+    new_workspace = _flag(args, "new_workspace", False)
+    if bool(target_workspace_id) == new_workspace:
+        raise ToolArgumentError(
+            "Name exactly one destination: a 'target_workspace_id', or "
+            "'new_workspace': true."
+        )
+    workspace_label = _text(args, "workspace_label")
+    if workspace_label and not new_workspace:
+        raise ToolArgumentError("'workspace_label' only applies with 'new_workspace': true.")
+    if not identity.session_id:
+        raise ToolArgumentError(
+            "This agent was not started by GridVibe, so it has no pane and "
+            "owns no session group. Move the tab from the GridVibe launcher."
+        )
+
+    if session_name:
+        candidates = _group_candidates(client, session_name)
+        if not candidates:
+            return {
+                "error": (
+                    f"No live session group is named '{session_name}'. Nothing "
+                    "was moved; call list_workspaces for the groups that are open."
+                ),
+                "kind": "not_found",
+                "changed": False,
+            }
+        if len(candidates) > 1:
+            return {
+                "error": (
+                    f"{len(candidates)} live session groups are named "
+                    f"'{session_name}'. Nothing was moved; ask which one is "
+                    "meant and call move_group again with its group_id."
+                ),
+                "kind": "ambiguous",
+                "changed": False,
+                "candidates": candidates,
+            }
+        group_id = candidates[0]["group_id"]
+
+    body: Dict[str, Any] = {"requested_by_session_id": identity.session_id}
+    if new_workspace:
+        body["new_workspace"] = True
+        if workspace_label:
+            body["label"] = workspace_label
+    else:
+        body["target_workspace_id"] = target_workspace_id
+    if _flag(args, "override", False):
+        # Waives lineage server-side; never a decision this dispatcher makes
+        # on its own -- it only forwards what the calling agent stated.
+        body["override"] = True
+    result = client.move_group(group_id, body)
+
+    if _flag(args, "show", False):
+        # A second step with its own answer: a window that would not switch
+        # tabs is not a group that did not move.
+        destination = str(result.get("current_workspace_id") or result.get("workspace_id") or "")
+        try:
+            result["shown"] = window_opener(client, destination, group_id)
+        except GridVibeError as exc:
+            result["shown"] = exc.to_dict()
+    return result
+
+
 # ---------------- dispatch ----------------
 
 
@@ -1423,6 +1631,35 @@ def _run(
         if not workspace_id:
             raise ToolArgumentError("open_window needs a 'workspace_id'.")
         return window_opener(client, workspace_id, _text(args, "group_id"))
+
+    if name == "focus_pane":
+        session_id = _text(args, "session_id")
+        if not session_id:
+            raise ToolArgumentError("focus_pane needs a 'session_id'.")
+        # The pane's group, and that group's workspace *now* -- never the
+        # pane's spawn-time workspace, which a move has made stale. GridVibe
+        # checks both again when the window and activation are recorded.
+        pane = client.pane(session_id)
+        group_id = str(pane.get("group_id") or "")
+        workspace_id = str(client.pane_layout(group_id).get("workspace_id") or "") if group_id else ""
+        if not group_id or not workspace_id:
+            return {
+                "error": (
+                    f"GridVibe could not say which workspace pane {session_id} "
+                    "is in right now. Nothing was shown; call list_panes and "
+                    "try again."
+                ),
+                "kind": "unresolved",
+                "changed": False,
+            }
+        result = window_opener(client, workspace_id, group_id, session_id=session_id)
+        result.setdefault("workspace_id", workspace_id)
+        result.setdefault("group_id", group_id)
+        result.setdefault("session_id", session_id)
+        return result
+
+    if name == "move_group":
+        return _move_group(args, client=client, identity=identity, window_opener=window_opener)
 
     if name == "split_pane":
         session_id = _text(args, "session_id")

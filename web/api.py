@@ -215,6 +215,7 @@ from web.mcp_launch import (  # noqa: F401 - mcp_config_path re-exported for tes
     set_server_address,
     write_mcp_config,
 )
+from web.navigation import NavigationRefusal, move_group_for_agent, resolve_view_target
 from web.pane_gates import (
     LINEAGE_GATE,
     MACHINE_GATE,
@@ -2257,13 +2258,60 @@ def open_window_intent():
     workspace_id = str(data.get("workspace_id") or "").strip()
     if not workspace_id:
         return jsonify({"error": "workspace_id is required"}), 400
-    intent = window_intents.open(workspace_id, data.get("group_id") or "")
+    group_id = str(data.get("group_id") or "").strip()
+    if group_id:
+        # A group another workspace now holds is refused here rather than
+        # opened in the wrong window: the caller read it before it moved.
+        try:
+            resolve_view_target(workspace_id, group_id)
+        except NavigationRefusal as exc:
+            return jsonify(exc.payload()), exc.status_code
+    intent = window_intents.open(workspace_id, group_id)
     logger.info(
         "Window intent %s recorded workspace=%s group=%s mode=%s",
         intent["intent_id"],
         intent["workspace_id"],
         intent["group_id"] or "-",
         window_mode(),
+    )
+    return jsonify(intent), 201
+
+
+@app.route('/api/windows/activate', methods=['POST'])
+def activate_window_intent():
+    """Store one "show this session tab, and focus this pane" intent.
+
+    Raising a window does not change which tab it shows, so this is the half
+    only the page holding the group can do. The ids are resolved against the
+    live registry first: a pane names its group and a group its workspace, and
+    a stated id that disagrees is a stale read, refused before anything is
+    recorded.
+    """
+    data = request.get_json(silent=True) or {}
+    try:
+        target = resolve_view_target(
+            data.get("workspace_id") or "",
+            data.get("group_id") or "",
+            data.get("session_id") or "",
+        )
+    except NavigationRefusal as exc:
+        return jsonify(exc.payload()), exc.status_code
+    if not target.group_id:
+        return jsonify({
+            "error": "A session group or pane has to be named to show it.",
+            "changed": False,
+        }), 400
+    intent = window_intents.open_activation(
+        target.workspace_id,
+        target.group_id,
+        target.session_id,
+    )
+    logger.info(
+        "Activate intent %s recorded workspace=%s group=%s session=%s",
+        intent["intent_id"],
+        target.workspace_id,
+        target.group_id,
+        target.session_id or "-",
     )
     return jsonify(intent), 201
 
@@ -2297,9 +2345,10 @@ def claim_window_intent(intent_id: str):
 def record_window_intent_result(intent_id: str):
     """The claimant reports what happened.
 
-    `opened` or `blocked` for a window; `split` or `refused` for a split. The
-    store checks the outcome against the intent's own kind, so a page cannot
-    report a window's verb on a pane.
+    `opened` or `blocked` for a window; `split` or `refused` for a split;
+    `activated` or `blocked` for an activation. The store checks the outcome
+    against the intent's own kind, so a page cannot report a window's verb on
+    a pane.
     """
     data = request.get_json(silent=True) or {}
     recorded, payload = window_intents.record_result(
@@ -2456,6 +2505,20 @@ def move_session_group(group_id: str):
     """Move one live session tab to another workspace without restarting it."""
     data = request.get_json(silent=True) or {}
     payload, status = move_group_to_workspace(group_id, data)
+    return jsonify(payload), status
+
+
+@app.route('/api/session-groups/<group_id>/agent-move', methods=['POST'])
+def agent_move_session_group(group_id: str):
+    """The gated twin of the move route, for a tool.
+
+    The launcher's own route checks nobody, because the person dragging the
+    tab is looking at it. This one names the pane asking and passes
+    `web/navigation.py`'s gates -- its own group, a group it created, or the
+    person's `override` -- before the same transaction runs.
+    """
+    data = request.get_json(silent=True) or {}
+    payload, status = move_group_for_agent(group_id, data)
     return jsonify(payload), status
 
 

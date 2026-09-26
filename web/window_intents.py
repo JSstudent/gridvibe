@@ -11,6 +11,12 @@ both:
   measured off the live terminal. A process that cannot measure a pane cannot
   place one, so it leaves an intent and the page that can measure performs the
   split with the button's own handler.
+* **Show a session tab.** Raising a native window is not the same as changing
+  which tab it shows, and only the page holding the group can switch to it --
+  under its own refusals, an unsaved editor among them. An *activate* intent
+  names a workspace, a group and optionally a pane; the workspace page holding
+  that group claims it, switches, focuses the pane, and reports what it now
+  shows.
 
 In-memory and TTL-bounded. No durable state, no file, nothing that survives a
 restart -- an intent nobody claimed within its TTL is not worth remembering.
@@ -51,11 +57,17 @@ REFUSED = "refused"
 WINDOW_KIND = "window"
 SPLIT_KIND = SPLIT
 
+#: An activation's success outcome, and the kind that reports it. Its refusal
+#: is `BLOCKED`, the same word a window uses for "a page refused".
+ACTIVATED = "activated"
+ACTIVATE_KIND = "activate"
+
 #: What a page may report back, per kind. Anything else is refused: a page that
 #: reported `opened` on a split would be reporting something it did not do.
 OUTCOMES_BY_KIND: Dict[str, Tuple[str, ...]] = {
     WINDOW_KIND: (OPENED, BLOCKED),
     SPLIT_KIND: (SPLIT, REFUSED),
+    ACTIVATE_KIND: (ACTIVATED, BLOCKED),
 }
 
 #: Back-compat: the window kind's outcomes, which is what this name always
@@ -73,6 +85,21 @@ SPLIT_RESULT_FIELDS = (
     "agent_selection",
     "index",
 )
+
+#: A settled activation reports what the page now shows: the tab, whether the
+#: named pane is on screen in it, and whether it holds keyboard focus -- read
+#: back by the page, so an explorer or browser pane is visible but unfocused.
+ACTIVATE_RESULT_FIELDS = (
+    "active_group_id",
+    "session_id",
+    "pane_visible",
+    "focused",
+)
+
+RESULT_FIELDS_BY_KIND: Dict[str, Tuple[str, ...]] = {
+    SPLIT_KIND: SPLIT_RESULT_FIELDS,
+    ACTIVATE_KIND: ACTIVATE_RESULT_FIELDS,
+}
 
 
 class WindowIntentStore:
@@ -140,6 +167,29 @@ class WindowIntentStore:
                 "session_id": str(session_id or "").strip(),
                 "axis": str(axis or "").strip().lower(),
                 "split_request": dict(split_request or {}),
+            },
+            now=now,
+        )
+
+    def open_activation(
+        self,
+        workspace_id: str,
+        group_id: str,
+        session_id: str = "",
+        *,
+        now: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """Record one "show this group, and focus this pane" intent.
+
+        The ids are checked against the live registry by the route before this
+        is called (`web/navigation.py`); the store only remembers them.
+        """
+        return self._record(
+            {
+                "kind": ACTIVATE_KIND,
+                "workspace_id": str(workspace_id or "").strip(),
+                "group_id": str(group_id or "").strip(),
+                "session_id": str(session_id or "").strip(),
             },
             now=now,
         )
@@ -224,10 +274,11 @@ class WindowIntentStore:
                 }
             record["state"] = resolved
             record["detail"] = str(detail or "")[:240]
-            if isinstance(result, Mapping):
+            fields = RESULT_FIELDS_BY_KIND.get(record.get("kind") or WINDOW_KIND, ())
+            if isinstance(result, Mapping) and fields:
                 record["result"] = {
                     key: result.get(key)
-                    for key in SPLIT_RESULT_FIELDS
+                    for key in fields
                     if key in result
                 }
             # Keep a settled intent readable just long enough for the sidecar's
@@ -328,6 +379,8 @@ class WindowIntentStore:
             payload["session_id"] = record.get("session_id", "")
             payload["axis"] = record.get("axis", "")
             payload["split_request"] = dict(record.get("split_request") or {})
+        elif kind == ACTIVATE_KIND:
+            payload["session_id"] = record.get("session_id", "")
         if record.get("result") is not None:
             payload["result"] = dict(record["result"])
         return payload
