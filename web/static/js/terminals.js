@@ -646,6 +646,7 @@
     let splitColumnWeights = null;
     let splitRowWeights = null;
     let activeGridResize = null;
+    let resizeIntentInFlight = false;
     let originalSplitSlotCount = 0;
 
     function isExplorerSession(session) {
@@ -3673,6 +3674,7 @@
     }
 
     function startGridResize(event) {
+        if (resizeIntentInFlight) return;
         const handle = event.currentTarget;
         const axis = handle?.dataset?.resizeAxis;
         const lineIndex = Number(handle?.dataset?.resizeLine);
@@ -7063,6 +7065,10 @@
     }
 
     async function closeTerminalPane(index) {
+        if (resizeIntentInFlight) {
+            showTerminalToast('A divider resize is finishing. Try closing this pane again shortly.', 'error');
+            return;
+        }
         const explorerSessionId = sessionIds[index];
         if (hasActiveExplorerFilesystemOperation(index)) {
             showTerminalToast('A copy or delete is finishing. Try closing this pane again shortly.', 'error');
@@ -7152,6 +7158,9 @@
        Returns what happened, so the intent path can report it. The button path
        ignores the return and reads the toast, as it always has. */
     async function splitTerminalPane(index, axis, splitRequest = null) {
+        if (resizeIntentInFlight) {
+            return { ok: false, error: 'A divider resize is finishing. Try the split again shortly.' };
+        }
         const sourceSessionId = sessionIds[index];
         const sourceTerminal = terminals[index];
         const sourceCard = document.getElementById(`tc-${index}`);
@@ -7349,6 +7358,129 @@
         }
     };
     window.GridVibeSplitBridge = splitBridge;
+
+    /* One page owns measurement, minimums and the compare-and-swap write.
+       The server never invents pixel geometry. Nothing is painted until the
+       live presentation transaction acknowledges the new weights. */
+    const resizeBridge = {
+        holds(workspaceId, groupId) {
+            return String(workspaceId || '') === currentWorkspaceId
+                && sessionGroups.some(group => group.group_id === String(groupId || ''));
+        },
+
+        async perform(intent) {
+            const groupId = String(intent.group_id || '');
+            const axis = String(intent.axis || '');
+            const lineIndex = Number(intent.line_index);
+            const position = Number(intent.position);
+            const expectedRevision = Number(intent.expected_revision);
+            const refuse = error => ({ ok: false, error: `${error} Nothing changed.` });
+            if (resizeIntentInFlight || activeGridResize) return refuse('Another resize is in progress.');
+            if (groupId !== activeGroupId || groupId !== visibleGroupId || !gridBuilt) {
+                return refuse('Open this session tab before resizing its divider.');
+            }
+            const grid = document.getElementById('terminalsGrid');
+            if (!grid || grid.children.length < 2 || window.innerWidth <= 700) {
+                return refuse('This viewport is too narrow to resize the grid.');
+            }
+            resizeIntentInFlight = true;
+            try {
+                const controller = presentationController();
+                if (!controller) return refuse('Presentation sync is unavailable.');
+                await controller.settleGroup(groupId);
+                const response = await fetch(`/api/panes/layout?group_id=${encodeURIComponent(groupId)}`);
+                const live = await response.json();
+                if (!response.ok) return refuse(live.error || 'The session is no longer open.');
+                if (live.presentation_revision !== expectedRevision) {
+                    return refuse('The session layout changed; read list_panes and retry.');
+                }
+                if (groupId !== activeGroupId || groupId !== visibleGroupId || !gridBuilt) {
+                    return refuse('The session tab changed while resizing.');
+                }
+                const rects = ensureSplitSlotRects();
+                const size = getSplitGridSize(rects);
+                const count = axis === 'vertical' ? size.columns : size.rows;
+                if (!Number.isInteger(lineIndex) || lineIndex < 1 || lineIndex >= count
+                    || !Number.isFinite(position) || position <= 0 || position >= 1) {
+                    return refuse('That divider or position is outside this grid.');
+                }
+                if (!getSharedGridEdgeSegments(rects, axis, lineIndex).length) {
+                    return refuse('There is no shared pane edge at that divider.');
+                }
+                const columns = normalizeSplitTrackWeights(splitColumnWeights, size.columns);
+                const rows = normalizeSplitTrackWeights(splitRowWeights, size.rows);
+                splitColumnWeights = columns;
+                splitRowWeights = rows;
+                const orderedIds = Array.from(grid.children)
+                    .map(card => sessionIds[Number(card.dataset.slot)]);
+                const stored = live.geometry || {};
+                const sameNumbers = (a, b) => Array.isArray(a) && Array.isArray(b)
+                    && a.length === b.length
+                    && a.every((value, index) => Math.abs(Number(value) - Number(b[index])) < 0.000001);
+                const sameRects = Array.isArray(stored.split_slot_rects)
+                    && stored.split_slot_rects.length === rects.length
+                    && rects.every((rect, index) => ['x', 'y', 'w', 'h'].every(
+                        key => Number(rect[key]) === Number(stored.split_slot_rects[index][key])
+                    ));
+                if (!sameRects || !sameNumbers(columns, stored.column_weights)
+                    || !sameNumbers(rows, stored.row_weights)
+                    || orderedIds.some((id, index) => id !== live.panes?.[index]?.session_id)) {
+                    return refuse('The page and stored layout differ; refresh the session and retry.');
+                }
+                const metrics = getResizableGridMetrics(grid, columns, rows);
+                if (!metrics || metrics.gridContentWidth <= 0 || metrics.gridContentHeight <= 0) {
+                    return refuse('The grid has no measurable space.');
+                }
+                const groups = getResizeTrackGroups(axis, lineIndex);
+                if (!groups) return refuse('That divider has no adjacent tracks.');
+                const sizes = axis === 'vertical' ? metrics.columnSizes : metrics.rowSizes;
+                const weights = axis === 'vertical' ? columns : rows;
+                const gap = axis === 'vertical' ? metrics.columnGap : metrics.rowGap;
+                const extent = axis === 'vertical' ? metrics.gridContentWidth : metrics.gridContentHeight;
+                const candidate = window.GridVibeSplitGeometry?.planDividerResize(
+                    weights, sizes, gap, groups, lineIndex, position, extent
+                );
+                if (!candidate) return refuse('That position leaves no space beside the divider.');
+                if (!validateResizeCandidate(axis, candidate)) {
+                    return refuse('That position would make a pane smaller than its minimum width or height.');
+                }
+                const nextColumns = axis === 'vertical' ? candidate : columns;
+                const nextRows = axis === 'horizontal' ? candidate : rows;
+                const payload = controller.captureGroup(groupId);
+                if (!payload) return refuse('The page could not capture this session.');
+                payload.expected_revision = expectedRevision;
+                payload.workspace_layout = buildWorkspaceLayoutSnapshotFromState(
+                    terminals.length, grid.className, rects, nextColumns, nextRows,
+                    originalSplitSlotCount || terminals.length
+                );
+                const saved = await postPresentation('/api/session-presentation', payload);
+                const settled = await saved.json();
+                if (!saved.ok) return refuse(settled.error || 'The layout could not be saved.');
+                splitColumnWeights = nextColumns;
+                splitRowWeights = nextRows;
+                applySplitSlotGeometry({ fit: true });
+                redrawAttachedTerminals(affectedResizeIndices(axis, lineIndex), { forceResize: true });
+                controller.setGroupRevision(groupId, settled.presentation_revision);
+                const group = getGroupById(groupId);
+                if (group) group.presentation_revision = settled.presentation_revision;
+                return { ok: true, result: {
+                    group_id: groupId,
+                    revision: settled.presentation_revision,
+                    column_weights: nextColumns,
+                    row_weights: nextRows,
+                    panes: orderedIds.map((sessionId, index) => ({
+                        session_id: sessionId, index,
+                        rect: { x: rects[index].x, y: rects[index].y, w: rects[index].w, h: rects[index].h }
+                    }))
+                } };
+            } catch (error) {
+                return refuse(`The resize failed: ${error.message}`);
+            } finally {
+                resizeIntentInFlight = false;
+            }
+        }
+    };
+    window.GridVibeResizeBridge = resizeBridge;
 
     /* ─────────────────────────────────────────────
        Focus bridge — the page half of an activation intent
@@ -8635,6 +8767,10 @@
 
     async function switchGroup(groupId) {
         if (!groupId || groupId === activeGroupId) {
+            return;
+        }
+        if (resizeIntentInFlight) {
+            showTerminalToast('A divider resize is finishing. Try switching sessions again shortly.', 'error');
             return;
         }
         if (hasActiveExplorerFilesystemOperationForSessions(sessionIds)) {

@@ -1,6 +1,6 @@
 /* GridVibeWindowIntent — the page half of "somebody with a page please do this".
 
-   Two things GridVibe cannot do from outside a page, and one poll answers both:
+   Actions requiring a live page share one poll:
 
    - **Open a window.** Creating a workspace over HTTP creates a record; it
      does not make anything appear on screen, and in native mode nothing
@@ -14,6 +14,8 @@
      shows. Only the workspace page holding the group can switch to it, under
      its own refusals (an unsaved editor, a copy in flight), and focus the
      pane that was named.
+   - **Resize a divider.** The page measures the live grid, checks pane
+     minimums, persists the weights, and reports the settled geometry.
 
    So the MCP sidecar leaves an *intent* on the server and whichever GridVibe
    page can act on it picks it up.
@@ -64,6 +66,7 @@
     const WINDOW_KIND = 'window';
     const SPLIT_KIND = 'split';
     const ACTIVATE_KIND = 'activate';
+    const RESIZE_KIND = 'resize';
 
     /* What a stacked or side-by-side split is called in a sentence, so a
        refusal can name the axis that *would* have worked in the words the
@@ -89,7 +92,7 @@
            holds none, and a second workspace window holding a different group
            holds not this one. `owns` is the page's own answer to that, and a
            page with no way to split at all passes none. */
-        actionable(intents, owns = null, holdsGroup = null) {
+        actionable(intents, owns = null, holdsGroup = null, holdsResizeGroup = null) {
             if (!Array.isArray(intents)) return [];
             return intents.filter(intent => {
                 if (!intent || typeof intent !== 'object') return false;
@@ -108,6 +111,13 @@
                     return Boolean(
                         workspaceId && groupId && holdsGroup
                         && holdsGroup(workspaceId, groupId)
+                    );
+                }
+                if (policy.kind(intent) === RESIZE_KIND) {
+                    return Boolean(
+                        holdsResizeGroup && holdsResizeGroup(
+                            String(intent.workspace_id || ''), String(intent.group_id || '')
+                        )
                     );
                 }
                 return Boolean(String(intent.workspace_id || '').trim());
@@ -213,6 +223,7 @@
             splitBridge = null,
             /* The page's tab-switch half, present only on a workspace page. */
             focusBridge = null,
+            resizeBridge = null,
             setInterval: schedule,
             clearInterval: unschedule,
             isVisible = () => true,
@@ -245,6 +256,7 @@
             const kind = policy.kind(intent);
             if (kind === SPLIT_KIND) return deliverSplit(intentId, intent);
             if (kind === ACTIVATE_KIND) return deliverActivation(intentId, intent);
+            if (kind === RESIZE_KIND) return deliverResize(intentId, intent);
             return deliverWindow(intentId, intent);
         }
 
@@ -270,6 +282,27 @@
                 onError(error);
             }
             return settled.outcome === ACTIVATED;
+        }
+
+        async function deliverResize(intentId, intent) {
+            let answer;
+            try {
+                answer = await resizeBridge.perform(intent);
+            } catch (error) {
+                onError(error);
+                answer = { ok: false, error: `The resize failed in this window: ${error.message}` };
+            }
+            const outcome = answer?.ok ? 'resized' : REFUSED;
+            try {
+                await reportResult(
+                    intentId, outcome,
+                    answer?.ok ? '' : String(answer?.error || 'The resize was refused; nothing changed.'),
+                    answer?.ok ? answer.result : null
+                );
+            } catch (error) {
+                onError(error);
+            }
+            return Boolean(answer?.ok);
         }
 
         async function deliverWindow(intentId, intent) {
@@ -351,6 +384,9 @@
                     splitBridge ? sessionId => splitBridge.owns(sessionId) : null,
                     focusBridge
                         ? (workspaceId, groupId) => focusBridge.holds(workspaceId, groupId)
+                        : null,
+                    resizeBridge
+                        ? (workspaceId, groupId) => resizeBridge.holds(workspaceId, groupId)
                         : null
                 );
                 for (const intent of intents) {
@@ -442,6 +478,7 @@
             splitBridge: host.GridVibeSplitBridge || null,
             /* Same rule: the launcher holds no tabs, so it never claims one. */
             focusBridge: host.GridVibeFocusBridge || null,
+            resizeBridge: host.GridVibeResizeBridge || null,
             setInterval: (handler, interval) => host.setInterval(handler, interval),
             clearInterval: handle => host.clearInterval(handle),
             isVisible: () => host.document?.visibilityState !== 'hidden',

@@ -540,6 +540,7 @@
             setGroupRevision,
             setWorkspaceRevision,
             groupRevision: groupId => groupQueue.revision(groupId),
+            settleGroup: groupId => groupQueue.flush(groupId),
             workspaceRevision: () => workspaceQueue.revision(WORKSPACE_KEY),
             forgetGroup,
             flush

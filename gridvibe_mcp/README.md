@@ -1,6 +1,6 @@
 # GridVibe MCP sidecar
 
-A stdio MCP server that gives an agent running in a GridVibe pane twenty
+A stdio MCP server that gives an agent running in a GridVibe pane twenty-one
 tools for seeing, building and navigating GridVibe workspaces.
 
 This file is the reference for the MCP feature. Everything else that mentions
@@ -93,7 +93,7 @@ back to it as an inline TOML table on the launch line
 
 ## Tools
 
-Twenty, in six tiers by blast radius. The order below is the order
+Twenty-one, in six tiers by blast radius. The order below is the order
 `tool_specs()` registers them in, and `tests/test_mcp_tools.py` pins it.
 
 **Three nouns, one meaning each.** A *workspace* is a window. A *session* is a
@@ -188,13 +188,14 @@ pane's shell family; a tool never supplies a byte of it. The result keeps the
 two halves apart on purpose — `buffer_purged` is a fact, `display_reset_requested`
 is a request, and a pane nobody has open resets nothing.
 
-### navigate — three
+### navigate — four
 
 | Tool | Does |
 | --- | --- |
 | `focus_session` | brings one session to the foreground: raises its workspace window and switches it to that tab. Named by `session_name` (or `group_id`); the workspace is found from the session, and `workspace_id` only narrows a name two workspaces share |
 | `focus_pane` | brings one pane into view: raises its window, switches to its session and gives the pane focus. The session and workspace are read from the pane itself, as they are *now* |
 | `move_session` | moves one open session — the tab and all its panes — to another workspace, named by `target_workspace_label`, `target_workspace_id`, or `new_workspace` (exactly one). With `show` the destination window is then raised on that tab |
+| `resize_divider` | moves a numbered vertical or horizontal grid divider to a normalized position, after the visible page checks minimum pane sizes and persists the result. It returns applied weights and pane rectangles, or a refusal with no geometry change |
 
 None creates, ends or types anything. A moved session keeps its pane ids,
 processes, SSH connections, handoffs and result assignments; the only thing
@@ -217,6 +218,17 @@ and never turns a move into a failure: a window that would not switch tabs is
 not a session that did not move. A destination label two workspaces share is
 refused as `ambiguous`; a missing one is `not_found` and suggests
 `new_workspace`.
+
+`resize_divider` takes `group_id`, `axis`, `line_index`, `position`, and
+`expected_revision` from `list_panes.layout.presentation_revision`. A vertical
+line is between columns N and N+1; a horizontal line is between rows N and
+N+1. `position` is a fraction of the full grid width or height, strictly
+between 0 and 1. The page moves only that track boundary and refuses a stale
+revision, a divider absent from the layout, a position that violates pane
+minimums, or a narrow viewport. A native window must show the session tab.
+After two vertical splits, moving the first and second dividers to roughly
+one-third and two-thirds can make three equal side-by-side panes. The splits
+and resizes are separate steps; a later refusal does not undo earlier splits.
 
 ### The gates on the replace and display tools
 
@@ -262,9 +274,9 @@ Closing a pane, a session or a workspace; typing arbitrary input into a
 terminal. These are not written, not registered, and not flag-gated. A tool
 that does not exist cannot be talked into running by a file an agent reads.
 
-## Splitting, showing and opening windows need a page
+## Splitting, resizing, showing and opening windows need a page
 
-Three things GridVibe cannot do from outside a browser page, and the same
+Four things GridVibe cannot do from outside a browser page, and the same
 mechanism answers all of them (`web/window_intents.py`,
 `web/static/js/window-intent.js`):
 
@@ -273,6 +285,9 @@ mechanism answers all of them (`web/window_intents.py`,
   rectangles, and its refusals — the minimum columns and rows below a terminal
   header, the narrow-viewport rule, the pane cap — are measured off the live
   terminal. A process that cannot measure a pane cannot place one.
+- **Resize a divider.** Only the page knows the current pixel dimensions and
+  terminal cell minimums. It checks the proposed weights against the live grid,
+  writes a revisioned presentation update, then acknowledges the applied layout.
 - **Show a session or a pane.** Raising a window is not proof that its tab
   changed; only the page that holds the tab can switch it and say so.
 

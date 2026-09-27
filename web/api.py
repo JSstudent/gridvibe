@@ -3359,7 +3359,35 @@ def get_pane_layout():
     )
     payload["group_id"] = group.group_id
     payload["workspace_id"] = group.workspace_id
+    payload["presentation_revision"] = group.presentation_revision
     return jsonify(payload)
+
+
+@app.route('/api/session-groups/<group_id>/resize-intent', methods=['POST'])
+def open_resize_intent(group_id: str):
+    """Record a geometry request; the page measures and persists it."""
+    data = request.get_json(silent=True) or {}
+    axis = data.get("axis")
+    line_index = data.get("line_index")
+    position = data.get("position")
+    revision = data.get("expected_revision")
+    if axis not in ("vertical", "horizontal"):
+        return jsonify({"error": "axis must be vertical or horizontal; nothing changed"}), 400
+    if isinstance(line_index, bool) or not isinstance(line_index, int) or line_index < 1:
+        return jsonify({"error": "line_index must be a positive integer; nothing changed"}), 400
+    if isinstance(position, bool) or not isinstance(position, (int, float)) or not 0 < position < 1:
+        return jsonify({"error": "position must be between 0 and 1; nothing changed"}), 400
+    if isinstance(revision, bool) or not isinstance(revision, int) or revision < 0:
+        return jsonify({"error": "expected_revision must be a non-negative integer; nothing changed"}), 400
+    group = session_manager.get_group(group_id)
+    if not group:
+        return jsonify({"error": "Session group not found; nothing changed"}), 404
+    if revision != group.presentation_revision:
+        return jsonify({"error": "The session layout changed; read list_panes and retry. Nothing changed."}), 409
+    intent = window_intents.open_resize(
+        group.workspace_id, group_id, axis, line_index, float(position), revision,
+    )
+    return jsonify(intent), 201
 
 
 # ==================== Split: what the new pane is ====================

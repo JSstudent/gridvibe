@@ -100,9 +100,24 @@ function runtime(options = {}) {
             };
         }
     };
+    const resizeCalls = [];
+    const resizeBridge = options.resizeBridge === null ? null : {
+        holds(workspaceId, groupId) {
+            return (options.heldGroups || ['ws-1/g-1']).includes(`${workspaceId}/${groupId}`);
+        },
+        async perform(intent) {
+            resizeCalls.push(intent);
+            if (options.resizeFails) return { ok: false, error: 'Minimum width refused. Nothing changed.' };
+            return { ok: true, result: {
+                group_id: intent.group_id, revision: 2,
+                column_weights: [1.2, 0.8], row_weights: [1], panes: []
+            } };
+        }
+    };
     const poll = intentModule.create({
         splitBridge,
         focusBridge,
+        resizeBridge,
         listIntents: async () => {
             calls.listed += 1;
             if (options.listThrows) throw new Error('list failed');
@@ -131,8 +146,14 @@ function runtime(options = {}) {
         claimant: 'window-a',
         onError: () => {}
     });
-    return { poll, calls, timers, state, splitCalls, focusCalls };
+    return { poll, calls, timers, state, splitCalls, focusCalls, resizeCalls };
 }
+
+const resizeIntent = (id, group = 'g-1') => ({
+    intent_id: id, kind: 'resize', workspace_id: 'ws-1', group_id: group,
+    axis: 'vertical', line_index: 1, position: 0.6, expected_revision: 1,
+    state: 'pending'
+});
 
 const activateIntent = (id, group = 'g-1', session = '', workspace = 'ws-1') => ({
     intent_id: id,
@@ -484,6 +505,34 @@ const out = {};
         (workspaceId, groupId) => workspaceId === 'ws-1' && groupId === 'g-1'
     ).map(item => item.intent_id);
 
+    {
+        const { poll, calls, resizeCalls } = runtime({ intents: [resizeIntent('r-1')] });
+        await poll.tick();
+        await poll.tick();
+        out.resizeHappy = { calls: resizeCalls.length, results: calls.results };
+    }
+    {
+        const { poll, calls } = runtime({
+            intents: [resizeIntent('r-1')], resizeFails: true
+        });
+        await poll.tick();
+        out.resizeRefused = calls.results;
+    }
+    {
+        const { poll, calls } = runtime({
+            intents: [resizeIntent('r-1', 'g-elsewhere')]
+        });
+        await poll.tick();
+        out.resizeElsewhere = calls.claims.length;
+    }
+    {
+        const { poll, calls } = runtime({
+            intents: [resizeIntent('r-1')], focusBridge: null, resizeBridge: null
+        });
+        await poll.tick();
+        out.resizeNoBridge = calls.claims.length;
+    }
+
     console.log(JSON.stringify(out));
 })();
 """
@@ -517,6 +566,16 @@ class WindowIntentClientTestCase(unittest.TestCase):
         self.assertEqual(
             happy["results"], [{"intentId": "i-1", "outcome": "opened", "detail": ""}]
         )
+
+    def test_resize_is_claimed_once_and_reports_only_page_outcome(self):
+        happy = self.out["resizeHappy"]
+        self.assertEqual(happy["calls"], 1)
+        self.assertEqual(happy["results"][0]["outcome"], "resized")
+        self.assertEqual(happy["results"][0]["result"]["revision"], 2)
+        self.assertEqual(self.out["resizeRefused"][0]["outcome"], "refused")
+        self.assertIn("Nothing changed", self.out["resizeRefused"][0]["detail"])
+        self.assertEqual(self.out["resizeElsewhere"], 0)
+        self.assertEqual(self.out["resizeNoBridge"], 0)
 
     def test_the_page_that_loses_the_claim_does_nothing(self):
         # This is what stops two open pages delivering one request twice.

@@ -57,6 +57,7 @@ import unicodedata
 from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
 from gridvibe_mcp.client import GridVibeClient, GridVibeError, session_name_of
+from gridvibe_mcp.geometry import resize_divider as resize_divider_for
 from gridvibe_mcp.identity import (
     DEFAULT_MAX_AGENT_DEPTH,
     PaneIdentity,
@@ -122,7 +123,7 @@ DISPLAY_TOOLS = ("clear_pane",)
 #: and handoffs, so the only thing these verbs change is what the person sees
 #: where. `move_session` still passes a lineage gate on GridVibe's own route,
 #: because the tab it moves may be one the person is working in.
-NAVIGATION_TOOLS = ("focus_session", "focus_pane", "move_session")
+NAVIGATION_TOOLS = ("focus_session", "focus_pane", "move_session", "resize_divider")
 
 #: The keys GridVibe's routes use for a pane, and the name each takes in a tool
 #: result. Explicit rather than a substring rule: ``saved_session_id`` names a
@@ -1051,7 +1052,36 @@ def tool_specs() -> List[Dict[str, Any]]:
                 "additionalProperties": False,
             },
         },
-    ] + _navigation_specs()
+    ] + _navigation_specs() + [_resize_spec()]
+
+
+def _resize_spec() -> Dict[str, Any]:
+    return {
+        "name": "resize_divider",
+        "description": (
+            "Move one live grid track boundary in a session. Read list_panes first for "
+            "group_id, layout.presentation_revision and geometry. A vertical boundary "
+            "between columns N and N+1 has line_index N; horizontal is between "
+            "rows N and N+1. Position is a fraction of the full grid width or "
+            "height, strictly between 0 and 1. The visible native page checks "
+            "pane minimums and persists before reporting resized. A stale layout, "
+            "impossible size, or missing page changes nothing. For three equal "
+            "side-by-side panes, split twice, then position the two boundaries "
+            "at one-third and two-thirds; each step can fail independently."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "group_id": {"type": "string"},
+                "axis": {"type": "string", "enum": list(SPLIT_AXES)},
+                "line_index": {"type": "integer", "minimum": 1},
+                "position": {"type": "number", "exclusiveMinimum": 0, "exclusiveMaximum": 1},
+                "expected_revision": {"type": "integer", "minimum": 0},
+            },
+            "required": ["group_id", "axis", "line_index", "position", "expected_revision"],
+            "additionalProperties": False,
+        },
+    }
 
 
 def _navigation_specs() -> List[Dict[str, Any]]:
@@ -2084,6 +2114,24 @@ def _run(
             pane,
             origin_session_id=identity.session_id,
         )
+
+    if name == "resize_divider":
+        group_id = _text(args, "group_id")
+        if not group_id:
+            raise ToolArgumentError("resize_divider needs a 'group_id'.")
+        axis = _choice(_text(args, "axis"), SPLIT_AXES, "axis")
+        if not axis:
+            raise ToolArgumentError("resize_divider needs an 'axis'.")
+        line_index = args.get("line_index")
+        position = args.get("position")
+        revision = args.get("expected_revision")
+        if isinstance(line_index, bool) or not isinstance(line_index, int) or line_index < 1:
+            raise ToolArgumentError("'line_index' must be a positive integer.")
+        if isinstance(position, bool) or not isinstance(position, (int, float)) or not 0 < position < 1:
+            raise ToolArgumentError("'position' must be strictly between 0 and 1.")
+        if isinstance(revision, bool) or not isinstance(revision, int) or revision < 0:
+            raise ToolArgumentError("'expected_revision' must be a non-negative integer.")
+        return resize_divider_for(client, group_id, axis, line_index, float(position), revision)
 
     if name == "set_pane_agent":
         session_id = _text(args, "pane_id")

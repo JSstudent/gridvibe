@@ -92,9 +92,9 @@ class RefusingOpener:
 
 
 class ToolSurfaceTestCase(unittest.TestCase):
-    def test_the_registered_surface_is_exactly_twenty(self):
+    def test_the_registered_surface_is_exactly_twenty_one(self):
         """Eight read, two hand back, four create, two replace, one erases,
-        three navigate.
+        four navigate.
 
         The last two tiers are the only things in this surface that end
         anything, and what bounds them is the gates on GridVibe's own routes
@@ -105,7 +105,7 @@ class ToolSurfaceTestCase(unittest.TestCase):
         """
         names = tool_names()
 
-        self.assertEqual(len(names), 20)
+        self.assertEqual(len(names), 21)
         self.assertEqual(names[:8], list(READ_TOOLS))
         self.assertEqual(READ_TOOLS[-1], "read_handoff")
         self.assertEqual(names[8:10], list(HANDBACK_TOOLS))

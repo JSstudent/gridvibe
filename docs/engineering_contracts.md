@@ -1765,7 +1765,7 @@ in `README.md`; state the rules a change has to keep.
   its slot back, because a budget that leaks is a tunnel that stops answering.
   The per-request head and body bounds cannot see this: an idle connection that
   sends nothing still costs a slot for `REQUEST_READ_TIMEOUT`.
-- **Opening a window and splitting a pane are page work, recorded as intents.**
+- **Opening a window, splitting a pane, and resizing a divider are page work, recorded as intents.**
   The split axis never reaches the server: the page computes the rectangles and
   measures its own refusals off the live terminal. `web/window_intents.py` is in
   memory, TTL-bounded and capped, and exactly one claimant wins so two open pages
@@ -1773,9 +1773,19 @@ in `README.md`; state the rules a change has to keep.
   before the intent is recorded. A page reports only its own kind's outcomes, and
   a refusal is relayed with the axis that would have worked — never a silent
   retry on the other axis.
+- **A resize is a revisioned presentation transaction.** The tool takes a
+  group, axis, numbered track boundary, normalized position, and the revision
+  read from `list_panes`. Only the visible page can claim it. The page compares
+  its pane order, rectangles and weights with the live group, measures the
+  candidate using the pointer drag's track groups and minimum-size rule, then
+  writes through the group presentation compare-and-swap before painting and
+  acknowledging it. A stale revision, missing divider, narrow viewport or
+  impossible minimum refuses without applying weights. The result carries the
+  persisted weights and pane rectangles; `list_panes` reads the same record.
 - **The sidecar's wait must exceed the store's worst case, and the relation is
   pinned rather than derived.** `DEFAULT_WAIT_SECONDS` in `splits.py` and
-  `windows.py` is above `INTENT_TTL_SECONDS + CLAIM_TTL_SECONDS`, so an expiry the
+  `windows.py` (and the resize helper that uses the split wait) is above
+  `INTENT_TTL_SECONDS + CLAIM_TTL_SECONDS`, so an expiry the
   sidecar reports is an expiry the store reached — which is what makes
   "the panes and the workspace are untouched" true wherever it is said. The
   sidecar cannot import `web/`, so a test asserts the inequality. The HTTP path
@@ -1786,9 +1796,9 @@ in `README.md`; state the rules a change has to keep.
   keep waiting to the deadline; a wait that *ends* never having read the store
   answers `no_window_available` with the sentence that says so and names
   `list_panes`, never the one claiming nothing happened.
-- **Three honest outcomes per intent verb** (`opened`/`blocked`/`no_window_available`,
+- **Honest outcomes per intent verb** (`opened`/`blocked`/`no_window_available`,
   `split`/`refused`/`no_window_available`, and an activation's
-  `activated`/`blocked`), never a retry and never a pretended
+  `activated`/`blocked`; resize answers `resized`/`refused`/`no_window_available`), never a retry and never a pretended
   result. Browser mode answers `no_window_available` for a split because the
   intent poll runs in a native window only; `open_window` has a browser fallback
   because `webbrowser.open` is a real alternative and there is no equivalent for

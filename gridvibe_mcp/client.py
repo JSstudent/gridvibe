@@ -218,6 +218,7 @@ LAYOUT_FIELDS = (
     "layout_advisory",
     "terminal_count",
     "geometry",
+    "presentation_revision",
 )
 
 #: A saved preset's *shape*, and never its connection. The saved-session route
@@ -870,6 +871,14 @@ class GridVibeClient:
         payload = self.request(
             "POST",
             f"/api/sessions/{urllib.parse.quote(session_id)}/split-intent",
+            body=dict(body),
+        )
+        return payload if isinstance(payload, dict) else {}
+
+    def resize_intent(self, group_id: str, body: Mapping[str, Any]) -> Dict[str, Any]:
+        payload = self.request(
+            "POST",
+            f"/api/session-groups/{urllib.parse.quote(group_id)}/resize-intent",
             body=dict(body),
         )
         return payload if isinstance(payload, dict) else {}
