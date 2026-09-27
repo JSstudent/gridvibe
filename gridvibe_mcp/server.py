@@ -124,6 +124,7 @@ DISPLAY_TOOLS = ("clear_pane",)
 #: where. `move_session` still passes a lineage gate on GridVibe's own route,
 #: because the tab it moves may be one the person is working in.
 NAVIGATION_TOOLS = ("focus_session", "focus_pane", "move_session", "resize_divider")
+SAVE_TOOLS = ("save_group_layout",)
 
 #: The keys GridVibe's routes use for a pane, and the name each takes in a tool
 #: result. Explicit rather than a substring rule: ``saved_session_id`` names a
@@ -1052,7 +1053,38 @@ def tool_specs() -> List[Dict[str, Any]]:
                 "additionalProperties": False,
             },
         },
-    ] + _navigation_specs() + [_resize_spec()]
+    ] + _navigation_specs() + [_resize_spec(), _save_layout_spec()]
+
+
+def _save_layout_spec() -> Dict[str, Any]:
+    return {
+        "name": "save_group_layout",
+        "description": (
+            "Save one live session tab as a named reusable launcher preset. "
+            "Give its exact group_id from whoami or list_panes, a name, and "
+            "optionally root_directory. The owning workspace page must be open "
+            "and acknowledge a presentation flush; otherwise nothing is saved "
+            "and the result tells you to open the session and retry. A stated "
+            "root is checked on each pane's own machine before writing, and "
+            "becomes the saved start directory for terminal, agent and explorer "
+            "panes; browser URLs stay as they are. The result contains only "
+            "the persisted pane types, shell families and geometry, never "
+            "credentials, handoff text, processes or private paths. A failed "
+            "disk write leaves the live group open."
+            " A name already used by a saved preset is refused without "
+            "changing that preset; choose another name."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "group_id": {"type": "string"},
+                "name": {"type": "string"},
+                "root_directory": {"type": "string"},
+            },
+            "required": ["group_id", "name"],
+            "additionalProperties": False,
+        },
+    }
 
 
 def _resize_spec() -> Dict[str, Any]:
@@ -1919,6 +1951,16 @@ def _run(
 
     if name == "list_saved_layouts":
         return client.saved_layouts()
+
+    if name == "save_group_layout":
+        group_id = _text(args, "group_id")
+        preset_name = _text(args, "name")
+        if not group_id or not preset_name:
+            raise ToolArgumentError("save_group_layout needs a 'group_id' and 'name'. Nothing was saved.")
+        root = args.get("root_directory")
+        if root is not None and (not isinstance(root, str) or not root.strip()):
+            raise ToolArgumentError("'root_directory' must be a non-empty path. Nothing was saved.")
+        return client.save_group_layout(group_id, preset_name, root)
 
     if name == "whoami":
         payload = identity.to_dict()

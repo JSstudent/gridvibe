@@ -76,6 +76,35 @@ class SavedSessionStoreTestBase(unittest.TestCase):
 class SavedSessionTransactionTestCase(SavedSessionStoreTestBase):
     """One locked read-modify-write per mutation, not a load/save pair."""
 
+    def test_concurrent_unique_name_claims_create_only_one_preset(self):
+        ready = threading.Barrier(2)
+        outcomes = []
+        lock = threading.Lock()
+
+        def write(name):
+            ready.wait(10)
+            try:
+                web_saved_sessions.upsert_saved_session(
+                    config=_config(), name=name, require_unique_name=True
+                )
+                outcome = "saved"
+            except web_saved_sessions.SavedSessionNameConflictError:
+                outcome = "duplicate"
+            with lock:
+                outcomes.append(outcome)
+
+        threads = [
+            threading.Thread(target=write, args=(name,))
+            for name in ("Review", "review")
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(10)
+
+        self.assertEqual(sorted(outcomes), ["duplicate", "saved"])
+        self.assertEqual(len(web_saved_sessions.load_saved_sessions()), 1)
+
     def test_concurrent_upserts_of_different_presets_all_survive(self):
         """The lost-update path: every writer's own preset must still be there."""
         writers = 8

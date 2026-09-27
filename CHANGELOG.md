@@ -4,6 +4,8 @@ All notable changes to GridVibe will be documented in this file.
 
 ## Unreleased
 
+- **(feat) Agents can save a live session as a reusable layout preset.** The new `save_group_layout` tool flushes the open workspace page, captures the latest pane types and geometry, and optionally starts saved panes at a validated directory on their own machine. It reports a preset only after the saved-session store commits, and refuses when the page cannot verify the layout, the name is already used, or the write fails. The rules are in [Agent tools (MCP)](docs/engineering_contracts.md#agent-tools-mcp).
+
 - **(feat) Agents can resize dividers in an open session.** The new `resize_divider` tool moves a numbered grid boundary to a requested fraction of the session's width or height. The visible page measures pane minimums and persists the layout before confirming the new weights and rectangles. Stale layouts and positions that cannot fit are refused without applying the resize; the rules are in [Agent tools (MCP)](docs/engineering_contracts.md#agent-tools-mcp).
 
 - **(doc) The MCP reference, contracts and README describe the navigation tools, stated directories and agent discovery.** The maintained docs still described a sixteen-tool surface with moving a session absent and a `session_id` that meant a pane. [`gridvibe_mcp/README.md`](gridvibe_mcp/README.md) now covers the twenty tools, the workspace/session/pane vocabulary, the navigate tier, page-confirmed activation, whole-launch validation, `list_agent_types` and the stated-directory rules; [Agent tools (MCP)](docs/engineering_contracts.md#agent-tools-mcp) and [Pane transitions](docs/engineering_contracts.md#pane-transitions) state the rules those keep.

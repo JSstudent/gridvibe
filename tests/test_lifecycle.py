@@ -1005,6 +1005,317 @@ class LifecycleRouteTestCase(unittest.TestCase):
         self.assertTrue(unknown.get_json()["workspace_missing"])
         self.assertEqual(malformed.status_code, 400)
 
+    # ── MCP named layout: a freshly flushed reusable launch shape ──
+
+    def test_named_layout_requires_an_owning_page_and_keeps_the_live_group(self):
+        launched = self._launch()
+        response = self.client.post(
+            f"/api/session-groups/{launched['group_id']}/save-layout",
+            json={"name": "Named files"},
+        )
+        self.assertEqual(response.status_code, 503)
+        self.assertFalse(response.get_json()["saved"])
+        self.assertIn("Open", response.get_json()["error"])
+        self.assertFalse(self.saved_path.exists())
+        self.assertEqual(len(api.session_manager.get_group_sessions(launched["group_id"])), 1)
+
+    def test_named_layout_flushes_then_saves_root_and_persisted_shape(self):
+        launched = self._launch()
+        group_id = launched["group_id"]
+        api.lifecycle_coordinator.join_workspace("client-a", "default", "window-a")
+        new_root = Path(self.temp_dir.name) / "second-root"
+        new_root.mkdir()
+
+        def acknowledge(event, data, room=None, **_kwargs):
+            self.assertEqual(event, "lifecycle_flush_requested")
+            self.assertEqual(room, workspace_room("default"))
+            with api.session_manager.lock:
+                # A queued title and pane directory reaches the server only
+                # when the page handles the flush. The save must read after it.
+                pane = api.session_manager.sessions[launched["sessions"][0]["session_id"]]
+                pane.title = "Latest title"
+            api.lifecycle_coordinator.acknowledge_flush(
+                "client-a", {**data, "ok": True, "metadata": {}}
+            )
+
+        with patch.object(api.socketio, "emit", side_effect=acknowledge):
+            response = self.client.post(
+                f"/api/session-groups/{group_id}/save-layout",
+                json={"name": "Named files", "root_directory": str(new_root)},
+            )
+
+        self.assertEqual(response.status_code, 201, response.get_json())
+        payload = response.get_json()
+        self.assertTrue(payload["saved"])
+        self.assertEqual(payload["shape"]["panes"][0]["startup_mode"], "explorer")
+        self.assertNotIn(str(new_root), response.get_data(as_text=True))
+        entries = web_saved_sessions.load_saved_sessions()
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["id"], payload["id"])
+        pane = entries[0]["config"]["terminals"][0]
+        self.assertEqual(pane["title"], "Latest title")
+        self.assertEqual(pane["directory"], str(new_root))
+        self.assertEqual(pane["explorer_root_directory"], str(new_root))
+        self.assertFalse(self.state_path.exists())
+        self.assertEqual(len(api.session_manager.get_group_sessions(group_id)), 1)
+
+    def test_named_layout_refuses_bad_root_before_disk_write(self):
+        launched = self._launch()
+        api.lifecycle_coordinator.join_workspace("client-a", "default", "window-a")
+
+        def acknowledge(event, data, room=None, **_kwargs):
+            api.lifecycle_coordinator.acknowledge_flush(
+                "client-a", {**data, "ok": True, "metadata": {}}
+            )
+
+        with patch.object(api.socketio, "emit", side_effect=acknowledge):
+            response = self.client.post(
+                f"/api/session-groups/{launched['group_id']}/save-layout",
+                json={"name": "Named files", "root_directory": str(self.repo_dir / "missing")},
+            )
+        self.assertEqual(response.status_code, 400, response.get_json())
+        self.assertFalse(response.get_json()["saved"])
+        self.assertFalse(self.saved_path.exists())
+
+    def test_named_layout_records_geometry_settled_by_the_flush(self):
+        group = api.session_manager.create_group(
+            "Pair", "wsl", "horizontal", 2, group_id="pair"
+        )
+        for title in ("First", "Second"):
+            api.session_manager.create_session(
+                group.group_id, host="", mode="wsl", directory=str(self.repo_dir), title=title
+            )
+        group_id = group.group_id
+        api.lifecycle_coordinator.join_workspace("client-a", "default", "window-a")
+        latest = {
+            "split_slot_rects": [
+                {"originSlot": 0, "x": 1, "y": 1, "w": 1, "h": 1},
+                {"originSlot": 1, "x": 2, "y": 1, "w": 1, "h": 1},
+            ],
+            "split_column_weights": [3, 1],
+            "split_row_weights": [1],
+            "original_split_slot_count": 2,
+        }
+
+        def acknowledge(event, data, room=None, **_kwargs):
+            with api.session_manager.lock:
+                api.session_manager.groups[group_id].workspace_layout = latest
+            api.lifecycle_coordinator.acknowledge_flush(
+                "client-a", {**data, "ok": True, "metadata": {}}
+            )
+
+        with patch.object(api.socketio, "emit", side_effect=acknowledge):
+            saved = self.client.post(
+                f"/api/session-groups/{group_id}/save-layout",
+                json={"name": "Pair"},
+            )
+        self.assertEqual(saved.status_code, 201, saved.get_json())
+        geometry = saved.get_json()["shape"]["workspace_layout"]
+        self.assertEqual(geometry["split_column_weights"], [3.0, 1.0])
+        self.assertEqual(
+            web_saved_sessions.load_saved_sessions()[0]["config"]["workspace_layout"],
+            geometry,
+        )
+
+    def test_named_layout_refuses_a_group_that_moves_during_flush(self):
+        launched = self._launch()
+        group_id = launched["group_id"]
+        api.lifecycle_coordinator.join_workspace("client-a", "default", "window-a")
+
+        def acknowledge(event, data, room=None, **_kwargs):
+            with api.session_manager.lock:
+                api.session_manager.groups[group_id].workspace_id = "elsewhere"
+            api.lifecycle_coordinator.acknowledge_flush(
+                "client-a", {**data, "ok": True, "metadata": {}}
+            )
+
+        with patch.object(api.socketio, "emit", side_effect=acknowledge):
+            response = self.client.post(
+                f"/api/session-groups/{group_id}/save-layout",
+                json={"name": "Stale"},
+            )
+        self.assertEqual(response.status_code, 409, response.get_json())
+        self.assertFalse(response.get_json()["saved"])
+        self.assertFalse(self.saved_path.exists())
+
+    def test_named_layout_refuses_presentation_changed_after_snapshot(self):
+        launched = self._launch()
+        group_id = launched["group_id"]
+        api.lifecycle_coordinator.join_workspace("client-a", "default", "window-a")
+
+        def acknowledge(event, data, room=None, **_kwargs):
+            api.lifecycle_coordinator.acknowledge_flush(
+                "client-a", {**data, "ok": True, "metadata": {}}
+            )
+
+        def revise(_pane, _path):
+            with api.session_manager.lock:
+                api.session_manager.groups[group_id].presentation_revision += 1
+            return str(self.repo_dir)
+
+        with (
+            patch.object(api.socketio, "emit", side_effect=acknowledge),
+            patch.object(web_lifecycle, "resolve_stated_directory", side_effect=revise),
+        ):
+            response = self.client.post(
+                f"/api/session-groups/{group_id}/save-layout",
+                json={"name": "Stale", "root_directory": str(self.repo_dir)},
+            )
+        self.assertEqual(response.status_code, 409, response.get_json())
+        self.assertFalse(response.get_json()["saved"])
+        self.assertFalse(self.saved_path.exists())
+
+    def test_named_layout_reports_persistence_failure_without_closing(self):
+        launched = self._launch()
+        api.lifecycle_coordinator.join_workspace("client-a", "default", "window-a")
+
+        def acknowledge(event, data, room=None, **_kwargs):
+            api.lifecycle_coordinator.acknowledge_flush(
+                "client-a", {**data, "ok": True, "metadata": {}}
+            )
+
+        with (
+            patch.object(api.socketio, "emit", side_effect=acknowledge),
+            patch.object(web_lifecycle, "upsert_saved_session", side_effect=web_lifecycle.SavedSessionsPersistenceError("disk")),
+        ):
+            response = self.client.post(
+                f"/api/session-groups/{launched['group_id']}/save-layout",
+                json={"name": "Named files"},
+            )
+        self.assertEqual(response.status_code, 503, response.get_json())
+        self.assertFalse(response.get_json()["saved"])
+        self.assertFalse(self.saved_path.exists())
+        self.assertEqual(len(api.session_manager.get_group_sessions(launched["group_id"])), 1)
+
+    def test_named_layout_refuses_duplicate_name_without_replacing(self):
+        launched = self._launch()
+        api.lifecycle_coordinator.join_workspace("client-a", "default", "window-a")
+
+        def acknowledge(event, data, room=None, **_kwargs):
+            api.lifecycle_coordinator.acknowledge_flush(
+                "client-a", {**data, "ok": True, "metadata": {}}
+            )
+
+        with patch.object(api.socketio, "emit", side_effect=acknowledge):
+            first = self.client.post(
+                f"/api/session-groups/{launched['group_id']}/save-layout",
+                json={"name": "Named files"},
+            )
+            before = self.saved_path.read_bytes()
+            duplicate = self.client.post(
+                f"/api/session-groups/{launched['group_id']}/save-layout",
+                json={"name": "named FILES"},
+            )
+
+        self.assertEqual(first.status_code, 201, first.get_json())
+        self.assertEqual(duplicate.status_code, 409, duplicate.get_json())
+        self.assertFalse(duplicate.get_json()["saved"])
+        self.assertEqual(self.saved_path.read_bytes(), before)
+        self.assertEqual(len(web_saved_sessions.load_saved_sessions()), 1)
+
+    def test_named_layout_keeps_browser_url_and_reusable_agent_selection(self):
+        group = api.session_manager.create_group(
+            "Agent and browser", "wsl", "vertical", 2, group_id="agent-browser"
+        )
+        api.session_manager.create_session(
+            group.group_id,
+            host="",
+            mode="wsl",
+            startup_mode="agent",
+            directory=str(self.repo_dir),
+            agent_selection="claude",
+            initial_command="claude",
+            title="Claude",
+        )
+        api.session_manager.create_session(
+            group.group_id,
+            host="",
+            mode="wsl",
+            startup_mode="browser",
+            directory=str(self.repo_dir),
+            initial_command="https://example.org/",
+            browser_tabs=["https://example.org/"],
+            title="Preview",
+        )
+        api.lifecycle_coordinator.join_workspace("client-a", "default", "window-a")
+
+        def acknowledge(event, data, room=None, **_kwargs):
+            api.lifecycle_coordinator.acknowledge_flush(
+                "client-a", {**data, "ok": True, "metadata": {}}
+            )
+
+        with patch.object(api.socketio, "emit", side_effect=acknowledge):
+            response = self.client.post(
+                f"/api/session-groups/{group.group_id}/save-layout",
+                json={"name": "Agent and browser", "root_directory": str(self.repo_dir)},
+            )
+        self.assertEqual(response.status_code, 201, response.get_json())
+        stored = web_saved_sessions.load_saved_sessions()[0]["config"]["terminals"][:2]
+        self.assertEqual(stored[0]["agent_selection"], "claude")
+        self.assertEqual(stored[0]["initial_command"], "claude")
+        self.assertEqual(stored[0]["directory"], str(self.repo_dir))
+        self.assertEqual(stored[1]["startup_mode"], "browser")
+        self.assertEqual(stored[1]["initial_command"], "https://example.org/")
+        self.assertEqual(stored[1]["browser_tabs"], ["https://example.org/"])
+        self.assertNotIn("https://example.org/", response.get_data(as_text=True))
+
+    def test_named_layout_can_launch_its_pane_types_and_geometry(self):
+        geometry = {
+            "split_slot_rects": [
+                {"originSlot": 0, "x": 1, "y": 1, "w": 1, "h": 1},
+                {"originSlot": 1, "x": 2, "y": 1, "w": 1, "h": 1},
+            ],
+            "split_column_weights": [2, 1],
+            "split_row_weights": [1],
+            "original_split_slot_count": 2,
+        }
+        group = api.session_manager.create_group(
+            "Template", "wsl", "vertical", 2,
+            group_id="template", workspace_layout=geometry,
+        )
+        api.session_manager.create_session(
+            group.group_id, host="", mode="wsl", startup_mode="explorer",
+            directory=str(self.repo_dir), title="Files",
+        )
+        api.session_manager.create_session(
+            group.group_id, host="", mode="wsl", startup_mode="browser",
+            directory=str(self.repo_dir), title="Preview",
+            initial_command="https://example.org/",
+            browser_tabs=["https://example.org/"],
+        )
+        api.lifecycle_coordinator.join_workspace("client-a", "default", "window-a")
+
+        def acknowledge(event, data, room=None, **_kwargs):
+            api.lifecycle_coordinator.acknowledge_flush(
+                "client-a", {**data, "ok": True, "metadata": {}}
+            )
+
+        with patch.object(api.socketio, "emit", side_effect=acknowledge):
+            saved = self.client.post(
+                f"/api/session-groups/{group.group_id}/save-layout",
+                json={"name": "Template"},
+            )
+        self.assertEqual(saved.status_code, 201, saved.get_json())
+        config = web_saved_sessions.load_saved_sessions()[0]["config"]
+        reopened = self.client.post(
+            "/api/sessions",
+            json={
+                **config,
+                "session_name": "Reopened",
+                "workspace_id": "default",
+                "sessions": config["terminals"][:config["terminal_count"]],
+            },
+        )
+        self.assertEqual(reopened.status_code, 201, reopened.get_json())
+        self.assertEqual(
+            [pane["startup_mode"] for pane in reopened.get_json()["sessions"]],
+            ["explorer", "browser"],
+        )
+        self.assertEqual(
+            reopened.get_json()["workspace_layout"]["split_column_weights"],
+            [2.0, 1.0],
+        )
+
     # ── Per-group Save: the close prompt's middle button, from elsewhere ──
 
     def test_group_save_writes_one_preset_and_links_the_live_group_to_it(self):

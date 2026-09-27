@@ -61,6 +61,7 @@ AGENT_TYPE_FIELDS = (
 #: distribution or an SSH host -- the one read that is not sub-second. Kept
 #: under the shortest agent CLI tool-call timeout, like `wait_for_results`.
 AGENT_TYPES_TIMEOUT_SECONDS = 50.0
+SAVE_LAYOUT_TIMEOUT_SECONDS = 120.0
 
 #: What a pane is, where it points, and what it runs on.
 PANE_FIELDS = (
@@ -249,6 +250,10 @@ GEOMETRY_FIELDS = (
     "split_row_weights",
     "original_split_slot_count",
 )
+
+SAVE_LAYOUT_FIELDS = ("saved", "group_id", "workspace_id", "id", "name")
+SAVE_LAYOUT_SHAPE_FIELDS = ("layout", "pane_count")
+SAVE_LAYOUT_PANE_FIELDS = ("startup_mode", "shell", "agent_selection")
 
 #: What a clear answers. Two fields rather than one `cleared: true`, because
 #: they are not the same kind of claim: the replay buffer is gone, and the
@@ -779,6 +784,32 @@ class GridVibeClient:
         result: Dict[str, Any] = {"layouts": rows, "count": len(rows)}
         if truncated:
             result["truncated_at"] = MAX_SAVED_LAYOUTS
+        return result
+
+    def save_group_layout(self, group_id: str, name: str, root_directory: Optional[str]) -> Dict[str, Any]:
+        """Save one live group, exposing its persisted shape and no connection."""
+        body: Dict[str, Any] = {"name": name}
+        if root_directory is not None:
+            body["root_directory"] = root_directory
+        try:
+            payload = self.request(
+                "POST",
+                f"/api/session-groups/{urllib.parse.quote(group_id)}/save-layout",
+                body=body,
+                timeout=max(self.timeout, SAVE_LAYOUT_TIMEOUT_SECONDS),
+            )
+        except GridVibeError as exc:
+            return {**exc.to_dict(), "saved": False, "changed": False}
+        result = project(payload, SAVE_LAYOUT_FIELDS)
+        shape = payload.get("shape") if isinstance(payload, Mapping) else None
+        if isinstance(shape, Mapping):
+            projected = project(shape, SAVE_LAYOUT_SHAPE_FIELDS)
+            geometry = shape.get("workspace_layout")
+            projected["workspace_layout"] = (
+                project(geometry, GEOMETRY_FIELDS) if isinstance(geometry, Mapping) else None
+            )
+            projected["panes"] = project_all(shape.get("panes"), SAVE_LAYOUT_PANE_FIELDS)
+            result["shape"] = projected
         return result
 
     def _saved_layout_shape(self, saved_session_id: str) -> Dict[str, Any]:

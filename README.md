@@ -117,7 +117,7 @@ make mcp-status   # run this when an agent reports the server will not start
 
 Until it is installed the checkbox still appears and the agent simply finds no tools. `make mcp-status` walks the whole chain from the outside — the generated config, the interpreter, the entry point, the handshake — and names the link that is broken.
 
-### The twenty-one tools
+### The twenty-two tools
 
 | Tier | Tools | What the agent can do |
 | --- | --- | --- |
@@ -127,11 +127,13 @@ Until it is installed the checkbox still appears and the agent simply finds no t
 | **Replace** | `set_pane_agent` `set_pane_mode` | Relaunch a pane under a different agent (optionally with a task) or back to a plain shell, or turn it into a file explorer or a browser preview |
 | **Clear** | `clear_pane` | Clear one terminal pane and its replay buffer, exactly as the 🧹 button does |
 | **Navigate** | `focus_session` `focus_pane` `move_session` `resize_divider` | Bring a session tab or a single pane to the foreground, move a session to another workspace, and resize a divider in an open session |
+| **Save** | `save_group_layout` | Save an open session's pane types and layout as a named preset for later launches |
 
 - **Nothing closes and nothing types.** There is no tool for closing a pane, a tab, or a workspace, and none for sending keystrokes to a terminal. They are absent from the build, not switched off.
 - **Sessions by the name on their tab.** Ask for *"bring the gridvibe_main session forward"* or *"move test_session to the gridvibe_2 workspace and show it"*. Two tabs with the same name are never guessed between, and the agent only reports a tab as shown once the window confirms it.
 - **New panes start where you say.** A stated folder is checked on the pane's own machine and wins over where the pane is standing, including a folder above the one a Files pane is showing.
 - **Agents can shape the grid.** Ask an agent to split a pane, then set a divider to a fraction of the open session's width or height. GridVibe checks each pane's minimum size before applying it.
+- **Agents can save a session layout.** Ask an agent to save the current session as a named preset, optionally rooted at a stated folder. The session's window must be open so GridVibe can capture its latest layout.
 - **Every installed agent, not just the MCP ones.** An agent can list which agent CLIs are available and launch any of them. A missing agent is refused rather than quietly opened as a plain terminal.
 - **An agent only touches panes it made.** The three tools that replace or clear a pane refuse the agent's own pane always, and refuse any pane it did not create — including every pane from before a restart — unless you tell it in that conversation to replace that particular one. Moving a session it did not make needs your word the same way.
 - **Agents hand each other tasks.** An agent that splits off or launches a Claude Code, Codex or Copilot pane can give it a task, and the new agent starts on it rather than waiting — ask for *"hand the findings to a new Codex agent below this one."* The task never goes to another machine, and nothing is typed into an agent that is already running.

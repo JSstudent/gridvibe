@@ -17,6 +17,7 @@ import time
 import uuid
 from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple
 
+from web.pane_directory import StatedDirectoryError, resolve_stated_directory
 from web.pane_paths import capture_pane_paths
 from web.runtime_state import (
     RuntimeStatePersistenceError,
@@ -24,7 +25,9 @@ from web.runtime_state import (
     capture_workspace,
     normalize_native_zoom_factor,
 )
+from web.saved_session_store import SavedSessionsPersistenceError
 from web.saved_sessions import (
+    SavedSessionNameConflictError,
     _find_saved_session_entry,
     _load_saved_sessions_payload,
     _merge_workspace_session_config,
@@ -1056,6 +1059,199 @@ def prepare_workspace_save(
         "agent_sidebar_open": slot["agent_sidebar_open"],
         "agent_sidebar_scale": slot["agent_sidebar_scale"],
     }, 200
+
+
+def save_group_layout(
+    session_manager: Any,
+    group_id: Any,
+    name: Any,
+    root_directory: Any,
+    emit_request: Callable[[str, str], None],
+) -> Tuple[Dict[str, Any], int]:
+    """Persist a named launch template from one freshly flushed live group."""
+    deadline = time.monotonic() + 90.0
+    group_key = str(group_id or "").strip()
+    preset_name = str(name or "").strip() if isinstance(name, str) else ""
+    if not preset_name or len(preset_name) > 120:
+        return {"saved": False, "error": "A layout name of 1–120 characters is required. Nothing was saved."}, 400
+    if root_directory is not None and (
+        not isinstance(root_directory, str) or not root_directory.strip()
+    ):
+        return {"saved": False, "error": "The root directory must be a non-empty path. Nothing was saved."}, 400
+
+    with session_manager.lock:
+        live_group = session_manager.groups.get(group_key)
+        workspace_id = str(live_group.workspace_id) if live_group else ""
+    if live_group is None:
+        return {"saved": False, "error": "Session group not found. Nothing was saved."}, 404
+
+    # A tool has no DOM and cannot prove that the server's last revision is
+    # current. Require the owning page to drain its queue before the snapshot.
+    if lifecycle_coordinator.connected_window_count(workspace_id) == 0:
+        return {
+            "saved": False,
+            "error": "Open the session's workspace window and retry; its current layout could not be verified. Nothing was saved.",
+            "retryable": True,
+        }, 503
+    flush = lifecycle_coordinator.request_flush({workspace_id}, emit_request)
+    if not flush["ok"]:
+        return {
+            "saved": False,
+            "error": "The workspace window did not finish flushing; open the session and retry. Nothing was saved.",
+            "retryable": True,
+            "errors": flush["errors"],
+        }, 503
+
+    snapshots = session_manager.snapshot_lifecycle_workspaces()
+    group_snapshot = next(
+        (
+            candidate
+            for candidate in (snapshots.get(workspace_id) or {}).get("groups") or []
+            if str(candidate.get("group_id") or "") == group_key
+        ),
+        None,
+    )
+    if group_snapshot is None:
+        return {"saved": False, "error": "The session closed or has no panes. Nothing was saved."}, 409
+    panes = group_snapshot.get("sessions") or []
+    pane_ids = [str(pane.get("session_id") or "") for pane in panes]
+
+    # Validate each pane on its actual machine. A local group can mix
+    # PowerShell and WSL panes, for which one stated path has different forms.
+    roots: Dict[str, str] = {}
+    if root_directory is not None:
+        with session_manager.lock:
+            current = session_manager.groups.get(group_key)
+            live_panes = {
+                pane.session_id: pane
+                for pane in session_manager.get_group_sessions(group_key)
+            } if current is not None else {}
+            if current is None or str(current.workspace_id) != workspace_id or set(live_panes) != set(pane_ids):
+                return {"saved": False, "error": "The session changed while its layout was captured. Nothing was saved."}, 409
+        try:
+            checked_machines: Dict[Tuple[Any, ...], str] = {}
+            for pane in panes:
+                if pane.get("startup_mode") != "browser":
+                    pane_id = str(pane.get("session_id") or "")
+                    live_pane = live_panes[pane_id]
+                    machine = (
+                        live_pane.mode,
+                        live_pane.host,
+                        live_pane.username,
+                        live_pane.port,
+                        live_pane.distribution,
+                        live_pane.use_wsl,
+                        live_pane.use_powershell,
+                    )
+                    if machine not in checked_machines:
+                        checked_machines[machine] = resolve_stated_directory(
+                            live_pane, root_directory
+                        )
+                    roots[pane_id] = checked_machines[machine]
+                    if time.monotonic() > deadline:
+                        return {
+                            "saved": False,
+                            "error": "Root validation took too long. Nothing was saved; retry.",
+                            "retryable": True,
+                        }, 503
+            if not roots and pane_ids:
+                # A browser-only group still names a machine for the stated
+                # root, even though its URL is the only saved launch target.
+                resolve_stated_directory(live_panes[pane_ids[0]], root_directory)
+        except StatedDirectoryError as exc:
+            return {"saved": False, "error": f"{exc} Nothing was saved."}, 400
+        except Exception:  # noqa: BLE001 - transport errors must not expose internals
+            logger.exception("Could not validate a named layout's root directory")
+            return {
+                "saved": False,
+                "error": "The root directory could not be verified on the session's machine. Nothing was saved.",
+                "retryable": True,
+            }, 503
+
+    config = _live_group_config(group_snapshot)
+    from web.agents import AGENT_REGISTRY, _normalize_agent_key
+
+    for pane in config["terminals"]:
+        mode = str(pane.get("startup_mode") or "terminal")
+        if mode == "agent":
+            key = _normalize_agent_key(pane.get("agent_selection") or pane.get("custom_agent"))
+            if key not in AGENT_REGISTRY:
+                return {
+                    "saved": False,
+                    "error": "An agent pane has no known reusable agent selection. Nothing was saved.",
+                }, 409
+            pane["agent_selection"] = key
+            pane["custom_agent"] = ""
+            pane["initial_command"] = key
+            pane["initial_command_mode"] = "agent"
+        pane_id = str(pane.get("session_id") or "")
+        if pane_id in roots:
+            pane["directory"] = roots[pane_id]
+            pane["explorer_root_directory"] = roots[pane_id]
+            pane["explorer_root_configured"] = mode == "explorer"
+    if roots:
+        default_root = next(iter(roots.values()))
+        config["ssh"]["default_dir"] = default_root
+        config["wsl"]["default_dir"] = default_root
+
+    with session_manager.lock:
+        current = session_manager.groups.get(group_key)
+        if (
+            current is None
+            or str(current.workspace_id) != workspace_id
+            or list(current.pane_order) != pane_ids
+            or current.presentation_revision != group_snapshot.get("presentation_revision")
+        ):
+            return {"saved": False, "error": "The session changed before its layout could be saved. Nothing was saved."}, 409
+    if time.monotonic() > deadline:
+        return {
+            "saved": False,
+            "error": "Layout capture took too long. Nothing was saved; retry.",
+            "retryable": True,
+        }, 503
+    try:
+        saved = upsert_saved_session(
+            config,
+            name=preset_name,
+            set_last_session=False,
+            require_unique_name=True,
+        )
+    except SavedSessionNameConflictError as exc:
+        return {"saved": False, "error": str(exc)}, 409
+    except SavedSessionsPersistenceError:
+        return {
+            "saved": False,
+            "error": "The saved layout could not be written to disk. The live session is still open; retry.",
+            "retryable": True,
+        }, 503
+
+    stored = saved["config"]
+    shape = {
+        "layout": stored["layout"],
+        "pane_count": stored["terminal_count"],
+        "workspace_layout": stored["workspace_layout"],
+        "panes": [
+            {
+                "startup_mode": pane["startup_mode"],
+                "shell": (
+                    "ssh" if stored["connection_mode"] == "ssh"
+                    else "wsl" if pane["use_wsl"]
+                    else "powershell" if pane["use_powershell"]
+                    else "cmd"
+                ),
+                "agent_selection": pane["agent_selection"] if pane["startup_mode"] == "agent" else "",
+            }
+            for pane in stored["terminals"][:stored["terminal_count"]]
+        ],
+    }
+    return {
+        "saved": True,
+        "group_id": group_key,
+        "workspace_id": workspace_id,
+        "id": saved["id"],
+        "name": saved["name"],
+        "shape": shape,
+    }, 201
 
 
 def prepare_group_save(

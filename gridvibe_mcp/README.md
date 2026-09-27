@@ -1,7 +1,7 @@
 # GridVibe MCP sidecar
 
-A stdio MCP server that gives an agent running in a GridVibe pane twenty-one
-tools for seeing, building and navigating GridVibe workspaces.
+A stdio MCP server that gives an agent running in a GridVibe pane twenty-two
+tools for seeing, building, navigating and saving GridVibe workspaces.
 
 This file is the reference for the MCP feature. Everything else that mentions
 it — `README.md`, `CLAUDE.md`, `docs/engineering_contracts.md` — says what it
@@ -93,7 +93,7 @@ back to it as an inline TOML table on the launch line
 
 ## Tools
 
-Twenty-one, in six tiers by blast radius. The order below is the order
+Twenty-two, in seven tiers by blast radius. The order below is the order
 `tool_specs()` registers them in, and `tests/test_mcp_tools.py` pins it.
 
 **Three nouns, one meaning each.** A *workspace* is a window. A *session* is a
@@ -229,6 +229,27 @@ minimums, or a narrow viewport. A native window must show the session tab.
 After two vertical splits, moving the first and second dividers to roughly
 one-third and two-thirds can make three equal side-by-side panes. The splits
 and resizes are separate steps; a later refusal does not undo earlier splits.
+
+### save — one
+
+`save_group_layout(group_id, name, root_directory?)` saves a named launcher
+preset from a live session tab. It asks the owning workspace page to flush its
+presentation queue before capturing pane order, startup modes, shell choices,
+current directories and split geometry. With `root_directory`, GridVibe
+checks the path on every relevant pane's machine and saves it as each
+terminal, agent or explorer pane's start directory; browser URLs stay as
+they are. A browser-only session still validates the stated root.
+
+The page must be reachable. When no page can confirm the current layout,
+the tool refuses with an instruction to open the session and retry. A failed
+flush, stale group, invalid directory, unknown agent selection, duplicate
+name or failed durable write saves nothing and leaves the live session open.
+Names are checked case-insensitively inside the saved-session transaction, so
+a retry cannot create an indistinguishable second preset. Success returns
+the preset id, name, pane types, shell families and persisted geometry after
+the atomic saved-session commit. It omits paths, connection details,
+credentials, handoff tasks and active processes. `list_saved_layouts` then
+shows the new preset, and the launcher can open it as a fresh session.
 
 ### The gates on the replace and display tools
 

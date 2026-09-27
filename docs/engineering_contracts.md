@@ -1470,13 +1470,14 @@ in `README.md`; state the rules a change has to keep.
   secret at any depth regardless of the list. `list_saved_layouts` is the sharp
   case: the route it reads answers with a *decrypted* SSH password by design.
   Failures are typed and carry GridVibe's own sentence verbatim, unretried.
-- **Six tiers, and the destroy tier is absent from the build.** Read and create
+- **Seven tiers, and the destroy tier is absent from the build.** Read and create
   only ever make something new (`read_handoff` is a read: its only side effect
   is a handoff's state); `report_result`/`wait_for_results` carry a report back
   and touch no pane; `set_pane_agent`/`set_pane_mode` replace what is
   behind an existing pane; `clear_pane` erases what one has drawn;
   `focus_session`/`focus_pane`/`move_session` change what is shown where and
-  create or end nothing. Closing a pane, session or workspace, and typing
+  create or end nothing; `save_group_layout` writes a named reusable preset.
+  Closing a pane, session or workspace, and typing
   arbitrary input into a terminal, are not written, not registered and not
   flag-gated — a tool that does not exist cannot be talked into running by a
   file an agent reads. `clear_pane` is not `send_input`: the only thing reaching
@@ -1492,6 +1493,17 @@ in `README.md`; state the rules a change has to keep.
   pane is `pane_id`. A tool that resolves a session by name matches exactly,
   then case-insensitively, then as an id, and never guesses between two matches:
   an ambiguous name is refused with the candidates and nothing is changed.
+- **A tool save requires a page-confirmed live layout.** `save_group_layout`
+  uses the lifecycle presentation flush before it snapshots the live group.
+  Unlike the dashboard's older group-save route, it refuses with an
+  open-and-retry message when no owning window can answer, because a tool has
+  no DOM from which to verify pending divider changes. It validates a stated
+  root on each affected pane's machine, preserves browser URLs, keeps only
+  known agent selections, and writes through the saved-session store. A name
+  already held by a preset is refused inside that store's transaction, rather
+  than creating an indistinguishable duplicate. The
+  result is a projected launch shape only after the durable commit; a refusal
+  or write failure leaves the live group open and does not claim a preset.
 - **Every create verb is bounded by something.** `launch_panes` by
   `terminal.max_sessions` and the depth budget, `split_pane` by the group cap, and
   `create_workspace` by `MAX_EMPTY_WORKSPACES` — counted over workspaces that are

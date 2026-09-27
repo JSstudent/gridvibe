@@ -210,6 +210,7 @@ from web.lifecycle import (
     prepare_group_save,
     prepare_lifecycle_action,
     prepare_workspace_save,
+    save_group_layout,
 )
 from web.mcp_launch import (  # noqa: F401 - mcp_config_path re-exported for tests
     mcp_config_path,
@@ -2495,6 +2496,26 @@ def save_session_group(group_id: str):
     payload, status = prepare_group_save(
         session_manager,
         group_id,
+        lambda target_id, request_id: socketio.emit(
+            "lifecycle_flush_requested",
+            {"request_id": request_id, "workspace_id": target_id},
+            room=workspace_room(target_id),
+        ),
+    )
+    return jsonify(payload), status
+
+
+@app.route('/api/session-groups/<group_id>/save-layout', methods=['POST'])
+def save_session_group_layout(group_id: str):
+    """Save a named reusable layout after the owning page flushes presentation."""
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return jsonify({"saved": False, "error": "A JSON object is required. Nothing was saved."}), 400
+    payload, status = save_group_layout(
+        session_manager,
+        group_id,
+        data.get("name"),
+        data.get("root_directory"),
         lambda target_id, request_id: socketio.emit(
             "lifecycle_flush_requested",
             {"request_id": request_id, "workspace_id": target_id},

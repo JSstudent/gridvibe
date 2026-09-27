@@ -3,7 +3,7 @@
 Four things are pinned here, and each is a property of the build rather than
 of a code path:
 
-- **The registered surface is exactly nineteen**, and the tiers that reach an
+- **The registered surface is exactly twenty-two**, and the tiers that reach an
   existing pane hold exactly three -- two that replace what it is, one that
   erases what it has drawn -- beside two that only change where something is
   shown or held. The destroy tier is *absent from the build*, not
@@ -43,6 +43,7 @@ from gridvibe_mcp.server import (  # noqa: E402
     PANE_MODES,
     READ_TOOLS,
     RELAUNCH_TOOLS,
+    SAVE_TOOLS,
     dispatch,
     tool_names,
     tool_specs,
@@ -92,9 +93,9 @@ class RefusingOpener:
 
 
 class ToolSurfaceTestCase(unittest.TestCase):
-    def test_the_registered_surface_is_exactly_twenty_one(self):
+    def test_the_registered_surface_is_exactly_twenty_two(self):
         """Eight read, two hand back, four create, two replace, one erases,
-        four navigate.
+        four navigate, one saves.
 
         The last two tiers are the only things in this surface that end
         anything, and what bounds them is the gates on GridVibe's own routes
@@ -105,14 +106,15 @@ class ToolSurfaceTestCase(unittest.TestCase):
         """
         names = tool_names()
 
-        self.assertEqual(len(names), 21)
+        self.assertEqual(len(names), 22)
         self.assertEqual(names[:8], list(READ_TOOLS))
         self.assertEqual(READ_TOOLS[-1], "read_handoff")
         self.assertEqual(names[8:10], list(HANDBACK_TOOLS))
         self.assertEqual(names[10:14], list(CREATE_TOOLS))
         self.assertEqual(names[14:16], list(RELAUNCH_TOOLS))
         self.assertEqual(names[16:17], list(DISPLAY_TOOLS))
-        self.assertEqual(names[17:], list(NAVIGATION_TOOLS))
+        self.assertEqual(names[17:21], list(NAVIGATION_TOOLS))
+        self.assertEqual(names[21:], list(SAVE_TOOLS))
 
     def test_the_layout_enum_is_the_set_gridvibe_actually_accepts(self):
         """`stack` was never a GridVibe layout, and the two that are were
@@ -1214,6 +1216,68 @@ class SavedLayoutTestCase(unittest.TestCase):
 
         self.assertEqual(result["count"], MAX_SAVED_LAYOUTS)
         self.assertEqual(result["truncated_at"], MAX_SAVED_LAYOUTS)
+
+
+class SaveGroupLayoutTestCase(unittest.TestCase):
+    def test_saved_shape_is_projected_without_connection_or_paths(self):
+        opener = StubOpener([{
+            "saved": True,
+            "id": "layout-1",
+            "name": "Review",
+            "group_id": "group-1",
+            "workspace_id": "default",
+            "password": "secret",
+            "shape": {
+                "layout": "horizontal",
+                "pane_count": 2,
+                "workspace_layout": {
+                    "split_slot_rects": [{"x": 1, "y": 1, "w": 1, "h": 1}],
+                    "password": "secret",
+                },
+                "panes": [
+                    {"startup_mode": "agent", "shell": "powershell",
+                     "agent_selection": "claude", "directory": "C:/private",
+                     "password": "secret"},
+                    {"startup_mode": "browser", "shell": "cmd",
+                     "agent_selection": "", "url": "https://private"},
+                ],
+            },
+        }])
+        result = dispatch(
+            "save_group_layout",
+            {"group_id": "group-1", "name": "Review", "root_directory": "C:/work"},
+            client=client_for(opener),
+            identity=read_identity(INSIDE_PANE),
+        )
+
+        self.assertTrue(result["saved"])
+        self.assertEqual(result["shape"]["panes"][0]["agent_selection"], "claude")
+        self.assertEqual(result["shape"]["workspace_layout"]["split_slot_rects"][0]["w"], 1)
+        request = opener.requests[0]
+        self.assertTrue(request.full_url.endswith("/api/session-groups/group-1/save-layout"))
+        self.assertEqual(json.loads(request.data), {
+            "name": "Review", "root_directory": "C:/work"
+        })
+        body = json.dumps(result)
+        self.assertNotIn("secret", body)
+        self.assertNotIn("private", body)
+
+    def test_disk_refusal_reports_no_save_and_is_not_retried(self):
+        opener = StubOpener(raises=http_error(503, {
+            "error": "The saved layout could not be written to disk.",
+            "saved": False,
+        }))
+        result = dispatch(
+            "save_group_layout",
+            {"group_id": "group-1", "name": "Review"},
+            client=client_for(opener),
+            identity=read_identity(INSIDE_PANE),
+        )
+
+        self.assertFalse(result["saved"])
+        self.assertFalse(result["changed"])
+        self.assertEqual(result["status"], 503)
+        self.assertEqual(len(opener.requests), 1)
 
 
 class SplitPaneTestCase(unittest.TestCase):

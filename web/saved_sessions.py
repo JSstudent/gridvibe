@@ -70,6 +70,10 @@ SAVED_SESSIONS_PATH = os.path.join(BASE_DIR, "saved_sessions.json")
 DEFAULT_SAVED_SESSION_ID = "default-session"
 DEFAULT_SAVED_SESSION_NAME = "Default Session"
 
+
+class SavedSessionNameConflictError(ValueError):
+    """A requested new preset name is already owned by another preset."""
+
 # Scratch launches: a launch that carries no saved-preset identity (the
 # built-in "Default Session", or any hand-filled form) is disposable, is named
 # after its connection target, and may be repeated. `build_unique_session_name`
@@ -927,12 +931,15 @@ def upsert_saved_session(
     name: Optional[str] = None,
     session_id: Optional[str] = None,
     set_last_session: bool = True,
+    require_unique_name: bool = False,
 ) -> Dict[str, Any]:
     """Create or update one named saved session preset.
 
     The read and the write are one store transaction (SGP-05): a second thread
     or process saving an unrelated preset at the same moment can no longer have
     its entry read here and dropped by this write.
+    When `require_unique_name` is set for a new preset, the name claim runs
+    inside that same transaction and refuses case-insensitive duplicates.
     """
     normalized_config = _normalize_session_config(config)
     if str(session_id or "").strip() == DEFAULT_SAVED_SESSION_ID:
@@ -943,6 +950,18 @@ def upsert_saved_session(
     def mutate(stored: Any):
         state = _normalize_stored_payload(stored)
         saved_sessions = state["sessions"]
+
+        if require_unique_name and (
+            normalized_name.casefold() == DEFAULT_SAVED_SESSION_NAME.casefold()
+            or any(
+                str(entry.get("name") or "").strip().casefold()
+                == normalized_name.casefold()
+                for entry in saved_sessions
+            )
+        ):
+            raise SavedSessionNameConflictError(
+                "A saved layout already has that name. Choose another name; nothing was saved."
+            )
 
         if session_id:
             for entry in saved_sessions:
