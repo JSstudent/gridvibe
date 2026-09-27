@@ -81,6 +81,16 @@ class ResizeRouteTestCase(unittest.TestCase):
         ).get_json()
         self.assertEqual(layout["geometry"]["column_weights"], [1.0, 1.0])
 
+    def test_uncertain_write_outcome_is_preserved_by_intent_route(self):
+        intent_id = self._post().get_json()["intent_id"]
+        self.client.post(f"/api/windows/intents/{intent_id}/claim", json={})
+        response = self.client.post(
+            f"/api/windows/intents/{intent_id}/result",
+            json={"outcome": "unknown", "detail": "Read list_panes before retrying."},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["state"], "unknown")
+
 
 class ResizeToolTestCase(unittest.TestCase):
     def test_surface_and_argument_validation(self):
@@ -121,6 +131,9 @@ class ResizeToolTestCase(unittest.TestCase):
         refused = resize_divider(Client("refused"), "g", "vertical", 1, 0.6, 1)
         self.assertEqual(refused["status"], "refused")
         self.assertFalse(refused["changed"])
+        unknown = resize_divider(Client("unknown"), "g", "vertical", 1, 0.6, 1)
+        self.assertEqual(unknown["status"], "unknown")
+        self.assertNotIn("changed", unknown)
         expired = resize_divider(Client("expired"), "g", "vertical", 1, 0.6, 1)
         self.assertEqual(expired["status"], "no_window_available")
         self.assertIn("read list_panes", expired["detail"])

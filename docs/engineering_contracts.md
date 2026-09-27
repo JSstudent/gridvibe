@@ -1500,7 +1500,10 @@ in `README.md`; state the rules a change has to keep.
   root on each affected pane's machine, preserves browser URLs, keeps only
   known agent selections, and writes through the saved-session store. A name
   already held by a preset is refused inside that store's transaction, rather
-  than creating an indistinguishable duplicate. The
+  than creating an indistinguishable duplicate. After root validation, the
+  saved launch shape is compared with the live pane shape under the manager
+  lock; a changed mode, directory, agent, title, or other preset field refuses
+  the stale capture. The
   result is a projected launch shape only after the durable commit; a refusal
   or write failure leaves the live group open and does not claim a preset.
 - **Every create verb is bounded by something.** `launch_panes` by
@@ -1669,7 +1672,9 @@ in `README.md`; state the rules a change has to keep.
   a missing destination is a `400`, never the default workspace. The gate is run
   again under `SessionManager.lock` in the same hold as the move
   (`move_group_to_workspace(..., guard=...)`) with the source workspace compared,
-  and a refusal there rolls back a workspace the move created. Showing the
+  including when the destination is already the source; a stale same-workspace
+  request returns `409` instead of claiming a no-op. A refusal there rolls back
+  a workspace the move created. Showing the
   destination afterwards is a separate answer (`shown`) and never fails a move.
 - **A launch from inside a pane opens on that pane's machine.** The body names
   `origin_session_id` and `workspaces.resolve_origin_connection` reads the host,
@@ -1806,6 +1811,8 @@ in `README.md`; state the rules a change has to keep.
   acknowledging it. A stale revision, missing divider, narrow viewport or
   impossible minimum refuses without applying weights. The result carries the
   persisted weights and pane rectangles; `list_panes` reads the same record.
+  Once a write starts, a lost or unreadable response is `unknown`, with no
+  claim that the weights stayed unchanged; read `list_panes` before retrying.
 - **The sidecar's wait must exceed the store's worst case, and the relation is
   pinned rather than derived.** `DEFAULT_WAIT_SECONDS` in `splits.py` and
   `windows.py` (and the resize helper that uses the split wait) is above

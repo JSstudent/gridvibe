@@ -1120,7 +1120,8 @@ def _resize_spec() -> Dict[str, Any]:
             "rows N and N+1. Position is a fraction of the full grid width or "
             "height, strictly between 0 and 1. The visible native page checks "
             "pane minimums and persists before reporting resized. A stale layout, "
-            "impossible size, or missing page changes nothing. For three equal "
+            "impossible size, or missing page changes nothing. If a write response "
+            "cannot be confirmed, the result is unknown; read list_panes before retrying. For three equal "
             "side-by-side panes, split twice, then position the two boundaries "
             "at one-third and two-thirds; each step can fail independently."
         ),

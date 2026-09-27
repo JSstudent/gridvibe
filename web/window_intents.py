@@ -64,6 +64,7 @@ ACTIVATED = "activated"
 ACTIVATE_KIND = "activate"
 RESIZE_KIND = "resize"
 RESIZED = "resized"
+UNKNOWN = "unknown"
 
 #: What a page may report back, per kind. Anything else is refused: a page that
 #: reported `opened` on a split would be reporting something it did not do.
@@ -71,7 +72,7 @@ OUTCOMES_BY_KIND: Dict[str, Tuple[str, ...]] = {
     WINDOW_KIND: (OPENED, BLOCKED),
     SPLIT_KIND: (SPLIT, REFUSED),
     ACTIVATE_KIND: (ACTIVATED, BLOCKED),
-    RESIZE_KIND: (RESIZED, REFUSED),
+    RESIZE_KIND: (RESIZED, REFUSED, UNKNOWN),
 }
 
 #: Back-compat: the window kind's outcomes, which is what this name always

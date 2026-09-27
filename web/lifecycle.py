@@ -1196,11 +1196,18 @@ def save_group_layout(
 
     with session_manager.lock:
         current = session_manager.groups.get(group_key)
+        live_group_snapshot = current.to_dict() if current is not None else {}
+        if current is not None:
+            live_group_snapshot["sessions"] = [
+                {**pane.to_dict(include_conversation=True), "password": pane.password}
+                for pane in session_manager.get_group_sessions(group_key)
+            ]
         if (
-            current is None
+            current is not live_group
             or str(current.workspace_id) != workspace_id
             or list(current.pane_order) != pane_ids
             or current.presentation_revision != group_snapshot.get("presentation_revision")
+            or _live_group_config(live_group_snapshot) != _live_group_config(group_snapshot)
         ):
             return {"saved": False, "error": "The session changed before its layout could be saved. Nothing was saved."}, 409
     if time.monotonic() > deadline:

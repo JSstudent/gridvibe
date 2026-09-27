@@ -108,6 +108,8 @@ function runtime(options = {}) {
         async perform(intent) {
             resizeCalls.push(intent);
             if (options.resizeFails) return { ok: false, error: 'Minimum width refused. Nothing changed.' };
+            if (options.resizeUnknown) return { ok: false, unknown: true,
+                error: 'The outcome is unknown. Read list_panes before retrying.' };
             return { ok: true, result: {
                 group_id: intent.group_id, revision: 2,
                 column_weights: [1.2, 0.8], row_weights: [1], panes: []
@@ -520,6 +522,13 @@ const out = {};
     }
     {
         const { poll, calls } = runtime({
+            intents: [resizeIntent('r-1')], resizeUnknown: true
+        });
+        await poll.tick();
+        out.resizeUnknown = calls.results;
+    }
+    {
+        const { poll, calls } = runtime({
             intents: [resizeIntent('r-1', 'g-elsewhere')]
         });
         await poll.tick();
@@ -574,6 +583,8 @@ class WindowIntentClientTestCase(unittest.TestCase):
         self.assertEqual(happy["results"][0]["result"]["revision"], 2)
         self.assertEqual(self.out["resizeRefused"][0]["outcome"], "refused")
         self.assertIn("Nothing changed", self.out["resizeRefused"][0]["detail"])
+        self.assertEqual(self.out["resizeUnknown"][0]["outcome"], "unknown")
+        self.assertIn("outcome is unknown", self.out["resizeUnknown"][0]["detail"])
         self.assertEqual(self.out["resizeElsewhere"], 0)
         self.assertEqual(self.out["resizeNoBridge"], 0)
 

@@ -378,6 +378,26 @@ class AgentMoveRouteTestCase(_LiveRegistryTestCase):
         self.assertEqual(response.get_json()["workspace_id"], elsewhere)
         self.assertEqual(api.session_manager.get_group(self.caller_group).workspace_id, elsewhere)
 
+    def test_same_workspace_no_op_rechecks_ownership(self):
+        elsewhere = self._workspace("Elsewhere")
+        self._between_gate_and_move(
+            lambda: api.session_manager.move_group(self.caller_group, elsewhere)
+        )
+
+        response = self._move(self.caller_group, target_workspace_id="default")
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.get_json()["workspace_id"], elsewhere)
+
+    def test_same_workspace_no_op_runs_the_agent_guard(self):
+        group_id, _ = self._group(name="Workers", created_by=self.caller)
+        self._between_gate_and_move(self._foreign_pane(group_id))
+
+        response = self._move(group_id, target_workspace_id="default")
+
+        self.assertEqual(response.status_code, 403)
+        self.assertFalse(response.get_json()["changed"])
+
     def test_a_refused_recheck_rolls_back_a_workspace_it_created(self):
         group_id, _ = self._group(name="Workers", created_by=self.caller)
         before = {item.workspace_id for item in api.session_manager.get_all_workspaces()}

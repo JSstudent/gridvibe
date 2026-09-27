@@ -195,7 +195,7 @@ is a request, and a pane nobody has open resets nothing.
 | `focus_session` | brings one session to the foreground: raises its workspace window and switches it to that tab. Named by `session_name` (or `group_id`); the workspace is found from the session, and `workspace_id` only narrows a name two workspaces share |
 | `focus_pane` | brings one pane into view: raises its window, switches to its session and gives the pane focus. The session and workspace are read from the pane itself, as they are *now* |
 | `move_session` | moves one open session — the tab and all its panes — to another workspace, named by `target_workspace_label`, `target_workspace_id`, or `new_workspace` (exactly one). With `show` the destination window is then raised on that tab |
-| `resize_divider` | moves a numbered vertical or horizontal grid divider to a normalized position, after the visible page checks minimum pane sizes and persists the result. It returns applied weights and pane rectangles, or a refusal with no geometry change |
+| `resize_divider` | moves a numbered vertical or horizontal grid divider to a normalized position, after the visible page checks minimum pane sizes and persists the result. It returns applied weights and pane rectangles, a refusal with no geometry change, or `unknown` when the write response cannot be confirmed |
 
 None creates, ends or types anything. A moved session keeps its pane ids,
 processes, SSH connections, handoffs and result assignments; the only thing
@@ -229,6 +229,8 @@ minimums, or a narrow viewport. A native window must show the session tab.
 After two vertical splits, moving the first and second dividers to roughly
 one-third and two-thirds can make three equal side-by-side panes. The splits
 and resizes are separate steps; a later refusal does not undo earlier splits.
+If the write response is lost or unreadable, the outcome is `unknown`; read
+`list_panes` before retrying.
 
 ### save — one
 

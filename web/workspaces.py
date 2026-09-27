@@ -1522,7 +1522,24 @@ def move_group_to_workspace(
     reserved_workspace_id = session_manager.reserve_workspace_launch(target_workspace_id)
     try:
         if target_workspace_id == source_workspace_id:
+            try:
+                with session_manager.lock:
+                    current = session_manager.groups.get(normalized_group_id)
+                    refusal = guard() if guard is not None else None
+                    current_workspace_id = str(current.workspace_id) if current is not None else ""
+            except ValueError as exc:
+                rollback_created_workspace(created_workspace_id)
+                return {"error": str(exc)}, 400
             rollback_created_workspace(created_workspace_id)
+            if refusal is not None:
+                return refusal
+            if current is None:
+                return {"error": "Session group not found"}, 404
+            if current_workspace_id != source_workspace_id:
+                return {
+                    "error": "The session group moved while this request was checked. Read it again and retry.",
+                    "workspace_id": current_workspace_id,
+                }, 409
             return {
                 "moved": False,
                 "group_id": normalized_group_id,

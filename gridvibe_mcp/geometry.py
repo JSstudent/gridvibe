@@ -44,6 +44,11 @@ def resize_divider(
                 "status": "refused", "detail": record.get("detail") or "The page refused the resize; nothing changed.",
                 "changed": False,
             }
+        if state == "unknown":
+            return {
+                "status": "unknown",
+                "detail": record.get("detail") or "The resize write could not be confirmed. Read list_panes before retrying.",
+            }
         if state == "expired":
             return {
                 "status": "no_window_available",

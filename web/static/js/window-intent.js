@@ -292,7 +292,7 @@
                 onError(error);
                 answer = { ok: false, error: `The resize failed in this window: ${error.message}` };
             }
-            const outcome = answer?.ok ? 'resized' : REFUSED;
+            const outcome = answer?.ok ? 'resized' : answer?.unknown ? 'unknown' : REFUSED;
             try {
                 await reportResult(
                     intentId, outcome,

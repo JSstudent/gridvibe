@@ -7384,6 +7384,7 @@
                 return refuse('This viewport is too narrow to resize the grid.');
             }
             resizeIntentInFlight = true;
+            let writeStarted = false;
             try {
                 const controller = presentationController();
                 if (!controller) return refuse('Presentation sync is unavailable.');
@@ -7453,9 +7454,18 @@
                     terminals.length, grid.className, rects, nextColumns, nextRows,
                     originalSplitSlotCount || terminals.length
                 );
+                writeStarted = true;
                 const saved = await postPresentation('/api/session-presentation', payload);
                 const settled = await saved.json();
                 if (!saved.ok) return refuse(settled.error || 'The layout could not be saved.');
+                if (!Number.isInteger(settled?.presentation_revision)
+                    || settled.presentation_revision <= expectedRevision) {
+                    return {
+                        ok: false,
+                        unknown: true,
+                        error: 'The resize write returned no valid revision. Read list_panes before retrying; the outcome is unknown.'
+                    };
+                }
                 splitColumnWeights = nextColumns;
                 splitRowWeights = nextRows;
                 applySplitSlotGeometry({ fit: true });
@@ -7474,6 +7484,13 @@
                     }))
                 } };
             } catch (error) {
+                if (writeStarted) {
+                    return {
+                        ok: false,
+                        unknown: true,
+                        error: `The resize write could not be confirmed: ${error.message}. Read list_panes before retrying; the outcome is unknown.`
+                    };
+                }
                 return refuse(`The resize failed: ${error.message}`);
             } finally {
                 resizeIntentInFlight = false;

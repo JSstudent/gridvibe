@@ -4,6 +4,8 @@ All notable changes to GridVibe will be documented in this file.
 
 ## Unreleased
 
+- **(fix) Layout saves and workspace moves reject stale pane state, and uncertain resizes report their outcome honestly.** A named layout now checks its captured pane launch fields again after root validation, and a same-workspace move runs its ownership guard before reporting no change. If a resize write has no readable response, the tool returns `unknown` and directs the agent to read the live layout before retrying. The rules are in [Agent tools (MCP)](docs/engineering_contracts.md#agent-tools-mcp).
+
 - **(feat) Agents can close finished panes, session tabs and live workspaces.** The new close tools check every affected pane before closing any, refuse the calling pane and containers holding it, and ask for target-specific authorization when lineage or a running agent requires an override. A live workspace close preserves saved snapshots; interrupted closes report exactly which resources ended, and pending worker result assignments end with a reason. The rules are in [Agent tools (MCP)](docs/engineering_contracts.md#agent-tools-mcp).
 
 - **(feat) Agents can save a live session as a reusable layout preset.** The new `save_group_layout` tool flushes the open workspace page, captures the latest pane types and geometry, and optionally starts saved panes at a validated directory on their own machine. It reports a preset only after the saved-session store commits, and refuses when the page cannot verify the layout, the name is already used, or the write fails. The rules are in [Agent tools (MCP)](docs/engineering_contracts.md#agent-tools-mcp).

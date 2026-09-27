@@ -1165,6 +1165,35 @@ class LifecycleRouteTestCase(unittest.TestCase):
         self.assertFalse(response.get_json()["saved"])
         self.assertFalse(self.saved_path.exists())
 
+    def test_named_layout_refuses_pane_metadata_changed_during_root_validation(self):
+        launched = self._launch()
+        group_id = launched["group_id"]
+        pane_id = launched["sessions"][0]["session_id"]
+        api.lifecycle_coordinator.join_workspace("client-a", "default", "window-a")
+
+        def acknowledge(_event, data, **_kwargs):
+            api.lifecycle_coordinator.acknowledge_flush(
+                "client-a", {**data, "ok": True, "metadata": {}}
+            )
+
+        def revise(_pane, _path):
+            api.session_manager.update_session_metadata(
+                pane_id, startup_mode="terminal", title="Changed", directory="elsewhere"
+            )
+            return str(self.repo_dir)
+
+        with (
+            patch.object(api.socketio, "emit", side_effect=acknowledge),
+            patch.object(web_lifecycle, "resolve_stated_directory", side_effect=revise),
+        ):
+            response = self.client.post(
+                f"/api/session-groups/{group_id}/save-layout",
+                json={"name": "Stale", "root_directory": str(self.repo_dir)},
+            )
+        self.assertEqual(response.status_code, 409, response.get_json())
+        self.assertFalse(response.get_json()["saved"])
+        self.assertFalse(self.saved_path.exists())
+
     def test_named_layout_reports_persistence_failure_without_closing(self):
         launched = self._launch()
         api.lifecycle_coordinator.join_workspace("client-a", "default", "window-a")

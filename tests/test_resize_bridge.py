@@ -65,8 +65,11 @@ async function run(kind) {
         }),
         postPresentation: async (_url,payload) => {
             events.push('post');
+            if (kind === 'postThrow') throw new Error('connection lost');
             return {ok:kind !== 'persist',json:async () => kind === 'persist'
-                ? {error:'Save failed'} : {presentation_revision:2}};
+                ? {error:'Save failed'} : kind === 'badResponse'
+                ? Promise.reject(new Error('invalid JSON')) : kind === 'missingRevision'
+                ? {} : {presentation_revision:2}};
         },
         applySplitSlotGeometry: () => {events.push('paint');},
         redrawAttachedTerminals: () => {events.push('redraw');},
@@ -82,7 +85,7 @@ async function run(kind) {
     return {answer,events,revision:group.presentation_revision};
 }
 (async () => {
-    for (const kind of ['ok','stale','narrow','minimum','persist']) {
+    for (const kind of ['ok','stale','narrow','minimum','persist','postThrow','badResponse','missingRevision']) {
         results[kind] = await run(kind);
     }
     console.log(JSON.stringify(results));
@@ -102,3 +105,9 @@ async function run(kind) {
             self.assertFalse(cases[kind]["answer"]["ok"], kind)
             self.assertNotIn("paint", cases[kind]["events"])
             self.assertEqual(cases[kind]["revision"], 1)
+        for kind in ("postThrow", "badResponse", "missingRevision"):
+            self.assertFalse(cases[kind]["answer"]["ok"])
+            self.assertTrue(cases[kind]["answer"]["unknown"])
+            self.assertIn("outcome is unknown", cases[kind]["answer"]["error"])
+            self.assertNotIn("Nothing changed", cases[kind]["answer"]["error"])
+            self.assertNotIn("paint", cases[kind]["events"])
