@@ -117,7 +117,7 @@ make mcp-status   # run this when an agent reports the server will not start
 
 Until it is installed the checkbox still appears and the agent simply finds no tools. `make mcp-status` walks the whole chain from the outside — the generated config, the interpreter, the entry point, the handshake — and names the link that is broken.
 
-### The twenty-two tools
+### The twenty-five tools
 
 | Tier | Tools | What the agent can do |
 | --- | --- | --- |
@@ -128,14 +128,15 @@ Until it is installed the checkbox still appears and the agent simply finds no t
 | **Clear** | `clear_pane` | Clear one terminal pane and its replay buffer, exactly as the 🧹 button does |
 | **Navigate** | `focus_session` `focus_pane` `move_session` `resize_divider` | Bring a session tab or a single pane to the foreground, move a session to another workspace, and resize a divider in an open session |
 | **Save** | `save_group_layout` | Save an open session's pane types and layout as a named preset for later launches |
+| **Close** | `close_pane` `close_group` `close_workspace` | End a worker pane, a session tab, or a live workspace; saved workspace snapshots remain available |
 
-- **Nothing closes and nothing types.** There is no tool for closing a pane, a tab, or a workspace, and none for sending keystrokes to a terminal. They are absent from the build, not switched off.
+- **Agents can close finished work.** An agent can close panes it created, or whole session tabs and workspaces after every affected pane passes the checks. It cannot close its own pane or a container holding it; there is no tool for sending arbitrary keystrokes.
 - **Sessions by the name on their tab.** Ask for *"bring the gridvibe_main session forward"* or *"move test_session to the gridvibe_2 workspace and show it"*. Two tabs with the same name are never guessed between, and the agent only reports a tab as shown once the window confirms it.
 - **New panes start where you say.** A stated folder is checked on the pane's own machine and wins over where the pane is standing, including a folder above the one a Files pane is showing.
 - **Agents can shape the grid.** Ask an agent to split a pane, then set a divider to a fraction of the open session's width or height. GridVibe checks each pane's minimum size before applying it.
 - **Agents can save a session layout.** Ask an agent to save the current session as a named preset, optionally rooted at a stated folder. The session's window must be open so GridVibe can capture its latest layout.
 - **Every installed agent, not just the MCP ones.** An agent can list which agent CLIs are available and launch any of them. A missing agent is refused rather than quietly opened as a plain terminal.
-- **An agent only touches panes it made.** The three tools that replace or clear a pane refuse the agent's own pane always, and refuse any pane it did not create — including every pane from before a restart — unless you tell it in that conversation to replace that particular one. Moving a session it did not make needs your word the same way.
+- **An agent only touches panes it made.** Replace, clear and close tools refuse the agent's own pane, and refuse panes it did not create — including panes from before a restart — unless you authorize that specific action in the conversation. Moving a session it did not make needs your word the same way.
 - **Agents hand each other tasks.** An agent that splits off or launches a Claude Code, Codex or Copilot pane can give it a task, and the new agent starts on it rather than waiting — ask for *"hand the findings to a new Codex agent below this one."* The task never goes to another machine, and nothing is typed into an agent that is already running.
 - **Agents report back.** An agent handed a task reports its outcome to the agent that handed it over, which can wait for several at once — ask for *"hand this to three Codex agents beside this one and wait for their results."* A pane closed before it reported is reported as ended, so nothing waits forever.
 - **It asks before it replaces.** Refused a pane it did not make, an agent gets GridVibe's own question to put to you — which pane, and what it would end — and acts only on your yes.

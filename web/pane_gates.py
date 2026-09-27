@@ -1,10 +1,11 @@
 """The gates a pane transition passes when an *agent* asked for it.
 
-Three transactions are now reachable from a tool -- relaunching a pane into
+Several transactions are reachable from a tool -- relaunching a pane into
 another agent (`web/session_shell.py`), switching what kind of pane it is
-(`web/session_modes.py`), and clearing it (`web/session_clear.py`) -- and each
-of them does something to a pane somebody else may be looking at. The rule that
-bounds all three is the same, so it lives here rather than three times:
+(`web/session_modes.py`), clearing it (`web/session_clear.py`), and closing a
+pane or its containing group/workspace (`web/mcp_close.py`) -- and each
+of them does something to a pane somebody else may be looking at. The shared
+rules live here:
 
 * **Self.** Never the pane the request came from. An agent does not reach
   through a tool call to end, re-mode or type into its own pane.
@@ -14,8 +15,9 @@ bounds all three is the same, so it lives here rather than three times:
 
 What is *not* shared is the third gate, because it is a different question in
 each transaction: a relaunch refuses anything that is not a plain terminal, a
-mode switch refuses a pane with an agent running in it, and a clear refuses
-both. Each transaction states its own, in its own module, using the gate names
+mode switch refuses a pane with an agent running in it, a clear refuses
+both, and a close requires an override for a running agent. Each transaction
+states its own, in its own module, using the gate names
 below so every refusal reads the same way.
 
 `override` waives lineage and never self. The waiver is not a decision this
@@ -41,7 +43,7 @@ It is the minority path, and nothing below assumes it.)
 
 One level up, the same is true more plainly: a local agent pane runs with the
 user's own privileges and GridVibe's API on loopback, where
-`DELETE /api/sessions/<id>` and the ungated twins of all three of these
+`DELETE /api/sessions/<id>` and the ungated twins of these
 transactions pass no gate at all. `identity.depth_budget()` states its
 equivalent weakness in the same words, and for the same reason.
 
@@ -51,9 +53,9 @@ that has been prompt-injected has to leave the tool surface and start
 constructing HTTP requests to get any further. That is a meaningfully higher
 bar. It is not "cannot".
 
-No Flask, no HTTP, and no error type of its own crossing a route boundary:
-`PaneGateRefusal` carries a message and the status the route should answer, and
-each transaction translates it into the error type its own route already maps.
+No Flask and no HTTP here. `PaneGateRefusal` carries a message and the status
+the route should answer. Existing transition modules translate it into their
+route's error type; the agent close route maps it directly to JSON.
 
 **A refusal is also a structure, so an agent can ask before it overrides.**
 Every gate refusal names its ``gate`` and whether ``override`` could ever
@@ -118,10 +120,9 @@ class AgentPaneRequest:
 class PaneGateRefusal(Exception):
     """One gate refused, with the status the route should answer.
 
-    Deliberately not one of the transaction error types: this module is below
-    all three of them, and each translates rather than re-raises so its own
-    route keeps mapping exactly one exception -- carrying :meth:`details` with
-    it, so the structure survives the translation.
+    Deliberately not one of the transaction error types: existing transitions
+    translate it and the close route maps it directly, carrying :meth:`details`
+    so the structure reaches the calling tool either way.
     """
 
     def __init__(

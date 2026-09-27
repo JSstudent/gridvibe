@@ -804,8 +804,8 @@ class ForwardedRequestFilterTestCase(unittest.TestCase):
 
     sshd hands back a raw TCP channel, and the address on this end is
     GridVibe's *whole* loopback HTTP API: saved sessions whose SSH password
-    decrypts on the way out, the destroy tier the tool surface deliberately
-    does not contain, the ungated twins of every gated tool route, the window
+    decrypts on the way out, ungated close routes, the ungated twins of every
+    gated tool route, the window
     intents another pane is waiting on. Their only guard has ever been "you
     have to be on this machine", and a byte pump would have handed all of it
     to the remote host with the token guarding exactly one route on it.

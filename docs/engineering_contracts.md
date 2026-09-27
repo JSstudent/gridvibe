@@ -1470,17 +1470,16 @@ in `README.md`; state the rules a change has to keep.
   secret at any depth regardless of the list. `list_saved_layouts` is the sharp
   case: the route it reads answers with a *decrypted* SSH password by design.
   Failures are typed and carry GridVibe's own sentence verbatim, unretried.
-- **Seven tiers, and the destroy tier is absent from the build.** Read and create
+- **Eight tool tiers.** Read and create
   only ever make something new (`read_handoff` is a read: its only side effect
   is a handoff's state); `report_result`/`wait_for_results` carry a report back
   and touch no pane; `set_pane_agent`/`set_pane_mode` replace what is
   behind an existing pane; `clear_pane` erases what one has drawn;
-  `focus_session`/`focus_pane`/`move_session` change what is shown where and
-  create or end nothing; `save_group_layout` writes a named reusable preset.
-  Closing a pane, session or workspace, and typing
-  arbitrary input into a terminal, are not written, not registered and not
-  flag-gated — a tool that does not exist cannot be talked into running by a
-  file an agent reads. `clear_pane` is not `send_input`: the only thing reaching
+  `focus_session`/`focus_pane`/`move_session`/`resize_divider` change what is
+  shown where and create or end nothing; `save_group_layout` writes a named
+  reusable preset; `close_pane`/`close_group`/`close_workspace` end live resources
+  under the shared gates. Arbitrary terminal input has no tool. `clear_pane` is
+  not `send_input`: the only thing reaching
   stdin is GridVibe's own clear command, chosen by the window that knows the
   pane's shell family.
 - **The tool surface says workspace, session and pane, one meaning each.** A
@@ -1525,6 +1524,19 @@ in `README.md`; state the rules a change has to keep.
   built by `attach_confirmation` from the live registry, never by the caller. A
   refusal nothing can waive is raised before any that `override` can, so an agent
   is never refused after the person already said yes.
+- **Close tools preflight the complete live target under one manager lock.**
+  `close_pane`, `close_group` and `close_workspace` use `web/mcp_close.py` and
+  never close the caller pane or a container holding it. Every affected pane
+  passes self, lineage and running-agent checks before the first close. A
+  waivable refusal includes the target kind/id/name and affected pane IDs in
+  `confirm`; no close occurs. Execution checks each pane object's current group
+  and workspace ownership under the same lock. No transport teardown, emit or
+  persistence write runs there. If a close fails after mutation begins, the
+  result carries exact closed pane/group/workspace IDs and a generic error;
+  the server logs only the failure category and affected IDs. Pending worker result
+  assignments end as `pane closed`, while a completed report outlives its pane.
+  `close_workspace` is the live close and preserves saved snapshots; it never
+  invokes the forget variant.
 - **`override` is the user's word, never the tool's inference.** It waives
   lineage and the "already running an agent" refusal; never self, never the kind
   gate's mode rule, and never the machine rule a task carries. It is forwarded

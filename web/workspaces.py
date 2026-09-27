@@ -2169,9 +2169,12 @@ def list_restorable_workspace_summaries() -> List[Dict[str, Any]]:
 def _close_workspace_contents(workspace_id: str) -> Optional[Dict[str, Any]]:
     """Close every session and group of one live workspace; drop the record.
 
-    The single teardown path behind *Close live workspace* and leaving
-    multi-workspace mode, so both verbs can only ever have the same live
-    effect. Returns ``None`` when the workspace is not live.
+    The teardown path behind the interactive *Close live workspace* and
+    leaving multi-workspace mode, so those two verbs have the same live
+    effect. The MCP close path in ``web/mcp_close.py`` holds the manager lock
+    across whole-target gates and per-pane ownership checks to report an
+    interrupted close precisely. Returns ``None`` when the workspace is not
+    live.
 
     Nothing is captured or cleared here — the caller owns the snapshot half of
     the matrix. The caller must not hold ``SessionManager.lock``: the SSH

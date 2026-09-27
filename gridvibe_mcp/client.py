@@ -174,6 +174,11 @@ REFUSAL_FIELDS = (
     # Stated by the navigation routes on every refusal: nothing moved and
     # nothing was shown, so a caller can say so rather than infer it.
     "changed",
+    "partial",
+    "target",
+    "closed_session_ids",
+    "closed_group_ids",
+    "closed_workspace_ids",
 )
 
 #: The dashboard's agent rows are already a published field list; the sidecar
@@ -278,6 +283,15 @@ CLEAR_FIELDS = (
     "session_id",
     "buffer_purged",
     "display_reset_requested",
+)
+
+CLOSE_FIELDS = (
+    "closed",
+    "partial",
+    "target",
+    "closed_session_ids",
+    "closed_group_ids",
+    "closed_workspace_ids",
 )
 
 #: A ceiling on the per-preset reads `list_saved_layouts` makes, so a store
@@ -974,6 +988,15 @@ class GridVibeClient:
             body=dict(body),
         )
         return project(payload, CLEAR_FIELDS)
+
+    def close_resource(self, kind: str, target_id: str, body: Mapping[str, Any]) -> Dict[str, Any]:
+        """Close a pane, group or live workspace through its whole-target gate."""
+        payload = self.request(
+            "POST",
+            f"/api/mcp/close/{urllib.parse.quote(kind)}/{urllib.parse.quote(target_id)}",
+            body=dict(body),
+        )
+        return project(payload, CLOSE_FIELDS)
 
     def move_group(self, group_id: str, body: Mapping[str, Any]) -> Dict[str, Any]:
         """Move one live group, through the gated twin of the launcher's route.

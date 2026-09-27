@@ -22,8 +22,8 @@ own ``POST /mcp/<token>``. A reader who does not tick MCP opens no port at all.
 
 **Why the filter is load-bearing.** sshd hands back a raw TCP channel, and the
 address on this end is GridVibe's whole loopback HTTP API -- saved sessions
-with decryptable credentials, the destroy tier the tool surface deliberately
-does not contain, the ungated twins of every gated tool route. Their only
+with decryptable credentials, ungated close routes, and the ungated twins of
+every gated tool route. Their only
 guard has always been "you have to be on this machine", and a plain byte pump
 would have handed all of it to the remote host with the token guarding exactly
 one route on it. So each channel is parsed here first, and a socket to

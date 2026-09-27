@@ -3,13 +3,8 @@
 Four things are pinned here, and each is a property of the build rather than
 of a code path:
 
-- **The registered surface is exactly twenty-two**, and the tiers that reach an
-  existing pane hold exactly three -- two that replace what it is, one that
-  erases what it has drawn -- beside two that only change where something is
-  shown or held. The destroy tier is *absent from the build*, not
-  flag-gated: a tool that does not exist cannot be talked into running by a
-  file an agent reads. The test names those tools so that adding one has to be
-  a deliberate edit here too.
+- **The registered surface is exactly twenty-five**, including three close
+  tools. Arbitrary terminal input has no tool, and the tier order is pinned.
 - **Argument validation happens before any HTTP.** The refusals run against an
   opener that raises if it is ever opened, so a passing test means nothing left
   the process.
@@ -35,6 +30,7 @@ from gridvibe_mcp import splits as splits_module  # noqa: E402
 from gridvibe_mcp import windows as windows_module  # noqa: E402
 from gridvibe_mcp.identity import read_identity  # noqa: E402
 from gridvibe_mcp.server import (  # noqa: E402
+    CLOSE_TOOLS,
     CREATE_TOOLS,
     DISPLAY_TOOLS,
     HANDBACK_TOOLS,
@@ -62,9 +58,6 @@ from web.window_intents import CLAIM_TTL_SECONDS, INTENT_TTL_SECONDS  # noqa: E4
 #: Every tool this phase deliberately does not build. Naming them is the point:
 #: an accidental re-addition has to fail a test that says why it is absent.
 ABSENT_TOOLS = (
-    "close_pane",
-    "close_group",
-    "close_workspace",
     "set_pane_shell",
     # `clear_pane` is not this one wearing a different name: the only bytes it
     # puts on a shell's stdin are GridVibe's own clear command, chosen by the
@@ -93,7 +86,7 @@ class RefusingOpener:
 
 
 class ToolSurfaceTestCase(unittest.TestCase):
-    def test_the_registered_surface_is_exactly_twenty_two(self):
+    def test_the_registered_surface_is_exactly_twenty_five(self):
         """Eight read, two hand back, four create, two replace, one erases,
         four navigate, one saves.
 
@@ -106,7 +99,7 @@ class ToolSurfaceTestCase(unittest.TestCase):
         """
         names = tool_names()
 
-        self.assertEqual(len(names), 22)
+        self.assertEqual(len(names), 25)
         self.assertEqual(names[:8], list(READ_TOOLS))
         self.assertEqual(READ_TOOLS[-1], "read_handoff")
         self.assertEqual(names[8:10], list(HANDBACK_TOOLS))
@@ -114,7 +107,8 @@ class ToolSurfaceTestCase(unittest.TestCase):
         self.assertEqual(names[14:16], list(RELAUNCH_TOOLS))
         self.assertEqual(names[16:17], list(DISPLAY_TOOLS))
         self.assertEqual(names[17:21], list(NAVIGATION_TOOLS))
-        self.assertEqual(names[21:], list(SAVE_TOOLS))
+        self.assertEqual(names[21:22], list(SAVE_TOOLS))
+        self.assertEqual(names[22:], list(CLOSE_TOOLS))
 
     def test_the_layout_enum_is_the_set_gridvibe_actually_accepts(self):
         """`stack` was never a GridVibe layout, and the two that are were
@@ -184,7 +178,7 @@ class ToolSurfaceTestCase(unittest.TestCase):
         # Not the absent `send_input` under another name.
         self.assertIn("not a way to type into a terminal", spec["description"])
 
-    def test_the_destroy_tier_is_absent_from_the_build(self):
+    def test_arbitrary_terminal_input_is_absent_from_the_build(self):
         names = set(tool_names())
 
         for absent in ABSENT_TOOLS:
@@ -193,7 +187,7 @@ class ToolSurfaceTestCase(unittest.TestCase):
 
     def test_no_tool_can_ask_gridvibe_to_forget_a_workspace(self):
         # `?forget=true` is never a tool argument in any phase.
-        self.assertNotIn("forget", json.dumps(tool_specs()).lower())
+        self.assertTrue(all("forget" not in spec["inputSchema"]["properties"] for spec in tool_specs()))
 
     def test_every_tool_publishes_a_closed_schema(self):
         for spec in tool_specs():
@@ -206,13 +200,13 @@ class ToolSurfaceTestCase(unittest.TestCase):
 
     def test_an_unknown_tool_is_reported_not_raised(self):
         result = dispatch(
-            "close_workspace",
+            "send_input",
             {},
             client=client_for(RefusingOpener(self)),
             identity=read_identity(INSIDE_PANE),
         )
 
-        self.assertIn("close_workspace", result["error"])
+        self.assertIn("send_input", result["error"])
         self.assertEqual(result["kind"], "unknown_tool")
 
 

@@ -212,6 +212,7 @@ from web.lifecycle import (
     prepare_workspace_save,
     save_group_layout,
 )
+from web.mcp_close import close_for_agent
 from web.mcp_launch import (  # noqa: F401 - mcp_config_path re-exported for tests
     mcp_config_path,
     server_base_url,
@@ -4175,6 +4176,13 @@ def clear_session_for_agent(session_id: str):
     except ClearTransitionError as exc:
         return jsonify({"error": exc.message, **exc.details}), exc.status_code
     return jsonify(payload)
+
+
+@app.route('/api/mcp/close/<kind>/<target_id>', methods=['POST'])
+def close_resource_for_agent(kind: str, target_id: str):
+    """Agent-tool close with whole-target gates and a live ownership check."""
+    payload, status = close_for_agent(kind, target_id, request.get_json(silent=True) or {})
+    return jsonify(payload), status
 
 
 @app.route('/api/sessions/<session_id>', methods=['DELETE'])

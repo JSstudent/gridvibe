@@ -1,7 +1,7 @@
 # GridVibe MCP sidecar
 
-A stdio MCP server that gives an agent running in a GridVibe pane twenty-two
-tools for seeing, building, navigating and saving GridVibe workspaces.
+A stdio MCP server that gives an agent running in a GridVibe pane twenty-five
+tools for seeing, building, navigating, saving and closing GridVibe resources.
 
 This file is the reference for the MCP feature. Everything else that mentions
 it — `README.md`, `CLAUDE.md`, `docs/engineering_contracts.md` — says what it
@@ -82,7 +82,7 @@ process, so the pane's environment is already its environment:
 
 An agent started by hand outside GridVibe inherits none of them, and `whoami`
 says so rather than guessing. The read tools still work, and a launch still
-works if it names a workspace; the three gated pane tools and `move_session`
+works if it names a workspace; the gated pane, close and `move_session` tools
 are refused outright, because the lineage gate compares against a calling pane
 there is none of.
 
@@ -93,7 +93,7 @@ back to it as an inline TOML table on the launch line
 
 ## Tools
 
-Twenty-two, in seven tiers by blast radius. The order below is the order
+Twenty-five, in eight tiers by blast radius. The order below is the order
 `tool_specs()` registers them in, and `tests/test_mcp_tools.py` pins it.
 
 **Three nouns, one meaning each.** A *workspace* is a window. A *session* is a
@@ -251,9 +251,30 @@ the atomic saved-session commit. It omits paths, connection details,
 credentials, handoff tasks and active processes. `list_saved_layouts` then
 shows the new preset, and the launcher can open it as a fresh session.
 
-### The gates on the replace and display tools
+### close — three
 
-Shared in `web/pane_gates.py`, so all three refuse in the same words. A refusal
+| Tool | Ends |
+| --- | --- |
+| `close_pane(pane_id)` | one pane and its shell, view or agent |
+| `close_group(group_id)` | every pane in one session tab, then that tab |
+| `close_workspace(workspace_id)` | every group and pane in one live workspace, preserving its saved snapshot for restore |
+
+Each call checks the *entire* target set through the shared pane gates before
+closing anything. A caller cannot close its own pane or a group or workspace
+containing it, even with `override`. Other panes must have been created by the
+caller; closing a running agent also needs `override`. A waivable refusal has
+`confirm.target`, `confirm.affected_pane_ids`, and a question naming the affected
+pane. The caller asks the person before retrying. Server execution checks live
+pane and group ownership again under one manager lock. A runtime failure reports
+the exact `closed_pane_ids`, `closed_group_ids`, and `closed_workspace_ids`
+without exposing internal exception details.
+Closing an unreported worker ends its result assignment with a reason. Collect
+reports with `wait_for_results` before closing workers when their work matters.
+`close_workspace` closes only the live workspace; it cannot forget a snapshot.
+
+### The gates on the replace, display and close tools
+
+Shared in `web/pane_gates.py`, so these transactions refuse in the same words. A refusal
 names which gate failed, because an agent told only "refused" calls again.
 `move_session` passes the same lineage gate widened to a whole session
 (`web/navigation.py`), with the same `override` rule.
@@ -262,7 +283,7 @@ names which gate failed, because an agent told only "refused" calls again.
 | --- | --- | --- |
 | **self** | never the pane the request came from | no |
 | **lineage** | only a pane this agent's own pane created, and only while that caller pane is still open | by `override` |
-| **kind** | each transaction's own: a relaunch takes only a plain terminal; a mode switch refuses a pane with an agent running in it; a clear refuses both a non-terminal pane and a running agent | the "already an agent" half, by `override` |
+| **kind** | each transaction's own: a relaunch takes only a plain terminal; a mode switch refuses a pane with an agent running in it; a clear refuses both a non-terminal pane and a running agent; a close checks a running agent | the "already an agent" half, by `override` |
 | **machine** | a relaunch carrying a `task` only reaches a pane on the caller's own machine | no |
 
 Every gate refusal is structured as well as worded: `gate`, `waivable`, and —
@@ -291,9 +312,8 @@ Every waiver is logged with both pane ids.
 
 ### absent
 
-Closing a pane, a session or a workspace; typing arbitrary input into a
-terminal. These are not written, not registered, and not flag-gated. A tool
-that does not exist cannot be talked into running by a file an agent reads.
+Typing arbitrary input into a terminal has no tool. `clear_pane` chooses its
+own shell-specific command; an agent cannot supply input bytes.
 
 ## Splitting, resizing, showing and opening windows need a page
 
@@ -458,8 +478,8 @@ handoff is bound and when one goes.
 
 - **Prompt injection reaches further than a terminal.** A repository file that
   talks an agent into `launch_panes` has a lever on the machine GridVibe runs
-  on. This is why the create tier is small and the destroy tier is absent
-  rather than gated.
+  on. Close tools are gated but these gates depend on the caller following its
+  instructions; the tool surface remains a guardrail, not a security boundary.
 - **The depth budget is a guardrail, not a boundary.** `launch_panes` refuses
   past `--max-agent-depth` (default 2) and stamps depth + 1 on the panes it
   creates, so the refusal compounds. The agent it constrains could unset
@@ -653,9 +673,9 @@ a loop of connections that send nothing still costs a thread each for the
 
 That filter is load-bearing, not defence in depth. On this end of the forward is
 GridVibe's whole loopback HTTP API: saved sessions with decryptable credentials,
-the destroy tier the tool surface deliberately does not contain, the ungated
-twins of every gated route. Their only guard has ever been "you have to be on
-this machine", and a plain byte pump would have handed every one of them to the
+ungated close routes, and the ungated twins of every gated tool route. Their
+only guard has ever been "you have to be on this machine", and a plain byte
+pump would have handed every one of them to the
 remote host with the token guarding exactly one route on it.
 
 So what a process on that remote host can reach is this pane's tool surface, and
