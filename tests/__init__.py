@@ -1,9 +1,10 @@
 """Test-package bootstrap: isolate the suite from production local state.
 
-Importing any test module imports this package first, whichever runner is used
-(``python tests/run_tests.py``, ``python -m unittest tests.test_api``, pytest),
-so it is the one place that can redirect process-wide state before ``web`` is
-imported.
+Package-based runners (``python tests/run_tests.py``,
+``python -m unittest tests.test_api``, pytest) import this package before test
+modules. For top-level ``python -m unittest discover -s tests``, the first
+discovered file, ``test_000_bootstrap.py``, imports it before other tests.
+This redirects process-wide state before ``web`` is imported.
 
 ``web.runtime_state`` resolves its file from ``GRIDVIBE_RUNTIME_STATE_PATH`` at
 import time and refuses the canonical project-local ``runtime_state.json``
