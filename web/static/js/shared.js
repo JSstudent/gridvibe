@@ -179,6 +179,17 @@
         });
     }
 
+    /* The warning shown before any surface grants an agent override mode --
+       the launcher's checkbox and the pane menu's "MCP override" button alike,
+       so both ask the same question in the same words. */
+    const AGENT_MCP_OVERRIDE_CONFIRM = {
+        title: 'Let this agent act without asking?',
+        copy: 'This agent will close, move, relaunch, re-mode and clear panes it did not create, without asking first. It still cannot touch its own pane.',
+        note: 'This is not a new way in: any agent pane can already reach GridVibe directly. What changes is the effort. An agent misled by what it reads can do damage with one tool call instead of having to build the request itself.',
+        confirmLabel: 'Turn on override',
+        danger: true
+    };
+
     function initGenericConfirmModal() {
         const modal = document.getElementById('genericConfirmModal');
         const cancelButton = document.getElementById('genericConfirmCancel');

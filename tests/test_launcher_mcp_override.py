@@ -23,6 +23,7 @@ from tempfile import TemporaryDirectory
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 LAUNCHER_JS = PROJECT_ROOT / "web" / "static" / "js" / "launcher.js"
 LAUNCHER_CSS = PROJECT_ROOT / "web" / "static" / "css" / "launcher.css"
+SHARED_JS = PROJECT_ROOT / "web" / "static" / "js" / "shared.js"
 
 NODE = shutil.which("node")
 
@@ -34,8 +35,15 @@ def _slice(source: str, start: str, end: str) -> str:
 
 def _launcher_helpers() -> str:
     source = LAUNCHER_JS.read_text(encoding="utf-8")
+    # The warning copy lives in shared.js, where the pane menu reads it too.
+    shared = SHARED_JS.read_text(encoding="utf-8")
     return "\n".join(
         [
+            _slice(
+                shared,
+                "    const AGENT_MCP_OVERRIDE_CONFIRM = {",
+                "    function initGenericConfirmModal() {",
+            ),
             _slice(
                 source,
                 "    function agentMcpSupported(agentValue) {",

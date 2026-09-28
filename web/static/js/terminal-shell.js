@@ -22,7 +22,9 @@
        The third dimension uses that same shape one level down: an agent whose
        CLI can be handed the sidecar carries an "MCP" button beside its row,
        and pressing it starts that agent with GridVibe tools while the row
-       itself starts it plainly. Two one-press actions rather than a modifier
+       itself starts it plainly. An "Override" button beside it starts the agent
+       with those tools in override mode (after the same in-page warning the
+       launcher shows). Three one-press actions rather than a modifier
        the reader has to set first — and an inline control rather than a
        flyout, which is what keeps the menu inside the window on a pane docked
        against its right edge.
@@ -110,6 +112,28 @@
        left by a preset written before the pane was sent back to one. */
     function paneAgentMcp(session) {
         return Boolean(paneAgentKey(session) && session?.agent_mcp);
+    }
+
+    /* Whether the pane's agent holds override mode. Only ever beside the tools
+       it rides on: a grant left on a pane whose tools are off reports false,
+       as `agent-identity.js::paneAgentMcpOverride` does for the header. */
+    function paneAgentMcpOverride(session) {
+        return paneAgentMcp(session) && session?.agent_mcp_override === true;
+    }
+
+    /* What a relaunch choice was made against: the pane's kind, shell family,
+       agent and tools. The session object itself is replaced on every status
+       sync, so identity would call an unchanged pane changed. */
+    function paneRelaunchSignature(session) {
+        return JSON.stringify([
+            session?.mode || '',
+            session?.startup_mode || '',
+            paneShellKind(session),
+            String(session?.distribution || '').trim(),
+            paneAgentKey(session),
+            paneAgentMcp(session),
+            paneAgentMcpOverride(session)
+        ]);
     }
 
     function paneIsRelaunchable(session) {
@@ -226,13 +250,14 @@
     /* One row per relaunch target, so nothing on this side can send a shell
        family without saying what the pane should start under it — or start an
        agent without saying whether it gets GridVibe tools. */
-    function paneShellLaunchAttrs(shellKind, distribution, agentKey, mcp) {
+    function paneShellLaunchAttrs(shellKind, distribution, agentKey, mcp, override = false) {
         return (
             `data-pane-shell-launch="1"`
             + ` data-pane-shell-kind="${escHtml(shellKind)}"`
             + ` data-pane-shell-distro="${escHtml(distribution)}"`
             + ` data-pane-shell-agent="${escHtml(agentKey)}"`
             + ` data-pane-shell-mcp="${mcp ? '1' : '0'}"`
+            + ` data-pane-shell-mcp-override="${mcp && override ? '1' : '0'}"`
         );
     }
 
@@ -242,7 +267,7 @@
        when it is updating the agent the pane already runs with them, so
        updating is never also a way off the tools. An agent that publishes no
        update command gets no button. */
-    function paneShellAgentUpdateHtml(option, label, shellKind, distribution, keepMcp) {
+    function paneShellAgentUpdateHtml(option, label, shellKind, distribution, keepMcp, keepOverride = false) {
         const command = String(option?.update_command || '').trim();
         if (!command) {
             return '';
@@ -255,7 +280,7 @@
                 class="pane-shell-menu-update"
                 title="${escHtml(title)}"
                 aria-label="${escHtml(title)}"
-                ${paneShellLaunchAttrs(shellKind, distribution, option.value, keepMcp)}
+                ${paneShellLaunchAttrs(shellKind, distribution, option.value, keepMcp, keepOverride)}
                 data-pane-shell-update="1"
             >${AGENT_UPDATE_ICON}</button>
         `;
@@ -274,8 +299,14 @@
        GridVibe tools, and exactly one of the two wears the check — so the pair
        reports which of the two the pane is actually running, and either press
        is the way off the other. Agents with no published MCP mechanism get the
-       bare row, the same way a pane with no shell family gets no chevron. */
-    function paneShellAgentItemsHtml(shellKind, distribution, activeAgent, familyIsActive, activeMcp) {
+       bare row, the same way a pane with no shell family gets no chevron.
+
+       Override mode is a third target on the same row, so the trio is one
+       radio group: plain, tools, tools in override mode. Pressing "MCP" states
+       override false, which is what makes it the way back from override mode
+       to plain tools rather than a silence the route reads as "keep the
+       grant". Override mode asks its warning before it is granted. */
+    function paneShellAgentItemsHtml(shellKind, distribution, activeAgent, familyIsActive, activeMcp, activeOverride = false) {
         const rows = [
             paneShellMenuItemHtml({
                 label: 'Plain shell',
@@ -287,6 +318,8 @@
         paneAgentMenuOptions().forEach(option => {
             const label = option.display_name || option.label || option.value;
             const isLive = familyIsActive && activeAgent === option.value;
+            const toolsLive = isLive && activeMcp && !activeOverride;
+            const overrideLive = isLive && activeMcp && activeOverride;
             const plainRow = paneShellMenuItemHtml({
                 label,
                 active: isLive && !activeMcp,
@@ -295,7 +328,8 @@
                 attrs: paneShellLaunchAttrs(shellKind, distribution, option.value, false)
             });
             const updateButton = paneShellAgentUpdateHtml(
-                option, label, shellKind, distribution, isLive && activeMcp
+                option, label, shellKind, distribution,
+                isLive && activeMcp, overrideLive
             );
             if (!paneAgentSupportsMcp(option)) {
                 rows.push(updateButton
@@ -304,6 +338,7 @@
                 return;
             }
             const toolsLabel = `${label} with GridVibe tools`;
+            const overrideLabel = `${toolsLabel} in override mode`;
             rows.push(`
                 <div class="pane-shell-menu-row">
                     ${plainRow}
@@ -311,12 +346,21 @@
                     <button
                         type="button"
                         role="menuitemradio"
-                        class="pane-shell-menu-mcp${isLive && activeMcp ? ' is-active' : ''}"
-                        aria-checked="${isLive && activeMcp ? 'true' : 'false'}"
+                        class="pane-shell-menu-mcp${toolsLive ? ' is-active' : ''}"
+                        aria-checked="${toolsLive ? 'true' : 'false'}"
                         title="${escHtml(toolsLabel)}"
                         aria-label="${escHtml(toolsLabel)}"
-                        ${paneShellLaunchAttrs(shellKind, distribution, option.value, true)}
+                        ${paneShellLaunchAttrs(shellKind, distribution, option.value, true, false)}
                     >MCP</button>
+                    <button
+                        type="button"
+                        role="menuitemradio"
+                        class="pane-shell-menu-mcp pane-shell-menu-mcp-override${overrideLive ? ' is-active' : ''}"
+                        aria-checked="${overrideLive ? 'true' : 'false'}"
+                        title="${escHtml(overrideLabel)}"
+                        aria-label="${escHtml(overrideLabel)}"
+                        ${paneShellLaunchAttrs(shellKind, distribution, option.value, true, true)}
+                    >Override</button>
                 </div>
             `);
         });
@@ -325,7 +369,7 @@
 
     /* A shell family row plus its right-hand chevron, and — while that chevron
        is open — the family's agent list indented under it. */
-    function paneShellFamilyRowHtml({ index, label, hint, shellKind, distribution, activeAgent, activeMcp, familyIsActive }) {
+    function paneShellFamilyRowHtml({ index, label, hint, shellKind, distribution, activeAgent, activeMcp, activeOverride, familyIsActive }) {
         const rowKey = paneShellRowKey(shellKind, distribution);
         const expanded = _expandedShellAgentRows.get(index) === rowKey;
         const agentsLabel = `Agents for ${label}`;
@@ -348,12 +392,12 @@
             </div>
             ${expanded ? `
             <div class="pane-shell-menu-sub" role="group" aria-label="${escHtml(agentsLabel)}">
-                ${paneShellAgentItemsHtml(shellKind, distribution, activeAgent, familyIsActive, activeMcp)}
+                ${paneShellAgentItemsHtml(shellKind, distribution, activeAgent, familyIsActive, activeMcp, activeOverride)}
             </div>` : ''}
         `;
     }
 
-    function paneShellMenuWslItemsHtml(index, activeKind, activeDistribution, activeAgent, activeMcp) {
+    function paneShellMenuWslItemsHtml(index, activeKind, activeDistribution, activeAgent, activeMcp, activeOverride) {
         const rows = [
             paneShellFamilyRowHtml({
                 index,
@@ -363,6 +407,7 @@
                 distribution: '',
                 activeAgent,
                 activeMcp,
+                activeOverride,
                 familyIsActive: activeKind === 'wsl' && !activeDistribution
             })
         ];
@@ -376,6 +421,7 @@
                 distribution: name,
                 activeAgent,
                 activeMcp,
+                activeOverride,
                 familyIsActive: activeKind === 'wsl' && activeDistribution === name
             }));
         });
@@ -405,6 +451,7 @@
         const activeDistribution = String(session?.distribution || '').trim();
         const activeAgent = paneAgentKey(session);
         const activeMcp = paneAgentMcp(session);
+        const activeOverride = paneAgentMcpOverride(session);
         const busy = _pendingShellSwitchPanes.has(terminals[index]);
 
         let sections = '';
@@ -417,12 +464,13 @@
                 distribution: '',
                 activeAgent,
                 activeMcp,
+                activeOverride,
                 familyIsActive: activeKind === option.kind
             })).join('');
             sections = `
                 <div class="pane-shell-menu-title">Shell</div>
                 ${shellRows}
-                ${paneShellMenuWslItemsHtml(index, activeKind, activeDistribution, activeAgent, activeMcp)}
+                ${paneShellMenuWslItemsHtml(index, activeKind, activeDistribution, activeAgent, activeMcp, activeOverride)}
             `;
         } else if (paneSupportsAgentSwitch(session)) {
             /* No shell family to hang the chevrons on, so the agent radio group
@@ -432,7 +480,7 @@
                pane's tools ride its own transport home. */
             sections = `
                 <div class="pane-shell-menu-title">Agent</div>
-                ${paneShellAgentItemsHtml('', '', activeAgent, true, activeMcp)}
+                ${paneShellAgentItemsHtml('', '', activeAgent, true, activeMcp, activeOverride)}
             `;
         }
 
@@ -547,6 +595,7 @@
                     distribution: launch.dataset.paneShellDistro || '',
                     agent: launch.dataset.paneShellAgent || '',
                     mcp: launch.dataset.paneShellMcp === '1',
+                    mcpOverride: launch.dataset.paneShellMcpOverride === '1',
                     update: launch.dataset.paneShellUpdate === '1'
                 });
                 return;
@@ -609,7 +658,7 @@
        to a plain shell) changes what that header should say. The stored title
        is untouched either way — a name the user typed keeps winning, and the
        agent's name is still never persisted back. */
-    async function relaunchSessionShell(index, { shell = '', distribution = '', agent = '', mcp = false, update = false } = {}) {
+    async function relaunchSessionShell(index, { shell = '', distribution = '', agent = '', mcp = false, mcpOverride = false, update = false } = {}) {
         const sessionId = sessionIds[index];
         const pane = terminals[index];
         const session = pane?._session;
@@ -620,7 +669,41 @@
         if (shell && !paneSupportsShellSwitch(session)) {
             return;
         }
-        const body = { agent, mcp: Boolean(agent) && Boolean(mcp) };
+        const withTools = Boolean(agent) && Boolean(mcp);
+        const withOverride = withTools && Boolean(mcpOverride);
+        /* A pane that already holds the grant under this agent is kept in it
+           without asking again -- re-pressing the row, or updating the agent.
+           But the page's copy of the pane can lag the server, so a kept grant
+           is never *stated*: the request leaves `mcp_override` out and the
+           route carries only a grant it still records. A stale page therefore
+           cannot restore a grant somebody else has since dropped. */
+        const keepsGrant = withOverride
+            && paneAgentMcpOverride(session) && paneAgentKey(session) === agent;
+        /* Override mode is asked for before it is granted, in the same in-page
+           dialog the launcher uses. Nothing has been painted yet, so declining
+           leaves the pane exactly as it was. */
+        if (withOverride && !keepsGrant) {
+            const before = paneRelaunchSignature(session);
+            const confirmed = await openGenericConfirmModal(AGENT_MCP_OVERRIDE_CONFIRM);
+            /* The dialog is modal but not a lock: while it was open the pane
+               may have left its slot, started a relaunch of its own, or been
+               moved on by somebody else (a tool relaunch, a mode switch) --
+               and the answer was given to the pane as it was. */
+            if (!confirmed
+                || terminals[index] !== pane
+                || sessionIds[index] !== sessionId
+                || _pendingShellSwitchPanes.has(pane)
+                || paneRelaunchSignature(pane._session) !== before) {
+                return;
+            }
+        }
+        const body = { agent, mcp: withTools };
+        /* Stated whenever the tools are and no grant is being kept, so the
+           "MCP" button is the way back from override mode rather than a
+           silence the route reads as "keep it". */
+        if (withTools && !keepsGrant) {
+            body.mcp_override = withOverride;
+        }
         /* Only ever sent as true: an update is a one-shot action, and every
            request that leaves it out is simply not asking for one. */
         if (agent && update) {

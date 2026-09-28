@@ -1662,8 +1662,12 @@ class ApiRoutesTestCase(unittest.TestCase):
         # An MCP-capable agent's tools button uses that same two-control row.
         # Inline, so the panel never opens sideways out of the window; and
         # right-anchored with a ceiling, so it grows away from that edge.
-        self.assertIn("class=\"pane-shell-menu-mcp${isLive && activeMcp ? ' is-active' : ''}\"", html)
+        self.assertIn("class=\"pane-shell-menu-mcp${toolsLive ? ' is-active' : ''}\"", html)
         self.assertIn(".pane-shell-menu-mcp.is-active {", html)
+        # Override mode is a third target on that row and reads red, off the
+        # same theme token the header frame and dashboard chip wear.
+        self.assertIn("pane-shell-menu-mcp pane-shell-menu-mcp-override", html)
+        self.assertIn(".pane-shell-menu-mcp-override.is-active", html)
         self.assertIn("max-width: min(320px, calc(100vw - 16px));", html)
 
     def test_terminals_page_agent_options_carry_registry_display_names(self):

@@ -1688,14 +1688,6 @@
         };
     }
 
-    const AGENT_MCP_OVERRIDE_CONFIRM = {
-        title: 'Let this agent act without asking?',
-        copy: 'This agent will close, move, relaunch, re-mode and clear panes it did not create, without asking first. It still cannot touch its own pane.',
-        note: 'This is not a new way in: any agent pane can already reach GridVibe directly. What changes is the effort. An agent misled by what it reads can do damage with one tool call instead of having to build the request itself.',
-        confirmLabel: 'Turn on override',
-        danger: true
-    };
-
     /* Ticking the box only asks. It stays unticked while the dialog is open,
        so a launch or preset save in the meantime carries no grant, and only
        an explicit Confirm ticks it -- provided the row still offers it to the

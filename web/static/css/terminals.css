@@ -1654,6 +1654,14 @@
             color: var(--t-accent);
         }
 
+        /* Override mode reads red everywhere it is worn -- the pane header's
+           frame, the dashboard chip -- so the button that grants it does too. */
+        .pane-shell-menu-mcp-override:hover,
+        .pane-shell-menu-mcp-override.is-active {
+            border-color: var(--gv-mcp-override);
+            color: var(--gv-mcp-override);
+        }
+
         /* The agent row's update target — run the agent's update command,
            then start it. The chevron's footprint, in the slot the row's
            command-name hint used to take. */
