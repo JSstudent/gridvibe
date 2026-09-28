@@ -28,7 +28,7 @@ if str(PROJECT_ROOT) not in sys.path:
 import tests  # noqa: E402,F401 - redirects durable state away from the real files
 from gridvibe_mcp import splits as splits_module  # noqa: E402
 from gridvibe_mcp import windows as windows_module  # noqa: E402
-from gridvibe_mcp.identity import read_identity  # noqa: E402
+from gridvibe_mcp.identity import DEFAULT_MAX_AGENT_DEPTH, read_identity  # noqa: E402
 from gridvibe_mcp.server import (  # noqa: E402
     CLOSE_TOOLS,
     CREATE_TOOLS,
@@ -65,6 +65,9 @@ ABSENT_TOOLS = (
     # them.
     "send_input",
 )
+
+#: A pane stamped exactly at the depth budget, derived so the tests follow the default.
+AT_LIMIT = str(DEFAULT_MAX_AGENT_DEPTH)
 
 INSIDE_PANE = {
     "GRIDVIBE_URL": "http://127.0.0.1:5050",
@@ -452,12 +455,12 @@ class LaunchRequestTestCase(unittest.TestCase):
             "launch_panes",
             {"panes": [{"kind": "agent", "agent": "claude"}]},
             client=client_for(opener),
-            identity=read_identity({**INSIDE_PANE, "GRIDVIBE_AGENT_DEPTH": "2"}),
+            identity=read_identity({**INSIDE_PANE, "GRIDVIBE_AGENT_DEPTH": AT_LIMIT}),
         )
 
         self.assertEqual(result["kind"], "depth_limit")
-        self.assertEqual(result["agent_depth"], 2)
-        self.assertIn("2", result["error"])
+        self.assertEqual(result["agent_depth"], DEFAULT_MAX_AGENT_DEPTH)
+        self.assertIn(AT_LIMIT, result["error"])
         # Refused here, so nothing was asked of GridVibe.
         self.assertEqual(opener.requests, [])
 
@@ -570,11 +573,11 @@ class WhoamiTestCase(unittest.TestCase):
             "whoami",
             {},
             client=client_for(StubOpener([{"session_id": "pane-1"}])),
-            identity=read_identity({**INSIDE_PANE, "GRIDVIBE_AGENT_DEPTH": "2"}),
+            identity=read_identity({**INSIDE_PANE, "GRIDVIBE_AGENT_DEPTH": AT_LIMIT}),
         )
 
         self.assertFalse(result["may_launch_panes"])
-        self.assertIn("2", result["launch_refusal"])
+        self.assertIn(AT_LIMIT, result["launch_refusal"])
         # ...and told, in the same answer, what it may still do. The budget
         # bounds agents, so only a split that *starts* one costs it -- an agent
         # reading `may_launch_panes: false` alone concluded it could create
@@ -1365,7 +1368,7 @@ class SplitPaneTestCase(unittest.TestCase):
     def test_an_agent_at_the_limit_cannot_split_off_another_agent(self):
         result, recorded = self.split(
             {"pane_id": "pane-4", "kind": "agent", "agent": "claude"},
-            environ={**INSIDE_PANE, "GRIDVIBE_AGENT_DEPTH": "2"},
+            environ={**INSIDE_PANE, "GRIDVIBE_AGENT_DEPTH": AT_LIMIT},
         )
 
         self.assertEqual(result["kind"], "depth_limit")
@@ -1375,7 +1378,7 @@ class SplitPaneTestCase(unittest.TestCase):
         """The budget bounds agents, not panes."""
         result, recorded = self.split(
             {"pane_id": "pane-4"},
-            environ={**INSIDE_PANE, "GRIDVIBE_AGENT_DEPTH": "2"},
+            environ={**INSIDE_PANE, "GRIDVIBE_AGENT_DEPTH": AT_LIMIT},
         )
 
         self.assertEqual(result["status"], SPLIT)
@@ -1793,7 +1796,7 @@ class SetPaneAgentTestCase(unittest.TestCase):
             "set_pane_agent",
             {"pane_id": "pane-4", "agent": "claude"},
             client=client_for(RefusingOpener(self)),
-            identity=read_identity({**INSIDE_PANE, "GRIDVIBE_AGENT_DEPTH": "2"}),
+            identity=read_identity({**INSIDE_PANE, "GRIDVIBE_AGENT_DEPTH": AT_LIMIT}),
         )
 
         self.assertEqual(result["kind"], "depth_limit")
@@ -1947,7 +1950,7 @@ class SetPaneModeTestCase(unittest.TestCase):
             "set_pane_mode",
             {"pane_id": "pane-4", "mode": "explorer"},
             client=client_for(opener),
-            identity=read_identity({**INSIDE_PANE, "GRIDVIBE_AGENT_DEPTH": "2"}),
+            identity=read_identity({**INSIDE_PANE, "GRIDVIBE_AGENT_DEPTH": AT_LIMIT}),
         )
 
         self.assertNotIn("error", result)

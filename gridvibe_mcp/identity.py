@@ -34,7 +34,7 @@ IDENTITY_VARIABLES = (
 #: How many generations of agent-launching-agent are allowed. ``terminal.
 #: max_sessions`` caps a group, not a fleet: without this, an agent that can
 #: start agents can start agents that start agents.
-DEFAULT_MAX_AGENT_DEPTH = 2
+DEFAULT_MAX_AGENT_DEPTH = 5
 
 
 @dataclass(frozen=True)

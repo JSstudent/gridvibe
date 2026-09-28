@@ -493,7 +493,7 @@ handoff is bound and when one goes.
   on. Close tools are gated but these gates depend on the caller following its
   instructions; the tool surface remains a guardrail, not a security boundary.
 - **The depth budget is a guardrail, not a boundary.** `launch_panes` refuses
-  past `--max-agent-depth` (default 2) and stamps depth + 1 on the panes it
+  past `--max-agent-depth` (default 5) and stamps depth + 1 on the panes it
   creates, so the refusal compounds. The agent it constrains could unset
   `GRIDVIBE_AGENT_DEPTH`. It stops a runaway loop; it does not stop an
   adversary. A server-side per-group counter is the real answer and is a later
