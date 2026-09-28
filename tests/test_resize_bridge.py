@@ -24,6 +24,7 @@ const bridgeSource = process.argv[2];
 const results = {};
 async function run(kind) {
     const events = [];
+    let closeEpoch = 0;
     const rects = [{x:1,y:1,w:1,h:1}, {x:2,y:1,w:1,h:1}];
     const cards = [{dataset:{slot:'0'}}, {dataset:{slot:'1'}}];
     const grid = {children: cards, className:'layout-2-vertical'};
@@ -35,11 +36,15 @@ async function run(kind) {
         currentWorkspaceId:'ws', sessionGroups:[group],
         activeGroupId:'g', visibleGroupId:'g', gridBuilt:true,
         resizeIntentInFlight:false, activeGridResize:null,
+        closeGeometryCoordinator: {epoch: () => closeEpoch},
         splitColumnWeights:[1,1], splitRowWeights:[1],
         terminals:[{},{}], sessionIds:['p1','p2'],
         originalSplitSlotCount:2,
         presentationController: () => ({
-            settleGroup: async () => {events.push('settle');},
+            settleGroup: async () => {
+                events.push('settle');
+                if (kind === 'closeBeforeWrite') closeEpoch += 1;
+            },
             captureGroup: () => ({pane_order:['p1','p2'], panes:[{session_id:'p1'},{session_id:'p2'}]}),
             setGroupRevision: (_id, revision) => {events.push('revision'); group.presentation_revision=revision;}
         }),
@@ -66,6 +71,7 @@ async function run(kind) {
         postPresentation: async (_url,payload) => {
             events.push('post');
             if (kind === 'postThrow') throw new Error('connection lost');
+            if (kind === 'closeAfterWrite') closeEpoch += 1;
             return {ok:kind !== 'persist',json:async () => kind === 'persist'
                 ? {error:'Save failed'} : kind === 'badResponse'
                 ? Promise.reject(new Error('invalid JSON')) : kind === 'missingRevision'
@@ -85,7 +91,10 @@ async function run(kind) {
     return {answer,events,revision:group.presentation_revision};
 }
 (async () => {
-    for (const kind of ['ok','stale','narrow','minimum','persist','postThrow','badResponse','missingRevision']) {
+    for (const kind of [
+        'ok','stale','narrow','minimum','persist','postThrow','badResponse',
+        'missingRevision','closeBeforeWrite','closeAfterWrite'
+    ]) {
         results[kind] = await run(kind);
     }
     console.log(JSON.stringify(results));
@@ -111,3 +120,10 @@ async function run(kind) {
             self.assertIn("outcome is unknown", cases[kind]["answer"]["error"])
             self.assertNotIn("Nothing changed", cases[kind]["answer"]["error"])
             self.assertNotIn("paint", cases[kind]["events"])
+        self.assertFalse(cases["closeBeforeWrite"]["answer"]["ok"])
+        self.assertEqual(cases["closeBeforeWrite"]["events"], ["settle"])
+        self.assertIn("Nothing changed", cases["closeBeforeWrite"]["answer"]["error"])
+        self.assertFalse(cases["closeAfterWrite"]["answer"]["ok"])
+        self.assertTrue(cases["closeAfterWrite"]["answer"]["unknown"])
+        self.assertEqual(cases["closeAfterWrite"]["events"], ["settle", "post"])
+        self.assertIn("saved layout may still hold them", cases["closeAfterWrite"]["answer"]["error"])

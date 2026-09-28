@@ -609,10 +609,13 @@
     let workspacePresentationRevision = 0;
     let surfaceModeChangedManually = false;
     let currentGlobalSurfaceMode = normalizeSurfaceMode(DEFAULT_SURFACE_MODE);
-    let pendingSplitRestore = null;
-    /* Live explorer/browser client state captured before a terminal close so the
-       forced grid rebuild does not wipe sibling panes (ISSUE-2026-027). */
-    let pendingCloseClientState = null;
+    const closeGeometryCoordinator = window.GridVibeCloseGeometry.createCoordinator();
+    const closeRestoreMismatchAttempts = new Map();
+    /* An X-button close captures before its DELETE. The socket delta can arrive
+       before the response, so keep that exact snapshot available to the shared
+       staging path until both transports have had a chance to use it. */
+    const closeSnapshotsBySessionId = new Map();
+    const closedGroupsAwaitingTeardown = new Set();
     let pendingModeSwitchSessionIds = new Set();
     let savedSessionResolver = null;
     let saveSessionAsResolver = null;
@@ -3956,33 +3959,37 @@
         });
     }
 
-    function fixedLayoutSlotRects(count, layoutClass = '') {
+    function fixedLayoutRectCoordinates(count, layoutClass = '') {
         const unit = SPLIT_CELL_UNIT;
-        originalSplitSlotCount = Math.max(originalSplitSlotCount, count);
         if (count === 1) {
-            return [makeSplitLeaf({ originSlot: 0, x: 1, y: 1, w: 2 * unit, h: unit })];
+            return [{ originSlot: 0, x: 1, y: 1, w: 2 * unit, h: unit }];
         }
         if (count === 2 && layoutClass.includes('horizontal')) {
             return [
-                makeSplitLeaf({ originSlot: 0, x: 1, y: 1, w: 2 * unit, h: unit }),
-                makeSplitLeaf({ originSlot: 1, x: 1, y: 1 + unit, w: 2 * unit, h: unit }),
+                { originSlot: 0, x: 1, y: 1, w: 2 * unit, h: unit },
+                { originSlot: 1, x: 1, y: 1 + unit, w: 2 * unit, h: unit },
             ];
         }
         if (count === 2) {
             return [
-                makeSplitLeaf({ originSlot: 0, x: 1, y: 1, w: unit, h: unit }),
-                makeSplitLeaf({ originSlot: 1, x: 1 + unit, y: 1, w: unit, h: unit }),
+                { originSlot: 0, x: 1, y: 1, w: unit, h: unit },
+                { originSlot: 1, x: 1 + unit, y: 1, w: unit, h: unit },
             ];
         }
 
         const base = getBaseLayoutSlots(count, layoutClass);
-        return base.slots.map((slot, index) => makeSplitLeaf({
+        return base.slots.map((slot, index) => ({
             originSlot: index,
             x: 1 + (slot.col - 1) * unit,
             y: 1 + (slot.row - 1) * unit,
             w: slot.colSpan * unit,
             h: slot.rowSpan * unit,
         }));
+    }
+
+    function fixedLayoutSlotRects(count, layoutClass = '') {
+        originalSplitSlotCount = Math.max(originalSplitSlotCount, count);
+        return fixedLayoutRectCoordinates(count, layoutClass).map(rect => makeSplitLeaf(rect));
     }
 
     function clearSplitSlotGeometry() {
@@ -4260,301 +4267,150 @@
         ];
     }
 
-    function splitRectArea(rect) {
-        return Math.max(0, Number(rect?.w || 0)) * Math.max(0, Number(rect?.h || 0));
+    function closeGroupIdForSession(sessionId) {
+        const route = sessionRouteMap.get(String(sessionId || ''));
+        if (route?.groupId) return route.groupId;
+        return sessionGroups.find(group => (
+            Array.isArray(group.pane_order) && group.pane_order.includes(sessionId)
+        ))?.group_id || '';
     }
 
-    function splitRectUnion(left, right) {
-        const x1 = Math.min(left.x, right.x);
-        const y1 = Math.min(left.y, right.y);
-        const x2 = Math.max(left.x + left.w, right.x + right.w);
-        const y2 = Math.max(left.y + left.h, right.y + right.h);
-        return { x: x1, y: y1, w: x2 - x1, h: y2 - y1 };
+    function closeEntriesFromCards(cards, ids, rects) {
+        return cards.map((card, visualIndex) => {
+            const slotIndex = Number(card.dataset.slot);
+            const sessionId = Number.isInteger(slotIndex) ? ids[slotIndex] : '';
+            const rect = rects[visualIndex];
+            return sessionId && rect ? { sessionId, visualIndex, slotIndex, rect } : null;
+        }).filter(Boolean);
     }
 
-    function splitRectsOverlap(left, right) {
-        return left.x < right.x + right.w
-            && left.x + left.w > right.x
-            && left.y < right.y + right.h
-            && left.y + left.h > right.y;
-    }
+    /* Capture one group's current close model. Visible groups use the live DOM;
+       background groups use their detached cache; a tab this window has never
+       shown uses the server summary it already holds. Pointer-drag weights are
+       copied before the drag is cancelled. */
+    function captureCloseGroupSnapshot(groupId, closedSessionIds = []) {
+        const normalizedGroupId = String(groupId || '');
+        let entries = [];
+        let columnWeights = null;
+        let rowWeights = null;
+        let slotCount = 0;
 
-    function sharedBorderLength(left, right) {
-        if (!left || !right) {
-            return 0;
-        }
-
-        let longest = 0;
-        if (left.x + left.w === right.x || right.x + right.w === left.x) {
-            longest = Math.max(
-                longest,
-                Math.min(left.y + left.h, right.y + right.h) - Math.max(left.y, right.y)
-            );
-        }
-        if (left.y + left.h === right.y || right.y + right.h === left.y) {
-            longest = Math.max(
-                longest,
-                Math.min(left.x + left.w, right.x + right.w) - Math.max(left.x, right.x)
-            );
-        }
-        return Math.max(0, longest);
-    }
-
-    function canAbsorbClosedRect(candidateRect, closedRect, otherRects) {
-        const union = splitRectUnion(candidateRect, closedRect);
-        if (splitRectArea(union) !== splitRectArea(candidateRect) + splitRectArea(closedRect)) {
-            return false;
-        }
-        return !otherRects.some(rect => splitRectsOverlap(union, rect));
-    }
-
-    function coveredIntervalLength(intervals) {
-        const sorted = intervals
-            .map(interval => ({
-                start: Math.min(interval.start, interval.end),
-                end: Math.max(interval.start, interval.end),
-            }))
-            .filter(interval => interval.end > interval.start)
-            .sort((left, right) => left.start - right.start || left.end - right.end);
-        let covered = 0;
-        let cursor = null;
-        sorted.forEach(interval => {
-            if (!cursor || interval.start > cursor.end) {
-                covered += interval.end - interval.start;
-                cursor = { ...interval };
-                return;
+        if (normalizedGroupId === visibleGroupId && gridBuilt) {
+            const grid = document.getElementById('terminalsGrid');
+            const cards = Array.from(grid?.children || []);
+            const rects = cloneSplitSlotRects(ensureSplitSlotRects()) || [];
+            entries = closeEntriesFromCards(cards, sessionIds, rects);
+            columnWeights = cloneSplitTrackWeights(splitColumnWeights);
+            rowWeights = cloneSplitTrackWeights(splitRowWeights);
+            slotCount = originalSplitSlotCount || entries.length;
+        } else {
+            const cached = cachedGroupViews.get(normalizedGroupId);
+            if (cached) {
+                const cards = Array.from(cached.fragment?.children || []);
+                const ids = cached.sessionIds || [];
+                const rects = cached.className === 'layout-split-local'
+                    ? cloneSplitSlotRects(cached.splitSlotRects) || []
+                    : fixedLayoutRectCoordinates(ids.length, cached.className || '');
+                entries = closeEntriesFromCards(cards, ids, rects);
+                columnWeights = cloneSplitTrackWeights(cached.splitColumnWeights);
+                rowWeights = cloneSplitTrackWeights(cached.splitRowWeights);
+                slotCount = cached.originalSplitSlotCount || entries.length;
+            } else {
+                const group = getGroupById(normalizedGroupId);
+                const ids = Array.isArray(group?.pane_order) ? group.pane_order.slice() : [];
+                const layout = group?.workspace_layout || {};
+                const storedRects = Array.isArray(layout.split_slot_rects)
+                    && layout.split_slot_rects.length === ids.length
+                    ? layout.split_slot_rects : null;
+                const rects = storedRects || fixedLayoutRectCoordinates(ids.length, getLayoutClass(
+                    ids.length, group?.layout || ''
+                ));
+                entries = ids.map((sessionId, visualIndex) => ({
+                    sessionId,
+                    visualIndex,
+                    slotIndex: visualIndex,
+                    rect: rects[visualIndex],
+                }));
+                columnWeights = cloneSplitTrackWeights(layout.split_column_weights);
+                rowWeights = cloneSplitTrackWeights(layout.split_row_weights);
+                slotCount = Number(layout.original_split_slot_count || ids.length || 0);
             }
-            if (interval.end > cursor.end) {
-                covered += interval.end - cursor.end;
-                cursor.end = interval.end;
-            }
-        });
-        return covered;
-    }
+        }
 
-    function terminalCloseContacts(closedRect, entry) {
-        const rect = entry.rect;
-        const contacts = [];
-        const yStart = Math.max(closedRect.y, rect.y);
-        const yEnd = Math.min(closedRect.y + closedRect.h, rect.y + rect.h);
-        const xStart = Math.max(closedRect.x, rect.x);
-        const xEnd = Math.min(closedRect.x + closedRect.w, rect.x + rect.w);
-        if (rect.x + rect.w === closedRect.x && yEnd > yStart) {
-            contacts.push({ ...entry, side: 'left', sharedBorder: yEnd - yStart, start: yStart, end: yEnd });
-        }
-        if (rect.x === closedRect.x + closedRect.w && yEnd > yStart) {
-            contacts.push({ ...entry, side: 'right', sharedBorder: yEnd - yStart, start: yStart, end: yEnd });
-        }
-        if (rect.y + rect.h === closedRect.y && xEnd > xStart) {
-            contacts.push({ ...entry, side: 'top', sharedBorder: xEnd - xStart, start: xStart, end: xEnd });
-        }
-        if (rect.y === closedRect.y + closedRect.h && xEnd > xStart) {
-            contacts.push({ ...entry, side: 'bottom', sharedBorder: xEnd - xStart, start: xStart, end: xEnd });
-        }
-        return contacts;
-    }
-
-    function findTerminalCloseNeighbor(closedRect, candidates) {
-        return candidates
-            .map(candidate => ({
-                ...candidate,
-                sharedBorder: sharedBorderLength(closedRect, candidate.rect),
-            }))
-            .filter(candidate => candidate.sharedBorder > 0)
-            .sort((left, right) => (
-                right.sharedBorder - left.sharedBorder
-                || left.visualIndex - right.visualIndex
-            ))[0] || null;
-    }
-
-    function terminalCloseSideGroups(closedRect, entries) {
-        const sideLengths = {
-            left: closedRect.h,
-            right: closedRect.h,
-            top: closedRect.w,
-            bottom: closedRect.w,
+        const snapshot = {
+            groupId: normalizedGroupId,
+            entries,
+            originalSplitSlotCount: slotCount,
+            columnWeights,
+            rowWeights,
+            clientStateBySessionId: captureSurvivingPaneClientState(
+                normalizedGroupId, closedSessionIds
+            ),
         };
-        const groupsBySide = new Map();
-        entries.flatMap(entry => terminalCloseContacts(closedRect, entry)).forEach(contact => {
-            if (!groupsBySide.has(contact.side)) {
-                groupsBySide.set(contact.side, []);
+        if (normalizedGroupId === visibleGroupId && activeGridResize) {
+            clearActiveGridResize();
+        }
+        return snapshot;
+    }
+
+    function stageSessionCloseDelta(message, snapshotOverrides = new Map()) {
+        const delta = window.GridVibeCloseGeometry.planCloseDelta(
+            message, closeGroupIdForSession
+        );
+        delta.closedGroupIds.forEach(groupId => {
+            closeGeometryCoordinator.invalidate(groupId);
+            closeRestoreMismatchAttempts.delete(groupId);
+            closedGroupsAwaitingTeardown.add(groupId);
+            presentationController()?.forgetGroup(groupId);
+            if (groupId !== visibleGroupId) {
+                dropCachedGroupView(groupId);
+                closedGroupsAwaitingTeardown.delete(groupId);
             }
-            groupsBySide.get(contact.side).push(contact);
         });
 
-        return Array.from(groupsBySide.entries()).map(([side, contacts]) => {
-            const coverage = coveredIntervalLength(contacts);
-            return {
-                side,
-                entries: contacts,
-                coverage,
-                sideLength: sideLengths[side],
-                totalSharedBorder: contacts.reduce((total, contact) => total + contact.sharedBorder, 0),
-                firstVisualIndex: Math.min(...contacts.map(contact => contact.visualIndex)),
-            };
-        });
-    }
-
-    function expandRectIntoClosedSide(rect, closedRect, side) {
-        if (side === 'left') {
-            return { ...rect, w: (closedRect.x + closedRect.w) - rect.x, ancestors: [] };
-        }
-        if (side === 'right') {
-            return { ...rect, x: closedRect.x, w: (rect.x + rect.w) - closedRect.x, ancestors: [] };
-        }
-        if (side === 'top') {
-            return { ...rect, h: (closedRect.y + closedRect.h) - rect.y, ancestors: [] };
-        }
-        if (side === 'bottom') {
-            return { ...rect, y: closedRect.y, h: (rect.y + rect.h) - closedRect.y, ancestors: [] };
-        }
-        return rect;
-    }
-
-    /* Expand a chosen subset of side contacts into the closed rect and return
-       the resulting rects only when the layout stays gap-free (area invariant)
-       and overlap-free; otherwise null so the caller can try another subset. */
-    function terminalCloseRectsForExpandingContacts(plan, side, contactsToExpand) {
-        const expandingSessionIds = new Set(contactsToExpand.map(entry => entry.sessionId));
-        const nextEntries = plan.remainingEntries.map(entry => ({
-            ...entry,
-            rect: expandingSessionIds.has(entry.sessionId)
-                ? expandRectIntoClosedSide(entry.rect, plan.closedRect, side)
-                : entry.rect,
-        }));
-        for (let leftIndex = 0; leftIndex < nextEntries.length; leftIndex += 1) {
-            for (let rightIndex = leftIndex + 1; rightIndex < nextEntries.length; rightIndex += 1) {
-                if (splitRectsOverlap(nextEntries[leftIndex].rect, nextEntries[rightIndex].rect)) {
-                    return null;
+        const results = [];
+        delta.groups.forEach(({ groupId, closedSessionIds }) => {
+            let snapshot = snapshotOverrides.get(groupId) || null;
+            if (!snapshot) {
+                for (const sessionId of closedSessionIds) {
+                    const reserved = closeSnapshotsBySessionId.get(sessionId);
+                    if (reserved?.groupId === groupId) {
+                        snapshot = reserved;
+                        break;
+                    }
                 }
             }
-        }
-
-        const previousArea = plan.remainingEntries.reduce((total, entry) => total + splitRectArea(entry.rect), 0);
-        const nextArea = nextEntries.reduce((total, entry) => total + splitRectArea(entry.rect), 0);
-        if (nextArea !== previousArea + splitRectArea(plan.closedRect)) {
-            return null;
-        }
-
-        const rectsBySessionId = {};
-        nextEntries.forEach(entry => {
-            rectsBySessionId[entry.sessionId] = cloneSplitSlotRects([entry.rect])[0];
-        });
-        return rectsBySessionId;
-    }
-
-    function buildTerminalCloseRectsForSideGroup(plan, sideGroup) {
-        if (!sideGroup || sideGroup.coverage < sideGroup.sideLength) {
-            return null;
-        }
-
-        /* Prefer expanding only the single contact with the greatest shared
-           border, so closing a pane never resizes more neighbours than the
-           geometry requires (ISSUE-2026-022). Fall back to the full side group
-           only when the single-pane expansion would leave a gap or overlap. */
-        const rankedContacts = [...sideGroup.entries].sort((left, right) => (
-            right.sharedBorder - left.sharedBorder
-            || left.visualIndex - right.visualIndex
-        ));
-        const singleContact = rankedContacts[0];
-        if (singleContact && sideGroup.entries.length > 1) {
-            const single = terminalCloseRectsForExpandingContacts(plan, sideGroup.side, [singleContact]);
-            if (single) {
-                return single;
-            }
-        }
-        return terminalCloseRectsForExpandingContacts(plan, sideGroup.side, sideGroup.entries);
-    }
-
-    function buildTerminalCloseRectsBySessionId(plan) {
-        const neighbor = findTerminalCloseNeighbor(plan.closedRect, plan.remainingEntries);
-        if (neighbor) {
-            const otherRects = plan.remainingEntries
-                .filter(entry => entry.sessionId !== neighbor.sessionId)
-                .map(entry => entry.rect);
-            if (canAbsorbClosedRect(neighbor.rect, plan.closedRect, otherRects)) {
-                const rectsBySessionId = {};
-                plan.remainingEntries.forEach(entry => {
-                    const rect = entry.sessionId === neighbor.sessionId
-                        ? {
-                            ...entry.rect,
-                            ...splitRectUnion(entry.rect, plan.closedRect),
-                            ancestors: [],
-                        }
-                        : entry.rect;
-                    rectsBySessionId[entry.sessionId] = cloneSplitSlotRects([rect])[0];
+            snapshot ||= captureCloseGroupSnapshot(groupId, closedSessionIds);
+            const result = closeGeometryCoordinator.stage({
+                groupId,
+                snapshot,
+                closedSessionIds,
+            });
+            if (!result.ok) {
+                console.error('[GridVibe Sessions] close geometry refused', {
+                    groupId,
+                    closedSessionIds,
+                    reason: result.reason,
                 });
-                return rectsBySessionId;
             }
-        }
-
-        const sideGroups = terminalCloseSideGroups(plan.closedRect, plan.remainingEntries)
-            .map(sideGroup => ({
-                ...sideGroup,
-                rectsBySessionId: buildTerminalCloseRectsForSideGroup(plan, sideGroup),
-            }))
-            .filter(sideGroup => sideGroup.rectsBySessionId);
-        sideGroups.sort((left, right) => (
-            right.totalSharedBorder - left.totalSharedBorder
-            || left.entries.length - right.entries.length
-            || left.firstVisualIndex - right.firstVisualIndex
-        ));
-        return sideGroups[0]?.rectsBySessionId || null;
+            results.push({ groupId, result });
+        });
+        return results;
     }
 
-    function buildCloseTerminalPlan(index) {
-        const grid = document.getElementById('terminalsGrid');
-        const card = document.getElementById(`tc-${index}`);
+    function previewTerminalClose(index) {
         const sessionId = sessionIds[index];
-        if (!grid || !card || !sessionId) {
-            return null;
-        }
-
-        const cards = Array.from(grid.children);
-        const visualIndex = cards.indexOf(card);
-        if (visualIndex < 0) {
-            return null;
-        }
-
-        const activeSessionIds = sessionIds.filter(Boolean);
-        if (activeSessionIds.length <= 1) {
-            return { sessionId, closeLastPane: true };
-        }
-
-        const rects = cloneSplitSlotRects(ensureSplitSlotRects());
-        const closedRect = rects?.[visualIndex];
-        if (!closedRect) {
-            return null;
-        }
-
-        const remainingEntries = cards
-            .map((paneCard, paneVisualIndex) => {
-                const slotIndex = Number(paneCard.dataset.slot);
-                const paneSessionId = Number.isInteger(slotIndex) ? sessionIds[slotIndex] : '';
-                const rect = rects[paneVisualIndex];
-                if (!paneSessionId || paneSessionId === sessionId || !rect) {
-                    return null;
-                }
-                return {
-                    sessionId: paneSessionId,
-                    visualIndex: paneVisualIndex,
-                    slotIndex,
-                    rect,
-                };
-            })
-            .filter(Boolean);
-
-        if (remainingEntries.length === 0) {
-            return { sessionId, closeLastPane: true };
-        }
-
-        return {
+        const groupId = visibleGroupId || activeGroupId;
+        if (!sessionId || !groupId) return null;
+        const snapshot = captureCloseGroupSnapshot(groupId, [sessionId]);
+        const result = window.GridVibeCloseGeometry.reduceCloseGeometry(snapshot, [sessionId]);
+        return window.GridVibeCloseGeometry.closeResultApplied(result, sessionId) ? {
             sessionId,
-            closeLastPane: false,
-            closedRect,
-            remainingEntries,
-            originalSplitSlotCount,
-        };
+            groupId,
+            closeLastPane: result.status === 'last-pane',
+            snapshot,
+            result,
+        } : null;
     }
 
     function applySplitButtonState(button, enabled, activeTitle, disabledReason) {
@@ -6968,11 +6824,16 @@
        (initialLoad), which would otherwise reset sibling explorer panes to a
        plain listing and reload browser panes; re-applying this snapshot after the
        rebuild keeps their open file, tree, Git sidebar and URL (ISSUE-2026-027). */
-    function captureSurvivingPaneClientState(closingSessionId) {
+    function captureSurvivingPaneClientState(groupId, closingSessionIds) {
         const stateBySessionId = {};
-        terminals.forEach((pane, index) => {
-            const sessionId = sessionIds[index];
-            if (!pane || !sessionId || sessionId === closingSessionId) {
+        const isVisible = groupId === visibleGroupId;
+        const cached = isVisible ? null : cachedGroupViews.get(groupId);
+        const panes = isVisible ? terminals : (cached?.terminals || []);
+        const ids = isVisible ? sessionIds : (cached?.sessionIds || []);
+        const closing = new Set((closingSessionIds || []).map(String));
+        panes.forEach((pane, index) => {
+            const sessionId = ids[index];
+            if (!pane || !sessionId || closing.has(sessionId)) {
                 return;
             }
             if (isExplorerSession(pane._session)) {
@@ -6981,9 +6842,9 @@
                    metrics, identity, zoom, mode preference) through the rebuild
                    — the disk-shape session fields alone would reset the per-tab
                    state 2.e introduced. */
-                explorerCaptureActiveTabView(index);
+                if (isVisible) explorerCaptureActiveTabView(index);
                 const tabs = explorerSerializeTabs(pane);
-                const sidebar = explorerSidebarPresentation(index);
+                const sidebar = explorerSidebarPresentation(isVisible ? index : -1, pane);
                 const previewTab = explorerPreviewTab(pane);
                 const previewActive = pane._explorerActiveTabId === EXPLORER_PREVIEW_TAB_ID;
                 const pin = panePinDescriptor(pane);
@@ -7079,14 +6940,8 @@
         if (!(await confirmDiscardExplorerEdit(index, 'Closing this pane'))) {
             return;
         }
-        const plan = buildCloseTerminalPlan(index);
+        const plan = previewTerminalClose(index);
         if (!plan) {
-            return;
-        }
-        const restoreRectsBySessionId = plan.closeLastPane
-            ? null
-            : buildTerminalCloseRectsBySessionId(plan);
-        if (!plan.closeLastPane && !restoreRectsBySessionId) {
             setWorkspaceSaveMessage(
                 'Close terminal failed: no neighboring pane can safely fill this layout',
                 'error'
@@ -7101,6 +6956,7 @@
             button.disabled = true;
             button.textContent = '...';
         }
+        closeSnapshotsBySessionId.set(plan.sessionId, plan.snapshot);
 
         try {
             const response = await fetch(`/api/sessions/${encodeURIComponent(plan.sessionId)}`, {
@@ -7115,6 +6971,8 @@
                 if (visibleGroupId === activeGroupId) {
                     teardownCurrentGrid();
                 }
+                closedGroupsAwaitingTeardown.delete(plan.groupId);
+                closeRestoreMismatchAttempts.delete(plan.groupId);
                 activeGroupId = '';
                 await loadSessionGroups();
                 if (sessionGroups.length === 0) {
@@ -7125,22 +6983,25 @@
                 return;
             }
 
-            pendingCloseClientState = {
-                groupId: activeGroupId,
-                stateBySessionId: captureSurvivingPaneClientState(plan.sessionId),
-            };
-            pendingSplitRestore = {
-                groupId: activeGroupId,
-                rectsBySessionId: restoreRectsBySessionId,
-                originalSplitSlotCount: plan.originalSplitSlotCount,
-                splitColumnWeights: cloneSplitTrackWeights(splitColumnWeights),
-                splitRowWeights: cloneSplitTrackWeights(splitRowWeights),
-            };
+            const staged = stageSessionCloseDelta(
+                {
+                    group_id: plan.groupId,
+                    closed_session_ids: [plan.sessionId],
+                    closed_group_ids: [],
+                },
+                new Map([[plan.groupId, plan.snapshot]])
+            );
+            if (staged.some(entry => !entry.result.ok)) {
+                throw new Error('no neighboring pane can safely fill this layout');
+            }
             await initialLoad();
         } catch (error) {
             console.error('[GridVibe Sessions] closeTerminalPane failed:', error);
             setWorkspaceSaveMessage(`Close terminal failed: ${error.message}`, 'error');
         } finally {
+            if (closeSnapshotsBySessionId.get(plan.sessionId) === plan.snapshot) {
+                closeSnapshotsBySessionId.delete(plan.sessionId);
+            }
             if (button) {
                 button.textContent = '×';
                 button.disabled = false;
@@ -7385,12 +7246,26 @@
             }
             resizeIntentInFlight = true;
             let writeStarted = false;
+            const closeEpoch = closeGeometryCoordinator.epoch(groupId);
+            const closeInterrupted = () => (
+                closeGeometryCoordinator.epoch(groupId) !== closeEpoch
+            );
+            const interruptedResult = () => writeStarted
+                ? {
+                    ok: false,
+                    unknown: true,
+                    error: 'A pane closed while the resize write was in flight. The page did not paint stale weights, but the saved layout may still hold them; read list_panes before retrying.'
+                }
+                : refuse('A pane closed while the resize was being prepared.');
             try {
                 const controller = presentationController();
                 if (!controller) return refuse('Presentation sync is unavailable.');
                 await controller.settleGroup(groupId);
+                if (closeInterrupted()) return interruptedResult();
                 const response = await fetch(`/api/panes/layout?group_id=${encodeURIComponent(groupId)}`);
+                if (closeInterrupted()) return interruptedResult();
                 const live = await response.json();
+                if (closeInterrupted()) return interruptedResult();
                 if (!response.ok) return refuse(live.error || 'The session is no longer open.');
                 if (live.presentation_revision !== expectedRevision) {
                     return refuse('The session layout changed; read list_panes and retry.');
@@ -7456,7 +7331,9 @@
                 );
                 writeStarted = true;
                 const saved = await postPresentation('/api/session-presentation', payload);
+                if (closeInterrupted()) return interruptedResult();
                 const settled = await saved.json();
+                if (closeInterrupted()) return interruptedResult();
                 if (!saved.ok) return refuse(settled.error || 'The layout could not be saved.');
                 if (!Number.isInteger(settled?.presentation_revision)
                     || settled.presentation_revision <= expectedRevision) {
@@ -8200,9 +8077,39 @@
                surviving pane's captured explorer/browser state onto the fetched
                session objects so the rebuild seeds and restores it rather than
                resetting siblings (ISSUE-2026-027). */
-            const closeClientState = pendingCloseClientState?.groupId === requestedGroupId
-                ? pendingCloseClientState.stateBySessionId
-                : null;
+            let pendingClose = closeGeometryCoordinator.peek(requestedGroupId);
+            const pendingCloseMatches = !pendingClose || (
+                pendingClose.model.entries.length === data.sessions.length
+                && pendingClose.model.entries.every(entry => (
+                    data.sessions.some(session => session.session_id === entry.sessionId)
+                ))
+            );
+            /* A newer close may have staged while this load was awaiting an
+               older response. Do not paint that older pane set or consume the
+               newer generation; the coalesced refresh will fetch again. */
+            if (!pendingCloseMatches) {
+                const mismatch = closeRestoreMismatchAttempts.get(requestedGroupId);
+                if (!mismatch || mismatch.generation !== pendingClose.generation) {
+                    closeRestoreMismatchAttempts.set(requestedGroupId, {
+                        generation: pendingClose.generation,
+                        attempts: 1,
+                    });
+                    scheduleStatusRefresh();
+                    return;
+                }
+                /* One retry protects a newer close from an older fetch. If the
+                   same generation still cannot match, the server has moved on
+                   (for example, a split followed the close). Drop only the
+                   stale restore and rebuild from the authoritative pane set;
+                   otherwise this branch would poll forever. */
+                closeGeometryCoordinator.invalidate(requestedGroupId);
+                closeRestoreMismatchAttempts.delete(requestedGroupId);
+                pendingClose = null;
+                scheduleStatusRefresh();
+            } else if (pendingClose) {
+                closeRestoreMismatchAttempts.delete(requestedGroupId);
+            }
+            const closeClientState = pendingClose?.clientStateBySessionId || null;
             if (closeClientState) {
                 data.sessions.forEach(entry => {
                     const snapshot = closeClientState[entry.session_id];
@@ -8245,7 +8152,13 @@
             let restoredFromCache = false;
 
             if (!usingCurrentView && gridBuilt && visibleGroupId && visibleGroupId !== requestedGroupId) {
-                cacheVisibleGroupView(visibleGroupId);
+                if (closedGroupsAwaitingTeardown.has(visibleGroupId)) {
+                    const closedGroupId = visibleGroupId;
+                    teardownCurrentGrid();
+                    closedGroupsAwaitingTeardown.delete(closedGroupId);
+                } else {
+                    cacheVisibleGroupView(visibleGroupId);
+                }
             }
 
             if (!usingCurrentView) {
@@ -8314,29 +8227,31 @@
                 }
             });
 
-            const pendingRestore = pendingSplitRestore?.groupId === requestedGroupId
-                ? pendingSplitRestore
-                : null;
+            const pendingRestore = pendingClose;
             if (pendingRestore) {
+                const rectsBySessionId = Object.fromEntries(
+                    pendingRestore.model.entries.map(entry => [entry.sessionId, entry.rect])
+                );
                 const restoredRects = data.sessions
-                    .map(session => pendingRestore.rectsBySessionId[session.session_id])
+                    .map(session => rectsBySessionId[session.session_id])
                     .filter(Boolean);
                 if (restoredRects.length === data.sessions.length && restoredRects.length > 0) {
                     originalSplitSlotCount = Number(
-                        pendingRestore.originalSplitSlotCount || originalSplitSlotCount || data.sessions.length
+                        pendingRestore.model.originalSplitSlotCount
+                        || originalSplitSlotCount || data.sessions.length
                     );
                     splitSlotRects = cloneSplitSlotRects(restoredRects);
                     /* A valid close preserves the grid's bounding box, so the
                        pre-close track weights map 1:1 onto the reflowed grid and
                        user-set proportions survive (ISSUE-2026-022). */
-                    splitColumnWeights = cloneSplitTrackWeights(pendingRestore.splitColumnWeights);
-                    splitRowWeights = cloneSplitTrackWeights(pendingRestore.splitRowWeights);
+                    splitColumnWeights = cloneSplitTrackWeights(pendingRestore.model.columnWeights);
+                    splitRowWeights = cloneSplitTrackWeights(pendingRestore.model.rowWeights);
                     applySplitSlotGeometry({ fit: false });
+                    closeGeometryCoordinator.consume(
+                        requestedGroupId, pendingRestore.generation
+                    );
+                    closeRestoreMismatchAttempts.delete(requestedGroupId);
                 }
-                pendingSplitRestore = null;
-            }
-            if (closeClientState) {
-                pendingCloseClientState = null;
             }
 
             updateSessionChrome(data.sessions.length, requestedGroupId);
@@ -8727,7 +8642,9 @@
 
     async function resetSessionView() {
         await resetFullscreenState();
+        const resetGroupId = visibleGroupId;
         teardownCurrentGrid();
+        closedGroupsAwaitingTeardown.delete(resetGroupId);
         document.getElementById('terminalsGrid').className = '';
         document.getElementById('terminalsGrid').innerHTML = '';
         document.getElementById('terminalsGrid').style.display = '';
@@ -8740,8 +8657,6 @@
         splitSlotRects = null;
         splitColumnWeights = null;
         splitRowWeights = null;
-        pendingSplitRestore = null;
-        pendingCloseClientState = null;
         clearActiveGridResize();
         clearResizeHandles();
         document.getElementById('emptyState').classList.add('visible');
@@ -9211,6 +9126,7 @@
 
         socket.on('session_groups_updated', message => {
             if (message?.workspace_id === currentWorkspaceId) {
+                stageSessionCloseDelta(message || {});
                 scheduleStatusRefresh();
             }
             /* The launcher is not in any workspace room (it has no socket), so

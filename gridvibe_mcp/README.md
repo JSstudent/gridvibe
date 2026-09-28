@@ -274,6 +274,16 @@ Closing an unreported worker ends its result assignment with a reason. Collect
 reports with `wait_for_results` before closing workers when their work matters.
 `close_workspace` closes only the live workspace; it cannot forget a snapshot.
 
+A pane close uses the same geometry rule as clicking its **×** button. The
+neighbour with the longest shared border absorbs the space when it can do so
+without overlap; shapes that cannot be filled by one neighbour use the complete
+contacting side, exactly as the button does. Existing divider proportions and
+the state of surviving explorer and browser panes are preserved. Rapid closes
+compose in order, and a close in a background session is staged until that tab
+is opened instead of rebuilding it into a new base layout. Every close broadcast
+carries the exact pane ids that ended and the group ids that disappeared, so a
+partial group close reflows only what actually closed.
+
 ### The gates on the replace, display and close tools
 
 Shared in `web/pane_gates.py`, so these transactions refuse in the same words. A refusal

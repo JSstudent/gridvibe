@@ -130,7 +130,7 @@ Until it is installed the checkbox still appears and the agent simply finds no t
 | **Save** | `save_group_layout` | Save an open session's pane types and layout as a named preset for later launches |
 | **Close** | `close_pane` `close_group` `close_workspace` | End a worker pane, a session tab, or a live workspace; saved workspace snapshots remain available |
 
-- **Agents can close finished work.** An agent can close panes it created, or whole session tabs and workspaces after every affected pane passes the checks. It cannot close its own pane or a container holding it; there is no tool for sending arbitrary keystrokes.
+- **Agents can close finished work.** An agent can close panes it created, or whole session tabs and workspaces after every affected pane passes the checks. Closing one pane preserves the tab's existing arrangement and divider proportions exactly as its **×** button does; an agent still cannot close its own pane or a container holding it.
 - **Sessions by the name on their tab.** Ask for *"bring the gridvibe_main session forward"* or *"move test_session to the gridvibe_2 workspace and show it"*. Two tabs with the same name are never guessed between, and the agent only reports a tab as shown once the window confirms it.
 - **New panes start where you say.** A stated folder is checked on the pane's own machine and wins over where the pane is standing, including a folder above the one a Files pane is showing.
 - **Agents can shape the grid.** Ask an agent to split a pane, then set a divider to a fraction of the open session's width or height. GridVibe checks each pane's minimum size before applying it.

@@ -2210,13 +2210,17 @@ def _close_workspace_contents(workspace_id: str) -> Optional[Dict[str, Any]]:
         if workspace is None:
             return None
         label = str(workspace.label or "").strip()
+        sessions = session_manager.get_workspace_sessions(workspace_id)
+        original_group_ids = [
+            group.group_id
+            for group in session_manager.get_workspace_groups(workspace_id)
+        ]
+        group_count = len(original_group_ids)
         session_ids = [
             session.session_id
-            for session in session_manager.get_workspace_sessions(workspace_id)
+            for session in sessions
+            if session_manager.close_session(session.session_id)
         ]
-        group_count = len(session_manager.get_workspace_groups(workspace_id))
-        for session_id in session_ids:
-            session_manager.close_session(session_id)
         # A workspace created deliberately empty is retained until its first
         # group arrives; closing it deliberately ends that promise. Cleared
         # first, so the sweep below is allowed to take it.
@@ -2227,10 +2231,20 @@ def _close_workspace_contents(workspace_id: str) -> Optional[Dict[str, Any]]:
         # the manager, not either return value, is asked what actually remains.
         session_manager.remove_workspace(workspace_id)
         removed = session_manager.get_workspace(workspace_id) is None
+        closed_group_ids = [
+            group_id
+            for group_id in original_group_ids
+            if group_id not in session_manager.groups
+        ]
 
     for session_id in session_ids:
         _close_ssh_connection(session_id, clear_buffer=True)
-    _broadcast_session_groups_updated("workspace_closed", workspace_id=workspace_id)
+    _broadcast_session_groups_updated(
+        "workspace_closed" if removed else "session_closed",
+        workspace_id=workspace_id,
+        closed_session_ids=session_ids,
+        closed_group_ids=closed_group_ids,
+    )
     return {
         "workspace_id": workspace_id,
         "label": label,

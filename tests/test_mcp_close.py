@@ -48,6 +48,9 @@ class CloseRouteTestCase(unittest.TestCase):
     def close(self, kind, target, override=False):
         return close_for_agent(kind, target, {"requested_by_session_id": self.caller.session_id, "override": override})
 
+    def broadcasts(self):
+        return [effect for effect in self.effects if effect[0] == "broadcast"]
+
     def test_pane_close_reports_just_that_pane(self):
         answer, status = self.close("pane", self.worker.session_id)
         self.assertEqual(status, 200)
@@ -56,6 +59,11 @@ class CloseRouteTestCase(unittest.TestCase):
         self.assertEqual(answer["closed_group_ids"], [])
         self.assertIsNone(self.manager.get_session(self.worker.session_id))
         self.assertIsNotNone(self.manager.get_session(self.second.session_id))
+        _kind, args, kwargs = self.broadcasts()[0]
+        self.assertEqual(args, ("session_closed",))
+        self.assertEqual(kwargs["group_id"], "workers")
+        self.assertEqual(kwargs["closed_session_ids"], [self.worker.session_id])
+        self.assertEqual(kwargs["closed_group_ids"], [])
 
     def test_post_route_uses_the_same_gated_close(self):
         from web import api
@@ -100,6 +108,13 @@ class CloseRouteTestCase(unittest.TestCase):
         self.assertEqual(answer["closed_group_ids"], ["workers"])
         self.assertEqual(answer["closed_workspace_ids"], [OTHER_WORKSPACE])
         self.assertFalse(any(effect[0] in ("pruned", "default") for effect in self.effects))
+        _kind, args, kwargs = self.broadcasts()[0]
+        self.assertEqual(args, ("workspace_closed",))
+        self.assertEqual(
+            kwargs["closed_session_ids"],
+            [self.worker.session_id, self.second.session_id],
+        )
+        self.assertEqual(kwargs["closed_group_ids"], ["workers"])
 
     def test_group_close_ends_only_its_panes_and_forgets_an_emptied_workspace(self):
         answer, status = self.close("group", "workers")
@@ -109,6 +124,9 @@ class CloseRouteTestCase(unittest.TestCase):
         self.assertEqual(answer["closed_workspace_ids"], [OTHER_WORKSPACE])
         self.assertIsNotNone(self.manager.get_session(self.caller.session_id))
         self.assertIn(("pruned", [OTHER_WORKSPACE]), self.effects)
+        _kind, args, kwargs = self.broadcasts()[0]
+        self.assertEqual(args, ("group_closed",))
+        self.assertEqual(kwargs["closed_group_ids"], ["workers"])
 
     def test_interrupted_group_close_reports_exact_closed_ids(self):
         real_close = self.manager.close_session
@@ -126,6 +144,11 @@ class CloseRouteTestCase(unittest.TestCase):
         self.assertNotIn("C:/internal/credentials.json", answer["error"])
         self.assertNotIn("C:/internal/credentials.json", str(close_log.error.call_args_list))
         self.assertIsNotNone(self.manager.get_session(self.second.session_id))
+        _kind, args, kwargs = self.broadcasts()[0]
+        self.assertEqual(args, ("session_closed",))
+        self.assertEqual(kwargs["group_id"], "workers")
+        self.assertEqual(kwargs["closed_session_ids"], [self.worker.session_id])
+        self.assertEqual(kwargs["closed_group_ids"], [])
 
     def test_reentrant_ownership_change_stops_before_closing_the_moved_pane(self):
         real_close = self.manager.close_session

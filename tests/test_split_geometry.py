@@ -879,6 +879,7 @@ RESTORE_SOURCE = "\n\n".join(
             "cloneSplitSlotRects",
             "getBaseLayoutSlots",
             "baseLayoutCellShapes",
+            "fixedLayoutRectCoordinates",
             "fixedLayoutSlotRects",
             "rescaleCoarseLayoutSnapshot",
             "applyWorkspaceLayoutSnapshot",

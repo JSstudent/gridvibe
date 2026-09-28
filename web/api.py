@@ -4212,12 +4212,16 @@ def close_session(session_id: str):
             # workspace alive with no panes in it and its snapshot
             # unforgettable.
             pruned_workspace_ids = session_manager.clear_disconnected_sessions()
+            closed_group_ids = (
+                [group_id] if group_id not in session_manager.groups else []
+            )
             workspace_id = (
                 group.workspace_id if group else DEFAULT_WORKSPACE_ID
             )
         else:
             pruned_workspace_ids = []
             group_id = ""
+            closed_group_ids = []
             workspace_id = DEFAULT_WORKSPACE_ID
     if not success:
         return jsonify({"error": "Session not found"}), 404
@@ -4231,6 +4235,8 @@ def close_session(session_id: str):
         "session_closed",
         group_id=group_id,
         workspace_id=workspace_id,
+        closed_session_ids=[session_id],
+        closed_group_ids=closed_group_ids,
     )
     for pruned_workspace_id in pruned_workspace_ids:
         if pruned_workspace_id != workspace_id:
@@ -4274,21 +4280,28 @@ def close_all_sessions():
                 close_error = "Session group not found"
                 close_status = 404
             if not close_error:
+                close_failed = False
+                closed_session_ids = []
                 for session in sessions:
-                    session_manager.close_session(session.session_id)
+                    if session_manager.close_session(session.session_id):
+                        closed_session_ids.append(session.session_id)
+                    else:
+                        close_failed = True
                 # Its panes are closed, so the group is empty and the sweep
                 # takes it immediately (MW-06).
                 pruned_workspace_ids = session_manager.clear_disconnected_sessions()
                 closed_workspace_id = (
                     group.workspace_id if group else workspace_id
                 )
-                closed_session_ids = [
-                    session.session_id for session in sessions
-                ]
+                closed_group_ids = (
+                    [group_id] if group_id not in session_manager.groups else []
+                )
             else:
                 pruned_workspace_ids = []
                 closed_workspace_id = workspace_id
                 closed_session_ids = []
+                closed_group_ids = []
+                close_failed = False
         if close_error:
             return jsonify({"error": close_error}), close_status
         for session_id in closed_session_ids:
@@ -4299,9 +4312,11 @@ def close_all_sessions():
         forget_pruned_workspaces(pruned_workspace_ids)
         forget_emptied_default_workspace(closed_workspace_id)
         _broadcast_session_groups_updated(
-            "group_closed",
+            "group_closed" if closed_group_ids else "session_closed",
             group_id=group_id,
             workspace_id=closed_workspace_id,
+            closed_session_ids=closed_session_ids,
+            closed_group_ids=closed_group_ids,
         )
         for pruned_workspace_id in pruned_workspace_ids:
             if pruned_workspace_id != closed_workspace_id:
@@ -4309,20 +4324,48 @@ def close_all_sessions():
                     "workspace_pruned",
                     workspace_id=pruned_workspace_id,
                 )
+        if close_failed:
+            return jsonify({
+                "error": "Session group close was interrupted",
+                "partial": bool(closed_session_ids),
+                "closed_session_ids": closed_session_ids,
+                "closed_group_ids": closed_group_ids,
+            }), 500
         return jsonify({"message": "Session group closed successfully", "group_id": group_id})
 
-    affected_workspace_ids = [
-        workspace.workspace_id
-        for workspace in session_manager.get_all_workspaces()
-        if session_manager.get_workspace_groups(workspace.workspace_id)
-    ] or [DEFAULT_WORKSPACE_ID]
+    affected_close_deltas = {}
+    with session_manager.lock:
+        for workspace in session_manager.workspaces.values():
+            groups = [
+                group
+                for group in session_manager.groups.values()
+                if group.workspace_id == workspace.workspace_id
+            ]
+            if not groups:
+                continue
+            group_ids = [group.group_id for group in groups]
+            affected_close_deltas[workspace.workspace_id] = {
+                "group_ids": group_ids,
+                "session_ids": [
+                    session.session_id
+                    for session in session_manager.sessions.values()
+                    if session.group_id in group_ids
+                ],
+            }
+    if not affected_close_deltas:
+        affected_close_deltas[DEFAULT_WORKSPACE_ID] = {
+            "group_ids": [],
+            "session_ids": [],
+        }
     session_manager.close_all_sessions()
     _close_all_ssh_connections(clear_buffers=True)
     session_manager.reset_sessions()
-    for affected_workspace_id in affected_workspace_ids:
+    for affected_workspace_id, delta in affected_close_deltas.items():
         _broadcast_session_groups_updated(
             "all_closed",
             workspace_id=affected_workspace_id,
+            closed_session_ids=delta["session_ids"],
+            closed_group_ids=delta["group_ids"],
         )
 
     return jsonify({"message": "All sessions closed successfully"})

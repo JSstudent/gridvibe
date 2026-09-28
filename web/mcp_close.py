@@ -251,10 +251,18 @@ def close_for_agent(kind: str, target_id: str, payload: Mapping[str, Any]) -> Tu
             failure = f"{failure}; snapshot cleanup failed".strip("; ")
     try:
         event_group_id = target_id if kind == "group" else group.group_id if kind == "pane" else ""
+        if kind == "workspace" and target_id in workspace_ids:
+            event_reason = "workspace_closed"
+        elif kind == "group" and target_id in group_ids:
+            event_reason = "group_closed"
+        else:
+            event_reason = "session_closed"
         _broadcast_session_groups_updated(
-            {"pane": "session_closed", "group": "group_closed", "workspace": "workspace_closed"}[kind],
+            event_reason,
             group_id=event_group_id,
             workspace_id=workspace_id,
+            closed_session_ids=pane_ids,
+            closed_group_ids=group_ids,
         )
         for pruned_workspace_id in pruned:
             if pruned_workspace_id != workspace_id:

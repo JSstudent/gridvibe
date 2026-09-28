@@ -1540,6 +1540,22 @@ in `README.md`; state the rules a change has to keep.
   assignments end as `pane closed`, while a completed report outlives its pane.
   `close_workspace` is the live close and preserves saved snapshots; it never
   invokes the forget variant.
+- **Close broadcasts state the exact completed delta, and pane closes preserve
+  the page's measured layout.** Every close path publishes ordered
+  `closed_session_ids` and the `closed_group_ids` that actually disappeared; a
+  partial close never claims a surviving group closed. The workspace page stages
+  that delta synchronously before its coalesced refresh, keyed by group, so rapid
+  closes reduce sequentially and a background group keeps its geometry until it
+  is shown. The pane X and agent paths use the same DOM-free absorb rule: prefer
+  the valid neighbour with the longest shared border (visual order breaks ties),
+  then use the complete contacting side only when one neighbour cannot fill the
+  gap without overlap. Survivor rectangles keep the same bounding box and track
+  weights, and explorer/browser client state follows the surviving pane ids. A
+  complete group close invalidates its pending restore; a survivor-set mismatch
+  retries one generation once, then drops only the stale restore and rebuilds
+  from the server instead of polling indefinitely. A pointer drag is snapshotted
+  before cancellation, and a group close generation prevents an in-flight tool
+  resize from painting stale weights after the close.
 - **`override` is the user's word, never the tool's inference.** It waives
   lineage and the "already running an agent" refusal; never self, never the kind
   gate's mode rule, and never the machine rule a task carries. It is forwarded

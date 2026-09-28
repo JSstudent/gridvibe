@@ -307,7 +307,7 @@ class MultiWorkspaceApiTestCase(WorkspaceSocketClientMixin, unittest.TestCase):
         self.assertEqual(_workspace_events(client_b), [])
 
     def test_closing_last_group_in_one_workspace_preserves_the_other(self):
-        self._group("group-a", self.WORKSPACE_A)
+        _group_a, session_a = self._group("group-a", self.WORKSPACE_A)
         _group_b, session_b = self._group("group-b", self.WORKSPACE_B)
         client_a = self._socket_client(self.WORKSPACE_A)
         client_b = self._socket_client(self.WORKSPACE_B)
@@ -325,8 +325,16 @@ class MultiWorkspaceApiTestCase(WorkspaceSocketClientMixin, unittest.TestCase):
         self.assertIsNotNone(api.session_manager.get_group("group-b"))
         self.assertIsNotNone(api.session_manager.get_session(session_b.session_id))
         self.assertEqual(
-            [event["reason"] for event in _workspace_events(client_a)],
-            ["group_closed"],
+            _workspace_events(client_a),
+            [
+                {
+                    "workspace_id": self.WORKSPACE_A,
+                    "reason": "group_closed",
+                    "group_id": "group-a",
+                    "closed_session_ids": [session_a.session_id],
+                    "closed_group_ids": ["group-a"],
+                }
+            ],
         )
         self.assertEqual(_workspace_events(client_b), [])
 
@@ -6146,9 +6154,14 @@ class WorkspaceCloseActionMatrixTestCase(unittest.TestCase):
     def test_close_live_workspace_ends_the_sessions_and_keeps_the_slot(self):
         launched = self._launch(new_workspace=True, workspace_label="Alpha")
         workspace_id = launched["workspace_id"]
+        session_ids = [
+            session.session_id
+            for session in api.session_manager.get_group_sessions(launched["group_id"])
+        ]
         self._capture(workspace_id)
 
-        response = self.client.delete(f"/api/workspaces/{workspace_id}")
+        with patch("web.terminal_io._broadcast_session_groups_updated") as broadcast:
+            response = self.client.delete(f"/api/workspaces/{workspace_id}")
 
         self.assertEqual(response.status_code, 200)
         payload = response.get_json()
@@ -6164,6 +6177,12 @@ class WorkspaceCloseActionMatrixTestCase(unittest.TestCase):
         # Persisted: this is the restorable verb, unlike closing the last tab.
         self.assertIsNotNone(
             web_runtime_state.load_restorable_workspace(workspace_id)
+        )
+        broadcast.assert_called_once_with(
+            "workspace_closed",
+            workspace_id=workspace_id,
+            closed_session_ids=session_ids,
+            closed_group_ids=[launched["group_id"]],
         )
 
     def test_close_and_forget_removes_the_slot_too(self):
