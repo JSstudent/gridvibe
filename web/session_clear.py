@@ -167,10 +167,11 @@ def apply_agent_pane_clear(
     effects.broadcast_cleared(session_id)
     logger.info(
         "Agent-requested pane clear session_id=%s "
-        "requested_by_session_id=%s override=%s",
+        "requested_by_session_id=%s override=%s source=%s",
         session_id,
         request.caller_session_id,
         request.override,
+        request.waiver_source or "-",
     )
     return {
         "session_id": session_id,

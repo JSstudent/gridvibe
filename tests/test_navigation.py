@@ -282,6 +282,51 @@ class AgentMoveRouteTestCase(_LiveRegistryTestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(api.session_manager.get_group(group_id).workspace_id, self.target)
 
+    def _grant_override_mode(self):
+        api.session_manager.update_session_metadata(
+            self.caller,
+            startup_mode="agent",
+            agent_selection="claude",
+            agent_mcp=True,
+            agent_mcp_override=True,
+        )
+        self.assertTrue(api.session_manager.get_session(self.caller).agent_mcp_override)
+
+    def test_override_mode_moves_someone_elses_group_without_stating_override(self):
+        """The move reads its caller where every other gated request does."""
+        group_id, _ = self._group(name="Theirs")
+        self._grant_override_mode()
+
+        with self.assertLogs("web.navigation", level="INFO") as captured:
+            response = self._move(group_id, target_workspace_id=self.target)
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertEqual(api.session_manager.get_group(group_id).workspace_id, self.target)
+        waiver = [line for line in captured.output if "Group move gate override" in line]
+        self.assertEqual(len(waiver), 1)
+        self.assertIn("source=mode", waiver[0])
+
+    def test_a_stated_override_is_logged_as_the_call(self):
+        group_id, _ = self._group(name="Theirs")
+
+        with self.assertLogs("web.navigation", level="INFO") as captured:
+            response = self._move(group_id, target_workspace_id=self.target, override=True)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(any("source=call" in line for line in captured.output))
+
+    def test_without_the_grant_a_move_still_asks(self):
+        group_id, _ = self._group(name="Theirs")
+        api.session_manager.update_session_metadata(
+            self.caller, startup_mode="agent", agent_selection="claude", agent_mcp=True,
+        )
+
+        response = self._move(group_id, target_workspace_id=self.target)
+
+        self.assertEqual(response.status_code, 403)
+        self.assertTrue(response.get_json()["waivable"])
+        self.assertEqual(api.session_manager.get_group(group_id).workspace_id, "default")
+
     def test_a_caller_that_closed_is_refused_and_override_does_not_help(self):
         group_id, _ = self._group(name="Theirs", created_by="closed-pane")
 

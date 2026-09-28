@@ -8,9 +8,12 @@ from web.app import session_manager
 from web.pane_gates import (
     LINEAGE_GATE,
     MODE_GATE,
+    OVERRIDE_FROM_MODE,
+    AgentPaneRequest,
     GateWording,
     PaneGateRefusal,
     attach_confirmation,
+    caller_holds_override_mode,
     check_caller,
     check_lineage,
     read_agent_request,
@@ -84,6 +87,10 @@ def close_for_agent(kind: str, target_id: str, payload: Mapping[str, Any]) -> Tu
         if caller is None:
             refusal = refuse(LINEAGE_GATE, "The pane this request came from is no longer open.")
         else:
+            if request.override_source == OVERRIDE_FROM_MODE and not caller_holds_override_mode(caller):
+                # The standing grant was read before this hold; a caller that
+                # lost it since is gated as it stands now, not as it stood.
+                request = AgentPaneRequest(request.caller_session_id, False)
             if kind == "pane":
                 session = session_manager.sessions.get(target_id)
                 if session is None:

@@ -116,6 +116,73 @@ class CloseRouteTestCase(unittest.TestCase):
         )
         self.assertEqual(kwargs["closed_group_ids"], ["workers"])
 
+    def _grant_override_mode(self):
+        self.manager.update_session_metadata(
+            self.caller.session_id, agent_mcp=True, agent_mcp_override=True
+        )
+        self.assertTrue(self.manager.get_session(self.caller.session_id).agent_mcp_override)
+
+    def test_override_mode_closes_a_foreign_running_agent_without_stating_override(self):
+        """Lineage and the running-agent gate both waived by the standing grant."""
+        foreign = self._pane(
+            "workers", title="Foreign", startup_mode="agent", agent_selection="claude",
+        )
+        answer, status = self.close("pane", foreign.session_id)
+        self.assertEqual(status, 403)
+        self.assertEqual(answer["gate"], "lineage")
+
+        self._grant_override_mode()
+        answer, status = self.close("pane", foreign.session_id)
+
+        self.assertEqual(status, 200, answer)
+        self.assertEqual(answer["closed_session_ids"], [foreign.session_id])
+        self.assertIsNone(self.manager.get_session(foreign.session_id))
+
+    def test_override_mode_never_closes_the_callers_own_pane_group_or_workspace(self):
+        self._grant_override_mode()
+        for kind, target in (("pane", self.caller.session_id), ("group", "caller"), ("workspace", "default")):
+            with self.subTest(kind=kind):
+                answer, status = self.close(kind, target)
+                self.assertEqual(status, 403)
+                self.assertEqual(answer["gate"], "self")
+                self.assertFalse(answer["waivable"])
+                self.assertEqual(self.effects, [])
+
+    def test_a_grant_revoked_before_the_close_executes_waives_nothing(self):
+        """Read before the manager lock, checked again inside it."""
+        from web import mcp_close, pane_gates
+
+        foreign = self._pane("workers", title="Foreign")
+        self._grant_override_mode()
+
+        def read_then_revoke(payload, wording):
+            request = pane_gates.read_agent_request(payload, wording)
+            self.assertEqual(request.waiver_source, pane_gates.OVERRIDE_FROM_MODE)
+            self.manager.update_session_metadata(self.caller.session_id, agent_mcp=False)
+            return request
+
+        with patch.object(mcp_close, "read_agent_request", side_effect=read_then_revoke):
+            answer, status = self.close("pane", foreign.session_id)
+
+        self.assertFalse(self.manager.get_session(self.caller.session_id).agent_mcp_override)
+        self.assertEqual(status, 403)
+        self.assertEqual(answer["gate"], "lineage")
+        self.assertTrue(answer["waivable"])
+        self.assertIsNotNone(self.manager.get_session(foreign.session_id))
+        self.assertEqual(self.effects, [])
+
+    def test_a_grant_stated_in_the_request_is_not_override_mode(self):
+        """Only the caller's record grants it; a body claiming it gets refused."""
+        self.second.created_by_session_id = ""
+        answer, status = close_for_agent(
+            "pane",
+            self.second.session_id,
+            {"requested_by_session_id": self.caller.session_id, "agent_mcp_override": True},
+        )
+        self.assertEqual(status, 403)
+        self.assertEqual(answer["gate"], "lineage")
+        self.assertIsNotNone(self.manager.get_session(self.second.session_id))
+
     def test_group_close_ends_only_its_panes_and_forgets_an_emptied_workspace(self):
         answer, status = self.close("group", "workers")
         self.assertEqual(status, 200)

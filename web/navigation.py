@@ -28,7 +28,9 @@ from web.app import session_manager
 from web.pane_gates import (
     LINEAGE_GATE,
     OVERRIDE_TAIL,
+    AgentPaneRequest,
     PaneGateRefusal,
+    read_caller_request,
     refuse,
 )
 
@@ -119,15 +121,14 @@ def resolve_view_target(
 # ---------------- the gated group move ----------------
 
 
-def _caller(payload: Mapping[str, Any]) -> Tuple[str, bool]:
-    caller = str((payload or {}).get("requested_by_session_id") or "").strip()
-    if not caller:
-        raise NavigationRefusal(
-            "requested_by_session_id is required: a move has to name the pane "
-            "asking for it.",
-            400,
-        )
-    return caller, bool((payload or {}).get("override"))
+def _move_request(payload: Mapping[str, Any]) -> AgentPaneRequest:
+    """Who is asking and whether ``override`` applies, read where every other
+    gated request is read -- so a caller in override mode moves a group under
+    the same standing grant it closes and re-modes panes under."""
+    try:
+        return read_caller_request(payload, "a move")
+    except PaneGateRefusal as exc:
+        raise NavigationRefusal(exc.message, exc.status_code, exc.details()) from exc
 
 
 def _workspace_label(workspace_id: str) -> str:
@@ -178,12 +179,14 @@ def check_group_move(group_id: str, payload: Mapping[str, Any], *, log_override:
     * Its own group moves without permission -- the person's agent moving the
       tab it lives in is the common case, and it ends nothing.
     * Any other group moves only when every pane in it was created by the
-      caller, or when the person said so (``override``).
+      caller, or when the person said so (``override``, stated in the call
+      or held by the caller's pane as override mode).
 
     In-memory only, so the move transaction can run it again under the
     manager lock; ``log_override`` is false there, because a log line is I/O.
     """
-    caller, override = _caller(payload)
+    request = _move_request(payload)
+    caller = request.caller_session_id
     group = session_manager.get_group(str(group_id or "").strip())
     if group is None:
         raise NavigationRefusal(
@@ -207,13 +210,14 @@ def check_group_move(group_id: str, payload: Mapping[str, Any], *, log_override:
     creators = {str(getattr(pane, "created_by_session_id", "") or "") for pane in panes}
     if panes and creators == {caller}:
         return group
-    if override:
+    if request.override:
         if not log_override:
             return group
         logger.info(
-            "Group move gate override group_id=%s requested_by_session_id=%s",
+            "Group move gate override group_id=%s requested_by_session_id=%s source=%s",
             group.group_id,
             caller,
+            request.waiver_source,
         )
         return group
     refusal: PaneGateRefusal = refuse(

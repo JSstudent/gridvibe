@@ -687,11 +687,12 @@ def apply_agent_pane_mode_change(
     stated_directory = str(change.pop("directory", "") or "").strip()
     logger.info(
         "Agent-requested pane mode switch session_id=%s startup_mode=%s "
-        "requested_by_session_id=%s override=%s directory_stated=%s",
+        "requested_by_session_id=%s override=%s source=%s directory_stated=%s",
         session_id,
         str(change.get("startup_mode") or "-"),
         request.caller_session_id,
         request.override,
+        request.waiver_source or "-",
         bool(stated_directory),
     )
     return apply_pane_mode_change(

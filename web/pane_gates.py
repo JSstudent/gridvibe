@@ -20,13 +20,17 @@ both, and a close requires an override for a running agent. Each transaction
 states its own, in its own module, using the gate names
 below so every refusal reads the same way.
 
-`override` waives lineage and never self. The waiver is not a decision this
-module makes: it arrives in the payload because the *calling agent* stated it,
-and it should state it only when the person it is talking to asked for this
-specific pane in this conversation. The residual risk is stated rather than
-designed away -- a pane that passes every gate can still be sitting mid-command,
-and liveness is a heuristic (`web/agent_activity.py`) rather than a fact about
-the foreground process.
+`override` waives lineage and each transaction's waivable third gate, and
+never self, another machine or a caller that is gone. The waiver is not a
+decision this module makes. It arrives one of two ways: in the payload,
+because the *calling agent* stated it -- which it should do only when the
+person it is talking to asked for this specific pane in this conversation --
+or from the calling pane's own record, because the person launched that agent
+in override mode (``agent_mcp_override``), a standing grant read in
+:func:`read_caller_request` and never from the payload. The residual risk is
+stated rather than designed away -- a pane that passes every gate can still be
+sitting mid-command, and liveness is a heuristic (`web/agent_activity.py`)
+rather than a fact about the foreground process.
 
 **These gates constrain an agent that follows its instructions. They are not a
 security boundary, and cannot be one.** Both of them are evaluated against
@@ -109,12 +113,35 @@ class GateWording:
     acts: str
 
 
+#: Where a request's ``override`` came from, so a waiver log tells a one-off
+#: the calling agent stated apart from the standing grant its pane was
+#: launched with.
+OVERRIDE_FROM_CALL = "call"
+OVERRIDE_FROM_MODE = "mode"
+
+
 @dataclass(frozen=True)
 class AgentPaneRequest:
-    """Who asked, and whether they said the user asked for this pane by name."""
+    """Who asked, and whether the waivable gates are waived for this request.
+
+    ``override`` is true when the call stated it, or when the calling pane
+    holds the override-mode grant (``agent_mcp_override``) -- see
+    :func:`read_caller_request`. Either way it waives the same gates and
+    never self, machine or a caller that is gone.
+    """
 
     caller_session_id: str
     override: bool
+    #: :data:`OVERRIDE_FROM_CALL` or :data:`OVERRIDE_FROM_MODE`; empty when a
+    #: request built elsewhere did not say, which reads as the call.
+    override_source: str = ""
+
+    @property
+    def waiver_source(self) -> str:
+        """What a waiver log records as its source, or ``""`` with no override."""
+        if not self.override:
+            return ""
+        return self.override_source or OVERRIDE_FROM_CALL
 
 
 class PaneGateRefusal(Exception):
@@ -282,11 +309,45 @@ def attach_confirmation(
     refusal.confirm = confirmation(facts, question_for(facts))
 
 
-def read_agent_request(
+def holds_override_mode(caller_session_id: str) -> bool:
+    """Whether the calling pane holds the standing override-mode grant now.
+
+    Read from the live record, never from the payload: the grant is something
+    the person gave the pane at launch, not something a request can claim. The
+    record already drops a grant its pane can no longer carry
+    (`sessions/manager.py`); the agent and MCP checks are repeated here so a
+    record that skipped that invariant still grants nothing. A caller that is
+    gone holds nothing, and `check_caller` refuses it anyway.
+
+    Advisory and unlocked, like the rest of this module's reads: a transaction
+    that executes under the manager lock re-reads its caller there, and hands
+    that record to :func:`caller_holds_override_mode`.
+    """
+    return caller_holds_override_mode(session_manager.get_session(caller_session_id))
+
+
+def caller_holds_override_mode(caller: Any) -> bool:
+    """:func:`holds_override_mode` for a caller record already in hand."""
+    return (
+        caller is not None
+        and getattr(caller, "agent_mcp_override", False) is True
+        and bool(getattr(caller, "agent_mcp", False))
+        and str(getattr(caller, "startup_mode", "") or "") == "agent"
+    )
+
+
+def read_caller_request(
     payload: Mapping[str, Any],
-    wording: GateWording,
+    request_noun: str,
 ) -> AgentPaneRequest:
-    """Read who is asking, or refuse a request that names nobody.
+    """Read who is asking and whether ``override`` applies, or refuse.
+
+    The one place every gated request is read -- the pane transactions through
+    :func:`read_agent_request`, and the group move (`web/navigation.py`),
+    which has no pane wording, directly. So override mode is decided here and
+    nowhere else: a caller pane holding the grant has its request carry
+    ``override`` exactly as if it had stated it, and every gate that reads
+    ``request.override`` obeys it without knowing why.
 
     Refused here rather than by a gate, and with 400 rather than 403: a request
     that cannot name a caller is malformed, not denied.
@@ -295,11 +356,23 @@ def read_agent_request(
     caller_session_id = str(data.get("requested_by_session_id") or "").strip()
     if not caller_session_id:
         raise PaneGateRefusal(
-            f"requested_by_session_id is required: {wording.request_noun} has "
+            f"requested_by_session_id is required: {request_noun} has "
             "to name the pane asking for it.",
             400,
         )
-    return AgentPaneRequest(caller_session_id, bool(data.get("override")))
+    if data.get("override"):
+        return AgentPaneRequest(caller_session_id, True, OVERRIDE_FROM_CALL)
+    if holds_override_mode(caller_session_id):
+        return AgentPaneRequest(caller_session_id, True, OVERRIDE_FROM_MODE)
+    return AgentPaneRequest(caller_session_id, False)
+
+
+def read_agent_request(
+    payload: Mapping[str, Any],
+    wording: GateWording,
+) -> AgentPaneRequest:
+    """:func:`read_caller_request`, worded for one pane transaction."""
+    return read_caller_request(payload, wording.request_noun)
 
 
 def check_caller(
@@ -359,12 +432,14 @@ def check_lineage(
 
     if not creator or creator != request.caller_session_id:
         # Logged rather than counted: the waiver is the interesting event, and
-        # the record has to name both panes for it to be readable afterwards.
+        # the record has to name both panes -- and whether the person granted
+        # it for this call or at launch -- for it to be readable afterwards.
         logger.info(
             "Pane gate override session_id=%s act=%s "
-            "requested_by_session_id=%s creator=%s",
+            "requested_by_session_id=%s creator=%s source=%s",
             str(getattr(session, "session_id", "") or "-"),
             wording.act,
             request.caller_session_id,
             creator or "-",
+            request.waiver_source,
         )

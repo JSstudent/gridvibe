@@ -13,6 +13,9 @@ part that is only visible when the three are looked at together:
 - **The self gate never reads `override`.** It is the one refusal with no
   escape hatch, and the way to keep it that way is for the check not to take
   the flag at all.
+- **Override mode is `override` read off the caller's record, and no more.**
+  It waives what a stated `override` waives; self and a gone caller still
+  refuse, and the waiver log says which of the two granted it.
 - **A malformed request is 400 and a denial is 403.** A request that cannot
   name a caller is not a denied one.
 - **Every refusal names its gate, in one shape.** An agent told only "refused"
@@ -64,6 +67,38 @@ class _Registry:
 
 def _request(caller="pane-1", override=False):
     return pane_gates.AgentPaneRequest(caller, override)
+
+
+class _Caller(_Pane):
+    """A calling pane as the registry holds it: an agent, maybe with its grant."""
+
+    def __init__(
+        self,
+        session_id="pane-1",
+        *,
+        agent_mcp_override=True,
+        agent_mcp=True,
+        startup_mode="agent",
+    ):
+        super().__init__(session_id)
+        self.agent_mcp_override = agent_mcp_override
+        self.agent_mcp = agent_mcp
+        self.startup_mode = startup_mode
+
+
+class _Callers:
+    """A registry of callers stated whole, so a grant is on the record or not."""
+
+    def __init__(self, *callers):
+        self.panes = {caller.session_id: caller for caller in callers}
+
+    def get_session(self, session_id):
+        return self.panes.get(session_id)
+
+
+def _read(body, registry, wording=CLEAR_WORDING):
+    with patch.object(pane_gates, "session_manager", registry):
+        return pane_gates.read_agent_request(body, wording)
 
 
 class ReadAgentRequestTestCase(unittest.TestCase):
@@ -182,6 +217,113 @@ class LineageGateTestCase(unittest.TestCase):
             pane_gates.check_lineage(pane, _request(override=True), CLEAR_WORDING)
 
         info.assert_not_called()
+
+
+class OverrideModeTestCase(unittest.TestCase):
+    """A caller pane launched in override mode carries `override` on every
+    gated request, read from its record -- and waives nothing more than a
+    stated `override` would. The negative cases are the point."""
+
+    BODY = {"requested_by_session_id": "pane-1"}
+
+    def test_a_granted_caller_carries_override_it_did_not_state(self):
+        request = _read(self.BODY, _Callers(_Caller()))
+
+        self.assertTrue(request.override)
+        self.assertEqual(request.waiver_source, pane_gates.OVERRIDE_FROM_MODE)
+
+    def test_every_pane_transaction_and_the_move_read_the_grant(self):
+        """One choke point: no verb reads its caller any other way."""
+        registry = _Callers(_Caller())
+        for name, wording in ALL_WORDINGS.items():
+            with self.subTest(transaction=name):
+                self.assertTrue(_read(self.BODY, registry, wording).override)
+        with patch.object(pane_gates, "session_manager", registry):
+            self.assertTrue(pane_gates.read_caller_request(self.BODY, "a move").override)
+
+    def test_a_stated_override_is_logged_as_the_call_even_under_a_grant(self):
+        request = _read({**self.BODY, "override": True}, _Callers(_Caller()))
+
+        self.assertTrue(request.override)
+        self.assertEqual(request.waiver_source, pane_gates.OVERRIDE_FROM_CALL)
+
+    def test_a_caller_without_the_grant_carries_nothing(self):
+        request = _read(self.BODY, _Callers(_Caller(agent_mcp_override=False)))
+
+        self.assertFalse(request.override)
+        self.assertEqual(request.waiver_source, "")
+
+    def test_only_a_true_grant_on_a_live_mcp_agent_counts(self):
+        """The record invariant, repeated at the gate: a stale or truthy-looking
+        value on a pane that is no longer an MCP agent grants nothing."""
+        for label, caller in (
+            ("truthy string", _Caller(agent_mcp_override="true")),
+            ("tools off", _Caller(agent_mcp=False)),
+            ("not an agent", _Caller(startup_mode="terminal")),
+        ):
+            with self.subTest(caller=label):
+                self.assertFalse(_read(self.BODY, _Callers(caller)).override)
+
+    def test_a_request_cannot_claim_the_grant_for_itself(self):
+        """The grant is read off the record; the payload has no say."""
+        body = {**self.BODY, "agent_mcp_override": True, "override_source": "mode"}
+
+        request = _read(body, _Callers(_Caller(agent_mcp_override=False)))
+
+        self.assertFalse(request.override)
+
+    def test_a_caller_that_is_gone_holds_no_grant_and_is_still_refused(self):
+        """Dead caller: nothing to read a grant from, and the liveness check --
+        not waivable -- refuses it whatever the request carries."""
+        request = _read(self.BODY, _Callers())
+        self.assertFalse(request.override)
+
+        granted = _read(self.BODY, _Callers(_Caller()))
+        with patch.object(pane_gates, "session_manager", _Callers()):
+            with self.assertRaises(pane_gates.PaneGateRefusal) as raised:
+                pane_gates.check_caller("pane-2", granted, CLEAR_WORDING)
+
+        self.assertIn(f"[{pane_gates.LINEAGE_GATE} gate]", raised.exception.message)
+        self.assertFalse(raised.exception.waivable)
+
+    def test_override_mode_never_reaches_the_callers_own_pane(self):
+        registry = _Callers(_Caller())
+        request = _read(self.BODY, registry)
+
+        for name, wording in ALL_WORDINGS.items():
+            with self.subTest(transaction=name):
+                with patch.object(pane_gates, "session_manager", registry):
+                    with self.assertRaises(pane_gates.PaneGateRefusal) as raised:
+                        pane_gates.check_caller("pane-1", request, wording)
+                self.assertIn(f"[{pane_gates.SELF_GATE} gate]", raised.exception.message)
+                self.assertFalse(raised.exception.waivable)
+
+    def test_override_mode_waives_both_lineage_refusals(self):
+        request = _read(self.BODY, _Callers(_Caller()))
+
+        for pane in (_Pane(), _Pane(created_by_session_id="pane-9")):
+            with self.subTest(creator=pane.created_by_session_id or "none"):
+                self.assertIsNone(
+                    pane_gates.check_lineage(pane, request, RELAUNCH_WORDING)
+                )
+
+    def test_the_waiver_log_says_whether_it_was_the_mode_or_the_call(self):
+        pane = _Pane(session_id="pane-7", created_by_session_id="pane-9")
+        registry = _Callers(_Caller())
+
+        for body, source in (
+            (self.BODY, "mode"),
+            ({**self.BODY, "override": True}, "call"),
+        ):
+            with self.subTest(source=source):
+                request = _read(body, registry)
+                with self.assertLogs(pane_gates.logger, level="INFO") as captured:
+                    pane_gates.check_lineage(pane, request, CLEAR_WORDING)
+                self.assertIn(f"source={source}", "\n".join(captured.output))
+
+    def test_a_request_built_without_a_source_logs_as_the_call(self):
+        self.assertEqual(_request(override=True).waiver_source, pane_gates.OVERRIDE_FROM_CALL)
+        self.assertEqual(_request().waiver_source, "")
 
 
 class StatedCallerTestCase(unittest.TestCase):

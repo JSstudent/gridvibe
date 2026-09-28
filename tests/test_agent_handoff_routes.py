@@ -1054,6 +1054,56 @@ class RelaunchWithTaskTestCase(shell_tests.ShellTransitionTestCase):
                 self.assertIn("example.com", payload["error"])
                 self.assertEqual(started, [])
 
+    def _grant_override_mode(self, caller):
+        api.session_manager.update_session_metadata(
+            caller.session_id, agent_mcp=True, agent_mcp_override=True
+        )
+        granted = api.session_manager.get_session(caller.session_id)
+        self.assertTrue(granted.agent_mcp_override)
+        return granted
+
+    def test_override_mode_does_not_waive_another_machine(self):
+        caller, _repo = self._caller()
+        caller = self._grant_override_mode(caller)
+        for creator in (caller.session_id, ""):
+            with self.subTest(creator=creator or "none"):
+                target = self._ssh_pane(created_by_session_id=creator)
+                before = _pane_state(target.session_id)
+
+                response, started = self._relaunch(target.session_id, self._body(caller))
+
+                self._assert_refused(
+                    response, target.session_id, before, status=403, gate="machine", waivable=False
+                )
+                self.assertEqual(started, [])
+
+    def test_override_mode_relaunches_a_foreign_running_agent_without_asking(self):
+        """Lineage and "already an agent" both waived by the caller's grant."""
+        caller, repo = self._caller()
+        target = self._target(
+            caller, repo, created_by_session_id="", startup_mode="agent",
+            initial_command_mode="agent", initial_command="codex", agent_selection="codex",
+        )
+        before = _pane_state(target.session_id)
+        response, _started = self._relaunch(target.session_id, self._body(caller))
+        self._assert_refused(response, target.session_id, before, status=403, gate="mode", waivable=True)
+
+        caller = self._grant_override_mode(caller)
+        response, started = self._relaunch(target.session_id, self._body(caller))
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertEqual(response.get_json()["agent_selection"], "codex")
+        self.assertEqual(len(started), 1)
+
+    def test_override_mode_never_relaunches_the_callers_own_pane(self):
+        caller, _repo = self._caller()
+        caller = self._grant_override_mode(caller)
+        before = _pane_state(caller.session_id)
+
+        response, _started = self._relaunch(caller.session_id, self._body(caller))
+
+        self._assert_refused(response, caller.session_id, before, status=403, gate="self", waivable=False)
+
     def test_another_machine_is_refused_before_a_waivable_gate(self):
         """Asking the person, then being refused anyway, is the worst order."""
         caller, _repo = self._caller()
