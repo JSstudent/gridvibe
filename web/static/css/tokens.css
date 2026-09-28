@@ -73,6 +73,12 @@
     --gv-success-soft: rgba(34, 197, 94, 0.12);
     --gv-danger-soft: rgba(239, 68, 68, 0.12);
     --gv-warning-soft: rgba(245, 158, 11, 0.12);
+    /* An agent pane in MCP override mode -- one that acts on panes it did not
+       create without asking. Red, because the grant is a standing waiver, and
+       its own name so the pane header's frame and the dashboard's MCP chip can
+       be re-tuned without touching every other danger surface. */
+    --gv-mcp-override: var(--gv-danger);
+    --gv-mcp-override-soft: var(--gv-danger-soft);
     --gv-radius-s: 8px;
     --gv-radius-m: 12px;
     --gv-radius-l: 16px;
@@ -135,6 +141,8 @@
     --gv-success-soft: rgba(4, 120, 87, 0.12);
     --gv-danger-soft: rgba(220, 38, 38, 0.10);
     --gv-warning-soft: rgba(180, 83, 9, 0.12);
+    --gv-mcp-override: var(--gv-danger);
+    --gv-mcp-override-soft: var(--gv-danger-soft);
     --gv-dialog-scrim: rgba(107, 114, 128, 0.35);
     --gv-dialog-bg: rgba(248, 250, 252, 0.99);
     --gv-dialog-panel-soft: rgba(229, 231, 235, 0.92);

@@ -416,15 +416,17 @@ function parseRows() {
         const hover = attributes['title'] || '';
         const transport = hover.includes('\n') ? hover.split('\n').pop() : '';
         const tagHovers = [];
+        const tagClasses = [];
         const tags = [];
         /* A chip may carry a hover of its own -- `MCP` is three characters the
            reader may not recognise -- so the attributes after the class are
            read past rather than required to be absent. */
-        const tagPattern = /<span class="dash-tag[^"]*"([^>]*)>([\s\S]*?)<\/span>/g;
+        const tagPattern = /<span class="(dash-tag[^"]*)"([^>]*)>([\s\S]*?)<\/span>/g;
         let tag;
         while ((tag = tagPattern.exec(inner)) !== null) {
-            tags.push(tag[2].trim());
-            const tagHover = /\btitle="([^"]*)"/.exec(tag[1]);
+            tags.push(tag[3].trim());
+            tagClasses.push(tag[1].split(/\s+/).filter(Boolean));
+            const tagHover = /\btitle="([^"]*)"/.exec(tag[2]);
             tagHovers.push(tagHover ? tagHover[1] : '');
         }
         rows.push({
@@ -441,6 +443,7 @@ function parseRows() {
             transport: transport.trim(),
             tags,
             tagHovers,
+            tagClasses,
             state: state ? state[1] : '',
             stateHover: stateHover ? stateHover[1].trim() : '',
             word: word ? word[1].trim() : '',
@@ -2442,6 +2445,60 @@ class DashboardDialogRepaintTestCase(DashboardDialogTestCase):
         self.assertFalse(result["afterRelaunch"])
         self.assertEqual(result["plain"], [])
 
+    def test_an_override_mode_pane_wears_the_same_chip_in_red(self):
+        """Override mode is a hue, not a second chip: the text stays `MCP`, the
+        chip gains `is-override`, and its hover says in words what the colour
+        means. Only a pane that wears the chip at all can wear it red, and a
+        relaunch that drops the grant repaints the row without it."""
+        result = self._run_node(
+            """
+            fetchAnswer = snapshot([group([
+                pane({ agent_mcp: true, agent_mcp_override: true }),
+                pane({ session_id: 's2', index: 1, agent_mcp: true }),
+                pane({
+                    session_id: 's3', index: 2, agent_mcp: false,
+                    agent_mcp_override: true
+                }),
+                pane({
+                    session_id: 's4', index: 3, agent_mcp: true,
+                    agent_mcp_override: 'true'
+                })
+            ])]);
+            showDashboard();
+            await settle();
+            const read = key => ({
+                tags: rowFor(key).tags,
+                classes: rowFor(key).tagClasses,
+                hovers: rowFor(key).tagHovers
+            });
+            const before = ['pane:s1', 'pane:s2', 'pane:s3', 'pane:s4'].map(read);
+            fetchAnswer = snapshot([group([
+                pane({ agent_mcp: true, agent_mcp_override: false })
+            ])]);
+            await refreshAgentDashboard();
+            report({
+                before,
+                after: read('pane:s1'),
+                plainTitle: GridVibeAgentIdentity.MCP_TAG_TITLE,
+                overrideTitle: GridVibeAgentIdentity.MCP_OVERRIDE_TAG_TITLE
+            });
+            """
+        )
+        red, plain, stale, stringy = result["before"]
+        self.assertEqual(red["tags"], ["MCP"])
+        self.assertEqual(red["classes"], [["dash-tag", "dash-tag-mcp", "is-override"]])
+        self.assertEqual(red["hovers"], [result["overrideTitle"]])
+        self.assertEqual(plain["classes"], [["dash-tag", "dash-tag-mcp"]])
+        self.assertEqual(plain["hovers"], [result["plainTitle"]])
+        # A grant left behind on a pane without the tools paints nothing.
+        self.assertEqual(stale["tags"], [])
+        # Only a stated `true` is the grant.
+        self.assertEqual(stringy["classes"], [["dash-tag", "dash-tag-mcp"]])
+        # The relaunch that dropped the grant took the red with it.
+        self.assertEqual(result["after"]["tags"], ["MCP"])
+        self.assertEqual(result["after"]["classes"], [["dash-tag", "dash-tag-mcp"]])
+        self.assertEqual(result["after"]["hovers"], [result["plainTitle"]])
+
     def test_a_reading_that_changed_keeps_the_caret_and_the_scroll(self):
         result = self._run_node(
             """
@@ -2566,6 +2623,45 @@ class DashboardDialogRepaintTestCase(DashboardDialogTestCase):
             result["back"], {"open": True, "armed": 2, "fetches": 2}
         )
 
+
+
+class OverrideModeStylingTestCase(unittest.TestCase):
+    """Override mode's red is a theme token, defined for every theme and read
+    by both the pane header's frame and the dashboard chip -- never a literal
+    in either rule. Source assertions for the stylesheet hooks only; what the
+    hooks are attached to is executed above and in test_dashboard_targeting."""
+
+    STATIC_CSS = REPO_ROOT / "web" / "static" / "css"
+    TOKENS = ("--gv-mcp-override", "--gv-mcp-override-soft")
+
+    def _css(self, name):
+        return (self.STATIC_CSS / name).read_text(encoding="utf-8")
+
+    @staticmethod
+    def _block(css, opener):
+        start = css.index(opener)
+        return css[start: css.index("}", start)]
+
+    def test_the_tokens_are_defined_for_every_theme(self):
+        tokens = self._css("tokens.css")
+        for opener in (":root {", '[data-theme="light"] {'):
+            block = self._block(tokens, opener)
+            for token in self.TOKENS:
+                with self.subTest(theme=opener, token=token):
+                    self.assertIn(f"{token}:", block)
+
+    def test_the_header_frame_and_the_chip_read_the_tokens(self):
+        frame = self._block(
+            self._css("terminals.css"),
+            ".terminal-agent-icon[data-mcp][data-mcp-override] {",
+        )
+        self.assertIn("var(--gv-mcp-override)", frame)
+        chip = self._block(self._css("agent-dashboard.css"), ".dash-tag-mcp.is-override {")
+        self.assertIn("color: var(--gv-mcp-override);", chip)
+        self.assertIn("background: var(--gv-mcp-override-soft);", chip)
+        for rule in (frame, chip):
+            self.assertNotIn("#", rule)
+            self.assertNotIn("rgb", rule)
 
 
 if __name__ == "__main__":

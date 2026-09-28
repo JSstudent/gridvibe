@@ -604,6 +604,33 @@ class DashboardRouteTestCase(unittest.TestCase):
         self.assertEqual(group_row["panes"][0]["agent_selection"], "claude")
         self.assertEqual(group_row["panes"][0]["startup_mode"], "agent")
 
+    def test_the_route_publishes_the_live_override_grant(self):
+        """The row paints its MCP chip red from `agent_mcp_override`, so the
+        route must carry the live record's own value -- including after a
+        relaunch without the tools settled the grant away, which re-ticking
+        the tools does not bring back."""
+        created = api.session_manager.create_group(
+            name="Override", connection_mode="local", layout="single",
+            terminal_count=1, workspace_id="default",
+        )
+        agent = api.session_manager.create_session(
+            group_id=created.group_id, host="localhost", directory="/srv/app",
+            title="Terminal 1", startup_mode="agent", initial_command_mode="agent",
+            agent_selection="claude", agent_mcp=True, agent_mcp_override=True,
+        )
+
+        def published():
+            payload = self.client.get("/api/dashboard").get_json()
+            pane = payload["workspaces"][0]["groups"][0]["panes"][0]
+            return pane["agent_mcp"], pane["agent_mcp_override"]
+
+        self.assertIn("agent_mcp_override", PANE_FIELDS)
+        self.assertEqual(published(), (True, True))
+        api.session_manager.update_session_metadata(agent.session_id, agent_mcp=False)
+        self.assertEqual(published(), (False, False))
+        api.session_manager.update_session_metadata(agent.session_id, agent_mcp=True)
+        self.assertEqual(published(), (True, False))
+
     def test_a_session_with_no_agent_reaches_the_route_and_sorts_last(self):
         """End to end: the surface is how a reader reaches any session, so a
         group of plain terminals is a card here -- behind the agents, holding

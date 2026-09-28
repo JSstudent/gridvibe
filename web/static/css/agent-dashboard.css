@@ -515,6 +515,14 @@
     color: var(--gv-accent);
 }
 
+/* The same chip for an agent in override mode, which acts on panes it did not
+   create without asking. The text stays `MCP`; only the hue changes, and the
+   chip's hover says why. */
+.dash-tag-mcp.is-override {
+    background: var(--gv-mcp-override-soft);
+    color: var(--gv-mcp-override);
+}
+
 .dash-tag-active {
     border-color: transparent;
     background: var(--gv-accent);

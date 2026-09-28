@@ -257,16 +257,28 @@
         return identity ? identity.paneAgentMcpTag(pane) : '';
     }
 
-    function dashboardMcpTagTitle() {
+    function dashboardMcpTagTitle(pane) {
         const identity = dashboardIdentity();
-        return (identity && identity.MCP_TAG_TITLE) || '';
+        return identity ? identity.paneAgentMcpTagTitle(pane) : '';
+    }
+
+    /* Override mode keeps the chip's `MCP` and adds `is-override`, which the
+       stylesheet turns red. Same reading as the pane header's red frame. */
+    function dashboardMcpOverride(pane) {
+        const identity = dashboardIdentity();
+        return Boolean(identity && identity.paneAgentMcpOverride(pane));
     }
 
     /* The whole chip, so the docked sidebar draws *this* one rather than
        composing it out of three of this module's answers -- the same reason
        every other field on its row is asked for by name here. */
     function dashboardMcpTagHtml(pane) {
-        return dashboardTagHtml(dashboardMcpTag(pane), 'mcp', dashboardMcpTagTitle());
+        return dashboardTagHtml(
+            dashboardMcpTag(pane),
+            'mcp',
+            dashboardMcpTagTitle(pane),
+            dashboardMcpOverride(pane) ? 'is-override' : ''
+        );
     }
 
     /* Which conversation this row is, and the hover that carries what the line
@@ -401,11 +413,12 @@
        reader may not recognise can answer on itself instead of spending row
        width on prose. A chip whose label is already the word (`auto`,
        `active`) is handed none. */
-    function dashboardTagHtml(label, modifier = '', title = '') {
+    function dashboardTagHtml(label, modifier = '', title = '', state = '') {
         if (!label) {
             return '';
         }
-        return `<span class="dash-tag${modifier ? ` dash-tag-${escHtml(modifier)}` : ''}"`
+        return `<span class="dash-tag${modifier ? ` dash-tag-${escHtml(modifier)}` : ''}`
+            + `${state ? ` ${escHtml(state)}` : ''}"`
             + `${title ? ` title="${escHtml(title)}"` : ''}>${escHtml(label)}</span>`;
     }
 

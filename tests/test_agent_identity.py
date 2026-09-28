@@ -347,6 +347,50 @@ class AgentIdentityTestCase(unittest.TestCase):
             ["MCP", "MCP"],
         )
 
+    def test_override_mode_is_read_only_beside_the_tag(self):
+        """The red reading: a stated `true` grant on a pane that wears the tag.
+
+        The server already drops the grant with the tools or the agent; a
+        record that still carried one past them -- or a hand-edited truthy
+        string -- must not paint a waiver nothing honours.
+        """
+        result = self._run_node(
+            """
+            report([
+                { startup_mode: 'agent', agent_selection: 'claude', agent_mcp: true,
+                  agent_mcp_override: true },
+                { startup_mode: 'agent', agent_selection: 'claude', agent_mcp: true,
+                  agent_mcp_override: false },
+                { startup_mode: 'agent', agent_selection: 'claude', agent_mcp: true },
+                { startup_mode: 'agent', agent_selection: 'claude', agent_mcp: true,
+                  agent_mcp_override: 'true' },
+                { startup_mode: 'agent', agent_selection: 'claude', agent_mcp: false,
+                  agent_mcp_override: true },
+                { startup_mode: 'terminal', agent_selection: 'claude', agent_mcp: true,
+                  agent_mcp_override: true },
+                { mode: 'ssh', startup_mode: 'agent', agent_selection: 'claude',
+                  agent_mcp: true, agent_mcp_override: true }
+            ].map(overrides => {
+                const session = pane(overrides);
+                return {
+                    tag: identity.paneAgentMcpTag(session),
+                    red: identity.paneAgentMcpOverride(session),
+                    title: identity.paneAgentMcpTagTitle(session)
+                };
+            }));
+            """
+        )
+        titles = self._run_node(
+            "report({ plain: identity.MCP_TAG_TITLE, override: identity.MCP_OVERRIDE_TAG_TITLE });"
+        )
+        red = {"tag": "MCP", "red": True, "title": titles["override"]}
+        plain = {"tag": "MCP", "red": False, "title": titles["plain"]}
+        none = {"tag": "", "red": False, "title": ""}
+        self.assertEqual(result, [red, plain, plain, plain, none, none, red])
+        # The hover names the mode in words; the colour is not the only signal.
+        self.assertIn("override mode", titles["override"])
+        self.assertNotEqual(titles["override"], titles["plain"])
+
     def test_a_custom_agent_and_an_unlisted_one_are_agents_too(self):
         # The launcher offers the checkbox off the registry's `mcp_supported`,
         # but a hand-edited preset reaches the same field -- and a pane that is

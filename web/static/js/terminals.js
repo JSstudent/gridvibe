@@ -732,16 +732,23 @@
         const html = paneAgentIconHtml(session);
         if (icon.innerHTML !== html) icon.innerHTML = html;
         icon.hidden = !html;
+        const identity = window.GridVibeAgentIdentity;
         const mcp = Boolean(html && paneMcpTag(session));
         if (mcp !== ('mcp' in icon.dataset)) {
             if (mcp) icon.dataset.mcp = 'on';
             else delete icon.dataset.mcp;
         }
-        const identity = window.GridVibeAgentIdentity;
+        /* Override mode turns the frame red. Read from the same live record
+           as the frame, so a relaunch that drops the grant clears it here. */
+        const override = mcp && identity.paneAgentMcpOverride(session);
+        if (override !== ('mcpOverride' in icon.dataset)) {
+            if (override) icon.dataset.mcpOverride = 'on';
+            else delete icon.dataset.mcpOverride;
+        }
         const name = html
             ? identity.agentDisplayName(session, typeof AGENT_OPTIONS === 'undefined' ? [] : AGENT_OPTIONS)
             : '';
-        const label = [name, mcp ? identity.MCP_TAG_TITLE : ''].filter(Boolean).join('\n');
+        const label = [name, mcp ? identity.paneAgentMcpTagTitle(session) : ''].filter(Boolean).join('\n');
         if (icon.title !== label) icon.title = label;
     }
 

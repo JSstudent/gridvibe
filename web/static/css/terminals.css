@@ -1431,6 +1431,12 @@
             outline: 1.5px solid var(--t-accent);
             outline-offset: 1.5px;
         }
+        /* Override mode: the same frame, turned red. Colour only, so a pane
+           gaining or losing the grant moves nothing; the mark's hover says it
+           in words. */
+        .terminal-agent-icon[data-mcp][data-mcp-override] {
+            outline-color: var(--gv-mcp-override);
+        }
 
         .terminal-meta {
             display: flex;

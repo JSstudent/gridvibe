@@ -350,6 +350,8 @@ function parseAgentRows() {
             state: /class="dash-activity dash-state-([a-z]+)"/.exec(inner)?.[1] || '',
             tags: [...inner.matchAll(/<span class="dash-tag[^"]*"[^>]*>([\s\S]*?)<\/span>/g)]
                 .map(match => match[1].trim()),
+            tagClasses: [...inner.matchAll(/<span class="(dash-tag[^"]*)"[^>]*>/g)]
+                .map(match => match[1].split(/\s+/).filter(Boolean)),
             word: grab('dash-state-word'),
             glyph: glyph ? glyph[0] : '',
             hasBar: inner.includes('dash-progress-fill'),
@@ -604,6 +606,29 @@ class DashboardSidebarRowTestCase(DashboardSidebarNodeTestCase):
                 "dash-agent-line",
             ],
         )
+
+    def test_an_override_mode_pane_wears_the_dialogs_red_chip(self):
+        """The sidebar draws the dialog's chip, so override mode reaches it
+        with no reading of its own: same `MCP`, same `is-override`."""
+        result = self._run_node(
+            """
+            sidebarShown();
+            const red = pane({ agent_mcp: true, agent_mcp_override: true });
+            const plain = pane({ session_id: 's2', index: 1, agent_mcp: true });
+            fetchAnswer = snapshot([group([red, plain])]);
+            await sidebar.refresh();
+            const rows = parseAgentRows();
+            report({
+                rows: rows.map(row => ({ tags: row.tags, classes: row.tagClasses })),
+                dialog: dashboardMcpTagHtml(red)
+            });
+            """
+        )
+        self.assertEqual(result["rows"], [
+            {"tags": ["MCP"], "classes": [["dash-tag", "dash-tag-mcp", "is-override"]]},
+            {"tags": ["MCP"], "classes": [["dash-tag", "dash-tag-mcp"]]},
+        ])
+        self.assertIn('class="dash-tag dash-tag-mcp is-override"', result["dialog"])
 
     def test_every_other_field_is_the_dialogs_own_answer(self):
         """The naming rule, the transport tag, the state word, the hue and the

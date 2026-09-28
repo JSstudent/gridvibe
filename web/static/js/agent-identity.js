@@ -188,6 +188,10 @@
        is where a reader who does not know the acronym looks. */
     const MCP_TAG_LABEL = 'MCP';
     const MCP_TAG_TITLE = 'This agent is running with GridVibe tools (MCP)';
+    /* The same tag in override mode wears red, and red alone says nothing to
+       a reader who cannot tell it apart, so the hover says it in words. */
+    const MCP_OVERRIDE_TAG_TITLE = 'This agent is running with GridVibe tools (MCP) '
+        + 'in override mode: it acts on panes it did not create without asking';
 
     function text(value) {
         return String(value === null || value === undefined ? '' : value).trim();
@@ -458,6 +462,25 @@
         return MCP_TAG_LABEL;
     }
 
+    /* Whether that tag is worn in override mode -- the standing grant that
+       lets this agent act on panes it did not create without asking. Only a
+       pane that wears the tag at all can, and only a stated `true` counts: the
+       server drops the grant with the tools or the agent, and a pane record
+       that still carried one past them must not paint a waiver nothing
+       honours. */
+    function paneAgentMcpOverride(session) {
+        return Boolean(paneAgentMcpTag(session)) && session.agent_mcp_override === true;
+    }
+
+    /* The hover the tag carries, which names override mode when the pane is
+       in it. `''` for a pane without the tag, matching `paneAgentMcpTag`. */
+    function paneAgentMcpTagTitle(session) {
+        if (!paneAgentMcpTag(session)) {
+            return '';
+        }
+        return paneAgentMcpOverride(session) ? MCP_OVERRIDE_TAG_TITLE : MCP_TAG_TITLE;
+    }
+
     return {
         GENERIC_PANE_TITLE_PATTERN,
         PANE_KIND_AGENT,
@@ -472,6 +495,7 @@
         TRANSPORT_LABEL_CMD,
         MCP_TAG_LABEL,
         MCP_TAG_TITLE,
+        MCP_OVERRIDE_TAG_TITLE,
         isGenericPaneTitle,
         agentKeyForSession,
         paneKindForSession,
@@ -486,6 +510,8 @@
         paneChatTooltip,
         paneTransportLabel,
         paneHeaderHostLabel,
-        paneAgentMcpTag
+        paneAgentMcpTag,
+        paneAgentMcpOverride,
+        paneAgentMcpTagTitle
     };
 }));
