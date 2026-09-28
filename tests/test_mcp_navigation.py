@@ -25,6 +25,8 @@ import unittest
 import urllib.error
 import urllib.parse
 from pathlib import Path
+from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
@@ -608,9 +610,18 @@ class LiveSessionNamesTestCase(unittest.TestCase):
     """Against the real registry: a tab's name needs neither a save nor a restart."""
 
     def setUp(self):
-        from web import api
+        from web import api, saved_sessions
 
         self.api = api
+        self.temp_dir = TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        saved_path_patch = patch.object(
+            saved_sessions,
+            "SAVED_SESSIONS_PATH",
+            str(Path(self.temp_dir.name) / "saved_sessions.json"),
+        )
+        saved_path_patch.start()
+        self.addCleanup(saved_path_patch.stop)
         api.app.config["TESTING"] = True
         self.http = api.app.test_client()
         api.session_manager.reset_sessions()

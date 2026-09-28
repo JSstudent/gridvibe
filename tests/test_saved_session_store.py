@@ -73,6 +73,17 @@ class SavedSessionStoreTestBase(unittest.TestCase):
         return [entry for entry in Path(self.temp_dir.name).iterdir() if ".corrupt-" in entry.name]
 
 
+class SavedSessionIsolationTestCase(SavedSessionStoreTestBase):
+    def test_test_mode_refuses_the_production_preset_file(self):
+        with patch.object(
+            web_saved_sessions,
+            "SAVED_SESSIONS_PATH",
+            web_saved_sessions.PRODUCTION_SAVED_SESSIONS_PATH,
+        ), patch.dict(os.environ, {"GRIDVIBE_TEST_MODE": "1"}):
+            with self.assertRaisesRegex(RuntimeError, "Refusing to use production"):
+                web_saved_sessions.load_saved_sessions()
+
+
 class SavedSessionTransactionTestCase(SavedSessionStoreTestBase):
     """One locked read-modify-write per mutation, not a load/save pair."""
 
@@ -438,6 +449,15 @@ class EncryptionKeyCreationTestCase(unittest.TestCase):
         patcher = patch.object(web_secrets, "ENCRYPTION_KEY_PATH", str(self.key_path))
         patcher.start()
         self.addCleanup(patcher.stop)
+
+    def test_test_mode_refuses_the_production_key(self):
+        with patch.object(
+            web_secrets,
+            "ENCRYPTION_KEY_PATH",
+            web_secrets.PRODUCTION_ENCRYPTION_KEY_PATH,
+        ), patch.dict(os.environ, {"GRIDVIBE_TEST_MODE": "1"}):
+            with self.assertRaisesRegex(RuntimeError, "Refusing to use production"):
+                web_secrets._get_encryption_key()
 
     def test_two_first_run_processes_converge_on_one_key(self):
         starters = 6

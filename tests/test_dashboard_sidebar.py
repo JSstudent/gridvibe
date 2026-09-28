@@ -46,6 +46,7 @@ from unittest.mock import patch
 
 from sessions.manager import SessionManager
 from web import api
+from web import config as web_config
 from web import runtime_state as web_runtime_state
 from web.lifecycle import LifecycleValidationError, normalize_workspace_metadata
 from web.session_presentation import (
@@ -1605,15 +1606,22 @@ class DashboardSidebarSideSettingTestCase(unittest.TestCase):
     """
 
     def setUp(self):
+        self.temp_dir = TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        config_patch = patch.object(
+            web_config, "CONFIG_PATH", str(Path(self.temp_dir.name) / "config.json")
+        )
+        config_patch.start()
+        def restore_config_path():
+            config_patch.stop()
+            api._refresh_runtime_config()
+
+        self.addCleanup(restore_config_path)
+        api._refresh_runtime_config()
         api.app.config["TESTING"] = True
         self.client = api.app.test_client()
         api.session_manager.reset_sessions()
         self.addCleanup(api.session_manager.reset_sessions)
-        config = api.load_config()
-        saved_workspace = json.loads(json.dumps(config.get("workspace", {})))
-        self.addCleanup(self._restore_workspace_config, saved_workspace)
-        self.temp_dir = TemporaryDirectory()
-        self.addCleanup(self.temp_dir.cleanup)
         self.repo_dir = Path(self.temp_dir.name) / "repo"
         self.repo_dir.mkdir()
         self.state_path = Path(self.temp_dir.name) / "runtime_state.json"
@@ -1622,12 +1630,6 @@ class DashboardSidebarSideSettingTestCase(unittest.TestCase):
         )
         patcher.start()
         self.addCleanup(patcher.stop)
-
-    def _restore_workspace_config(self, saved_workspace):
-        config = api.load_config()
-        config["workspace"] = saved_workspace
-        api.save_config(config)
-        api._refresh_runtime_config()
 
     def _save_side(self, side):
         with patch.object(api.socketio, "emit") as emit:

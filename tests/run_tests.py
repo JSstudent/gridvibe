@@ -7,8 +7,8 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 # Discovery may import the test modules as top-level modules, so the package
-# bootstrap that redirects runtime_state.json away from the developer's real
-# file is imported explicitly here — before any test module imports `web`.
+# bootstrap that redirects durable state away from the developer's real files
+# is imported explicitly here — before any test module imports `web`.
 import tests  # noqa: E402,F401
 
 
@@ -42,4 +42,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

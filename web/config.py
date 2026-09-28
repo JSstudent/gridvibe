@@ -38,7 +38,8 @@ from web.state_files import (
 logger = logging.getLogger(__name__)
 
 DEFAULT_CONFIG_PATH = os.path.join(BASE_DIR, "default_config.json")
-CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
+PRODUCTION_CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
+CONFIG_PATH = os.environ.get("GRIDVIBE_CONFIG_PATH") or PRODUCTION_CONFIG_PATH
 _config_lock = threading.RLock()
 
 HOST_KEY_POLICY_OPTIONS = ("auto-add", "known-hosts", "strict")
@@ -160,9 +161,22 @@ def _merge_dicts(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, An
     return merged
 
 
+def _config_path(config_path: Optional[str] = None) -> str:
+    """Resolve the settings file, refusing the user's file in test mode."""
+    target_path = config_path or CONFIG_PATH
+    if os.environ.get("GRIDVIBE_TEST_MODE") and os.path.normcase(
+        os.path.realpath(target_path)
+    ) == os.path.normcase(os.path.realpath(PRODUCTION_CONFIG_PATH)):
+        raise RuntimeError(
+            "Refusing to use production config.json in test mode; "
+            "set GRIDVIBE_CONFIG_PATH or patch CONFIG_PATH."
+        )
+    return target_path
+
+
 def load_config(config_path: Optional[str] = None) -> Dict[str, Any]:
     """Load configuration from file, falling back to default_config.json."""
-    target_path = config_path or CONFIG_PATH
+    target_path = _config_path(config_path)
     with _config_lock, _CrossProcessConfigLock(target_path):
         return _load_config_unlocked(target_path)
 
@@ -232,7 +246,7 @@ def save_config(config: Dict[str, Any], config_path: Optional[str] = None):
     replaces across GridVibe processes, and the atomic writer takes the
     `<file>.bak` `load_config` recovers from.
     """
-    target_path = config_path or CONFIG_PATH
+    target_path = _config_path(config_path)
     with _config_lock, _CrossProcessConfigLock(target_path):
         _validate_config_shape(config)
         _prepare_config_write(target_path)
@@ -265,7 +279,7 @@ def _write_config(config, target_path):
 
 def update_config(updater, config_path=None):
     """Read, normalize/merge and commit under one cross-process lock."""
-    target_path = config_path or CONFIG_PATH
+    target_path = _config_path(config_path)
     with _config_lock, _CrossProcessConfigLock(target_path):
         current = _load_config_unlocked(target_path)
         updated = _merge_dicts(current, updater(current))

@@ -4,6 +4,8 @@ All notable changes to GridVibe will be documented in this file.
 
 ## Unreleased
 
+- **(fix) Test runs no longer write to local saved sessions or settings.** A session name test saved `mcp_stage` presets into the user's `saved_sessions.json`, and a dashboard test temporarily changed the user's `config.json`. Tests now use temporary files for saved sessions, settings, and the encryption key, with guards that refuse the production paths in test mode; the affected fixtures also isolate each case.
+
 - **(fix) Agent-initiated pane closes preserve the session's existing layout.** A close requested through GridVibe's tools used to refresh the pane list without carrying the page's measured geometry, so the remaining panes were rebuilt from the tab's base layout and reshuffled. Tool and **×** closes now share one absorb rule, retain divider weights and surviving explorer/browser state, compose rapid closes, and stage background-tab reflow until that tab is shown. Close broadcasts carry the exact pane and group ids that actually ended, including partial failures; the rule is in [Agent tools (MCP)](docs/engineering_contracts.md#agent-tools-mcp).
 
 - **(fix) Layout saves and workspace moves reject stale pane state, and uncertain resizes report their outcome honestly.** A named layout now checks its captured pane launch fields again after root validation, and a same-workspace move runs its ownership guard before reporting no change. If a resize write has no readable response, the tool returns `unknown` and directs the agent to read the live layout before retrying. The rules are in [Agent tools (MCP)](docs/engineering_contracts.md#agent-tools-mcp).

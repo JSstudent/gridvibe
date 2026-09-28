@@ -66,7 +66,10 @@ from web.session_presentation import (  # noqa: F401 - compatibility re-exports
 
 logger = logging.getLogger(__name__)
 
-SAVED_SESSIONS_PATH = os.path.join(BASE_DIR, "saved_sessions.json")
+PRODUCTION_SAVED_SESSIONS_PATH = os.path.join(BASE_DIR, "saved_sessions.json")
+SAVED_SESSIONS_PATH = (
+    os.environ.get("GRIDVIBE_SAVED_SESSIONS_PATH") or PRODUCTION_SAVED_SESSIONS_PATH
+)
 DEFAULT_SAVED_SESSION_ID = "default-session"
 DEFAULT_SAVED_SESSION_NAME = "Default Session"
 
@@ -731,10 +734,23 @@ def _saved_payload_is_supported(payload: Any) -> bool:
     return isinstance(payload, (dict, list))
 
 
+def _saved_sessions_path() -> str:
+    """Resolve the current preset file, refusing production state in tests."""
+    path = SAVED_SESSIONS_PATH
+    if os.environ.get("GRIDVIBE_TEST_MODE") and os.path.normcase(
+        os.path.realpath(path)
+    ) == os.path.normcase(os.path.realpath(PRODUCTION_SAVED_SESSIONS_PATH)):
+        raise RuntimeError(
+            "Refusing to use production saved_sessions.json in test mode; "
+            "set GRIDVIBE_SAVED_SESSIONS_PATH or patch SAVED_SESSIONS_PATH."
+        )
+    return path
+
+
 _saved_session_store = SavedSessionStore(
     # Resolved per call: the module global is redirected per test case, and a
     # store that pinned the path at import would keep writing the old file.
-    path_resolver=lambda: SAVED_SESSIONS_PATH,
+    path_resolver=_saved_sessions_path,
     is_supported=_saved_payload_is_supported,
 )
 
