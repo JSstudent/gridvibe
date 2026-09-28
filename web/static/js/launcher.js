@@ -520,13 +520,18 @@
                 customAgent = initialCommand;
             }
 
+            const keptAgentMcp = agentMcp && agentMcpSupported(agentSelection);
             return {
                 mode,
                 commandValue,
                 agentSelection,
                 customAgent,
                 agentAutoMode: agentAutoMode && Boolean(agentAutoModeFlag(agentSelection)),
-                agentMcp: agentMcp && agentMcpSupported(agentSelection)
+                agentMcp: keptAgentMcp,
+                /* Only a stated `true` beside kept tools, as the server reads
+                   it: a preset whose MCP box no longer applies cannot bring
+                   an override back into the form on its own. */
+                agentMcpOverride: keptAgentMcp && terminal?.agent_mcp_override === true
             };
         }
 
@@ -822,6 +827,7 @@
                     browserTabs.push(initialCommand);
                 }
             }
+            const agentMcpFlags = readRowAgentMcpFlags(row, commandMode);
             return {
                 title: row.querySelector('.t-title')?.value.trim() || `Terminal ${index + 1}`,
                 directory,
@@ -851,9 +857,8 @@
                 agent_auto_mode: commandMode === 'agent'
                     && Boolean(agentAutoModeFlag(getRowAgentSelection(row)))
                     && Boolean(row.querySelector('.t-agent-auto-mode')?.checked),
-                agent_mcp: commandMode === 'agent'
-                    && agentMcpSupported(getRowAgentSelection(row))
-                    && Boolean(row.querySelector('.t-agent-mcp')?.checked),
+                agent_mcp: agentMcpFlags.agent_mcp,
+                agent_mcp_override: agentMcpFlags.agent_mcp_override,
                 explorer_tree_open: commandMode === 'explorer' && row.dataset.explorerTreeOpen === 'true',
                 explorer_git_open: commandMode === 'explorer' && row.dataset.explorerGitOpen === 'true',
                 explorer_git_follow_browsing: commandMode === 'explorer'
@@ -1626,12 +1631,124 @@
                 mcpField.querySelector('.tip-btn')?.setAttribute('aria-expanded', 'false');
             }
         }
-        if (!available) {
-            const checkbox = mcpField.querySelector('.t-agent-mcp');
-            if (checkbox) {
+        const checkbox = mcpField.querySelector('.t-agent-mcp');
+        if (!available && checkbox) {
+            checkbox.checked = false;
+        }
+        syncTerminalAgentMcpOverrideState(
+            row,
+            available ? selectedAgent : '',
+            available && Boolean(checkbox?.checked)
+        );
+    }
+
+    /* Override mode waives the waivable gates on this agent's own tool calls,
+       so it means nothing without the tools: it is shown wherever the MCP box
+       is, usable only while that box is ticked, and cleared the moment it is
+       not -- a hidden or disabled override never rides into a launch or a
+       preset. The consent was given for one agent CLI, so picking another one
+       clears it too, as relaunching a pane as a different agent does. */
+    function syncTerminalAgentMcpOverrideState(row, selectedAgent, mcpOn) {
+        const overrideField = row.querySelector('.t-agent-mcp-override-field');
+        if (!overrideField) {
+            return;
+        }
+        const mcpField = row.querySelector('.t-agent-mcp-field');
+        const shown = Boolean(mcpField) && !mcpField.classList.contains('hidden');
+        const agent = String(selectedAgent || '');
+        const agentChanged = overrideField.dataset.agent !== agent;
+        overrideField.dataset.agent = agent;
+        overrideField.classList.toggle('hidden', !shown);
+        overrideField.classList.toggle('is-disabled', !mcpOn);
+        const checkbox = overrideField.querySelector('.t-agent-mcp-override');
+        if (checkbox) {
+            checkbox.disabled = !mcpOn;
+            if (!mcpOn || agentChanged) {
                 checkbox.checked = false;
+                /* Withdraws a confirmation still open for the old answer. */
+                checkbox.dataset.consentEpoch = String(Number(checkbox.dataset.consentEpoch || 0) + 1);
             }
         }
+        if (!shown) {
+            row.querySelector('.t-agent-mcp-override-help')?.classList.remove('visible');
+            overrideField.querySelector('.tip-btn')?.setAttribute('aria-expanded', 'false');
+        }
+    }
+
+    /* The one reader of both flags for a launcher row, so the launch payload
+       and a saved preset state the grant only beside the tools it rides on. */
+    function readRowAgentMcpFlags(row, commandMode) {
+        const agentMcp = commandMode === 'agent'
+            && agentMcpSupported(getRowAgentSelection(row))
+            && Boolean(row.querySelector('.t-agent-mcp')?.checked);
+        return {
+            agent_mcp: agentMcp,
+            agent_mcp_override: agentMcp
+                && Boolean(row.querySelector('.t-agent-mcp-override')?.checked)
+        };
+    }
+
+    const AGENT_MCP_OVERRIDE_CONFIRM = {
+        title: 'Let this agent act without asking?',
+        copy: 'This agent will close, move, relaunch, re-mode and clear panes it did not create, without asking first. It still cannot touch its own pane.',
+        note: 'This is not a new way in: any agent pane can already reach GridVibe directly. What changes is the effort. An agent misled by what it reads can do damage with one tool call instead of having to build the request itself.',
+        confirmLabel: 'Turn on override',
+        danger: true
+    };
+
+    /* Ticking the box only asks. It stays unticked while the dialog is open,
+       so a launch or preset save in the meantime carries no grant, and only
+       an explicit Confirm ticks it -- provided the row still offers it to the
+       same agent with MCP on throughout: the rows may have been rebuilt, or
+       the agent switched or MCP unticked (and perhaps ticked again) meanwhile,
+       each of which moves the consent epoch. */
+    async function handleAgentMcpOverrideToggle(checkbox) {
+        if (!checkbox.checked) {
+            return;
+        }
+        checkbox.checked = false;
+        const epoch = checkbox.dataset.consentEpoch;
+        const confirmed = await openGenericConfirmModal(AGENT_MCP_OVERRIDE_CONFIRM);
+        if (!confirmed || !checkbox.isConnected || checkbox.disabled
+            || checkbox.dataset.consentEpoch !== epoch) {
+            return;
+        }
+        checkbox.checked = true;
+    }
+
+    function renderTerminalAgentMcpFields(commandUi) {
+        const mcpShown = commandUi.mode === 'agent' && agentMcpSupported(commandUi.agentSelection);
+        const mcpOn = mcpShown && Boolean(commandUi.agentMcp);
+        const overrideOn = mcpOn && Boolean(commandUi.agentMcpOverride);
+        return `
+                            <label class="check-field t-agent-mcp-field ${mcpShown ? '' : 'hidden'}">
+                                <input class="t-agent-mcp" type="checkbox" ${commandUi.agentMcp ? 'checked' : ''} aria-label="Give this agent GridVibe tools">
+                                <span class="check-copy">
+                                    <strong>MCP</strong>
+                                </span>
+                                <button
+                                    type="button"
+                                    class="tip-btn"
+                                    aria-expanded="false"
+                                    aria-label="Explain the GridVibe MCP"
+                                    onclick="toggleInlineTip(this)"
+                                >?</button>
+                            </label>
+                            <div class="inline-tip t-agent-mcp-help"></div>
+                            <label class="check-field t-agent-mcp-override-field ${mcpShown ? '' : 'hidden'} ${mcpOn ? '' : 'is-disabled'}" data-agent="${escHtml(mcpShown ? commandUi.agentSelection : '')}">
+                                <input class="t-agent-mcp-override" type="checkbox" ${overrideOn ? 'checked' : ''} ${mcpOn ? '' : 'disabled'} aria-label="Let this agent act on panes it did not create without asking">
+                                <span class="check-copy">
+                                    <strong>Override</strong>
+                                </span>
+                                <button
+                                    type="button"
+                                    class="tip-btn"
+                                    aria-expanded="false"
+                                    aria-label="Explain override mode"
+                                    onclick="toggleInlineTip(this)"
+                                >?</button>
+                            </label>
+                            <div class="inline-tip t-agent-mcp-override-help">Needs MCP. The agent closes, moves, relaunches, re-modes and clears panes it did not create without asking first. It still cannot touch its own pane.</div>`;
     }
 
     function resetTerminalCommandOnModeChange(row, nextMode) {
@@ -1651,6 +1768,8 @@
             if (autoModeCheckbox) autoModeCheckbox.checked = false;
             const mcpCheckbox = row.querySelector('.t-agent-mcp');
             if (mcpCheckbox) mcpCheckbox.checked = false;
+            const overrideCheckbox = row.querySelector('.t-agent-mcp-override');
+            if (overrideCheckbox) overrideCheckbox.checked = false;
         }
     }
 
@@ -1971,6 +2090,8 @@
             const powershellCheckbox = row.querySelector('.t-use-powershell');
             const distributionInput = row.querySelector('.t-distribution');
             const startupModeSelect = row.querySelector('.startup-mode-select');
+            const mcpCheckbox = row.querySelector('.t-agent-mcp');
+            const overrideCheckbox = row.querySelector('.t-agent-mcp-override');
 
             window.GridVibeStartupModePicker?.enhance(startupModeSelect, {
                 label: 'Startup mode',
@@ -1986,6 +2107,12 @@
             wslCheckbox?.addEventListener('change', () => handleTerminalShellToggle(row, 'wsl'));
             powershellCheckbox?.addEventListener('change', () => handleTerminalShellToggle(row, 'powershell'));
             distributionInput?.addEventListener('change', () => scheduleAgentPreflight(row, 120));
+            mcpCheckbox?.addEventListener('change', () => {
+                syncTerminalAgentMcpOverrideState(row, getRowAgentSelection(row), mcpCheckbox.checked);
+            });
+            overrideCheckbox?.addEventListener('change', () => {
+                handleAgentMcpOverrideToggle(overrideCheckbox);
+            });
             syncTerminalCommandState(row);
             syncTerminalWslState(row);
             scheduleAgentPreflight(row, 30);
@@ -2095,20 +2222,7 @@
                                 >?</button>
                             </label>
                             <div class="inline-tip t-agent-auto-help"></div>
-                            <label class="check-field t-agent-mcp-field ${commandUi.mode === 'agent' && agentMcpSupported(commandUi.agentSelection) ? '' : 'hidden'}">
-                                <input class="t-agent-mcp" type="checkbox" ${commandUi.agentMcp ? 'checked' : ''} aria-label="Give this agent GridVibe tools">
-                                <span class="check-copy">
-                                    <strong>MCP</strong>
-                                </span>
-                                <button
-                                    type="button"
-                                    class="tip-btn"
-                                    aria-expanded="false"
-                                    aria-label="Explain the GridVibe MCP"
-                                    onclick="toggleInlineTip(this)"
-                                >?</button>
-                            </label>
-                            <div class="inline-tip t-agent-mcp-help"></div>
+                            ${renderTerminalAgentMcpFields(commandUi)}
                         </div>
                         <div class="field t-agent-custom-field ${commandUi.mode === 'agent' && commandUi.agentSelection === 'other' ? '' : 'hidden'}">
                             <label>Custom Agent</label>

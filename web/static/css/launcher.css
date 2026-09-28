@@ -1986,6 +1986,14 @@
             margin-left: auto;
         }
 
+        /* Override needs the MCP box ticked; until then it reads as unavailable
+           while its ? still explains why. */
+        .t-agent-mcp-override-field.is-disabled strong,
+        .t-agent-mcp-override-field.is-disabled input[type="checkbox"] {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
         .t-shell-field .check-stack {
             grid-template-columns: repeat(2, minmax(0, 1fr));
             gap: 4px;
