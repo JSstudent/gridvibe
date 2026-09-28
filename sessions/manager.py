@@ -51,6 +51,22 @@ def _normalize_agent_depth(value: Any) -> int:
     return max(0, min(_MAX_AGENT_DEPTH, depth))
 
 
+def _settle_agent_mcp_override(session: Any) -> None:
+    """Drop an override grant the pane can no longer carry.
+
+    The grant rides on the agent it was given to: once the pane stops being an
+    agent pane with GridVibe's tools -- a mode switch, a relaunch without MCP,
+    an agent that failed preflight -- it goes, and it does not come back when
+    the tools do. Held on the record rather than at each writer, so a
+    transition that forgets the field cannot leave a stale grant behind.
+    """
+    session.agent_mcp_override = (
+        session.agent_mcp_override is True
+        and bool(session.agent_mcp)
+        and session.startup_mode == "agent"
+    )
+
+
 class SessionStatus(Enum):
     """Status of a terminal session."""
     PENDING = "pending"
@@ -92,6 +108,12 @@ class TerminalSession:
     # Whether this pane's agent CLI is started with the GridVibe MCP
     # sidecar registered. A launch option, never a live toggle.
     agent_mcp: bool = False
+    # Whether this pane's agent acts on other panes without first asking the
+    # person -- a standing grant made when the pane was launched. Meaningful
+    # only beside `agent_mcp` on an agent pane, so the record never holds it
+    # otherwise (`_settle_agent_mcp_override`). Absent from a request or a
+    # stored file reads False: a grant is stated, never inherited.
+    agent_mcp_override: bool = False
     # Exact provider conversation identity. The pair is durable only in the
     # runtime workspace snapshot; reusable presets never carry it. Resume is a
     # live delivery decision: a new assigned UUID starts in create mode and
@@ -175,6 +197,7 @@ class TerminalSession:
             self.explorer_root_configured = bool(
                 str(self.explorer_root_directory or "").strip()
             ) and self.startup_mode == "explorer"
+        _settle_agent_mcp_override(self)
 
     def to_dict(self, *, include_conversation: bool = False) -> dict:
         """Convert to a public dictionary, optionally adding durable identity.
@@ -204,6 +227,7 @@ class TerminalSession:
             "custom_agent": self.custom_agent,
             "agent_auto_mode": self.agent_auto_mode,
             "agent_mcp": self.agent_mcp,
+            "agent_mcp_override": self.agent_mcp_override,
             "agent_depth": self.agent_depth,
             "created_by_session_id": self.created_by_session_id,
             "title": self.title,
@@ -1003,6 +1027,9 @@ class SessionManager:
             "custom_agent": str(config.get("custom_agent") or ""),
             "agent_auto_mode": bool(config.get("agent_auto_mode")),
             "agent_mcp": bool(config.get("agent_mcp")),
+            # Only a stated `true` grants it; a missing key, `null` or a
+            # truthy string does not.
+            "agent_mcp_override": config.get("agent_mcp_override") is True,
             "agent_conversation_provider": str(
                 config.get("agent_conversation_provider") or ""
             ),
@@ -1209,6 +1236,7 @@ class SessionManager:
             "custom_agent",
             "agent_auto_mode",
             "agent_mcp",
+            "agent_mcp_override",
             "agent_conversation_provider",
             "agent_conversation_id",
             "agent_conversation_resume",
@@ -1250,6 +1278,7 @@ class SessionManager:
             for field_name, value in updates.items():
                 if field_name in allowed_fields:
                     setattr(session, field_name, value)
+            _settle_agent_mcp_override(session)
 
             return session
 
@@ -1308,6 +1337,7 @@ class SessionManager:
             session.initial_command = resolved_url
             session.initial_command_mode = "browser"
             session.startup_mode = "browser"
+            _settle_agent_mcp_override(session)
             session.agent_conversation_provider = ""
             session.agent_conversation_id = ""
             session.agent_conversation_resume = False

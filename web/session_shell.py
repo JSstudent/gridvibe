@@ -335,6 +335,7 @@ def _agent_updates(session: Any, agent_key: str) -> Dict[str, Any]:
             "initial_command": "",
             "agent_auto_mode": False,
             "agent_mcp": False,
+            "agent_mcp_override": False,
         }
     return {
         "startup_mode": "agent",
@@ -348,6 +349,11 @@ def _agent_updates(session: Any, agent_key: str) -> Dict[str, Any]:
         ),
         "agent_mcp": (
             bool(getattr(session, "agent_mcp", False))
+            and _pane_agent_key(session) == agent_key
+        ),
+        # Granted to one agent, so it follows that agent exactly as MCP does.
+        "agent_mcp_override": (
+            getattr(session, "agent_mcp_override", False) is True
             and _pane_agent_key(session) == agent_key
         ),
     }
@@ -453,6 +459,15 @@ def apply_pane_shell_change(
             bool(mcp_enabled)
             and bool(resolved_agent)
             and _agent_supports_mcp(resolved_agent)
+        )
+        # Stating `mcp` never grants the override: turning the tools off
+        # takes it with them, and turning them on keeps only a grant the same
+        # agent already holds.
+        updates["agent_mcp_override"] = updates["agent_mcp"] and bool(
+            updates.get(
+                "agent_mcp_override",
+                getattr(session, "agent_mcp_override", False) is True,
+            )
         )
 
     # An empty payload states no choice at all and retains the old no-op API

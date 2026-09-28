@@ -210,6 +210,7 @@ def _relaunch_terminal_at(
                 "custom_agent": "",
                 "agent_auto_mode": False,
                 "agent_mcp": False,
+                "agent_mcp_override": False,
                 **EMPTY_CONVERSATION_FIELDS,
             }
         )

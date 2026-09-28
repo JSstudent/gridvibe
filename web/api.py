@@ -3462,6 +3462,7 @@ def _split_pane_overrides(source, data: Dict[str, Any]) -> Dict[str, Any]:
                 "custom_agent": "",
                 "agent_auto_mode": False,
                 "agent_mcp": False,
+                "agent_mcp_override": False,
             }
         )
         return overrides
@@ -3478,6 +3479,7 @@ def _split_pane_overrides(source, data: Dict[str, Any]) -> Dict[str, Any]:
                 "custom_agent": "",
                 "agent_auto_mode": False,
                 "agent_mcp": False,
+                "agent_mcp_override": False,
             }
         )
         if local_pane:
@@ -3513,6 +3515,7 @@ def _split_pane_overrides(source, data: Dict[str, Any]) -> Dict[str, Any]:
                 "custom_agent": "",
                 "agent_auto_mode": False,
                 "agent_mcp": False,
+                "agent_mcp_override": False,
                 "host": "Browser",
                 "use_wsl": False,
                 "use_powershell": False,
@@ -3576,6 +3579,9 @@ def _split_pane_overrides(source, data: Dict[str, Any]) -> Dict[str, Any]:
             # reach, and the flag is what paints the header tag and opens a
             # tunnel on an SSH pane.
             "agent_mcp": bool(mcp) and _agent_supports_mcp(agent_key),
+            # Nothing on this route states a grant, and a clone of an
+            # override-mode source must not inherit one.
+            "agent_mcp_override": False,
         }
     )
     return overrides

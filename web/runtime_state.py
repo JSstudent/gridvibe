@@ -178,6 +178,10 @@ _SESSION_SNAPSHOT_FIELDS = (
     "custom_agent",
     "agent_auto_mode",
     "agent_mcp",
+    # The same pane coming back keeps the grant it was launched with. A
+    # snapshot written before this field existed does not state it, and the
+    # launch then reads False.
+    "agent_mcp_override",
     # Exact conversation identity belongs to this same-pane restore only.
     # The create/resume decision is live and deliberately absent.
     CONVERSATION_PROVIDER_FIELD,

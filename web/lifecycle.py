@@ -581,6 +581,7 @@ def _live_group_config(group: Dict[str, Any]) -> Dict[str, Any]:
         "custom_agent",
         "agent_auto_mode",
         "agent_mcp",
+        "agent_mcp_override",
         "explorer_tree_open",
         "explorer_git_open",
         "explorer_search_open",

@@ -410,6 +410,11 @@
             custom_agent: resolvedStartupMode === 'agent' ? (terminal?.custom_agent || '') : '',
             agent_auto_mode: resolvedStartupMode === 'agent' && Boolean(terminal?.agent_auto_mode),
             agent_mcp: resolvedStartupMode === 'agent' && Boolean(terminal?.agent_mcp),
+            /* A grant that rides on the tools; only a stated `true` carries it,
+               so a preset saved before the field existed launches without. */
+            agent_mcp_override: resolvedStartupMode === 'agent'
+                && Boolean(terminal?.agent_mcp)
+                && terminal?.agent_mcp_override === true,
             /* The explorer's confinement boundary and whether anybody chose it
                travel together, and travel separately from `directory`: a pane
                rooted at a project while browsing one of its subdirectories has

@@ -61,6 +61,7 @@ _PANE_FIELDS = (
     "custom_agent",
     "agent_auto_mode",
     "agent_mcp",
+    "agent_mcp_override",
     "status",
 )
 
@@ -855,6 +856,68 @@ class PaneMcpRelaunchTestCase(ShellTransitionTestCase):
         self.assertFalse(api.session_manager.get_session(session.session_id).agent_mcp)
 
 
+class PaneMcpOverrideRelaunchTestCase(ShellTransitionTestCase):
+    """Override mode follows the agent and the tools it was granted with."""
+
+    def _granted_pane(self, **overrides):
+        fields = {
+            "startup_mode": "agent",
+            "initial_command_mode": "agent",
+            "agent_selection": "claude",
+            "initial_command": "claude",
+            "agent_mcp": True,
+            "agent_mcp_override": True,
+        }
+        fields.update(overrides)
+        session, _repo = self._local_pane(**fields)
+        self.assertIs(session.agent_mcp_override, fields["agent_mcp_override"])
+        return session
+
+    def _override_after(self, session, body):
+        response, _close, _start = self._post_shell(session.session_id, body)
+        self.assertEqual(response.status_code, 200, response.get_json())
+        return api.session_manager.get_session(session.session_id).agent_mcp_override
+
+    def test_relaunching_the_same_agent_keeps_the_grant(self):
+        session = self._granted_pane()
+
+        self.assertIs(self._override_after(session, {"agent": "claude"}), True)
+
+    def test_restating_the_tools_keeps_the_grant(self):
+        session = self._granted_pane()
+
+        self.assertIs(
+            self._override_after(session, {"agent": "claude", "mcp": True}), True
+        )
+
+    def test_turning_the_tools_off_drops_the_grant(self):
+        session = self._granted_pane()
+
+        self.assertIs(
+            self._override_after(session, {"agent": "claude", "mcp": False}), False
+        )
+
+    def test_turning_the_tools_on_grants_nothing(self):
+        session = self._granted_pane(agent_mcp=False, agent_mcp_override=False)
+
+        self.assertIs(
+            self._override_after(session, {"agent": "claude", "mcp": True}), False
+        )
+        self.assertTrue(api.session_manager.get_session(session.session_id).agent_mcp)
+
+    def test_another_agent_does_not_inherit_the_grant(self):
+        session = self._granted_pane()
+
+        self.assertIs(
+            self._override_after(session, {"agent": "codex", "mcp": True}), False
+        )
+
+    def test_a_plain_shell_keeps_no_grant(self):
+        session = self._granted_pane()
+
+        self.assertIs(self._override_after(session, {"agent": ""}), False)
+
+
 class PaneAgentUpdateTestCase(ShellTransitionTestCase):
     """The agent row's update button: the same relaunch, update first.
 
@@ -1607,6 +1670,34 @@ class SplitSaysWhatToCreateTestCase(ShellTransitionTestCase):
         self.assertEqual(created["agent_selection"], "claude")
         self.assertTrue(created["agent_mcp"])
         self.assertFalse(created["agent_auto_mode"])
+
+    def test_a_split_never_passes_on_override_mode(self):
+        """Neither a clone nor a new agent inherits the source's grant."""
+        _group, pane = self._pane(
+            startup_mode="agent",
+            initial_command="claude",
+            initial_command_mode="agent",
+            agent_selection="claude",
+            agent_mcp=True,
+            agent_mcp_override=True,
+        )
+        self.assertIs(pane.agent_mcp_override, True)
+
+        for body in (
+            {"axis": "vertical"},
+            {"axis": "vertical", "kind": "agent", "agent": "claude", "mcp": True},
+            {
+                "axis": "vertical",
+                "kind": "agent",
+                "agent": "claude",
+                "mcp": True,
+                "agent_mcp_override": True,
+            },
+        ):
+            with self.subTest(body=body):
+                response = self._split(pane.session_id, body)
+                self.assertEqual(response.status_code, 201, response.get_json())
+                self.assertIs(response.get_json()["session"]["agent_mcp_override"], False)
 
     def test_a_split_can_create_an_explorer_pane_rooted_where_it_lands(self):
         _group, pane = self._pane()

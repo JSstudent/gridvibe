@@ -1529,6 +1529,7 @@ def _clear_agent_launch_identity(session: Dict[str, Any]) -> None:
     session["custom_agent"] = ""
     session["agent_auto_mode"] = False
     session["agent_mcp"] = False
+    session["agent_mcp_override"] = False
     session.update(EMPTY_CONVERSATION_FIELDS)
 
 

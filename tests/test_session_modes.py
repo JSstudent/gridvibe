@@ -976,6 +976,55 @@ class AgentRequestedModeSwitchTestCase(ModeTransitionTestCase):
         )
 
 
+class OverrideModeTransitionTestCase(ModeTransitionTestCase):
+    """A pane that stops running its agent stops holding the agent's grant.
+
+    The grant does not return when the pane later becomes a terminal again:
+    it was given to the agent that ended, not to the slot.
+    """
+
+    def _granted_pane(self):
+        session, _repo = self._local_pane(
+            startup_mode="agent",
+            initial_command_mode="agent",
+            agent_selection="claude",
+            initial_command="claude",
+            agent_mcp=True,
+            agent_mcp_override=True,
+        )
+        self.assertIs(session.agent_mcp_override, True)
+        return session
+
+    def _override(self, session):
+        return api.session_manager.get_session(session.session_id).agent_mcp_override
+
+    def test_switching_to_files_and_back_drops_the_grant(self):
+        session = self._granted_pane()
+
+        response, _close, _start = self._post_mode(
+            session.session_id, {"startup_mode": "explorer"}
+        )
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertIs(self._override(session), False)
+
+        response, _close, _start = self._post_mode(
+            session.session_id, {"startup_mode": "terminal"}
+        )
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertIs(self._override(session), False)
+
+    def test_switching_to_a_browser_drops_the_grant(self):
+        session = self._granted_pane()
+
+        response, _close, _start = self._post_mode(
+            session.session_id,
+            {"startup_mode": "browser", "url": "http://localhost:3000"},
+        )
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertIs(self._override(session), False)
+
+
 class RefreshPaneCwdMoveTestCase(ModeTransitionTestCase):
     """`_refresh_pane_cwd()` moved with the transaction it only ever served."""
 

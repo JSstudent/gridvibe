@@ -1279,6 +1279,11 @@ def launch_session_group(
         launch_warnings: List[str] = []
         if tool_launch:
             refuse_unsupported_mcp(prepared_sessions)
+            # A tool launch grants no override mode: a grant written into its
+            # body is dropped rather than believed, so an agent cannot hand a
+            # child a standing waiver of the gates it is itself held to.
+            for pane in prepared_sessions:
+                pane["agent_mcp_override"] = False
             launch_warnings = _sanitize_agent_launch_commands(
                 connection_mode, prepared_sessions, refuse_absent=True
             )
