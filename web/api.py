@@ -2272,12 +2272,16 @@ def open_window_intent():
             resolve_view_target(workspace_id, group_id)
         except NavigationRefusal as exc:
             return jsonify(exc.payload()), exc.status_code
-    intent = window_intents.open(workspace_id, group_id)
+    # Only an explicit `false` leaves the window where it is: the focus tools,
+    # the launcher and every older caller send nothing and keep the raise.
+    raise_window = data.get("raise") is not False
+    intent = window_intents.open(workspace_id, group_id, raise_window=raise_window)
     logger.info(
-        "Window intent %s recorded workspace=%s group=%s mode=%s",
+        "Window intent %s recorded workspace=%s group=%s raise=%s mode=%s",
         intent["intent_id"],
         intent["workspace_id"],
         intent["group_id"] or "-",
+        raise_window,
         window_mode(),
     )
     return jsonify(intent), 201

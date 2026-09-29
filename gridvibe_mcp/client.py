@@ -1034,10 +1034,18 @@ class GridVibeClient:
 
     # ---------------- window intents ----------------
 
-    def open_window_intent(self, workspace_id: str, group_id: str = "") -> Dict[str, Any]:
+    def open_window_intent(
+        self,
+        workspace_id: str,
+        group_id: str = "",
+        *,
+        raise_window: bool = True,
+    ) -> Dict[str, Any]:
         body: Dict[str, Any] = {"workspace_id": workspace_id}
         if group_id:
             body["group_id"] = group_id
+        if not raise_window:
+            body["raise"] = False
         payload = self.request("POST", "/api/windows/open", body=body)
         return payload if isinstance(payload, dict) else {}
 

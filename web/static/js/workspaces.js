@@ -601,24 +601,49 @@
     }
 
     async function openWorkspaceWindow(workspaceId, options = {}) {
+        return (await openWorkspaceWindowResult(workspaceId, options)).ok;
+    }
+
+    /* `openWorkspaceWindow`, answering with how the native window was left
+       rather than a bare yes/no. `raise: false` is an agent's `open_window`:
+       an open window stays where it is and a new one is created minimized, so
+       nothing comes forward — and nothing asks that window for its arrival
+       pulse either. Every other caller omits it and keeps the raise. */
+    async function openWorkspaceWindowResult(workspaceId, options = {}) {
         const resolvedWorkspaceId = normalizeWorkspaceId(workspaceId);
         const groupId = String(options.groupId || '');
         const nativeZoomFactor = normalizeNativeZoomFactor(options.nativeZoomFactor);
-        requestWorkspaceArrivalPulse(resolvedWorkspaceId);
+        const raiseWindow = options.raise !== false;
+        if (raiseWindow) {
+            requestWorkspaceArrivalPulse(resolvedWorkspaceId);
+        }
         const api = nativeWorkspaceApi();
         if (api?.open_workspace_window) {
             try {
                 const result = await api.open_workspace_window(
                     resolvedWorkspaceId,
                     groupId,
-                    nativeZoomFactor
+                    nativeZoomFactor,
+                    raiseWindow
                 );
                 if (result?.ok) {
-                    return true;
+                    return {
+                        ok: true,
+                        reused: result.reused === true,
+                        raised: result.raised !== false,
+                        minimized: result.minimized === true,
+                        focus_moved: result.focus_moved === true
+                    };
                 }
             } catch (error) {
                 console.error('[GridVibe Workspaces] open workspace window failed:', error);
             }
+        }
+        /* A tab the browser opens is a window that may come forward, so an
+           open that may not raise ends here rather than falling back to one:
+           a native bridge that refused is reported as refused. */
+        if (!raiseWindow) {
+            return { ok: false };
         }
         /* Browser mode: one tab per workspace, beside the launcher tab, in the
            window the app started in. The name is what makes a second open of
@@ -640,9 +665,9 @@
             console.error('[GridVibe Workspaces] the browser blocked the workspace tab:', {
                 workspace_id: resolvedWorkspaceId
             });
-            return false;
+            return { ok: false };
         }
-        return true;
+        return { ok: true };
     }
 
     /* One wording for the one browser behaviour, shared by every caller that

@@ -103,7 +103,14 @@ ACTIVATE_RESULT_FIELDS = (
 
 RESIZE_RESULT_FIELDS = ("group_id", "revision", "column_weights", "row_weights", "panes")
 
+#: How an opened window was left: an existing one reused, whether it came
+#: forward, whether it is minimized, and whether a new window kept the keyboard
+#: focus it took. Only an open that did not raise reports these; a page that
+#: reports nothing leaves the result empty.
+WINDOW_RESULT_FIELDS = ("reused", "raised", "minimized", "focus_moved")
+
 RESULT_FIELDS_BY_KIND: Dict[str, Tuple[str, ...]] = {
+    WINDOW_KIND: WINDOW_RESULT_FIELDS,
     SPLIT_KIND: SPLIT_RESULT_FIELDS,
     ACTIVATE_KIND: ACTIVATE_RESULT_FIELDS,
     RESIZE_KIND: RESIZE_RESULT_FIELDS,
@@ -138,14 +145,21 @@ class WindowIntentStore:
         workspace_id: str,
         group_id: str = "",
         *,
+        raise_window: bool = True,
         now: Optional[float] = None,
     ) -> Dict[str, Any]:
-        """Record one "open this workspace" intent and return it."""
+        """Record one "open this workspace" intent and return it.
+
+        ``raise_window`` is false for the agent's ``open_window``, which never
+        brings a window forward, and true for the focus tools, whose open step
+        is how the window comes forward. The page passes it to the bridge.
+        """
         return self._record(
             {
                 "kind": WINDOW_KIND,
                 "workspace_id": str(workspace_id or "").strip(),
                 "group_id": str(group_id or "").strip(),
+                "raise": bool(raise_window),
             },
             now=now,
         )
@@ -418,7 +432,9 @@ class WindowIntentStore:
             "detail": record["detail"],
             "expires_in": max(0.0, round(record["expires_at"] - moment, 3)),
         }
-        if kind == SPLIT_KIND:
+        if kind == WINDOW_KIND:
+            payload["raise"] = record.get("raise", True) is not False
+        elif kind == SPLIT_KIND:
             payload["session_id"] = record.get("session_id", "")
             payload["axis"] = record.get("axis", "")
             payload["split_request"] = dict(record.get("split_request") or {})

@@ -710,7 +710,7 @@ def tool_specs() -> List[Dict[str, Any]]:
             "name": "create_workspace",
             "description": (
                 "Create one empty, labelled workspace. Creating it does not "
-                "make a window appear -- call open_window for that."
+                "open a window -- call open_window for that."
             ),
             "inputSchema": {
                 "type": "object",
@@ -815,11 +815,15 @@ def tool_specs() -> List[Dict[str, Any]]:
         {
             "name": "open_window",
             "description": (
-                "Make a workspace window appear on screen, whichever session "
-                "tab it shows. To bring a named session (tab) forward use "
-                "focus_session; for one pane use focus_pane. Reports opened, "
-                "blocked, or no_window_available -- it never retries and never "
-                "pretends."
+                "Make sure a workspace has a window. It never brings a window "
+                "forward: one that is already open is left where it is "
+                "(already_open: true), and a new one is created minimized in "
+                "the taskbar (minimized: true), so the person's tab, focus and "
+                "window order stay as they were. When the person asks to see "
+                "or bring forward a session (tab) use focus_session; for one "
+                "pane use focus_pane. In browser mode it opens a browser tab, "
+                "which the browser may show. Reports opened, blocked, or "
+                "no_window_available -- it never retries and never pretends."
             ),
             "inputSchema": {
                 "type": "object",
@@ -2139,7 +2143,7 @@ def _run(
         workspace_id = _text(args, "workspace_id")
         if not workspace_id:
             raise ToolArgumentError("open_window needs a 'workspace_id'.")
-        return window_opener(client, workspace_id)
+        return window_opener(client, workspace_id, raise_window=False)
 
     if name == "focus_session":
         return _focus_session(args, client=client, window_opener=window_opener)

@@ -1730,7 +1730,7 @@ class _LatePage:
     def split_intent(self, session_id, body):
         return {"intent_id": "s-1", "axis": body["axis"], "state": "pending"}
 
-    def open_window_intent(self, workspace_id, group_id=""):
+    def open_window_intent(self, workspace_id, group_id="", raise_window=True):
         return {"intent_id": "w-1", "state": "pending"}
 
     def read_window_intent(self, intent_id):
@@ -1870,7 +1870,7 @@ class _LateFocusPage:
     def health(self):
         return {"window_mode": "native"}
 
-    def open_window_intent(self, workspace_id, group_id=""):
+    def open_window_intent(self, workspace_id, group_id="", raise_window=True):
         self.recorded["w-1"] = self.clock()
         return {"intent_id": "w-1", "state": "pending"}
 

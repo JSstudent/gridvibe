@@ -131,6 +131,52 @@ def _restore_minimized_window(window) -> bool:
         return False
 
 
+def _foreground_window_handle() -> int | None:
+    """The window the person is using, on Windows; None anywhere else."""
+    if sys.platform != "win32":
+        return None
+    user32 = _windows_user32()
+    if user32 is None:
+        return None
+    try:
+        return int(user32.GetForegroundWindow() or 0) or None
+    except Exception:
+        logger.debug("Could not read the foreground window", exc_info=True)
+        return None
+
+
+def _hand_foreground_back(previous, window) -> bool | None:
+    """Give the foreground back if a window created minimized took it.
+
+    WinForms shows a minimized form with ``SW_SHOWMINIMIZED``, which activates
+    it, and focuses its page once shown: a window created so as not to come
+    forward would still take the keyboard from the person's window. Only a
+    foreground that is now the new window is handed back, so a window the
+    person picked in the meantime is never taken from them.
+
+    ``None`` when there was nothing to hand back, ``True`` when it was handed
+    back, ``False`` when the new window holds the foreground and it could not
+    be returned -- ``SetForegroundWindow`` is allowed to refuse.
+    """
+    if not previous or sys.platform != "win32":
+        return None
+    hwnd = _resolve_native_window_handle(window)
+    user32 = _windows_user32()
+    if hwnd is None or user32 is None:
+        return None
+    try:
+        if int(user32.GetForegroundWindow() or 0) != hwnd:
+            return None
+        if not user32.IsWindow(ctypes.c_void_p(previous)):
+            return None
+        if user32.SetForegroundWindow(ctypes.c_void_p(previous)):
+            return True
+    except Exception:
+        logger.debug("Could not hand the foreground back", exc_info=True)
+    logger.warning("A workspace window created minimized kept the keyboard focus")
+    return False
+
+
 # ── Where a window called up from another window belongs ──
 # Bringing the launcher up from a workspace is a request to look at it, and a
 # launcher parked on a monitor the user is not sitting in front of answers that
@@ -1650,13 +1696,21 @@ class GridVibeApi:
         workspace_id,
         group_id: str = "",
         native_zoom_factor=None,
+        raise_window=True,
     ):
-        """Open or focus one workspace window, optionally restoring zoom."""
+        """Open or focus one workspace window, optionally restoring zoom.
+
+        ``raise_window=False`` is the agent's ``open_window``: nothing comes
+        forward. An open window is left exactly where it is, and a new one is
+        created minimized (see ``_open_workspace_window``). Only an explicit
+        ``False`` asks for that; every other value keeps the raise.
+        """
         return self._open_workspace_window(
             workspace_id,
             group_id,
             native_zoom_factor,
             legacy_default_url=False,
+            raise_window=raise_window is not False,
         )
 
     def _open_workspace_window(
@@ -1666,8 +1720,16 @@ class GridVibeApi:
         native_zoom_factor,
         *,
         legacy_default_url: bool,
+        raise_window: bool = True,
     ):
-        """Implementation shared by workspace-aware and legacy bridge calls."""
+        """Implementation shared by workspace-aware and legacy bridge calls.
+
+        Without ``raise_window`` a new window is created minimized rather than
+        shown without activation: pywebview's ``focus=False`` makes a window
+        that can never take keyboard focus, and none of its options places a
+        window behind the foreground one, so minimized is the only state that
+        is guaranteed not to cover what the person is looking at.
+        """
         try:
             resolved_workspace_id = normalize_workspace_id(workspace_id)
         except ValueError as exc:
@@ -1705,6 +1767,13 @@ class GridVibeApi:
                     logger.debug(
                         "Keeping existing workspace window open; frontend will reconcile its groups"
                     )
+                if not raise_window:
+                    return {
+                        "ok": True,
+                        "reused": True,
+                        "raised": False,
+                        "minimized": self._is_window_minimized(window_name),
+                    }
                 if requested_zoom is not None and _set_native_window_zoom(
                     window, requested_zoom
                 ) is None:
@@ -1727,6 +1796,14 @@ class GridVibeApi:
                 url,
             )
             _patch_winforms_dark_title_bar()
+            create_options = {}
+            foreground = None
+            if not raise_window:
+                create_options["minimized"] = True
+                foreground = _foreground_window_handle()
+                # Tracked minimized from before the window exists, so its own
+                # `minimized` event is an echo and never starts the cascade.
+                self._set_window_minimized(window_name, True)
             window = webview.create_window(
                 "GridVibe Workspace",
                 url,
@@ -1740,8 +1817,11 @@ class GridVibeApi:
                 text_select=True,
                 zoomable=True,
                 js_api=self,
+                **create_options,
             )
             if window is None:
+                if not raise_window:
+                    self._set_window_minimized(window_name, False)
                 logger.error("pywebview.create_window returned None for a workspace window")
                 return {"ok": False, "error": "Failed to create workspace window"}
 
@@ -1762,14 +1842,35 @@ class GridVibeApi:
                 resolved_group_id,
             )
             if self._register_window is not None:
-                self._register_window(window, window_name)
+                if raise_window:
+                    self._register_window(window, window_name)
+                else:
+                    self._register_window(window, window_name, minimized=True)
+            focus_kept = None
+            if not raise_window:
+                focus_kept = _hand_foreground_back(foreground, window)
+                shown_event = getattr(getattr(window, "events", None), "shown", None)
+                if shown_event is not None:
+                    # WinForms focuses the page from its own Shown handler,
+                    # which can run after create_window has returned.
+                    shown_event += (
+                        lambda *_args, previous=foreground, created=window:
+                        _hand_foreground_back(previous, created)
+                    )
             logger.info(
                 "Workspace window created and registered (workspace=%s group=%s)",
                 resolved_workspace_id,
                 resolved_group_id or "all",
             )
+            if not raise_window:
+                answer = {"ok": True, "reused": False, "raised": False, "minimized": True}
+                if focus_kept is False:
+                    answer["focus_moved"] = True
+                return answer
             return {"ok": True, "reused": False}
         except Exception as exc:
+            if not raise_window and resolved_workspace_id not in self._workspace_windows:
+                self._set_window_minimized(f"workspace:{resolved_workspace_id}", False)
             logger.exception(
                 "Failed to open workspace window workspace=%s group=%s",
                 resolved_workspace_id,
@@ -2204,9 +2305,9 @@ def main():
 
     open_windows = set()
 
-    def register_window(window, kind: str):
+    def register_window(window, kind: str, minimized: bool = False):
         open_windows.add(kind)
-        api_bridge._set_window_minimized(kind, False)
+        api_bridge._set_window_minimized(kind, minimized)
 
         def _handle_minimized(*_args):
             logger.debug("GridVibe %s window minimized", kind)

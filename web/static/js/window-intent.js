@@ -138,6 +138,36 @@
             );
         },
 
+        /* Whether a window intent may bring its window forward. Only an
+           explicit `false` says no: that is an agent's `open_window`, and an
+           older server's records, which carry no flag, came from callers that
+           raised. */
+        raises(intent) {
+            return intent?.raise !== false;
+        },
+
+        /* Whether the open answered yes. The host answers with a boolean or,
+           through `openWorkspaceWindowResult`, with `{ ok, ... }`. */
+        opened(answer) {
+            return answer === true || answer?.ok === true;
+        },
+
+        /* How an open that was not allowed to raise left the window, for the
+           agent's answer. Nothing to report after a raise, or from a host
+           that answered with a bare boolean. */
+        windowResult(intent, answer) {
+            if (policy.raises(intent) || !answer || typeof answer !== 'object') {
+                return null;
+            }
+            const result = {
+                reused: answer.reused === true,
+                raised: answer.raised === true,
+                minimized: answer.minimized === true
+            };
+            if (answer.focus_moved === true) result.focus_moved = true;
+            return result;
+        },
+
         /* What the page reports back after asking the window to open. */
         outcome(opened) {
             return opened ? OPENED : BLOCKED;
@@ -308,21 +338,26 @@
         }
 
         async function deliverWindow(intentId, intent) {
-            let opened = false;
+            let answer = null;
             try {
-                opened = Boolean(await openWorkspaceWindow(
+                const options = { groupId: String(intent.group_id || '') };
+                if (!policy.raises(intent)) options.raise = false;
+                answer = await openWorkspaceWindow(
                     String(intent.workspace_id || ''),
-                    { groupId: String(intent.group_id || '') }
-                ));
+                    options
+                );
             } catch (error) {
                 onError(error);
-                opened = false;
+                answer = null;
             }
+            const opened = policy.opened(answer);
+            const result = opened ? policy.windowResult(intent, answer) : null;
             try {
                 await reportResult(
                     intentId,
                     policy.outcome(opened),
-                    policy.detail(opened)
+                    policy.detail(opened),
+                    result || undefined
                 );
             } catch (error) {
                 onError(error);
@@ -488,8 +523,12 @@
             listIntents: readIntents,
             claimIntent: claim,
             reportResult: report,
+            /* The result form says how the window was left, which an
+               `open_window` that may not raise reports back. */
             openWorkspaceWindow: (workspaceId, options) =>
-                host.openWorkspaceWindow(workspaceId, options),
+                typeof host.openWorkspaceWindowResult === 'function'
+                    ? host.openWorkspaceWindowResult(workspaceId, options)
+                    : host.openWorkspaceWindow(workspaceId, options),
             /* Present on the workspace page and absent on the launcher, which
                is the whole ownership rule: a page with no panes never claims a
                split intent. */
