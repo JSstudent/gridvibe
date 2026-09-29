@@ -12,7 +12,7 @@ if str(PROJECT_ROOT) not in sys.path:
 import tests  # noqa: E402,F401
 from gridvibe_mcp.geometry import resize_divider  # noqa: E402
 from gridvibe_mcp.identity import PaneIdentity  # noqa: E402
-from gridvibe_mcp.server import dispatch, tool_names  # noqa: E402
+from gridvibe_mcp.server import dispatch, tool_names, tool_specs  # noqa: E402
 from web import api  # noqa: E402
 from web.window_intents import window_intents  # noqa: E402
 
@@ -138,6 +138,14 @@ class ResizeToolTestCase(unittest.TestCase):
         self.assertEqual(expired["status"], "no_window_available")
         self.assertIn("read list_panes", expired["detail"])
         self.assertNotIn("changed", expired)
+
+    def test_description_says_any_tab_works_and_nothing_switches(self):
+        description = next(
+            spec["description"] for spec in tool_specs() if spec["name"] == "resize_divider"
+        )
+        self.assertIn("showing or not", description)
+        self.assertIn("does not switch tabs", description)
+        self.assertNotIn("visible native page", description)
 
     def test_dispatch_calls_same_transport_independent_helper(self):
         with patch("gridvibe_mcp.server.resize_divider_for", return_value={"status": "resized"}) as call:

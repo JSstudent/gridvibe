@@ -17,6 +17,9 @@
       transaction, and drop the tab's cached view so it is rebuilt from what
       the server now holds the next time it is shown.
 
+   Reading, measuring, the hold and the write are the tab's, shared with the
+   divider resize: `background-tab.js`, handed in as `page.tab`.
+
    Two halves, the same split every other module here uses:
 
    - `policy` is pure: which rule refuses a pane, and what the tab looks like
@@ -36,9 +39,9 @@
      instead: it owns a live grid, and this path does not.
    - **A tab opened while its split is in flight waits for it.** From the moment
      the request goes out until the arrangement is written, the tab is held:
-     the page's load asks `settled` first, so it never paints the new pane from
-     the server before its place in the layout exists, nor restores a cached
-     view the split is about to drop.
+     the page's load asks the tab's `settled` first, so it never paints the new
+     pane from the server before its place in the layout exists, nor restores a
+     cached view the split is about to drop.
    - **A pane that exists is reported, whatever happened to its layout.** The
      server has made it. If the arrangement could not be saved the result says
      so, and the tab comes back with the default arrangement for its size.
@@ -139,22 +142,15 @@
 
     function create(page) {
         const {
+            /* The window's `GridVibeBackgroundTab`: the tab's reading,
+               measuring, hold and write, shared with the divider resize. */
+            tab,
             /* The session tab this window holds a pane in without showing it,
                or '' — for a pane on screen, one this window does not hold, or
                a window that has not settled on a tab. */
             groupOf,
             /* Whether the tab is now the shown one, or about to be. */
             isShown,
-            /* Resolves once the tab's queued presentation has landed. */
-            settle,
-            /* The tab as the server would rebuild it: `{ groupId, ids,
-               rects, columnWeights, rowWeights, baseCount }`, panes in visual
-               order. Null when the tab is gone. */
-            readModel,
-            /* The shared grid, measured for this model's weights:
-               `{ narrow, surfaces, cell, headerHeight }`, one surface per
-               rectangle. Null when there is nothing to measure. */
-            measure,
             /* Where the cut lands and what the axis weights become. */
             plan,
             splitRect,
@@ -163,50 +159,20 @@
             unmeasurable,
             /* Create the pane on the server: `{ ok, session, group, error }`. */
             split,
-            /* Drop the tab's cached view, unless it is the one painted. */
-            discard,
-            /* Write the arrangement through the revisioned transaction:
-               `{ ok, revision, error }`. */
-            saveLayout,
-            /* Take the server's record of the tab into the tab strip. */
-            adopt,
             /* The visible handler, for a tab that was opened meanwhile. */
             performShown,
-            limits,
-            onError = () => {}
+            limits
         } = page || {};
-
-        /* The splits in flight, per tab. More than one can be out for the same
-           tab when two intents land together, so it is a set, not a flag. */
-        const inFlight = new Map();
-
-        function hold(groupId) {
-            let release = null;
-            const pending = new Promise(resolve => { release = resolve; });
-            const held = inFlight.get(groupId) || new Set();
-            held.add(pending);
-            inFlight.set(groupId, held);
-            return () => {
-                held.delete(pending);
-                if (!held.size && inFlight.get(groupId) === held) {
-                    inFlight.delete(groupId);
-                }
-                release();
-            };
-        }
 
         async function inspect(sessionId) {
             const id = String(sessionId || '');
             const groupId = String(groupOf(id) || '');
             if (!groupId) return null;
-            /* Best effort: the write sends only the arrangement, so a queued
-               presentation that failed to land is reported and not fatal. */
-            try { await settle(groupId); } catch (error) { onError(error); }
-            const model = await readModel(groupId);
+            const model = await tab.read(groupId);
             if (!model) return null;
             const visualIndex = model.ids.indexOf(id);
             if (visualIndex < 0) return null;
-            const measured = measure(model);
+            const measured = tab.measure(model);
             if (!measured) {
                 return { groupId, model, visualIndex, measured: null, blockers: null, candidates: [] };
             }
@@ -249,7 +215,6 @@
            the split returned, take the record. The tab is held by the caller. */
         async function place(view, axis, cut, posted) {
             /* From here the pane exists whatever else happens. */
-            discard(view.groupId);
             const arranged = policy.arrange({
                 ids: view.model.ids,
                 rects: view.model.rects,
@@ -261,37 +226,17 @@
                 newId: posted.session.session_id,
                 splitRect
             });
-            let saved = { ok: false };
-            const revision = posted.group && posted.group.presentation_revision;
-            if (Number.isInteger(revision)) {
-                try {
-                    saved = await saveLayout({
-                        groupId: view.groupId,
-                        expectedRevision: revision,
-                        ids: arranged.ids,
-                        rects: arranged.rects,
-                        columnWeights: arranged.columnWeights,
-                        rowWeights: arranged.rowWeights,
-                        baseCount: view.model.baseCount
-                    }) || { ok: false };
-                } catch (error) {
-                    onError(error);
-                    saved = { ok: false };
-                }
-            }
-            adopt(
-                posted.group,
-                saved.ok
-                    ? {
-                        ids: arranged.ids,
-                        rects: arranged.rects,
-                        columnWeights: arranged.columnWeights,
-                        rowWeights: arranged.rowWeights,
-                        baseCount: view.model.baseCount,
-                        revision: saved.revision
-                    }
-                    : null
+            const layout = {
+                ids: arranged.ids,
+                rects: arranged.rects,
+                columnWeights: arranged.columnWeights,
+                rowWeights: arranged.rowWeights,
+                baseCount: view.model.baseCount
+            };
+            const saved = await tab.write(
+                view.groupId, posted.group && posted.group.presentation_revision, layout
             );
+            tab.adopt(posted.group, layout, saved);
             return {
                 ok: true,
                 session: posted.session,
@@ -304,17 +249,6 @@
             /* Whether this window holds the pane in a tab it is not showing. */
             holds(sessionId) {
                 return Boolean(groupOf(String(sessionId || '')));
-            },
-
-            /* Resolves once no split of this tab is in flight: the one thing a
-               load of the tab has to wait for. Immediately, almost always. */
-            async settled(groupId) {
-                const id = String(groupId || '');
-                let held = inFlight.get(id);
-                while (held && held.size) {
-                    await Promise.all(Array.from(held));
-                    held = inFlight.get(id);
-                }
             },
 
             /* The axes the pane could be halved on, or null when it is not in
@@ -338,7 +272,7 @@
                the grid now showing is another tab's. Held from the call, with
                nothing before it, so a return to the tab waits for the write. */
             async placeAfterMove(view, axis, cut, posted) {
-                const release = hold(String((view && view.groupId) || ''));
+                const release = tab.hold(String((view && view.groupId) || ''));
                 try {
                     return await place(view, axis, cut, posted);
                 } finally {
@@ -380,7 +314,7 @@
                 }
                 /* Held from here, with nothing between the check and the hold:
                    a tab opened from now on waits in its load for the write. */
-                const release = hold(view.groupId);
+                const release = tab.hold(view.groupId);
                 try {
                     return await splitBehind(id, axis, request, view);
                 } finally {

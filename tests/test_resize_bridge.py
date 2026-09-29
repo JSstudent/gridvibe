@@ -36,6 +36,7 @@ async function run(kind) {
         currentWorkspaceId:'ws', sessionGroups:[group],
         activeGroupId:'g', visibleGroupId:'g', gridBuilt:true,
         resizeIntentInFlight:false, activeGridResize:null,
+        backgroundResize:null,
         closeGeometryCoordinator: {epoch: () => closeEpoch},
         splitColumnWeights:[1,1], splitRowWeights:[1],
         terminals:[{},{}], sessionIds:['p1','p2'],

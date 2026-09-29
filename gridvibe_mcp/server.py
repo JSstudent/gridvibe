@@ -1121,11 +1121,14 @@ def _resize_spec() -> Dict[str, Any]:
     return {
         "name": "resize_divider",
         "description": (
-            "Move one live grid track boundary in a session. Read list_panes first for "
+            "Move one grid track boundary in a session. The session may be any tab "
+            "of its workspace window, showing or not: the window does not switch "
+            "tabs or move focus, and a tab that isn't showing has its new "
+            "proportions the next time it is shown. Read list_panes first for "
             "group_id, layout.presentation_revision and geometry. A vertical boundary "
             "between columns N and N+1 has line_index N; horizontal is between "
             "rows N and N+1. Position is a fraction of the full grid width or "
-            "height, strictly between 0 and 1. The visible native page checks "
+            "height, strictly between 0 and 1. The open native window measures "
             "pane minimums and persists before reporting resized. A stale layout, "
             "impossible size, or missing page changes nothing. If a write response "
             "cannot be confirmed, the result is unknown; read list_panes before retrying. For three equal "

@@ -34,7 +34,9 @@ from tests.test_split_geometry import RESTORE_SOURCE, RESTORE_STUBS
 
 ROOT = Path(__file__).resolve().parent.parent
 STATIC_JS = ROOT / "web" / "static" / "js"
+BACKGROUND_TAB_JS = STATIC_JS / "background-tab.js"
 BACKGROUND_SPLIT_JS = STATIC_JS / "background-split.js"
+BACKGROUND_RESIZE_JS = STATIC_JS / "background-resize.js"
 SPLIT_GEOMETRY_JS = STATIC_JS / "split-geometry.js"
 TERMINALS_JS = STATIC_JS / "terminals.js"
 TERMINALS_HTML = ROOT / "templates" / "terminals.html"
@@ -81,6 +83,7 @@ def _run_node_file(script: str) -> dict:
 
 MODULE_HARNESS = r"""
 const bg = require(MODULE_PATH);
+const backgroundTab = require(TAB_PATH);
 
 const RECT = (originSlot, x, y, w, h) => ({ originSlot, x, y, w, h });
 
@@ -136,7 +139,7 @@ function fakePage(options = {}) {
         split: async (id, axis, request) => {
             log.push('split');
             requests.push({ id, axis, request });
-            if (options.duringSplit) options.duringSplit(api, log);
+            if (options.duringSplit) options.duringSplit(tab, log);
             if (options.splitWaits) await options.splitWaits;
             if (options.splitThrows) throw new Error('network down');
             return options.splitResult || {
@@ -157,14 +160,16 @@ function fakePage(options = {}) {
         limits: { maxPanes: options.maxPanes || 16, minCols: 8, minRows: 4 },
         onError: error => log.push(`error:${error.message}`)
     };
-    const api = bg.create(page);
-    return { page, log, saves, adopted, requests, api };
+    /* The window's one tab module, as the page builds it, under the split. */
+    const tab = backgroundTab.create(page);
+    const api = bg.create({ ...page, tab });
+    return { page, log, saves, adopted, requests, api, tab };
 }
 
 /* Whether the tab is free to load within a tick or two, or still held. */
-async function releasedSoon(api, groupId) {
+async function releasedSoon(tab, groupId) {
     return Promise.race([
-        api.settled(groupId).then(() => true),
+        tab.settled(groupId).then(() => true),
         new Promise(resolve => setTimeout(() => resolve(false), 50))
     ]);
 }
@@ -274,7 +279,7 @@ const out = {};
     {
         const t = fakePage({ splitResult: { ok: false, error: 'Split failed with status 400' } });
         const answer = await t.api.perform('pane-b', 'vertical', null);
-        out.createFailed = { answer, log: t.log, released: await releasedSoon(t.api, 'g-2') };
+        out.createFailed = { answer, log: t.log, released: await releasedSoon(t.tab, 'g-2') };
     }
     {
         /* The tab is picked while the request is out: its load asks first, and
@@ -285,32 +290,32 @@ const out = {};
         const sent = new Promise(resolve => { requestSent = resolve; });
         const t = fakePage({
             splitWaits: new Promise(resolve => { answerRequest = resolve; }),
-            duringSplit: (api, log) => {
-                load = api.settled('g-2').then(() => log.push('load'));
+            duringSplit: (tab, log) => {
+                load = tab.settled('g-2').then(() => log.push('load'));
                 requestSent();
             }
         });
         const performing = t.api.perform('pane-b', 'vertical', null);
         await sent;
-        const heldDuring = !(await releasedSoon(t.api, 'g-2'));
-        const otherTabFree = await releasedSoon(t.api, 'g-1');
+        const heldDuring = !(await releasedSoon(t.tab, 'g-2'));
+        const otherTabFree = await releasedSoon(t.tab, 'g-1');
         answerRequest();
         const answer = await performing;
         await load;
         out.openedDuringRequest = {
             answer, log: t.log, heldDuring, otherTabFree,
-            releasedAfter: await releasedSoon(t.api, 'g-2')
+            releasedAfter: await releasedSoon(t.tab, 'g-2')
         };
     }
     {
         const t = fakePage({ splitThrows: true });
         let thrown = '';
         try { await t.api.perform('pane-b', 'vertical', null); } catch (error) { thrown = error.message; }
-        out.splitThrew = { thrown, released: await releasedSoon(t.api, 'g-2') };
+        out.splitThrew = { thrown, released: await releasedSoon(t.tab, 'g-2') };
     }
     {
         const t = fakePage();
-        out.idle = await releasedSoon(t.api, 'g-2');
+        out.idle = await releasedSoon(t.tab, 'g-2');
     }
     {
         const t = fakePage({ saveResult: { ok: false, error: 'stale' } });
@@ -321,7 +326,7 @@ const out = {};
         const t = fakePage({ saveThrows: true });
         const answer = await t.api.perform('pane-b', 'vertical', null);
         out.saveThrew = {
-            answer, adopted: t.adopted, log: t.log, released: await releasedSoon(t.api, 'g-2')
+            answer, adopted: t.adopted, log: t.log, released: await releasedSoon(t.tab, 'g-2')
         };
     }
     {
@@ -365,7 +370,7 @@ ADAPTER_SOURCE_NAMES = (
     "readBackgroundGroupModel",
     "measureTerminalCell",
     "measureGridForModel",
-    "adoptBackgroundSplit",
+    "adoptBackgroundGroup",
     "discardBackgroundGroupView",
 )
 
@@ -531,7 +536,9 @@ const out = {};
         narrow: measured.narrow,
         widths: measured.surfaces.map(surface => Math.round(surface.width * 10) / 10),
         height: Math.round(measured.surfaces[0].height * 10) / 10,
-        cell: measured.cell, headerHeight: measured.headerHeight
+        cell: measured.cell, headerHeight: measured.headerHeight,
+        // The track sizes a divider move is planned on come with it.
+        columnSizes: measured.metrics.columnSizes.length, rowSizes: measured.metrics.rowSizes.length
     };
     terminals = [{}, { term: { _core: { _renderService: { dimensions: { css: { cell: { width: 9, height: 20 } } } } } } }];
     headerBox = { height: 40 };
@@ -548,7 +555,7 @@ const out = {};
 
     // ── the tab's record after a split the page just wrote ──
     sessionGroups = [{ group_id: 'g-2', pane_order: ['pane-a'], workspace_layout: null, presentation_revision: 3 }];
-    adoptBackgroundSplit(
+    adoptBackgroundGroup(
         { group_id: 'g-2', pane_order: ['pane-a', 'pane-new'], presentation_revision: 7, terminal_count: 2 },
         {
             ids: ['pane-a', 'pane-new'],
@@ -562,7 +569,7 @@ const out = {};
     };
     revisionsSet = [];
     sessionGroups = [{ group_id: 'g-2', pane_order: ['pane-a'] }];
-    adoptBackgroundSplit({ group_id: 'g-2', pane_order: ['pane-a', 'pane-new'], presentation_revision: 7 }, null);
+    adoptBackgroundGroup({ group_id: 'g-2', pane_order: ['pane-a', 'pane-new'], presentation_revision: 7 }, null);
     out.adoptedUnsaved = {
         order: sessionGroups[0].pane_order, layout: sessionGroups[0].workspace_layout || null,
         revision: sessionGroups[0].presentation_revision, revisions: revisionsSet.slice()
@@ -677,6 +684,7 @@ function build(options) {
 
 SPLIT_IN_FLIGHT_HARNESS = r"""
 const bg = require(MODULE_PATH);
+const backgroundTab = require(TAB_PATH);
 
 /* The real `splitTerminalPane`, against a page that is only as much of a page
    as it reads, and the real background-split module under it for a pane that
@@ -694,20 +702,16 @@ async function run(interrupt, options = {}) {
         after: () => events.push('card-added')
     };
     const grid = { children: [sourceCard] };
-    let backgroundSplit = null;
+    let tab = null;
     /* Whether a load of the tab would still be waiting while the write is
        out: `settled` must not resolve until the write has landed. */
     const heldDuringWrite = async groupId => {
         let resolved = false;
-        backgroundSplit.settled(groupId).then(() => { resolved = true; });
+        tab.settled(groupId).then(() => { resolved = true; });
         await new Promise(resolve => setTimeout(resolve, 5));
         return !resolved;
     };
-    backgroundSplit = bg.create({
-        splitRect: (rect, axis, firstSpan) => [
-            { originSlot: 0, x: rect.x, y: rect.y, w: firstSpan, h: rect.h },
-            { originSlot: 1, x: rect.x + firstSpan, y: rect.y, w: rect.w - firstSpan, h: rect.h }
-        ],
+    tab = backgroundTab.create({
         discard: groupId => { discarded.push(groupId); events.push('discarded'); },
         saveLayout: async layout => {
             events.push('layout-written');
@@ -717,7 +721,14 @@ async function run(interrupt, options = {}) {
         adopt: (group, saved) => {
             events.push('adopted');
             adopted.push({ groupId: group && group.group_id, saved });
-        },
+        }
+    });
+    const backgroundSplit = bg.create({
+        tab,
+        splitRect: (rect, axis, firstSpan) => [
+            { originSlot: 0, x: rect.x, y: rect.y, w: firstSpan, h: rect.h },
+            { originSlot: 1, x: rect.x + firstSpan, y: rect.y, w: rect.w - firstSpan, h: rect.h }
+        ],
         limits: { maxPanes: 16, minCols: 20, minRows: 5 }
     });
     const context = {
@@ -794,7 +805,7 @@ async function run(interrupt, options = {}) {
     vm.runInNewContext(`${SPLIT_SOURCE}\nglobalThis.api = { splitTerminalPane };`, context);
     const answer = await context.api.splitTerminalPane(0, 'vertical', null);
     let releasedAfter = false;
-    backgroundSplit.settled('g-1').then(() => { releasedAfter = true; });
+    tab.settled('g-1').then(() => { releasedAfter = true; });
     await new Promise(resolve => setTimeout(resolve, 5));
     return {
         ok: answer.ok,
@@ -870,7 +881,7 @@ async function run(scenario) {
         activeLoadToken: 0,
         activeGroupId: 'g-2',
         workspaceGone: false,
-        backgroundSplit: {
+        backgroundTab: {
             settled: async groupId => {
                 events.push(`settled:${groupId}`);
                 if (groupId === 'g-2') await held;
@@ -918,7 +929,8 @@ class BackgroundSplitModuleTestCase(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.out = _run_node_file(
-            f"const MODULE_PATH = {json.dumps(str(BACKGROUND_SPLIT_JS))};\n" + MODULE_HARNESS
+            f"const MODULE_PATH = {json.dumps(str(BACKGROUND_SPLIT_JS))};\n"
+            f"const TAB_PATH = {json.dumps(str(BACKGROUND_TAB_JS))};\n" + MODULE_HARNESS
         )
 
     # ── the reading ──
@@ -1229,6 +1241,7 @@ class BackgroundSplitPageAdapterTestCase(unittest.TestCase):
         # Nothing on screen to read a font off: the defaults the live reading uses.
         self.assertEqual(measured["cell"], {"width": 8, "height": 17})
         self.assertEqual(measured["headerHeight"], 34)
+        self.assertEqual((measured["columnSizes"], measured["rowSizes"]), (16, 8))
 
     def test_the_cell_and_header_are_read_off_a_live_terminal_when_there_is_one(self):
         self.assertEqual(
@@ -1343,6 +1356,7 @@ class SplitInFlightTestCase(unittest.TestCase):
         cls.out = _run_node_file(
             "const vm = require('vm');\n"
             f"const MODULE_PATH = {json.dumps(str(BACKGROUND_SPLIT_JS))};\n"
+            f"const TAB_PATH = {json.dumps(str(BACKGROUND_TAB_JS))};\n"
             f"const SPLIT_SOURCE = {json.dumps(split)};\n" + SPLIT_IN_FLIGHT_HARNESS
         )
 
@@ -1457,7 +1471,7 @@ class LoadWaitsForBackgroundSplitTestCase(unittest.TestCase):
     def setUpClass(cls):
         source = TERMINALS_JS.read_text(encoding="utf-8")
         load = "\n\n".join(
-            _function_source(source, name) for name in ("backgroundSplitSettled", "initialLoad")
+            _function_source(source, name) for name in ("backgroundTabSettled", "initialLoad")
         )
         cls.out = _run_node_file(
             "const vm = require('vm');\n"
@@ -1486,31 +1500,39 @@ class LoadWaitsForBackgroundSplitTestCase(unittest.TestCase):
 
 class BackgroundSplitWiringTestCase(unittest.TestCase):
     def test_the_workspace_page_loads_the_module_before_terminals(self):
-        """Wiring, not behaviour: `terminals.js` builds its adapter from the
-        module at load, so the tag has to be there and has to come first."""
+        """Wiring, not behaviour: `terminals.js` builds its adapters from the
+        modules at load, so the tags have to be there and have to come first."""
         markup = TERMINALS_HTML.read_text(encoding="utf-8")
         scripts = re.findall(r"filename='js/([a-z0-9\-]+\.js)'", markup)
 
-        self.assertIn("background-split.js", scripts)
-        self.assertLess(
-            scripts.index("background-split.js"), scripts.index("terminals.js")
-        )
+        for name in ("background-tab.js", "background-split.js", "background-resize.js"):
+            with self.subTest(name=name):
+                self.assertIn(name, scripts)
+                self.assertLess(scripts.index(name), scripts.index("terminals.js"))
 
-    def test_no_tab_is_switched_to_split_a_pane_in_it(self):
+    def test_no_tab_is_switched_to_edit_it_from_behind(self):
         """The whole point, stated against the source: this path must never
         reach for the tab strip's own switch, the focus bridge, or a landing on
         a pane. A source assertion because there is nothing to execute -- the
         property is an absence."""
-        module = BACKGROUND_SPLIT_JS.read_text(encoding="utf-8")
+        modules = "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in (BACKGROUND_TAB_JS, BACKGROUND_SPLIT_JS, BACKGROUND_RESIZE_JS)
+        )
+        source = TERMINALS_JS.read_text(encoding="utf-8")
         adapter = _between(
-            TERMINALS_JS.read_text(encoding="utf-8"),
+            source,
             "    async function readBackgroundGroupModel(groupId) {",
             "    const splitBridge = {",
+        ) + _between(
+            source,
+            "    function backgroundGroupHeld(groupId) {",
+            "    const resizeBridge = {",
         )
 
         for forbidden in ("switchGroup", "focusPaneForArrival", "initialLoad", "restoreCachedGroupView"):
             with self.subTest(name=forbidden):
-                self.assertNotIn(forbidden, module)
+                self.assertNotIn(forbidden, modules)
                 self.assertNotIn(forbidden, adapter)
 
 

@@ -15428,7 +15428,6 @@ class ApiRoutesTestCase(unittest.TestCase):
         html = self._page_html(response)
         self.assertIn("window.addEventListener('pointermove', updateGridResize);", html)
         self.assertIn("window.addEventListener('pointerup', finishGridResize);", html)
-        self.assertIn("function getResizeTrackGroups(axis, lineIndex)", html)
         self.assertIn("const beforeIndexes = resize.trackGroups.before;", html)
         self.assertIn("resize.affectedIndices.forEach(index => scheduleFit(index));", html)
         self.assertIn("redrawAttachedTerminals(affectedIndices, { forceResize: true });", html)

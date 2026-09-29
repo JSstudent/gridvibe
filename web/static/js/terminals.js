@@ -3606,16 +3606,18 @@
             .filter(index => index >= 0);
     }
 
-    function getResizeTrackGroups(axis, lineIndex) {
-        if (!Array.isArray(splitSlotRects)) {
+    /* Off the painted grid's rectangles, or a tab's model's when one is
+       given: a divider moved in a tab that is not showing. */
+    function getResizeTrackGroups(axis, lineIndex, rects = splitSlotRects) {
+        if (!Array.isArray(rects)) {
             return null;
         }
-        const beforeRects = splitSlotRects.filter(rect => (
+        const beforeRects = rects.filter(rect => (
             axis === 'vertical'
                 ? rect.x + rect.w - 1 === lineIndex
                 : rect.y + rect.h - 1 === lineIndex
         ));
-        const afterRects = splitSlotRects.filter(rect => (
+        const afterRects = rects.filter(rect => (
             axis === 'vertical'
                 ? rect.x === lineIndex + 1
                 : rect.y === lineIndex + 1
@@ -7463,8 +7465,9 @@
     }
 
     /* The shared grid, measured for one tab's weights: how many pixels each
-       rectangle would span. Null when the window has no grid to measure — a
-       collapsed or hidden one — which is a refusal, never a guess. */
+       rectangle would span, and the track sizes and gaps a divider move is
+       planned on. Null when the window has no grid to measure — a collapsed
+       or hidden one — which is a refusal, never a guess. */
     function measureGridForModel(model) {
         const grid = document.getElementById('terminalsGrid');
         const metrics = grid
@@ -7475,6 +7478,7 @@
         }
         return {
             narrow: window.innerWidth <= 700,
+            metrics,
             surfaces: model.rects.map(rect => getPaneCandidateSurface(
                 rect, model.columnWeights, model.rowWeights, metrics
             )),
@@ -7482,11 +7486,11 @@
         };
     }
 
-    /* The tab's record, and its stored arrangement, after a split the page has
-       just written: what `loadSessionGroups` would hand back once the write
-       landed, taken now so the next reading of this tab does not start from the
-       arrangement it had before. */
-    function adoptBackgroundSplit(group, saved) {
+    /* The tab's record, and its stored arrangement, after a split or resize
+       the page has just written from behind: what `loadSessionGroups` would
+       hand back once the write landed, taken now so the next reading of this
+       tab does not start from the arrangement it had before. */
+    function adoptBackgroundGroup(group, saved) {
         if (!group) {
             return;
         }
@@ -7507,35 +7511,80 @@
         adoptSplitGroupRecord(record);
     }
 
-    /* A background split's tab loses its cached view: it is rebuilt from what
+    /* A tab edited from behind loses its cached view: it is rebuilt from what
        the server holds the next time it is shown. Every tab but the painted one
-       — including a tab picked while the split was in flight, which is active
-       but whose load is waiting for the split and has not reached the cache. */
+       — including a tab picked while the edit was in flight, which is active
+       but whose load is waiting for the edit and has not reached the cache. */
     function discardBackgroundGroupView(groupId) {
         if (groupId !== visibleGroupId) {
             dropCachedGroupView(groupId);
         }
     }
 
-    /* A load of a tab a background split is writing waits for that write, so
-       the tab is painted with the pane in its place rather than from the
-       server's arrangement before the split's was saved. */
-    async function backgroundSplitSettled(groupId) {
-        if (backgroundSplit !== null && groupId) {
-            await backgroundSplit.settled(groupId);
+    /* A load of a tab a split or resize from behind is writing waits for that
+       write, so the tab is painted with its new arrangement rather than from
+       the server's arrangement before it was saved. */
+    async function backgroundTabSettled(groupId) {
+        if (backgroundTab !== null && groupId) {
+            await backgroundTab.settled(groupId);
         }
     }
+
+    /* A tab this window holds without showing it, read and written as data
+       (`background-tab.js`): one per window, under both the split and the
+       resize, so a load waits for either. */
+    const backgroundTab = window.GridVibeBackgroundTab
+        ? window.GridVibeBackgroundTab.create({
+            settle: groupId => presentationController()?.settleGroup(groupId),
+            readModel: readBackgroundGroupModel,
+            measure: measureGridForModel,
+            discard: discardBackgroundGroupView,
+            saveLayout: async ({ groupId, expectedRevision, ids, rects, columnWeights, rowWeights, baseCount }) => {
+                const group = getGroupById(groupId);
+                const workspaceLayout = buildWorkspaceLayoutSnapshotFromState(
+                    ids.length, 'layout-split-local', rects, columnWeights, rowWeights, baseCount
+                );
+                if (!group || !workspaceLayout) {
+                    return { ok: false, error: 'The arrangement could not be described.' };
+                }
+                /* Panes named by id alone: a pane entry with no fields leaves
+                   whatever the server holds for that pane exactly as it is. */
+                const response = await postPresentation('/api/session-presentation', {
+                    workspace_id: currentWorkspaceId,
+                    group_id: groupId,
+                    expected_revision: expectedRevision,
+                    pane_order: ids,
+                    panes: ids.map(sessionId => ({ session_id: sessionId })),
+                    workspace_layout: workspaceLayout
+                });
+                const body = await response.json().catch(() => ({}));
+                if (!response.ok) {
+                    return { ok: false, error: body.error || `Layout save failed with status ${response.status}` };
+                }
+                /* Accepted, but with no revision to show for it: the write may
+                   have landed. */
+                if (!Number.isInteger(body.presentation_revision)) {
+                    return { ok: false, unknown: true, error: 'The layout save returned no revision.' };
+                }
+                return { ok: true, revision: body.presentation_revision };
+            },
+            adopt: adoptBackgroundGroup,
+            onError: error => console.error(
+                '[GridVibe Sessions] presentation write failed for a tab edited from behind', error
+            )
+        })
+        : null;
+
+    const backgroundTabShown = groupId => groupId === visibleGroupId || groupId === activeGroupId;
 
     /* `background-split.js` owns the sequence and the rules; this is the
        window under it. A tab is split without being shown: nothing here
        switches a tab, moves focus, or repaints the grid that is on screen. */
-    const backgroundSplit = window.GridVibeBackgroundSplit
+    const backgroundSplit = backgroundTab !== null && window.GridVibeBackgroundSplit
         ? window.GridVibeBackgroundSplit.create({
+            tab: backgroundTab,
             groupOf: backgroundGroupHolding,
-            isShown: groupId => groupId === visibleGroupId || groupId === activeGroupId,
-            settle: groupId => presentationController()?.settleGroup(groupId),
-            readModel: readBackgroundGroupModel,
-            measure: measureGridForModel,
+            isShown: backgroundTabShown,
             plan: (model, visualIndex, axis) => planSplitSlotGeometryFor(
                 model.rects, visualIndex, model.rects[visualIndex], axis,
                 model.columnWeights, model.rowWeights
@@ -7570,32 +7619,6 @@
                 }
                 return { ok: true, session: data.session, group: data.group };
             },
-            discard: discardBackgroundGroupView,
-            saveLayout: async ({ groupId, expectedRevision, ids, rects, columnWeights, rowWeights, baseCount }) => {
-                const group = getGroupById(groupId);
-                const workspaceLayout = buildWorkspaceLayoutSnapshotFromState(
-                    ids.length, 'layout-split-local', rects, columnWeights, rowWeights, baseCount
-                );
-                if (!group || !workspaceLayout) {
-                    return { ok: false, error: 'The arrangement could not be described.' };
-                }
-                /* Panes named by id alone: a pane entry with no fields leaves
-                   whatever the server holds for that pane exactly as it is. */
-                const response = await postPresentation('/api/session-presentation', {
-                    workspace_id: currentWorkspaceId,
-                    group_id: groupId,
-                    expected_revision: expectedRevision,
-                    pane_order: ids,
-                    panes: ids.map(sessionId => ({ session_id: sessionId })),
-                    workspace_layout: workspaceLayout
-                });
-                const body = await response.json().catch(() => ({}));
-                if (!response.ok || !Number.isInteger(body.presentation_revision)) {
-                    return { ok: false, error: body.error || `Layout save failed with status ${response.status}` };
-                }
-                return { ok: true, revision: body.presentation_revision };
-            },
-            adopt: adoptBackgroundSplit,
             performShown: async (sessionId, axis, request) => {
                 const index = sessionIds.indexOf(sessionId);
                 return index < 0
@@ -7606,10 +7629,7 @@
                 maxPanes: MAX_SPLIT_TERMINALS,
                 minCols: MIN_SPLIT_COLS,
                 minRows: MIN_SPLIT_ROWS
-            },
-            onError: error => console.error(
-                '[GridVibe Sessions] presentation write failed before a background split', error
-            )
+            }
         })
         : null;
 
@@ -7675,6 +7695,59 @@
     };
     window.GridVibeSplitBridge = splitBridge;
 
+    /* A tab this window holds and is not showing, with the window settled on
+       the one it is showing — the same condition `backgroundGroupHolding`
+       puts on a pane: mid-load the window cannot say what it shows. */
+    function backgroundGroupHeld(groupId) {
+        const id = String(groupId || '');
+        return Boolean(id) && gridBuilt && Boolean(visibleGroupId)
+            && activeGroupId === visibleGroupId && id !== visibleGroupId
+            && sessionGroups.some(group => group.group_id === id);
+    }
+
+    /* `background-resize.js` owns the sequence and the rules; this is the
+       window under it. A divider is moved in a tab without showing it: nothing
+       here switches a tab, moves focus, or repaints the grid on screen. */
+    const backgroundResize = backgroundTab !== null && window.GridVibeBackgroundResize
+        ? window.GridVibeBackgroundResize.create({
+            tab: backgroundTab,
+            holds: backgroundGroupHeld,
+            isShown: backgroundTabShown,
+            readLayout: async groupId => {
+                const response = await fetch(`/api/panes/layout?group_id=${encodeURIComponent(groupId)}`);
+                const body = await response.json().catch(() => ({}));
+                return response.ok
+                    ? { ...body, ok: true }
+                    : { ok: false, error: body.error || 'The session is no longer open.' };
+            },
+            /* The server's own record of each pane: a tab never shown has no
+               pane objects to ask. */
+            readExemptions: async (groupId, ids) => {
+                const response = await fetch(getSessionApiPath(groupId));
+                const body = await response.json().catch(() => ({}));
+                if (!response.ok) {
+                    throw new Error(body.error || `Session list failed with status ${response.status}`);
+                }
+                const sessions = Array.isArray(body.sessions) ? body.sessions : [];
+                return ids.map(sessionId => isExplorerSession(
+                    sessions.find(session => session.session_id === sessionId)
+                ));
+            },
+            trackGroups: (rects, axis, lineIndex) => getResizeTrackGroups(axis, lineIndex, rects),
+            sharedEdges: getSharedGridEdgeSegments,
+            planResize: (...args) => window.GridVibeSplitGeometry?.planDividerResize(...args) || null,
+            groupRecord: getGroupById,
+            closeEpoch: groupId => closeGeometryCoordinator.epoch(groupId),
+            closePending: groupId => Boolean(closeGeometryCoordinator.peek(groupId)),
+            performShown: intent => resizeBridge.performShown(intent),
+            limits: {
+                minCols: MIN_SPLIT_COLS,
+                minRows: MIN_SPLIT_ROWS,
+                minSurfaceRatio: MIN_RESIZE_SURFACE_RATIO
+            }
+        })
+        : null;
+
     /* One page owns measurement, minimums and the compare-and-swap write.
        The server never invents pixel geometry. Nothing is painted until the
        live presentation transaction acknowledges the new weights. */
@@ -7684,7 +7757,16 @@
                 && sessionGroups.some(group => group.group_id === String(groupId || ''));
         },
 
+        /* A tab the window holds without showing is resized from behind, off
+           its model; the painted tab by the handler that owns its grid. */
         async perform(intent) {
+            if (backgroundResize !== null && backgroundGroupHeld(intent.group_id)) {
+                return backgroundResize.perform(intent);
+            }
+            return resizeBridge.performShown(intent);
+        },
+
+        async performShown(intent) {
             const groupId = String(intent.group_id || '');
             const axis = String(intent.axis || '');
             const lineIndex = Number(intent.line_index);
@@ -7693,7 +7775,9 @@
             const refuse = error => ({ ok: false, error: `${error} Nothing changed.` });
             if (resizeIntentInFlight || activeGridResize) return refuse('Another resize is in progress.');
             if (groupId !== activeGroupId || groupId !== visibleGroupId || !gridBuilt) {
-                return refuse('Open this session tab before resizing its divider.');
+                /* Held and not showing goes from behind; here the window is
+                   between tabs and cannot say which grid it would measure. */
+                return refuse('This window is switching session tabs; try the resize again shortly.');
             }
             const grid = document.getElementById('terminalsGrid');
             if (!grid || grid.children.length < 2 || window.innerWidth <= 700) {
@@ -8507,9 +8591,10 @@
         try {
             label.textContent = 'Loading…';
             /* Before the group list as well as before the tab's own read: a
-               list read ahead of a split's layout write would hand the tab
-               strip the arrangement that write is replacing. */
-            await backgroundSplitSettled(activeGroupId);
+               list read ahead of a split's or resize's layout write from
+               behind would hand the tab strip the arrangement that write is
+               replacing. */
+            await backgroundTabSettled(activeGroupId);
             if (loadToken !== activeLoadToken) {
                 return;
             }
@@ -8523,7 +8608,7 @@
             }
 
             const requestedGroupId = activeGroupId;
-            await backgroundSplitSettled(requestedGroupId);
+            await backgroundTabSettled(requestedGroupId);
             if (loadToken !== activeLoadToken || requestedGroupId !== activeGroupId) {
                 return;
             }
