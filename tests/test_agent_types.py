@@ -133,6 +133,7 @@ class AgentTypesRouteTestCase(_Case):
         self.assertTrue(all(req["terminal"]["use_powershell"] for _key, req in self.requests))
         self.assertIn("GridVibe's own machine", response.get_json()["target"])
 
+    @patch.object(api.os, "name", "nt")  # a shell family is a Windows choice
     def test_a_stated_family_is_the_one_asked_about(self):
         origin = self._pane(use_powershell=True)
 
@@ -265,6 +266,7 @@ class ToolLaunchValidationTestCase(_Case):
         self.assertIn("Only claude, codex, copilot can be handed a task", error)
         self.assertEqual(store.count(), 0)
 
+    @patch.object(api.os, "name", "nt")  # a shell family is a Windows choice
     def test_powershell_from_a_wsl_pane_is_refused(self):
         origin = self._pane(use_wsl=True, host="WSL")
 
@@ -275,6 +277,7 @@ class ToolLaunchValidationTestCase(_Case):
         self._assert_nothing_launched(response, groups, workspaces)
         self.assertIn("runs in WSL", response.get_json()["error"])
 
+    @patch.object(api.os, "name", "nt")  # a shell family is a Windows choice
     def test_a_two_by_four_grid_of_available_agents_and_terminals_launches(self):
         """The manual prompt's shape: available agents, plain terminals for the rest."""
         origin = self._pane(use_powershell=True)
