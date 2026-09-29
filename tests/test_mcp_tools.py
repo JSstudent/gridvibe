@@ -30,6 +30,7 @@ from gridvibe_mcp import splits as splits_module  # noqa: E402
 from gridvibe_mcp import windows as windows_module  # noqa: E402
 from gridvibe_mcp.identity import DEFAULT_MAX_AGENT_DEPTH, read_identity  # noqa: E402
 from gridvibe_mcp.server import (  # noqa: E402
+    BACKGROUND_TOOLS,
     CLOSE_TOOLS,
     CREATE_TOOLS,
     DISPLAY_TOOLS,
@@ -40,6 +41,8 @@ from gridvibe_mcp.server import (  # noqa: E402
     READ_TOOLS,
     RELAUNCH_TOOLS,
     SAVE_TOOLS,
+    VIEW_MOVING_FLAGS,
+    VIEW_MOVING_TOOLS,
     dispatch,
     tool_names,
     tool_specs,
@@ -116,6 +119,37 @@ class ToolSurfaceTestCase(unittest.TestCase):
         self.assertEqual(names[17:21], list(NAVIGATION_TOOLS))
         self.assertEqual(names[21:22], list(SAVE_TOOLS))
         self.assertEqual(names[22:], list(CLOSE_TOOLS))
+
+    def test_every_tool_says_whether_it_may_move_the_persons_view(self):
+        """Only an explicit focus request moves what the person sees.
+
+        Every registered tool is either one of the two focus tools or a
+        background tool, never both and never neither, so a new tool has to
+        choose. The one flag that makes a background call view-moving is
+        `move_session`'s `show`, and it says it is only for the person's ask.
+        """
+        names = tool_names()
+        background = set(BACKGROUND_TOOLS)
+        moving = set(VIEW_MOVING_TOOLS)
+
+        self.assertEqual(moving, {"focus_session", "focus_pane"})
+        self.assertEqual(len(background), len(BACKGROUND_TOOLS))
+        self.assertFalse(background & moving)
+        self.assertEqual(set(names), background | moving)
+
+        specs = {spec["name"]: spec for spec in tool_specs()}
+        for name in VIEW_MOVING_TOOLS:
+            with self.subTest(tool=name):
+                self.assertIn("raise its workspace window", specs[name]["description"])
+        self.assertEqual(VIEW_MOVING_FLAGS, {"move_session": "show"})
+        for name, flag in VIEW_MOVING_FLAGS.items():
+            with self.subTest(tool=name, flag=flag):
+                self.assertIn(name, background)
+                prop = specs[name]["inputSchema"]["properties"][flag]
+                self.assertEqual(prop["type"], "boolean")
+                self.assertIn("Only when the person asked", prop["description"])
+        # A launch is a background tool whose new tab arrives unshown, and says so.
+        self.assertIn("without being shown", specs["launch_panes"]["description"])
 
     def test_the_layout_enum_is_the_set_gridvibe_actually_accepts(self):
         """`stack` was never a GridVibe layout, and the two that are were
