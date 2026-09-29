@@ -66,6 +66,10 @@ ABSENT_TOOLS = (
     "send_input",
 )
 
+#: Codex abandons a tool call after this long (gridvibe_mcp/README.md), so an
+#: answer arriving later is never seen.
+CODEX_TOOL_TIMEOUT_SECONDS = 60.0
+
 #: A pane stamped exactly at the depth budget, derived so the tests follow the default.
 AT_LIMIT = str(DEFAULT_MAX_AGENT_DEPTH)
 
@@ -1796,6 +1800,97 @@ class IntentWaitTestCase(unittest.TestCase):
         )
 
         self.assertEqual(result["status"], OPENED)
+
+    def test_the_budget_sits_under_codex_and_leaves_the_window_step_its_worst_case(self):
+        self.assertLess(windows_module.FOCUS_BUDGET_SECONDS, CODEX_TOOL_TIMEOUT_SECONDS)
+        self.assertGreater(
+            windows_module.FOCUS_BUDGET_SECONDS,
+            INTENT_TTL_SECONDS + CLAIM_TTL_SECONDS,
+        )
+
+    def test_a_focus_whose_both_steps_run_late_answers_inside_the_budget(self):
+        """Window and tab each take the store's worst case: once 70s in total."""
+        ticks, now, rest = self._clock()
+        page = _LateFocusPage(now, claim_after=14.9, report_after=34.9)
+
+        result = open_window(
+            page, "ws1", "g-2", session_id="pane-9",
+            window_mode="native", sleep=rest, monotonic=now,
+        )
+
+        self.assertLess(ticks["now"], CODEX_TOOL_TIMEOUT_SECONDS)
+        self.assertLessEqual(
+            ticks["now"],
+            windows_module.FOCUS_BUDGET_SECONDS + windows_module.DEFAULT_POLL_SECONDS,
+        )
+        self.assertEqual(result["status"], NO_WINDOW_AVAILABLE)
+        self.assertTrue(result["window_raised"])
+        self.assertFalse(result["group_activated"])
+        self.assertTrue(result["activation_pending"])
+        self.assertIn("still switching", result["detail"])
+        self.assertIn("may still switch", result["detail"])
+
+    def test_an_unclaimed_tab_step_cut_short_is_not_called_a_page_switching(self):
+        ticks, now, rest = self._clock()
+        page = _LateFocusPage(now, claim_after=30.0, report_after=34.9)
+
+        result = open_window(
+            page, "ws1", "g-2", window_mode="native", sleep=rest, monotonic=now
+        )
+
+        self.assertTrue(result["activation_pending"])
+        self.assertIn("had yet taken", result["detail"])
+
+    def test_a_tab_step_that_answers_within_the_budget_is_still_opened(self):
+        ticks, now, rest = self._clock()
+        page = _LateFocusPage(now, claim_after=5.0, report_after=15.0)
+
+        result = open_window(
+            page, "ws1", "g-2", window_mode="native", sleep=rest, monotonic=now
+        )
+
+        self.assertEqual(result["status"], OPENED)
+        self.assertTrue(result["group_activated"])
+        self.assertNotIn("activation_pending", result)
+
+
+class _LateFocusPage:
+    """Both focus steps, each taking as long as it is told to.
+
+    Every intent is timed from when it was recorded, so the activate intent
+    starts its own clock only once the window step has answered.
+    """
+
+    def __init__(self, clock, claim_after, report_after):
+        self.clock = clock
+        self.claim_after = claim_after
+        self.report_after = report_after
+        self.recorded = {}
+
+    def health(self):
+        return {"window_mode": "native"}
+
+    def open_window_intent(self, workspace_id, group_id=""):
+        self.recorded["w-1"] = self.clock()
+        return {"intent_id": "w-1", "state": "pending"}
+
+    def activate_intent(self, workspace_id, group_id, session_id=""):
+        self.recorded["a-1"] = self.clock()
+        return {"intent_id": "a-1", "state": "pending"}
+
+    def read_window_intent(self, intent_id):
+        age = self.clock() - self.recorded[intent_id]
+        if age >= self.report_after:
+            if intent_id == "w-1":
+                return {"intent_id": intent_id, "state": OPENED}
+            return {
+                "intent_id": intent_id,
+                "state": "activated",
+                "result": {"active_group_id": "g-2", "pane_visible": True, "focused": True},
+            }
+        if age >= self.claim_after:
+            return {"intent_id": intent_id, "state": "claimed"}
+        return {"intent_id": intent_id, "state": "pending"}
 
 
 class SetPaneAgentTestCase(unittest.TestCase):

@@ -273,6 +273,8 @@ without exposing internal exception details.
 Closing an unreported worker ends its result assignment with a reason. Collect
 reports with `wait_for_results` before closing workers when their work matters.
 `close_workspace` closes only the live workspace; it cannot forget a snapshot.
+The `default` workspace is permanent: closing it ends every group and pane in
+it, but it stays live and empty, so it is not listed in `closed_workspace_ids`.
 
 A pane close uses the same geometry rule as clicking its **×** button. The
 neighbour with the longest shared border absorbs the space when it can do so
@@ -417,9 +419,13 @@ for the session to paint, lands on the pane, and reads focus back from the
 document rather than assuming it. `activated` means the requested tab is the
 active one and, when a pane was named, that pane is visible.
 
-Each step is bounded by its own intent TTL, so the worst case is about 70 s. A
-hidden or minimised native page polls nothing and the answer is
-`no_window_available`. In browser mode the tab is opened by URL and the answer
+The two steps share one 55 s budget, under Codex's 60 s tool-call timeout. The
+window step keeps its own wait; the tab step gets what is left. When that
+budget runs out before the page answers, the answer is `no_window_available`
+with `activation_pending: true`: the window is up, which tab it shows is not
+known, and the page may still switch — read `list_workspaces` rather than
+calling again at once. A hidden or minimised native page polls nothing and the
+answer is `no_window_available`. In browser mode the tab is opened by URL and the answer
 says `verified: false`: no page confirms it.
 
 ## Handing an agent its task

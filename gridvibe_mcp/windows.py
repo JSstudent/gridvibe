@@ -29,6 +29,13 @@ now shows. ``opened`` with ``group_activated: true`` is that page's word; a
 refusal is ``blocked`` with its reason and ``window_raised: true``; nobody
 answering is ``no_window_available``, never a success. Browser mode has no
 page to ask, so it says the tab it opened is ``verified: false``.
+
+**Both native steps share one budget.** Each intent may take the store's full
+claim-plus-report worst case, so two back-to-back waits could outlast an agent
+CLI's tool-call timeout and the agent would never see the answer. The window
+step keeps its own wait; the tab step gets whatever is left of
+``FOCUS_BUDGET_SECONDS``. A tab step cut short by that budget, not by the store,
+says so: ``activation_pending: true``, because the page may still switch.
 """
 
 import time
@@ -56,6 +63,14 @@ ACTIVATED = "activated"
 DEFAULT_WAIT_SECONDS = 40.0
 DEFAULT_POLL_SECONDS = 0.5
 
+#: The whole native ``open_window`` -- window step plus tab step -- under
+#: Codex's 60s tool-call timeout, like ``wait_for_results``' 55s ceiling.
+FOCUS_BUDGET_SECONDS = 55.0
+
+#: ``_wait_for_intent``'s own word for "this call stopped waiting first". The
+#: store's ``expired`` means nobody may act on the intent any more; this does not.
+WAIT_ENDED = "wait_ended"
+
 #: Said after both failing outcomes: the workspace exists either way, and that
 #: is the thing the reader needs to know.
 FALLBACK_HINT = "The workspace exists and can be opened from the GridVibe launcher."
@@ -78,6 +93,7 @@ def open_window(
     window_mode: str = "",
     wait_seconds: float = DEFAULT_WAIT_SECONDS,
     poll_seconds: float = DEFAULT_POLL_SECONDS,
+    budget_seconds: float = FOCUS_BUDGET_SECONDS,
     browser_opener: Optional[Callable[[str], bool]] = None,
     sleep: Optional[Callable[[float], None]] = None,
     monotonic: Optional[Callable[[], float]] = None,
@@ -97,20 +113,33 @@ def open_window(
     resolved_group_id = str(group_id or "").strip()
     resolved_session_id = str(session_id or "").strip()
     if mode == "native":
+        clock = monotonic or time.monotonic
+        budget = max(0.0, float(budget_seconds))
+        started = clock()
         timing = {
-            "wait_seconds": wait_seconds,
             "poll_seconds": poll_seconds,
             "sleep": sleep or time.sleep,
-            "monotonic": monotonic or time.monotonic,
+            "monotonic": clock,
         }
-        opened = _open_native(client, resolved_workspace_id, resolved_group_id, **timing)
+        opened = _open_native(
+            client,
+            resolved_workspace_id,
+            resolved_group_id,
+            wait_seconds=min(float(wait_seconds), budget),
+            **timing,
+        )
         if opened.get("status") != OPENED or not resolved_group_id:
             return opened
+        # The tab step gets only what the window step left of the budget, so
+        # the answer reaches the agent before its tool call is abandoned.
+        remaining = max(0.0, budget - (clock() - started))
         return _activate_native(
             client,
             resolved_workspace_id,
             resolved_group_id,
             resolved_session_id,
+            wait_seconds=min(float(wait_seconds), remaining),
+            budget_seconds=budget,
             **timing,
         )
     result = _open_browser(
@@ -181,7 +210,7 @@ def _open_native(
             "detail": f"GridVibe did not record the request. {FALLBACK_HINT}",
         }
 
-    state, detail, _result, read_error = _wait_for_intent(
+    state, detail, _result, read_error, _store_state = _wait_for_intent(
         client,
         intent_id,
         (OPENED, BLOCKED),
@@ -230,11 +259,12 @@ def _wait_for_intent(
     poll_seconds: float,
     sleep: Callable[[float], None],
     monotonic: Callable[[], float],
-) -> Tuple[str, str, Dict[str, Any], str]:
+) -> Tuple[str, str, Dict[str, Any], str, str]:
     """Poll one intent until it settles, goes, or the wait runs out.
 
-    Returns ``(state, detail, result, read_error)``; a wait that ran out reads
-    ``expired``.
+    Returns ``(state, detail, result, read_error, store_state)``. A wait that
+    ran out here reads ``WAIT_ENDED``, with the store's last state (``pending``
+    or ``claimed``) in ``store_state``; the store's own expiry reads ``expired``.
     """
     deadline = monotonic() + max(0.0, float(wait_seconds))
     state = "pending"
@@ -261,10 +291,9 @@ def _wait_for_intent(
         if state in settled or state == "expired":
             break
         if monotonic() >= deadline:
-            state = "expired"
-            break
+            return WAIT_ENDED, detail, result, read_error, state
         sleep(max(0.05, float(poll_seconds)))
-    return state, detail, result, read_error
+    return state, detail, result, read_error, state
 
 
 def _activate_native(
@@ -274,6 +303,7 @@ def _activate_native(
     session_id: str,
     *,
     wait_seconds: float,
+    budget_seconds: float,
     poll_seconds: float,
     sleep: Callable[[float], None],
     monotonic: Callable[[], float],
@@ -314,7 +344,7 @@ def _activate_native(
         }
     base["intent_id"] = intent_id
 
-    state, detail, result, read_error = _wait_for_intent(
+    state, detail, result, read_error, store_state = _wait_for_intent(
         client,
         intent_id,
         (ACTIVATED, BLOCKED),
@@ -354,6 +384,26 @@ def _activate_native(
                 "The window was raised, but GridVibe could not be reached while "
                 f"waiting for it to show that session ({read_error}), so which "
                 "tab it shows is not known here."
+            ),
+        }
+    if state == WAIT_ENDED:
+        # The store has not given up on the intent, so a page may still act
+        # on it after this answer. Unknown is said as unknown, never as none.
+        doing = (
+            "a GridVibe page was still switching to that session"
+            if store_state == "claimed"
+            else "no GridVibe page had yet taken the request to show that session"
+        )
+        return {
+            **base,
+            "status": NO_WINDOW_AVAILABLE,
+            "group_activated": False,
+            "activation_pending": True,
+            "detail": (
+                f"The window was raised, but {doing} when this call's "
+                f"{budget_seconds:g}s limit ran out, so which tab it shows is "
+                "not known here. The page may still switch to it; check with "
+                "list_workspaces rather than calling again at once."
             ),
         }
     return {

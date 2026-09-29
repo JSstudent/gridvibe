@@ -116,6 +116,37 @@ class CloseRouteTestCase(unittest.TestCase):
         )
         self.assertEqual(kwargs["closed_group_ids"], ["workers"])
 
+    def test_closing_default_from_another_workspace_empties_it_without_claiming_it_closed(self):
+        """``default``'s record is permanent, so the result and event say so."""
+        manager = SessionManager()
+        manager.create_workspace("Other", workspace_id=OTHER_WORKSPACE)
+        manager.create_group("Caller", "local", "single", 1, group_id="remote-caller", workspace_id=OTHER_WORKSPACE)
+        caller = manager.create_session(
+            "remote-caller", host="localhost", directory=".", startup_mode="agent", agent_selection="codex",
+        )
+        manager.create_group("Default tab", "local", "single", 1, group_id="default-tab")
+        worker = manager.create_session(
+            "default-tab", host="localhost", directory=".", created_by_session_id=caller.session_id,
+        )
+        with patch("web.mcp_close.session_manager", manager), patch("web.pane_gates.session_manager", manager):
+            answer, status = close_for_agent(
+                "workspace", "default", {"requested_by_session_id": caller.session_id},
+            )
+
+        self.assertEqual(status, 200, answer)
+        self.assertEqual(answer["closed_session_ids"], [worker.session_id])
+        self.assertEqual(answer["closed_group_ids"], ["default-tab"])
+        self.assertEqual(answer["closed_workspace_ids"], [])
+        self.assertIsNotNone(manager.get_workspace("default"))
+        self.assertEqual(manager.get_workspace_groups("default"), [])
+        self.assertIsNotNone(manager.get_session(caller.session_id))
+        self.assertFalse(any(effect[0] in ("pruned", "default") for effect in self.effects))
+        _kind, args, kwargs = self.broadcasts()[0]
+        self.assertEqual(args, ("session_closed",))
+        self.assertEqual(kwargs["workspace_id"], "default")
+        self.assertEqual(kwargs["closed_session_ids"], [worker.session_id])
+        self.assertEqual(kwargs["closed_group_ids"], ["default-tab"])
+
     def _grant_override_mode(self):
         self.manager.update_session_metadata(
             self.caller.session_id, agent_mcp=True, agent_mcp_override=True

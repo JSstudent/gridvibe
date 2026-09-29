@@ -1160,7 +1160,9 @@ def _navigation_specs() -> List[Dict[str, Any]]:
                 "confirmed the tab: 'session_activated': true), blocked with "
                 "the window's reason (an unsaved editor or a copy in flight "
                 "blocks a tab switch; 'window_raised': true), or "
-                "no_window_available. In browser mode the tab is opened but "
+                "no_window_available ('activation_pending': true when the page "
+                "had not answered the tab switch within the call's time limit "
+                "and may still make it). In browser mode the tab is opened but "
                 "'verified' is false: no page confirms it. For one pane inside "
                 "a session use focus_pane. " + SESSION_WORDS
             ),
@@ -1194,7 +1196,9 @@ def _navigation_specs() -> List[Dict[str, Any]]:
                 "session_name='gridvibe_main' first and pass the pane_id "
                 "found. Reports opened (with 'focused'), blocked with the "
                 "window's reason (an unsaved editor or a copy in flight blocks "
-                "a tab switch), or no_window_available. Nothing is typed into "
+                "a tab switch), or no_window_available (with "
+                "'activation_pending': true when the switch was still "
+                "unanswered at the call's time limit). Nothing is typed into "
                 "the pane and nothing is started or ended. In browser mode the "
                 "tab is opened but the focus is not verified."
             ),

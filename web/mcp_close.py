@@ -184,7 +184,9 @@ def close_for_agent(kind: str, target_id: str, payload: Mapping[str, Any]) -> Tu
                     group_ids.append(group.group_id)
                 elif kind == "workspace":
                     group_ids.extend(group_id for group_id in original_group_ids if group_id not in session_manager.groups)
-                if kind == "workspace" and not session_manager.get_workspace_groups(target_id):
+                # ``default``'s record is permanent: emptied, never closed. The
+                # manager, not the empty group list, says what actually remains.
+                if kind == "workspace" and target_id not in session_manager.workspaces:
                     workspace_ids.append(target_id)
                 elif kind != "workspace" and workspace_id in pruned:
                     workspace_ids.append(workspace_id)

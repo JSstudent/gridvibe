@@ -1549,7 +1549,10 @@ in `README.md`; state the rules a change has to keep.
   the server logs only the failure category and affected IDs. Pending worker result
   assignments end as `pane closed`, while a completed report outlives its pane.
   `close_workspace` is the live close and preserves saved snapshots; it never
-  invokes the forget variant.
+  invokes the forget variant. `closed_workspace_ids` and the `workspace_closed`
+  broadcast name a workspace only when its live record is gone: `default`'s
+  record is permanent, so closing it empties it and reports its panes and
+  groups under `session_closed`, as the interactive *Close live workspace* does.
 - **Close broadcasts state the exact completed delta, and pane closes preserve
   the page's measured layout.** Every close path publishes ordered
   `closed_session_ids` and the `closed_group_ids` that actually disappeared; a
@@ -1713,7 +1716,13 @@ in `README.md`; state the rules a change has to keep.
   delete, and reports focus read back from the document, never assumed.
   `opened` with `group_activated` is the page's word only; a raised window that
   did not switch is `blocked`. A pane's session and workspace are read from the
-  live group, never the spawn-time identity.
+  live group, never the spawn-time identity. Both native steps share one
+  `FOCUS_BUDGET_SECONDS` (55 s, under Codex's 60 s tool-call timeout) in
+  `gridvibe_mcp/windows.py`: the window step keeps its own wait, and the tab step
+  gets only what is left. A tab step cut short by that budget while the store
+  still holds the intent answers `no_window_available` with
+  `activation_pending: true` and says whether a page had claimed it — never a
+  success and never "nobody answered".
 - **A tool moves a session only through the gated twin of the launcher's move.**
   `POST /api/session-groups/<id>/agent-move` (`move_group_for_agent`) lets the
   caller's own group move, and a group whose every pane the caller created;
