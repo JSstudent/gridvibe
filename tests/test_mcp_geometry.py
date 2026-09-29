@@ -13,6 +13,7 @@ import tests  # noqa: E402,F401
 from gridvibe_mcp.geometry import resize_divider  # noqa: E402
 from gridvibe_mcp.identity import PaneIdentity  # noqa: E402
 from gridvibe_mcp.server import dispatch, tool_names, tool_specs  # noqa: E402
+from gridvibe_mcp.splits import NO_PAGE_HINT, VISIBLE_WINDOW_REQUIREMENT  # noqa: E402
 from web import api  # noqa: E402
 from web.window_intents import window_intents  # noqa: E402
 
@@ -146,6 +147,44 @@ class ResizeToolTestCase(unittest.TestCase):
         self.assertIn("showing or not", description)
         self.assertIn("does not switch tabs", description)
         self.assertNotIn("visible native page", description)
+
+    def test_no_window_answers_state_the_visible_window_requirement(self):
+        """An expired resize and one never recorded say what the window needs
+        -- the split's own sentence, not a copy -- and send the agent to the
+        person rather than to a focus tool."""
+        class Client:
+            def __init__(self, intent_id):
+                self.intent_id = intent_id
+
+            def resize_intent(self, group_id, body):
+                return {"intent_id": self.intent_id}
+
+            def read_window_intent(self, intent_id):
+                return {"state": "expired"}
+
+        expired = resize_divider(Client("intent-1"), "g", "vertical", 1, 0.6, 1)
+        unrecorded = resize_divider(Client(""), "g", "vertical", 1, 0.6, 1)
+        for answer in (expired, unrecorded):
+            with self.subTest(detail=answer["detail"]):
+                self.assertEqual(answer["status"], "no_window_available")
+                self.assertIn(VISIBLE_WINDOW_REQUIREMENT, answer["detail"])
+        self.assertIn(VISIBLE_WINDOW_REQUIREMENT, NO_PAGE_HINT)
+        for words in ("not minimized or hidden", "session tab", "ask the person",
+                      "rather than calling focus_session or focus_pane"):
+            self.assertIn(words, VISIBLE_WINDOW_REQUIREMENT)
+        # The expiry keeps its caution: a page may have claimed the intent.
+        self.assertIn("read list_panes", expired["detail"])
+        self.assertIn("nothing changed", unrecorded["detail"])
+
+    def test_split_and_resize_descriptions_state_the_visible_window_requirement(self):
+        descriptions = {
+            spec["name"]: spec["description"] for spec in tool_specs()
+            if spec["name"] in {"split_pane", "resize_divider"}
+        }
+        self.assertEqual(set(descriptions), {"split_pane", "resize_divider"})
+        for name, description in descriptions.items():
+            with self.subTest(tool=name):
+                self.assertIn(VISIBLE_WINDOW_REQUIREMENT, description)
 
     def test_dispatch_calls_same_transport_independent_helper(self):
         with patch("gridvibe_mcp.server.resize_divider_for", return_value={"status": "resized"}) as call:

@@ -53,14 +53,25 @@ NO_WINDOW_AVAILABLE = "no_window_available"
 DEFAULT_WAIT_SECONDS = 40.0
 DEFAULT_POLL_SECONDS = 0.5
 
+#: What a split or a resize needs from the window, said once: both tools'
+#: descriptions and both tools' no-window answers read this constant. A hidden
+#: page polls nothing, so a minimized window cannot claim either intent. The
+#: remedy is the person's, not the agent's: restoring a window brings it
+#: forward, and only a request from the person may do that. So the agent is
+#: told to ask, and never to reach for a focus tool instead.
+VISIBLE_WINDOW_REQUIREMENT = (
+    "A split or resize needs a native-mode GridVibe window on its workspace "
+    "that is open and visible, not minimized or hidden; whichever session tab "
+    "it shows does not matter. If that window is closed or minimized, ask the "
+    "person running GridVibe to open or restore it rather than calling "
+    "focus_session or focus_pane."
+)
+
 #: Said after ``no_window_available``: the pane is untouched, and the reader
 #: needs to know the split did not half-happen.
 NO_PAGE_HINT = (
     "No GridVibe window performed the split. The panes and the workspace are "
-    "untouched. Splitting needs a native-mode GridVibe window on the workspace "
-    "holding this pane that is open and visible, not minimized or hidden. "
-    "Whichever session tab it shows does not matter; ask the person running "
-    "GridVibe to open or restore it."
+    f"untouched. {VISIBLE_WINDOW_REQUIREMENT}"
 )
 
 #: Said instead when the wait ended with the *poll* unreadable rather than the

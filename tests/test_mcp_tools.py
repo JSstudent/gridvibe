@@ -1656,6 +1656,10 @@ class SplitIntentPollTestCase(unittest.TestCase):
         self.assertNotIn("was open", result["detail"])
         self.assertIn("not minimized or hidden", result["detail"])
         self.assertIn("session tab", result["detail"])
+        # Restoring the window is the person's to do: a focus tool would
+        # bring it forward, which only the person may ask for.
+        self.assertIn("ask the person", result["detail"])
+        self.assertIn("rather than calling focus_session or focus_pane", result["detail"])
 
     def test_a_tab_that_could_not_be_shown_is_a_refusal_with_the_pages_reason(self):
         """A window that exists but would lose work by switching tabs answers

@@ -52,6 +52,7 @@ from gridvibe_mcp.identity import (
     depth_budget,
     read_identity,
 )
+from gridvibe_mcp.splits import VISIBLE_WINDOW_REQUIREMENT
 from gridvibe_mcp.splits import split_pane as split_pane_for
 from gridvibe_mcp.windows import open_window as open_window_for
 
@@ -845,6 +846,7 @@ def tool_specs() -> List[Dict[str, Any]]:
                 "The pane may be in any session tab of that window, shown or "
                 "not: the split is made without switching tabs or moving "
                 "focus, so the person sees nothing change. "
+                f"{VISIBLE_WINDOW_REQUIREMENT} "
                 "Reports split, refused, or no_window_available. The result "
                 "names the new pane, so splits can be chained. With "
                 "kind='agent' the new agent can be handed a 'task' in the same "
@@ -1129,7 +1131,8 @@ def _resize_spec() -> Dict[str, Any]:
             "between columns N and N+1 has line_index N; horizontal is between "
             "rows N and N+1. Position is a fraction of the full grid width or "
             "height, strictly between 0 and 1. The open native window measures "
-            "pane minimums and persists before reporting resized. A stale layout, "
+            "pane minimums and persists before reporting resized. "
+            f"{VISIBLE_WINDOW_REQUIREMENT} A stale layout, "
             "impossible size, or missing page changes nothing. If a write response "
             "cannot be confirmed, the result is unknown; read list_panes before retrying. For three equal "
             "side-by-side panes, split twice, then position the two boundaries "
