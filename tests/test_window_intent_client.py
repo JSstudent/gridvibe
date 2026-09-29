@@ -36,7 +36,7 @@ HARNESS = """
 const intentModule = require(MODULE_PATH);
 
 function runtime(options = {}) {
-    const calls = { listed: 0, claims: [], results: [], opens: [] };
+    const calls = { listed: 0, claims: [], results: [], opens: [], order: [] };
     const timers = [];
     const state = {
         intents: options.intents || [],
@@ -50,25 +50,43 @@ function runtime(options = {}) {
             splitCalls.owns.push(sessionId);
             return (options.ownedSessions || ['pane-1']).includes(sessionId);
         },
+        /* Answered as a promise when a scenario says the pane is in a tab that
+           is not showing: it is measured off that tab's stored arrangement,
+           which is a read. A pane on screen answers at once. */
         candidates(sessionId) {
+            calls.order.push('candidates');
             splitCalls.candidates.push(sessionId);
-            return options.candidates === undefined
+            const answer = options.candidates === undefined
                 ? ['vertical', 'horizontal']
                 : options.candidates;
+            return options.asyncReads ? Promise.resolve(answer) : answer;
         },
         disabledReason(axis, sessionId) {
             splitCalls.reasons.push({ axis, sessionId });
-            return options.disabledReason
+            const answer = options.disabledReason
                 || 'Side-by-side split needs at least 8 columns in each terminal';
+            return options.asyncReads ? Promise.resolve(answer) : answer;
         },
         async perform(sessionId, axis, request) {
+            calls.order.push('perform');
             splitCalls.performed.push({ sessionId, axis, request });
             if (options.performThrows) throw new Error('grid exploded');
             if (options.performFails) {
                 return { ok: false, error: 'Split failed with status 400' };
             }
+            if (options.performRefuses) {
+                return {
+                    ok: false,
+                    refusal: {
+                        axis,
+                        candidates: options.performRefuses,
+                        reason: 'Side-by-side split needs at least 8 columns in each terminal'
+                    }
+                };
+            }
             return {
                 ok: true,
+                note: options.performNote || '',
                 index: 2,
                 session: {
                     session_id: 'pane-9',
@@ -132,6 +150,7 @@ function runtime(options = {}) {
                 : { ok: false, state: 'claimed', error: 'Another window took it.' };
         },
         reportResult: async (intentId, outcome, detail, result) => {
+            calls.order.push('report');
             calls.results.push({ intentId, outcome, detail, result });
         },
         openWorkspaceWindow: async (workspaceId, opts) => {
@@ -349,6 +368,65 @@ const out = {};
         });
         await poll.tick();
         out.splitThrew = calls.results.map(item => item.outcome);
+    }
+
+    // A pane in a tab that is not showing answers its reads as promises. The
+    // split goes the same way: asked, performed, reported once.
+    {
+        const { poll, calls, splitCalls } = runtime({
+            intents: [splitIntent('s-1')],
+            asyncReads: true
+        });
+        await poll.tick();
+        out.splitAsyncReads = {
+            order: calls.order,
+            performed: splitCalls.performed.length,
+            results: calls.results
+        };
+    }
+
+    // ...and so does its refusal, worded from the promised reason.
+    {
+        const { poll, calls, splitCalls } = runtime({
+            intents: [splitIntent('s-1', 'pane-1', 'vertical')],
+            asyncReads: true,
+            candidates: ['horizontal']
+        });
+        await poll.tick();
+        out.splitAsyncRefused = {
+            performed: splitCalls.performed.length,
+            results: calls.results
+        };
+    }
+
+    // Decided again at the moment of the split, against a fresh reading: the
+    // refusal comes back from `perform`, and is worded like the first.
+    {
+        const { poll, calls } = runtime({
+            intents: [splitIntent('s-1', 'pane-1', 'vertical')],
+            performRefuses: ['horizontal']
+        });
+        await poll.tick();
+        out.splitPerformRefused = calls.results;
+    }
+    {
+        const { poll, calls } = runtime({
+            intents: [splitIntent('s-1', 'pane-1', 'vertical')],
+            performRefuses: []
+        });
+        await poll.tick();
+        out.splitPerformRefusedBoth = calls.results;
+    }
+
+    // A pane that was made but could not be finished is still a split, and
+    // says what was not finished.
+    {
+        const { poll, calls } = runtime({
+            intents: [splitIntent('s-1')],
+            performNote: 'The pane was created, but its place in the layout could not be saved.'
+        });
+        await poll.tick();
+        out.splitWithNote = calls.results;
     }
 
     // A window intent and a split intent in one pass are both delivered.
@@ -693,6 +771,46 @@ class SplitIntentClientTestCase(WindowIntentClientTestCase):
 
     def test_a_bridge_that_threw_is_still_an_honest_refusal(self):
         self.assertEqual(self.out["splitThrew"], ["refused"])
+
+    def test_a_pane_in_a_tab_that_is_not_showing_is_asked_about_then_split_then_reported(self):
+        """Its reads are promises, because they are taken off the tab's stored
+        arrangement. The order is the same one a pane on screen has."""
+        asked = self.out["splitAsyncReads"]
+
+        self.assertEqual(asked["order"], ["candidates", "perform", "report"])
+        self.assertEqual(asked["performed"], 1)
+        self.assertEqual(asked["results"][0]["outcome"], "split")
+
+    def test_a_promised_refusal_names_the_axis_that_would_have_worked(self):
+        refused = self.out["splitAsyncRefused"]
+
+        self.assertEqual(refused["performed"], 0)
+        self.assertEqual(refused["results"][0]["outcome"], "refused")
+        self.assertIn("stacked split would work", refused["results"][0]["detail"])
+
+    def test_a_refusal_decided_at_the_moment_of_the_split_reads_like_the_first(self):
+        """The reading is taken again, right before the request, against what
+        the tab holds by then. Same words, same outcome."""
+        refused = self.out["splitPerformRefused"][0]
+        neither = self.out["splitPerformRefusedBoth"][0]
+
+        self.assertEqual(refused["outcome"], "refused")
+        self.assertIn("stacked split would work", refused["detail"])
+        self.assertIn("at least 8 columns", refused["detail"])
+        self.assertEqual(neither["outcome"], "refused")
+        self.assertIn("Neither axis would work", neither["detail"])
+
+    def test_a_pane_made_but_not_finished_is_a_split_that_says_so(self):
+        """The pane exists, so the outcome is `split` -- and what could not be
+        finished travels with it instead of being dropped."""
+        noted = self.out["splitWithNote"][0]
+
+        self.assertEqual(noted["outcome"], "split")
+        self.assertIn("could not be saved", noted["detail"])
+        self.assertEqual(noted["result"]["session_id"], "pane-9")
+
+    def test_a_split_with_nothing_to_add_reports_no_detail(self):
+        self.assertEqual(self.out["splitHappy"]["results"][0]["detail"], "")
 
     def test_both_kinds_are_delivered_in_one_pass(self):
         both = self.out["bothKinds"]

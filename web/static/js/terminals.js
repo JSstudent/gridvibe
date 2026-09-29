@@ -4089,13 +4089,18 @@
         });
     }
 
-    function applyWorkspaceLayoutSnapshot(snapshot, expectedCount) {
+    /* A stored geometry record read back onto the grid this build draws, as
+       data: the rectangles at this build's resolution, the weights sized to
+       them, and the base the layout was made from. Null when the record does
+       not describe exactly `expectedCount` panes. Pure — the restore paints
+       what it returns, and a split in a tab that is not showing edits it. */
+    function resolveWorkspaceLayoutSnapshot(snapshot, expectedCount) {
         if (
             !snapshot
             || !Array.isArray(snapshot.split_slot_rects)
             || snapshot.split_slot_rects.length !== expectedCount
         ) {
-            return false;
+            return null;
         }
 
         const stored = snapshot.split_slot_rects.map((rect, index) => normalizeSplitRectMetadata({
@@ -4106,25 +4111,40 @@
             w: rect.w,
             h: rect.h
         }));
-        originalSplitSlotCount = Math.max(
+        const baseCount = Math.max(
             1,
             Number(snapshot.original_split_slot_count || expectedCount) || expectedCount
         );
         /* Read against the base the snapshot was built from, not the panes it
            holds now: a split layout carries more rectangles than its base had
            cells, and the base is what names the unit. */
-        const rescaled = rescaleCoarseLayoutSnapshot(stored, snapshot, originalSplitSlotCount);
+        const rescaled = rescaleCoarseLayoutSnapshot(stored, snapshot, baseCount);
         const rects = rescaled ? rescaled.rects : stored;
         const size = getSplitGridSize(rects);
-        splitSlotRects = cloneSplitSlotRects(rects);
-        splitColumnWeights = normalizeSplitTrackWeights(
-            rescaled ? rescaled.columnWeights : snapshot.split_column_weights,
-            size.columns
-        );
-        splitRowWeights = normalizeSplitTrackWeights(
-            rescaled ? rescaled.rowWeights : snapshot.split_row_weights,
-            size.rows
-        );
+        return {
+            rects,
+            columnWeights: normalizeSplitTrackWeights(
+                rescaled ? rescaled.columnWeights : snapshot.split_column_weights,
+                size.columns
+            ),
+            rowWeights: normalizeSplitTrackWeights(
+                rescaled ? rescaled.rowWeights : snapshot.split_row_weights,
+                size.rows
+            ),
+            baseCount
+        };
+    }
+
+    function applyWorkspaceLayoutSnapshot(snapshot, expectedCount) {
+        const resolved = resolveWorkspaceLayoutSnapshot(snapshot, expectedCount);
+        if (!resolved) {
+            return false;
+        }
+
+        originalSplitSlotCount = resolved.baseCount;
+        splitSlotRects = cloneSplitSlotRects(resolved.rects);
+        splitColumnWeights = resolved.columnWeights;
+        splitRowWeights = resolved.rowWeights;
         return applySplitSlotGeometry({ fit: false });
     }
 
@@ -4221,8 +4241,13 @@
        reasons about are the ones this window is painting.
 
        Planned before the splice, off the rectangle list that is about to be
-       spliced: the weights must line up with the grid as it stands now. */
-    function planSplitSlotGeometry(rects, visualIndex, rect, axis) {
+       spliced: the weights must line up with the grid as it stands now.
+
+       The two weight lists are parameters so one tab's plan never reads
+       another's: the showing tab passes its own, and a tab that is not showing
+       passes the ones it was stored with. The grid measured is the same either
+       way — a window has one, and every tab is laid out in it. */
+    function planSplitSlotGeometryFor(rects, visualIndex, rect, axis, columnWeights, rowWeights) {
         const vertical = axis === 'vertical';
         const span = vertical ? rect.w : rect.h;
         const fallback = { firstSpan: Math.floor(span / 2), weights: null };
@@ -4232,9 +4257,7 @@
             return fallback;
         }
 
-        const size = getSplitGridSize(rects);
-        initializeSplitTrackWeights(size.columns, size.rows);
-        const metrics = getResizableGridMetrics(grid, splitColumnWeights, splitRowWeights);
+        const metrics = getResizableGridMetrics(grid, columnWeights, rowWeights);
         if (!metrics) {
             return fallback;
         }
@@ -4248,11 +4271,22 @@
         return planner.planSplit({
             start,
             span,
-            weights: vertical ? splitColumnWeights : splitRowWeights,
+            weights: vertical ? columnWeights : rowWeights,
             sizes: vertical ? metrics.columnSizes : metrics.rowSizes,
             gap: vertical ? metrics.columnGap : metrics.rowGap,
             foreignEdges: planner.foreignEdgeOffsets(intervals, start, span),
         });
+    }
+
+    function planSplitSlotGeometry(rects, visualIndex, rect, axis) {
+        if (Array.isArray(rects) && window.GridVibeSplitGeometry
+            && document.getElementById('terminalsGrid')) {
+            const size = getSplitGridSize(rects);
+            initializeSplitTrackWeights(size.columns, size.rows);
+        }
+        return planSplitSlotGeometryFor(
+            rects, visualIndex, rect, axis, splitColumnWeights, splitRowWeights
+        );
     }
 
     function splitSlotRect(rect, axis, firstSpan = 0) {
@@ -4436,11 +4470,11 @@
        caller with no pane to read — the pane cap, which refuses before any
        rectangle is looked at — passes none and gets the character floor, which
        is what this always said. */
-    function getSplitDisabledReason(axis, blocker = '') {
+    function getSplitDisabledReason(axis, blocker = '', count = terminals.length) {
         if (window.innerWidth <= 700) {
             return 'Splitting is disabled on narrow screens';
         }
-        if (terminals.length >= MAX_SPLIT_TERMINALS) {
+        if (count >= MAX_SPLIT_TERMINALS) {
             return `Splitting is limited to ${MAX_SPLIT_TERMINALS} terminal panes`;
         }
         if (blocker === SPLIT_BLOCKED_BY_GRID) {
@@ -7018,6 +7052,46 @@
         }
     }
 
+    /* What a split is about to extend, taken before its request goes out.
+       `terminals` and `sessionIds` are page globals that a tab switch or a
+       rebuild swaps for another group's arrays, so the arrays themselves are
+       the identity: a window that switched away and back holds the same ones
+       again, and a window that rebuilt the grid does not. */
+    function captureSplitSource(index) {
+        return {
+            index,
+            groupId: activeGroupId,
+            terminals,
+            sessionIds,
+            terminal: terminals[index],
+            sessionId: sessionIds[index]
+        };
+    }
+
+    function splitSourceStillShown(source) {
+        return activeGroupId === source.groupId
+            && visibleGroupId === source.groupId
+            && terminals === source.terminals
+            && sessionIds === source.sessionIds
+            && terminals[source.index] === source.terminal
+            && sessionIds[source.index] === source.sessionId;
+    }
+
+    /* The group record a split response carries: the tab strip and the
+       window's own list of which tab holds which pane. */
+    function adoptSplitGroupRecord(group) {
+        if (!group) {
+            return;
+        }
+        const groupIndex = sessionGroups.findIndex(candidate => candidate.group_id === group.group_id);
+        if (groupIndex >= 0) {
+            sessionGroups[groupIndex] = group;
+        } else {
+            sessionGroups.push(group);
+        }
+        renderSessionTabs();
+    }
+
     /* `splitRequest` is the extra description of the new pane: what it is,
        which agent it runs, whether that agent gets the GridVibe tools. Empty
        for the header button, which produces exactly what it always did. It is
@@ -7060,6 +7134,7 @@
             return { ok: false, error: getSplitDisabledReason(axis, blockers?.[axis]) };
         }
 
+        const source = captureSplitSource(index);
         splitButtons.forEach(button => { button.disabled = true; });
 
         /* An explorer pane splits off a terminal rooted where the user is
@@ -7093,6 +7168,20 @@
                 throw new Error('Split response did not include a session');
             }
 
+            if (!splitSourceStillShown(source)) {
+                /* The window moved on while the request was in flight — a tab
+                   picked, or the grid rebuilt. The pane exists, the server made
+                   it, but the arrays, cards and rectangles this call was about
+                   to extend belong to a view that is no longer the one on
+                   screen, and painting into whichever group is showing now
+                   would put a pane in the wrong tab. Nothing is painted. The
+                   group record is still taken so the tab strip and a later
+                   intent know the pane; the next time that tab is shown it is
+                   rebuilt from the server, which lists the pane. */
+                adoptSplitGroupRecord(data.group);
+                return { ok: true, session, index: null };
+            }
+
             const newIndex = terminals.length;
             const terminal = makeTerminal();
             terminal._session = session;
@@ -7124,15 +7213,7 @@
                 attachTerminal(newIndex);
             }
 
-            if (data.group) {
-                const groupIndex = sessionGroups.findIndex(group => group.group_id === data.group.group_id);
-                if (groupIndex >= 0) {
-                    sessionGroups[groupIndex] = data.group;
-                } else {
-                    sessionGroups.push(data.group);
-                }
-                renderSessionTabs();
-            }
+            adoptSplitGroupRecord(data.group);
 
             updateSessionChrome(terminals.length, activeGroupId);
             updateAllSplitButtonStates();
@@ -7178,6 +7259,281 @@
         };
     }
 
+    /* The tab holding a pane this window is not showing, or '' — for a pane
+       on screen, one this window does not hold, or a window that is not
+       settled on one tab. Mid-load `sessionIds` still names the tab being left,
+       so nothing can be said about the others yet and a later poll asks again.
+       Read off the group list, not the cached views: a tab this window has not
+       shown yet has no cached view and is still one it holds. */
+    function backgroundGroupHolding(sessionId) {
+        const id = String(sessionId || '');
+        if (!id || !gridBuilt || !visibleGroupId || activeGroupId !== visibleGroupId) {
+            return '';
+        }
+        if (sessionIds.includes(id)) {
+            return '';
+        }
+        const group = sessionGroups.find(candidate => (
+            candidate.group_id !== visibleGroupId
+            && Array.isArray(candidate.pane_order)
+            && candidate.pane_order.includes(id)
+        ));
+        return group ? group.group_id : '';
+    }
+
+    /* A tab that is not showing, as the model a split edits: its panes in
+       visual order, one rectangle each, and the two lists of track weights.
+
+       Read off the freshest picture there is. The window's own cached view of
+       the tab is that picture while it still holds exactly the panes the server
+       lists — it is what the person last saw, and its queued presentation is
+       settled before this is called. A tab the window has never shown, or one
+       whose panes changed since it was cached, has only the server's summary,
+       read here rather than trusted from whenever the list was last loaded.
+       Either way it is data: no card is measured or moved.
+
+       Read with a plain fetch and not `loadSessionGroups()`, which is the
+       window's own refresh: it re-points the active tab when a group has
+       appeared, and a caller that is not going to rebuild the view must not
+       take that decision away from the refresh that will. */
+    async function fetchGroupRecord(groupId) {
+        const response = await fetch(
+            `/api/session-groups?workspace_id=${encodeURIComponent(currentWorkspaceId)}`
+        );
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) {
+            throw new Error(data.error || `Session list failed with status ${response.status}`);
+        }
+        return (Array.isArray(data.groups) ? data.groups : [])
+            .find(group => group.group_id === groupId) || null;
+    }
+
+    async function readBackgroundGroupModel(groupId) {
+        const group = await fetchGroupRecord(groupId);
+        const serverIds = Array.isArray(group?.pane_order) ? group.pane_order.slice() : [];
+        if (!group || !serverIds.length) {
+            return null;
+        }
+
+        const cached = cachedGroupViews.get(groupId);
+        if (cached) {
+            const cards = Array.from(cached.fragment?.children || []);
+            const cachedIds = cards
+                .map(card => (cached.sessionIds || [])[Number(card.dataset.slot)])
+                .filter(Boolean);
+            const rects = cached.className === 'layout-split-local'
+                ? cached.splitSlotRects
+                : fixedLayoutRectCoordinates(cachedIds.length, cached.className || '');
+            const sameSessions = cachedIds.length === serverIds.length
+                && cachedIds.every(sessionId => serverIds.includes(sessionId));
+            if (sameSessions && Array.isArray(rects) && rects.length === cachedIds.length) {
+                const size = getSplitGridSize(rects);
+                return {
+                    groupId,
+                    ids: cachedIds,
+                    rects: cloneSplitSlotRects(rects),
+                    columnWeights: normalizeSplitTrackWeights(cached.splitColumnWeights, size.columns),
+                    rowWeights: normalizeSplitTrackWeights(cached.splitRowWeights, size.rows),
+                    baseCount: Number(cached.originalSplitSlotCount || cachedIds.length) || cachedIds.length
+                };
+            }
+        }
+
+        const stored = resolveWorkspaceLayoutSnapshot(group.workspace_layout, serverIds.length);
+        if (stored) {
+            return {
+                groupId,
+                ids: serverIds,
+                rects: cloneSplitSlotRects(stored.rects),
+                columnWeights: stored.columnWeights,
+                rowWeights: stored.rowWeights,
+                baseCount: stored.baseCount
+            };
+        }
+        /* No record the page wrote: the tab wears the preset its size and layout
+           name call for, exactly as it is rebuilt when it is shown. */
+        const rects = fixedLayoutRectCoordinates(
+            serverIds.length,
+            getLayoutClass(serverIds.length, group.layout || '')
+        );
+        const size = getSplitGridSize(rects);
+        return {
+            groupId,
+            ids: serverIds,
+            rects: cloneSplitSlotRects(rects),
+            columnWeights: normalizeSplitTrackWeights(null, size.columns),
+            rowWeights: normalizeSplitTrackWeights(null, size.rows),
+            baseCount: serverIds.length
+        };
+    }
+
+    /* The cell and header a terminal is drawn with, read off any live plain
+       terminal on screen: the font is a window-wide setting, so a pane in
+       another tab is drawn with the same. The defaults are the ones the live
+       reading falls back to. */
+    function measureTerminalCell() {
+        const cell = terminals
+            .map(terminal => terminal?.term?._core?._renderService?.dimensions?.css?.cell)
+            .find(candidate => Number(candidate?.width) > 0 && Number(candidate?.height) > 0);
+        const header = document.querySelector('#terminalsGrid .terminal-header')
+            ?.getBoundingClientRect?.()?.height;
+        return {
+            cell: { width: Number(cell?.width || 8), height: Number(cell?.height || 17) },
+            headerHeight: Number(header) > 0 ? Number(header) : 34
+        };
+    }
+
+    /* The shared grid, measured for one tab's weights: how many pixels each
+       rectangle would span. Null when the window has no grid to measure — a
+       collapsed or hidden one — which is a refusal, never a guess. */
+    function measureGridForModel(model) {
+        const grid = document.getElementById('terminalsGrid');
+        const metrics = grid
+            ? getResizableGridMetrics(grid, model.columnWeights, model.rowWeights)
+            : null;
+        if (!metrics || metrics.gridContentWidth <= 0 || metrics.gridContentHeight <= 0) {
+            return null;
+        }
+        return {
+            narrow: window.innerWidth <= 700,
+            surfaces: model.rects.map(rect => getPaneCandidateSurface(
+                rect, model.columnWeights, model.rowWeights, metrics
+            )),
+            ...measureTerminalCell()
+        };
+    }
+
+    /* The tab's record, and its stored arrangement, after a split the page has
+       just written: what `loadSessionGroups` would hand back once the write
+       landed, taken now so the next reading of this tab does not start from the
+       arrangement it had before. */
+    function adoptBackgroundSplit(group, saved) {
+        if (!group) {
+            return;
+        }
+        const record = { ...group };
+        if (saved) {
+            record.pane_order = saved.ids.slice();
+            record.workspace_layout = buildWorkspaceLayoutSnapshotFromState(
+                saved.ids.length,
+                'layout-split-local',
+                saved.rects,
+                saved.columnWeights,
+                saved.rowWeights,
+                saved.baseCount
+            );
+            record.presentation_revision = saved.revision;
+            presentationController()?.setGroupRevision(group.group_id, saved.revision);
+        }
+        adoptSplitGroupRecord(record);
+    }
+
+    /* A background split's tab loses its cached view: it is rebuilt from what
+       the server holds the next time it is shown. Every tab but the painted one
+       — including a tab picked while the split was in flight, which is active
+       but whose load is waiting for the split and has not reached the cache. */
+    function discardBackgroundGroupView(groupId) {
+        if (groupId !== visibleGroupId) {
+            dropCachedGroupView(groupId);
+        }
+    }
+
+    /* A load of a tab a background split is writing waits for that write, so
+       the tab is painted with the pane in its place rather than from the
+       server's arrangement before the split's was saved. */
+    async function backgroundSplitSettled(groupId) {
+        if (backgroundSplit !== null && groupId) {
+            await backgroundSplit.settled(groupId);
+        }
+    }
+
+    /* `background-split.js` owns the sequence and the rules; this is the
+       window under it. A tab is split without being shown: nothing here
+       switches a tab, moves focus, or repaints the grid that is on screen. */
+    const backgroundSplit = window.GridVibeBackgroundSplit
+        ? window.GridVibeBackgroundSplit.create({
+            groupOf: backgroundGroupHolding,
+            isShown: groupId => groupId === visibleGroupId || groupId === activeGroupId,
+            settle: groupId => presentationController()?.settleGroup(groupId),
+            readModel: readBackgroundGroupModel,
+            measure: measureGridForModel,
+            plan: (model, visualIndex, axis) => planSplitSlotGeometryFor(
+                model.rects, visualIndex, model.rects[visualIndex], axis,
+                model.columnWeights, model.rowWeights
+            ),
+            splitRect: splitSlotRect,
+            reason: (axis, blocker, count) => getSplitDisabledReason(axis, blocker, count),
+            unmeasurable: () => 'This window has no measurable grid right now, so the pane cannot be sized.',
+            split: async (sessionId, axis, request) => {
+                const payload = { axis };
+                if (request && typeof request === 'object') {
+                    Object.assign(payload, request);
+                }
+                /* An explorer pane splits off a terminal rooted where it is
+                   browsing. That is on the pane object, which a cached tab still
+                   holds; a tab the window never showed has none, and the server
+                   roots the terminal at the explorer's own directory. */
+                if (!payload.directory) {
+                    const held = cachedGroupViews.get(backgroundGroupHolding(sessionId));
+                    const pane = held?.terminals?.[(held.sessionIds || []).indexOf(sessionId)];
+                    if (pane && isExplorerSession(pane._session) && pane._explorerPath) {
+                        payload.directory = pane._explorerPath;
+                    }
+                }
+                const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/split`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                const data = await response.json().catch(() => ({}));
+                if (!response.ok) {
+                    return { ok: false, error: data.error || `Split failed with status ${response.status}` };
+                }
+                return { ok: true, session: data.session, group: data.group };
+            },
+            discard: discardBackgroundGroupView,
+            saveLayout: async ({ groupId, expectedRevision, ids, rects, columnWeights, rowWeights, baseCount }) => {
+                const group = getGroupById(groupId);
+                const workspaceLayout = buildWorkspaceLayoutSnapshotFromState(
+                    ids.length, 'layout-split-local', rects, columnWeights, rowWeights, baseCount
+                );
+                if (!group || !workspaceLayout) {
+                    return { ok: false, error: 'The arrangement could not be described.' };
+                }
+                /* Panes named by id alone: a pane entry with no fields leaves
+                   whatever the server holds for that pane exactly as it is. */
+                const response = await postPresentation('/api/session-presentation', {
+                    workspace_id: currentWorkspaceId,
+                    group_id: groupId,
+                    expected_revision: expectedRevision,
+                    pane_order: ids,
+                    panes: ids.map(sessionId => ({ session_id: sessionId })),
+                    workspace_layout: workspaceLayout
+                });
+                const body = await response.json().catch(() => ({}));
+                if (!response.ok || !Number.isInteger(body.presentation_revision)) {
+                    return { ok: false, error: body.error || `Layout save failed with status ${response.status}` };
+                }
+                return { ok: true, revision: body.presentation_revision };
+            },
+            adopt: adoptBackgroundSplit,
+            performShown: async (sessionId, axis, request) => {
+                const index = sessionIds.indexOf(sessionId);
+                return index < 0
+                    ? { ok: false, error: 'That session tab was opened while the split was being prepared. Nothing changed. Try the split again.' }
+                    : splitTerminalPane(index, axis, request || null);
+            },
+            limits: {
+                maxPanes: MAX_SPLIT_TERMINALS,
+                minCols: MIN_SPLIT_COLS,
+                minRows: MIN_SPLIT_ROWS
+            },
+            onError: error => console.error(
+                '[GridVibe Sessions] presentation write failed before a background split', error
+            )
+        })
+        : null;
+
     /* ─────────────────────────────────────────────
        Split bridge — the page half of a split intent
     ─────────────────────────────────────────────
@@ -7191,19 +7547,25 @@
        button's own tooltip says about the one that would not. The wording is
        composed in `window-intent.js`, where it can be executed in Node. */
     const splitBridge = {
-        /* Whether this window is the one holding that pane. A page that does
-           not hold it never claims the intent, which is how two open windows
-           on different groups do not fight over one split. */
+        /* Whether this window is the one holding that pane — on screen, or in
+           another session tab it holds. A page that holds it in neither never
+           claims the intent, which is how two open windows on different
+           groups do not fight over one split. */
         owns(sessionId) {
-            return sessionIds.indexOf(String(sessionId || '')) >= 0;
+            return sessionIds.indexOf(String(sessionId || '')) >= 0
+                || (backgroundSplit !== null && backgroundSplit.holds(sessionId));
         },
 
         /* The axes this pane could actually be halved on right now, or `null`
-           when the pane is not in this window at all. */
+           when the pane is not in this window at all. A pane in a tab that is
+           not showing is measured off that tab's stored arrangement, which is
+           a read, so the answer for it is a promise. */
         candidates(sessionId) {
             const found = paneSplitTarget(sessionId);
-            if (!found) return null;
-            return found.rect ? getSplitCandidates(found.index, found.rect) : [];
+            if (found) return found.rect ? getSplitCandidates(found.index, found.rect) : [];
+            return backgroundSplit !== null && backgroundSplit.holds(sessionId)
+                ? backgroundSplit.candidates(sessionId)
+                : null;
         },
 
         /* GridVibe's own sentence for why an axis is unavailable — the same
@@ -7214,6 +7576,9 @@
            gets the same refusal again. */
         disabledReason(axis, sessionId) {
             const found = paneSplitTarget(sessionId);
+            if (!found && backgroundSplit !== null && backgroundSplit.holds(sessionId)) {
+                return backgroundSplit.reason(axis, sessionId);
+            }
             const blockers = found?.rect ? getSplitBlockers(found.index, found.rect) : null;
             return getSplitDisabledReason(axis, blockers ? blockers[axis] : '');
         },
@@ -7221,6 +7586,9 @@
         async perform(sessionId, axis, splitRequest) {
             const index = sessionIds.indexOf(String(sessionId || ''));
             if (index < 0) {
+                if (backgroundSplit !== null && backgroundSplit.holds(sessionId)) {
+                    return backgroundSplit.perform(sessionId, axis, splitRequest || null);
+                }
                 return { ok: false, error: 'That pane is not open in this window.' };
             }
             return splitTerminalPane(index, axis, splitRequest || null);
@@ -8059,6 +8427,13 @@
         const grid  = document.getElementById('terminalsGrid');
         try {
             label.textContent = 'Loading…';
+            /* Before the group list as well as before the tab's own read: a
+               list read ahead of a split's layout write would hand the tab
+               strip the arrangement that write is replacing. */
+            await backgroundSplitSettled(activeGroupId);
+            if (loadToken !== activeLoadToken) {
+                return;
+            }
             await loadSessionGroups();
             if (loadToken !== activeLoadToken) {
                 return;
@@ -8069,6 +8444,10 @@
             }
 
             const requestedGroupId = activeGroupId;
+            await backgroundSplitSettled(requestedGroupId);
+            if (loadToken !== activeLoadToken || requestedGroupId !== activeGroupId) {
+                return;
+            }
             const resp = await fetch(getSessionApiPath(requestedGroupId));
             if (!resp.ok) throw new Error(`Server returned ${resp.status}`);
             const data = await resp.json();

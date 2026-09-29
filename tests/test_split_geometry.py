@@ -641,6 +641,7 @@ PAGE_SOURCE = "\n\n".join(
         "getSplitGridSize",
         "getResizableGridMetrics",
         "splitSlotSpan",
+        "planSplitSlotGeometryFor",
         "planSplitSlotGeometry",
         "splitSlotRect",
     )
@@ -882,6 +883,7 @@ RESTORE_SOURCE = "\n\n".join(
             "fixedLayoutRectCoordinates",
             "fixedLayoutSlotRects",
             "rescaleCoarseLayoutSnapshot",
+            "resolveWorkspaceLayoutSnapshot",
             "applyWorkspaceLayoutSnapshot",
             "getSplitBlockers",
             "getSplitCandidates",

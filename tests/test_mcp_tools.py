@@ -1549,6 +1549,47 @@ class SplitIntentPollTestCase(unittest.TestCase):
         self.assertEqual(result["axis"], "horizontal")
         self.assertEqual(result["pane"]["session_id"], "pane-9")
 
+    def test_a_split_the_page_could_not_finish_says_so_beside_the_pane(self):
+        """The pane exists, so it is a split; what could not be saved about it
+        is relayed rather than lost with the success."""
+        sentence = (
+            "The pane was created, but its place in the layout could not be "
+            "saved, so it will appear with the default arrangement."
+        )
+        opener = StubOpener([
+            {"intent_id": "s-1", "axis": "vertical", "state": "pending"},
+            {"intent_id": "s-1", "state": "split", "detail": sentence,
+             "result": {"session_id": "pane-9"}},
+        ])
+
+        result = split_pane(
+            client_for(opener),
+            "pane-4",
+            "vertical",
+            sleep=lambda _seconds: None,
+            monotonic=lambda: 0.0,
+        )
+
+        self.assertEqual(result["status"], SPLIT)
+        self.assertEqual(result["pane"]["session_id"], "pane-9")
+        self.assertEqual(result["note"], sentence)
+
+    def test_a_split_with_nothing_to_add_carries_no_note(self):
+        opener = StubOpener([
+            {"intent_id": "s-1", "axis": "vertical", "state": "pending"},
+            {"intent_id": "s-1", "state": "split", "result": {"session_id": "pane-9"}},
+        ])
+
+        result = split_pane(
+            client_for(opener),
+            "pane-4",
+            "vertical",
+            sleep=lambda _seconds: None,
+            monotonic=lambda: 0.0,
+        )
+
+        self.assertNotIn("note", result)
+
     def test_a_pane_too_small_is_refused_with_gridvibes_own_sentence(self):
         sentence = (
             "Side-by-side split needs at least 8 columns in each terminal. "
@@ -1588,6 +1629,55 @@ class SplitIntentPollTestCase(unittest.TestCase):
 
         self.assertEqual(result["status"], SPLIT_NO_WINDOW)
         self.assertIn("untouched", result["detail"])
+
+    def test_an_expiry_never_says_no_window_was_open(self):
+        """A window can be open and simply not answering -- hidden, minimized --
+        so the sentence names what was missing rather than claiming there was
+        no window at all. Which session tab it shows is not one of the things
+        it needs."""
+        opener = StubOpener([
+            {"intent_id": "s-1", "axis": "vertical", "state": "pending"},
+            {"intent_id": "s-1", "state": "expired"},
+        ])
+
+        result = split_pane(
+            client_for(opener),
+            "pane-4",
+            "vertical",
+            sleep=lambda _seconds: None,
+            monotonic=lambda: 0.0,
+        )
+
+        self.assertEqual(result["status"], SPLIT_NO_WINDOW)
+        self.assertNotIn("was open", result["detail"])
+        self.assertIn("not minimized or hidden", result["detail"])
+        self.assertIn("session tab", result["detail"])
+
+    def test_a_tab_that_could_not_be_shown_is_a_refusal_with_the_pages_reason(self):
+        """A window that exists but would lose work by switching tabs answers
+        for itself. It is a refusal, relayed verbatim, not a missing window."""
+        sentence = (
+            "That pane is in a session tab this window is not showing, so the "
+            "split needs a brief switch to it. An open file in this window has "
+            "unsaved changes, and switching sessions would discard them. Save "
+            "or discard them first. Nothing changed."
+        )
+        opener = StubOpener([
+            {"intent_id": "s-1", "axis": "vertical", "state": "pending"},
+            {"intent_id": "s-1", "state": "refused", "detail": sentence},
+        ])
+
+        result = split_pane(
+            client_for(opener),
+            "pane-4",
+            "vertical",
+            sleep=lambda _seconds: None,
+            monotonic=lambda: 0.0,
+        )
+
+        self.assertEqual(result["status"], REFUSED)
+        self.assertEqual(result["detail"], sentence)
+        self.assertEqual(len(opener.requests), 2)
 
     def test_a_refusal_the_server_decided_never_starts_a_wait(self):
         """An unknown agent is answered by the intent call itself."""

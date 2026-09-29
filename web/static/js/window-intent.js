@@ -35,7 +35,9 @@
      window (or one new pane) rather than two. A page that loses the claim does
      nothing at all.
    - **Only the page that can act, claims.** A split intent names a pane, and
-     only the window holding that pane may take it. An activation names a
+     only the window holding that pane may take it — on screen or in another
+     session tab of its own, which is split without being shown
+     (`background-split.js`). An activation names a
      group, and only the workspace page holding that group may take it. The
      launcher holds neither and therefore never claims either.
    - **Report once, honestly.** `opened`/`blocked` for a window, `split`/
@@ -338,13 +340,17 @@
                 /* Asked before the split rather than inferred after it: a pane
                    too small to halve is a refusal with a reason, not a failed
                    request. The candidates are what the header button reads to
-                   decide whether its own arrow is enabled. */
-                const candidates = splitBridge.candidates(sessionId);
+                   decide whether its own arrow is enabled.
+
+                   Awaited, because a pane in a tab this window is not showing
+                   is measured off the tab's stored arrangement, which is a
+                   read, and the answer for a pane on screen is immediate. */
+                const candidates = await splitBridge.candidates(sessionId);
                 if (!Array.isArray(candidates) || !candidates.includes(axis)) {
                     detail = policy.splitRefusal(
                         axis,
                         candidates,
-                        splitBridge.disabledReason(axis, sessionId)
+                        await splitBridge.disabledReason(axis, sessionId)
                     );
                 } else {
                     const performed = await splitBridge.perform(
@@ -354,8 +360,20 @@
                     );
                     if (performed?.ok) {
                         outcome = SPLIT;
-                        detail = '';
+                        /* Empty unless the pane was made and something about
+                           it could not be finished — its place in the layout
+                           not saved. Said, because the pane exists either
+                           way. */
+                        detail = String(performed.note || '');
                         result = policy.splitResult(performed);
+                    } else if (performed?.refusal) {
+                        /* Decided again at the moment of the split, against a
+                           fresh reading, and worded like the first. */
+                        detail = policy.splitRefusal(
+                            performed.refusal.axis || axis,
+                            performed.refusal.candidates,
+                            performed.refusal.reason
+                        );
                     } else {
                         detail = String(performed?.error || detail);
                     }
