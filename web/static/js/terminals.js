@@ -3030,11 +3030,43 @@
         }
     }
 
+    /* The strip is rebuilt on every refresh — a tab an agent opened arriving
+       included, while the window stays where it is — so a tab control that
+       had keyboard focus is noted before the rebuild and its replacement
+       takes the focus back after it. Null when focus is anywhere else. */
+    function captureSessionTabFocus(container) {
+        const focused = document.activeElement;
+        if (!focused || !container.contains(focused)) {
+            return null;
+        }
+        const tab = focused.closest?.('.session-tab');
+        const groupId = tab?.dataset?.groupId || '';
+        if (!groupId) {
+            return null;
+        }
+        return {
+            groupId,
+            control: focused.classList?.contains('session-tab-close')
+                ? '.session-tab-close'
+                : '.session-tab-main'
+        };
+    }
+
+    function restoreSessionTabFocus(container, focus) {
+        if (!focus) {
+            return;
+        }
+        const tab = Array.from(container.children || [])
+            .find(candidate => candidate?.dataset?.groupId === focus.groupId);
+        tab?.querySelector?.(focus.control)?.focus?.({ preventScroll: true });
+    }
+
     function renderSessionTabs() {
         syncSessionMenuState();
         const container = document.getElementById('sessionTabs');
         if (!container) return;
 
+        const focus = captureSessionTabFocus(container);
         container.innerHTML = '';
 
         sessionGroups.forEach((group, index) => {
@@ -3116,6 +3148,7 @@
             wireSessionTabDragAndDrop(button, container);
             container.appendChild(button);
         });
+        restoreSessionTabFocus(container, focus);
     }
 
     function setSessionGroupsOrder(orderedGroupIds) {
@@ -7077,6 +7110,42 @@
             && sessionIds[source.index] === source.sessionId;
     }
 
+    /* Where a split's pane goes in its tab, read off the grid showing it
+       before the request goes out: the tab as a model (panes in visual order,
+       one rectangle each, the two weight lists) and the cut. Taken at the same
+       point as the source, because once the window moves on the grid on screen
+       is another tab's and cannot be measured for this one. Null when the grid
+       does not describe every pane — then there is nothing to place against. */
+    function captureSplitPlacement(visualIndex, sourceRect, axis) {
+        const grid = document.getElementById('terminalsGrid');
+        const rects = cloneSplitSlotRects(ensureSplitSlotRects());
+        const ids = Array.from(grid?.children || [])
+            .map(card => sessionIds[Number(card?.dataset?.slot)]);
+        if (!rects.length || rects.length !== ids.length || ids.some(id => !id)) {
+            return null;
+        }
+        const size = getSplitGridSize(rects);
+        const columnWeights = normalizeSplitTrackWeights(splitColumnWeights, size.columns);
+        const rowWeights = normalizeSplitTrackWeights(splitRowWeights, size.rows);
+        return {
+            view: {
+                groupId: activeGroupId,
+                visualIndex,
+                model: {
+                    groupId: activeGroupId,
+                    ids,
+                    rects,
+                    columnWeights,
+                    rowWeights,
+                    baseCount: Number(originalSplitSlotCount || ids.length) || ids.length
+                }
+            },
+            cut: planSplitSlotGeometryFor(
+                rects, visualIndex, sourceRect, axis, columnWeights, rowWeights
+            )
+        };
+    }
+
     /* The group record a split response carries: the tab strip and the
        window's own list of which tab holds which pane. */
     function adoptSplitGroupRecord(group) {
@@ -7135,6 +7204,7 @@
         }
 
         const source = captureSplitSource(index);
+        const placement = captureSplitPlacement(visualIndex, sourceRect, axis);
         splitButtons.forEach(button => { button.disabled = true; });
 
         /* An explorer pane splits off a terminal rooted where the user is
@@ -7174,10 +7244,19 @@
                    it, but the arrays, cards and rectangles this call was about
                    to extend belong to a view that is no longer the one on
                    screen, and painting into whichever group is showing now
-                   would put a pane in the wrong tab. Nothing is painted. The
-                   group record is still taken so the tab strip and a later
-                   intent know the pane; the next time that tab is shown it is
-                   rebuilt from the server, which lists the pane. */
+                   would put a pane in the wrong tab. Nothing is painted.
+
+                   A tab that is not painted now gets the pane placed the way a
+                   split from behind places one, off the placement read before
+                   the request: its arrangement written, its cached view
+                   dropped, and a return to it held until the write lands. A
+                   tab rebuilt in place was painted from the server and owns
+                   its arrangement, so it only takes the record. */
+                if (placement && backgroundSplit !== null && source.groupId !== visibleGroupId) {
+                    return backgroundSplit.placeAfterMove(
+                        placement.view, axis, placement.cut, { ok: true, session, group: data.group }
+                    );
+                }
                 adoptSplitGroupRecord(data.group);
                 return { ok: true, session, index: null };
             }
@@ -8884,16 +8963,29 @@
         const newestGroupId = sessionGroups.length
             ? sessionGroups[sessionGroups.length - 1].group_id
             : '';
-        const hasNewGroup = previousGroupIds.length > 0
-            && knownGroupIds.some(groupId => !previousGroupIds.includes(groupId));
+        /* A tab that appeared since the last read takes the window over only
+           when the person opened it — from this window or the launcher. A tab
+           an agent launched or moved here joins the strip and waits to be
+           clicked or focused: an agent working in one tab never changes what
+           the person is looking at. A window showing nothing still picks the
+           newest tab, since that takes nothing away. */
+        const personOpenedNewGroups = previousGroupIds.length > 0
+            ? sessionGroups.filter(group => (
+                !previousGroupIds.includes(group.group_id)
+                && group.opened_by !== 'agent'
+            ))
+            : [];
+        const newestPersonOpenedGroupId = personOpenedNewGroups.length
+            ? personOpenedNewGroups[personOpenedNewGroups.length - 1].group_id
+            : '';
 
         if (activeGroupId && !getGroupById(activeGroupId)) {
             activeGroupId = '';
         }
         if (!activeGroupId && sessionGroups.length > 0) {
             activeGroupId = newestGroupId;
-        } else if (hasNewGroup && newestGroupId && activeGroupId !== newestGroupId) {
-            activeGroupId = newestGroupId;
+        } else if (newestPersonOpenedGroupId && activeGroupId !== newestPersonOpenedGroupId) {
+            activeGroupId = newestPersonOpenedGroupId;
         }
         syncLocationToGroup(activeGroupId);
         renderSessionTabs();

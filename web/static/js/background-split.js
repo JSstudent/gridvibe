@@ -41,7 +41,11 @@
      view the split is about to drop.
    - **A pane that exists is reported, whatever happened to its layout.** The
      server has made it. If the arrangement could not be saved the result says
-     so, and the tab comes back with the default arrangement for its size. */
+     so, and the tab comes back with the default arrangement for its size.
+   - **The visible handler places the same way when its window moves on.** A
+     split asked for in the showing tab whose request was still out when
+     another tab was picked hands its pane to `placeAfterMove`, with the model
+     and cut it read before the request, and the tab is held for that write. */
 (function (root, factory) {
     const api = factory(root);
     if (typeof module === 'object' && module.exports) module.exports = api;
@@ -227,8 +231,7 @@
             };
         }
 
-        /* The split itself, once the tab is held: create, drop the cache, write
-           the arrangement, take the record. */
+        /* The split itself, once the tab is held: create, then place. */
         async function splitBehind(id, axis, request, view) {
             const cut = plan(view.model, view.visualIndex, axis);
             const posted = await split(id, axis, request);
@@ -238,7 +241,13 @@
                     error: String((posted && posted.error) || 'The split failed in this window.')
                 };
             }
+            return place(view, axis, cut, posted);
+        }
 
+        /* A pane the server has made, put in its place in a tab that is not
+           painted: drop the cache, write the arrangement against the revision
+           the split returned, take the record. The tab is held by the caller. */
+        async function place(view, axis, cut, posted) {
             /* From here the pane exists whatever else happens. */
             discard(view.groupId);
             const arranged = policy.arrange({
@@ -320,6 +329,21 @@
                 if (!view) return reason(axis, '', 0);
                 if (!view.measured) return unmeasurable();
                 return reason(axis, view.blockers[axis], view.model.ids.length);
+            },
+
+            /* A split the visible handler made, whose window moved on while
+               its request was out — a tab picked, or the tab left loading. The
+               pane exists; it is placed the way a split from behind places
+               one, off the model and the cut read *before* the request, since
+               the grid now showing is another tab's. Held from the call, with
+               nothing before it, so a return to the tab waits for the write. */
+            async placeAfterMove(view, axis, cut, posted) {
+                const release = hold(String((view && view.groupId) || ''));
+                try {
+                    return await place(view, axis, cut, posted);
+                } finally {
+                    release();
+                }
             },
 
             async perform(sessionId, axis, request) {
