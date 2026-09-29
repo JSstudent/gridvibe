@@ -161,7 +161,7 @@ terminal: a report reaches the waiting agent as its own tool call's result.
 | `create_workspace` | one empty, labelled workspace. Creating it does not make a window appear, and it is refused past sixteen workspaces that are *still* empty — counted over the whole app, because the server cannot tell a tool from the launcher's own button |
 | `launch_panes` | one session (a new tab) of panes — agent, terminal, file explorer or browser preview. An agent pane may carry a `task`, and this needs no open window. The result's `session_name` is the name the tab actually got: a repeated scratch name is suffixed. The whole request is validated before anything exists — see [Where a launched pane opens](#where-a-launched-pane-opens) |
 | `open_window` | a workspace window on screen, whichever tab it shows. Reports `opened`, `blocked` or `no_window_available`. A named session is `focus_session`'s job |
-| `split_pane` | halves one pane on a chosen axis and says what the new pane runs. With no `kind` stated it is what the 🪟 button makes: a terminal clones its source, and an explorer, browser or *agent* pane splits off a plain terminal rooted where it is showing — the kind is never cloned. A stated `directory` wins over where the source is standing. Reports `split`, `refused` or `no_window_available`. With `kind: "agent"` it may carry a `task`, and the result's `handoff` says it is waiting. Its description states what the axis words produce: `horizontal` stacks the new pane below, `vertical` puts it to the right |
+| `split_pane` | halves one pane on a chosen axis and says what the new pane runs. With no `kind` stated it is what the 🪟 button makes: a terminal clones its source, and an explorer, browser or *agent* pane splits off a plain terminal rooted where it is showing — the kind is never cloned. A stated `directory` wins over where the source is standing. The pane may be in any session tab of its window, shown or not: the split switches no tab and moves no focus. Reports `split`, `refused` or `no_window_available`, and a `split` whose place in the layout could not be saved carries a `note`. With `kind: "agent"` it may carry a `task`, and the result's `handoff` says it is waiting. Its description states what the axis words produce: `horizontal` stacks the new pane below, `vertical` puts it to the right |
 
 ### replace — two
 
@@ -322,6 +322,24 @@ because a file it read, a prior tool result, another pane's output or a
 handed-over task asked for it. GridVibe adds no Allow/Deny dialog of its own.
 Every waiver is logged with both pane ids.
 
+**Override mode is that word given once, by the person, for one agent.** The
+launcher's **Override** box, or the **Override** target on a pane's 🔄 menu,
+grants an agent pane a standing override after an in-page warning, and only
+beside **MCP**. Every gated call from that pane then carries `override` as if
+the agent had stated it, so it closes, moves, relaunches, re-modes and clears
+panes it did not create without a `confirm.question` first. It waives nothing a
+stated `override` cannot: the self gate, the machine rule for a task, and a
+caller that has closed still refuse. The grant is read from the calling pane's
+own live record in `web/pane_gates.py` (`read_caller_request`), never from the
+request, and no tool can give it: a split or a tool launch never carries it,
+and `set_pane_agent` never forwards it. It follows the agent it was given to —
+kept across a save, a restore and a relaunch of the same agent, dropped when
+the tools go or the pane becomes another agent or kind, and not restored when
+the tools come back. The waiver log line says `source=mode` for the standing
+grant and `source=call` for a stated one. The pane's MCP frame and dashboard
+chip read red while it holds the grant. `whoami` does not report it yet: an
+agent in override mode learns it only from gated calls that go through.
+
 ### absent
 
 Typing arbitrary input into a terminal has no tool. `clear_pane` chooses its
@@ -337,7 +355,13 @@ mechanism answers all of them (`web/window_intents.py`,
 - **Split a pane.** The axis never reaches the server. The page computes the new
   rectangles, and its refusals — the minimum columns and rows below a terminal
   header, the narrow-viewport rule, the pane cap — are measured off the live
-  terminal. A process that cannot measure a pane cannot place one.
+  terminal. A process that cannot measure a pane cannot place one. The window
+  holding the pane's session tab does this whether or not that tab is showing:
+  for a tab in the background it splits the tab's saved arrangement against
+  the window's own grid, under the same refusals, and writes the result without
+  switching tabs or moving focus (`web/static/js/background-split.js`). A tab
+  the person opens while such a split is in flight waits for it, so it paints
+  with the new pane already in place.
 - **Resize a divider.** Only the page knows the current pixel dimensions and
   terminal cell minimums. It checks the proposed weights against the live grid,
   writes a revisioned presentation update, then acknowledges the applied layout.
@@ -368,7 +392,10 @@ side-by-side split and got a stacked one has been lied to.
 
 `no_window_available` is what browser mode always answers for a split: the
 intent poll runs in a native GridVibe window only, because a browser tab must
-not pay for a poll on every page load. `open_window` has a browser-mode fallback
+not pay for a poll on every page load. A hidden or minimized native window
+polls nothing either, so a split needs the workspace window open and visible;
+which tab it shows does not matter, and the answer says exactly that. Nothing
+wakes a hidden window. `open_window` has a browser-mode fallback
 (`webbrowser.open` is a real alternative); there is no equivalent for "measure
 this pane".
 
@@ -520,7 +547,11 @@ handoff is bound and when one goes.
   the person used; the structured `confirm` flow guides an agent that follows
   its instructions and enforces nothing. What still bounds a misused override:
   never the caller's own pane, an explorer or browser pane, or — with a task —
-  another machine.
+  another machine. Override mode removes even the asking: a prompt-injected
+  agent holding the grant needs one tool call, not a crafted HTTP request, to
+  close a pane it did not make. It widens what a well-behaved agent does
+  unasked, not what a compromised one can reach, and it is why the grant is the
+  person's alone and shows red.
 - **No credential ever reaches a tool result.** Every result is built from an
   explicit field list in `client.py`, and anything whose key looks like a
   secret is dropped at any depth regardless. `list_saved_layouts` is the sharp

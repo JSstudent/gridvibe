@@ -1082,6 +1082,16 @@ unless the task explicitly changes this contract.
   the typed-title comparison as though somebody had chosen it. `agent_mcp`
   therefore stays in `PANE_FIELDS` and in the repaint's structure key, so a
   relaunch on or off the tools rebuilds the row and an unchanged poll does not.
+- **Override mode is a state of that same tag, never a second one.**
+  `paneAgentMcpOverride()` in `agent-identity.js` is true only when the pane
+  wears the MCP tag *and* `agent_mcp_override === true`, so a stale or stringy
+  grant paints nothing. The header writes `data-mcp-override` beside `data-mcp`
+  and the dashboard chip gains `is-override`; both colour through
+  `--gv-mcp-override` / `--gv-mcp-override-soft` (the theme's danger hue, never
+  a literal), the chip text stays `MCP`, and `paneAgentMcpTagTitle()` swaps in
+  `MCP_OVERRIDE_TAG_TITLE` so colour is not the only signal.
+  `agent_mcp_override` is in `PANE_FIELDS`, read from the live record, so a
+  relaunch that drops the grant clears the red where the pane stands.
 - The dashboard conversation line is `paneChatLine()` in `agent-identity.js`,
   not the dashboard's own ladder: a resolved conversation name, then the
   agent's usable OSC tab/window title, then a non-generic pane title, then `New
@@ -1563,6 +1573,30 @@ in `README.md`; state the rules a change has to keep.
   descriptions must keep saying that only a person's words in that conversation —
   or a yes to the refusal's own `confirm.question` — justify it. GridVibe adds no
   confirmation dialog of its own; that is a stated weakness, not an oversight.
+- **Override mode is the person's standing `override`, read from the caller's
+  live record and decided in one place.** `agent_mcp_override` is granted only
+  by a person: the launcher's **Override** box or the pane menu's **Override**
+  target, each behind the shared in-page warning, and only beside `agent_mcp`.
+  `read_caller_request` in `web/pane_gates.py` is the one reader of every gated
+  request — the pane transactions through `read_agent_request`, and the group
+  move directly — and a caller that holds the grant carries `override` with
+  source `mode`; a stated `override` is source `call` and wins the source. The
+  grant counts only on a live `startup_mode == "agent"` pane with `agent_mcp`
+  (`caller_holds_override_mode`), and a request body can never claim it. It
+  waives exactly what a stated `override` waives: `check_caller` (self, then
+  caller liveness) and the relaunch's machine gate still run first and refuse.
+  A close re-checks a `mode` waiver against the caller it reads under
+  `SessionManager.lock`; a grant lost in between waives nothing. Waiver logs
+  carry `source=mode|call`. The record keeps the grant only while the pane is an
+  agent pane with the tools (`_settle_agent_mcp_override`), so a transition that
+  forgets the field cannot leave one behind, and a dropped grant does not return
+  with the tools. It persists beside `agent_mcp` in presets, workspace saves and
+  the runtime snapshot; an absent key reads `False`, and only a JSON `true` is
+  believed. No tool can grant it: splits never set it, a tool launch drops a
+  stated one, the relaunch route refuses `mcp_override` unless `mcp` is stated
+  beside it (and `true` without `mcp: true`), and the tool relaunch never
+  forwards it. Relaunching the same agent keeps a grant it already holds without
+  restating it, so a stale window cannot restore one dropped elsewhere.
 - **No byte a tool supplies reaches a launch line.** A handed-over task adds
   exactly `HANDOFF_OPENING_PROMPT` (`web/agent_handoffs.py`), a constant whose
   characters are pinned to `[A-Za-z0-9 .,_]`, and the agent fetches the task
@@ -1818,6 +1852,28 @@ in `README.md`; state the rules a change has to keep.
   before the intent is recorded. A page reports only its own kind's outcomes, and
   a refusal is relayed with the axis that would have worked — never a silent
   retry on the other axis.
+- **A split works in any tab the window holds, and never moves the view.**
+  `splitBridge.owns()` claims a pane in the painted group or in a group the page
+  holds in the background (`backgroundGroupHolding()`, read from the group list,
+  not the cached views). A background split is `web/static/js/background-split.js`:
+  an edit to the tab's model — pane order, one rectangle each, column and row
+  weights — read from its cached view only while that holds exactly the server's
+  panes, else from the server's summary. It measures against the window's shared
+  grid with the split button's own pane cap, narrow-window, integer-grid and
+  character-floor rules, and refuses before anything is created. Then it creates
+  the pane, drops that tab's cached view, writes the arrangement through the
+  group's revisioned presentation transaction, and adopts the new record into
+  the tab strip; it never reaches `switchGroup`, pane focus, `initialLoad` or a
+  cached-view restore. A tab opened before the request goes out is handed to the
+  visible handler. From the request until the write, the tab is held:
+  `initialLoad` waits on `backgroundSplit.settled(groupId)` before its group-list
+  read and before its read of the tab, so a tab picked mid-request is never
+  painted from the pre-save arrangement or from a cache about to be dropped, and
+  every tab except the one painted loses its cached view. A pane that was created
+  is reported even when its arrangement could not be written, with a `note` the
+  sidecar relays. The page still has to poll: a hidden or minimized native window
+  answers `no_window_available`, and `NO_PAGE_HINT` says the window must be open
+  and visible, whichever tab it shows. A resize still needs its tab showing.
 - **A resize is a revisioned presentation transaction.** The tool takes a
   group, axis, numbered track boundary, normalized position, and the revision
   read from `list_panes`. Only the visible page can claim it. The page compares
