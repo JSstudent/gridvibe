@@ -179,6 +179,17 @@
         });
     }
 
+    /* The warning shown before any surface grants an agent override mode --
+       the launcher's checkbox and the pane menu's "MCP override" button alike,
+       so both ask the same question in the same words. */
+    const AGENT_MCP_OVERRIDE_CONFIRM = {
+        title: 'Let this agent act without asking?',
+        copy: 'This agent will close, move, relaunch, re-mode and clear panes it did not create, without asking first. It still cannot touch its own pane.',
+        note: 'This is not a new way in: any agent pane can already reach GridVibe directly. What changes is the effort. An agent misled by what it reads can do damage with one tool call instead of having to build the request itself.',
+        confirmLabel: 'Turn on override',
+        danger: true
+    };
+
     function initGenericConfirmModal() {
         const modal = document.getElementById('genericConfirmModal');
         const cancelButton = document.getElementById('genericConfirmCancel');
@@ -410,6 +421,11 @@
             custom_agent: resolvedStartupMode === 'agent' ? (terminal?.custom_agent || '') : '',
             agent_auto_mode: resolvedStartupMode === 'agent' && Boolean(terminal?.agent_auto_mode),
             agent_mcp: resolvedStartupMode === 'agent' && Boolean(terminal?.agent_mcp),
+            /* A grant that rides on the tools; only a stated `true` carries it,
+               so a preset saved before the field existed launches without. */
+            agent_mcp_override: resolvedStartupMode === 'agent'
+                && Boolean(terminal?.agent_mcp)
+                && terminal?.agent_mcp_override === true,
             /* The explorer's confinement boundary and whether anybody chose it
                travel together, and travel separately from `directory`: a pane
                rooted at a project while browsing one of its subdirectories has

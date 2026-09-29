@@ -66,9 +66,16 @@ from web.session_presentation import (  # noqa: F401 - compatibility re-exports
 
 logger = logging.getLogger(__name__)
 
-SAVED_SESSIONS_PATH = os.path.join(BASE_DIR, "saved_sessions.json")
+PRODUCTION_SAVED_SESSIONS_PATH = os.path.join(BASE_DIR, "saved_sessions.json")
+SAVED_SESSIONS_PATH = (
+    os.environ.get("GRIDVIBE_SAVED_SESSIONS_PATH") or PRODUCTION_SAVED_SESSIONS_PATH
+)
 DEFAULT_SAVED_SESSION_ID = "default-session"
 DEFAULT_SAVED_SESSION_NAME = "Default Session"
+
+
+class SavedSessionNameConflictError(ValueError):
+    """A requested new preset name is already owned by another preset."""
 
 # Scratch launches: a launch that carries no saved-preset identity (the
 # built-in "Default Session", or any hand-filled form) is disposable, is named
@@ -102,6 +109,7 @@ def _default_terminal_entries():
             "custom_agent": "",
             "agent_auto_mode": False,
             "agent_mcp": False,
+            "agent_mcp_override": False,
             "explorer_tree_open": False,
             "explorer_git_open": False,
             "explorer_git_follow_browsing": False,
@@ -241,6 +249,17 @@ def _normalize_terminal_entries(
         )
         if browser_tabs:
             initial_command = browser_tabs[browser_active_tab]
+        # The flag says the reader wants GridVibe tools in this pane; whether
+        # the CLI has any way to be handed them is the registry's answer, and
+        # it is asked here because this is the one normalizer every launch
+        # body passes through -- the launcher's own, an imported preset's, and
+        # the one a tool composes. `web/agents.py` imports this module, so the
+        # import is local rather than at the top.
+        agent_mcp = (
+            startup_mode == "agent"
+            and bool(entry.get("agent_mcp"))
+            and _agent_supports_mcp(agent_selection or custom_agent)
+        )
         normalized.append(
             {
                 "title": str(entry.get("title") or f"Terminal {index + 1}"),
@@ -257,17 +276,12 @@ def _normalize_terminal_entries(
                 "agent_selection": agent_selection,
                 "custom_agent": custom_agent,
                 "agent_auto_mode": startup_mode == "agent" and bool(entry.get("agent_auto_mode")),
-                # The flag says the reader wants GridVibe tools in this pane;
-                # whether the CLI has any way to be handed them is the
-                # registry's answer, and it is asked here because this is the
-                # one normalizer every launch body passes through -- the
-                # launcher's own, an imported preset's, and the one a tool
-                # composes. `web/agents.py` imports this module, so the import
-                # is local rather than at the top.
-                "agent_mcp": (
-                    startup_mode == "agent"
-                    and bool(entry.get("agent_mcp"))
-                    and _agent_supports_mcp(agent_selection or custom_agent)
+                "agent_mcp": agent_mcp,
+                # A grant that rides on the tools, so it goes with them. Only
+                # a stated `true` grants it: a preset written before the field
+                # existed reads False, never "inherit".
+                "agent_mcp_override": (
+                    agent_mcp and entry.get("agent_mcp_override") is True
                 ),
                 "explorer_tree_open": bool(entry.get("explorer_tree_open")),
                 "explorer_git_open": bool(entry.get("explorer_git_open")),
@@ -538,6 +552,9 @@ def _merge_workspace_session_config(
             saved_terminal["custom_agent"] = custom_agent
             saved_terminal["agent_auto_mode"] = workspace_terminal["agent_auto_mode"]
             saved_terminal["agent_mcp"] = workspace_terminal["agent_mcp"]
+            saved_terminal["agent_mcp_override"] = workspace_terminal[
+                "agent_mcp_override"
+            ]
             saved_terminal["initial_command"] = initial_command
         elif (
             base["terminals"][index]["initial_command_mode"] == "agent"
@@ -548,6 +565,7 @@ def _merge_workspace_session_config(
             saved_terminal["custom_agent"] = ""
             saved_terminal["agent_auto_mode"] = False
             saved_terminal["agent_mcp"] = False
+            saved_terminal["agent_mcp_override"] = False
             saved_terminal["initial_command"] = ""
 
         saved_terminal["explorer_tree_open"] = (
@@ -716,10 +734,23 @@ def _saved_payload_is_supported(payload: Any) -> bool:
     return isinstance(payload, (dict, list))
 
 
+def _saved_sessions_path() -> str:
+    """Resolve the current preset file, refusing production state in tests."""
+    path = SAVED_SESSIONS_PATH
+    if os.environ.get("GRIDVIBE_TEST_MODE") and os.path.normcase(
+        os.path.realpath(path)
+    ) == os.path.normcase(os.path.realpath(PRODUCTION_SAVED_SESSIONS_PATH)):
+        raise RuntimeError(
+            "Refusing to use production saved_sessions.json in test mode; "
+            "set GRIDVIBE_SAVED_SESSIONS_PATH or patch SAVED_SESSIONS_PATH."
+        )
+    return path
+
+
 _saved_session_store = SavedSessionStore(
     # Resolved per call: the module global is redirected per test case, and a
     # store that pinned the path at import would keep writing the old file.
-    path_resolver=lambda: SAVED_SESSIONS_PATH,
+    path_resolver=_saved_sessions_path,
     is_supported=_saved_payload_is_supported,
 )
 
@@ -927,12 +958,15 @@ def upsert_saved_session(
     name: Optional[str] = None,
     session_id: Optional[str] = None,
     set_last_session: bool = True,
+    require_unique_name: bool = False,
 ) -> Dict[str, Any]:
     """Create or update one named saved session preset.
 
     The read and the write are one store transaction (SGP-05): a second thread
     or process saving an unrelated preset at the same moment can no longer have
     its entry read here and dropped by this write.
+    When `require_unique_name` is set for a new preset, the name claim runs
+    inside that same transaction and refuses case-insensitive duplicates.
     """
     normalized_config = _normalize_session_config(config)
     if str(session_id or "").strip() == DEFAULT_SAVED_SESSION_ID:
@@ -943,6 +977,18 @@ def upsert_saved_session(
     def mutate(stored: Any):
         state = _normalize_stored_payload(stored)
         saved_sessions = state["sessions"]
+
+        if require_unique_name and (
+            normalized_name.casefold() == DEFAULT_SAVED_SESSION_NAME.casefold()
+            or any(
+                str(entry.get("name") or "").strip().casefold()
+                == normalized_name.casefold()
+                for entry in saved_sessions
+            )
+        ):
+            raise SavedSessionNameConflictError(
+                "A saved layout already has that name. Choose another name; nothing was saved."
+            )
 
         if session_id:
             for entry in saved_sessions:

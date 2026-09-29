@@ -621,6 +621,57 @@ class PaneIdentityChromeTestCase(NodeHarnessTestCase):
             {"framed": True, "title": with_tools},
         ])
 
+    def test_the_override_mode_frame_follows_the_live_record(self):
+        """Override mode turns the same frame red (`data-mcp-override`) and
+        names itself on the mark's hover. It is read from the record each
+        status sync delivers, so a relaunch that drops the grant clears it
+        where the pane stands, and a grant left on a pane without the tools
+        paints nothing."""
+        result = self._run(
+            """
+            makeField('tname-0', 'Claude Code');
+            makeField('thost-0', 'PowerShell');
+            const icon = { innerHTML: '', hidden: true, dataset: {}, title: '' };
+            fields.set('ticon-0', icon);
+            const captures = [];
+            const agent = { startup_mode: 'agent', agent_selection: 'claude' };
+            for (const session of [
+                { ...agent, agent_mcp: true, agent_mcp_override: true },
+                { ...agent, agent_mcp: true, agent_mcp_override: false },
+                { ...agent, agent_mcp: true, agent_mcp_override: true },
+                { ...agent, agent_mcp: false, agent_mcp_override: true },
+                { startup_mode: 'terminal', agent_mcp: true, agent_mcp_override: true },
+                { ...agent, agent_mcp: true, agent_mcp_override: 'true' }
+            ]) {
+                syncPaneIdentityChrome(0, Object.assign({ title: 'Terminal 1', host: '' }, session));
+                captures.push({
+                    framed: 'mcp' in icon.dataset,
+                    red: 'mcpOverride' in icon.dataset,
+                    title: icon.title
+                });
+            }
+            const identity = window.GridVibeAgentIdentity;
+            report({
+                captures,
+                plain: identity.MCP_TAG_TITLE,
+                override: identity.MCP_OVERRIDE_TAG_TITLE
+            });
+            """
+        )
+        red = {"framed": True, "red": True, "title": "Claude Code\n" + result["override"]}
+        plain = {"framed": True, "red": False, "title": "Claude Code\n" + result["plain"]}
+        self.assertEqual(result["captures"], [
+            red,
+            # The relaunch that dropped the grant.
+            plain,
+            red,
+            # Tools off: no frame, so no red either.
+            {"framed": False, "red": False, "title": "Claude Code"},
+            {"framed": False, "red": False, "title": ""},
+            # Only a stated `true` is the grant.
+            plain,
+        ])
+
     def test_the_header_prints_ps_and_keeps_the_full_name_on_hover(self):
         result = self._run(
             """
@@ -661,7 +712,8 @@ class PaneIdentityChromeTestCase(NodeHarnessTestCase):
             fields.set('ticon-0', icon);
             const session = {
                 title: 'Terminal 1', host: 'PowerShell', startup_mode: 'agent',
-                agent_selection: 'claude', custom_agent: '', agent_mcp: true
+                agent_selection: 'claude', custom_agent: '', agent_mcp: true,
+                agent_mcp_override: true
             };
             syncPaneIdentityChrome(0, session);
             const before = { frame: frameWrites, host: host.writes };
@@ -670,11 +722,14 @@ class PaneIdentityChromeTestCase(NodeHarnessTestCase):
             report({
                 frameWrites: frameWrites - before.frame,
                 hostWrites: host.writes - before.host,
-                framed: 'mcp' in icon.dataset
+                framed: 'mcp' in icon.dataset,
+                red: 'mcpOverride' in icon.dataset
             });
             """
         )
-        self.assertEqual(result, {"frameWrites": 0, "hostWrites": 0, "framed": True})
+        self.assertEqual(
+            result, {"frameWrites": 0, "hostWrites": 0, "framed": True, "red": True}
+        )
 
     def test_an_agent_pane_drops_its_name_once_it_would_ellipsise(self):
         """A clipped "OpenAI ..." crowded the host out of a narrow header; the

@@ -872,6 +872,9 @@ class PanePathBuilderTestCase(unittest.TestCase):
             function buildTerminalInitialCommand() { return ''; }
             function getRowAgentSelection() { return ''; }
             function agentAutoModeFlag() { return false; }
+            function readRowAgentMcpFlags() {
+                return { agent_mcp: false, agent_mcp_override: false };
+            }
         """
         launcher = STATIC_JS / "launcher.js"
         script = (

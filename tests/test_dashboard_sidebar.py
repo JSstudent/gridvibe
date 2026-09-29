@@ -46,6 +46,7 @@ from unittest.mock import patch
 
 from sessions.manager import SessionManager
 from web import api
+from web import config as web_config
 from web import runtime_state as web_runtime_state
 from web.lifecycle import LifecycleValidationError, normalize_workspace_metadata
 from web.session_presentation import (
@@ -350,6 +351,8 @@ function parseAgentRows() {
             state: /class="dash-activity dash-state-([a-z]+)"/.exec(inner)?.[1] || '',
             tags: [...inner.matchAll(/<span class="dash-tag[^"]*"[^>]*>([\s\S]*?)<\/span>/g)]
                 .map(match => match[1].trim()),
+            tagClasses: [...inner.matchAll(/<span class="(dash-tag[^"]*)"[^>]*>/g)]
+                .map(match => match[1].split(/\s+/).filter(Boolean)),
             word: grab('dash-state-word'),
             glyph: glyph ? glyph[0] : '',
             hasBar: inner.includes('dash-progress-fill'),
@@ -604,6 +607,29 @@ class DashboardSidebarRowTestCase(DashboardSidebarNodeTestCase):
                 "dash-agent-line",
             ],
         )
+
+    def test_an_override_mode_pane_wears_the_dialogs_red_chip(self):
+        """The sidebar draws the dialog's chip, so override mode reaches it
+        with no reading of its own: same `MCP`, same `is-override`."""
+        result = self._run_node(
+            """
+            sidebarShown();
+            const red = pane({ agent_mcp: true, agent_mcp_override: true });
+            const plain = pane({ session_id: 's2', index: 1, agent_mcp: true });
+            fetchAnswer = snapshot([group([red, plain])]);
+            await sidebar.refresh();
+            const rows = parseAgentRows();
+            report({
+                rows: rows.map(row => ({ tags: row.tags, classes: row.tagClasses })),
+                dialog: dashboardMcpTagHtml(red)
+            });
+            """
+        )
+        self.assertEqual(result["rows"], [
+            {"tags": ["MCP"], "classes": [["dash-tag", "dash-tag-mcp", "is-override"]]},
+            {"tags": ["MCP"], "classes": [["dash-tag", "dash-tag-mcp"]]},
+        ])
+        self.assertIn('class="dash-tag dash-tag-mcp is-override"', result["dialog"])
 
     def test_every_other_field_is_the_dialogs_own_answer(self):
         """The naming rule, the transport tag, the state word, the hue and the
@@ -1580,15 +1606,22 @@ class DashboardSidebarSideSettingTestCase(unittest.TestCase):
     """
 
     def setUp(self):
+        self.temp_dir = TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        config_patch = patch.object(
+            web_config, "CONFIG_PATH", str(Path(self.temp_dir.name) / "config.json")
+        )
+        config_patch.start()
+        def restore_config_path():
+            config_patch.stop()
+            api._refresh_runtime_config()
+
+        self.addCleanup(restore_config_path)
+        api._refresh_runtime_config()
         api.app.config["TESTING"] = True
         self.client = api.app.test_client()
         api.session_manager.reset_sessions()
         self.addCleanup(api.session_manager.reset_sessions)
-        config = api.load_config()
-        saved_workspace = json.loads(json.dumps(config.get("workspace", {})))
-        self.addCleanup(self._restore_workspace_config, saved_workspace)
-        self.temp_dir = TemporaryDirectory()
-        self.addCleanup(self.temp_dir.cleanup)
         self.repo_dir = Path(self.temp_dir.name) / "repo"
         self.repo_dir.mkdir()
         self.state_path = Path(self.temp_dir.name) / "runtime_state.json"
@@ -1597,12 +1630,6 @@ class DashboardSidebarSideSettingTestCase(unittest.TestCase):
         )
         patcher.start()
         self.addCleanup(patcher.stop)
-
-    def _restore_workspace_config(self, saved_workspace):
-        config = api.load_config()
-        config["workspace"] = saved_workspace
-        api.save_config(config)
-        api._refresh_runtime_config()
 
     def _save_side(self, side):
         with patch.object(api.socketio, "emit") as emit:

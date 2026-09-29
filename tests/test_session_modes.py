@@ -856,6 +856,50 @@ class AgentRequestedModeSwitchTestCase(ModeTransitionTestCase):
         self.assertIn("lineage gate", response.get_json()["error"])
         self.assertEqual(_pane_state(handmade.session_id), before)
 
+    # ---------------- override mode: the caller's standing grant ----------------
+
+    def _grant_override_mode(self, caller):
+        api.session_manager.update_session_metadata(
+            caller.session_id, agent_mcp=True, agent_mcp_override=True
+        )
+        self.assertTrue(api.session_manager.get_session(caller.session_id).agent_mcp_override)
+
+    def test_override_mode_switches_a_foreign_agent_pane_without_stating_override(self):
+        caller, target = self._agent_pair(
+            created_by_session_id="",
+            startup_mode="agent",
+            initial_command_mode="agent",
+            agent_selection="codex",
+            initial_command="codex",
+        )
+        self._grant_override_mode(caller)
+
+        with self.assertLogs("web.session_modes", level="INFO") as captured:
+            response, _close, _start = self._switch(
+                target.session_id,
+                {"requested_by_session_id": caller.session_id, "startup_mode": "explorer"},
+            )
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertEqual(
+            api.session_manager.get_session(target.session_id).startup_mode, "explorer"
+        )
+        self.assertTrue(any("source=mode" in line for line in captured.output))
+
+    def test_override_mode_never_switches_the_callers_own_pane(self):
+        caller, _target = self._agent_pair()
+        self._grant_override_mode(caller)
+        before = _pane_state(caller.session_id)
+
+        response, _close, _start = self._switch(
+            caller.session_id,
+            {"requested_by_session_id": caller.session_id, "startup_mode": "explorer"},
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertIn("self gate", response.get_json()["error"])
+        self.assertEqual(_pane_state(caller.session_id), before)
+
     # ---------------- the ordinary refusals still apply ----------------
 
     def test_the_ordinary_transition_refusals_survive_the_gates(self):
@@ -974,6 +1018,55 @@ class AgentRequestedModeSwitchTestCase(ModeTransitionTestCase):
             "exc.status_code",
             ast.unparse(handler),
         )
+
+
+class OverrideModeTransitionTestCase(ModeTransitionTestCase):
+    """A pane that stops running its agent stops holding the agent's grant.
+
+    The grant does not return when the pane later becomes a terminal again:
+    it was given to the agent that ended, not to the slot.
+    """
+
+    def _granted_pane(self):
+        session, _repo = self._local_pane(
+            startup_mode="agent",
+            initial_command_mode="agent",
+            agent_selection="claude",
+            initial_command="claude",
+            agent_mcp=True,
+            agent_mcp_override=True,
+        )
+        self.assertIs(session.agent_mcp_override, True)
+        return session
+
+    def _override(self, session):
+        return api.session_manager.get_session(session.session_id).agent_mcp_override
+
+    def test_switching_to_files_and_back_drops_the_grant(self):
+        session = self._granted_pane()
+
+        response, _close, _start = self._post_mode(
+            session.session_id, {"startup_mode": "explorer"}
+        )
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertIs(self._override(session), False)
+
+        response, _close, _start = self._post_mode(
+            session.session_id, {"startup_mode": "terminal"}
+        )
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertIs(self._override(session), False)
+
+    def test_switching_to_a_browser_drops_the_grant(self):
+        session = self._granted_pane()
+
+        response, _close, _start = self._post_mode(
+            session.session_id,
+            {"startup_mode": "browser", "url": "http://localhost:3000"},
+        )
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertIs(self._override(session), False)
 
 
 class RefreshPaneCwdMoveTestCase(ModeTransitionTestCase):

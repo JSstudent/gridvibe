@@ -865,14 +865,16 @@ class McpFlagGateTestCase(unittest.TestCase):
         )
 
         with patch.object(api, "_agent_absent_reason", return_value=""):
-            refused = api._split_pane_overrides(
-                source, {"kind": "agent", "agent": "grok", "mcp": True}
-            )
+            # Refused rather than silently dropped: the split adds no pane.
+            with self.assertRaises(api.SplitRequestError) as refused:
+                api._split_pane_overrides(
+                    source, {"kind": "agent", "agent": "grok", "mcp": True}
+                )
             allowed = api._split_pane_overrides(
                 source, {"kind": "agent", "agent": "claude", "mcp": True}
             )
 
-        self.assertFalse(refused["agent_mcp"])
+        self.assertIn("No pane was added", str(refused.exception))
         self.assertTrue(allowed["agent_mcp"])
 
     def test_a_relaunch_cannot_turn_it_on_for_one(self):

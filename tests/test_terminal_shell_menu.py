@@ -52,6 +52,18 @@ AGENT_IDENTITY_JS = STATIC_JS / "agent-identity.js"
 
 NODE = shutil.which("node")
 
+
+def _override_confirm_source() -> str:
+    """The real warning copy, sliced out of `shared.js` rather than restated.
+
+    The launcher and this menu ask the same question in the same words, so the
+    harness reads the one constant both of them read.
+    """
+    source = (STATIC_JS / "shared.js").read_text(encoding="utf-8")
+    begin = source.index("    const AGENT_MCP_OVERRIDE_CONFIRM = {")
+    return source[begin:source.index("    function initGenericConfirmModal() {", begin)]
+
+
 # The whole page surface the module can reach. Small on purpose: the menu is one
 # `innerHTML` write and one delegated click listener, so the stub only has to
 # hold that element, hand back the buttons the module looks up by id, and answer
@@ -128,6 +140,22 @@ function syncPanePlaceholder(index) {
     calls.order.push('sync-placeholder');
 }
 function showTerminalToast(message) { calls.toasts.push(message); }
+
+/* shared.js's in-page confirmation. `CONSENT` is the person's answer, and
+   `ON_DIALOG` runs while it is open -- the window in which the grid can move
+   under a pending relaunch. Every dialog is recorded, with the point in the
+   sequence it opened at. */
+var CONSENT = true;
+var ON_DIALOG = null;
+const dialogs = [];
+function openGenericConfirmModal(options) {
+    dialogs.push(options);
+    calls.order.push('dialog');
+    return new Promise(resolve => setImmediate(() => {
+        if (typeof ON_DIALOG === 'function') { ON_DIALOG(); }
+        resolve(CONSENT);
+    }));
+}
 
 function fakeClassList() {
     const names = new Set();
@@ -237,8 +265,11 @@ function parseRows(html) {
             expander: Object.prototype.hasOwnProperty.call(dataset, 'paneShellExpand'),
             launch: Object.prototype.hasOwnProperty.call(dataset, 'paneShellLaunch'),
             /* The MCP button carries no label span -- its text is the badge --
-               so it is told apart by the class the page styles it with. */
-            tools: /class="[^"]*pane-shell-menu-mcp/.test(match[1]),
+               so it is told apart by the class the page styles it with. The
+               override button shares the base class and adds its own. */
+            tools: /class="[^"]*pane-shell-menu-mcp/.test(match[1])
+                && !/pane-shell-menu-mcp-override/.test(match[1]),
+            override: /pane-shell-menu-mcp-override/.test(match[1]),
             /* The update button, likewise: an icon and an aria-label. */
             update: /class="[^"]*pane-shell-menu-update/.test(match[1])
         });
@@ -258,7 +289,7 @@ async function press(index, row) {
             /* The MCP button is a sibling control, not a menu item, so it is
                reachable only through the launch lookup above. */
             if (selector === '.pane-shell-menu-item') {
-                return row.expander || row.tools || row.update ? null : node;
+                return row.expander || row.tools || row.override || row.update ? null : node;
             }
             return null;
         }
@@ -335,6 +366,7 @@ class TerminalShellMenuTestCase(unittest.TestCase):
     def _run_node(self, body: str):
         script = (
             HARNESS_STUBS
+            + _override_confirm_source()
             + TERMINAL_MODES_JS.read_text(encoding="utf-8")
             + AGENT_IDENTITY_JS.read_text(encoding="utf-8")
             + (STATIC_JS / "agent-glyphs.js").read_text(encoding="utf-8")
@@ -415,8 +447,10 @@ class ShellFamilyChevronTestCase(TerminalShellMenuTestCase):
             [
                 {"label": "Claude Code", "kind": "powershell"},
                 {"label": "Claude Code with GridVibe tools", "kind": "powershell"},
+                {"label": "Claude Code with GridVibe tools in override mode", "kind": "powershell"},
                 {"label": "OpenAI Codex CLI", "kind": "powershell"},
                 {"label": "OpenAI Codex CLI with GridVibe tools", "kind": "powershell"},
+                {"label": "OpenAI Codex CLI with GridVibe tools in override mode", "kind": "powershell"},
                 {"label": "Kilo CLI", "kind": "powershell"},
             ],
         )
@@ -458,8 +492,9 @@ class ShellFamilyChevronTestCase(TerminalShellMenuTestCase):
             report({ whileOpen, reopened: rowsFor(0).filter(row => row.dataset.paneShellAgent).length });
             """
         )
-        # Three agents and the two tools buttons beside the capable ones.
-        self.assertEqual(result["whileOpen"], 5)
+        # Three agents, and the tools and override buttons beside the capable
+        # ones.
+        self.assertEqual(result["whileOpen"], 7)
         self.assertEqual(result["reopened"], 0)
 
 
@@ -561,8 +596,10 @@ class PaneWithoutShellFamiliesTestCase(TerminalShellMenuTestCase):
                 "Plain shell",
                 "Claude Code",
                 "Claude Code with GridVibe tools",
+                "Claude Code with GridVibe tools in override mode",
                 "OpenAI Codex CLI",
                 "OpenAI Codex CLI with GridVibe tools",
+                "OpenAI Codex CLI with GridVibe tools in override mode",
                 "Kilo CLI",
             ],
         )
@@ -589,8 +626,10 @@ class PaneWithoutShellFamiliesTestCase(TerminalShellMenuTestCase):
                 "Plain shell",
                 "Claude Code",
                 "Claude Code with GridVibe tools",
+                "Claude Code with GridVibe tools in override mode",
                 "OpenAI Codex CLI",
                 "OpenAI Codex CLI with GridVibe tools",
+                "OpenAI Codex CLI with GridVibe tools in override mode",
                 "Kilo CLI",
             ],
         )
@@ -685,7 +724,7 @@ class AgentToolsButtonTestCase(TerminalShellMenuTestCase):
         # the route would read as "leave that alone".
         self.assertEqual(
             result["stated"],
-            ["-=0", "claude=0", "claude=1", "codex=0", "codex=1", "kilo=0"],
+            ["-=0", "claude=0", "claude=1", "claude=1", "codex=0", "codex=1", "codex=1", "kilo=0"],
         )
 
     def test_the_button_starts_that_agent_with_gridvibe_tools(self):
@@ -702,7 +741,10 @@ class AgentToolsButtonTestCase(TerminalShellMenuTestCase):
         # beside it does: "this pane, but Codex in WSL Ubuntu, with tools".
         self.assertEqual(
             result["requests"][0]["body"],
-            {"agent": "codex", "mcp": True, "shell": "wsl", "distribution": "Ubuntu"},
+            {
+                "agent": "codex", "mcp": True, "mcp_override": False,
+                "shell": "wsl", "distribution": "Ubuntu",
+            },
         )
 
     def test_an_ssh_pane_may_start_its_agent_with_tools_too(self):
@@ -715,7 +757,8 @@ class AgentToolsButtonTestCase(TerminalShellMenuTestCase):
             """
         )
         self.assertEqual(
-            result["requests"][0]["body"], {"agent": "claude", "mcp": True}
+            result["requests"][0]["body"],
+            {"agent": "claude", "mcp": True, "mcp_override": False},
         )
 
     def test_the_row_beside_the_button_is_the_way_back_off_the_tools(self):
@@ -758,6 +801,288 @@ class AgentToolsButtonTestCase(TerminalShellMenuTestCase):
         # No agent, no tools -- however a preset written before the pane was
         # sent back to a plain shell left the flag.
         self.assertEqual(result["plain"], ["Plain shell"])
+
+
+class AgentOverrideButtonTestCase(TerminalShellMenuTestCase):
+    """The third target on an MCP-capable agent's row: tools in override mode.
+
+    Same shape as the MCP button -- inline, one press, on every terminal type
+    the menu serves -- but granting it is asked first, in the launcher's own
+    in-page dialog, because a standing waiver is the person's to give.
+    """
+
+    def test_every_terminal_type_offers_it_beside_the_mcp_button(self):
+        result = self._run_node(
+            """
+            const out = {};
+            for (const [name, session, options] of [
+                ['ssh', sshPane(), {}],
+                ['posix', localPane(), { windowsShells: false }],
+            ]) {
+                menus.clear();
+                const rows = await openMenu(0, session, options);
+                out[name] = rows.filter(row => row.override).map(row => row.dataset.paneShellAgent);
+            }
+            menus.clear();
+            let rows = await openMenu(0, localPane(), { windowsShells: true });
+            for (const key of ['cmd ', 'powershell ', 'wsl ', 'wsl Ubuntu']) {
+                await press(0, rowsFor(0).find(row => row.dataset.paneShellExpand === key));
+                out[key.trim() || key] = rowsFor(0).filter(row => row.override)
+                    .map(row => row.dataset.paneShellAgent);
+                await press(0, rowsFor(0).find(row => row.dataset.paneShellExpand === key));
+            }
+            report(out);
+            """
+        )
+        # Only the two agents whose CLI can take the sidecar, exactly as the
+        # MCP button; the CLI publishing no mechanism keeps its bare row.
+        for name, agents in result.items():
+            self.assertEqual(agents, ["claude", "codex"], name)
+
+    def test_it_states_the_tools_and_the_grant_together(self):
+        result = self._run_node(
+            """
+            const rows = await openMenu(0, sshPane());
+            const button = rows.find(row => row.override && row.dataset.paneShellAgent === 'codex');
+            report({ stated: button.dataset, label: button.label });
+            """
+        )
+        self.assertEqual(result["stated"]["paneShellMcp"], "1")
+        self.assertEqual(result["stated"]["paneShellMcpOverride"], "1")
+        self.assertEqual(
+            result["label"], "OpenAI Codex CLI with GridVibe tools in override mode"
+        )
+
+    def test_pressing_it_asks_the_launchers_warning_before_anything_is_sent(self):
+        result = self._run_node(
+            """
+            const rows = await openMenu(0, sshPane());
+            await press(0, rows.find(row => row.override && row.dataset.paneShellAgent === 'claude'));
+            report({
+                dialogs,
+                order: calls.order,
+                requests: calls.requests.filter(request => request.body)
+            });
+            """
+        )
+        self.assertEqual(len(result["dialogs"]), 1)
+        dialog = result["dialogs"][0]
+        self.assertEqual(dialog["title"], "Let this agent act without asking?")
+        self.assertTrue(dialog["danger"])
+        self.assertIn("without asking first", dialog["copy"])
+        # Asked before the pane is touched: the spinner and the reset come
+        # only once the answer is yes.
+        self.assertEqual(
+            result["order"], ["dialog", "term-reset", "connecting", "request"]
+        )
+        self.assertEqual(
+            result["requests"][0]["body"],
+            {"agent": "claude", "mcp": True, "mcp_override": True},
+        )
+
+    def test_it_carries_the_shell_family_it_was_opened_under(self):
+        result = self._run_node(
+            """
+            let rows = await openMenu(0, localPane());
+            await press(0, rows.find(row => row.dataset.paneShellExpand === 'wsl Ubuntu'));
+            await press(0, rowsFor(0).find(row => row.override && row.dataset.paneShellAgent === 'codex'));
+            report({ requests: calls.requests.filter(request => request.body) });
+            """
+        )
+        self.assertEqual(
+            result["requests"][0]["body"],
+            {
+                "agent": "codex", "mcp": True, "mcp_override": True,
+                "shell": "wsl", "distribution": "Ubuntu",
+            },
+        )
+
+    def test_declining_leaves_the_pane_untouched(self):
+        result = self._run_node(
+            """
+            CONSENT = false;
+            const rows = await openMenu(0, sshPane());
+            await press(0, rows.find(row => row.override && row.dataset.paneShellAgent === 'claude'));
+            report({
+                dialogs: dialogs.length,
+                order: calls.order,
+                requests: calls.requests.filter(request => request.body),
+                toasts: calls.toasts
+            });
+            """
+        )
+        self.assertEqual(result["dialogs"], 1)
+        self.assertEqual(result["order"], ["dialog"])
+        self.assertEqual(result["requests"], [])
+        self.assertEqual(result["toasts"], [])
+
+    def test_a_pane_that_left_its_slot_while_the_dialog_was_open_is_not_relaunched(self):
+        result = self._run_node(
+            """
+            ON_DIALOG = () => {
+                terminals[0] = { _session: sshPane({ session_id: 'sess-other' }), term: {} };
+                sessionIds[0] = 'sess-other';
+            };
+            const rows = await openMenu(0, sshPane());
+            await press(0, rows.find(row => row.override && row.dataset.paneShellAgent === 'claude'));
+            report({ requests: calls.requests.filter(request => request.body), order: calls.order });
+            """
+        )
+        self.assertEqual(result["requests"], [])
+        self.assertEqual(result["order"], ["dialog"])
+
+    def test_the_mcp_button_asks_nothing_and_states_the_grant_off(self):
+        """It is the way back from override mode to plain tools."""
+        result = self._run_node(
+            """
+            const rows = await openMenu(0, sshPane({
+                startup_mode: 'agent', agent_selection: 'claude',
+                agent_mcp: true, agent_mcp_override: true
+            }));
+            await press(0, rows.find(row => row.tools && row.dataset.paneShellAgent === 'claude'));
+            report({ dialogs: dialogs.length, requests: calls.requests.filter(r => r.body) });
+            """
+        )
+        self.assertEqual(result["dialogs"], 0)
+        self.assertEqual(
+            result["requests"][0]["body"],
+            {"agent": "claude", "mcp": True, "mcp_override": False},
+        )
+
+    def test_the_plain_row_states_no_grant_and_asks_nothing(self):
+        result = self._run_node(
+            """
+            const rows = await openMenu(0, sshPane({
+                startup_mode: 'agent', agent_selection: 'claude',
+                agent_mcp: true, agent_mcp_override: true
+            }));
+            await press(0, rows.find(row => !row.tools && !row.override && row.label === 'Claude Code'));
+            report({ dialogs: dialogs.length, requests: calls.requests.filter(r => r.body) });
+            """
+        )
+        self.assertEqual(result["dialogs"], 0)
+        self.assertEqual(result["requests"][0]["body"], {"agent": "claude", "mcp": False})
+
+    def test_a_pane_already_holding_it_relaunches_without_asking_again(self):
+        result = self._run_node(
+            """
+            const running = () => sshPane({
+                startup_mode: 'agent', agent_selection: 'claude',
+                agent_mcp: true, agent_mcp_override: true
+            });
+            const rows = await openMenu(0, running());
+            await press(0, rows.find(row => row.override && row.dataset.paneShellAgent === 'claude'));
+            report({ dialogs: dialogs.length, requests: calls.requests.filter(r => r.body) });
+            """
+        )
+        self.assertEqual(result["dialogs"], 0)
+        # The kept grant is not restated: the page's copy of the pane can lag
+        # the server, so the route carries only a grant it still records.
+        self.assertEqual(
+            result["requests"][0]["body"], {"agent": "claude", "mcp": True}
+        )
+
+    def test_a_pane_moved_on_while_the_dialog_was_open_is_not_relaunched(self):
+        """Same pane, same slot -- but a tool relaunch or mode switch finished
+        meanwhile, and the answer was given to the pane as it was."""
+        result = self._run_node(
+            """
+            const out = {};
+            for (const [name, next] of [
+                ['relaunched', { startup_mode: 'agent', agent_selection: 'codex' }],
+                ['explorer', { startup_mode: 'explorer' }],
+            ]) {
+                menus.clear();
+                calls.requests.length = 0;
+                calls.order.length = 0;
+                ON_DIALOG = () => { terminals[0]._session = sshPane(next); };
+                const rows = await openMenu(0, sshPane());
+                await press(0, rows.find(row => row.override && row.dataset.paneShellAgent === 'claude'));
+                out[name] = { requests: calls.requests.filter(r => r.body), order: calls.order.slice() };
+            }
+            report(out);
+            """
+        )
+        for name, seen in result.items():
+            self.assertEqual(seen["requests"], [], name)
+            self.assertEqual(seen["order"], ["dialog"], name)
+
+    def test_a_status_sync_during_the_dialog_does_not_withdraw_the_answer(self):
+        """Every sync replaces the session object; an unchanged pane is still
+        the pane the answer was given to."""
+        result = self._run_node(
+            """
+            ON_DIALOG = () => { terminals[0]._session = sshPane({ status: 'connected' }); };
+            const rows = await openMenu(0, sshPane());
+            await press(0, rows.find(row => row.override && row.dataset.paneShellAgent === 'claude'));
+            report({ requests: calls.requests.filter(r => r.body) });
+            """
+        )
+        self.assertEqual(
+            result["requests"][0]["body"],
+            {"agent": "claude", "mcp": True, "mcp_override": True},
+        )
+
+    def test_a_grant_held_by_another_agent_is_asked_for_again(self):
+        """The consent was for one CLI, as in the launcher."""
+        result = self._run_node(
+            """
+            const rows = await openMenu(0, sshPane({
+                startup_mode: 'agent', agent_selection: 'claude',
+                agent_mcp: true, agent_mcp_override: true
+            }));
+            await press(0, rows.find(row => row.override && row.dataset.paneShellAgent === 'codex'));
+            report({ dialogs: dialogs.length });
+            """
+        )
+        self.assertEqual(result["dialogs"], 1)
+
+    def test_the_trio_reports_which_of_the_three_the_pane_is_running(self):
+        result = self._run_node(
+            """
+            function checkedIn(session) {
+                menus.clear();
+                return openMenu(0, session).then(rows => rows
+                    .filter(row => row.checked)
+                    .map(row => row.label));
+            }
+            const agent = { startup_mode: 'agent', agent_selection: 'claude' };
+            report({
+                override: await checkedIn(sshPane({ ...agent, agent_mcp: true, agent_mcp_override: true })),
+                tools: await checkedIn(sshPane({ ...agent, agent_mcp: true })),
+                plain: await checkedIn(sshPane(agent)),
+                // A grant left on a pane whose tools are off is not worn.
+                stale: await checkedIn(sshPane({ ...agent, agent_mcp_override: true })),
+                // A truthy string is not the stated `true` the record holds.
+                stringy: await checkedIn(sshPane({ ...agent, agent_mcp: true, agent_mcp_override: 'true' }))
+            });
+            """
+        )
+        self.assertEqual(
+            result["override"], ["Claude Code with GridVibe tools in override mode"]
+        )
+        self.assertEqual(result["tools"], ["Claude Code with GridVibe tools"])
+        self.assertEqual(result["plain"], ["Claude Code"])
+        self.assertEqual(result["stale"], ["Claude Code"])
+        self.assertEqual(result["stringy"], ["Claude Code with GridVibe tools"])
+
+    def test_updating_the_running_agent_keeps_its_grant(self):
+        result = self._run_node(
+            WITH_UPDATE_COMMANDS
+            + """
+            const rows = await openMenu(0, sshPane({
+                startup_mode: 'agent', agent_selection: 'claude',
+                agent_mcp: true, agent_mcp_override: true
+            }));
+            await press(0, rows.find(row => row.update && row.dataset.paneShellAgent === 'claude'));
+            report({ dialogs: dialogs.length, requests: calls.requests.filter(r => r.body) });
+            """
+        )
+        self.assertEqual(result["dialogs"], 0)
+        self.assertEqual(
+            result["requests"][0]["body"],
+            {"agent": "claude", "mcp": True, "update": True},
+        )
 
 
 # The registry as it really is for updates: two agents publish a command and the
@@ -838,7 +1163,10 @@ class AgentUpdateButtonTestCase(TerminalShellMenuTestCase):
         )
         self.assertEqual(
             result["bodies"],
-            [{"agent": "claude", "mcp": False}, {"agent": "claude", "mcp": True}],
+            [
+                {"agent": "claude", "mcp": False},
+                {"agent": "claude", "mcp": True, "mcp_override": False},
+            ],
         )
 
     def test_updating_the_running_agent_keeps_its_gridvibe_tools(self):
@@ -865,7 +1193,7 @@ class AgentUpdateButtonTestCase(TerminalShellMenuTestCase):
         self.assertEqual(
             result["bodies"],
             [
-                {"agent": "claude", "mcp": True, "update": True},
+                {"agent": "claude", "mcp": True, "mcp_override": False, "update": True},
                 {"agent": "kilo", "mcp": False, "update": True},
             ],
         )

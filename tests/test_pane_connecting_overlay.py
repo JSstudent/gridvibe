@@ -74,7 +74,10 @@ TERMINALS_SOURCE = "\n\n".join(
 # appended and removed through the real helpers against a DOM that really holds
 # them, so "the overlay is gone" is read off the page rather than off a spy.
 HARNESS_STUBS = r"""
-const calls = { statuses: [], opened: [], rebuilt: [], redrawn: [] };
+const calls = {
+    statuses: [], opened: [], rebuilt: [], redrawn: [], applied: [],
+    scheduled: 0, consumed: [], invalidated: []
+};
 
 class StubNode {
     constructor(id = '') {
@@ -143,8 +146,24 @@ var visibleGroupId = 'g1';
 var gridBuilt = true;
 var workspaceGone = false;
 var activeLoadToken = 0;
-var pendingCloseClientState = null;
-var pendingSplitRestore = null;
+var pendingCloseRecord = null;
+const closeGeometryCoordinator = {
+    peek(groupId) {
+        return pendingCloseRecord?.groupId === groupId ? pendingCloseRecord : null;
+    },
+    consume(groupId, generation) {
+        calls.consumed.push([groupId, generation]);
+        const record = this.peek(groupId);
+        if (record?.generation === generation) pendingCloseRecord = null;
+        return record;
+    },
+    invalidate(groupId) {
+        calls.invalidated.push(groupId);
+        pendingCloseRecord = null;
+    }
+};
+const closeRestoreMismatchAttempts = new Map();
+const closedGroupsAwaitingTeardown = new Set();
 var sessionGroups = [];
 var knownGroupIds = [];
 var socket = null;
@@ -153,6 +172,8 @@ var SESSIONS = [];
 
 /* ── Everything the two load paths call and this test does not decide ── */
 async function loadSessionGroups() { return false; }
+/* No background split is ever in flight here. */
+async function backgroundSplitSettled() {}
 async function resetSessionView() {}
 function getSessionApiPath() { return '/api/sessions'; }
 async function fetch() {
@@ -162,6 +183,7 @@ function getLayoutClass() { return 'layout-1'; }
 function hasMatchingSessionViews() { return true; }
 function applyConfiguredSurfaceMode() {}
 function applyConfiguredAgentSidebarSide() {}
+function scheduleStatusRefresh() { calls.scheduled += 1; }
 function applyWorkspaceLayoutSnapshot() {}
 function cacheVisibleGroupView() {}
 function dropCachedGroupView(groupId) { cachedGroupViews.delete(groupId); }
@@ -169,6 +191,24 @@ function dropCachedGroupView(groupId) { cachedGroupViews.delete(groupId); }
    `terminals`, which is the state it would have left behind. */
 function restoreCachedGroupView() { return true; }
 function buildGrid() { calls.rebuilt.push(true); }
+var originalSplitSlotCount = 0;
+var splitSlotRects = null;
+var splitColumnWeights = null;
+var splitRowWeights = null;
+function cloneSplitSlotRects(rects) {
+    return Array.isArray(rects) ? rects.map(rect => ({ ...rect })) : null;
+}
+function cloneSplitTrackWeights(weights) {
+    return Array.isArray(weights) ? weights.slice() : null;
+}
+function applySplitSlotGeometry(options) {
+    calls.applied.push({
+        options,
+        rects: cloneSplitSlotRects(splitSlotRects),
+        columns: cloneSplitTrackWeights(splitColumnWeights),
+        rows: cloneSplitTrackWeights(splitRowWeights)
+    });
+}
 function setStatus(index, status) { calls.statuses.push([index, status]); }
 function syncPaneIdentityChrome() {}
 function setSessionRoute() {}
@@ -366,6 +406,84 @@ class StaleConnectingOverlayTestCase(PaneOverlayTestCase):
         )
         self.assertEqual(result["opened"], [])
         self.assertFalse(result["attached"])
+
+
+class CloseRestoreIntegrationTestCase(PaneOverlayTestCase):
+    """The page adapter consumes a matching restore and escapes stale ones."""
+
+    def test_survivor_fetch_applies_rects_weights_and_consumes_generation(self):
+        result = self._run_node(
+            """
+            makePane(0, { attached: true });
+            makePane(1, { attached: true });
+            SESSIONS = [session(0, 'connected'), session(1, 'connected')];
+            pendingCloseRecord = {
+                groupId: 'g1', generation: 7, clientStateBySessionId: {},
+                model: {
+                    entries: [
+                        { sessionId: 's1', rect: { x: 1, y: 1, w: 8, h: 16 } },
+                        { sessionId: 's2', rect: { x: 9, y: 1, w: 8, h: 16 } }
+                    ],
+                    originalSplitSlotCount: 4,
+                    columnWeights: [1, 2],
+                    rowWeights: [3, 4]
+                }
+            };
+            await initialLoad();
+            report({ applied: calls.applied, consumed: calls.consumed });
+            """
+        )
+        self.assertEqual(result["consumed"], [["g1", 7]])
+        self.assertEqual(
+            result["applied"][0]["rects"],
+            [
+                {"x": 1, "y": 1, "w": 8, "h": 16},
+                {"x": 9, "y": 1, "w": 8, "h": 16},
+            ],
+        )
+        self.assertEqual(result["applied"][0]["columns"], [1, 2])
+        self.assertEqual(result["applied"][0]["rows"], [3, 4])
+
+    def test_same_mismatched_generation_retries_once_then_rebuilds(self):
+        result = self._run_node(
+            """
+            makePane(0, { attached: true });
+            makePane(1, { attached: true });
+            SESSIONS = [
+                session(0, 'connected'), session(1, 'connected'),
+                session(2, 'connected')
+            ];
+            pendingCloseRecord = {
+                groupId: 'g1', generation: 9, clientStateBySessionId: {},
+                model: { entries: [
+                    { sessionId: 's1', rect: { x: 1, y: 1, w: 8, h: 8 } },
+                    { sessionId: 's2', rect: { x: 9, y: 1, w: 8, h: 8 } }
+                ] }
+            };
+            await initialLoad();
+            const afterFirst = {
+                scheduled: calls.scheduled,
+                invalidated: calls.invalidated.slice(),
+                rebuilt: calls.rebuilt.length
+            };
+            await initialLoad();
+            report({
+                afterFirst,
+                scheduled: calls.scheduled,
+                invalidated: calls.invalidated,
+                rebuilt: calls.rebuilt.length,
+                pending: pendingCloseRecord
+            });
+            """
+        )
+        self.assertEqual(
+            result["afterFirst"],
+            {"scheduled": 1, "invalidated": [], "rebuilt": 0},
+        )
+        self.assertEqual(result["scheduled"], 2)
+        self.assertEqual(result["invalidated"], ["g1"])
+        self.assertEqual(result["rebuilt"], 1)
+        self.assertIsNone(result["pending"])
 
 
 class FailedRelaunchRepaintTestCase(PaneOverlayTestCase):

@@ -1431,6 +1431,12 @@
             outline: 1.5px solid var(--t-accent);
             outline-offset: 1.5px;
         }
+        /* Override mode: the same frame, turned red. Colour only, so a pane
+           gaining or losing the grant moves nothing; the mark's hover says it
+           in words. */
+        .terminal-agent-icon[data-mcp][data-mcp-override] {
+            outline-color: var(--gv-mcp-override);
+        }
 
         .terminal-meta {
             display: flex;
@@ -1646,6 +1652,14 @@
         .pane-shell-menu-mcp.is-active {
             border-color: var(--t-accent);
             color: var(--t-accent);
+        }
+
+        /* Override mode reads red everywhere it is worn -- the pane header's
+           frame, the dashboard chip -- so the button that grants it does too. */
+        .pane-shell-menu-mcp-override:hover,
+        .pane-shell-menu-mcp-override.is-active {
+            border-color: var(--gv-mcp-override);
+            color: var(--gv-mcp-override);
         }
 
         /* The agent row's update target — run the agent's update command,

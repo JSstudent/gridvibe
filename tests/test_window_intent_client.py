@@ -16,6 +16,8 @@ What is pinned:
   overlapped -- opening a window can take a second or more.
 - **An intent is acted on once**, even when the poll comes round again before
   the server has settled the record.
+- **Only the page holding a tab switches to it**, and it reports what it now
+  shows -- a switch its own rules refused is ``blocked`` with its reason.
 """
 
 import json
@@ -34,7 +36,7 @@ HARNESS = """
 const intentModule = require(MODULE_PATH);
 
 function runtime(options = {}) {
-    const calls = { listed: 0, claims: [], results: [], opens: [] };
+    const calls = { listed: 0, claims: [], results: [], opens: [], order: [] };
     const timers = [];
     const state = {
         intents: options.intents || [],
@@ -48,25 +50,43 @@ function runtime(options = {}) {
             splitCalls.owns.push(sessionId);
             return (options.ownedSessions || ['pane-1']).includes(sessionId);
         },
+        /* Answered as a promise when a scenario says the pane is in a tab that
+           is not showing: it is measured off that tab's stored arrangement,
+           which is a read. A pane on screen answers at once. */
         candidates(sessionId) {
+            calls.order.push('candidates');
             splitCalls.candidates.push(sessionId);
-            return options.candidates === undefined
+            const answer = options.candidates === undefined
                 ? ['vertical', 'horizontal']
                 : options.candidates;
+            return options.asyncReads ? Promise.resolve(answer) : answer;
         },
         disabledReason(axis, sessionId) {
             splitCalls.reasons.push({ axis, sessionId });
-            return options.disabledReason
+            const answer = options.disabledReason
                 || 'Side-by-side split needs at least 8 columns in each terminal';
+            return options.asyncReads ? Promise.resolve(answer) : answer;
         },
         async perform(sessionId, axis, request) {
+            calls.order.push('perform');
             splitCalls.performed.push({ sessionId, axis, request });
             if (options.performThrows) throw new Error('grid exploded');
             if (options.performFails) {
                 return { ok: false, error: 'Split failed with status 400' };
             }
+            if (options.performRefuses) {
+                return {
+                    ok: false,
+                    refusal: {
+                        axis,
+                        candidates: options.performRefuses,
+                        reason: 'Side-by-side split needs at least 8 columns in each terminal'
+                    }
+                };
+            }
             return {
                 ok: true,
+                note: options.performNote || '',
                 index: 2,
                 session: {
                     session_id: 'pane-9',
@@ -79,8 +99,45 @@ function runtime(options = {}) {
             };
         }
     };
+    const focusCalls = { holds: [], activated: [] };
+    const focusBridge = options.focusBridge === null ? null : {
+        holds(workspaceId, groupId) {
+            focusCalls.holds.push({ workspaceId, groupId });
+            return (options.heldGroups || ['ws-1/g-1']).includes(`${workspaceId}/${groupId}`);
+        },
+        activeGroupId() { return 'g-0'; },
+        async activate(groupId, sessionId) {
+            focusCalls.activated.push({ groupId, sessionId });
+            if (options.activateThrows) throw new Error('grid exploded');
+            if (options.activateResult) return options.activateResult;
+            return {
+                ok: true,
+                activeGroupId: groupId,
+                paneVisible: Boolean(sessionId),
+                focused: Boolean(sessionId)
+            };
+        }
+    };
+    const resizeCalls = [];
+    const resizeBridge = options.resizeBridge === null ? null : {
+        holds(workspaceId, groupId) {
+            return (options.heldGroups || ['ws-1/g-1']).includes(`${workspaceId}/${groupId}`);
+        },
+        async perform(intent) {
+            resizeCalls.push(intent);
+            if (options.resizeFails) return { ok: false, error: 'Minimum width refused. Nothing changed.' };
+            if (options.resizeUnknown) return { ok: false, unknown: true,
+                error: 'The outcome is unknown. Read list_panes before retrying.' };
+            return { ok: true, result: {
+                group_id: intent.group_id, revision: 2,
+                column_weights: [1.2, 0.8], row_weights: [1], panes: []
+            } };
+        }
+    };
     const poll = intentModule.create({
         splitBridge,
+        focusBridge,
+        resizeBridge,
         listIntents: async () => {
             calls.listed += 1;
             if (options.listThrows) throw new Error('list failed');
@@ -93,6 +150,7 @@ function runtime(options = {}) {
                 : { ok: false, state: 'claimed', error: 'Another window took it.' };
         },
         reportResult: async (intentId, outcome, detail, result) => {
+            calls.order.push('report');
             calls.results.push({ intentId, outcome, detail, result });
         },
         openWorkspaceWindow: async (workspaceId, opts) => {
@@ -109,8 +167,23 @@ function runtime(options = {}) {
         claimant: 'window-a',
         onError: () => {}
     });
-    return { poll, calls, timers, state, splitCalls };
+    return { poll, calls, timers, state, splitCalls, focusCalls, resizeCalls };
 }
+
+const resizeIntent = (id, group = 'g-1') => ({
+    intent_id: id, kind: 'resize', workspace_id: 'ws-1', group_id: group,
+    axis: 'vertical', line_index: 1, position: 0.6, expected_revision: 1,
+    state: 'pending'
+});
+
+const activateIntent = (id, group = 'g-1', session = '', workspace = 'ws-1') => ({
+    intent_id: id,
+    kind: 'activate',
+    workspace_id: workspace,
+    group_id: group,
+    session_id: session,
+    state: 'pending'
+});
 
 const splitIntent = (id, session = 'pane-1', axis = 'vertical', request = null) => ({
     intent_id: id,
@@ -297,6 +370,65 @@ const out = {};
         out.splitThrew = calls.results.map(item => item.outcome);
     }
 
+    // A pane in a tab that is not showing answers its reads as promises. The
+    // split goes the same way: asked, performed, reported once.
+    {
+        const { poll, calls, splitCalls } = runtime({
+            intents: [splitIntent('s-1')],
+            asyncReads: true
+        });
+        await poll.tick();
+        out.splitAsyncReads = {
+            order: calls.order,
+            performed: splitCalls.performed.length,
+            results: calls.results
+        };
+    }
+
+    // ...and so does its refusal, worded from the promised reason.
+    {
+        const { poll, calls, splitCalls } = runtime({
+            intents: [splitIntent('s-1', 'pane-1', 'vertical')],
+            asyncReads: true,
+            candidates: ['horizontal']
+        });
+        await poll.tick();
+        out.splitAsyncRefused = {
+            performed: splitCalls.performed.length,
+            results: calls.results
+        };
+    }
+
+    // Decided again at the moment of the split, against a fresh reading: the
+    // refusal comes back from `perform`, and is worded like the first.
+    {
+        const { poll, calls } = runtime({
+            intents: [splitIntent('s-1', 'pane-1', 'vertical')],
+            performRefuses: ['horizontal']
+        });
+        await poll.tick();
+        out.splitPerformRefused = calls.results;
+    }
+    {
+        const { poll, calls } = runtime({
+            intents: [splitIntent('s-1', 'pane-1', 'vertical')],
+            performRefuses: []
+        });
+        await poll.tick();
+        out.splitPerformRefusedBoth = calls.results;
+    }
+
+    // A pane that was made but could not be finished is still a split, and
+    // says what was not finished.
+    {
+        const { poll, calls } = runtime({
+            intents: [splitIntent('s-1')],
+            performNote: 'The pane was created, but its place in the layout could not be saved.'
+        });
+        await poll.tick();
+        out.splitWithNote = calls.results;
+    }
+
     // A window intent and a split intent in one pass are both delivered.
     {
         const { poll, calls, splitCalls } = runtime({
@@ -333,6 +465,161 @@ const out = {};
         intentModule.policy.splitRefusal('vertical', [], 'Too narrow.')
     ];
 
+    // ── activations ──
+
+    // The page holding the tab claims it, switches, focuses, and reports.
+    {
+        const { poll, calls, focusCalls } = runtime({
+            intents: [activateIntent('a-1', 'g-1', 'pane-1')]
+        });
+        await poll.tick();
+        out.activateHappy = {
+            claims: calls.claims.length,
+            activated: focusCalls.activated,
+            opens: calls.opens.length,
+            results: calls.results
+        };
+    }
+
+    // A group with no pane named switches the tab and focuses nothing.
+    {
+        const { poll, calls } = runtime({ intents: [activateIntent('a-1')] });
+        await poll.tick();
+        out.activateGroupOnly = calls.results;
+    }
+
+    // A page that does not hold the tab never claims it.
+    {
+        const { poll, calls, focusCalls } = runtime({
+            intents: [activateIntent('a-1', 'g-elsewhere')]
+        });
+        await poll.tick();
+        out.activateNotOurs = {
+            claims: calls.claims.length,
+            activated: focusCalls.activated.length,
+            results: calls.results.length
+        };
+    }
+
+    // The launcher — no focus bridge — claims no activation.
+    {
+        const { poll, calls } = runtime({
+            intents: [activateIntent('a-1')],
+            focusBridge: null
+        });
+        await poll.tick();
+        out.activateNoBridge = { claims: calls.claims.length, results: calls.results.length };
+    }
+
+    // The page's own refusal (an unsaved editor) is reported, with its words.
+    {
+        const { poll, calls } = runtime({
+            intents: [activateIntent('a-1', 'g-1', 'pane-1')],
+            activateResult: {
+                ok: false,
+                activeGroupId: 'g-0',
+                error: 'An open file in this window has unsaved changes.'
+            }
+        });
+        await poll.tick();
+        out.activateBlocked = calls.results;
+    }
+
+    // A page that says ok but shows another tab is not an activation.
+    {
+        const { poll, calls } = runtime({
+            intents: [activateIntent('a-1', 'g-1')],
+            activateResult: { ok: true, activeGroupId: 'g-0' }
+        });
+        await poll.tick();
+        out.activateWrongTab = calls.results;
+    }
+
+    // The pane is on screen but did not take focus: shown, and said so.
+    {
+        const { poll, calls } = runtime({
+            intents: [activateIntent('a-1', 'g-1', 'pane-1')],
+            activateResult: { ok: true, activeGroupId: 'g-1', paneVisible: true, focused: false }
+        });
+        await poll.tick();
+        out.activateUnfocused = calls.results;
+    }
+
+    // A page claiming focus on a pane it does not show is not believed.
+    {
+        const { poll, calls } = runtime({
+            intents: [activateIntent('a-1', 'g-1', 'pane-1')],
+            activateResult: { ok: true, activeGroupId: 'g-1', paneVisible: false, focused: true }
+        });
+        await poll.tick();
+        out.activateInvisible = calls.results;
+    }
+
+    // A bridge that threw is an honest `blocked`.
+    {
+        const { poll, calls } = runtime({
+            intents: [activateIntent('a-1')],
+            activateThrows: true
+        });
+        await poll.tick();
+        out.activateThrew = calls.results;
+    }
+
+    // Two passes over one activation switch once.
+    {
+        const { poll, focusCalls } = runtime({ intents: [activateIntent('a-1')] });
+        await poll.tick();
+        await poll.tick();
+        out.activateRepeated = focusCalls.activated.length;
+    }
+
+    out.activateActionable = intentModule.policy.actionable(
+        [
+            activateIntent('a-1'),
+            activateIntent('a-2', 'g-2'),
+            activateIntent('a-3', 'g-1', '', 'ws-2'),
+            { ...activateIntent('a-4'), group_id: '' },
+            intent('i-1')
+        ],
+        null,
+        (workspaceId, groupId) => workspaceId === 'ws-1' && groupId === 'g-1'
+    ).map(item => item.intent_id);
+
+    {
+        const { poll, calls, resizeCalls } = runtime({ intents: [resizeIntent('r-1')] });
+        await poll.tick();
+        await poll.tick();
+        out.resizeHappy = { calls: resizeCalls.length, results: calls.results };
+    }
+    {
+        const { poll, calls } = runtime({
+            intents: [resizeIntent('r-1')], resizeFails: true
+        });
+        await poll.tick();
+        out.resizeRefused = calls.results;
+    }
+    {
+        const { poll, calls } = runtime({
+            intents: [resizeIntent('r-1')], resizeUnknown: true
+        });
+        await poll.tick();
+        out.resizeUnknown = calls.results;
+    }
+    {
+        const { poll, calls } = runtime({
+            intents: [resizeIntent('r-1', 'g-elsewhere')]
+        });
+        await poll.tick();
+        out.resizeElsewhere = calls.claims.length;
+    }
+    {
+        const { poll, calls } = runtime({
+            intents: [resizeIntent('r-1')], focusBridge: null, resizeBridge: null
+        });
+        await poll.tick();
+        out.resizeNoBridge = calls.claims.length;
+    }
+
     console.log(JSON.stringify(out));
 })();
 """
@@ -366,6 +653,18 @@ class WindowIntentClientTestCase(unittest.TestCase):
         self.assertEqual(
             happy["results"], [{"intentId": "i-1", "outcome": "opened", "detail": ""}]
         )
+
+    def test_resize_is_claimed_once_and_reports_only_page_outcome(self):
+        happy = self.out["resizeHappy"]
+        self.assertEqual(happy["calls"], 1)
+        self.assertEqual(happy["results"][0]["outcome"], "resized")
+        self.assertEqual(happy["results"][0]["result"]["revision"], 2)
+        self.assertEqual(self.out["resizeRefused"][0]["outcome"], "refused")
+        self.assertIn("Nothing changed", self.out["resizeRefused"][0]["detail"])
+        self.assertEqual(self.out["resizeUnknown"][0]["outcome"], "unknown")
+        self.assertIn("outcome is unknown", self.out["resizeUnknown"][0]["detail"])
+        self.assertEqual(self.out["resizeElsewhere"], 0)
+        self.assertEqual(self.out["resizeNoBridge"], 0)
 
     def test_the_page_that_loses_the_claim_does_nothing(self):
         # This is what stops two open pages delivering one request twice.
@@ -473,6 +772,46 @@ class SplitIntentClientTestCase(WindowIntentClientTestCase):
     def test_a_bridge_that_threw_is_still_an_honest_refusal(self):
         self.assertEqual(self.out["splitThrew"], ["refused"])
 
+    def test_a_pane_in_a_tab_that_is_not_showing_is_asked_about_then_split_then_reported(self):
+        """Its reads are promises, because they are taken off the tab's stored
+        arrangement. The order is the same one a pane on screen has."""
+        asked = self.out["splitAsyncReads"]
+
+        self.assertEqual(asked["order"], ["candidates", "perform", "report"])
+        self.assertEqual(asked["performed"], 1)
+        self.assertEqual(asked["results"][0]["outcome"], "split")
+
+    def test_a_promised_refusal_names_the_axis_that_would_have_worked(self):
+        refused = self.out["splitAsyncRefused"]
+
+        self.assertEqual(refused["performed"], 0)
+        self.assertEqual(refused["results"][0]["outcome"], "refused")
+        self.assertIn("stacked split would work", refused["results"][0]["detail"])
+
+    def test_a_refusal_decided_at_the_moment_of_the_split_reads_like_the_first(self):
+        """The reading is taken again, right before the request, against what
+        the tab holds by then. Same words, same outcome."""
+        refused = self.out["splitPerformRefused"][0]
+        neither = self.out["splitPerformRefusedBoth"][0]
+
+        self.assertEqual(refused["outcome"], "refused")
+        self.assertIn("stacked split would work", refused["detail"])
+        self.assertIn("at least 8 columns", refused["detail"])
+        self.assertEqual(neither["outcome"], "refused")
+        self.assertIn("Neither axis would work", neither["detail"])
+
+    def test_a_pane_made_but_not_finished_is_a_split_that_says_so(self):
+        """The pane exists, so the outcome is `split` -- and what could not be
+        finished travels with it instead of being dropped."""
+        noted = self.out["splitWithNote"][0]
+
+        self.assertEqual(noted["outcome"], "split")
+        self.assertIn("could not be saved", noted["detail"])
+        self.assertEqual(noted["result"]["session_id"], "pane-9")
+
+    def test_a_split_with_nothing_to_add_reports_no_detail(self):
+        self.assertEqual(self.out["splitHappy"]["results"][0]["detail"], "")
+
     def test_both_kinds_are_delivered_in_one_pass(self):
         both = self.out["bothKinds"]
 
@@ -494,6 +833,95 @@ class SplitIntentClientTestCase(WindowIntentClientTestCase):
 
         self.assertIn("stacked split would work", with_other)
         self.assertIn("Neither axis would work", without)
+
+
+@unittest.skipIf(NODE is None, "Node.js is required for the window-intent suite")
+class ActivateIntentClientTestCase(unittest.TestCase):
+    """The tab-switch half of the same poll, executed in Node.
+
+    Raising a window does not change the tab it shows, so a tool asking to see
+    a session is answered by the page holding it -- and only that page.
+    """
+
+    setUpClass = classmethod(WindowIntentClientTestCase.setUpClass.__func__)
+
+    def test_the_page_holding_the_tab_switches_focuses_and_reports(self):
+        happy = self.out["activateHappy"]
+
+        self.assertEqual(happy["claims"], 1)
+        self.assertEqual(happy["activated"], [{"groupId": "g-1", "sessionId": "pane-1"}])
+        # Switching a tab is not opening a window.
+        self.assertEqual(happy["opens"], 0)
+        self.assertEqual(
+            happy["results"],
+            [{
+                "intentId": "a-1",
+                "outcome": "activated",
+                "detail": "",
+                "result": {
+                    "active_group_id": "g-1",
+                    "session_id": "pane-1",
+                    "pane_visible": True,
+                    "focused": True,
+                },
+            }],
+        )
+
+    def test_a_group_alone_is_activated_without_claiming_a_focus(self):
+        result = self.out["activateGroupOnly"][0]
+
+        self.assertEqual(result["outcome"], "activated")
+        self.assertFalse(result["result"]["focused"])
+
+    def test_a_page_that_does_not_hold_the_tab_never_claims_it(self):
+        self.assertEqual(
+            self.out["activateNotOurs"], {"claims": 0, "activated": 0, "results": 0}
+        )
+
+    def test_the_launcher_claims_no_activation(self):
+        self.assertEqual(self.out["activateNoBridge"], {"claims": 0, "results": 0})
+
+    def test_a_switch_the_page_refused_is_blocked_with_its_reason(self):
+        result = self.out["activateBlocked"][0]
+
+        self.assertEqual(result["outcome"], "blocked")
+        self.assertIn("unsaved changes", result["detail"])
+        # What the page actually shows, so the tool can say the tab stayed.
+        self.assertEqual(result["result"]["active_group_id"], "g-0")
+        self.assertFalse(result["result"]["focused"])
+
+    def test_ok_on_the_wrong_tab_is_not_an_activation(self):
+        result = self.out["activateWrongTab"][0]
+
+        self.assertEqual(result["outcome"], "blocked")
+        self.assertIn("did not switch", result["detail"])
+
+    def test_a_shown_pane_that_did_not_take_focus_says_so(self):
+        result = self.out["activateUnfocused"][0]
+
+        self.assertEqual(result["outcome"], "activated")
+        self.assertTrue(result["result"]["pane_visible"])
+        self.assertFalse(result["result"]["focused"])
+
+    def test_focus_on_a_pane_that_is_not_shown_is_not_believed(self):
+        result = self.out["activateInvisible"][0]
+
+        self.assertEqual(result["outcome"], "blocked")
+        self.assertIn("not in it", result["detail"])
+        self.assertFalse(result["result"]["focused"])
+
+    def test_a_bridge_that_threw_is_still_an_honest_block(self):
+        result = self.out["activateThrew"][0]
+
+        self.assertEqual(result["outcome"], "blocked")
+        self.assertIn("grid exploded", result["detail"])
+
+    def test_an_activation_is_acted_on_once(self):
+        self.assertEqual(self.out["activateRepeated"], 1)
+
+    def test_actionable_takes_only_the_tab_this_page_holds(self):
+        # The window intent is still actionable beside it.
+        self.assertEqual(self.out["activateActionable"], ["a-1", "i-1"])
 
 
 if __name__ == "__main__":

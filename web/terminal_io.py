@@ -235,6 +235,8 @@ def _broadcast_session_groups_updated(
     reason: str = "",
     group_id: str = "",
     workspace_id: Optional[str] = None,
+    closed_session_ids: Optional[Iterable[str]] = None,
+    closed_group_ids: Optional[Iterable[str]] = None,
 ):
     """Notify open terminal windows that the set of session groups changed.
 
@@ -259,6 +261,18 @@ def _broadcast_session_groups_updated(
     }
     if resolved_group_id:
         payload["group_id"] = resolved_group_id
+    if closed_session_ids is not None:
+        payload["closed_session_ids"] = list(dict.fromkeys(
+            str(session_id).strip()
+            for session_id in closed_session_ids
+            if str(session_id).strip()
+        ))
+    if closed_group_ids is not None:
+        payload["closed_group_ids"] = list(dict.fromkeys(
+            str(closed_group_id).strip()
+            for closed_group_id in closed_group_ids
+            if str(closed_group_id).strip()
+        ))
     socketio.emit(
         'session_groups_updated',
         payload,

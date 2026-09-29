@@ -466,6 +466,16 @@ changing any field that survives restart; it owns the complete save/restore flow
   agent. An arbitrary startup command is not an agent. Only a shell-family
   change retargets the directory; agent-only relaunch preserves the observed
   cwd. Reselecting the current choice is a no-op on both sides.
+- **A tool's stated directory is its own input, never the page's.** The gated
+  mode switch and the split carry it as `stated_directory`, beside and never in
+  place of the header's `directory`, and `web/pane_directory.resolve_stated_directory`
+  checks it on the pane's own machine before any mutation — a proven absence is a
+  `400` naming path and machine, a check that could not run is not an absence.
+  A stated path beats the observed cwd, is not clamped to a root the pane
+  derived for itself, keeps a configured root only when it lies inside it, and
+  drops a split clone's inherited root. A terminal given only a stated directory
+  relaunches there. The header toggle's containment is unchanged: only a tool's
+  stated path skips it.
 - **MCP is resolved last and cannot outlive its agent.** An unstated `mcp`
   follows the agent, which is the rule auto mode already has: carried forward
   when the agent is unchanged, dropped when it changes, because a mechanism
@@ -581,7 +591,8 @@ changing any field that survives restart; it owns the complete save/restore flow
   `explorer_root_directory` with `explorer_root_configured`, computed against the
   root actually stored. Derived roots must not become configured across restart;
   only configured roots retarget an outgoing explorer/browser terminal directory
-  and are inherited by a split clone. Legacy unstated flags default to configured
+  and are inherited by a split clone — a tool's stated directory aside, which
+  wins over both (above). Legacy unstated flags default to configured
   for explorer panes only. A root restored from a snapshot or preset is replayed
   exactly and never re-derived — and never pins the next explicit switch either.
 
@@ -1071,6 +1082,16 @@ unless the task explicitly changes this contract.
   the typed-title comparison as though somebody had chosen it. `agent_mcp`
   therefore stays in `PANE_FIELDS` and in the repaint's structure key, so a
   relaunch on or off the tools rebuilds the row and an unchanged poll does not.
+- **Override mode is a state of that same tag, never a second one.**
+  `paneAgentMcpOverride()` in `agent-identity.js` is true only when the pane
+  wears the MCP tag *and* `agent_mcp_override === true`, so a stale or stringy
+  grant paints nothing. The header writes `data-mcp-override` beside `data-mcp`
+  and the dashboard chip gains `is-override`; both colour through
+  `--gv-mcp-override` / `--gv-mcp-override-soft` (the theme's danger hue, never
+  a literal), the chip text stays `MCP`, and `paneAgentMcpTagTitle()` swaps in
+  `MCP_OVERRIDE_TAG_TITLE` so colour is not the only signal.
+  `agent_mcp_override` is in `PANE_FIELDS`, read from the live record, so a
+  relaunch that drops the grant clears the red where the pane stands.
 - The dashboard conversation line is `paneChatLine()` in `agent-identity.js`,
   not the dashboard's own ladder: a resolved conversation name, then the
   agent's usable OSC tab/window title, then a non-generic pane title, then `New
@@ -1459,16 +1480,42 @@ in `README.md`; state the rules a change has to keep.
   secret at any depth regardless of the list. `list_saved_layouts` is the sharp
   case: the route it reads answers with a *decrypted* SSH password by design.
   Failures are typed and carry GridVibe's own sentence verbatim, unretried.
-- **Five tiers, and the destroy tier is absent from the build.** Read and create
+- **Eight tool tiers.** Read and create
   only ever make something new (`read_handoff` is a read: its only side effect
   is a handoff's state); `report_result`/`wait_for_results` carry a report back
   and touch no pane; `set_pane_agent`/`set_pane_mode` replace what is
-  behind an existing pane; `clear_pane` erases what one has drawn. Closing a
-  pane, group or workspace, moving a group, and typing arbitrary input into a
-  terminal are not written, not registered and not flag-gated — a tool that does
-  not exist cannot be talked into running by a file an agent reads. `clear_pane`
-  is not `send_input`: the only thing reaching stdin is GridVibe's own clear
-  command, chosen by the window that knows the pane's shell family.
+  behind an existing pane; `clear_pane` erases what one has drawn;
+  `focus_session`/`focus_pane`/`move_session`/`resize_divider` change what is
+  shown where and create or end nothing; `save_group_layout` writes a named
+  reusable preset; `close_pane`/`close_group`/`close_workspace` end live resources
+  under the shared gates. Arbitrary terminal input has no tool. `clear_pane` is
+  not `send_input`: the only thing reaching
+  stdin is GridVibe's own clear command, chosen by the window that knows the
+  pane's shell family.
+- **The tool surface says workspace, session and pane, one meaning each.** A
+  session is a session tab (a group), named by the text its tab shows
+  (`session_name_of`: the group's name, else its id — the tab strip's own
+  fallback) and by `group_id`; a pane is `pane_id`. The routes' historical
+  "session" for a pane never crosses the surface: `dispatch` publishes every
+  result through `PUBLISHED_KEYS` at every depth, explicitly rather than by
+  substring (`saved_session_id` names a preset), and every argument naming a
+  pane is `pane_id`. A tool that resolves a session by name matches exactly,
+  then case-insensitively, then as an id, and never guesses between two matches:
+  an ambiguous name is refused with the candidates and nothing is changed.
+- **A tool save requires a page-confirmed live layout.** `save_group_layout`
+  uses the lifecycle presentation flush before it snapshots the live group.
+  Unlike the dashboard's older group-save route, it refuses with an
+  open-and-retry message when no owning window can answer, because a tool has
+  no DOM from which to verify pending divider changes. It validates a stated
+  root on each affected pane's machine, preserves browser URLs, keeps only
+  known agent selections, and writes through the saved-session store. A name
+  already held by a preset is refused inside that store's transaction, rather
+  than creating an indistinguishable duplicate. After root validation, the
+  saved launch shape is compared with the live pane shape under the manager
+  lock; a changed mode, directory, agent, title, or other preset field refuses
+  the stale capture. The
+  result is a projected launch shape only after the durable commit; a refusal
+  or write failure leaves the live group open and does not claim a preset.
 - **Every create verb is bounded by something.** `launch_panes` by
   `terminal.max_sessions` and the depth budget, `split_pane` by the group cap, and
   `create_workspace` by `MAX_EMPTY_WORKSPACES` — counted over workspaces that are
@@ -1490,6 +1537,38 @@ in `README.md`; state the rules a change has to keep.
   built by `attach_confirmation` from the live registry, never by the caller. A
   refusal nothing can waive is raised before any that `override` can, so an agent
   is never refused after the person already said yes.
+- **Close tools preflight the complete live target under one manager lock.**
+  `close_pane`, `close_group` and `close_workspace` use `web/mcp_close.py` and
+  never close the caller pane or a container holding it. Every affected pane
+  passes self, lineage and running-agent checks before the first close. A
+  waivable refusal includes the target kind/id/name and affected pane IDs in
+  `confirm`; no close occurs. Execution checks each pane object's current group
+  and workspace ownership under the same lock. No transport teardown, emit or
+  persistence write runs there. If a close fails after mutation begins, the
+  result carries exact closed pane/group/workspace IDs and a generic error;
+  the server logs only the failure category and affected IDs. Pending worker result
+  assignments end as `pane closed`, while a completed report outlives its pane.
+  `close_workspace` is the live close and preserves saved snapshots; it never
+  invokes the forget variant. `closed_workspace_ids` and the `workspace_closed`
+  broadcast name a workspace only when its live record is gone: `default`'s
+  record is permanent, so closing it empties it and reports its panes and
+  groups under `session_closed`, as the interactive *Close live workspace* does.
+- **Close broadcasts state the exact completed delta, and pane closes preserve
+  the page's measured layout.** Every close path publishes ordered
+  `closed_session_ids` and the `closed_group_ids` that actually disappeared; a
+  partial close never claims a surviving group closed. The workspace page stages
+  that delta synchronously before its coalesced refresh, keyed by group, so rapid
+  closes reduce sequentially and a background group keeps its geometry until it
+  is shown. The pane X and agent paths use the same DOM-free absorb rule: prefer
+  the valid neighbour with the longest shared border (visual order breaks ties),
+  then use the complete contacting side only when one neighbour cannot fill the
+  gap without overlap. Survivor rectangles keep the same bounding box and track
+  weights, and explorer/browser client state follows the surviving pane ids. A
+  complete group close invalidates its pending restore; a survivor-set mismatch
+  retries one generation once, then drops only the stale restore and rebuilds
+  from the server instead of polling indefinitely. A pointer drag is snapshotted
+  before cancellation, and a group close generation prevents an in-flight tool
+  resize from painting stale weights after the close.
 - **`override` is the user's word, never the tool's inference.** It waives
   lineage and the "already running an agent" refusal; never self, never the kind
   gate's mode rule, and never the machine rule a task carries. It is forwarded
@@ -1497,6 +1576,30 @@ in `README.md`; state the rules a change has to keep.
   descriptions must keep saying that only a person's words in that conversation —
   or a yes to the refusal's own `confirm.question` — justify it. GridVibe adds no
   confirmation dialog of its own; that is a stated weakness, not an oversight.
+- **Override mode is the person's standing `override`, read from the caller's
+  live record and decided in one place.** `agent_mcp_override` is granted only
+  by a person: the launcher's **Override** box or the pane menu's **Override**
+  target, each behind the shared in-page warning, and only beside `agent_mcp`.
+  `read_caller_request` in `web/pane_gates.py` is the one reader of every gated
+  request — the pane transactions through `read_agent_request`, and the group
+  move directly — and a caller that holds the grant carries `override` with
+  source `mode`; a stated `override` is source `call` and wins the source. The
+  grant counts only on a live `startup_mode == "agent"` pane with `agent_mcp`
+  (`caller_holds_override_mode`), and a request body can never claim it. It
+  waives exactly what a stated `override` waives: `check_caller` (self, then
+  caller liveness) and the relaunch's machine gate still run first and refuse.
+  A close re-checks a `mode` waiver against the caller it reads under
+  `SessionManager.lock`; a grant lost in between waives nothing. Waiver logs
+  carry `source=mode|call`. The record keeps the grant only while the pane is an
+  agent pane with the tools (`_settle_agent_mcp_override`), so a transition that
+  forgets the field cannot leave one behind, and a dropped grant does not return
+  with the tools. It persists beside `agent_mcp` in presets, workspace saves and
+  the runtime snapshot; an absent key reads `False`, and only a JSON `true` is
+  believed. No tool can grant it: splits never set it, a tool launch drops a
+  stated one, the relaunch route refuses `mcp_override` unless `mcp` is stated
+  beside it (and `true` without `mcp: true`), and the tool relaunch never
+  forwards it. Relaunching the same agent keeps a grant it already holds without
+  restating it, so a stale window cannot restore one dropped elsewhere.
 - **No byte a tool supplies reaches a launch line.** A handed-over task adds
   exactly `HANDOFF_OPENING_PROMPT` (`web/agent_handoffs.py`), a constant whose
   characters are pinned to `[A-Za-z0-9 .,_]`, and the agent fetches the task
@@ -1592,6 +1695,46 @@ in `README.md`; state the rules a change has to keep.
   instead: browser mode on a remote pane, a `startup_mode` outside
   `_AGENT_MODE_TARGETS`, a browser pane in a group opening on another host. Being
   handed a plain terminal labelled a success is the one answer a tool must not get.
+  A tool launch (`tool_launch: true`, or any body with an `origin_session_id`) is
+  therefore validated whole before any workspace, group or pane exists: an
+  unknown or proven-absent agent, `mcp: true` on a CLI with no mechanism, a task
+  for a CLI that cannot take one, and a stated local shell the origin cannot run
+  are each refused naming every offending pane. `check_failed` is not an
+  absence — that pane keeps its agent, identity and task, with a warning. The
+  launcher and restore keep opening an absent agent as a terminal with a
+  warning; the refusal is the tool path's alone. `list_agent_types` answers from
+  the same preflight (`agent_availability_target`, `agent_type_rows`) for the
+  same place a launch would open, on the shared bounded preflight pool, and keeps
+  `available`, `mcp_supported` and `task_supported` separate. A gated re-root
+  that changes nothing answers `changed: false`, never a pane payload.
+- **Navigation is page-confirmed and resolved from the live registry.**
+  `focus_session`/`focus_pane` record an `activate` intent only after
+  `web/navigation.resolve_view_target` has checked that pane, group and
+  workspace still belong together (`409` stale, `404` closed, nothing recorded).
+  Only the workspace page whose focus bridge holds that group claims it; the
+  bridge refuses without a dialog on unsaved explorer work or an active copy or
+  delete, and reports focus read back from the document, never assumed.
+  `opened` with `group_activated` is the page's word only; a raised window that
+  did not switch is `blocked`. A pane's session and workspace are read from the
+  live group, never the spawn-time identity. Both native steps share one
+  `FOCUS_BUDGET_SECONDS` (55 s, under Codex's 60 s tool-call timeout) in
+  `gridvibe_mcp/windows.py`: the window step keeps its own wait, and the tab step
+  gets only what is left. A tab step cut short by that budget while the store
+  still holds the intent answers `no_window_available` with
+  `activation_pending: true` and says whether a page had claimed it — never a
+  success and never "nobody answered".
+- **A tool moves a session only through the gated twin of the launcher's move.**
+  `POST /api/session-groups/<id>/agent-move` (`move_group_for_agent`) lets the
+  caller's own group move, and a group whose every pane the caller created;
+  anything else is a waivable lineage refusal whose `confirm` names the group,
+  its pane count and both workspaces. A closed caller is refused unwaivably, and
+  a missing destination is a `400`, never the default workspace. The gate is run
+  again under `SessionManager.lock` in the same hold as the move
+  (`move_group_to_workspace(..., guard=...)`) with the source workspace compared,
+  including when the destination is already the source; a stale same-workspace
+  request returns `409` instead of claiming a no-op. A refusal there rolls back
+  a workspace the move created. Showing the
+  destination afterwards is a separate answer (`shown`) and never fails a move.
 - **A launch from inside a pane opens on that pane's machine.** The body names
   `origin_session_id` and `workspaces.resolve_origin_connection` reads the host,
   user, port and password off that live session in this process; none of it
@@ -1710,7 +1853,7 @@ in `README.md`; state the rules a change has to keep.
   its slot back, because a budget that leaks is a tunnel that stops answering.
   The per-request head and body bounds cannot see this: an idle connection that
   sends nothing still costs a slot for `REQUEST_READ_TIMEOUT`.
-- **Opening a window and splitting a pane are page work, recorded as intents.**
+- **Opening a window, splitting a pane, and resizing a divider are page work, recorded as intents.**
   The split axis never reaches the server: the page computes the rectangles and
   measures its own refusals off the live terminal. `web/window_intents.py` is in
   memory, TTL-bounded and capped, and exactly one claimant wins so two open pages
@@ -1718,9 +1861,43 @@ in `README.md`; state the rules a change has to keep.
   before the intent is recorded. A page reports only its own kind's outcomes, and
   a refusal is relayed with the axis that would have worked — never a silent
   retry on the other axis.
+- **A split works in any tab the window holds, and never moves the view.**
+  `splitBridge.owns()` claims a pane in the painted group or in a group the page
+  holds in the background (`backgroundGroupHolding()`, read from the group list,
+  not the cached views). A background split is `web/static/js/background-split.js`:
+  an edit to the tab's model — pane order, one rectangle each, column and row
+  weights — read from its cached view only while that holds exactly the server's
+  panes, else from the server's summary. It measures against the window's shared
+  grid with the split button's own pane cap, narrow-window, integer-grid and
+  character-floor rules, and refuses before anything is created. Then it creates
+  the pane, drops that tab's cached view, writes the arrangement through the
+  group's revisioned presentation transaction, and adopts the new record into
+  the tab strip; it never reaches `switchGroup`, pane focus, `initialLoad` or a
+  cached-view restore. A tab opened before the request goes out is handed to the
+  visible handler. From the request until the write, the tab is held:
+  `initialLoad` waits on `backgroundSplit.settled(groupId)` before its group-list
+  read and before its read of the tab, so a tab picked mid-request is never
+  painted from the pre-save arrangement or from a cache about to be dropped, and
+  every tab except the one painted loses its cached view. A pane that was created
+  is reported even when its arrangement could not be written, with a `note` the
+  sidecar relays. The page still has to poll: a hidden or minimized native window
+  answers `no_window_available`, and `NO_PAGE_HINT` says the window must be open
+  and visible, whichever tab it shows. A resize still needs its tab showing.
+- **A resize is a revisioned presentation transaction.** The tool takes a
+  group, axis, numbered track boundary, normalized position, and the revision
+  read from `list_panes`. Only the visible page can claim it. The page compares
+  its pane order, rectangles and weights with the live group, measures the
+  candidate using the pointer drag's track groups and minimum-size rule, then
+  writes through the group presentation compare-and-swap before painting and
+  acknowledging it. A stale revision, missing divider, narrow viewport or
+  impossible minimum refuses without applying weights. The result carries the
+  persisted weights and pane rectangles; `list_panes` reads the same record.
+  Once a write starts, a lost or unreadable response is `unknown`, with no
+  claim that the weights stayed unchanged; read `list_panes` before retrying.
 - **The sidecar's wait must exceed the store's worst case, and the relation is
   pinned rather than derived.** `DEFAULT_WAIT_SECONDS` in `splits.py` and
-  `windows.py` is above `INTENT_TTL_SECONDS + CLAIM_TTL_SECONDS`, so an expiry the
+  `windows.py` (and the resize helper that uses the split wait) is above
+  `INTENT_TTL_SECONDS + CLAIM_TTL_SECONDS`, so an expiry the
   sidecar reports is an expiry the store reached — which is what makes
   "the panes and the workspace are untouched" true wherever it is said. The
   sidecar cannot import `web/`, so a test asserts the inequality. The HTTP path
@@ -1731,8 +1908,9 @@ in `README.md`; state the rules a change has to keep.
   keep waiting to the deadline; a wait that *ends* never having read the store
   answers `no_window_available` with the sentence that says so and names
   `list_panes`, never the one claiming nothing happened.
-- **Three honest outcomes per intent verb** (`opened`/`blocked`/`no_window_available`,
-  `split`/`refused`/`no_window_available`), never a retry and never a pretended
+- **Honest outcomes per intent verb** (`opened`/`blocked`/`no_window_available`,
+  `split`/`refused`/`no_window_available`, and an activation's
+  `activated`/`blocked`; resize answers `resized`/`refused`/`no_window_available`), never a retry and never a pretended
   result. Browser mode answers `no_window_available` for a split because the
   intent poll runs in a native window only; `open_window` has a browser fallback
   because `webbrowser.open` is a real alternative and there is no equivalent for

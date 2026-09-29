@@ -183,6 +183,26 @@ def _requested_mcp(payload: Dict[str, Any]) -> Optional[bool]:
     return value
 
 
+def _requested_mcp_override(payload: Dict[str, Any]) -> Optional[bool]:
+    """Return the requested override-mode choice, or ``None`` when unstated.
+
+    Read like ``mcp``, and only ever a companion to it: stating it without
+    ``mcp`` is refused rather than read as a no-op, and a grant with no tools
+    behind it is meaningless state, so ``true`` without ``mcp: true`` is
+    refused too. Absent leaves a grant the same agent already holds alone --
+    which is how the pane menu keeps one without restating it. Only the pane header's own menu states it -- the
+    tool relaunch (``apply_agent_pane_relaunch``) forwards a fixed set of keys
+    that does not include this one, so an agent cannot hand a pane a standing
+    waiver.
+    """
+    value = payload.get("mcp_override")
+    if value is None:
+        return None
+    if not isinstance(value, bool):
+        raise ShellTransitionError("mcp_override must be true or false")
+    return value
+
+
 def _requested_update(payload: Dict[str, Any], agent_key: Optional[str]) -> str:
     """Return the update command to run before the agent starts, or ``""``.
 
@@ -335,6 +355,7 @@ def _agent_updates(session: Any, agent_key: str) -> Dict[str, Any]:
             "initial_command": "",
             "agent_auto_mode": False,
             "agent_mcp": False,
+            "agent_mcp_override": False,
         }
     return {
         "startup_mode": "agent",
@@ -348,6 +369,11 @@ def _agent_updates(session: Any, agent_key: str) -> Dict[str, Any]:
         ),
         "agent_mcp": (
             bool(getattr(session, "agent_mcp", False))
+            and _pane_agent_key(session) == agent_key
+        ),
+        # Granted to one agent, so it follows that agent exactly as MCP does.
+        "agent_mcp_override": (
+            getattr(session, "agent_mcp_override", False) is True
             and _pane_agent_key(session) == agent_key
         ),
     }
@@ -404,6 +430,11 @@ def apply_pane_shell_change(
     shell_kind = _requested_shell(payload)
     agent_key = _requested_agent(payload)
     mcp_enabled = _requested_mcp(payload)
+    override_requested = _requested_mcp_override(payload)
+    if override_requested is not None and mcp_enabled is None:
+        raise ShellTransitionError("mcp_override needs mcp to be stated beside it")
+    if override_requested and not mcp_enabled:
+        raise ShellTransitionError("mcp_override needs mcp to be true")
     update_command = _requested_update(payload, agent_key)
 
     if shell_kind is not None:
@@ -454,6 +485,18 @@ def apply_pane_shell_change(
             and bool(resolved_agent)
             and _agent_supports_mcp(resolved_agent)
         )
+        # Stating `mcp` never grants the override: turning the tools off
+        # takes it with them, and turning them on keeps only a grant the same
+        # agent already holds. Only a stated `mcp_override` changes that -- the
+        # menu's "MCP override" button grants it, and its "MCP" button states
+        # it false so the pair stays a radio group.
+        carried = updates.get(
+            "agent_mcp_override",
+            getattr(session, "agent_mcp_override", False) is True,
+        )
+        if override_requested is not None:
+            carried = override_requested
+        updates["agent_mcp_override"] = updates["agent_mcp"] and bool(carried)
 
     # An empty payload states no choice at all and retains the old no-op API
     # behaviour. Every menu row states at least `agent`, so a real selection

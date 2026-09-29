@@ -1472,79 +1472,23 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn('aria-label="Close this terminal pane"', html)
         self.assertIn(".terminal-close-btn", html)
         self.assertIn("border-color: rgba(255, 92, 92, .7);", html)
-        self.assertIn("function buildCloseTerminalPlan(index)", html)
-        self.assertIn("function findTerminalCloseNeighbor(closedRect, candidates)", html)
-        self.assertIn("function terminalCloseSideGroups(closedRect, entries)", html)
-        self.assertIn("function buildTerminalCloseRectsForSideGroup(plan, sideGroup)", html)
-        self.assertIn("function sharedBorderLength(left, right)", html)
         self.assertIn("async function closeTerminalPane(index)", html)
         self.assertIn(
             'wireCardButton(card, `[data-terminal-close="${i}"]`, () => closeTerminalPane(i));',
             html,
         )
         self.assertIn("closeTerminalPane(index);", html)
-        self.assertIn("rectsBySessionId: restoreRectsBySessionId", html)
         self.assertIn("no neighboring pane can safely fill this layout", html)
         self.assertIn("method: 'DELETE'", html)
-        close_plan_start = html.index("function buildTerminalCloseRectsBySessionId(plan)")
-        close_plan_end = html.index("function buildCloseTerminalPlan(index)", close_plan_start)
-        self.assertNotIn("fixedLayoutSlotRects(", html[close_plan_start:close_plan_end])
 
-    def test_terminals_page_close_prefers_single_neighbor_expansion(self):
+    def test_terminals_page_loads_extracted_close_geometry(self):
         response = self.client.get("/terminals")
 
         self.assertEqual(response.status_code, 200)
         html = self._page_html(response)
-        self.assertIn(
-            "function terminalCloseRectsForExpandingContacts(plan, side, contactsToExpand)",
-            html,
-        )
-        side_group_start = html.index("function buildTerminalCloseRectsForSideGroup(plan, sideGroup)")
-        side_group_end = html.index("function buildTerminalCloseRectsBySessionId(plan)", side_group_start)
-        side_group_html = html[side_group_start:side_group_end]
-        # The single greatest-shared-border contact is attempted before the whole
-        # side group, so a close never resizes more neighbours than required.
-        self.assertIn(
-            "const single = terminalCloseRectsForExpandingContacts(plan, sideGroup.side, [singleContact]);",
-            side_group_html,
-        )
-        self.assertIn("if (singleContact && sideGroup.entries.length > 1) {", side_group_html)
-        self.assertIn(
-            "return terminalCloseRectsForExpandingContacts(plan, sideGroup.side, sideGroup.entries);",
-            side_group_html,
-        )
-        # The single-pane result is still validated by the same overlap + area
-        # invariants inside the shared helper.
-        expand_start = html.index("function terminalCloseRectsForExpandingContacts(plan, side, contactsToExpand)")
-        expand_end = html.index("function buildTerminalCloseRectsForSideGroup(plan, sideGroup)", expand_start)
-        expand_html = html[expand_start:expand_end]
-        self.assertIn("splitRectsOverlap(nextEntries[leftIndex].rect, nextEntries[rightIndex].rect)", expand_html)
-        self.assertIn("if (nextArea !== previousArea + splitRectArea(plan.closedRect)) {", expand_html)
-
-    def test_terminals_page_close_preserves_split_track_weights(self):
-        response = self.client.get("/terminals")
-
-        self.assertEqual(response.status_code, 200)
-        html = self._page_html(response)
-        # The terminal-close path carries the pre-close track weights into the
-        # restore (closing a split pane now goes through this same path).
-        self.assertEqual(
-            html.count("splitColumnWeights: cloneSplitTrackWeights(splitColumnWeights),"),
-            1,
-        )
-        self.assertEqual(
-            html.count("splitRowWeights: cloneSplitTrackWeights(splitRowWeights),"),
-            1,
-        )
-        # initialLoad re-applies them onto the reflowed grid so proportions survive.
-        self.assertIn(
-            "splitColumnWeights = cloneSplitTrackWeights(pendingRestore.splitColumnWeights);",
-            html,
-        )
-        self.assertIn(
-            "splitRowWeights = cloneSplitTrackWeights(pendingRestore.splitRowWeights);",
-            html,
-        )
+        self.assertIn("js/close-geometry.js", html)
+        self.assertNotIn("function buildTerminalCloseRectsForSideGroup", html)
+        self.assertNotIn("function terminalCloseRectsForExpandingContacts", html)
 
     def test_terminals_page_offers_split_controls_on_every_pane_kind(self):
         """Explorer and browser panes split off a terminal, so they carry the
@@ -1573,12 +1517,10 @@ class ApiRoutesTestCase(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         html = self._page_html(response)
-        self.assertIn("let pendingCloseClientState = null;", html)
-        self.assertIn("function captureSurvivingPaneClientState(closingSessionId)", html)
         self.assertIn("function restoreExplorerPaneFromClose(index, snapshot)", html)
         # The close path captures surviving pane state before the forced rebuild.
         self.assertIn(
-            "stateBySessionId: captureSurvivingPaneClientState(plan.sessionId),",
+            "clientStateBySessionId: captureSurvivingPaneClientState(",
             html,
         )
         # Explorer siblings keep tree/Git sidebars and open tabs; browser siblings
@@ -1595,11 +1537,6 @@ class ApiRoutesTestCase(unittest.TestCase):
             "openExplorerFile(index, snapshot.explorer_preview_path, { pinned: false, showLoading: false });",
             html,
         )
-        # The snapshot is only consumed for its own close-driven rebuild.
-        self.assertIn(
-            "const closeClientState = pendingCloseClientState?.groupId === requestedGroupId",
-            html,
-        )
 
     def test_terminals_page_close_preserves_tab_view_state(self):
         """5.a: per-tab view mode, scroll, and zoom survive a terminal-close rebuild."""
@@ -1608,7 +1545,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         html = self._page_html(response)
         capture = html[
-            html.index("function captureSurvivingPaneClientState(closingSessionId)"):
+            html.index("function captureSurvivingPaneClientState"):
             html.index("function restoreExplorerPaneFromClose(index, snapshot)")
         ]
         # The shown tab's live mode + scroll are folded into its record before
@@ -1659,7 +1596,7 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertNotIn("loadExplorerPane(index, '', { force: true });", html[replace_start:replace_end])
         switch_start = html.index("async function switchSessionPaneMode(index)")
         switch_end = html.index(
-            "function captureSurvivingPaneClientState(closingSessionId)", switch_start
+            "function captureSurvivingPaneClientState", switch_start
         )
         self.assertNotIn("teardownCurrentGrid();", html[switch_start:switch_end])
 
@@ -1725,8 +1662,12 @@ class ApiRoutesTestCase(unittest.TestCase):
         # An MCP-capable agent's tools button uses that same two-control row.
         # Inline, so the panel never opens sideways out of the window; and
         # right-anchored with a ceiling, so it grows away from that edge.
-        self.assertIn("class=\"pane-shell-menu-mcp${isLive && activeMcp ? ' is-active' : ''}\"", html)
+        self.assertIn("class=\"pane-shell-menu-mcp${toolsLive ? ' is-active' : ''}\"", html)
         self.assertIn(".pane-shell-menu-mcp.is-active {", html)
+        # Override mode is a third target on that row and reads red, off the
+        # same theme token the header frame and dashboard chip wear.
+        self.assertIn("pane-shell-menu-mcp pane-shell-menu-mcp-override", html)
+        self.assertIn(".pane-shell-menu-mcp-override.is-active", html)
         self.assertIn("max-width: min(320px, calc(100vw - 16px));", html)
 
     def test_terminals_page_agent_options_carry_registry_display_names(self):
@@ -15423,7 +15364,8 @@ class ApiRoutesTestCase(unittest.TestCase):
         # stacked several times before the integer `>= 2` guard bites, so
         # horizontal (stacked) splits are not capped at a single level.
         self.assertIn("const SPLIT_CELL_UNIT = 8;", html)
-        self.assertIn("makeSplitLeaf({ originSlot: 0, x: 1, y: 1, w: 2 * unit, h: unit })", html)
+        self.assertIn("{ originSlot: 0, x: 1, y: 1, w: 2 * unit, h: unit }", html)
+        self.assertIn("fixedLayoutRectCoordinates(count, layoutClass).map(rect => makeSplitLeaf(rect))", html)
         self.assertIn("y: 1 + (slot.row - 1) * unit,", html)
         self.assertIn("h: slot.rowSpan * unit,", html)
 
@@ -17198,8 +17140,11 @@ class SessionGroupsUpdatedBroadcastTestCase(unittest.TestCase):
         return socket_client
 
     def _received_reasons(self, socket_client):
+        return [update.get("reason") for update in self._received_updates(socket_client)]
+
+    def _received_updates(self, socket_client):
         return [
-            event["args"][0].get("reason")
+            event["args"][0]
             for event in socket_client.get_received()
             if event["name"] == "session_groups_updated"
         ]
@@ -17263,15 +17208,68 @@ class SessionGroupsUpdatedBroadcastTestCase(unittest.TestCase):
         response = self.client.delete(f"/api/sessions/{session.session_id}")
 
         self.assertEqual(response.status_code, 200)
-        self.assertIn("session_closed", self._received_reasons(socket_client))
+        updates = self._received_updates(socket_client)
+        close = next(update for update in updates if update["reason"] == "session_closed")
+        self.assertEqual(close["group_id"], "g-solo")
+        self.assertEqual(close["closed_session_ids"], [session.session_id])
+        self.assertEqual(close["closed_group_ids"], ["g-solo"])
 
     def test_close_all_broadcasts_session_groups_updated(self):
+        api.session_manager.create_group(
+            name="All",
+            connection_mode="ssh",
+            layout="single",
+            terminal_count=1,
+            group_id="g-all",
+        )
+        session = api.session_manager.create_session(
+            group_id="g-all",
+            host="10.0.0.10",
+            directory="/srv/app",
+        )
         socket_client = self._socket_client()
 
         response = self.client.delete("/api/sessions")
 
         self.assertEqual(response.status_code, 200)
-        self.assertIn("all_closed", self._received_reasons(socket_client))
+        updates = self._received_updates(socket_client)
+        close = next(update for update in updates if update["reason"] == "all_closed")
+        self.assertEqual(close["closed_session_ids"], [session.session_id])
+        self.assertEqual(close["closed_group_ids"], ["g-all"])
+
+    def test_partial_group_close_broadcasts_only_ids_actually_closed(self):
+        api.session_manager.create_group(
+            name="Partial",
+            connection_mode="ssh",
+            layout="vertical",
+            terminal_count=2,
+            group_id="g-partial",
+        )
+        first = api.session_manager.create_session(
+            group_id="g-partial", host="10.0.0.10", directory="/srv/app"
+        )
+        second = api.session_manager.create_session(
+            group_id="g-partial", host="10.0.0.11", directory="/srv/app"
+        )
+        socket_client = self._socket_client()
+        original_close = api.session_manager.close_session
+
+        def close_one(session_id):
+            if session_id == second.session_id:
+                return False
+            return original_close(session_id)
+
+        with patch.object(api.session_manager, "close_session", side_effect=close_one):
+            response = self.client.delete("/api/sessions?group=g-partial")
+
+        self.assertEqual(response.status_code, 500)
+        self.assertTrue(response.get_json()["partial"])
+        updates = self._received_updates(socket_client)
+        close = next(update for update in updates if update["reason"] == "session_closed")
+        self.assertEqual(close["group_id"], "g-partial")
+        self.assertEqual(close["closed_session_ids"], [first.session_id])
+        self.assertEqual(close["closed_group_ids"], [])
+        self.assertIsNotNone(api.session_manager.get_session(second.session_id))
 
 
 class SessionStatusRoomScopeTestCase(unittest.TestCase):

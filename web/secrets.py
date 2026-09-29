@@ -11,7 +11,10 @@ from web.state_files import create_file_exclusively
 
 logger = logging.getLogger(__name__)
 
-ENCRYPTION_KEY_PATH = os.path.join(BASE_DIR, ".encryption_key")
+PRODUCTION_ENCRYPTION_KEY_PATH = os.path.join(BASE_DIR, ".encryption_key")
+ENCRYPTION_KEY_PATH = (
+    os.environ.get("GRIDVIBE_ENCRYPTION_KEY_PATH") or PRODUCTION_ENCRYPTION_KEY_PATH
+)
 
 # A reader can only lose a race against a *legacy* writer that still creates the
 # key file non-atomically; :func:`create_file_exclusively` never publishes a
@@ -45,6 +48,13 @@ def _get_encryption_key() -> bytes:
     partial file.
     """
     path = ENCRYPTION_KEY_PATH
+    if os.environ.get("GRIDVIBE_TEST_MODE") and os.path.normcase(
+        os.path.realpath(path)
+    ) == os.path.normcase(os.path.realpath(PRODUCTION_ENCRYPTION_KEY_PATH)):
+        raise RuntimeError(
+            "Refusing to use production .encryption_key in test mode; "
+            "set GRIDVIBE_ENCRYPTION_KEY_PATH or patch ENCRYPTION_KEY_PATH."
+        )
     key = _read_encryption_key(path)
     if key:
         return key

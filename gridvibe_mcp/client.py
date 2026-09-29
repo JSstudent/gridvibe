@@ -42,6 +42,27 @@ GROUP_FIELDS = (
     "terminal_count",
 )
 
+#: One registry agent as ``list_agent_types`` reports it: whether it can start
+#: on the target, and -- separately -- whether it can be given GridVibe's tools
+#: or a task. Never the binary's path, never the target's credential.
+AGENT_TYPE_FIELDS = (
+    "key",
+    "display_name",
+    "available",
+    "status",
+    "status_label",
+    "message",
+    "mcp_supported",
+    "task_supported",
+    "auto_mode_supported",
+)
+
+#: A binary probe per registry agent, on a machine that may be a cold WSL
+#: distribution or an SSH host -- the one read that is not sub-second. Kept
+#: under the shortest agent CLI tool-call timeout, like `wait_for_results`.
+AGENT_TYPES_TIMEOUT_SECONDS = 50.0
+SAVE_LAYOUT_TIMEOUT_SECONDS = 120.0
+
 #: What a pane is, where it points, and what it runs on.
 PANE_FIELDS = (
     "session_id",
@@ -150,6 +171,14 @@ REFUSAL_FIELDS = (
     "gate",
     "waivable",
     "confirm",
+    # Stated by the navigation routes on every refusal: nothing moved and
+    # nothing was shown, so a caller can say so rather than infer it.
+    "changed",
+    "partial",
+    "target",
+    "closed_session_ids",
+    "closed_group_ids",
+    "closed_workspace_ids",
 )
 
 #: The dashboard's agent rows are already a published field list; the sidecar
@@ -195,6 +224,7 @@ LAYOUT_FIELDS = (
     "layout_advisory",
     "terminal_count",
     "geometry",
+    "presentation_revision",
 )
 
 #: A saved preset's *shape*, and never its connection. The saved-session route
@@ -226,15 +256,42 @@ GEOMETRY_FIELDS = (
     "original_split_slot_count",
 )
 
+SAVE_LAYOUT_FIELDS = ("saved", "group_id", "workspace_id", "id", "name")
+SAVE_LAYOUT_SHAPE_FIELDS = ("layout", "pane_count")
+SAVE_LAYOUT_PANE_FIELDS = ("startup_mode", "shell", "agent_selection")
+
 #: What a clear answers. Two fields rather than one `cleared: true`, because
 #: they are not the same kind of claim: the replay buffer is gone, and the
 #: windows showing the pane have been *told* to reset their display. A pane
 #: nobody has open resets nothing, and this list is what stops the result from
 #: pretending otherwise.
+#: What a tool is told about a group move: both ends, whether it happened, and
+#: where the group is now. Never the two workspaces' full group lists the
+#: transaction hands its windows.
+MOVE_FIELDS = (
+    "moved",
+    "group_id",
+    "group_name",
+    "workspace_id",
+    "source_workspace_id",
+    "current_workspace_id",
+    "workspace_created",
+    "source_workspace_pruned",
+)
+
 CLEAR_FIELDS = (
     "session_id",
     "buffer_purged",
     "display_reset_requested",
+)
+
+CLOSE_FIELDS = (
+    "closed",
+    "partial",
+    "target",
+    "closed_session_ids",
+    "closed_group_ids",
+    "closed_workspace_ids",
 )
 
 #: A ceiling on the per-preset reads `list_saved_layouts` makes, so a store
@@ -315,6 +372,33 @@ def project_panes(payloads: Any) -> List[Dict[str, Any]]:
     if not isinstance(payloads, list):
         return []
     return [project_pane(item) for item in payloads]
+
+
+def session_name_of(group: Mapping[str, Any]) -> str:
+    """The name a session tab shows: its group's name, else its id.
+
+    The same fallback the tab strip draws (``group.name || group.group_id``),
+    so the name an agent reads is always the text the person sees.
+    """
+    return str(group.get("name") or "").strip() or str(group.get("group_id") or "")
+
+
+def session_tab(
+    group: Mapping[str, Any],
+    workspace_id: str,
+    workspace_label: str,
+    active_group_id: str = "",
+) -> Dict[str, Any]:
+    """One session tab, named the way the tab strip names it."""
+    group_id = str(group.get("group_id") or "")
+    return {
+        "session_name": session_name_of(group),
+        "group_id": group_id,
+        "workspace_id": workspace_id,
+        "workspace_label": workspace_label,
+        "pane_count": group.get("terminal_count"),
+        "active": bool(group_id) and group_id == active_group_id,
+    }
 
 
 def _url_host(host: str) -> str:
@@ -564,6 +648,41 @@ class GridVibeClient:
             return {}
         return payload if isinstance(payload, Mapping) else {}
 
+    def groups(self, workspace_id: str) -> List[Dict[str, Any]]:
+        """The live session groups (tabs) in one workspace."""
+        payload = self.request(
+            "GET",
+            "/api/session-groups",
+            params={"workspace_id": workspace_id},
+        )
+        raw = payload.get("groups") if isinstance(payload, Mapping) else None
+        return project_all(raw, GROUP_FIELDS)
+
+    def workspace_sessions(self) -> List[Dict[str, Any]]:
+        """Every live workspace, each with the session tabs it holds.
+
+        A *session* in GridVibe's own words is a session tab -- what the
+        person names when they say "the gridvibe_main session". Every live tab
+        has a name, saved or not: a scratch launch is named after its target
+        or its launch time, and a save renames the live tab. So the name is
+        read from the live group, exactly as the tab draws it, and never
+        inferred from a saved preset's id.
+        """
+        rows: List[Dict[str, Any]] = []
+        for workspace in self.workspaces():
+            workspace_id = str(workspace.get("workspace_id") or "")
+            if not workspace_id:
+                continue
+            active = str(workspace.get("active_group_id") or "")
+            label = str(workspace.get("label") or "")
+            sessions = [
+                session_tab(group, workspace_id, label, active)
+                for group in self.groups(workspace_id)
+                if group.get("group_id")
+            ]
+            rows.append({**workspace, "sessions": sessions})
+        return rows
+
     def pane(self, session_id: str) -> Dict[str, Any]:
         payload = self.request("GET", f"/api/sessions/{urllib.parse.quote(session_id)}")
         return project_pane(payload)
@@ -681,6 +800,32 @@ class GridVibeClient:
             result["truncated_at"] = MAX_SAVED_LAYOUTS
         return result
 
+    def save_group_layout(self, group_id: str, name: str, root_directory: Optional[str]) -> Dict[str, Any]:
+        """Save one live group, exposing its persisted shape and no connection."""
+        body: Dict[str, Any] = {"name": name}
+        if root_directory is not None:
+            body["root_directory"] = root_directory
+        try:
+            payload = self.request(
+                "POST",
+                f"/api/session-groups/{urllib.parse.quote(group_id)}/save-layout",
+                body=body,
+                timeout=max(self.timeout, SAVE_LAYOUT_TIMEOUT_SECONDS),
+            )
+        except GridVibeError as exc:
+            return {**exc.to_dict(), "saved": False, "changed": False}
+        result = project(payload, SAVE_LAYOUT_FIELDS)
+        shape = payload.get("shape") if isinstance(payload, Mapping) else None
+        if isinstance(shape, Mapping):
+            projected = project(shape, SAVE_LAYOUT_SHAPE_FIELDS)
+            geometry = shape.get("workspace_layout")
+            projected["workspace_layout"] = (
+                project(geometry, GEOMETRY_FIELDS) if isinstance(geometry, Mapping) else None
+            )
+            projected["panes"] = project_all(shape.get("panes"), SAVE_LAYOUT_PANE_FIELDS)
+            result["shape"] = projected
+        return result
+
     def _saved_layout_shape(self, saved_session_id: str) -> Dict[str, Any]:
         """The geometry and the per-pane shape of one preset, and nothing else."""
         try:
@@ -730,6 +875,27 @@ class GridVibeClient:
                     rows.append(row)
         return {"agents": rows, "count": len(rows)}
 
+    def agent_types(self, origin_session_id: str = "", shell: str = "") -> Dict[str, Any]:
+        """Every registry agent, and whether it can start where a launch would.
+
+        Given a longer deadline than an ordinary read: GridVibe probes each
+        CLI's binary on the target machine, and a cold WSL distribution or an
+        SSH host answers in seconds rather than milliseconds.
+        """
+        payload = self.request(
+            "GET",
+            "/api/agent-types",
+            params={"origin_session_id": origin_session_id, "shell": shell},
+            timeout=max(self.timeout, AGENT_TYPES_TIMEOUT_SECONDS),
+        )
+        rows = payload.get("agents") if isinstance(payload, Mapping) else None
+        agents = [project(row, AGENT_TYPE_FIELDS) for row in rows or [] if isinstance(row, Mapping)]
+        return {
+            "agent_types": agents,
+            "count": len(agents),
+            "target": str((payload or {}).get("target") or "") if isinstance(payload, Mapping) else "",
+        }
+
     # ---------------- create ----------------
 
     def create_workspace(self, label: str) -> Dict[str, Any]:
@@ -750,6 +916,14 @@ class GridVibeClient:
         payload = self.request(
             "POST",
             f"/api/sessions/{urllib.parse.quote(session_id)}/split-intent",
+            body=dict(body),
+        )
+        return payload if isinstance(payload, dict) else {}
+
+    def resize_intent(self, group_id: str, body: Mapping[str, Any]) -> Dict[str, Any]:
+        payload = self.request(
+            "POST",
+            f"/api/session-groups/{urllib.parse.quote(group_id)}/resize-intent",
             body=dict(body),
         )
         return payload if isinstance(payload, dict) else {}
@@ -790,7 +964,12 @@ class GridVibeClient:
             f"/api/sessions/{urllib.parse.quote(session_id)}/agent-mode-switch",
             body=dict(body),
         )
-        return project_pane(payload)
+        pane = project_pane(payload)
+        # Whether anything happened: a pane already in the asked-for state
+        # answers with its unchanged record, which must not read as a switch.
+        if isinstance(payload, Mapping) and "changed" in payload:
+            pane["changed"] = bool(payload["changed"])
+        return pane
 
     def clear_pane(
         self,
@@ -810,6 +989,29 @@ class GridVibeClient:
         )
         return project(payload, CLEAR_FIELDS)
 
+    def close_resource(self, kind: str, target_id: str, body: Mapping[str, Any]) -> Dict[str, Any]:
+        """Close a pane, group or live workspace through its whole-target gate."""
+        payload = self.request(
+            "POST",
+            f"/api/mcp/close/{urllib.parse.quote(kind)}/{urllib.parse.quote(target_id)}",
+            body=dict(body),
+        )
+        return project(payload, CLOSE_FIELDS)
+
+    def move_group(self, group_id: str, body: Mapping[str, Any]) -> Dict[str, Any]:
+        """Move one live group, through the gated twin of the launcher's route.
+
+        Not ``/move``: that route checks nobody, because the person dragging a
+        tab is looking at it. ``/agent-move`` names the pane asking and passes
+        GridVibe's own gates before the same transaction runs.
+        """
+        payload = self.request(
+            "POST",
+            f"/api/session-groups/{urllib.parse.quote(group_id)}/agent-move",
+            body=dict(body),
+        )
+        return project(payload, MOVE_FIELDS)
+
     @staticmethod
     def _launch_result(payload: Any) -> Dict[str, Any]:
         if not isinstance(payload, Mapping):
@@ -819,6 +1021,11 @@ class GridVibeClient:
             "group_id": str(payload.get("group_id") or ""),
             "panes": project_panes(payload.get("sessions")),
         }
+        group = payload.get("group")
+        if isinstance(group, Mapping):
+            # The name the new tab actually got: a repeated scratch name is
+            # suffixed ("gridvibe (1)"), so the requested one may not be it.
+            result["session_name"] = session_name_of(group)
         result["count"] = len(result["panes"])
         warnings = payload.get("agent_warnings") or payload.get("warnings")
         if isinstance(warnings, list) and warnings:
@@ -832,6 +1039,19 @@ class GridVibeClient:
         if group_id:
             body["group_id"] = group_id
         payload = self.request("POST", "/api/windows/open", body=body)
+        return payload if isinstance(payload, dict) else {}
+
+    def activate_intent(
+        self,
+        workspace_id: str,
+        group_id: str,
+        session_id: str = "",
+    ) -> Dict[str, Any]:
+        """Ask the page holding a group to show it, and focus one of its panes."""
+        body: Dict[str, Any] = {"workspace_id": workspace_id, "group_id": group_id}
+        if session_id:
+            body["session_id"] = session_id
+        payload = self.request("POST", "/api/windows/activate", body=body)
         return payload if isinstance(payload, dict) else {}
 
     def read_window_intent(self, intent_id: str) -> Dict[str, Any]:

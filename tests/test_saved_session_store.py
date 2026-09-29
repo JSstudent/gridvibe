@@ -73,8 +73,48 @@ class SavedSessionStoreTestBase(unittest.TestCase):
         return [entry for entry in Path(self.temp_dir.name).iterdir() if ".corrupt-" in entry.name]
 
 
+class SavedSessionIsolationTestCase(SavedSessionStoreTestBase):
+    def test_test_mode_refuses_the_production_preset_file(self):
+        with patch.object(
+            web_saved_sessions,
+            "SAVED_SESSIONS_PATH",
+            web_saved_sessions.PRODUCTION_SAVED_SESSIONS_PATH,
+        ), patch.dict(os.environ, {"GRIDVIBE_TEST_MODE": "1"}):
+            with self.assertRaisesRegex(RuntimeError, "Refusing to use production"):
+                web_saved_sessions.load_saved_sessions()
+
+
 class SavedSessionTransactionTestCase(SavedSessionStoreTestBase):
     """One locked read-modify-write per mutation, not a load/save pair."""
+
+    def test_concurrent_unique_name_claims_create_only_one_preset(self):
+        ready = threading.Barrier(2)
+        outcomes = []
+        lock = threading.Lock()
+
+        def write(name):
+            ready.wait(10)
+            try:
+                web_saved_sessions.upsert_saved_session(
+                    config=_config(), name=name, require_unique_name=True
+                )
+                outcome = "saved"
+            except web_saved_sessions.SavedSessionNameConflictError:
+                outcome = "duplicate"
+            with lock:
+                outcomes.append(outcome)
+
+        threads = [
+            threading.Thread(target=write, args=(name,))
+            for name in ("Review", "review")
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(10)
+
+        self.assertEqual(sorted(outcomes), ["duplicate", "saved"])
+        self.assertEqual(len(web_saved_sessions.load_saved_sessions()), 1)
 
     def test_concurrent_upserts_of_different_presets_all_survive(self):
         """The lost-update path: every writer's own preset must still be there."""
@@ -409,6 +449,15 @@ class EncryptionKeyCreationTestCase(unittest.TestCase):
         patcher = patch.object(web_secrets, "ENCRYPTION_KEY_PATH", str(self.key_path))
         patcher.start()
         self.addCleanup(patcher.stop)
+
+    def test_test_mode_refuses_the_production_key(self):
+        with patch.object(
+            web_secrets,
+            "ENCRYPTION_KEY_PATH",
+            web_secrets.PRODUCTION_ENCRYPTION_KEY_PATH,
+        ), patch.dict(os.environ, {"GRIDVIBE_TEST_MODE": "1"}):
+            with self.assertRaisesRegex(RuntimeError, "Refusing to use production"):
+                web_secrets._get_encryption_key()
 
     def test_two_first_run_processes_converge_on_one_key(self):
         starters = 6

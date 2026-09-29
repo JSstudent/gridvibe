@@ -117,26 +117,35 @@ make mcp-status   # run this when an agent reports the server will not start
 
 Until it is installed the checkbox still appears and the agent simply finds no tools. `make mcp-status` walks the whole chain from the outside — the generated config, the interpreter, the entry point, the handshake — and names the link that is broken.
 
-### The sixteen tools
+### The twenty-five tools
 
 | Tier | Tools | What the agent can do |
 | --- | --- | --- |
-| **Read** | `gridvibe_status` `list_workspaces` `list_panes` `list_agents` `list_saved_layouts` `whoami` `read_handoff` | See every workspace, every pane and where it sits in the grid, every agent and whether it is working, every saved preset, which pane it is itself in, and the task another agent handed it |
+| **Read** | `gridvibe_status` `list_workspaces` `list_panes` `list_agents` `list_agent_types` `list_saved_layouts` `whoami` `read_handoff` | See every workspace and the session tabs in it, every pane and where it sits in the grid, every agent and whether it is working, which agent CLIs it can start, every saved preset, which pane it is itself in, and the task another agent handed it |
 | **Hand back** | `report_result` `wait_for_results` | Report the outcome of a handed-over task to the agent that asked for it, and wait for the reports of the agents it handed tasks to |
 | **Create** | `create_workspace` `launch_panes` `open_window` `split_pane` | Make a workspace, launch a group of panes into it, put it on screen, split any pane side-by-side or stacked, and hand a new agent its task |
 | **Replace** | `set_pane_agent` `set_pane_mode` | Relaunch a pane under a different agent (optionally with a task) or back to a plain shell, or turn it into a file explorer or a browser preview |
 | **Clear** | `clear_pane` | Clear one terminal pane and its replay buffer, exactly as the 🧹 button does |
+| **Navigate** | `focus_session` `focus_pane` `move_session` `resize_divider` | Bring a session tab or a single pane to the foreground, move a session to another workspace, and resize a divider in an open session |
+| **Save** | `save_group_layout` | Save an open session's pane types and layout as a named preset for later launches |
+| **Close** | `close_pane` `close_group` `close_workspace` | End a worker pane, a session tab, or a live workspace; saved workspace snapshots remain available |
 
-- **Nothing closes and nothing types.** There is no tool for closing a pane, a tab, or a workspace, and none for sending keystrokes to a terminal. They are absent from the build, not switched off.
-- **An agent only touches panes it made.** The three tools that replace or clear a pane refuse the agent's own pane always, and refuse any pane it did not create — including every pane from before a restart — unless you tell it in that conversation to replace that particular one.
+- **Agents can close finished work.** An agent can close panes it created, or whole session tabs and workspaces after every affected pane passes the checks. Closing one pane preserves the tab's existing arrangement and divider proportions exactly as its **×** button does; an agent still cannot close its own pane or a container holding it.
+- **Sessions by the name on their tab.** Ask for *"bring the gridvibe_main session forward"* or *"move test_session to the gridvibe_2 workspace and show it"*. Two tabs with the same name are never guessed between, and the agent only reports a tab as shown once the window confirms it.
+- **New panes start where you say.** A stated folder is checked on the pane's own machine and wins over where the pane is standing, including a folder above the one a Files pane is showing.
+- **Agents can shape the grid.** Ask an agent to split a pane, then set a divider to a fraction of the open session's width or height. GridVibe checks each pane's minimum size before applying it.
+- **Agents can save a session layout.** Ask an agent to save the current session as a named preset, optionally rooted at a stated folder. The session's window must be open so GridVibe can capture its latest layout.
+- **Every installed agent, not just the MCP ones.** An agent can list which agent CLIs are available and launch any of them. A missing agent is refused rather than quietly opened as a plain terminal.
+- **An agent only touches panes it made.** Replace, clear and close tools refuse the agent's own pane, and refuse panes it did not create — including panes from before a restart — unless you authorize that specific action in the conversation. Moving a session it did not make needs your word the same way.
 - **Agents hand each other tasks.** An agent that splits off or launches a Claude Code, Codex or Copilot pane can give it a task, and the new agent starts on it rather than waiting — ask for *"hand the findings to a new Codex agent below this one."* The task never goes to another machine, and nothing is typed into an agent that is already running.
 - **Agents report back.** An agent handed a task reports its outcome to the agent that handed it over, which can wait for several at once — ask for *"hand this to three Codex agents beside this one and wait for their results."* A pane closed before it reported is reported as ended, so nothing waits forever.
 - **It asks before it replaces.** Refused a pane it did not make, an agent gets GridVibe's own question to put to you — which pane, and what it would end — and acts only on your yes.
-- **Agents launching agents is bounded.** A pane an agent creates counts one generation deeper than the pane that asked for it, and the chain stops after two.
+- **Override mode, when you want it to stop asking.** Tick **Override** beside **MCP** in the launcher, or pick **Override** on the pane's 🔄 dropdown, and after a warning that agent closes, moves, relaunches, re-modes and clears panes it did not create without asking. It still never touches its own pane or sends a task to another machine, and its MCP frame and dashboard chip turn red.
+- **Agents launching agents is bounded.** A pane an agent creates counts one generation deeper than the pane that asked for it, and the chain stops after five.
 - **New panes open where the asking agent is.** A tool called from an SSH pane opens its panes on that same host over the same connection, and refuses rather than quietly falling back to this machine. They land in the workspace that agent's tab is in *now*, so moving a session between workspaces takes its agent with it.
 - **SSH panes get the tools too**, with nothing installed on the remote host. The pane reaches GridVibe back down its own connection, on a port that exists only while the pane does, is reachable only from that host, and answers only that pane's own requests.
 - **No credential ever reaches an agent.** Saved presets come back as shapes — layout, pane count, what each pane is — never as a connection.
-- **Splitting a pane needs a window open.** Only a real GridVibe page can measure a pane, so a split in browser mode is refused as *no window available* rather than guessed at. Opening a workspace works in either mode.
+- **Splitting a pane needs a window open.** An agent can split a pane in any session tab of an open, unminimized workspace window without switching you to it; a split in browser mode is refused as *no window available* rather than guessed at. Opening a workspace works in either mode.
 
 ### In use
 
@@ -184,7 +193,7 @@ See **every session in every workspace**, agents first. Open the dashboard dialo
 - **Widen it when you need more room** — drag the sidebar's inner edge from its default width up to twice that width. The chosen scale is saved with the workspace and adapts to the window size.
 - **Put it on the side you want** — **App Settings ▸ Agents ▸ Agent Dashboard Side** docks the sidebar left or right — pick the card that shows it on that edge — and every open window moves as soon as you save. The handle, its marks and the rows are the same either way.
 - **Three levels** — a workspace is a titled band, a session tab is a card inside it drawn in that tab's own colour, and each agent is one row inside the card.
-- **Every agent on one line** — a leading status dot, the agent's mark, its chat title, and `MCP` when the agent has GridVibe tools. The dialog also draws the agent's name and `auto` when it was launched with auto-approval.
+- **Every agent on one line** — a leading status dot, the agent's mark, its chat title, and `MCP` when the agent has GridVibe tools, in red when it runs in override mode. The dialog also draws the agent's name and `auto` when it was launched with auto-approval.
 - **The state is the leading mark** — a spinning green ring while working, amber z's while idle, a red dot when unreachable. Point at it for the words: how long it has been idle, or what went wrong.
 - **The rest is one hover away** — pointing at a row gives the full chat title, where the pane is, and what it runs on (`SSH`, `WSL`, `PowerShell`, `cmd`).
 - **A badge that means something** — the button counts the agents **working right now**, not how many you have open. No badge means every agent is sitting at a prompt.
@@ -234,8 +243,9 @@ Launched a pane in cmd and wanted PowerShell — or Codex in WSL? Click the pane
 - **Pick a shell** — a Local Repo terminal on Windows lists **Command Prompt**, **PowerShell**, **WSL**, and every detected distro. The pane restarts in place, same slot, same title, in the directory the old shell was sitting in.
 - **Pick an agent** — each shell row's chevron opens **Plain shell** plus every agent, each under its own icon and brand colour, so "this pane, but Codex in WSL" is one click. SSH panes and non-Windows hosts get that list flat.
 - **Give it GridVibe tools** — agents that support MCP carry an **MCP** button beside their row: the row starts the agent plainly, the button starts it with GridVibe's own tools. Works on SSH panes as well as local ones.
+- **Or tools in override mode** — the **Override** button beside **MCP** relaunches the agent with its tools in [override mode](#gridvibe-tools-mcp), after the same warning the launcher shows. **MCP** takes the grant off again and keeps the tools.
 - **Update an agent in one press** — the arrow icon beside each agent row runs that agent's own update command (`claude update`, `codex update`, `opencode upgrade`, …) in the pane, then starts the agent.
-- **The pane says which it is** — a pane running with GridVibe tools draws a frame around the agent's icon in its header, and keeps it across a save and restore. Relaunching it plainly takes the frame off.
+- **The pane says which it is** — a pane running with GridVibe tools draws a frame around the agent's icon in its header, red in override mode, and keeps it across a save and restore. Relaunching it plainly takes the frame off.
 - **Plain shell** drops a running agent and comes back to an ordinary prompt. Picking whatever is already checked relaunches it too.
 - **A missing agent never touches your pane** — GridVibe runs the same install check against that row's own target, and answers with a message (*OpenAI Codex CLI is missing in WSL Ubuntu.*) instead of relaunching.
 - **Auto mode and GridVibe tools follow the agent**, not the pane: relaunch the same agent under another shell and they stay on; move to a different agent and they start from its plain launch.

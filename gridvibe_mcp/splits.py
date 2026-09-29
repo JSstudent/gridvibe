@@ -14,7 +14,8 @@ what it wants, the page that can measure the pane claims it and runs
 
 Three honest outcomes, the same shape ``windows.py`` has:
 
-* ``split`` -- it happened, and the result names the new pane.
+* ``split`` -- it happened, and the result names the new pane. A ``note`` says
+  what the page could not finish about it, when it says anything.
 * ``refused`` -- GridVibe's own sentence, and the axis that *would* have worked
   if either does. Never a retry on the other axis: an agent that asked for a
   side-by-side split and silently got a stacked one has been lied to.
@@ -55,9 +56,11 @@ DEFAULT_POLL_SECONDS = 0.5
 #: Said after ``no_window_available``: the pane is untouched, and the reader
 #: needs to know the split did not half-happen.
 NO_PAGE_HINT = (
-    "No GridVibe window was open to perform the split. The panes and the "
-    "workspace are untouched. Splitting needs an open GridVibe window "
-    "(native mode); ask the person running GridVibe to open the workspace."
+    "No GridVibe window performed the split. The panes and the workspace are "
+    "untouched. Splitting needs a native-mode GridVibe window on the workspace "
+    "holding this pane that is open and visible, not minimized or hidden. "
+    "Whichever session tab it shows does not matter; ask the person running "
+    "GridVibe to open or restore it."
 )
 
 #: Said instead when the wait ended with the *poll* unreadable rather than the
@@ -67,7 +70,7 @@ NO_PAGE_HINT = (
 UNREADABLE_HINT = (
     "GridVibe could not be reached while waiting for the split to settle "
     "({error}), so what happened is not known here: the request was recorded, "
-    "and a page may have performed it. Read the group with list_panes before "
+    "and a page may have performed it. Read the session with list_panes before "
     "asking for the split again."
 )
 
@@ -77,7 +80,7 @@ UNREADABLE_HINT = (
 TASK_NOT_HANDED_HINT = (
     "The task was not handed to anyone: no pane was created to receive it. "
     "launch_panes with a 'task' on an agent pane needs no open window, if a "
-    "new session group is acceptable."
+    "new session (tab) is acceptable."
 )
 
 
@@ -165,6 +168,11 @@ def split_pane(
         }
         if result:
             payload["pane"] = result
+        # The pane exists; a page that could not finish something about it (its
+        # place in the layout was not saved) says so, and the sentence is
+        # relayed as it was written rather than dropped with the success.
+        if detail:
+            payload["note"] = detail
         # Bound to the new pane and waiting for its agent to start; list_panes
         # says when that agent has read it.
         handoff = _handoff_state(intent, "waiting")

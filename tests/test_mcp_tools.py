@@ -3,12 +3,8 @@
 Four things are pinned here, and each is a property of the build rather than
 of a code path:
 
-- **The registered surface is exactly sixteen**, and the tiers that reach an
-  existing pane hold exactly three -- two that replace what it is, one that
-  erases what it has drawn. The destroy tier is *absent from the build*, not
-  flag-gated: a tool that does not exist cannot be talked into running by a
-  file an agent reads. The test names those tools so that adding one has to be
-  a deliberate edit here too.
+- **The registered surface is exactly twenty-five**, including three close
+  tools. Arbitrary terminal input has no tool, and the tier order is pinned.
 - **Argument validation happens before any HTTP.** The refusals run against an
   opener that raises if it is ever opened, so a passing test means nothing left
   the process.
@@ -32,15 +28,18 @@ if str(PROJECT_ROOT) not in sys.path:
 import tests  # noqa: E402,F401 - redirects durable state away from the real files
 from gridvibe_mcp import splits as splits_module  # noqa: E402
 from gridvibe_mcp import windows as windows_module  # noqa: E402
-from gridvibe_mcp.identity import read_identity  # noqa: E402
+from gridvibe_mcp.identity import DEFAULT_MAX_AGENT_DEPTH, read_identity  # noqa: E402
 from gridvibe_mcp.server import (  # noqa: E402
+    CLOSE_TOOLS,
     CREATE_TOOLS,
     DISPLAY_TOOLS,
     HANDBACK_TOOLS,
     LAYOUTS,
+    NAVIGATION_TOOLS,
     PANE_MODES,
     READ_TOOLS,
     RELAUNCH_TOOLS,
+    SAVE_TOOLS,
     dispatch,
     tool_names,
     tool_specs,
@@ -59,17 +58,20 @@ from web.window_intents import CLAIM_TTL_SECONDS, INTENT_TTL_SECONDS  # noqa: E4
 #: Every tool this phase deliberately does not build. Naming them is the point:
 #: an accidental re-addition has to fail a test that says why it is absent.
 ABSENT_TOOLS = (
-    "close_pane",
-    "close_group",
-    "close_workspace",
     "set_pane_shell",
-    "move_group",
     # `clear_pane` is not this one wearing a different name: the only bytes it
     # puts on a shell's stdin are GridVibe's own clear command, chosen by the
     # window that knows the pane's shell family, and no tool argument reaches
     # them.
     "send_input",
 )
+
+#: Codex abandons a tool call after this long (gridvibe_mcp/README.md), so an
+#: answer arriving later is never seen.
+CODEX_TOOL_TIMEOUT_SECONDS = 60.0
+
+#: A pane stamped exactly at the depth budget, derived so the tests follow the default.
+AT_LIMIT = str(DEFAULT_MAX_AGENT_DEPTH)
 
 INSIDE_PANE = {
     "GRIDVIBE_URL": "http://127.0.0.1:5050",
@@ -91,8 +93,9 @@ class RefusingOpener:
 
 
 class ToolSurfaceTestCase(unittest.TestCase):
-    def test_the_registered_surface_is_exactly_sixteen(self):
-        """Seven read, two hand back, four create, two replace, one erases.
+    def test_the_registered_surface_is_exactly_twenty_five(self):
+        """Eight read, two hand back, four create, two replace, one erases,
+        four navigate, one saves.
 
         The last two tiers are the only things in this surface that end
         anything, and what bounds them is the gates on GridVibe's own routes
@@ -103,13 +106,16 @@ class ToolSurfaceTestCase(unittest.TestCase):
         """
         names = tool_names()
 
-        self.assertEqual(len(names), 16)
-        self.assertEqual(names[:7], list(READ_TOOLS))
+        self.assertEqual(len(names), 25)
+        self.assertEqual(names[:8], list(READ_TOOLS))
         self.assertEqual(READ_TOOLS[-1], "read_handoff")
-        self.assertEqual(names[7:9], list(HANDBACK_TOOLS))
-        self.assertEqual(names[9:13], list(CREATE_TOOLS))
-        self.assertEqual(names[13:15], list(RELAUNCH_TOOLS))
-        self.assertEqual(names[15:], list(DISPLAY_TOOLS))
+        self.assertEqual(names[8:10], list(HANDBACK_TOOLS))
+        self.assertEqual(names[10:14], list(CREATE_TOOLS))
+        self.assertEqual(names[14:16], list(RELAUNCH_TOOLS))
+        self.assertEqual(names[16:17], list(DISPLAY_TOOLS))
+        self.assertEqual(names[17:21], list(NAVIGATION_TOOLS))
+        self.assertEqual(names[21:22], list(SAVE_TOOLS))
+        self.assertEqual(names[22:], list(CLOSE_TOOLS))
 
     def test_the_layout_enum_is_the_set_gridvibe_actually_accepts(self):
         """`stack` was never a GridVibe layout, and the two that are were
@@ -179,7 +185,7 @@ class ToolSurfaceTestCase(unittest.TestCase):
         # Not the absent `send_input` under another name.
         self.assertIn("not a way to type into a terminal", spec["description"])
 
-    def test_the_destroy_tier_is_absent_from_the_build(self):
+    def test_arbitrary_terminal_input_is_absent_from_the_build(self):
         names = set(tool_names())
 
         for absent in ABSENT_TOOLS:
@@ -188,7 +194,7 @@ class ToolSurfaceTestCase(unittest.TestCase):
 
     def test_no_tool_can_ask_gridvibe_to_forget_a_workspace(self):
         # `?forget=true` is never a tool argument in any phase.
-        self.assertNotIn("forget", json.dumps(tool_specs()).lower())
+        self.assertTrue(all("forget" not in spec["inputSchema"]["properties"] for spec in tool_specs()))
 
     def test_every_tool_publishes_a_closed_schema(self):
         for spec in tool_specs():
@@ -201,13 +207,13 @@ class ToolSurfaceTestCase(unittest.TestCase):
 
     def test_an_unknown_tool_is_reported_not_raised(self):
         result = dispatch(
-            "close_workspace",
+            "send_input",
             {},
             client=client_for(RefusingOpener(self)),
             identity=read_identity(INSIDE_PANE),
         )
 
-        self.assertIn("close_workspace", result["error"])
+        self.assertIn("send_input", result["error"])
         self.assertEqual(result["kind"], "unknown_tool")
 
 
@@ -453,12 +459,12 @@ class LaunchRequestTestCase(unittest.TestCase):
             "launch_panes",
             {"panes": [{"kind": "agent", "agent": "claude"}]},
             client=client_for(opener),
-            identity=read_identity({**INSIDE_PANE, "GRIDVIBE_AGENT_DEPTH": "2"}),
+            identity=read_identity({**INSIDE_PANE, "GRIDVIBE_AGENT_DEPTH": AT_LIMIT}),
         )
 
         self.assertEqual(result["kind"], "depth_limit")
-        self.assertEqual(result["agent_depth"], 2)
-        self.assertIn("2", result["error"])
+        self.assertEqual(result["agent_depth"], DEFAULT_MAX_AGENT_DEPTH)
+        self.assertIn(AT_LIMIT, result["error"])
         # Refused here, so nothing was asked of GridVibe.
         self.assertEqual(opener.requests, [])
 
@@ -495,7 +501,8 @@ class WhoamiTestCase(unittest.TestCase):
         )
 
         self.assertTrue(result["inside_gridvibe"])
-        self.assertEqual(result["session_id"], "pane-1")
+        self.assertEqual(result["pane_id"], "pane-1")
+        self.assertNotIn("session_id", result)
         self.assertEqual(result["workspace_id"], "ws-1")
         # Where the pane is *now*, which is what "this directory" means.
         self.assertEqual(result["directory"], "C:/project/src")
@@ -570,11 +577,11 @@ class WhoamiTestCase(unittest.TestCase):
             "whoami",
             {},
             client=client_for(StubOpener([{"session_id": "pane-1"}])),
-            identity=read_identity({**INSIDE_PANE, "GRIDVIBE_AGENT_DEPTH": "2"}),
+            identity=read_identity({**INSIDE_PANE, "GRIDVIBE_AGENT_DEPTH": AT_LIMIT}),
         )
 
         self.assertFalse(result["may_launch_panes"])
-        self.assertIn("2", result["launch_refusal"])
+        self.assertIn(AT_LIMIT, result["launch_refusal"])
         # ...and told, in the same answer, what it may still do. The budget
         # bounds agents, so only a split that *starts* one costs it -- an agent
         # reading `may_launch_panes: false` alone concluded it could create
@@ -642,10 +649,11 @@ class WindowModeTestCase(unittest.TestCase):
         ])
         slept = []
 
+        # No group: with one, a second step asks the page to show it, which
+        # `NativeActivationTestCase` pins.
         result = open_window(
             client_for(opener),
             "ws-2",
-            "g-2",
             sleep=slept.append,
             monotonic=lambda: 0.0,
         )
@@ -901,8 +909,11 @@ class PanePositionTestCase(unittest.TestCase):
 
         self.assertIsNone(result["panes"][0]["index"])
         self.assertNotIn("layout", result)
-        # One request: nothing was asked about an arrangement nobody named.
-        self.assertEqual(len(opener.requests), 1)
+        # Nothing was asked about an arrangement nobody named; the only other
+        # read is the workspace's tab names.
+        urls = [request.full_url for request in opener.requests]
+        self.assertFalse(any("/api/panes/layout" in url for url in urls))
+        self.assertTrue(urls[1].endswith("/api/session-groups?workspace_id=ws-9"))
 
     def test_a_geometry_read_that_failed_still_answers_with_the_panes(self):
         """An agent asking what is open gets the panes, minus what was not read.
@@ -1208,6 +1219,68 @@ class SavedLayoutTestCase(unittest.TestCase):
         self.assertEqual(result["truncated_at"], MAX_SAVED_LAYOUTS)
 
 
+class SaveGroupLayoutTestCase(unittest.TestCase):
+    def test_saved_shape_is_projected_without_connection_or_paths(self):
+        opener = StubOpener([{
+            "saved": True,
+            "id": "layout-1",
+            "name": "Review",
+            "group_id": "group-1",
+            "workspace_id": "default",
+            "password": "secret",
+            "shape": {
+                "layout": "horizontal",
+                "pane_count": 2,
+                "workspace_layout": {
+                    "split_slot_rects": [{"x": 1, "y": 1, "w": 1, "h": 1}],
+                    "password": "secret",
+                },
+                "panes": [
+                    {"startup_mode": "agent", "shell": "powershell",
+                     "agent_selection": "claude", "directory": "C:/private",
+                     "password": "secret"},
+                    {"startup_mode": "browser", "shell": "cmd",
+                     "agent_selection": "", "url": "https://private"},
+                ],
+            },
+        }])
+        result = dispatch(
+            "save_group_layout",
+            {"group_id": "group-1", "name": "Review", "root_directory": "C:/work"},
+            client=client_for(opener),
+            identity=read_identity(INSIDE_PANE),
+        )
+
+        self.assertTrue(result["saved"])
+        self.assertEqual(result["shape"]["panes"][0]["agent_selection"], "claude")
+        self.assertEqual(result["shape"]["workspace_layout"]["split_slot_rects"][0]["w"], 1)
+        request = opener.requests[0]
+        self.assertTrue(request.full_url.endswith("/api/session-groups/group-1/save-layout"))
+        self.assertEqual(json.loads(request.data), {
+            "name": "Review", "root_directory": "C:/work"
+        })
+        body = json.dumps(result)
+        self.assertNotIn("secret", body)
+        self.assertNotIn("private", body)
+
+    def test_disk_refusal_reports_no_save_and_is_not_retried(self):
+        opener = StubOpener(raises=http_error(503, {
+            "error": "The saved layout could not be written to disk.",
+            "saved": False,
+        }))
+        result = dispatch(
+            "save_group_layout",
+            {"group_id": "group-1", "name": "Review"},
+            client=client_for(opener),
+            identity=read_identity(INSIDE_PANE),
+        )
+
+        self.assertFalse(result["saved"])
+        self.assertFalse(result["changed"])
+        self.assertEqual(result["status"], 503)
+        self.assertEqual(len(opener.requests), 1)
+
+
 class SplitPaneTestCase(unittest.TestCase):
     """The axis is a page decision, so the tool is an intent and a poll."""
 
@@ -1230,20 +1303,20 @@ class SplitPaneTestCase(unittest.TestCase):
         return result, recorded
 
     def test_an_axis_that_is_not_stated_defaults_to_side_by_side(self):
-        _result, recorded = self.split({"session_id": "pane-4"})
+        _result, recorded = self.split({"pane_id": "pane-4"})
 
         self.assertEqual(recorded["axis"], "vertical")
         self.assertEqual(recorded["pane"], {})
 
     def test_the_split_names_the_pane_that_asked_for_it(self):
         """The lineage stamp the relaunch gate later reads."""
-        _result, recorded = self.split({"session_id": "pane-4", "axis": "horizontal"})
+        _result, recorded = self.split({"pane_id": "pane-4", "axis": "horizontal"})
 
         self.assertEqual(recorded["origin_session_id"], "pane-1")
 
     def test_a_split_can_say_what_the_new_pane_runs(self):
         _result, recorded = self.split({
-            "session_id": "pane-4",
+            "pane_id": "pane-4",
             "axis": "horizontal",
             "kind": "agent",
             "agent": "codex",
@@ -1259,14 +1332,14 @@ class SplitPaneTestCase(unittest.TestCase):
         """Not the same as a stated plain terminal: an explorer pane splits off
         a terminal rooted where it is browsing, and only an absent kind means
         "do what the button does"."""
-        _result, recorded = self.split({"session_id": "pane-4"})
+        _result, recorded = self.split({"pane_id": "pane-4"})
 
         self.assertNotIn("kind", recorded["pane"])
 
     def test_an_agent_named_without_the_kind_is_refused(self):
         result = dispatch(
             "split_pane",
-            {"session_id": "pane-4", "agent": "claude"},
+            {"pane_id": "pane-4", "agent": "claude"},
             client=client_for(RefusingOpener(self)),
             identity=read_identity(INSIDE_PANE),
             pane_splitter=lambda *args, **kwargs: self.fail("reached the splitter"),
@@ -1277,7 +1350,7 @@ class SplitPaneTestCase(unittest.TestCase):
     def test_an_agent_pane_with_no_agent_is_refused_before_any_intent(self):
         result = dispatch(
             "split_pane",
-            {"session_id": "pane-4", "kind": "agent"},
+            {"pane_id": "pane-4", "kind": "agent"},
             client=client_for(RefusingOpener(self)),
             identity=read_identity(INSIDE_PANE),
             pane_splitter=lambda *args, **kwargs: self.fail("reached the splitter"),
@@ -1288,7 +1361,7 @@ class SplitPaneTestCase(unittest.TestCase):
     def test_an_axis_that_is_not_one_of_the_two_is_refused(self):
         result = dispatch(
             "split_pane",
-            {"session_id": "pane-4", "axis": "diagonal"},
+            {"pane_id": "pane-4", "axis": "diagonal"},
             client=client_for(RefusingOpener(self)),
             identity=read_identity(INSIDE_PANE),
             pane_splitter=lambda *args, **kwargs: self.fail("reached the splitter"),
@@ -1298,8 +1371,8 @@ class SplitPaneTestCase(unittest.TestCase):
 
     def test_an_agent_at_the_limit_cannot_split_off_another_agent(self):
         result, recorded = self.split(
-            {"session_id": "pane-4", "kind": "agent", "agent": "claude"},
-            environ={**INSIDE_PANE, "GRIDVIBE_AGENT_DEPTH": "2"},
+            {"pane_id": "pane-4", "kind": "agent", "agent": "claude"},
+            environ={**INSIDE_PANE, "GRIDVIBE_AGENT_DEPTH": AT_LIMIT},
         )
 
         self.assertEqual(result["kind"], "depth_limit")
@@ -1308,8 +1381,8 @@ class SplitPaneTestCase(unittest.TestCase):
     def test_an_agent_at_the_limit_may_still_split_off_a_plain_terminal(self):
         """The budget bounds agents, not panes."""
         result, recorded = self.split(
-            {"session_id": "pane-4"},
-            environ={**INSIDE_PANE, "GRIDVIBE_AGENT_DEPTH": "2"},
+            {"pane_id": "pane-4"},
+            environ={**INSIDE_PANE, "GRIDVIBE_AGENT_DEPTH": AT_LIMIT},
         )
 
         self.assertEqual(result["status"], SPLIT)
@@ -1419,7 +1492,7 @@ class DroppedPollTestCase(unittest.TestCase):
 
         result = dispatch(
             "split_pane",
-            {"session_id": "pane-4"},
+            {"pane_id": "pane-4"},
             client=client_for(opener),
             identity=read_identity(INSIDE_PANE),
             pane_splitter=lambda client, session_id, axis, pane, **kwargs: split_pane(
@@ -1480,6 +1553,47 @@ class SplitIntentPollTestCase(unittest.TestCase):
         self.assertEqual(result["axis"], "horizontal")
         self.assertEqual(result["pane"]["session_id"], "pane-9")
 
+    def test_a_split_the_page_could_not_finish_says_so_beside_the_pane(self):
+        """The pane exists, so it is a split; what could not be saved about it
+        is relayed rather than lost with the success."""
+        sentence = (
+            "The pane was created, but its place in the layout could not be "
+            "saved, so it will appear with the default arrangement."
+        )
+        opener = StubOpener([
+            {"intent_id": "s-1", "axis": "vertical", "state": "pending"},
+            {"intent_id": "s-1", "state": "split", "detail": sentence,
+             "result": {"session_id": "pane-9"}},
+        ])
+
+        result = split_pane(
+            client_for(opener),
+            "pane-4",
+            "vertical",
+            sleep=lambda _seconds: None,
+            monotonic=lambda: 0.0,
+        )
+
+        self.assertEqual(result["status"], SPLIT)
+        self.assertEqual(result["pane"]["session_id"], "pane-9")
+        self.assertEqual(result["note"], sentence)
+
+    def test_a_split_with_nothing_to_add_carries_no_note(self):
+        opener = StubOpener([
+            {"intent_id": "s-1", "axis": "vertical", "state": "pending"},
+            {"intent_id": "s-1", "state": "split", "result": {"session_id": "pane-9"}},
+        ])
+
+        result = split_pane(
+            client_for(opener),
+            "pane-4",
+            "vertical",
+            sleep=lambda _seconds: None,
+            monotonic=lambda: 0.0,
+        )
+
+        self.assertNotIn("note", result)
+
     def test_a_pane_too_small_is_refused_with_gridvibes_own_sentence(self):
         sentence = (
             "Side-by-side split needs at least 8 columns in each terminal. "
@@ -1520,6 +1634,55 @@ class SplitIntentPollTestCase(unittest.TestCase):
         self.assertEqual(result["status"], SPLIT_NO_WINDOW)
         self.assertIn("untouched", result["detail"])
 
+    def test_an_expiry_never_says_no_window_was_open(self):
+        """A window can be open and simply not answering -- hidden, minimized --
+        so the sentence names what was missing rather than claiming there was
+        no window at all. Which session tab it shows is not one of the things
+        it needs."""
+        opener = StubOpener([
+            {"intent_id": "s-1", "axis": "vertical", "state": "pending"},
+            {"intent_id": "s-1", "state": "expired"},
+        ])
+
+        result = split_pane(
+            client_for(opener),
+            "pane-4",
+            "vertical",
+            sleep=lambda _seconds: None,
+            monotonic=lambda: 0.0,
+        )
+
+        self.assertEqual(result["status"], SPLIT_NO_WINDOW)
+        self.assertNotIn("was open", result["detail"])
+        self.assertIn("not minimized or hidden", result["detail"])
+        self.assertIn("session tab", result["detail"])
+
+    def test_a_tab_that_could_not_be_shown_is_a_refusal_with_the_pages_reason(self):
+        """A window that exists but would lose work by switching tabs answers
+        for itself. It is a refusal, relayed verbatim, not a missing window."""
+        sentence = (
+            "That pane is in a session tab this window is not showing, so the "
+            "split needs a brief switch to it. An open file in this window has "
+            "unsaved changes, and switching sessions would discard them. Save "
+            "or discard them first. Nothing changed."
+        )
+        opener = StubOpener([
+            {"intent_id": "s-1", "axis": "vertical", "state": "pending"},
+            {"intent_id": "s-1", "state": "refused", "detail": sentence},
+        ])
+
+        result = split_pane(
+            client_for(opener),
+            "pane-4",
+            "vertical",
+            sleep=lambda _seconds: None,
+            monotonic=lambda: 0.0,
+        )
+
+        self.assertEqual(result["status"], REFUSED)
+        self.assertEqual(result["detail"], sentence)
+        self.assertEqual(len(opener.requests), 2)
+
     def test_a_refusal_the_server_decided_never_starts_a_wait(self):
         """An unknown agent is answered by the intent call itself."""
         sentence = "agent must be a known agent CLI"
@@ -1527,7 +1690,7 @@ class SplitIntentPollTestCase(unittest.TestCase):
 
         result = dispatch(
             "split_pane",
-            {"session_id": "pane-4", "kind": "agent", "agent": "nope"},
+            {"pane_id": "pane-4", "kind": "agent", "agent": "nope"},
             client=client_for(opener),
             identity=read_identity(INSIDE_PANE),
         )
@@ -1541,7 +1704,7 @@ class SplitIntentPollTestCase(unittest.TestCase):
 
         result = dispatch(
             "split_pane",
-            {"session_id": "pane-gone"},
+            {"pane_id": "pane-gone"},
             client=client_for(opener),
             identity=read_identity(INSIDE_PANE),
         )
@@ -1638,6 +1801,97 @@ class IntentWaitTestCase(unittest.TestCase):
 
         self.assertEqual(result["status"], OPENED)
 
+    def test_the_budget_sits_under_codex_and_leaves_the_window_step_its_worst_case(self):
+        self.assertLess(windows_module.FOCUS_BUDGET_SECONDS, CODEX_TOOL_TIMEOUT_SECONDS)
+        self.assertGreater(
+            windows_module.FOCUS_BUDGET_SECONDS,
+            INTENT_TTL_SECONDS + CLAIM_TTL_SECONDS,
+        )
+
+    def test_a_focus_whose_both_steps_run_late_answers_inside_the_budget(self):
+        """Window and tab each take the store's worst case: once 70s in total."""
+        ticks, now, rest = self._clock()
+        page = _LateFocusPage(now, claim_after=14.9, report_after=34.9)
+
+        result = open_window(
+            page, "ws1", "g-2", session_id="pane-9",
+            window_mode="native", sleep=rest, monotonic=now,
+        )
+
+        self.assertLess(ticks["now"], CODEX_TOOL_TIMEOUT_SECONDS)
+        self.assertLessEqual(
+            ticks["now"],
+            windows_module.FOCUS_BUDGET_SECONDS + windows_module.DEFAULT_POLL_SECONDS,
+        )
+        self.assertEqual(result["status"], NO_WINDOW_AVAILABLE)
+        self.assertTrue(result["window_raised"])
+        self.assertFalse(result["group_activated"])
+        self.assertTrue(result["activation_pending"])
+        self.assertIn("still switching", result["detail"])
+        self.assertIn("may still switch", result["detail"])
+
+    def test_an_unclaimed_tab_step_cut_short_is_not_called_a_page_switching(self):
+        ticks, now, rest = self._clock()
+        page = _LateFocusPage(now, claim_after=30.0, report_after=34.9)
+
+        result = open_window(
+            page, "ws1", "g-2", window_mode="native", sleep=rest, monotonic=now
+        )
+
+        self.assertTrue(result["activation_pending"])
+        self.assertIn("had yet taken", result["detail"])
+
+    def test_a_tab_step_that_answers_within_the_budget_is_still_opened(self):
+        ticks, now, rest = self._clock()
+        page = _LateFocusPage(now, claim_after=5.0, report_after=15.0)
+
+        result = open_window(
+            page, "ws1", "g-2", window_mode="native", sleep=rest, monotonic=now
+        )
+
+        self.assertEqual(result["status"], OPENED)
+        self.assertTrue(result["group_activated"])
+        self.assertNotIn("activation_pending", result)
+
+
+class _LateFocusPage:
+    """Both focus steps, each taking as long as it is told to.
+
+    Every intent is timed from when it was recorded, so the activate intent
+    starts its own clock only once the window step has answered.
+    """
+
+    def __init__(self, clock, claim_after, report_after):
+        self.clock = clock
+        self.claim_after = claim_after
+        self.report_after = report_after
+        self.recorded = {}
+
+    def health(self):
+        return {"window_mode": "native"}
+
+    def open_window_intent(self, workspace_id, group_id=""):
+        self.recorded["w-1"] = self.clock()
+        return {"intent_id": "w-1", "state": "pending"}
+
+    def activate_intent(self, workspace_id, group_id, session_id=""):
+        self.recorded["a-1"] = self.clock()
+        return {"intent_id": "a-1", "state": "pending"}
+
+    def read_window_intent(self, intent_id):
+        age = self.clock() - self.recorded[intent_id]
+        if age >= self.report_after:
+            if intent_id == "w-1":
+                return {"intent_id": intent_id, "state": OPENED}
+            return {
+                "intent_id": intent_id,
+                "state": "activated",
+                "result": {"active_group_id": "g-2", "pane_visible": True, "focused": True},
+            }
+        if age >= self.claim_after:
+            return {"intent_id": intent_id, "state": "claimed"}
+        return {"intent_id": intent_id, "state": "pending"}
+
 
 class SetPaneAgentTestCase(unittest.TestCase):
     """The one verb that ends a process, and what the tool refuses itself."""
@@ -1658,7 +1912,7 @@ class SetPaneAgentTestCase(unittest.TestCase):
         return result, opener
 
     def test_the_request_names_the_pane_asking_and_the_agent(self):
-        result, opener = self.relaunch({"session_id": "pane-4", "agent": "claude"})
+        result, opener = self.relaunch({"pane_id": "pane-4", "agent": "claude"})
 
         body = json.loads(opener.requests[0].data.decode("utf-8"))
         self.assertEqual(body["requested_by_session_id"], "pane-1")
@@ -1670,7 +1924,7 @@ class SetPaneAgentTestCase(unittest.TestCase):
 
     def test_an_unstated_mcp_or_shell_is_left_out_of_the_body(self):
         """Each dimension is a tri-state, exactly as the route reads it."""
-        _result, opener = self.relaunch({"session_id": "pane-4", "agent": "claude"})
+        _result, opener = self.relaunch({"pane_id": "pane-4", "agent": "claude"})
 
         body = json.loads(opener.requests[0].data.decode("utf-8"))
         self.assertNotIn("mcp", body)
@@ -1678,7 +1932,7 @@ class SetPaneAgentTestCase(unittest.TestCase):
 
     def test_a_stated_mcp_and_shell_travel(self):
         _result, opener = self.relaunch({
-            "session_id": "pane-4", "agent": "claude", "mcp": True, "shell": "wsl",
+            "pane_id": "pane-4", "agent": "claude", "mcp": True, "shell": "wsl",
         })
 
         body = json.loads(opener.requests[0].data.decode("utf-8"))
@@ -1687,14 +1941,14 @@ class SetPaneAgentTestCase(unittest.TestCase):
 
     def test_an_unstated_override_is_left_out_of_the_body(self):
         """Absent, not `False` -- the server's own default is the same thing."""
-        _result, opener = self.relaunch({"session_id": "pane-4", "agent": "claude"})
+        _result, opener = self.relaunch({"pane_id": "pane-4", "agent": "claude"})
 
         body = json.loads(opener.requests[0].data.decode("utf-8"))
         self.assertNotIn("override", body)
 
     def test_a_stated_override_travels(self):
         _result, opener = self.relaunch({
-            "session_id": "pane-4", "agent": "claude", "override": True,
+            "pane_id": "pane-4", "agent": "claude", "override": True,
         })
 
         body = json.loads(opener.requests[0].data.decode("utf-8"))
@@ -1704,7 +1958,7 @@ class SetPaneAgentTestCase(unittest.TestCase):
         """The lineage gate compares against a caller, and there is none."""
         result = dispatch(
             "set_pane_agent",
-            {"session_id": "pane-4", "agent": "claude"},
+            {"pane_id": "pane-4", "agent": "claude"},
             client=client_for(RefusingOpener(self)),
             identity=read_identity({"GRIDVIBE_URL": "http://127.0.0.1:5050"}),
         )
@@ -1715,7 +1969,7 @@ class SetPaneAgentTestCase(unittest.TestCase):
     def test_a_request_with_no_agent_is_refused_before_any_http(self):
         result = dispatch(
             "set_pane_agent",
-            {"session_id": "pane-4"},
+            {"pane_id": "pane-4"},
             client=client_for(RefusingOpener(self)),
             identity=read_identity(INSIDE_PANE),
         )
@@ -1725,9 +1979,9 @@ class SetPaneAgentTestCase(unittest.TestCase):
     def test_an_agent_at_the_limit_cannot_relaunch_a_pane_into_an_agent(self):
         result = dispatch(
             "set_pane_agent",
-            {"session_id": "pane-4", "agent": "claude"},
+            {"pane_id": "pane-4", "agent": "claude"},
             client=client_for(RefusingOpener(self)),
-            identity=read_identity({**INSIDE_PANE, "GRIDVIBE_AGENT_DEPTH": "2"}),
+            identity=read_identity({**INSIDE_PANE, "GRIDVIBE_AGENT_DEPTH": AT_LIMIT}),
         )
 
         self.assertEqual(result["kind"], "depth_limit")
@@ -1741,7 +1995,7 @@ class SetPaneAgentTestCase(unittest.TestCase):
 
         result = dispatch(
             "set_pane_agent",
-            {"session_id": "pane-4", "agent": "claude"},
+            {"pane_id": "pane-4", "agent": "claude"},
             client=client_for(opener),
             identity=read_identity(INSIDE_PANE),
         )
@@ -1771,7 +2025,7 @@ class SetPaneModeTestCase(unittest.TestCase):
         return result, opener
 
     def test_the_request_names_the_pane_asking_and_the_mode(self):
-        result, opener = self.switch({"session_id": "pane-4", "mode": "explorer"})
+        result, opener = self.switch({"pane_id": "pane-4", "mode": "explorer"})
 
         body = json.loads(opener.requests[0].data.decode("utf-8"))
         self.assertEqual(body["requested_by_session_id"], "pane-1")
@@ -1783,7 +2037,7 @@ class SetPaneModeTestCase(unittest.TestCase):
 
     def test_an_explorer_with_no_directory_asks_where_the_pane_is_standing(self):
         """What the header's own toggle asks for, stated rather than assumed."""
-        _result, opener = self.switch({"session_id": "pane-4", "mode": "explorer"})
+        _result, opener = self.switch({"pane_id": "pane-4", "mode": "explorer"})
 
         body = json.loads(opener.requests[0].data.decode("utf-8"))
         self.assertTrue(body["refresh_cwd"])
@@ -1792,7 +2046,7 @@ class SetPaneModeTestCase(unittest.TestCase):
     def test_a_stated_directory_replaces_the_probe(self):
         """A caller that named a root has already answered the question."""
         _result, opener = self.switch({
-            "session_id": "pane-4", "mode": "explorer", "directory": "/srv/app/web",
+            "pane_id": "pane-4", "mode": "explorer", "directory": "/srv/app/web",
         })
 
         body = json.loads(opener.requests[0].data.decode("utf-8"))
@@ -1801,14 +2055,14 @@ class SetPaneModeTestCase(unittest.TestCase):
 
     def test_a_terminal_switch_probes_nothing(self):
         """Leaving explorer mode reads the browsed folder, not the shell."""
-        _result, opener = self.switch({"session_id": "pane-4", "mode": "terminal"})
+        _result, opener = self.switch({"pane_id": "pane-4", "mode": "terminal"})
 
         body = json.loads(opener.requests[0].data.decode("utf-8"))
         self.assertNotIn("refresh_cwd", body)
 
     def test_a_browser_pane_carries_its_url(self):
         _result, opener = self.switch({
-            "session_id": "pane-4", "mode": "browser", "url": "http://localhost:5050",
+            "pane_id": "pane-4", "mode": "browser", "url": "http://localhost:5050",
         })
 
         body = json.loads(opener.requests[0].data.decode("utf-8"))
@@ -1817,7 +2071,7 @@ class SetPaneModeTestCase(unittest.TestCase):
     def test_a_browser_pane_with_no_url_is_refused_before_any_http(self):
         result = dispatch(
             "set_pane_mode",
-            {"session_id": "pane-4", "mode": "browser"},
+            {"pane_id": "pane-4", "mode": "browser"},
             client=client_for(RefusingOpener(self)),
             identity=read_identity(INSIDE_PANE),
         )
@@ -1829,7 +2083,7 @@ class SetPaneModeTestCase(unittest.TestCase):
         """Silently dropping it would open an explorer and report success."""
         result = dispatch(
             "set_pane_mode",
-            {"session_id": "pane-4", "mode": "explorer", "url": "http://x"},
+            {"pane_id": "pane-4", "mode": "explorer", "url": "http://x"},
             client=client_for(RefusingOpener(self)),
             identity=read_identity(INSIDE_PANE),
         )
@@ -1840,7 +2094,7 @@ class SetPaneModeTestCase(unittest.TestCase):
     def test_an_unknown_mode_is_refused_before_any_http(self):
         result = dispatch(
             "set_pane_mode",
-            {"session_id": "pane-4", "mode": "agent"},
+            {"pane_id": "pane-4", "mode": "agent"},
             client=client_for(RefusingOpener(self)),
             identity=read_identity(INSIDE_PANE),
         )
@@ -1852,7 +2106,7 @@ class SetPaneModeTestCase(unittest.TestCase):
     def test_a_missing_mode_is_refused_before_any_http(self):
         result = dispatch(
             "set_pane_mode",
-            {"session_id": "pane-4"},
+            {"pane_id": "pane-4"},
             client=client_for(RefusingOpener(self)),
             identity=read_identity(INSIDE_PANE),
         )
@@ -1860,14 +2114,14 @@ class SetPaneModeTestCase(unittest.TestCase):
         self.assertEqual(result["kind"], "invalid_arguments")
 
     def test_an_unstated_override_is_left_out_of_the_body(self):
-        _result, opener = self.switch({"session_id": "pane-4", "mode": "explorer"})
+        _result, opener = self.switch({"pane_id": "pane-4", "mode": "explorer"})
 
         body = json.loads(opener.requests[0].data.decode("utf-8"))
         self.assertNotIn("override", body)
 
     def test_a_stated_override_travels(self):
         _result, opener = self.switch({
-            "session_id": "pane-4", "mode": "explorer", "override": True,
+            "pane_id": "pane-4", "mode": "explorer", "override": True,
         })
 
         body = json.loads(opener.requests[0].data.decode("utf-8"))
@@ -1879,9 +2133,9 @@ class SetPaneModeTestCase(unittest.TestCase):
 
         result = dispatch(
             "set_pane_mode",
-            {"session_id": "pane-4", "mode": "explorer"},
+            {"pane_id": "pane-4", "mode": "explorer"},
             client=client_for(opener),
-            identity=read_identity({**INSIDE_PANE, "GRIDVIBE_AGENT_DEPTH": "2"}),
+            identity=read_identity({**INSIDE_PANE, "GRIDVIBE_AGENT_DEPTH": AT_LIMIT}),
         )
 
         self.assertNotIn("error", result)
@@ -1890,7 +2144,7 @@ class SetPaneModeTestCase(unittest.TestCase):
     def test_an_agent_outside_gridvibe_owns_no_panes_and_is_refused(self):
         result = dispatch(
             "set_pane_mode",
-            {"session_id": "pane-4", "mode": "explorer"},
+            {"pane_id": "pane-4", "mode": "explorer"},
             client=client_for(RefusingOpener(self)),
             identity=read_identity({"GRIDVIBE_URL": "http://127.0.0.1:5050"}),
         )
@@ -1908,7 +2162,7 @@ class SetPaneModeTestCase(unittest.TestCase):
 
         result = dispatch(
             "set_pane_mode",
-            {"session_id": "pane-4", "mode": "explorer"},
+            {"pane_id": "pane-4", "mode": "explorer"},
             client=client_for(opener),
             identity=read_identity(INSIDE_PANE),
         )
@@ -1937,7 +2191,7 @@ class ClearPaneTestCase(unittest.TestCase):
         return result, opener
 
     def test_the_request_names_the_pane_asking_and_nothing_else(self):
-        result, opener = self.clear({"session_id": "pane-4"})
+        result, opener = self.clear({"pane_id": "pane-4"})
 
         body = json.loads(opener.requests[0].data.decode("utf-8"))
         self.assertEqual(body, {"requested_by_session_id": "pane-1"})
@@ -1946,7 +2200,7 @@ class ClearPaneTestCase(unittest.TestCase):
 
     def test_the_answer_keeps_the_purge_and_the_request_apart(self):
         """One is a fact about GridVibe, the other is what windows were told."""
-        result, _opener = self.clear({"session_id": "pane-4"})
+        result, _opener = self.clear({"pane_id": "pane-4"})
 
         self.assertTrue(result["buffer_purged"])
         self.assertTrue(result["display_reset_requested"])
@@ -1965,13 +2219,13 @@ class ClearPaneTestCase(unittest.TestCase):
         self.assertEqual(result["kind"], "invalid_arguments")
 
     def test_an_unstated_override_is_left_out_of_the_body(self):
-        _result, opener = self.clear({"session_id": "pane-4"})
+        _result, opener = self.clear({"pane_id": "pane-4"})
 
         body = json.loads(opener.requests[0].data.decode("utf-8"))
         self.assertNotIn("override", body)
 
     def test_a_stated_override_travels(self):
-        _result, opener = self.clear({"session_id": "pane-4", "override": True})
+        _result, opener = self.clear({"pane_id": "pane-4", "override": True})
 
         body = json.loads(opener.requests[0].data.decode("utf-8"))
         self.assertTrue(body["override"])
@@ -1979,7 +2233,7 @@ class ClearPaneTestCase(unittest.TestCase):
     def test_an_agent_outside_gridvibe_owns_no_panes_and_is_refused(self):
         result = dispatch(
             "clear_pane",
-            {"session_id": "pane-4"},
+            {"pane_id": "pane-4"},
             client=client_for(RefusingOpener(self)),
             identity=read_identity({"GRIDVIBE_URL": "http://127.0.0.1:5050"}),
         )
@@ -1996,7 +2250,7 @@ class ClearPaneTestCase(unittest.TestCase):
 
         result = dispatch(
             "clear_pane",
-            {"session_id": "pane-4"},
+            {"pane_id": "pane-4"},
             client=client_for(opener),
             identity=read_identity(INSIDE_PANE),
         )

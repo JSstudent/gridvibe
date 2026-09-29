@@ -71,6 +71,32 @@
         return total + Math.max(0, span - 1) * gap;
     }
 
+    /* Move one shared grid line to a fraction of the measured content box.
+       The adjacent track groups are the pointer drag's own groups, so no
+       unrelated track changes. The page still validates terminal minimums. */
+    function planDividerResize(weights, sizes, gap, groups, lineIndex, position, extent) {
+        if (!Array.isArray(weights) || !Array.isArray(sizes)
+            || weights.length !== sizes.length || !groups
+            || !Number.isInteger(lineIndex) || lineIndex < 1 || lineIndex >= sizes.length
+            || !Number.isFinite(position) || position <= 0 || position >= 1
+            || !Number.isFinite(extent) || extent <= 0) return null;
+        const before = groups.before || [];
+        const after = groups.after || [];
+        if (!before.length || !after.length) return null;
+        const beforeSize = before.reduce((sum, index) => sum + sizes[index], 0);
+        const afterSize = after.reduce((sum, index) => sum + sizes[index], 0);
+        const offset = sizes.slice(0, lineIndex).reduce((sum, size) => sum + size, 0)
+            + Math.max(0, lineIndex - 1) * gap + gap / 2;
+        const delta = position * extent - offset;
+        if (beforeSize + delta <= 0 || afterSize - delta <= 0) return null;
+        const candidate = weights.slice();
+        before.forEach(index => { candidate[index] *= (beforeSize + delta) / beforeSize; });
+        after.forEach(index => { candidate[index] *= (afterSize - delta) / afterSize; });
+        if (candidate.some(value => !Number.isFinite(value)
+            || value < MIN_TRACK_WEIGHT || value > MAX_TRACK_WEIGHT)) return null;
+        return candidate;
+    }
+
     /* Every line strictly inside [start, start + span) that some other
        rectangle begins or ends on — the dividers this split is not allowed to
        move. Offsets are relative to the span, so 1 is the line after its first
@@ -375,6 +401,7 @@
         MIN_TRACK_WEIGHT,
         MAX_TRACK_WEIGHT,
         trackSpan,
+        planDividerResize,
         foreignEdgeOffsets,
         planSplit,
         snapshotGridBox,

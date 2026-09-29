@@ -390,6 +390,32 @@ class SplitGeometryTestCase(unittest.TestCase):
             scripts.index("split-geometry.js"), scripts.index("terminals.js")
         )
 
+    def test_two_divider_moves_make_three_equal_panes(self):
+        result = self._run_node(
+            """
+            const extent = 1200, gap = 8;
+            const groups = line => ({ before: [line - 1], after: [line] });
+            let weights = [1, 1, 1];
+            for (const [line, position] of [[1, 1 / 3], [2, 2 / 3]]) {
+                weights = geometry.planDividerResize(
+                    weights, trackSizes(weights, extent, gap), gap,
+                    groups(line), line, position, extent
+                );
+            }
+            report({
+                sizes: trackSizes(weights, extent, gap),
+                impossible: geometry.planDividerResize(
+                    weights, trackSizes(weights, extent, gap), gap,
+                    groups(1), 1, 0, extent
+                ),
+                untouched: weights
+            });
+            """
+        )
+        self.assertIsNone(result["impossible"])
+        self.assertAlmostEqual(result["sizes"][0], result["sizes"][1], delta=5)
+        self.assertAlmostEqual(result["sizes"][1], result["sizes"][2], delta=5)
+
     def test_a_layout_from_a_coarser_grid_is_rescaled_to_this_builds_unit(self):
         """A six-pane base laid out at two grid units per cell, with one cell
         split once: the split pane's span of 1 is the floor of the integer
@@ -615,6 +641,7 @@ PAGE_SOURCE = "\n\n".join(
         "getSplitGridSize",
         "getResizableGridMetrics",
         "splitSlotSpan",
+        "planSplitSlotGeometryFor",
         "planSplitSlotGeometry",
         "splitSlotRect",
     )
@@ -853,8 +880,10 @@ RESTORE_SOURCE = "\n\n".join(
             "cloneSplitSlotRects",
             "getBaseLayoutSlots",
             "baseLayoutCellShapes",
+            "fixedLayoutRectCoordinates",
             "fixedLayoutSlotRects",
             "rescaleCoarseLayoutSnapshot",
+            "resolveWorkspaceLayoutSnapshot",
             "applyWorkspaceLayoutSnapshot",
             "getSplitBlockers",
             "getSplitCandidates",

@@ -78,6 +78,8 @@ from web.agents import (  # noqa: F401 - re-exported for backwards compatibility
     _select_install_option,
     _shell_single_quote,
     _tcp_probe_target,
+    agent_type_rows,
+    mcp_refusal,
     task_refusal,
 )
 from web.app import (  # noqa: F401 - re-exported for backwards compatibility
@@ -208,13 +210,17 @@ from web.lifecycle import (
     prepare_group_save,
     prepare_lifecycle_action,
     prepare_workspace_save,
+    save_group_layout,
 )
+from web.mcp_close import close_for_agent
 from web.mcp_launch import (  # noqa: F401 - mcp_config_path re-exported for tests
     mcp_config_path,
     server_base_url,
     set_server_address,
     write_mcp_config,
 )
+from web.navigation import NavigationRefusal, move_group_for_agent, resolve_view_target
+from web.pane_directory import resolve_stated_directory
 from web.pane_gates import (
     LINEAGE_GATE,
     MACHINE_GATE,
@@ -406,6 +412,7 @@ from web.workspaces import (
     DEFAULT_WORKSPACE_ID,
     WorkspaceRequestError,
     _redacted_launch_summary,
+    agent_availability_target,
     capacity_refusal,
     close_extra_workspaces,
     close_live_workspace,
@@ -2257,13 +2264,60 @@ def open_window_intent():
     workspace_id = str(data.get("workspace_id") or "").strip()
     if not workspace_id:
         return jsonify({"error": "workspace_id is required"}), 400
-    intent = window_intents.open(workspace_id, data.get("group_id") or "")
+    group_id = str(data.get("group_id") or "").strip()
+    if group_id:
+        # A group another workspace now holds is refused here rather than
+        # opened in the wrong window: the caller read it before it moved.
+        try:
+            resolve_view_target(workspace_id, group_id)
+        except NavigationRefusal as exc:
+            return jsonify(exc.payload()), exc.status_code
+    intent = window_intents.open(workspace_id, group_id)
     logger.info(
         "Window intent %s recorded workspace=%s group=%s mode=%s",
         intent["intent_id"],
         intent["workspace_id"],
         intent["group_id"] or "-",
         window_mode(),
+    )
+    return jsonify(intent), 201
+
+
+@app.route('/api/windows/activate', methods=['POST'])
+def activate_window_intent():
+    """Store one "show this session tab, and focus this pane" intent.
+
+    Raising a window does not change which tab it shows, so this is the half
+    only the page holding the group can do. The ids are resolved against the
+    live registry first: a pane names its group and a group its workspace, and
+    a stated id that disagrees is a stale read, refused before anything is
+    recorded.
+    """
+    data = request.get_json(silent=True) or {}
+    try:
+        target = resolve_view_target(
+            data.get("workspace_id") or "",
+            data.get("group_id") or "",
+            data.get("session_id") or "",
+        )
+    except NavigationRefusal as exc:
+        return jsonify(exc.payload()), exc.status_code
+    if not target.group_id:
+        return jsonify({
+            "error": "A session group or pane has to be named to show it.",
+            "changed": False,
+        }), 400
+    intent = window_intents.open_activation(
+        target.workspace_id,
+        target.group_id,
+        target.session_id,
+    )
+    logger.info(
+        "Activate intent %s recorded workspace=%s group=%s session=%s",
+        intent["intent_id"],
+        target.workspace_id,
+        target.group_id,
+        target.session_id or "-",
     )
     return jsonify(intent), 201
 
@@ -2297,9 +2351,10 @@ def claim_window_intent(intent_id: str):
 def record_window_intent_result(intent_id: str):
     """The claimant reports what happened.
 
-    `opened` or `blocked` for a window; `split` or `refused` for a split. The
-    store checks the outcome against the intent's own kind, so a page cannot
-    report a window's verb on a pane.
+    `opened` or `blocked` for a window; `split` or `refused` for a split;
+    `activated` or `blocked` for an activation. The store checks the outcome
+    against the intent's own kind, so a page cannot report a window's verb on
+    a pane.
     """
     data = request.get_json(silent=True) or {}
     recorded, payload = window_intents.record_result(
@@ -2451,11 +2506,45 @@ def save_session_group(group_id: str):
     return jsonify(payload), status
 
 
+@app.route('/api/session-groups/<group_id>/save-layout', methods=['POST'])
+def save_session_group_layout(group_id: str):
+    """Save a named reusable layout after the owning page flushes presentation."""
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return jsonify({"saved": False, "error": "A JSON object is required. Nothing was saved."}), 400
+    payload, status = save_group_layout(
+        session_manager,
+        group_id,
+        data.get("name"),
+        data.get("root_directory"),
+        lambda target_id, request_id: socketio.emit(
+            "lifecycle_flush_requested",
+            {"request_id": request_id, "workspace_id": target_id},
+            room=workspace_room(target_id),
+        ),
+    )
+    return jsonify(payload), status
+
+
 @app.route('/api/session-groups/<group_id>/move', methods=['POST'])
 def move_session_group(group_id: str):
     """Move one live session tab to another workspace without restarting it."""
     data = request.get_json(silent=True) or {}
     payload, status = move_group_to_workspace(group_id, data)
+    return jsonify(payload), status
+
+
+@app.route('/api/session-groups/<group_id>/agent-move', methods=['POST'])
+def agent_move_session_group(group_id: str):
+    """The gated twin of the move route, for a tool.
+
+    The launcher's own route checks nobody, because the person dragging the
+    tab is looking at it. This one names the pane asking and passes
+    `web/navigation.py`'s gates -- its own group, a group it created, or the
+    person's `override` -- before the same transaction runs.
+    """
+    data = request.get_json(silent=True) or {}
+    payload, status = move_group_for_agent(group_id, data)
     return jsonify(payload), status
 
 
@@ -2934,6 +3023,27 @@ def agent_preflight():
         return jsonify({"error": str(exc)}), 400
 
 
+@app.route('/api/agent-types', methods=['GET'])
+def get_agent_types():
+    """Every registry agent, and whether it can start where a launch would put it.
+
+    The read behind the ``list_agent_types`` tool. ``origin_session_id`` names
+    the asking pane, whose machine and shell family a launch from it uses;
+    ``shell`` states another local family, refused exactly as the launch would
+    refuse it. Thin: the target is resolved by `web/workspaces.py` and the
+    rows are built by `web/agents.py`. No credential reaches the response.
+    """
+    try:
+        connection_mode, config, described = agent_availability_target(
+            request.args.get("origin_session_id"),
+            request.args.get("shell"),
+        )
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    rows = agent_type_rows(connection_mode, config)
+    return jsonify({"agents": rows, "count": len(rows), "target": described})
+
+
 @app.route('/api/session-targets', methods=['GET'])
 def get_session_targets():
     """Return the distinct connection targets the saved presets already use.
@@ -3271,7 +3381,35 @@ def get_pane_layout():
     )
     payload["group_id"] = group.group_id
     payload["workspace_id"] = group.workspace_id
+    payload["presentation_revision"] = group.presentation_revision
     return jsonify(payload)
+
+
+@app.route('/api/session-groups/<group_id>/resize-intent', methods=['POST'])
+def open_resize_intent(group_id: str):
+    """Record a geometry request; the page measures and persists it."""
+    data = request.get_json(silent=True) or {}
+    axis = data.get("axis")
+    line_index = data.get("line_index")
+    position = data.get("position")
+    revision = data.get("expected_revision")
+    if axis not in ("vertical", "horizontal"):
+        return jsonify({"error": "axis must be vertical or horizontal; nothing changed"}), 400
+    if isinstance(line_index, bool) or not isinstance(line_index, int) or line_index < 1:
+        return jsonify({"error": "line_index must be a positive integer; nothing changed"}), 400
+    if isinstance(position, bool) or not isinstance(position, (int, float)) or not 0 < position < 1:
+        return jsonify({"error": "position must be between 0 and 1; nothing changed"}), 400
+    if isinstance(revision, bool) or not isinstance(revision, int) or revision < 0:
+        return jsonify({"error": "expected_revision must be a non-negative integer; nothing changed"}), 400
+    group = session_manager.get_group(group_id)
+    if not group:
+        return jsonify({"error": "Session group not found; nothing changed"}), 404
+    if revision != group.presentation_revision:
+        return jsonify({"error": "The session layout changed; read list_panes and retry. Nothing changed."}), 409
+    intent = window_intents.open_resize(
+        group.workspace_id, group_id, axis, line_index, float(position), revision,
+    )
+    return jsonify(intent), 201
 
 
 # ==================== Split: what the new pane is ====================
@@ -3324,6 +3462,7 @@ def _split_pane_overrides(source, data: Dict[str, Any]) -> Dict[str, Any]:
                 "custom_agent": "",
                 "agent_auto_mode": False,
                 "agent_mcp": False,
+                "agent_mcp_override": False,
             }
         )
         return overrides
@@ -3340,6 +3479,7 @@ def _split_pane_overrides(source, data: Dict[str, Any]) -> Dict[str, Any]:
                 "custom_agent": "",
                 "agent_auto_mode": False,
                 "agent_mcp": False,
+                "agent_mcp_override": False,
             }
         )
         if local_pane:
@@ -3375,6 +3515,7 @@ def _split_pane_overrides(source, data: Dict[str, Any]) -> Dict[str, Any]:
                 "custom_agent": "",
                 "agent_auto_mode": False,
                 "agent_mcp": False,
+                "agent_mcp_override": False,
                 "host": "Browser",
                 "use_wsl": False,
                 "use_powershell": False,
@@ -3420,6 +3561,11 @@ def _split_pane_overrides(source, data: Dict[str, Any]) -> Dict[str, Any]:
         raise SplitRequestError("auto_mode must be true or false")
     if mcp is not None and not isinstance(mcp, bool):
         raise SplitRequestError("mcp must be true or false")
+    # Refused, not dropped: only a tool states `mcp` on a split, and an agent
+    # it asked to have the tools must not start without them unannounced.
+    mcp_reason = mcp_refusal(agent_key) if mcp is True else ""
+    if mcp_reason:
+        raise SplitRequestError(f"{mcp_reason} No pane was added.")
     overrides.update(
         {
             "startup_mode": "agent",
@@ -3433,6 +3579,9 @@ def _split_pane_overrides(source, data: Dict[str, Any]) -> Dict[str, Any]:
             # reach, and the flag is what paints the header tag and opens a
             # tunnel on an SSH pane.
             "agent_mcp": bool(mcp) and _agent_supports_mcp(agent_key),
+            # Nothing on this route states a grant, and a clone of an
+            # override-mode source must not inherit one.
+            "agent_mcp_override": False,
         }
     )
     return overrides
@@ -3551,6 +3700,18 @@ def open_split_intent(session_id: str):
     except SplitRequestError as exc:
         return jsonify({"error": str(exc)}), 400
 
+    # A stated directory is checked on the source pane's machine now, so a
+    # missing path costs the caller nothing -- and again by the split itself,
+    # because the directory can go while the intent waits for a page.
+    stated_directory = str(data.get("directory") or "").strip()
+    if stated_directory:
+        try:
+            resolve_stated_directory(source, stated_directory)
+        except ValueError as exc:
+            return jsonify({"error": f"{exc} No split was recorded."}), 400
+        except _sftp_request_error_types() as exc:
+            return jsonify({"error": f"{exc} No split was recorded."}), 500
+
     task_text = None
     if data.get("task") is not None:
         try:
@@ -3563,9 +3724,14 @@ def open_split_intent(session_id: str):
     # relaunch gate later cannot be handed a lineage the caller invented.
     split_request = {
         key: data[key]
-        for key in ("kind", "agent", "auto_mode", "mcp", "title", "url", "directory")
+        for key in ("kind", "agent", "auto_mode", "mcp", "title", "url")
         if key in data
     }
+    # Under its own key: the page adds `directory` itself for an explorer
+    # source (the folder the reader is browsing, which stays inside that
+    # explorer's root), and a caller's stated path must not be read as that.
+    if stated_directory:
+        split_request["stated_directory"] = stated_directory
     split_request["axis"] = axis
     try:
         split_request["created_by_session_id"] = _creator_stamp(
@@ -3674,16 +3840,32 @@ def split_session(session_id: str):
         # stated `kind` replaces this anyway, and always has.
         startup_mode = "terminal"
 
-    if _is_explorer_session(source) or _is_browser_session(source):
+    # A directory a caller *stated* wins over where the source is standing,
+    # and is resolved on its own merits on the source's machine -- not through
+    # an explorer source's root, which bounds what that pane browses and says
+    # nothing about where a new pane may start. The root a clone would have
+    # inherited describes the source's place, so a stated path drops it.
+    stated_directory = str(request_data.get("stated_directory") or "").strip()
+    if stated_directory:
         try:
-            directory, root_directory = _resolve_pane_terminal_directory(
-                source,
-                request_data.get("directory", ""),
-            )
+            directory = resolve_stated_directory(source, stated_directory)
         except ValueError as exc:
-            return jsonify({"error": str(exc)}), 400
+            return jsonify({"error": f"{exc} No pane was added."}), 400
         except _sftp_request_error_types() as exc:
-            return jsonify({"error": str(exc)}), 500
+            return jsonify({"error": f"{exc} No pane was added."}), 500
+        root_directory = ""
+
+    if _is_explorer_session(source) or _is_browser_session(source):
+        if not stated_directory:
+            try:
+                directory, root_directory = _resolve_pane_terminal_directory(
+                    source,
+                    request_data.get("directory", ""),
+                )
+            except ValueError as exc:
+                return jsonify({"error": str(exc)}), 400
+            except _sftp_request_error_types() as exc:
+                return jsonify({"error": str(exc)}), 500
         startup_mode = "terminal"
         if source.mode == "wsl":
             # The pane's host label reads "File Explorer"/browser chrome; the new
@@ -3735,7 +3917,7 @@ def split_session(session_id: str):
     if overrides.get("startup_mode") == "explorer":
         # An explorer pane is confined to where the split is rooted, and that
         # boundary is chosen by the caller rather than derived from where a
-        # terminal happened to be standing.
+        # terminal happened to be standing. A stated directory is that choice.
         root_directory = root_directory or directory
 
     title = f"Terminal {len(group_sessions) + 1}"
@@ -4002,6 +4184,13 @@ def clear_session_for_agent(session_id: str):
     return jsonify(payload)
 
 
+@app.route('/api/mcp/close/<kind>/<target_id>', methods=['POST'])
+def close_resource_for_agent(kind: str, target_id: str):
+    """Agent-tool close with whole-target gates and a live ownership check."""
+    payload, status = close_for_agent(kind, target_id, request.get_json(silent=True) or {})
+    return jsonify(payload), status
+
+
 @app.route('/api/sessions/<session_id>', methods=['DELETE'])
 def close_session(session_id: str):
     """Close one pane — the last-pane half of the *Close group* verb.
@@ -4029,12 +4218,16 @@ def close_session(session_id: str):
             # workspace alive with no panes in it and its snapshot
             # unforgettable.
             pruned_workspace_ids = session_manager.clear_disconnected_sessions()
+            closed_group_ids = (
+                [group_id] if group_id not in session_manager.groups else []
+            )
             workspace_id = (
                 group.workspace_id if group else DEFAULT_WORKSPACE_ID
             )
         else:
             pruned_workspace_ids = []
             group_id = ""
+            closed_group_ids = []
             workspace_id = DEFAULT_WORKSPACE_ID
     if not success:
         return jsonify({"error": "Session not found"}), 404
@@ -4048,6 +4241,8 @@ def close_session(session_id: str):
         "session_closed",
         group_id=group_id,
         workspace_id=workspace_id,
+        closed_session_ids=[session_id],
+        closed_group_ids=closed_group_ids,
     )
     for pruned_workspace_id in pruned_workspace_ids:
         if pruned_workspace_id != workspace_id:
@@ -4091,21 +4286,28 @@ def close_all_sessions():
                 close_error = "Session group not found"
                 close_status = 404
             if not close_error:
+                close_failed = False
+                closed_session_ids = []
                 for session in sessions:
-                    session_manager.close_session(session.session_id)
+                    if session_manager.close_session(session.session_id):
+                        closed_session_ids.append(session.session_id)
+                    else:
+                        close_failed = True
                 # Its panes are closed, so the group is empty and the sweep
                 # takes it immediately (MW-06).
                 pruned_workspace_ids = session_manager.clear_disconnected_sessions()
                 closed_workspace_id = (
                     group.workspace_id if group else workspace_id
                 )
-                closed_session_ids = [
-                    session.session_id for session in sessions
-                ]
+                closed_group_ids = (
+                    [group_id] if group_id not in session_manager.groups else []
+                )
             else:
                 pruned_workspace_ids = []
                 closed_workspace_id = workspace_id
                 closed_session_ids = []
+                closed_group_ids = []
+                close_failed = False
         if close_error:
             return jsonify({"error": close_error}), close_status
         for session_id in closed_session_ids:
@@ -4116,9 +4318,11 @@ def close_all_sessions():
         forget_pruned_workspaces(pruned_workspace_ids)
         forget_emptied_default_workspace(closed_workspace_id)
         _broadcast_session_groups_updated(
-            "group_closed",
+            "group_closed" if closed_group_ids else "session_closed",
             group_id=group_id,
             workspace_id=closed_workspace_id,
+            closed_session_ids=closed_session_ids,
+            closed_group_ids=closed_group_ids,
         )
         for pruned_workspace_id in pruned_workspace_ids:
             if pruned_workspace_id != closed_workspace_id:
@@ -4126,20 +4330,48 @@ def close_all_sessions():
                     "workspace_pruned",
                     workspace_id=pruned_workspace_id,
                 )
+        if close_failed:
+            return jsonify({
+                "error": "Session group close was interrupted",
+                "partial": bool(closed_session_ids),
+                "closed_session_ids": closed_session_ids,
+                "closed_group_ids": closed_group_ids,
+            }), 500
         return jsonify({"message": "Session group closed successfully", "group_id": group_id})
 
-    affected_workspace_ids = [
-        workspace.workspace_id
-        for workspace in session_manager.get_all_workspaces()
-        if session_manager.get_workspace_groups(workspace.workspace_id)
-    ] or [DEFAULT_WORKSPACE_ID]
+    affected_close_deltas = {}
+    with session_manager.lock:
+        for workspace in session_manager.workspaces.values():
+            groups = [
+                group
+                for group in session_manager.groups.values()
+                if group.workspace_id == workspace.workspace_id
+            ]
+            if not groups:
+                continue
+            group_ids = [group.group_id for group in groups]
+            affected_close_deltas[workspace.workspace_id] = {
+                "group_ids": group_ids,
+                "session_ids": [
+                    session.session_id
+                    for session in session_manager.sessions.values()
+                    if session.group_id in group_ids
+                ],
+            }
+    if not affected_close_deltas:
+        affected_close_deltas[DEFAULT_WORKSPACE_ID] = {
+            "group_ids": [],
+            "session_ids": [],
+        }
     session_manager.close_all_sessions()
     _close_all_ssh_connections(clear_buffers=True)
     session_manager.reset_sessions()
-    for affected_workspace_id in affected_workspace_ids:
+    for affected_workspace_id, delta in affected_close_deltas.items():
         _broadcast_session_groups_updated(
             "all_closed",
             workspace_id=affected_workspace_id,
+            closed_session_ids=delta["session_ids"],
+            closed_group_ids=delta["group_ids"],
         )
 
     return jsonify({"message": "All sessions closed successfully"})

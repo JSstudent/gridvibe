@@ -131,9 +131,9 @@ class TaskRefusedBeforeHttpTestCase(unittest.TestCase):
         }
         for label, (task, expected) in cases.items():
             for name, arguments in (
-                ("split_pane", {"session_id": "pane-2", "kind": "agent", "agent": "codex", "task": task}),
+                ("split_pane", {"pane_id": "pane-2", "kind": "agent", "agent": "codex", "task": task}),
                 ("launch_panes", {"panes": [{"kind": "agent", "agent": "codex", "task": task}]}),
-                ("set_pane_agent", {"session_id": "pane-2", "agent": "codex", "task": task}),
+                ("set_pane_agent", {"pane_id": "pane-2", "agent": "codex", "task": task}),
             ):
                 with self.subTest(label, tool=name):
                     self.assertIn(expected, self.refuse(name, arguments))
@@ -141,7 +141,7 @@ class TaskRefusedBeforeHttpTestCase(unittest.TestCase):
     def test_a_task_for_a_pane_that_is_not_an_agent(self):
         for kind in ("terminal", "explorer", None):
             with self.subTest(kind=kind):
-                arguments = {"session_id": "pane-2", "task": BRIEF}
+                arguments = {"pane_id": "pane-2", "task": BRIEF}
                 if kind:
                     arguments["kind"] = kind
                 self.assertIn("set kind to 'agent'", self.refuse("split_pane", arguments))
@@ -153,21 +153,21 @@ class TaskRefusedBeforeHttpTestCase(unittest.TestCase):
         )
         self.assertIn(
             "name the agent",
-            self.refuse("set_pane_agent", {"session_id": "pane-2", "agent": "", "task": BRIEF}),
+            self.refuse("set_pane_agent", {"pane_id": "pane-2", "agent": "", "task": BRIEF}),
         )
 
     def test_a_task_beside_mcp_false(self):
         for name, arguments in (
-            ("split_pane", {"session_id": "p", "kind": "agent", "agent": "codex", "mcp": False, "task": BRIEF}),
+            ("split_pane", {"pane_id": "p", "kind": "agent", "agent": "codex", "mcp": False, "task": BRIEF}),
             ("launch_panes", {"panes": [{"kind": "agent", "agent": "codex", "mcp": False, "task": BRIEF}]}),
-            ("set_pane_agent", {"session_id": "p", "agent": "codex", "mcp": False, "task": BRIEF}),
+            ("set_pane_agent", {"pane_id": "p", "agent": "codex", "mcp": False, "task": BRIEF}),
         ):
             with self.subTest(tool=name):
                 self.assertIn("leave 'mcp' out", self.refuse(name, arguments))
 
     def test_a_caller_with_no_pane(self):
         for name, arguments in (
-            ("split_pane", {"session_id": "p", "kind": "agent", "agent": "codex", "task": BRIEF}),
+            ("split_pane", {"pane_id": "p", "kind": "agent", "agent": "codex", "task": BRIEF}),
             ("launch_panes", {"workspace_id": "ws-1", "panes": [{"kind": "agent", "agent": "codex", "task": BRIEF}]}),
         ):
             with self.subTest(tool=name):
@@ -208,7 +208,7 @@ class TaskBodiesTestCase(unittest.TestCase):
         }}])
 
         result = dispatch(
-            "set_pane_agent", {"session_id": "pane-4", "agent": "codex", "task": BRIEF},
+            "set_pane_agent", {"pane_id": "pane-4", "agent": "codex", "task": BRIEF},
             client=client_for(opener), identity=read_identity(INSIDE_PANE),
         )
 
@@ -217,12 +217,15 @@ class TaskBodiesTestCase(unittest.TestCase):
         self.assertTrue(body["mcp"])
         self.assertNotIn("override", body)
         # The pane's handoff comes back as a state, never the text or a path.
-        self.assertEqual(set(result["pane"]["handoff"]), set(HANDOFF_STATE_FIELDS))
+        self.assertEqual(
+            set(result["pane"]["handoff"]),
+            {"from_pane_id" if key == "from_session_id" else key for key in HANDOFF_STATE_FIELDS},
+        )
         self.assertNotIn(BRIEF, json.dumps(result))
 
     def test_an_unstated_task_is_left_out_of_every_body(self):
         opener = StubOpener([{"session_id": "pane-4"}])
-        dispatch("set_pane_agent", {"session_id": "pane-4", "agent": "codex"},
+        dispatch("set_pane_agent", {"pane_id": "pane-4", "agent": "codex"},
                  client=client_for(opener), identity=read_identity(INSIDE_PANE))
         self.assertNotIn("task", json.loads(opener.requests[0].data.decode("utf-8")))
 
@@ -235,7 +238,7 @@ class TaskBodiesTestCase(unittest.TestCase):
 
         result = dispatch(
             "split_pane",
-            {"session_id": "pane-1", "axis": "horizontal", "kind": "agent", "agent": "codex", "task": BRIEF},
+            {"pane_id": "pane-1", "axis": "horizontal", "kind": "agent", "agent": "codex", "task": BRIEF},
             client=client_for(opener), identity=read_identity(INSIDE_PANE),
             pane_splitter=lambda client, session_id, axis, pane, **kw: split_pane(
                 client, session_id, axis, pane, sleep=lambda _s: None, **kw
@@ -317,7 +320,7 @@ class ReadHandoffToolTestCase(unittest.TestCase):
         self.assertTrue(opener.requests[0].full_url.endswith("/api/sessions/pane-1/handoff"))
         self.assertEqual(opener.requests[0].get_method(), "GET")
         self.assertEqual(result["task"], BRIEF)
-        self.assertEqual(result["from"], {"session_id": "pane-0", "title": "Claude 1", "agent": "claude"})
+        self.assertEqual(result["from"], {"pane_id": "pane-0", "title": "Claude 1", "agent": "claude"})
         self.assertTrue(set(result) <= set(HANDOFF_FIELDS))
         self.assertNotIn("leaked", json.dumps(result))
 
@@ -350,14 +353,16 @@ class StructuredRefusalPassthroughTestCase(unittest.TestCase):
             "gate": "mode", "waivable": True, "confirm": confirm, "password": "x",
         }))
 
-        result = dispatch("set_pane_agent", {"session_id": "pane-4", "agent": "codex", "task": BRIEF},
+        result = dispatch("set_pane_agent", {"pane_id": "pane-4", "agent": "codex", "task": BRIEF},
                           client=client_for(opener), identity=read_identity(INSIDE_PANE))
 
         self.assertEqual(result["error"], "[mode gate] This pane is already running an agent.")
         self.assertEqual(result["status"], 403)
         self.assertEqual(result["gate"], "mode")
         self.assertTrue(result["waivable"])
-        self.assertEqual(result["confirm"], confirm)
+        self.assertEqual(result["confirm"], {
+            **confirm, "pane": {"pane_id": "pane-4", "title": "Terminal 3", "index": 2},
+        })
         self.assertNotIn("password", json.dumps(result))
 
     def test_a_plain_refusal_stays_plain(self):

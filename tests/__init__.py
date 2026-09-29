@@ -1,9 +1,10 @@
 """Test-package bootstrap: isolate the suite from production local state.
 
-Importing any test module imports this package first, whichever runner is used
-(``python tests/run_tests.py``, ``python -m unittest tests.test_api``, pytest),
-so it is the one place that can redirect process-wide state before ``web`` is
-imported.
+Package-based runners (``python tests/run_tests.py``,
+``python -m unittest tests.test_api``, pytest) import this package before test
+modules. For top-level ``python -m unittest discover -s tests``, the first
+discovered file, ``test_000_bootstrap.py``, imports it before other tests.
+This redirects process-wide state before ``web`` is imported.
 
 ``web.runtime_state`` resolves its file from ``GRIDVIBE_RUNTIME_STATE_PATH`` at
 import time and refuses the canonical project-local ``runtime_state.json``
@@ -11,6 +12,12 @@ while ``GRIDVIBE_TEST_MODE`` is set. Individual test cases still patch
 ``RUNTIME_STATE_PATH`` for per-test isolation; this guarantees the default is
 never the user's real restore file, and makes a missed patch fail loudly
 instead of silently overwriting their saved workspaces.
+
+``web.saved_sessions`` follows the same rule for ``saved_sessions.json``. A
+test that exercises the real save route without its own path patch uses a
+temporary preset store instead of adding entries to the user's saved sessions.
+The config and encryption key are redirected as well, since tests import the
+key owner and some exercise the real App Settings route.
 
 ``.gridvibe_mcp.json`` is redirected the same way and for a sharper reason: it
 is written by ``run_server``, which a test calls with a fabricated host and
@@ -34,6 +41,25 @@ if not os.environ.get("GRIDVIBE_RUNTIME_STATE_PATH"):
         _state_dir, "runtime_state.json"
     )
     atexit.register(shutil.rmtree, _state_dir, ignore_errors=True)
+
+if not os.environ.get("GRIDVIBE_SAVED_SESSIONS_PATH"):
+    _saved_sessions_dir = tempfile.mkdtemp(prefix="gridvibe-test-sessions-")
+    os.environ["GRIDVIBE_SAVED_SESSIONS_PATH"] = os.path.join(
+        _saved_sessions_dir, "saved_sessions.json"
+    )
+    atexit.register(shutil.rmtree, _saved_sessions_dir, ignore_errors=True)
+
+if not os.environ.get("GRIDVIBE_CONFIG_PATH"):
+    _config_dir = tempfile.mkdtemp(prefix="gridvibe-test-config-")
+    os.environ["GRIDVIBE_CONFIG_PATH"] = os.path.join(_config_dir, "config.json")
+    atexit.register(shutil.rmtree, _config_dir, ignore_errors=True)
+
+if not os.environ.get("GRIDVIBE_ENCRYPTION_KEY_PATH"):
+    _key_dir = tempfile.mkdtemp(prefix="gridvibe-test-key-")
+    os.environ["GRIDVIBE_ENCRYPTION_KEY_PATH"] = os.path.join(
+        _key_dir, ".encryption_key"
+    )
+    atexit.register(shutil.rmtree, _key_dir, ignore_errors=True)
 
 if not os.environ.get("GRIDVIBE_MCP_CONFIG_PATH"):
     _mcp_dir = tempfile.mkdtemp(prefix="gridvibe-test-mcp-")

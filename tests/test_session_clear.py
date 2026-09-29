@@ -418,6 +418,67 @@ class PaneClearTestCase(unittest.TestCase):
         self.assertEqual(response.status_code, 403)
         self.assertIn("lineage gate", response.get_json()["error"])
 
+    # ---------------- override mode: the caller's standing grant ----------------
+
+    def _override_mode_caller(self):
+        caller, _target = self._agent_pair()
+        api.session_manager.update_session_metadata(
+            caller.session_id, agent_mcp=True, agent_mcp_override=True
+        )
+        self.assertTrue(api.session_manager.get_session(caller.session_id).agent_mcp_override)
+        return caller
+
+    def test_override_mode_clears_a_foreign_agent_pane_without_stating_override(self):
+        caller = self._override_mode_caller()
+        foreign = self._pane(
+            group_id=caller.group_id,
+            repo_name="foreign",
+            startup_mode="agent",
+            initial_command_mode="agent",
+            agent_selection="codex",
+            initial_command="codex",
+        )
+        self._fill_buffer(foreign.session_id)
+
+        with self.assertLogs("web.session_clear", level="INFO") as captured:
+            response, _emit = self._clear(
+                foreign.session_id, {"requested_by_session_id": caller.session_id}
+            )
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertEqual(self._buffered(foreign.session_id), "")
+        self.assertTrue(any("source=mode" in line for line in captured.output))
+
+    def test_override_mode_never_clears_the_callers_own_pane(self):
+        caller = self._override_mode_caller()
+        self._fill_buffer(caller.session_id)
+        buffered = self._buffered(caller.session_id)
+
+        response, emit = self._clear(
+            caller.session_id, {"requested_by_session_id": caller.session_id}
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertIn("self gate", response.get_json()["error"])
+        self.assertEqual(self._buffered(caller.session_id), buffered)
+        emit.assert_not_called()
+
+    def test_override_mode_ends_when_its_caller_does(self):
+        caller = self._override_mode_caller()
+        handmade = self._pane(group_id=caller.group_id, repo_name="handmade")
+        api.session_manager.close_session(caller.session_id)
+        api.session_manager.clear_disconnected_sessions()
+        self.assertIsNone(api.session_manager.get_session(caller.session_id))
+
+        response, emit = self._clear(
+            handmade.session_id, {"requested_by_session_id": caller.session_id}
+        )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertIn("lineage gate", response.get_json()["error"])
+        self.assertFalse(response.get_json()["waivable"])
+        emit.assert_not_called()
+
     # ---------------- the boundary ----------------
 
     def test_the_service_is_not_a_flask_handler(self):

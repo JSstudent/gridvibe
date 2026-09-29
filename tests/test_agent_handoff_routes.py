@@ -511,18 +511,39 @@ class LaunchTaskTestCase(_RouteCase):
         self.assertEqual((pane["mode"], pane["host"]), ("ssh", "example.com"))
         self.assertEqual(pane["handoff"]["state"], WAITING)
 
-    def test_a_pane_whose_agent_is_not_installed_holds_no_task_and_says_so(self):
+    def test_a_pane_whose_agent_is_not_installed_refuses_the_whole_launch(self):
+        """A tool's launch is never handed a plain shell for the agent it named."""
         caller = self._agent_pane()
+        groups_before = len(api.session_manager.get_all_groups())
 
         status, payload = self._launch(
             self._body(caller, [self._agent_config()]),
             preflight={"status": "missing", "message": "codex is not installed."},
         )
 
-        self.assertEqual(status, 201, payload)
-        self.assertIsNone(payload["sessions"][0]["handoff"])
+        self.assertEqual(status, 400, payload)
+        self.assertIn("Pane 1 (codex): codex is not installed.", payload["error"])
+        self.assertIn("Nothing was launched", payload["error"])
+        self.assertEqual(len(api.session_manager.get_all_groups()), groups_before)
         self.assertEqual(store.count(), 0)
-        self.assertTrue(any("was not handed over" in item for item in payload["warnings"]))
+
+    def test_a_pane_whose_check_failed_still_starts_its_agent_with_its_task(self):
+        """A check that did not run proves nothing: a tool's launch starts the
+        agent it asked for -- never a plain shell in its place -- keeps its
+        task waiting for it, and says the check could not run."""
+        caller = self._agent_pane()
+
+        status, payload = self._launch(
+            self._body(caller, [self._agent_config()]),
+            preflight={"status": "check_failed", "message": "probe broke."},
+        )
+
+        self.assertEqual(status, 201, payload)
+        pane = payload["sessions"][0]
+        self.assertEqual((pane["startup_mode"], pane["agent_selection"]), ("agent", "codex"))
+        self.assertEqual(pane["initial_command"], "codex")
+        self.assertEqual(pane["handoff"]["state"], WAITING)
+        self.assertTrue(any("could not run" in item for item in payload["warnings"]))
 
 
 # ==================== the handoff route ====================
@@ -1032,6 +1053,56 @@ class RelaunchWithTaskTestCase(shell_tests.ShellTransitionTestCase):
                 )
                 self.assertIn("example.com", payload["error"])
                 self.assertEqual(started, [])
+
+    def _grant_override_mode(self, caller):
+        api.session_manager.update_session_metadata(
+            caller.session_id, agent_mcp=True, agent_mcp_override=True
+        )
+        granted = api.session_manager.get_session(caller.session_id)
+        self.assertTrue(granted.agent_mcp_override)
+        return granted
+
+    def test_override_mode_does_not_waive_another_machine(self):
+        caller, _repo = self._caller()
+        caller = self._grant_override_mode(caller)
+        for creator in (caller.session_id, ""):
+            with self.subTest(creator=creator or "none"):
+                target = self._ssh_pane(created_by_session_id=creator)
+                before = _pane_state(target.session_id)
+
+                response, started = self._relaunch(target.session_id, self._body(caller))
+
+                self._assert_refused(
+                    response, target.session_id, before, status=403, gate="machine", waivable=False
+                )
+                self.assertEqual(started, [])
+
+    def test_override_mode_relaunches_a_foreign_running_agent_without_asking(self):
+        """Lineage and "already an agent" both waived by the caller's grant."""
+        caller, repo = self._caller()
+        target = self._target(
+            caller, repo, created_by_session_id="", startup_mode="agent",
+            initial_command_mode="agent", initial_command="codex", agent_selection="codex",
+        )
+        before = _pane_state(target.session_id)
+        response, _started = self._relaunch(target.session_id, self._body(caller))
+        self._assert_refused(response, target.session_id, before, status=403, gate="mode", waivable=True)
+
+        caller = self._grant_override_mode(caller)
+        response, started = self._relaunch(target.session_id, self._body(caller))
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertEqual(response.get_json()["agent_selection"], "codex")
+        self.assertEqual(len(started), 1)
+
+    def test_override_mode_never_relaunches_the_callers_own_pane(self):
+        caller, _repo = self._caller()
+        caller = self._grant_override_mode(caller)
+        before = _pane_state(caller.session_id)
+
+        response, _started = self._relaunch(caller.session_id, self._body(caller))
+
+        self._assert_refused(response, caller.session_id, before, status=403, gate="self", waivable=False)
 
     def test_another_machine_is_refused_before_a_waivable_gate(self):
         """Asking the person, then being refused anyway, is the worst order."""

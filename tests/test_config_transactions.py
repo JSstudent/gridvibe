@@ -1,5 +1,6 @@
 import json
 import multiprocessing
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -29,6 +30,15 @@ class ConfigTransactionsTestCase(unittest.TestCase):
         self.path = Path(tmp.name) / 'config.json'
         self.backup = Path(str(self.path) + '.bak')
         self.good = {'appearance': {'theme': 'light'}, 'terminal': {'font_size': 19}}
+
+    def test_test_mode_refuses_the_production_config_file(self):
+        with patch.dict(os.environ, {'GRIDVIBE_TEST_MODE': '1'}):
+            with self.assertRaisesRegex(RuntimeError, 'Refusing to use production'):
+                config.load_config(config.PRODUCTION_CONFIG_PATH)
+            with self.assertRaisesRegex(RuntimeError, 'Refusing to use production'):
+                config.save_config(self.good, config.PRODUCTION_CONFIG_PATH)
+            with self.assertRaisesRegex(RuntimeError, 'Refusing to use production'):
+                config.update_config(lambda current: current, config.PRODUCTION_CONFIG_PATH)
 
     def test_invalid_content_recovers_and_cannot_poison_backup(self):
         bodies = [b'\xff', b'[]', b'null', b'42', b'"text"']
