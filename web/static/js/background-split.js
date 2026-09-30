@@ -45,6 +45,12 @@
    - **A pane that exists is reported, whatever happened to its layout.** The
      server has made it. If the arrangement could not be saved the result says
      so, and the tab comes back with the default arrangement for its size.
+   - **A placement never puts back an arrangement it did not read.** A model
+     carries the presentation revision it was read at. When the split answers
+     at another one -- a divider was moved while the request was out -- the
+     pane is placed on the arrangement the answer's record holds instead, and
+     the cut planned again; a record that no longer holds the same panes is not
+     written to at all.
    - **The visible handler places the same way when its window moves on.** A
      split asked for in the showing tab whose request was still out when
      another tab was picked hands its pane to `placeAfterMove`, with the model
@@ -159,6 +165,10 @@
             unmeasurable,
             /* Create the pane on the server: `{ ok, session, group, error }`. */
             split,
+            /* The tab as a group record describes it, without the pane just
+               added: `{ ids, rects, columnWeights, rowWeights, baseCount }`,
+               or null when the record has no arrangement for those panes. */
+            recordModel,
             /* The visible handler, for a tab that was opened meanwhile. */
             performShown,
             limits
@@ -210,11 +220,55 @@
             return place(view, axis, cut, posted);
         }
 
+        /* The placement to write, brought up to the arrangement the server
+           held when the split answered. A split does not move the tab's
+           presentation revision, so the revision the response carries is the
+           one a write compares against -- and a divider moved while the request
+           was out has already raised it. Written unchanged, the model read
+           before the request would pass that check and put the old weights
+           back. So a model read at another revision is replaced by the record
+           the response carries, and the cut is planned again on it. A record
+           that no longer holds the same panes, or has no arrangement for them,
+           cannot be placed: null. */
+        function current(view, axis, cut, posted) {
+            const group = posted.group || null;
+            const revision = group && group.presentation_revision;
+            if (Number.isInteger(view.model.revision) && view.model.revision === revision) {
+                return { view, cut };
+            }
+            const sourceId = view.model.ids[view.visualIndex];
+            const stored = typeof recordModel === 'function'
+                ? recordModel(group, posted.session.session_id)
+                : null;
+            if (!stored || !Number.isInteger(revision)) return null;
+            const sameSessions = stored.ids.length === view.model.ids.length
+                && view.model.ids.every(id => stored.ids.includes(id));
+            const visualIndex = stored.ids.indexOf(sourceId);
+            if (!sameSessions || visualIndex < 0) return null;
+            const model = { ...stored, groupId: view.groupId, revision };
+            return {
+                view: { ...view, model, visualIndex },
+                cut: plan(model, visualIndex, axis)
+            };
+        }
+
         /* A pane the server has made, put in its place in a tab that is not
            painted: drop the cache, write the arrangement against the revision
            the split returned, take the record. The tab is held by the caller. */
-        async function place(view, axis, cut, posted) {
+        async function place(requested, axis, requestedCut, posted) {
             /* From here the pane exists whatever else happens. */
+            const placement = current(requested, axis, requestedCut, posted);
+            if (!placement) {
+                tab.discard(requested.groupId);
+                tab.adopt(posted.group, null, null);
+                return {
+                    ok: true,
+                    session: posted.session,
+                    index: null,
+                    note: SAVE_FAILED_NOTE
+                };
+            }
+            const { view, cut } = placement;
             const arranged = policy.arrange({
                 ids: view.model.ids,
                 rects: view.model.rects,

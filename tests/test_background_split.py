@@ -94,7 +94,9 @@ function baseModel() {
         rects: [RECT(0, 1, 1, 8, 8), RECT(1, 9, 1, 8, 8)],
         columnWeights: Array.from({ length: 16 }, () => 1),
         rowWeights: Array.from({ length: 8 }, () => 1),
-        baseCount: 2
+        baseCount: 2,
+        // Current: the split below answers at this revision.
+        revision: 7
     };
 }
 
@@ -367,7 +369,9 @@ ADAPTER_SOURCE_NAMES = (
     "getPaneCandidateSurface",
     "backgroundGroupHolding",
     "fetchGroupRecord",
+    "groupRecordModel",
     "readBackgroundGroupModel",
+    "readSplitRecordModel",
     "measureTerminalCell",
     "measureGridForModel",
     "adoptBackgroundGroup",
@@ -453,7 +457,7 @@ const out = {};
 
     // ── a tab as data: the server's summary ──
     served = { ok: true, groups: [{
-        group_id: 'g-2', pane_order: ids, layout: 'vertical',
+        group_id: 'g-2', pane_order: ids, layout: 'vertical', presentation_revision: 4,
         workspace_layout: {
             split_slot_rects: [
                 { originSlot: 0, x: 1, y: 1, w: 8, h: 16 },
@@ -468,8 +472,26 @@ const out = {};
     out.stored = {
         ids: stored.ids, rects: plain(stored.rects),
         columns: stored.columnWeights.length, rows: stored.rowWeights.length,
-        firstColumnWeight: stored.columnWeights[0], baseCount: stored.baseCount
+        firstColumnWeight: stored.columnWeights[0], baseCount: stored.baseCount,
+        revision: stored.revision
     };
+
+    // ── the tab a split's answer describes, without the pane it added ──
+    const answered = { ...served.groups[0], pane_order: [...ids, 'pane-new'], presentation_revision: 6 };
+    const fromAnswer = readSplitRecordModel(answered, 'pane-new');
+    out.fromAnswer = {
+        ids: fromAnswer.ids, rects: plain(fromAnswer.rects),
+        firstColumnWeight: fromAnswer.columnWeights[0], revision: fromAnswer.revision
+    };
+    const presetAnswer = readSplitRecordModel(
+        { group_id: 'g-2', pane_order: [...ids, 'pane-new'], layout: 'vertical', workspace_layout: null, presentation_revision: 6 },
+        'pane-new'
+    );
+    out.presetAnswer = { rects: plain(presetAnswer.rects), revision: presetAnswer.revision };
+    out.misfitAnswer = readSplitRecordModel(
+        { ...answered, pane_order: ['pane-a', 'pane-b', 'pane-c', 'pane-new'] }, 'pane-new'
+    );
+    out.emptyAnswer = readSplitRecordModel({ group_id: 'g-2', pane_order: ['pane-new'] }, 'pane-new');
 
     // ── no record the page wrote: the preset its size and layout name call for ──
     served = { ok: true, groups: [{ group_id: 'g-2', pane_order: ids, layout: 'horizontal', workspace_layout: null }] };
@@ -490,7 +512,7 @@ const out = {};
     out.coarse = { box: boxOf(finer.rects), first: plain(finer.rects)[0], baseCount: finer.baseCount };
 
     // ── its cached view, while that still holds exactly the server's panes ──
-    served = { ok: true, groups: [{ group_id: 'g-2', pane_order: ['pane-a', 'pane-b', 'pane-c'], layout: 'vertical' }] };
+    served = { ok: true, groups: [{ group_id: 'g-2', pane_order: ['pane-a', 'pane-b', 'pane-c'], layout: 'vertical', presentation_revision: 9 }] };
     cachedGroupViews.set('g-2', {
         className: 'layout-split-local',
         fragment: cardsFor([2, 0, 1]),
@@ -508,7 +530,8 @@ const out = {};
     out.cached = {
         // Visual order is the cards' order, not creation order.
         ids: cached.ids, rects: plain(cached.rects),
-        weight: cached.columnWeights[0], baseCount: cached.baseCount
+        weight: cached.columnWeights[0], baseCount: cached.baseCount,
+        revision: cached.revision
     };
 
     // ── ...and not once the server lists panes it does not hold ──
@@ -729,6 +752,20 @@ async function run(interrupt, options = {}) {
             { originSlot: 0, x: rect.x, y: rect.y, w: firstSpan, h: rect.h },
             { originSlot: 1, x: rect.x + firstSpan, y: rect.y, w: rect.w - firstSpan, h: rect.h }
         ],
+        /* Planned again only on an arrangement the tab was rewritten to. */
+        plan: model => {
+            events.push('cut-replanned');
+            return { firstSpan: 2, weights: null, onWeights: model.columnWeights.slice() };
+        },
+        /* The page's reading of a record, as far as these tests need it. */
+        recordModel: (group, addedId) => {
+            const layout = group && group.workspace_layout;
+            const ids = (group.pane_order || []).filter(id => id !== addedId);
+            if (!layout || layout.rects.length !== ids.length) return null;
+            return { ids, rects: layout.rects, columnWeights: layout.columnWeights,
+                rowWeights: layout.rowWeights, baseCount: layout.baseCount,
+                revision: group.presentation_revision };
+        },
         limits: { maxPanes: 16, minCols: 20, minRows: 5 }
     });
     const context = {
@@ -781,7 +818,11 @@ async function run(interrupt, options = {}) {
         attachTerminal: () => {},
         renderSessionTabs: () => events.push('tabs-rendered'),
         updateSessionChrome: () => {},
-        presentationController: () => ({ setGroupRevision: () => events.push('revision') }),
+        presentationController: () => ({
+            setGroupRevision: () => events.push('revision'),
+            // The revision this window last had acknowledged for the tab.
+            groupRevision: () => (options.acknowledged === undefined ? 7 : options.acknowledged)
+        }),
         noteGroupPresentationChanged: () => events.push('presentation-noted'),
         ensureAttachedTerminalsReady: async () => {},
         emitTerminalResize: () => {},
@@ -796,7 +837,8 @@ async function run(interrupt, options = {}) {
                     group: {
                         group_id: 'g-1',
                         pane_order: ['pane-a', 'pane-new'],
-                        presentation_revision: 7
+                        presentation_revision: 7,
+                        ...(options.answeredGroup || {})
                     }
                 })
             };
@@ -857,6 +899,40 @@ async function run(interrupt, options = {}) {
         context.terminals = [{ _session: {} }];
         context.sessionIds = ['pane-other'];
     }, { saveFails: true });
+    const away = context => {
+        context.activeGroupId = 'g-2';
+        context.visibleGroupId = 'g-2';
+        context.terminals = [{ _session: {} }];
+        context.sessionIds = ['pane-other'];
+    };
+    // Another tab picked, and a divider in the tab left moved from behind
+    // while the request was out: the split answers at the revision that
+    // resize was acknowledged at, not the one this window read the tab at.
+    out.switchedAwayAfterResize = await run(away, {
+        acknowledged: 6,
+        answeredGroup: {
+            workspace_layout: {
+                rects: [{ originSlot: 0, x: 1, y: 1, w: 8, h: 8 }],
+                columnWeights: [1.6, 1.6, 1.2, 1.2, 0.8, 0.6, 0.5, 0.5],
+                rowWeights: [1, 1, 1, 1, 1, 1, 1, 1],
+                baseCount: 1
+            }
+        }
+    });
+    // ...and a pane was added to that tab meanwhile, so the record holds panes
+    // this placement never read.
+    out.switchedAwayAfterReshape = await run(away, {
+        acknowledged: 6,
+        answeredGroup: {
+            pane_order: ['pane-a', 'pane-other-new', 'pane-new'],
+            workspace_layout: {
+                rects: [{ originSlot: 0, x: 1, y: 1, w: 4, h: 8 }, { originSlot: 0, x: 5, y: 1, w: 4, h: 8 }],
+                columnWeights: [1, 1, 1, 1, 1, 1, 1, 1],
+                rowWeights: [1, 1, 1, 1, 1, 1, 1, 1],
+                baseCount: 1
+            }
+        }
+    });
     // Picked away from and picked again, its load still waiting: the tab is
     // active once more but not painted yet.
     out.returning = await run(context => {
@@ -1192,6 +1268,32 @@ class BackgroundSplitPageAdapterTestCase(unittest.TestCase):
         )
         self.assertEqual(stored["firstColumnWeight"], 1.5)
         self.assertEqual(stored["baseCount"], 2)
+        # A placement written later is checked against the revision it was read at.
+        self.assertEqual(stored["revision"], 4)
+
+    def test_a_split_answer_is_read_as_the_tab_without_the_pane_it_added(self):
+        answer = self.out["fromAnswer"]
+
+        self.assertEqual(answer["ids"], ["pane-a", "pane-b"])
+        self.assertEqual(
+            answer["rects"],
+            [{"x": 1, "y": 1, "w": 8, "h": 16}, {"x": 9, "y": 1, "w": 8, "h": 8}],
+        )
+        self.assertEqual(answer["firstColumnWeight"], 1.5)
+        self.assertEqual(answer["revision"], 6)
+
+    def test_a_split_answer_with_no_stored_arrangement_wears_its_preset(self):
+        preset = self.out["presetAnswer"]
+
+        self.assertEqual(
+            preset["rects"],
+            [{"x": 1, "y": 1, "w": 8, "h": 8}, {"x": 9, "y": 1, "w": 8, "h": 8}],
+        )
+        self.assertEqual(preset["revision"], 6)
+
+    def test_a_split_answer_whose_arrangement_fits_other_panes_is_no_arrangement(self):
+        self.assertIsNone(self.out["misfitAnswer"])
+        self.assertIsNone(self.out["emptyAnswer"])
 
     def test_a_tab_with_no_stored_arrangement_wears_its_preset(self):
         preset = self.out["preset"]
@@ -1219,6 +1321,9 @@ class BackgroundSplitPageAdapterTestCase(unittest.TestCase):
         self.assertEqual(len(cached["rects"]), 3)
         self.assertEqual(cached["weight"], 1.25)
         self.assertEqual(cached["baseCount"], 3)
+        # Its queue is settled before it is read, so it is the server's record
+        # at the revision the server lists.
+        self.assertEqual(cached["revision"], 9)
 
     def test_a_cached_view_of_other_panes_is_not_trusted(self):
         stale = self.out["staleCache"]
@@ -1407,6 +1512,48 @@ class SplitInFlightTestCase(unittest.TestCase):
         self.assertLess(moved["events"].index("discarded"), moved["events"].index("layout-written"))
         self.assertEqual(moved["adopted"][0]["saved"]["revision"], 8)
         self.assertEqual(moved["adopted"][0]["saved"]["ids"], ["pane-a", "pane-new"])
+
+    def test_a_divider_moved_while_the_request_was_out_is_kept(self):
+        """The acknowledged resize is the arrangement the pane is placed in:
+        the old weights read before the request are never written back."""
+        moved = self.out["switchedAwayAfterResize"]
+
+        self.assertTrue(moved["ok"])
+        self.assertEqual(moved["note"], "")
+        self.assertEqual(len(moved["saves"]), 1)
+        save = moved["saves"][0]
+        self.assertEqual(save["expectedRevision"], 7)
+        self.assertEqual(save["ids"], ["pane-a", "pane-new"])
+        self.assertEqual(
+            save["columnWeights"], [1.6, 1.6, 1.2, 1.2, 0.8, 0.6, 0.5, 0.5]
+        )
+        # The cut is planned again, on the weights that are now stored.
+        self.assertIn("cut-replanned", moved["events"])
+        self.assertEqual(
+            [(rect["x"], rect["w"]) for rect in save["rects"]], [(1, 2), (3, 6)]
+        )
+        self.assertTrue(save["held"])
+        self.assertTrue(moved["releasedAfter"])
+        self.assertEqual(moved["showingSessionIds"], ["pane-other"])
+        self.assertNotIn("painted", moved["events"])
+
+    def test_a_tab_whose_panes_changed_while_the_request_was_out_is_not_written(self):
+        reshaped = self.out["switchedAwayAfterReshape"]
+
+        self.assertTrue(reshaped["ok"])
+        self.assertEqual(reshaped["sessionId"], "pane-new")
+        self.assertIn("could not be saved", reshaped["note"])
+        self.assertEqual(reshaped["saves"], [])
+        # Its cached view still goes, and the record is taken as the server
+        # described it.
+        self.assertEqual(reshaped["discarded"], ["g-1"])
+        self.assertIsNone(reshaped["adopted"][0]["saved"])
+        self.assertTrue(reshaped["releasedAfter"])
+
+    def test_a_split_answered_at_the_revision_it_was_read_at_keeps_its_cut(self):
+        moved = self.out["switchedAway"]
+
+        self.assertNotIn("cut-replanned", moved["events"])
 
     def test_a_return_to_the_tab_waits_for_the_write(self):
         moved = self.out["switchedAway"]

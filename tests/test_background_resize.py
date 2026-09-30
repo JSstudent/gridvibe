@@ -20,6 +20,7 @@ import unittest
 
 from tests.test_background_split import (
     BACKGROUND_RESIZE_JS,
+    BACKGROUND_SPLIT_JS,
     BACKGROUND_TAB_JS,
     NODE,
     SPLIT_GEOMETRY_JS,
@@ -356,6 +357,240 @@ const intent = group => ({ workspace_id: 'ws', group_id: group, axis: 'vertical'
 """
 
 
+RESIZE_THEN_SPLIT_HARNESS = r"""
+const resize = require(RESIZE_PATH);
+const split = require(SPLIT_PATH);
+const backgroundTab = require(TAB_PATH);
+const geometry = require(GEOMETRY_PATH);
+
+const RECTS = () => [
+    { originSlot: 0, x: 1, y: 1, w: 8, h: 8 },
+    { originSlot: 1, x: 9, y: 1, w: 8, h: 8 }
+];
+const ones = count => Array.from({ length: count }, () => 1);
+const clone = value => JSON.parse(JSON.stringify(value));
+
+/* The shared grid: 1216 x 816 content, no gaps. */
+function measureFor(model) {
+    const scale = (weights, extent) => {
+        const total = weights.reduce((sum, weight) => sum + weight, 0);
+        return weights.map(weight => extent * weight / total);
+    };
+    const columnSizes = scale(model.columnWeights, 1216);
+    const rowSizes = scale(model.rowWeights, 816);
+    const span = (sizes, start, count) => sizes.slice(start, start + count).reduce((a, b) => a + b, 0);
+    return {
+        narrow: false,
+        metrics: {
+            gridContentWidth: 1216, gridContentHeight: 816, columnGap: 0, rowGap: 0,
+            columnSizes, rowSizes, columnTrackSpace: 1216, rowTrackSpace: 816
+        },
+        surfaces: model.rects.map(rect => ({
+            width: span(columnSizes, rect.x - 1, rect.w),
+            height: span(rowSizes, rect.y - 1, rect.h)
+        })),
+        cell: { width: 8, height: 17 },
+        headerHeight: 34
+    };
+}
+
+/* The page's split plan, off the real planner, for the model's own weights. */
+function planFor(model, visualIndex, axis) {
+    const rect = model.rects[visualIndex];
+    const metrics = measureFor(model).metrics;
+    const vertical = axis === 'vertical';
+    const start = vertical ? rect.x : rect.y;
+    const span = vertical ? rect.w : rect.h;
+    const intervals = model.rects
+        .filter((_other, index) => index !== visualIndex)
+        .map(other => (vertical ? { start: other.x, span: other.w } : { start: other.y, span: other.h }));
+    return geometry.planSplit({
+        start, span,
+        weights: vertical ? model.columnWeights : model.rowWeights,
+        sizes: vertical ? metrics.columnSizes : metrics.rowSizes,
+        gap: 0,
+        foreignEdges: geometry.foreignEdgeOffsets(intervals, start, span)
+    });
+}
+
+/* One tab on a server that writes its arrangement only through a
+   compare-and-swap on the presentation revision. Appending a pane leaves the
+   revision where it is, as the split route does. */
+function world() {
+    const log = [];
+    const record = {
+        group_id: 'g-2', presentation_revision: 5, pane_order: ['pane-a', 'pane-b'],
+        layout: { rects: RECTS(), columnWeights: ones(16), rowWeights: ones(8), baseCount: 2 }
+    };
+    const groupRecord = () => ({
+        group_id: record.group_id,
+        presentation_revision: record.presentation_revision,
+        pane_order: record.pane_order.slice(),
+        workspace_layout: clone(record.layout)
+    });
+    const modelOf = (group, ids) => {
+        if (!group.workspace_layout || group.workspace_layout.rects.length !== ids.length) return null;
+        const layout = group.workspace_layout;
+        return {
+            ids, rects: clone(layout.rects), columnWeights: layout.columnWeights.slice(),
+            rowWeights: layout.rowWeights.slice(), baseCount: layout.baseCount,
+            revision: group.presentation_revision
+        };
+    };
+    let gate = Promise.resolve();
+    let requestSent = () => {};
+    const page = {
+        holds: () => true,
+        isShown: () => false,
+        groupOf: id => (record.pane_order.includes(id) ? 'g-2' : ''),
+        settle: async () => {},
+        readModel: async groupId => {
+            const group = groupRecord();
+            const model = modelOf(group, group.pane_order);
+            return model && { groupId, ...model };
+        },
+        measure: measureFor,
+        discard: groupId => log.push(`discard:${groupId}`),
+        saveLayout: async ({ expectedRevision, ids, rects, columnWeights, rowWeights, baseCount }) => {
+            if (expectedRevision !== record.presentation_revision) {
+                log.push('save-refused');
+                return { ok: false, error: 'The session layout changed.' };
+            }
+            record.pane_order = ids.slice();
+            record.layout = clone({ rects, columnWeights, rowWeights, baseCount });
+            record.presentation_revision += 1;
+            log.push(`saved:${record.presentation_revision}`);
+            return { ok: true, revision: record.presentation_revision };
+        },
+        adopt: () => log.push('adopt'),
+        readLayout: async () => ({
+            ok: true,
+            presentation_revision: record.presentation_revision,
+            panes: record.pane_order.map(sessionId => ({ session_id: sessionId })),
+            geometry: {
+                split_slot_rects: record.layout.rects,
+                column_weights: record.layout.columnWeights,
+                row_weights: record.layout.rowWeights
+            }
+        }),
+        readExemptions: async (_groupId, ids) => ids.map(() => false),
+        trackGroups: (rects, axis, lineIndex) => getResizeTrackGroups(axis, lineIndex, rects),
+        sharedEdges: getSharedGridEdgeSegments,
+        planResize: geometry.planDividerResize,
+        groupRecord,
+        plan: planFor,
+        splitRect: (rect, axis, firstSpan) => (axis === 'vertical'
+            ? [{ ...rect, w: firstSpan }, { ...rect, x: rect.x + firstSpan, w: rect.w - firstSpan }]
+            : [{ ...rect, h: firstSpan }, { ...rect, y: rect.y + firstSpan, h: rect.h - firstSpan }]),
+        recordModel: (group, addedId) => modelOf(group, group.pane_order.filter(id => id !== addedId)),
+        split: async () => {
+            requestSent();
+            await gate;
+            record.pane_order.push('pane-new');
+            return { ok: true, session: { session_id: 'pane-new' }, group: groupRecord() };
+        },
+        reason: () => 'refused',
+        unmeasurable: () => 'unmeasurable',
+        limits: { maxPanes: 16, minCols: 8, minRows: 4, minSurfaceRatio: 1 / 16 },
+        onError: error => log.push(`error:${error.message}`)
+    };
+    const tab = backgroundTab.create(page);
+    const resizer = resize.create({ ...page, tab });
+    const splitter = split.create({ ...page, tab });
+    return {
+        log, record, tab, resizer, splitter, groupRecord,
+        view: groupId => page.readModel(groupId),
+        holdRequest() {
+            let open = null;
+            gate = new Promise(resolve => { open = resolve; });
+            const sent = new Promise(resolve => { requestSent = resolve; });
+            return { sent, open: () => open() };
+        }
+    };
+}
+
+const INTENT = { group_id: 'g-2', axis: 'vertical', line_index: 8, position: 0.6, expected_revision: 5 };
+
+async function settledSoon(tab) {
+    return Promise.race([
+        tab.settled('g-2').then(() => true),
+        new Promise(resolve => setTimeout(() => resolve(false), 30))
+    ]);
+}
+
+function outcome(w, resized, resizedWeights, answer) {
+    return {
+        resized: resized ? { ok: resized.ok, revision: resized.result && resized.result.revision } : null,
+        resizedWeights,
+        answer: { ok: answer.ok, note: answer.note, index: answer.index },
+        revision: w.record.presentation_revision,
+        order: w.record.pane_order,
+        rects: w.record.layout.rects.map(rect => [rect.x, rect.w]),
+        columnWeights: w.record.layout.columnWeights,
+        log: w.log
+    };
+}
+
+(async () => {
+    const out = {};
+    {
+        /* A split asked for in the showing tab; the window moves to another
+           tab and the tab left is resized from behind before the split
+           answers. Its placement was read before the request. */
+        const w = world();
+        const model = await w.view('g-2');
+        const cut = planFor(model, 0, 'vertical');
+        const resized = await w.resizer.perform(INTENT);
+        const resizedWeights = w.record.layout.columnWeights.slice();
+        w.record.pane_order.push('pane-new');
+        const answer = await w.splitter.placeAfterMove(
+            { groupId: 'g-2', visualIndex: 0, model }, 'vertical', cut,
+            { ok: true, session: { session_id: 'pane-new' }, group: w.groupRecord() }
+        );
+        out.afterMove = { ...outcome(w, resized, resizedWeights, answer), released: await settledSoon(w.tab) };
+    }
+    {
+        /* A split from behind whose request is out while the same tab is
+           resized from behind. */
+        const w = world();
+        const request = w.holdRequest();
+        const splitting = w.splitter.perform('pane-a', 'vertical', null);
+        await request.sent;
+        const resized = await w.resizer.perform(INTENT);
+        const resizedWeights = w.record.layout.columnWeights.slice();
+        request.open();
+        const answer = await splitting;
+        out.behind = { ...outcome(w, resized, resizedWeights, answer), released: await settledSoon(w.tab) };
+    }
+    {
+        /* Nothing else touched the tab. */
+        const w = world();
+        const answer = await w.splitter.perform('pane-a', 'vertical', null);
+        out.alone = outcome(w, null, null, answer);
+    }
+    {
+        /* A pane of the tab closed while the split was out, and the tab was
+           rewritten for the panes left. */
+        const w = world();
+        const model = await w.view('g-2');
+        const cut = planFor(model, 0, 'vertical');
+        w.record.pane_order = ['pane-a', 'pane-new'];
+        w.record.layout = {
+            rects: [{ originSlot: 0, x: 1, y: 1, w: 16, h: 8 }],
+            columnWeights: ones(16), rowWeights: ones(8), baseCount: 1
+        };
+        w.record.presentation_revision = 6;
+        const answer = await w.splitter.placeAfterMove(
+            { groupId: 'g-2', visualIndex: 0, model }, 'vertical', cut,
+            { ok: true, session: { session_id: 'pane-new' }, group: w.groupRecord() }
+        );
+        out.closed = { ...outcome(w, null, null, answer), released: await settledSoon(w.tab) };
+    }
+    console.log(JSON.stringify(out));
+})().catch(error => { console.error(error); process.exitCode = 1; });
+"""
+
+
 def _terminals_source() -> str:
     return TERMINALS_JS.read_text(encoding="utf-8")
 
@@ -585,6 +820,81 @@ class ResizeBridgeRoutingTestCase(unittest.TestCase):
         for name in ("switching", "withoutModule", "unknownGroup"):
             with self.subTest(case=name):
                 self.assertNotIn("Open this session tab", self.out[name]["error"])
+
+
+@unittest.skipIf(NODE is None, "Node.js is required for the background-resize suite")
+class SplitAfterBackgroundResizeTestCase(unittest.TestCase):
+    """A split whose request is out while its tab is resized from behind.
+
+    A split does not move the tab's presentation revision, so its answer
+    carries the revision the resize was acknowledged at, and a placement read
+    before the request would pass the compare-and-swap with the old weights.
+    Executed with the real resize, split, tab and planner modules against a
+    server that writes only through that compare-and-swap."""
+
+    @classmethod
+    def setUpClass(cls):
+        tracks = "\n\n".join(
+            _function_source(_terminals_source(), name) for name in TRACK_SOURCE_NAMES
+        )
+        cls.out = _run_node_file(
+            f"const RESIZE_PATH = {json.dumps(str(BACKGROUND_RESIZE_JS))};\n"
+            f"const SPLIT_PATH = {json.dumps(str(BACKGROUND_SPLIT_JS))};\n"
+            f"const TAB_PATH = {json.dumps(str(BACKGROUND_TAB_JS))};\n"
+            f"const GEOMETRY_PATH = {json.dumps(str(SPLIT_GEOMETRY_JS))};\n"
+            + tracks + "\n" + RESIZE_THEN_SPLIT_HARNESS
+        )
+
+    def assert_resize_survives_the_split(self, case):
+        self.assertEqual(case["resized"], {"ok": True, "revision": 6})
+        self.assertTrue(case["answer"]["ok"])
+        self.assertEqual(case["answer"]["note"], "")
+        self.assertEqual(case["answer"]["index"], 1)
+        self.assertEqual(case["revision"], 7)
+        self.assertEqual(case["order"], ["pane-a", "pane-new", "pane-b"])
+        resized = case["resizedWeights"]
+        final = case["columnWeights"]
+        # The divider the resize moved stays where it was acknowledged: the
+        # other pane's tracks are untouched, and the split pane keeps its share.
+        self.assertNotEqual(resized, [1] * 16)
+        self.assertEqual(final[8:], resized[8:])
+        self.assertAlmostEqual(sum(final[:8]), sum(resized[:8]))
+        # The new pane is cut out of the pane it came from.
+        (first_x, first_w), (second_x, second_w), other = case["rects"]
+        self.assertEqual((first_x, first_x + first_w, second_x + second_w), (1, second_x, 9))
+        self.assertEqual(other, [9, 8])
+        self.assertIn("discard:g-2", case["log"])
+        self.assertTrue(case["released"])
+
+    def test_a_split_placed_after_the_window_moved_on_keeps_the_resize(self):
+        self.assert_resize_survives_the_split(self.out["afterMove"])
+
+    def test_a_split_from_behind_keeps_a_resize_made_while_it_was_out(self):
+        self.assert_resize_survives_the_split(self.out["behind"])
+
+    def test_a_split_nothing_interleaved_with_writes_its_own_cut(self):
+        alone = self.out["alone"]
+
+        self.assertTrue(alone["answer"]["ok"])
+        self.assertEqual(alone["answer"]["note"], "")
+        self.assertEqual(alone["revision"], 6)
+        self.assertEqual(alone["order"], ["pane-a", "pane-new", "pane-b"])
+        self.assertEqual(alone["rects"], [[1, 4], [5, 4], [9, 8]])
+        self.assertEqual(alone["columnWeights"], [1] * 16)
+
+    def test_a_split_whose_tab_lost_a_pane_meanwhile_writes_nothing(self):
+        closed = self.out["closed"]
+
+        self.assertTrue(closed["answer"]["ok"])
+        self.assertIn("could not be saved", closed["answer"]["note"])
+        self.assertIsNone(closed["answer"]["index"])
+        # The arrangement written for the panes left is the one that stays.
+        self.assertEqual(closed["revision"], 6)
+        self.assertEqual(closed["rects"], [[1, 16]])
+        self.assertNotIn("save-refused", closed["log"])
+        self.assertFalse(any(entry.startswith("saved:") for entry in closed["log"]))
+        self.assertIn("discard:g-2", closed["log"])
+        self.assertTrue(closed["released"])
 
 
 if __name__ == "__main__":

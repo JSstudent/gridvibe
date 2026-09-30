@@ -7188,7 +7188,10 @@
                     rects,
                     columnWeights,
                     rowWeights,
-                    baseCount: Number(originalSplitSlotCount || ids.length) || ids.length
+                    baseCount: Number(originalSplitSlotCount || ids.length) || ids.length,
+                    /* The revision this window last had acknowledged for the
+                       tab: a placement written later is checked against it. */
+                    revision: presentationController()?.groupRevision?.(activeGroupId)
                 }
             },
             cut: planSplitSlotGeometryFor(
@@ -7464,37 +7467,63 @@
                     rects: cloneSplitSlotRects(rects),
                     columnWeights: normalizeSplitTrackWeights(cached.splitColumnWeights, size.columns),
                     rowWeights: normalizeSplitTrackWeights(cached.splitRowWeights, size.rows),
-                    baseCount: Number(cached.originalSplitSlotCount || cachedIds.length) || cachedIds.length
+                    baseCount: Number(cached.originalSplitSlotCount || cachedIds.length) || cachedIds.length,
+                    /* Its queued presentation is settled before this is read,
+                       so the view is the server's record at this revision. */
+                    revision: group.presentation_revision
                 };
             }
         }
 
-        const stored = resolveWorkspaceLayoutSnapshot(group.workspace_layout, serverIds.length);
+        return { groupId, ...groupRecordModel(group, serverIds) };
+    }
+
+    /* A tab as its group record describes it, for the panes `ids` names in
+       that order: the arrangement the page last wrote, or, with no record the
+       page wrote, the preset its size and layout name call for, exactly as it
+       is rebuilt when it is shown. Carries the record's presentation revision,
+       the one a model read from it is current at. */
+    function groupRecordModel(group, ids) {
+        const revision = group.presentation_revision;
+        const stored = resolveWorkspaceLayoutSnapshot(group.workspace_layout, ids.length);
         if (stored) {
             return {
-                groupId,
-                ids: serverIds,
+                ids,
                 rects: cloneSplitSlotRects(stored.rects),
                 columnWeights: stored.columnWeights,
                 rowWeights: stored.rowWeights,
-                baseCount: stored.baseCount
+                baseCount: stored.baseCount,
+                revision
             };
         }
-        /* No record the page wrote: the tab wears the preset its size and layout
-           name call for, exactly as it is rebuilt when it is shown. */
         const rects = fixedLayoutRectCoordinates(
-            serverIds.length,
-            getLayoutClass(serverIds.length, group.layout || '')
+            ids.length,
+            getLayoutClass(ids.length, group.layout || '')
         );
         const size = getSplitGridSize(rects);
         return {
-            groupId,
-            ids: serverIds,
+            ids,
             rects: cloneSplitSlotRects(rects),
             columnWeights: normalizeSplitTrackWeights(null, size.columns),
             rowWeights: normalizeSplitTrackWeights(null, size.rows),
-            baseCount: serverIds.length
+            baseCount: ids.length,
+            revision
         };
+    }
+
+    /* The tab a split's answer describes, without the pane it added: the
+       arrangement a placement is moved onto when the tab was rewritten while
+       the split was out. A stored arrangement that does not fit the record's
+       other panes is none to place a pane in; no stored one is the preset. */
+    function readSplitRecordModel(group, addedId) {
+        const ids = Array.isArray(group?.pane_order)
+            ? group.pane_order.filter(sessionId => sessionId !== addedId)
+            : [];
+        if (!ids.length || (group.workspace_layout
+            && !resolveWorkspaceLayoutSnapshot(group.workspace_layout, ids.length))) {
+            return null;
+        }
+        return groupRecordModel(group, ids);
     }
 
     /* The cell and header a terminal is drawn with, read off any live plain
@@ -7668,6 +7697,7 @@
                 }
                 return { ok: true, session: data.session, group: data.group };
             },
+            recordModel: readSplitRecordModel,
             performShown: async (sessionId, axis, request) => {
                 const index = sessionIds.indexOf(sessionId);
                 return index < 0

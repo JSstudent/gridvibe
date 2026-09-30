@@ -127,8 +127,10 @@ fails until it is. Closing the tab a window shows still moves that window to
 another tab, because the tab it showed is gone; and split and resize still need
 the window open and not minimized, which the agent asks the person to fix. The
 platform can still move things a tool did not ask for: when Windows refuses to
-hand the foreground back after `open_window` creates a window, the answer says
-`focus_moved`, and in browser mode the browser may show the tab it opens.
+hand the foreground back as `open_window` creates a window, the answer says
+`focus_moved`, and in browser mode the browser may show the tab it opens. Only
+that immediate hand-back is reported; a refusal after the answer, when the new
+window first takes focus from its own shown event, is logged but not reported.
 
 ### read — eight
 
@@ -383,7 +385,9 @@ mechanism answers all of them (`web/window_intents.py`,
   `open_window` the intent says not to raise it: an open window is left where it
   is, and a new one is created minimized, because pywebview cannot place a
   window behind another. On Windows the foreground is handed back to the window
-  that had it; if that is refused the answer says `focus_moved`.
+  that had it; if the hand-back made as the window is created is refused, the
+  answer says `focus_moved`. One refused later, when the window is first shown,
+  is only logged.
 - **Split a pane.** The axis never reaches the server. The page computes the new
   rectangles, and its refusals — the minimum columns and rows below a terminal
   header, the narrow-viewport rule, the pane cap — are measured off the live

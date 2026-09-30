@@ -1769,7 +1769,8 @@ in `README.md`; state the rules a change has to keep.
   need the window open and not minimized (below), which the agent asks the
   person to fix rather than doing it with a focus tool. The rule binds what a
   tool asks for, not what the platform does: `open_window` can still lose the
-  foreground when Windows refuses its hand-back (reported as `focus_moved`),
+  foreground when Windows refuses its hand-back (the immediate refusal is
+  reported as `focus_moved`; a later one is only logged),
   and in browser mode the OS browser may show the tab it opens (below).
 - **An agent's new tab joins the strip without being shown.** Every session
   group records `opened_by` (`normalize_group_opened_by` in
@@ -1950,8 +1951,11 @@ in `README.md`; state the rules a change has to keep.
   `focus=False` makes a window that can never take keyboard focus. On Windows
   the bridge hands the foreground back to the window that held it, only while
   the new window holds it, so a window the person picked meanwhile stays theirs;
-  a refused immediate hand-back is reported as `focus_moved`. A refused no-raise
-  open never falls back to `window.open`. The tool answers `already_open`,
+  a refused immediate hand-back is reported as `focus_moved`. The hand-back is
+  tried again from the window's `shown` event, which can run after the answer
+  was sent; a refusal there is logged, not reported, because opening a window
+  does not wait for that event. A refused no-raise open never falls back to
+  `window.open`. The tool answers `already_open`,
   `raised: false` and `minimized: true` (with a note) only from the page's own
   window report; a page that reports none gets no such claim. In browser mode the
   URL goes to the OS browser, which may show it, and the description says so.
@@ -1978,7 +1982,18 @@ in `README.md`; state the rules a change has to keep.
   relays. A split from the visible handler whose window moved to another tab
   mid-request is placed the same way (`placeAfterMove`), from the model and cut
   captured before the request, so its tab does not come back in the default
-  arrangement.
+  arrangement. The hold serializes loads, not edits: a divider can be moved in
+  the tab while the split's request is out, and appending a pane does not raise
+  the presentation revision, so the split answers at the revision that resize
+  was acknowledged at. Every placement model therefore carries the revision it
+  was read at (the server record's for a background read, the presentation
+  queue's acknowledged one for the visible capture). When the answer's revision
+  differs, the pane is placed on the arrangement the answer's own record holds
+  (`readSplitRecordModel()` in `terminals.js`) and the cut is planned again on
+  it; if that record no longer holds the same other panes, or its stored
+  arrangement does not fit them, nothing is written, the cached view is still
+  dropped, and the pane is reported with the not-saved `note`. A placement never
+  writes back weights it did not read.
 - **A resize is a revisioned presentation transaction, in any tab the window
   holds.** The tool takes a group, axis, numbered track boundary, normalized
   position, and the revision read from `list_panes`. The window that holds the

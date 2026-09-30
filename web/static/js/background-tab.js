@@ -103,6 +103,12 @@
                 return measure(model);
             },
 
+            /* Drop the tab's cached view without writing: an edit that made a
+               change it cannot place still leaves a view that no longer matches. */
+            discard(groupId) {
+                discard(String(groupId || ''));
+            },
+
             /* Drop the cache, then write. From the drop on, the tab is rebuilt
                from what the server holds the next time it is shown, whatever
                the write answers. A write that threw is `{ ok: false, thrown }`:

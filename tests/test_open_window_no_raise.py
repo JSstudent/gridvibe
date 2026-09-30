@@ -309,6 +309,32 @@ class LauncherNoRaiseTestCase(unittest.TestCase):
 
         self.assertIs(result["focus_moved"], True)
 
+    def test_a_hand_back_refused_once_the_window_is_shown_is_logged_not_reported(self):
+        """Opening does not wait for the shown event, so only the immediate
+        hand-back reaches the answer; a later refusal is the log's."""
+        window = _Window()
+        fake_webview = Mock()
+        fake_webview.create_window.return_value = window
+        user32 = _User32(foreground=300)
+        user32.grants = 0
+
+        with patch.object(webview_launcher, "webview", fake_webview), patch.object(
+            webview_launcher, "_foreground_window_handle", return_value=100
+        ), patch.object(webview_launcher.sys, "platform", "win32"), patch.object(
+            webview_launcher, "_windows_user32", return_value=user32
+        ), patch.object(webview_launcher, "_resolve_native_window_handle", return_value=200):
+            result = self.bridge.open_workspace_window("aaaaaaaaaaaa", "", None, False)
+            # WinForms focuses the page from its Shown handler, after the answer.
+            user32.foreground = 200
+            with self.assertLogs(webview_launcher.logger, level="WARNING") as logs:
+                window.events.shown.handlers[0]()
+
+        self.assertEqual(
+            result, {"ok": True, "reused": False, "raised": False, "minimized": True}
+        )
+        self.assertEqual(user32.set_calls, [100])
+        self.assertIn("kept the keyboard focus", "\n".join(logs.output))
+
     def test_a_raised_new_window_is_created_as_before(self):
         fake_webview = Mock()
         fake_webview.create_window.return_value = _Window()
