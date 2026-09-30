@@ -4923,4 +4923,7 @@ if __name__ == '__main__':
         level=logging.INFO,
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
     )
+    from web.log_redaction import install_mcp_token_redaction
+
+    install_mcp_token_redaction()
     run_server(debug=True)

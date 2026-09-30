@@ -745,7 +745,10 @@ nothing — `404` for a method or path that is not this pane's, the same answer
 either way, so a caller learns neither which routes exist nor whether it guessed
 a live token; `400` for framing, `413` for an oversized declared body, `502` when
 GridVibe itself cannot be reached — and the warning log prints only the target's
-first segment, because `/mcp/<token>` is a credential.
+first segment, because `/mcp/<token>` is a credential. GridVibe's own log treats
+it the same way: its access lines, error records and cross-origin warnings name
+the route as `/mcp/<redacted>`, so a log copied into a bug report carries no live
+token.
 
 Connections are bounded as well as requests, and they have to be handed off at
 once. Paramiko calls the forward handler on the transport's own packet thread,

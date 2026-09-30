@@ -291,6 +291,65 @@ C4 needs no headline of its own, because it edits an unreleased note.
 
 ### Stage 4 — A2: MCP tokens are redacted from every log record
 
+**Status: implemented 2026-09-30** on `szua_gridvibe-mcp-review` from `4c008cc`.
+It is uncommitted. One Codex review (OCR delegate, 5 of 5 reviewable files
+covered, the 6 others read by hand) found two medium issues. Both were
+confirmed and fixed after the review, so those fixes are unreviewed.
+- **Done:** steps 1–4 as written. `web/log_redaction.py` holds
+  `redact_mcp_path` and `RedactMcpTokenFilter`. The filter formats the record
+  once and, only when a token is present, replaces `msg`/`args`. It also renders
+  and redacts the traceback into `exc_text`, and redacts `stack_info`, because
+  the formatter appends those after the message. `setup_logging` puts it first
+  on both handlers through `install_mcp_token_redaction`, which is idempotent.
+  With no argument that call also covers every handler already attached to a
+  named logger, which reaches the stderr handlers python-engineio and
+  python-socketio put on their server loggers at import (review finding 1).
+  The pattern matches every separator that still reaches the route: `/`, `//`
+  (a redirect to it) and `%2F`, also double-encoded, case-insensitive (review
+  finding 2).
+  The native launcher calls `setup_logging`, so it is covered. The two debug
+  entry points (`api.py` and `web/api.py` run as scripts) install it on their
+  `basicConfig` handlers. The origin guard logs `redact_mcp_path(request.path)`.
+- **Changed from the plan:** the helper lives in `web/`, not `utils/`, because
+  no `web/` module imports `utils/` and the origin guard in `web/app.py` needs
+  it. It imports only the standard library, so `main.py` and `web/app.py` can
+  both take it without pulling in the token registry. The pattern is anchored so that
+  `/api/mcp/...` (the sidecar's pane-id routes) and the literal `/mcp/<token>`
+  placeholder are not rewritten.
+- **Not done:** the stdio sidecar (`gridvibe_mcp/__main__.py`) keeps its own
+  `basicConfig` on stderr. It never holds a pane token, because it talks to
+  `/api/mcp/...` over loopback, so it has nothing to redact. The grep for other
+  `request.path`/`request.url`/`request.full_path` log sites found only the
+  origin guard. `web/ssh_tunnel.py` already logs only the first segment
+  (`_loggable_target`). `web/mcp_launch.py` logs the local base URL, which
+  carries no token. A handler a library attaches after `setup_logging` runs is
+  not seen; none does today (werkzeug adds its own only when the root has
+  none).
+- **Tests:** the new `tests/test_log_redaction.py` (18). It sends a
+  werkzeug-shaped access record, a coloured 404 record, a bad-request-line
+  error, an error record from a child logger whose traceback also carries the
+  URL, and the origin guard's warning through the Flask test client, all
+  through the real `setup_logging` handlers. It reads back both the console and
+  `gridvibe.log`. A non-MCP path and `/api/mcp/...` pass unchanged, and the poll
+  suppression still drops `GET /api/sessions`. After review: a real Werkzeug
+  server on loopback gets `/mcp/<token>`, `/mcp%2F<token>` and `/mcp//<token>`,
+  and its own access lines are read back; a handler attached to a named logger
+  before `setup_logging`, and engineio's and socketio's handlers, are checked
+  and written through. With the handler install and the call-site redaction
+  disabled, 7 of the first 15 fail; against the reviewed version, 10 of the 18
+  do. The new module, `tests.test_mcp_remote`, `tests.test_api` and
+  `tests.test_main` pass (1075, 1 skip), and so do `tests.test_webview_launcher`
+  and `tests.test_mcp_tools` (230, 1 skip). Ruff and `git diff --check` are
+  clean.
+- **Review:** the reviewer ran `ocr delegate preview` and `rule` with escalated
+  permissions, and both succeeded. It reproduced both findings with the real
+  app and `setup_logging`, using a synthetic token. (1) engineio's and
+  socketio's own stderr handlers emitted an `Invalid session /mcp/<token>`
+  record unredacted, before propagation reached the filtered root handlers.
+  (2) `POST /mcp%2F<token>` reaches the route (routing decodes `%2F`), and the
+  access line kept the token. Both were fixed as above; the fixes are
+  unreviewed, by the one-round rule.
+
 **Change**
 1. Add one redaction function and one `logging.Filter` subclass. Put them next
    to the token registry (`web/mcp_http.py`) or in a small `utils/` helper, and

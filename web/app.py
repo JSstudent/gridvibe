@@ -17,6 +17,7 @@ from flask_socketio import SocketIO
 
 from sessions.manager import SessionManager
 from web.config import runtime_config
+from web.log_redaction import redact_mcp_path
 from web.paths import BASE_DIR
 
 logger = logging.getLogger(__name__)
@@ -206,7 +207,7 @@ def _reject_cross_origin_writes():
         logger.warning(
             "Rejected cross-origin %s %s from Origin %s",
             request.method,
-            request.path,
+            redact_mcp_path(request.path),
             origin,
         )
         return jsonify({"error": "Cross-origin request rejected"}), 403

@@ -48,6 +48,16 @@ Regression history and audit narratives do not belong in this reference.
   `.encryption_key` creation is exclusive and atomic so concurrent processes
   converge on one complete key. Never put credentials into new state files,
   responses, logs, or browser storage. Flag any intended weakening explicitly.
+- A remote pane's `/mcp/<token>` path is a credential. `web/log_redaction.py` is
+  its one log owner: `RedactMcpTokenFilter` sits first on every handler attached
+  when `setup_logging()` runs (its own two, and those libraries such as
+  engineio and socketio put on their own loggers at import; the debug entry
+  points' `basicConfig` handlers too), so access, error and propagated records
+  and their tracebacks read `/mcp/<redacted>` before any handler formats them.
+  Every separator spelling that still reaches the route (`%2F`, `//`) is
+  redacted. A call site that logs a request path still passes it through
+  `redact_mcp_path()`. A handler added later installs the filter first;
+  `/api/mcp/...` is not a credential and is left alone.
 - `POST /api/sessions/<id>/agent-conversation` is the one route an agent's own
   process calls without a page. It is authorised by a per-connection pane token
   rather than by origin; see
@@ -1921,7 +1931,8 @@ in `README.md`; state the rules a change has to keep.
   config from. Framing that cannot prove where the body ends is refused rather
   than normalized, the head and body are bounded, and refusals name nothing — the
   same `404` for a wrong method and a wrong token, and only the target's first
-  segment in the log, because the path is a credential. The still-true narrowing
+  segment in the log, because the path is a credential (GridVibe's own handlers
+  redact it too; see [Security and trust](#security-and-trust)). The still-true narrowing
   is what it now is: a remote process reaches this pane's tool surface, acting on
   this machine, and nothing else on the API.
 - **The channels that filter are bounded, and handed off at once.** Paramiko
@@ -2250,6 +2261,8 @@ Follow [logging_guide.md](logging_guide.md).
   budgets to compensate for library chatter.
 - Lifecycle logging is shape-only: ids, revisions, counts and failure categories;
   never paths, commands, file contents, credentials or payloads.
+- Every handler carries the MCP token redaction filter first; see
+  [Security and trust](#security-and-trust).
 
 ## Launcher setup and voice
 
