@@ -2006,7 +2006,31 @@ in `README.md`; state the rules a change has to keep.
   the read, shared-grid measure, hold, write and adopt steps it shares with the
   background split in `background-tab.js`; its minimum rule (`policy.fits`) is
   pinned against `validateResizeCandidate`, and it never switches tabs or moves
-  focus. A tab with a pane close it has not shown since is refused, because
+  focus. Unlike the split's write, the resize's (`writeGeometry`) changes no
+  panes, so it never drops the tab's cached view: its terminals, browser
+  documents and explorer views survive every outcome. A write that lands with a
+  newer revision is written into the view (`updateBackgroundGroupGeometry()` in
+  `terminals.js`: rectangles, weights and split class, which the restore's
+  `applySplitSlotGeometry` paints, so a fixed-layout view becomes a split one as
+  an on-screen resize makes it). A refusal or a missing revision leaves the view
+  untouched. A thrown write, an `unknown` answer, or one accepted without a
+  newer revision marks the view stale. Until it is painted again, reads of the
+  tab take the server's record. Its presentation captures omit the
+  arrangement, and so do captures of any background tab while an edit holds
+  it (`held()`), before the answer has updated or marked the view. A queued
+  write's conflict recapture therefore cannot rebase the replaced weights
+  onto the new revision. A save of the tab waits for that hold, then reads the
+  server's arrangement into a stale view (`settleStaleGroupGeometry()`). It
+  does this because the saved-session route writes the live group's layout
+  without a revision. A geometry write that reaches the view while that read
+  is out, or holds it when the read returns, makes the record older than the
+  view's last write: the view counts its writes (`geometryGeneration`), and
+  the settle reads the record again, up to three times. The save is refused
+  when the read fails or keeps being outraced. Its next restore applies the
+  arrangement its load just read before first paint, and drops the view only
+  when that arrangement does not fit its cards. A view whose cards are not the panes
+  written is dropped, as before. An unmarked restore is unchanged. A tab with a
+  pane close it has not shown since is refused, because
   that close's pending model would replace the written weights at its next
   load. A stale revision, missing divider, narrow viewport or impossible minimum
   refuses without applying weights. The result carries the persisted weights and

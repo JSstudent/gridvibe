@@ -2431,6 +2431,13 @@
        for no gain. Omitting the field leaves the stored geometry untouched. */
     function customSplitLayoutSnapshot(groupId) {
         const isVisible = visibleGroupId === groupId && gridBuilt;
+        /* A view marked stale may hold the arrangement a geometry write
+           replaced, and a held one the arrangement a write in flight is
+           replacing; sent, even a conflict's recapture would write it back. */
+        if (!isVisible && (cachedGroupViews.get(groupId)?.geometryStale
+            || backgroundTab?.held(groupId))) {
+            return null;
+        }
         const className = isVisible
             ? document.getElementById('terminalsGrid')?.className
             : cachedGroupViews.get(groupId)?.className;
@@ -2807,6 +2814,13 @@
         const promptForName = Boolean(options.promptForName);
         const createNewSession = Boolean(options.createNewSession);
         const group = getGroupById(targetGroupId);
+        if (!(await settleStaleGroupGeometry(targetGroupId))) {
+            const error = 'This session\'s arrangement could not be read after a resize. Try saving again.';
+            if (!silent) {
+                setWorkspaceSaveMessage(error, 'error');
+            }
+            return { ok: false, error };
+        }
         const config = buildActiveWorkspaceSessionConfig(targetGroupId);
         if (!config.terminals.length) {
             if (!silent) {
@@ -7448,12 +7462,11 @@
             return null;
         }
 
+        /* A view marked stale may hold an arrangement the server no longer
+           does: the record is the model until the view is painted again. */
         const cached = cachedGroupViews.get(groupId);
-        if (cached) {
-            const cards = Array.from(cached.fragment?.children || []);
-            const cachedIds = cards
-                .map(card => (cached.sessionIds || [])[Number(card.dataset.slot)])
-                .filter(Boolean);
+        if (cached && !cached.geometryStale) {
+            const cachedIds = cachedGroupCardIds(cached).filter(Boolean);
             const rects = cached.className === 'layout-split-local'
                 ? cached.splitSlotRects
                 : fixedLayoutRectCoordinates(cachedIds.length, cached.className || '');
@@ -7599,6 +7612,123 @@
         }
     }
 
+    /* The session ids of a cached view's cards, in the order they are painted. */
+    function cachedGroupCardIds(cached) {
+        return Array.from(cached.fragment?.children || [])
+            .map(card => (cached.sessionIds || [])[Number(card.dataset.slot)]);
+    }
+
+    /* Write an arrangement into a cached view, in the fields its restore
+       paints from: the restore's `applySplitSlotGeometry` then places every
+       card and turns the weights into the track templates, exactly as a
+       divider moved on screen does. A fixed-layout view becomes a split one,
+       as the on-screen resize makes it. False, and nothing written, when the
+       view's cards are not these panes in this order. */
+    function writeCachedGroupGeometry(cached, ids, geometry) {
+        const cardIds = cachedGroupCardIds(cached);
+        const rects = geometry?.rects;
+        if (!Array.isArray(ids) || !Array.isArray(rects) || rects.length !== ids.length
+            || cardIds.length !== ids.length || cardIds.some((sessionId, index) => sessionId !== ids[index])) {
+            return false;
+        }
+        const size = getSplitGridSize(rects);
+        cached.className = 'layout-split-local';
+        cached.gridColumns = '';
+        cached.gridRows = '';
+        cached.splitGridColumns = String(size.columns);
+        cached.splitGridRows = String(size.rows);
+        cached.splitSlotRects = cloneSplitSlotRects(rects);
+        cached.splitColumnWeights = normalizeSplitTrackWeights(geometry.columnWeights, size.columns);
+        cached.splitRowWeights = normalizeSplitTrackWeights(geometry.rowWeights, size.rows);
+        cached.originalSplitSlotCount = Number(geometry.baseCount) || ids.length;
+        cached.geometryStale = false;
+        return true;
+    }
+
+    /* A divider moved from behind changes the arrangement, not the panes: the
+       tab's cached view keeps its terminals, pages and explorer views and
+       takes the arrangement just written. One whose cards are no longer the
+       panes written is dropped, as before, and rebuilt from the server. */
+    function updateBackgroundGroupGeometry(groupId, layout) {
+        const cached = groupId !== visibleGroupId ? cachedGroupViews.get(groupId) : null;
+        if (!cached) {
+            return;
+        }
+        noteCachedGeometryWrite(cached);
+        if (!writeCachedGroupGeometry(cached, layout?.ids, layout)) {
+            dropCachedGroupView(groupId);
+        }
+    }
+
+    /* A geometry write whose outcome is unknown: the view keeps its panes and
+       reads the stored arrangement when it is next restored. */
+    function markBackgroundGroupGeometryStale(groupId) {
+        const cached = groupId !== visibleGroupId ? cachedGroupViews.get(groupId) : null;
+        if (cached) {
+            noteCachedGeometryWrite(cached);
+            cached.geometryStale = true;
+        }
+    }
+
+    /* Every geometry write that reached a view, landed or not, counted: a read
+       of the server started before one is older than what it may have written. */
+    function noteCachedGeometryWrite(cached) {
+        cached.geometryGeneration = (cached.geometryGeneration || 0) + 1;
+    }
+
+    /* A stale view takes the arrangement the server holds for panes `ids`,
+       in their order, and is no longer stale. No stored arrangement means no
+       geometry write landed, so the view is still the record. False, with the
+       view left as it was, when the stored one does not fit its cards. */
+    function adoptStoredGeometryForStaleView(cached, ids, workspaceLayout) {
+        if (!workspaceLayout) {
+            cached.geometryStale = false;
+            return true;
+        }
+        const stored = resolveWorkspaceLayoutSnapshot(workspaceLayout, ids.length);
+        return Boolean(stored) && writeCachedGroupGeometry(cached, ids, stored);
+    }
+
+    /* Before a tab's view is described for a save, which writes its
+       arrangement onto the live group without a revision: an edit in flight
+       is waited for, then a stale view reads the server's arrangement. False
+       when it could not, and the save must not go ahead with an arrangement a
+       geometry write may have replaced. */
+    async function settleStaleGroupGeometry(groupId) {
+        /* A write that started or ended while the record was being read makes
+           that record older than the view's last write: read again, a few
+           times, rather than take it. */
+        for (let attempt = 0; attempt < STALE_GEOMETRY_READ_ATTEMPTS; attempt += 1) {
+            await backgroundTabSettled(groupId);
+            const cached = groupId !== visibleGroupId ? cachedGroupViews.get(groupId) : null;
+            if (!cached?.geometryStale) {
+                return true;
+            }
+            const generation = cached.geometryGeneration;
+            let group = null;
+            try {
+                group = await fetchGroupRecord(groupId);
+            } catch (error) {
+                console.error('[GridVibe Sessions] could not read a tab resized from behind', error);
+                return false;
+            }
+            if (cachedGroupViews.get(groupId) !== cached) {
+                return true;
+            }
+            if (backgroundTab?.held(groupId) || cached.geometryGeneration !== generation) {
+                continue;
+            }
+            if (!cached.geometryStale) {
+                return true;
+            }
+            const ids = Array.isArray(group?.pane_order) ? group.pane_order : [];
+            return Boolean(group) && adoptStoredGeometryForStaleView(cached, ids, group.workspace_layout);
+        }
+        return false;
+    }
+
+    const STALE_GEOMETRY_READ_ATTEMPTS = 3;
+
     /* A load of a tab a split or resize from behind is writing waits for that
        write, so the tab is painted with its new arrangement rather than from
        the server's arrangement before it was saved. */
@@ -7617,6 +7747,8 @@
             readModel: readBackgroundGroupModel,
             measure: measureGridForModel,
             discard: discardBackgroundGroupView,
+            updateGeometry: updateBackgroundGroupGeometry,
+            markGeometryStale: markBackgroundGroupGeometryStale,
             saveLayout: async ({ groupId, expectedRevision, ids, rects, columnWeights, rowWeights, baseCount }) => {
                 const group = getGroupById(groupId);
                 const workspaceLayout = buildWorkspaceLayoutSnapshotFromState(
@@ -8798,6 +8930,11 @@
                         cached.terminals?.length === data.sessions.length
                         && (cached.className === expectedLayoutClass || cached.className === 'layout-split-local')
                         && hasMatchingSessionViews(cached.sessionIds || [], cached.terminals || [], data.sessions)
+                        && (!cached.geometryStale || adoptStoredGeometryForStaleView(
+                            cached,
+                            data.sessions.map(session => session.session_id),
+                            data.workspace_layout
+                        ))
                     );
                     if (cachedMatches) {
                         restoredFromCache = restoreCachedGroupView(requestedGroupId);

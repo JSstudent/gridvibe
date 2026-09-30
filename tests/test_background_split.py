@@ -370,6 +370,7 @@ ADAPTER_SOURCE_NAMES = (
     "backgroundGroupHolding",
     "fetchGroupRecord",
     "groupRecordModel",
+    "cachedGroupCardIds",
     "readBackgroundGroupModel",
     "readSplitRecordModel",
     "measureTerminalCell",

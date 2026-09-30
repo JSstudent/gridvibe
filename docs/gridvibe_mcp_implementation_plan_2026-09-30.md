@@ -53,6 +53,45 @@ Every stage follows the same close-out:
 
 ### Stage 1 — C2: a refused background resize keeps the cached view
 
+**Status: implemented 2026-09-30** on `szua_gridvibe-mcp-review` from `2d0b2a5`.
+It is uncommitted, pending review.
+- **Done:** steps 1–4 as written. `write` and the new `writeGeometry` share one
+  `save`. The resize's `commit` uses `writeGeometry`. The page implements
+  `updateBackgroundGroupGeometry` and `markBackgroundGroupGeometryStale` and
+  wires them into `GridVibeBackgroundTab.create`. A flagged view is reconciled
+  in the load's cache check by `adoptStoredGeometryForStaleView`, so an
+  unflagged restore takes today's code. A flagged view also makes
+  `readBackgroundGroupModel` read the server's record, so a second resize is
+  not refused as "page and stored layout differ".
+- **Changed from the plan:** a fixed-class cached view is converted to a split
+  view, not dropped. The restore's `applySplitSlotGeometry` sets every card's
+  grid area for a `layout-split-local` view, which is the same conversion an
+  on-screen resize makes.
+- **Added after review:** a stale view's old arrangement can no longer be
+  published. `customSplitLayoutSnapshot` omits it from presentation captures,
+  so the queue's 409 recapture cannot rebase it onto the new revision.
+  `saveActiveWorkspaceSession` first reads the server's arrangement into a
+  stale view (`settleStaleGroupGeometry`), because the saved-session route
+  writes the live group's layout without a revision. The save is refused when
+  that read fails. After the second review, the same omission covers a
+  background tab while an edit holds it (`backgroundTab.held()`), which
+  covers a write whose answer has not arrived yet. The save waits for that
+  hold before it settles. After the third review, the view counts its
+  geometry writes (`geometryGeneration`). A record read by the settle while a
+  later write reached the view, or held it, is read again (up to
+  `STALE_GEOMETRY_READ_ATTEMPTS`, 3) and not taken. The save is refused if the
+  settle keeps being outraced.
+- **Not done:** a pane close in a stale tab still captures its close model
+  from the view. That is no regression: before this stage the dropped view
+  fell back to the page's group record, which is equally pre-write after an
+  unknown answer.
+- **Tests:** everything listed below. The page hooks also have a new
+  `BackgroundResizeCachedViewTestCase`, lifted from `terminals.js` with the
+  real restore functions, the real tab module and the real presentation
+  controller. The validation suites pass (143), and so does `tests.test_api`
+  (951, 1 skip). Ruff is clean. The review document records the details
+  under C2.
+
 **Goal:** a resize from behind never disposes the tab's panes. Split keeps
 today's path, because it really does change the pane set.
 

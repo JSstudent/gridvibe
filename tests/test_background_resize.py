@@ -8,7 +8,9 @@ repaint of the grid on screen. What is pinned here is executed in Node:
 - **The sequence.** Every refusal comes before anything is written, in the
   visible resize's own words; a tab opened meanwhile goes to the visible
   handler; the tab is held for the write and released on every way out; once
-  the write has started a lost answer is `unknown`.
+  the write has started a lost answer is `unknown`. The write is geometry
+  alone: the tab's cached view is never dropped, it takes the arrangement
+  that landed or is marked stale when the outcome is unknown.
 - **The minimum is the live one.** The model-based check is compared against
   the page's own `validateResizeCandidate`, case for case.
 - **The bridge routes** a tab held in the background to this sequence and the
@@ -19,6 +21,8 @@ import json
 import unittest
 
 from tests.test_background_split import (
+    ADAPTER_SOURCE_NAMES,
+    ADAPTER_STUBS,
     BACKGROUND_RESIZE_JS,
     BACKGROUND_SPLIT_JS,
     BACKGROUND_TAB_JS,
@@ -29,7 +33,9 @@ from tests.test_background_split import (
     _function_source,
     _run_node_file,
 )
-from tests.test_split_geometry import _js_const_source
+from tests.test_split_geometry import RESTORE_SOURCE, RESTORE_STUBS, _js_const_source
+
+SESSION_PERSISTENCE_JS = TERMINALS_JS.parent / "session-persistence.js"
 
 TRACK_SOURCE_NAMES = ("getSharedGridEdgeSegments", "getResizeTrackGroups")
 
@@ -118,6 +124,8 @@ function fakePage(options = {}) {
         closeEpoch: () => state.epoch,
         closePending: () => Boolean(options.closePending),
         discard: groupId => log.push(`discard:${groupId}`),
+        updateGeometry: groupId => log.push(`updateGeometry:${groupId}`),
+        markGeometryStale: groupId => log.push(`markGeometryStale:${groupId}`),
         saveLayout: async args => {
             log.push('saveLayout');
             /* A load of the tab picked while the write is out waits for it. */
@@ -451,6 +459,8 @@ function world() {
         },
         measure: measureFor,
         discard: groupId => log.push(`discard:${groupId}`),
+        updateGeometry: groupId => log.push(`updateGeometry:${groupId}`),
+        markGeometryStale: groupId => log.push(`markGeometryStale:${groupId}`),
         saveLayout: async ({ expectedRevision, ids, rects, columnWeights, rowWeights, baseCount }) => {
             if (expectedRevision !== record.presentation_revision) {
                 log.push('save-refused');
@@ -591,6 +601,349 @@ function outcome(w, resized, resizedWeights, answer) {
 """
 
 
+# The page's half of a resize from behind: the two hooks the tab module calls
+# after a geometry write, and the restore of a view marked stale.
+CACHED_GEOMETRY_SOURCE_NAMES = (
+    "writeCachedGroupGeometry",
+    "updateBackgroundGroupGeometry",
+    "markBackgroundGroupGeometryStale",
+    "noteCachedGeometryWrite",
+    "adoptStoredGeometryForStaleView",
+    "settleStaleGroupGeometry",
+    "getGroupById",
+    "getWorkspacePanesInVisualOrder",
+    "buildActiveWorkspaceLayoutSnapshot",
+    "customSplitLayoutSnapshot",
+    "describeGroupPresentation",
+    "backgroundTabSettled",
+)
+
+CACHED_GEOMETRY_BODY = r"""
+const backgroundTabModule = require(TAB_PATH);
+const persistence = require(PERSISTENCE_PATH);
+/* The page's one tab instance; none until a case makes one. */
+var backgroundTab = null;
+const tick = ms => new Promise(resolve => setTimeout(resolve, ms));
+/* What the presentation payload needs of a pane: which session it is. */
+function describePanePresentation(pane) { return { sessionId: pane.sessionId }; }
+
+const RECTS = [
+    { originSlot: 0, x: 1, y: 1, w: 8, h: 8 },
+    { originSlot: 1, x: 9, y: 1, w: 8, h: 8 }
+];
+const MOVED = [...Array(8).fill(1.2), ...Array(8).fill(0.8)];
+const LAYOUT = {
+    ids: ['pane-a', 'pane-b'], rects: RECTS, columnWeights: MOVED,
+    rowWeights: Array(8).fill(1), baseCount: 2
+};
+const disposable = sessionId => ({
+    sessionId, term: { disposed: false, dispose() { this.disposed = true; } }
+});
+
+/* A view cached from a fixed two-pane layout: its cards carry no split area. */
+function fixedView(extra = {}) {
+    return {
+        groupId: 'g-2', terminals: [disposable('pane-a'), disposable('pane-b')],
+        sessionIds: ['pane-a', 'pane-b'],
+        fragment: cardsFor([0, 1]), className: 'layout-2', gridColumns: '2', gridRows: '1',
+        splitGridColumns: '', splitGridRows: '', splitSlotRects: null,
+        splitColumnWeights: null, splitRowWeights: null, originalSplitSlotCount: 2, ...extra
+    };
+}
+
+function splitView(extra = {}) {
+    return fixedView({
+        className: 'layout-split-local', gridColumns: '', gridRows: '',
+        splitGridColumns: '16', splitGridRows: '8', splitSlotRects: RECTS.map(rect => ({ ...rect })),
+        splitColumnWeights: Array(16).fill(1), splitRowWeights: Array(8).fill(1), ...extra
+    });
+}
+
+function summary(groupId) {
+    const cached = cachedGroupViews.get(groupId);
+    return cached ? {
+        className: cached.className,
+        gridColumns: cached.gridColumns,
+        splitGridColumns: cached.splitGridColumns,
+        splitGridRows: cached.splitGridRows,
+        rects: plainRects(cached.splitSlotRects || []),
+        columnWeights: cached.splitColumnWeights,
+        rowWeights: cached.splitRowWeights,
+        baseCount: cached.originalSplitSlotCount,
+        stale: Boolean(cached.geometryStale),
+        disposed: cached.terminals.map(terminal => terminal.term.disposed)
+    } : null;
+}
+
+function stored(columnWeights) {
+    return {
+        split_slot_rects: RECTS, split_column_weights: columnWeights,
+        split_row_weights: Array(8).fill(1), original_split_slot_count: 2
+    };
+}
+const IDS = ['pane-a', 'pane-b'];
+
+const out = {};
+function reset(views) {
+    dropped = [];
+    cachedGroupViews = new Map(views);
+}
+
+(async () => {
+    // ── a write that landed ──
+    reset([['g-2', fixedView()]]);
+    updateBackgroundGroupGeometry('g-2', LAYOUT);
+    out.landedFixed = { view: summary('g-2'), dropped };
+
+    reset([['g-2', splitView()]]);
+    updateBackgroundGroupGeometry('g-2', LAYOUT);
+    out.landedSplit = { view: summary('g-2'), dropped };
+
+    reset([['g-2', splitView()]]);
+    updateBackgroundGroupGeometry('g-2', { ...LAYOUT, ids: ['pane-b', 'pane-a'] });
+    out.otherPanes = { view: summary('g-2'), dropped };
+
+    reset([['g-1', splitView()]]);
+    updateBackgroundGroupGeometry('g-1', LAYOUT);
+    markBackgroundGroupGeometryStale('g-1');
+    out.painted = { view: summary('g-1'), dropped };
+
+    reset([]);
+    updateBackgroundGroupGeometry('g-2', LAYOUT);
+    markBackgroundGroupGeometryStale('g-2');
+    out.noView = { dropped, views: cachedGroupViews.size };
+
+    // ── a write whose outcome is unknown ──
+    reset([['g-2', splitView()]]);
+    markBackgroundGroupGeometryStale('g-2');
+    out.marked = summary('g-2');
+    served = { ok: true, groups: [{
+        group_id: 'g-2', pane_order: ['pane-a', 'pane-b'], presentation_revision: 9,
+        workspace_layout: stored(MOVED)
+    }] };
+    const staleModel = await readBackgroundGroupModel('g-2');
+    out.staleModel = { columnWeights: staleModel.columnWeights, revision: staleModel.revision };
+    cachedGroupViews.get('g-2').geometryStale = false;
+    out.freshModel = (await readBackgroundGroupModel('g-2')).columnWeights;
+
+    // A later write that landed supersedes the unknown one.
+    reset([['g-2', splitView()]]);
+    markBackgroundGroupGeometryStale('g-2');
+    updateBackgroundGroupGeometry('g-2', LAYOUT);
+    out.landedAfterStale = summary('g-2');
+
+    // ── restoring a view marked stale ──
+    reset([['g-2', fixedView({ geometryStale: true })]]);
+    out.restoreStored = {
+        kept: adoptStoredGeometryForStaleView(cachedGroupViews.get('g-2'), IDS, stored(MOVED)),
+        view: summary('g-2')
+    };
+
+    reset([['g-2', fixedView({ geometryStale: true })]]);
+    out.restoreNothingStored = {
+        kept: adoptStoredGeometryForStaleView(cachedGroupViews.get('g-2'), IDS, null),
+        view: summary('g-2')
+    };
+
+    reset([['g-2', splitView()]]);
+    cachedGroupViews.get('g-2').geometryStale = true;
+    out.restoreOtherPanes = adoptStoredGeometryForStaleView(
+        cachedGroupViews.get('g-2'), [...IDS].reverse(), stored(MOVED)
+    );
+    out.restoreWrongCount = adoptStoredGeometryForStaleView(
+        cachedGroupViews.get('g-2'), IDS, { ...stored(MOVED), split_slot_rects: [RECTS[0]] }
+    );
+
+    // ── a save of a stale tab reads the server's arrangement first ──
+    const record = (order, layout) => ({
+        ok: true, groups: [{ group_id: 'g-2', pane_order: order, presentation_revision: 8, workspace_layout: layout }]
+    });
+    reset([['g-2', splitView()]]);
+    served = { ok: false };
+    out.settleFresh = await settleStaleGroupGeometry('g-2');
+    markBackgroundGroupGeometryStale('g-2');
+    out.settleUnreadable = { settled: await settleStaleGroupGeometry('g-2'), view: summary('g-2') };
+    served = record(IDS, stored(MOVED));
+    out.settled = { settled: await settleStaleGroupGeometry('g-2'), view: summary('g-2') };
+    reset([['g-2', splitView({ geometryStale: true })]]);
+    served = record([...IDS].reverse(), stored(MOVED));
+    out.settleOtherPanes = { settled: await settleStaleGroupGeometry('g-2'), view: summary('g-2') };
+
+    // ── the review's case: a resize whose answer was lost, then an explicit
+    // save's presentation flush while the tab is still behind ──
+    async function flushAfterLostAnswer() {
+        reset([['g-2', splitView()]]);
+        sessionGroups = [{ group_id: 'g-2', pane_order: IDS.slice(), presentation_revision: 7 }];
+        const server = { revision: 7, columnWeights: Array(16).fill(1), sent: [] };
+        const tab = backgroundTabModule.create({
+            settle: async () => {},
+            readModel: async () => null,
+            measure: () => null,
+            discard: groupId => dropped.push(groupId),
+            updateGeometry: updateBackgroundGroupGeometry,
+            markGeometryStale: markBackgroundGroupGeometryStale,
+            saveLayout: async ({ columnWeights }) => {
+                server.revision += 1;
+                server.columnWeights = columnWeights.slice();
+                throw new Error('response lost');
+            },
+            adopt: () => {},
+            onError: () => {}
+        });
+        const saved = await tab.writeGeometry('g-2', 7, LAYOUT);
+        const controller = persistence.createPresentationController({
+            describeGroup: describeGroupPresentation,
+            sendGroup: async payload => {
+                server.sent.push({ expected: payload.expected_revision, layout: Boolean(payload.workspace_layout) });
+                if (payload.expected_revision !== server.revision) {
+                    return { status: 409, json: async () => ({ presentation_revision: server.revision }) };
+                }
+                if (payload.workspace_layout) {
+                    server.columnWeights = payload.workspace_layout.split_column_weights.slice();
+                }
+                server.revision += 1;
+                return { status: 200, json: async () => ({ presentation_revision: server.revision }) };
+            }
+        });
+        await controller.flush(['g-2']);
+        return {
+            thrown: Boolean(saved.thrown), view: summary('g-2'), dropped,
+            revision: server.revision, columnWeights: server.columnWeights, sent: server.sent
+        };
+    }
+    out.flushAfterLostAnswer = await flushAfterLostAnswer();
+
+    /* The second review's case: the flush runs while the resize's write is
+       still out, before its answer has updated or marked the view. */
+    async function flushDuringWrite(outcome) {
+        reset([['g-2', splitView()]]);
+        sessionGroups = [{ group_id: 'g-2', pane_order: IDS.slice(), presentation_revision: 7 }];
+        const server = { revision: 7, columnWeights: Array(16).fill(1), sent: [] };
+        let answer = null;
+        const answered = new Promise(resolve => { answer = resolve; });
+        backgroundTab = backgroundTabModule.create({
+            settle: async () => {},
+            readModel: async () => null,
+            measure: () => null,
+            discard: groupId => dropped.push(groupId),
+            updateGeometry: updateBackgroundGroupGeometry,
+            markGeometryStale: markBackgroundGroupGeometryStale,
+            saveLayout: async ({ columnWeights }) => {
+                server.revision += 1;
+                server.columnWeights = columnWeights.slice();
+                const written = server.revision;
+                await answered;
+                if (outcome === 'thrown') throw new Error('response lost');
+                return { ok: true, revision: written };
+            },
+            adopt: () => {},
+            onError: () => {}
+        });
+        const release = backgroundTab.hold('g-2');
+        const writing = backgroundTab.writeGeometry('g-2', 7, LAYOUT).finally(release);
+        await tick(1);
+        const controller = persistence.createPresentationController({
+            describeGroup: describeGroupPresentation,
+            sendGroup: async payload => {
+                server.sent.push({ expected: payload.expected_revision, layout: Boolean(payload.workspace_layout) });
+                if (payload.expected_revision !== server.revision) {
+                    return { status: 409, json: async () => ({ presentation_revision: server.revision }) };
+                }
+                if (payload.workspace_layout) {
+                    server.columnWeights = payload.workspace_layout.split_column_weights.slice();
+                }
+                server.revision += 1;
+                return { status: 200, json: async () => ({ presentation_revision: server.revision }) };
+            }
+        });
+        await controller.flush(['g-2']);
+        const sentDuring = server.sent.slice();
+        answer();
+        const saved = await writing;
+        const result = {
+            saved: { ok: saved.ok, thrown: Boolean(saved.thrown) },
+            sentDuring, view: summary('g-2'), dropped,
+            revision: server.revision, columnWeights: server.columnWeights
+        };
+        backgroundTab = null;
+        return result;
+    }
+    out.flushDuringWrite = await flushDuringWrite('ok');
+    out.flushDuringLostWrite = await flushDuringWrite('thrown');
+
+    /* A save of the tab waits for an edit in flight, then reads the server's
+       arrangement if the edit left the view stale. */
+    {
+        reset([['g-2', splitView()]]);
+        backgroundTab = backgroundTabModule.create({});
+        const release = backgroundTab.hold('g-2');
+        let done = false;
+        const settling = settleStaleGroupGeometry('g-2').then(value => { done = true; return value; });
+        await tick(10);
+        const waited = !done;
+        markBackgroundGroupGeometryStale('g-2');
+        served = record(IDS, stored(MOVED));
+        release();
+        out.settleWaits = { waited, settled: await settling, view: summary('g-2') };
+        backgroundTab = null;
+    }
+
+    /* The third review's case: the save's read of the record is out when a
+       second resize lands and loses its answer. The record that read returns
+       is older than that write, and must not be taken. */
+    {
+        const LATER = [...Array(8).fill(1.4), ...Array(8).fill(0.6)];
+        reset([['g-2', splitView({ geometryStale: true })]]);
+        backgroundTab = backgroundTabModule.create({
+            updateGeometry: updateBackgroundGroupGeometry,
+            markGeometryStale: markBackgroundGroupGeometryStale,
+            saveLayout: async () => { throw new Error('response lost'); },
+            onError: () => {}
+        });
+        const serve = fetch;
+        let reads = 0;
+        let answerFirst = null;
+        const firstAnswered = new Promise(resolve => { answerFirst = resolve; });
+        fetch = async (...args) => {
+            reads += 1;
+            if (reads > 1) return serve(...args);
+            const earlier = served;
+            await firstAnswered;
+            return { ok: true, status: 200, json: async () => ({ groups: earlier.groups }) };
+        };
+        served = record(IDS, stored(MOVED));
+        const settling = settleStaleGroupGeometry('g-2');
+        await tick(1);
+        const release = backgroundTab.hold('g-2');
+        await backgroundTab.writeGeometry('g-2', 8, { ...LAYOUT, columnWeights: LATER });
+        release();
+        served = record(IDS, stored(LATER));
+        answerFirst();
+        const settled = await settling;
+        fetch = serve;
+        out.settleOutraced = { settled, reads, view: summary('g-2') };
+
+        // A read that is outraced every time gives up rather than guess.
+        reset([['g-2', splitView({ geometryStale: true })]]);
+        fetch = async (...args) => {
+            markBackgroundGroupGeometryStale('g-2');
+            return serve(...args);
+        };
+        const gaveUp = await settleStaleGroupGeometry('g-2');
+        fetch = serve;
+        out.settleAlwaysOutraced = { settled: gaveUp, view: summary('g-2') };
+        backgroundTab = null;
+    }
+
+    // Not stale, the view's arrangement is described as before.
+    reset([['g-2', splitView()]]);
+    updateBackgroundGroupGeometry('g-2', LAYOUT);
+    out.describedLanded = describeGroupPresentation('g-2').workspaceLayout.split_column_weights;
+    console.log(JSON.stringify(out));
+})().catch(error => { console.error(error); process.exitCode = 1; });
+"""
+
+
 def _terminals_source() -> str:
     return TERMINALS_JS.read_text(encoding="utf-8")
 
@@ -620,7 +973,7 @@ class BackgroundResizeModuleTestCase(unittest.TestCase):
             happy["log"],
             [
                 "isShown", "settle", "readModel", "readLayout", "measure", "measure",
-                "readExemptions", "isShown", "discard:g-2", "saveLayout", "adopt", "load",
+                "readExemptions", "isShown", "saveLayout", "updateGeometry:g-2", "adopt", "load",
             ],
         )
 
@@ -668,7 +1021,7 @@ class BackgroundResizeModuleTestCase(unittest.TestCase):
         happy = self.out["happy"]
 
         self.assertTrue(happy["saves"][0]["heldDuringWrite"])
-        self.assertEqual(happy["log"][-3:], ["saveLayout", "adopt", "load"])
+        self.assertEqual(happy["log"][-4:], ["saveLayout", "updateGeometry:g-2", "adopt", "load"])
         self.assertTrue(happy["released"])
 
     def test_a_tab_showing_is_resized_by_the_handler_that_owns_its_grid(self):
@@ -716,15 +1069,44 @@ class BackgroundResizeModuleTestCase(unittest.TestCase):
     def test_a_close_waiting_for_the_tab_refuses_before_reading(self):
         self.assertEqual(self.out["closePending"]["log"], ["isShown"])
 
+    def test_a_resize_never_drops_the_tabs_cached_view(self):
+        for name in (
+            "happy", "stacked", "saveRefused", "saveThrew", "saveUnknown",
+            "saveOldRevision", "closeDuringWrite",
+        ):
+            with self.subTest(case=name):
+                self.assertIn("saveLayout", self.out[name]["log"])
+                self.assertFalse(any(step.startswith("discard") for step in self.out[name]["log"]))
+
     def test_a_write_the_server_refused_changed_nothing(self):
         refused = self.out["saveRefused"]
 
+        # Not the cached view either: no drop, no new geometry, no stale mark.
+        self.assertFalse(any(
+            step.startswith(("updateGeometry", "markGeometryStale")) for step in refused["log"]
+        ))
         self.assertFalse(refused["answer"]["ok"])
         self.assertNotIn("unknown", refused["answer"])
         self.assertIn("Presentation revision is stale", refused["answer"]["error"])
         self.assertIn("Nothing changed", refused["answer"]["error"])
         self.assertEqual(refused["adopted"], [])
         self.assertTrue(refused["released"])
+
+    def test_a_write_that_may_have_landed_marks_the_cached_view_stale(self):
+        for name in ("saveThrew", "saveUnknown", "saveOldRevision"):
+            with self.subTest(case=name):
+                log = self.out[name]["log"]
+                self.assertIn("markGeometryStale:g-2", log)
+                self.assertLess(log.index("saveLayout"), log.index("markGeometryStale:g-2"))
+                self.assertNotIn("updateGeometry:g-2", log)
+
+    def test_a_write_that_landed_hands_the_view_its_geometry_even_if_a_pane_closed(self):
+        # The pane set is reconciled when the tab is next shown: a view whose
+        # panes no longer match its session is dropped there, as before.
+        log = self.out["closeDuringWrite"]["log"]
+
+        self.assertIn("updateGeometry:g-2", log)
+        self.assertNotIn("markGeometryStale:g-2", log)
 
     def test_once_the_write_started_a_lost_answer_is_unknown(self):
         expected = {
@@ -742,6 +1124,176 @@ class BackgroundResizeModuleTestCase(unittest.TestCase):
                 self.assertNotIn("Nothing changed", case["answer"]["error"])
                 self.assertEqual(case["adopted"], [])
                 self.assertTrue(case["released"])
+
+
+@unittest.skipIf(NODE is None, "Node.js is required for the background-resize suite")
+class BackgroundResizeCachedViewTestCase(unittest.TestCase):
+    """The page's half, run from `terminals.js`'s own source: a tab resized
+    from behind keeps its cached view -- its terminals, pages and explorer
+    views -- and the view is painted with the arrangement the server holds."""
+
+    @classmethod
+    def setUpClass(cls):
+        terminals = _terminals_source()
+        lifted = "\n\n".join(
+            [_js_const_source(terminals, "STALE_GEOMETRY_READ_ATTEMPTS")]
+            + [
+                _function_source(terminals, name)
+                for name in ADAPTER_SOURCE_NAMES + CACHED_GEOMETRY_SOURCE_NAMES
+            ]
+        )
+        cls.out = _run_node_file(
+            "\n".join(
+                [
+                    SPLIT_GEOMETRY_JS.read_text(encoding="utf-8"),
+                    RESTORE_SOURCE,
+                    RESTORE_STUBS,
+                    f"const BACKGROUND_SPLIT_PATH = {json.dumps(str(BACKGROUND_SPLIT_JS))};",
+                    f"const TAB_PATH = {json.dumps(str(BACKGROUND_TAB_JS))};",
+                    f"const PERSISTENCE_PATH = {json.dumps(str(SESSION_PERSISTENCE_JS))};",
+                    lifted,
+                    ADAPTER_STUBS,
+                    CACHED_GEOMETRY_BODY,
+                    "",
+                ]
+            )
+        )
+
+    def assert_moved(self, view):
+        self.assertEqual(view["className"], "layout-split-local")
+        self.assertEqual(view["gridColumns"], "")
+        self.assertEqual((view["splitGridColumns"], view["splitGridRows"]), ("16", "8"))
+        self.assertEqual(
+            view["rects"], [{"x": 1, "y": 1, "w": 8, "h": 8}, {"x": 9, "y": 1, "w": 8, "h": 8}]
+        )
+        self.assertEqual(view["columnWeights"], [1.2] * 8 + [0.8] * 8)
+        self.assertEqual(view["rowWeights"], [1] * 8)
+        self.assertEqual(view["baseCount"], 2)
+        self.assertFalse(view["stale"])
+        self.assertEqual(view["disposed"], [False, False])
+
+    def test_a_write_that_landed_is_written_into_the_cached_view(self):
+        for name in ("landedSplit", "landedFixed"):
+            with self.subTest(case=name):
+                self.assertEqual(self.out[name]["dropped"], [])
+                self.assert_moved(self.out[name]["view"])
+
+    def test_a_view_whose_cards_are_not_the_panes_written_is_dropped(self):
+        self.assertEqual(self.out["otherPanes"]["dropped"], ["g-2"])
+
+    def test_the_painted_tab_and_a_tab_with_no_view_are_left_alone(self):
+        painted = self.out["painted"]
+
+        self.assertEqual(painted["dropped"], [])
+        self.assertEqual(painted["view"]["columnWeights"], [1] * 16)
+        self.assertFalse(painted["view"]["stale"])
+        self.assertEqual(self.out["noView"], {"dropped": [], "views": 0})
+
+    def test_an_unknown_outcome_marks_the_view_and_reads_the_record_meanwhile(self):
+        self.assertTrue(self.out["marked"]["stale"])
+        self.assertEqual(self.out["marked"]["disposed"], [False, False])
+        # Marked, the tab is read from the server's record, not the view...
+        self.assertEqual(self.out["staleModel"]["columnWeights"], [1.2] * 8 + [0.8] * 8)
+        self.assertEqual(self.out["staleModel"]["revision"], 9)
+        # ...and unmarked, from the view, as before.
+        self.assertEqual(self.out["freshModel"], [1] * 16)
+        self.assert_moved(self.out["landedAfterStale"])
+
+    def test_a_stale_view_is_restored_with_the_stored_arrangement(self):
+        restored = self.out["restoreStored"]
+
+        self.assertTrue(restored["kept"])
+        self.assert_moved(restored["view"])
+
+    def test_a_stale_view_with_nothing_stored_is_still_the_record(self):
+        restored = self.out["restoreNothingStored"]
+
+        self.assertTrue(restored["kept"])
+        self.assertEqual(restored["view"]["className"], "layout-2")
+        self.assertEqual(restored["view"]["rects"], [])
+        self.assertFalse(restored["view"]["stale"])
+
+    def test_a_stale_view_the_stored_arrangement_does_not_fit_is_dropped(self):
+        self.assertFalse(self.out["restoreOtherPanes"])
+        self.assertFalse(self.out["restoreWrongCount"])
+
+    def test_a_save_of_a_stale_tab_takes_the_servers_arrangement_first(self):
+        # Not stale: nothing to read, even with the server unreachable.
+        self.assertTrue(self.out["settleFresh"])
+        settled = self.out["settled"]
+        self.assertTrue(settled["settled"])
+        self.assert_moved(settled["view"])
+
+    def test_a_save_of_a_stale_tab_the_server_cannot_confirm_does_not_go_ahead(self):
+        for name in ("settleUnreadable", "settleOtherPanes"):
+            with self.subTest(case=name):
+                case = self.out[name]
+                self.assertFalse(case["settled"])
+                self.assertTrue(case["view"]["stale"])
+                self.assertEqual(case["view"]["columnWeights"], [1] * 16)
+                self.assertEqual(case["view"]["disposed"], [False, False])
+
+    def test_a_presentation_flush_never_writes_a_stale_views_arrangement_back(self):
+        """A resize whose answer was lost, then Save Workspace's flush while the
+        tab is still behind: the queue's first send conflicts, and its
+        recapture must not rebase the view's old weights onto the new revision."""
+        case = self.out["flushAfterLostAnswer"]
+
+        self.assertTrue(case["thrown"])
+        self.assertTrue(case["view"]["stale"])
+        self.assertEqual(case["dropped"], [])
+        self.assertEqual(case["sent"], [
+            {"expected": 7, "layout": False},
+            {"expected": 8, "layout": False},
+        ])
+        self.assertEqual(case["revision"], 9)
+        self.assertEqual(case["columnWeights"], [1.2] * 8 + [0.8] * 8)
+
+    def test_a_presentation_flush_during_the_write_never_writes_the_old_arrangement(self):
+        """The flush runs while the resize's answer is still out. Whatever the
+        answer, the server keeps the resize and the view never publishes the
+        weights it had before."""
+        for name, stale in (("flushDuringWrite", False), ("flushDuringLostWrite", True)):
+            with self.subTest(case=name):
+                case = self.out[name]
+                self.assertEqual(case["sentDuring"], [
+                    {"expected": 7, "layout": False},
+                    {"expected": 8, "layout": False},
+                ])
+                self.assertEqual(case["revision"], 9)
+                self.assertEqual(case["columnWeights"], [1.2] * 8 + [0.8] * 8)
+                self.assertEqual(case["dropped"], [])
+                self.assertEqual(case["view"]["stale"], stale)
+                self.assertEqual(case["view"]["disposed"], [False, False])
+        self.assertTrue(self.out["flushDuringWrite"]["saved"]["ok"])
+        self.assert_moved(self.out["flushDuringWrite"]["view"])
+        self.assertTrue(self.out["flushDuringLostWrite"]["saved"]["thrown"])
+
+    def test_a_save_of_a_tab_being_resized_waits_for_the_write(self):
+        case = self.out["settleWaits"]
+
+        self.assertTrue(case["waited"])
+        self.assertTrue(case["settled"])
+        self.assert_moved(case["view"])
+
+    def test_a_record_read_before_a_later_write_is_read_again(self):
+        case = self.out["settleOutraced"]
+
+        self.assertTrue(case["settled"])
+        self.assertEqual(case["reads"], 2)
+        self.assertFalse(case["view"]["stale"])
+        # The later write's arrangement, not the one the first read returned.
+        self.assertEqual(case["view"]["columnWeights"], [1.4] * 8 + [0.6] * 8)
+
+    def test_a_read_outraced_every_time_refuses_the_save(self):
+        case = self.out["settleAlwaysOutraced"]
+
+        self.assertFalse(case["settled"])
+        self.assertTrue(case["view"]["stale"])
+        self.assertEqual(case["view"]["columnWeights"], [1] * 16)
+
+    def test_a_view_that_is_not_stale_still_describes_its_arrangement(self):
+        self.assertEqual(self.out["describedLanded"], [1.2] * 8 + [0.8] * 8)
 
 
 @unittest.skipIf(NODE is None, "Node.js is required for the background-resize suite")

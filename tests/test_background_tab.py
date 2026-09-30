@@ -2,7 +2,9 @@
 
 `background-tab.js` is what a split and a divider resize from behind share:
 the reading (queue settled first, best effort), the measuring, the hold a load
-of the tab waits on, and the write (drop the cache, write, take the record).
+of the tab waits on, and the writes: the split's drops the cache, then writes;
+the resize's writes geometry alone and keeps the cached view, handing it the
+arrangement that landed or marking it stale when the outcome is unknown.
 Executed in Node against a page that records what it is asked to do.
 """
 
@@ -18,6 +20,12 @@ function fakePage(options = {}) {
     const log = [];
     const saves = [];
     const adopted = [];
+    /* The page's cached views: one per tab, holding a disposable xterm. */
+    const views = new Map([['g-2', {
+        xterm: { disposed: false, dispose() { this.disposed = true; } },
+        columnWeights: [1, 1],
+        stale: false
+    }]]);
     const page = {
         settle: async groupId => {
             log.push(`settle:${groupId}`);
@@ -29,7 +37,25 @@ function fakePage(options = {}) {
             return options.model === undefined ? { groupId, ids: ['pane-a'] } : options.model;
         },
         measure: model => { log.push('measure'); return { narrow: false, model }; },
-        discard: groupId => log.push(`discard:${groupId}`),
+        discard: groupId => {
+            log.push(`discard:${groupId}`);
+            /* The page's drop: the cached view's panes are disposed. */
+            const cached = views.get(groupId);
+            if (cached) {
+                cached.xterm.dispose();
+                views.delete(groupId);
+            }
+        },
+        updateGeometry: (groupId, layout) => {
+            log.push(`updateGeometry:${groupId}`);
+            const cached = views.get(groupId);
+            if (cached) cached.columnWeights = layout.columnWeights.slice();
+        },
+        markGeometryStale: groupId => {
+            log.push(`markGeometryStale:${groupId}`);
+            const cached = views.get(groupId);
+            if (cached) cached.stale = true;
+        },
         saveLayout: async args => {
             log.push('saveLayout');
             saves.push(args);
@@ -39,7 +65,13 @@ function fakePage(options = {}) {
         adopt: (group, saved) => { log.push('adopt'); adopted.push({ group, saved }); },
         onError: error => log.push(`error:${error.message}`)
     };
-    return { tab: backgroundTab.create(page), log, saves, adopted };
+    const view = groupId => {
+        const cached = views.get(groupId);
+        return cached
+            ? { disposed: cached.xterm.disposed, columnWeights: cached.columnWeights, stale: cached.stale }
+            : null;
+    };
+    return { tab: backgroundTab.create(page), log, saves, adopted, view };
 }
 
 async function freeSoon(tab, groupId) {
@@ -62,9 +94,11 @@ const out = {};
     {
         const { tab } = fakePage();
         out.idle = await freeSoon(tab, 'g-2');
+        const heldBefore = tab.held('g-2');
         const first = tab.hold('g-2');
         const second = tab.hold('g-2');
         const heldByTwo = !(await freeSoon(tab, 'g-2'));
+        const heldNow = tab.held('g-2') && !tab.held('g-3');
         const otherFree = await freeSoon(tab, 'g-3');
         first();
         const heldByOne = !(await freeSoon(tab, 'g-2'));
@@ -72,7 +106,10 @@ const out = {};
         const free = await freeSoon(tab, 'g-2');
         // A release called twice frees nothing it does not hold.
         second();
-        out.hold = { heldByTwo, otherFree, heldByOne, free, stillFree: await freeSoon(tab, 'g-2') };
+        out.hold = {
+            heldByTwo, otherFree, heldByOne, free, stillFree: await freeSoon(tab, 'g-2'),
+            heldBefore, heldNow, heldAfter: tab.held('g-2')
+        };
     }
     {
         // A load waiting when a second edit starts waits for that one too.
@@ -139,6 +176,39 @@ const out = {};
         const t = fakePage({ saveResult: null });
         out.writeEmpty = await t.tab.write('g-2', 7, LAYOUT);
     }
+
+    // ── the geometry write ──
+    {
+        const t = fakePage();
+        const saved = await t.tab.writeGeometry('g-2', 7, LAYOUT);
+        out.geometry = { saved, log: t.log, save: t.saves[0], view: t.view('g-2') };
+    }
+    {
+        // The review's reproduction: a resize the server refused, against a
+        // tab whose cached view holds a live xterm.
+        const t = fakePage({ saveResult: { ok: false, error: 'Presentation revision is stale' } });
+        const saved = await t.tab.writeGeometry('g-2', 7, LAYOUT);
+        out.geometryRefused = { saved, log: t.log, view: t.view('g-2') };
+        // The split's write, refused the same way, still drops the view.
+        const s = fakePage({ saveResult: { ok: false, error: 'Presentation revision is stale' } });
+        await s.tab.write('g-2', 7, LAYOUT);
+        out.splitRefused = { log: s.log, view: s.view('g-2') };
+    }
+    {
+        const t = fakePage();
+        const saved = await t.tab.writeGeometry('g-2', undefined, LAYOUT);
+        out.geometryNoRevision = { saved, log: t.log, view: t.view('g-2') };
+    }
+    for (const [name, options] of [
+        ['geometryThrew', { saveThrows: true }],
+        ['geometryUnknown', { saveResult: { ok: false, unknown: true, error: 'no revision' } }],
+        ['geometryOldRevision', { saveResult: { ok: true, revision: 7 } }],
+        ['geometryNoAnswerRevision', { saveResult: { ok: true } }]
+    ]) {
+        const t = fakePage(options);
+        const saved = await t.tab.writeGeometry('g-2', 7, LAYOUT);
+        out[name] = { saved, log: t.log, view: t.view('g-2') };
+    }
     console.log(JSON.stringify(out));
 })().catch(error => { console.error(error); process.exitCode = 1; });
 """
@@ -164,6 +234,10 @@ class BackgroundTabTestCase(unittest.TestCase):
         self.assertTrue(hold["stillFree"])
         # Only the tab being edited is held.
         self.assertTrue(hold["otherFree"])
+        # And the page can ask, synchronously, whether it is.
+        self.assertFalse(hold["heldBefore"])
+        self.assertTrue(hold["heldNow"])
+        self.assertFalse(hold["heldAfter"])
 
     def test_a_load_waits_for_an_edit_that_started_while_it_waited(self):
         self.assertEqual(self.out["chained"], ["second-released", "load"])
@@ -211,6 +285,56 @@ class BackgroundTabTestCase(unittest.TestCase):
         self.assertEqual(case["saved"]["error"], "connection lost")
         self.assertIn("error:connection lost", case["log"])
         self.assertIsNone(case["adopted"]["saved"])
+
+    def test_a_split_write_drops_the_cached_view_even_when_refused(self):
+        refused = self.out["splitRefused"]
+
+        self.assertEqual(refused["log"], ["discard:g-2", "saveLayout"])
+        self.assertIsNone(refused["view"])
+
+    def test_a_geometry_write_that_landed_keeps_the_view_and_hands_it_the_layout(self):
+        case = self.out["geometry"]
+
+        self.assertEqual(case["saved"], {"ok": True, "revision": 8})
+        self.assertEqual(case["log"], ["saveLayout", "updateGeometry:g-2"])
+        self.assertEqual(case["save"]["expectedRevision"], 7)
+        self.assertEqual(case["save"]["columnWeights"], [1.5, 0.5])
+        self.assertEqual(
+            case["view"], {"disposed": False, "columnWeights": [1.5, 0.5], "stale": False}
+        )
+
+    def test_a_refused_geometry_write_leaves_the_cached_view_untouched(self):
+        refused = self.out["geometryRefused"]
+
+        self.assertEqual(refused["saved"], {"ok": False, "error": "Presentation revision is stale"})
+        self.assertEqual(refused["log"], ["saveLayout"])
+        # The xterm is not disposed and the view is exactly as it was.
+        self.assertEqual(
+            refused["view"], {"disposed": False, "columnWeights": [1, 1], "stale": False}
+        )
+
+    def test_a_geometry_write_with_no_revision_touches_nothing(self):
+        case = self.out["geometryNoRevision"]
+
+        self.assertFalse(case["saved"]["ok"])
+        self.assertEqual(case["log"], [])
+        self.assertEqual(
+            case["view"], {"disposed": False, "columnWeights": [1, 1], "stale": False}
+        )
+
+    def test_a_geometry_write_that_may_have_landed_marks_the_view_stale(self):
+        for name in (
+            "geometryThrew", "geometryUnknown", "geometryOldRevision", "geometryNoAnswerRevision"
+        ):
+            with self.subTest(case=name):
+                case = self.out[name]
+                self.assertNotIn("updateGeometry:g-2", case["log"])
+                self.assertIn("markGeometryStale:g-2", case["log"])
+                self.assertFalse(any(step.startswith("discard") for step in case["log"]))
+                self.assertEqual(
+                    case["view"], {"disposed": False, "columnWeights": [1, 1], "stale": True}
+                )
+        self.assertTrue(self.out["geometryThrew"]["saved"]["thrown"])
 
     def test_a_refused_write_takes_the_record_without_an_arrangement(self):
         refused = self.out["writeRefused"]

@@ -222,7 +222,7 @@
            is `unknown`, never "nothing changed". */
         async function commit(groupId, epoch, plan) {
             const { expectedRevision, layout } = plan;
-            const saved = await tab.write(groupId, expectedRevision, layout);
+            const saved = await tab.writeGeometry(groupId, expectedRevision, layout);
             if (closeEpoch(groupId) !== epoch) {
                 return {
                     ok: false,
