@@ -33,6 +33,7 @@ import api  # noqa: E402
 import tests  # noqa: E402,F401 - redirects durable state away from the real files
 from web.pane_geometry import (  # noqa: E402
     GRID_BREAKPOINTS,
+    LAUNCH_LAYOUT_FIELDS,
     LAYOUT_CLASS_TRACKS,
     compose_group_geometry,
     grid_metrics,
@@ -322,6 +323,21 @@ class StoredGeometryTestCase(unittest.TestCase):
 
         self.assertEqual(geometry["split_column_weights"], [2.0, 1.0])
 
+    def test_the_base_the_page_read_the_record_against_is_kept(self):
+        """A split of one cell holds two rectangles on a base of one."""
+        stored = {
+            "split_slot_rects": [
+                {"originSlot": 0, "x": 1, "y": 1, "w": 1, "h": 1},
+                {"originSlot": 0, "x": 1, "y": 2, "w": 1, "h": 1},
+            ],
+            "original_split_slot_count": 1,
+        }
+
+        self.assertEqual(read_geometry(2, "vertical", stored)["original_split_slot_count"], 1)
+        # With none stored, the pane count is the base, as before.
+        del stored["original_split_slot_count"]
+        self.assertEqual(read_geometry(2, "vertical", stored)["original_split_slot_count"], 2)
+
 
 class ComposerTestCase(unittest.TestCase):
     def test_the_composer_keys_every_position_by_session_id(self):
@@ -345,6 +361,30 @@ class ComposerTestCase(unittest.TestCase):
 
         self.assertEqual(composed["panes"], [])
         self.assertIsNone(composed["geometry"])
+        self.assertIsNone(composed["workspace_layout"])
+
+    def test_the_arrangement_is_also_a_record_a_launch_takes(self):
+        """The launch schema's own names, and nothing it would refuse."""
+        stored = dict(StoredGeometryTestCase.STORED)
+        stored["split_column_weights"] = [1.5, 1.5, 0.5]
+
+        composed = compose_group_geometry(["a", "b", "c"], "grid", stored)
+
+        record = composed["workspace_layout"]
+        self.assertEqual(tuple(record), LAUNCH_LAYOUT_FIELDS)
+        self.assertEqual(record["split_slot_rects"], stored["split_slot_rects"])
+        self.assertEqual(record["split_column_weights"], [1.5, 1.5, 0.5])
+        self.assertEqual(record["split_row_weights"], [1.0, 1.0])
+        self.assertEqual(record["original_split_slot_count"], 3)
+        # The read-friendly block is unchanged beside it.
+        self.assertEqual(composed["geometry"]["column_weights"], [1.5, 1.5, 0.5])
+
+    def test_a_preset_arrangement_is_a_launch_record_too(self):
+        composed = compose_group_geometry(["a", "b", "c"], "split")
+
+        record = composed["workspace_layout"]
+        self.assertEqual(record["split_slot_rects"], composed["geometry"]["split_slot_rects"])
+        self.assertEqual(record["split_column_weights"], [2.0, 1.0])
 
 
 class PaneLayoutRouteTestCase(unittest.TestCase):
@@ -412,6 +452,8 @@ class PaneLayoutRouteTestCase(unittest.TestCase):
         ).get_json()
 
         self.assertFalse(payload["geometry"]["implied"])
+        self.assertEqual(payload["workspace_layout"]["split_row_weights"], [3.0, 1.0])
+        self.assertEqual(payload["workspace_layout"]["original_split_slot_count"], 1)
         # The record says stacked even though the layout name says vertical:
         # the geometry is what holds.
         self.assertEqual(payload["panes"][0]["neighbours"]["below"], [ids[1]])

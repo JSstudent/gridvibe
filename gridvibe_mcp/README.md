@@ -8,8 +8,9 @@ it — `README.md`, `CLAUDE.md`, `docs/engineering_contracts.md` — says what i
 does at its own altitude and points here rather than repeating it.
 
 It is a **sibling** of GridVibe, not a part of it. Nothing under `web/` or
-`sessions/` imports this package, and this package imports nothing from
-GridVibe — it speaks only HTTP to the loopback API. That boundary is what keeps
+`sessions/` imports this package at module level. `web/mcp_http.py` imports its
+client inside a function, to serve the tunnelled path. This package imports
+nothing from GridVibe — it speaks only HTTP to the loopback API. That boundary is what keeps
 the asyncio-native MCP SDK out of the threading-mode Flask-SocketIO process.
 
 ## Install
@@ -138,10 +139,10 @@ window first takes focus from its own shown event, is logged but not reported.
 | --- | --- |
 | `gridvibe_status` | is GridVibe running, which version, how many workspaces |
 | `list_workspaces` | every live workspace (window) and the sessions open in it — each tab's `session_name`, `group_id`, `pane_count`, and whether it is the tab the window shows (`active`) |
-| `list_panes` | the panes in one workspace or one session: what each is, where it points, what it runs on, which session it is in (`session_name`), and where it sits — `index`, `rect`, `relative_area`, and the `neighbours` above, below, left and right. Narrowed by `session_name`, it finds that tab in any workspace |
+| `list_panes` | the panes in one workspace or one session: what each is, where it points, what it runs on, which session it is in (`session_name`), and where it sits — `index`, `rect`, `relative_area`, and the `neighbours` above, below, left and right. Its `layout` block carries the arrangement twice: `geometry` to read, and `workspace_layout` to pass straight to `launch_panes`, weights included. Narrowed by `session_name`, it finds that tab in any workspace |
 | `list_agents` | every agent anywhere, with a working/idle reading, under the workspace and session holding it |
 | `list_agent_types` | every agent CLI in the registry, and whether each can start where a launch or split from this pane would put it — see [Which agents a tool can start](#which-agents-a-tool-can-start) |
-| `list_saved_layouts` | every saved launcher preset as a *shape* — name, layout, pane count, geometry, and what each pane is. Never a connection |
+| `list_saved_layouts` | every saved launcher preset as a *shape* — name, layout, pane count, geometry, and what each pane is. Never a connection. Its `workspace_layout` is one `launch_panes` accepts unchanged |
 | `whoami` | which pane this agent is in (`pane_id`), the session it is in (`session_name`, `group_id`), its directory, **which machine that directory is on**, how deep it is, where it sits, and whether it may still launch (`may_launch_panes`) or split (`may_split_panes`) — a refusal of the first carries a `split_note` saying the second is still open |
 | `read_handoff` | the task another agent handed to *this* pane — see [Handing an agent its task](#handing-an-agent-its-task). Its only side effect is the handoff's state becoming `read` |
 
@@ -270,7 +271,8 @@ name or failed durable write saves nothing and leaves the live session open.
 Names are checked case-insensitively inside the saved-session transaction, so
 a retry cannot create an indistinguishable second preset. Success returns
 the preset id, name, pane types, shell families and persisted geometry after
-the atomic saved-session commit. It omits paths, connection details,
+the atomic saved-session commit. That geometry, like every `workspace_layout` a
+read answers, can be passed to `launch_panes` unchanged. It omits paths, connection details,
 credentials, handoff tasks and active processes. `list_saved_layouts` then
 shows the new preset, and the launcher can open it as a fresh session.
 
@@ -746,7 +748,8 @@ socket to GridVibe is opened only for a request that survives it: one request pe
 connection, `POST`, and a target equal to *this pane's own* `/mcp/<token>`,
 compared with `secrets.compare_digest` on bytes. Exactly `Content-Length` bytes
 are read and nothing behind them is forwarded; `Transfer-Encoding`, a repeated
-`Content-Length` and obsolete line folding are refused rather than normalised,
+`Content-Length` (identical values included) and obsolete line folding are
+refused rather than normalised,
 because a filter that cannot say where the body ends cannot say that nothing
 rides behind it. Bounded at 16 KiB of head, 1 MiB of body, 30s. Refusals say
 nothing — `404` for a method or path that is not this pane's, the same answer
@@ -795,9 +798,9 @@ snapshot.
 
 A remote origin therefore produces an *SSH* group, and two things follow. A
 browser pane is refused there rather than silently downgraded to a terminal,
-because GridVibe draws that surface locally. The per-pane `shell` choice is
-dropped, because a local shell family names a machine the group is not opening
-on. An origin pane that has closed is a refusal, not a fall back to this
+because GridVibe draws that surface locally. A stated per-pane `shell` is
+refused, because a local shell family names a machine the group is not opening
+on; leave it out and the panes run the remote host's own shell. An origin pane that has closed is a refusal, not a fall back to this
 machine: "here" is exactly the wrong answer, and the one that used to open a
 PowerShell pane on a `/home/...` path.
 
@@ -818,7 +821,9 @@ pane names an unknown CLI or one whose preflight proves it absent, states
 `mcp: true` for a CLI with no MCP mechanism, carries a `task` for a CLI that
 cannot take one (the answer lists the three that can), or states a local
 `shell` the asking pane cannot honour — any family from an SSH pane, PowerShell
-or cmd from a WSL pane, any family on a non-Windows host. An agent is never
+or cmd from a WSL pane, any family on a non-Windows host. A `shell` on an
+explorer or browser pane is refused by the sidecar before anything is sent,
+because those panes run no shell. An agent is never
 quietly opened as a plain terminal for a tool. A preflight that *could not run*
 is not an absence: that pane keeps its agent, its identity and its task, and
 gets a warning. The launcher and restore keep their own behaviour, where an

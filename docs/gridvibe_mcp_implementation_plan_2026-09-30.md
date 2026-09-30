@@ -528,6 +528,69 @@ carries only the pane id" limitation rather than appending to it.
 
 ### Stage 6 — B1, B2 and the README corrections
 
+**Status: implemented 2026-09-30** on `szua_gridvibe-mcp-review` from `97bb75e`.
+It is uncommitted. One Codex review (OCR delegate, 4 of 4 reviewable files
+covered, the 7 other text files read by hand) found nothing.
+- **Done:** all three parts as written. **B1:** `compose_group_geometry` answers
+  a launch-shaped `workspace_layout` (`launch_layout`, `LAUNCH_LAYOUT_FIELDS`)
+  beside `geometry`, and the sidecar publishes it in `list_panes`' `layout`
+  block. `_normalize_workspace_layout` writes its own `class_name` and ignores
+  an incoming one, so `class_name` left `GEOMETRY_FIELDS`. The new
+  `project_geometry` projects every read's record, rectangles included, through
+  the schema's keys. The schema description now says to copy
+  `layout.workspace_layout` or a saved layout's `workspace_layout`. **B2:**
+  `build_pane_request` parses `shell` before the kind branches and refuses it
+  on explorer and browser entries with the plan's sentence. The schema says
+  "terminal and agent panes only". The audit found no other early-return drop:
+  `build_split_pane_request` takes no `shell`, and `set_pane_agent` and
+  `list_agent_types` validate and forward it. **README:** line 10 now reads as
+  the plan states. **Content-Length:** `_body_length` collects a list and
+  refuses more than one value.
+- **Changed from the plan:** `read_geometry` now keeps a stored
+  `original_split_slot_count`. It used to replace it with the pane count, so a
+  split of one cell (two rectangles on a base of one) would have been copied
+  with the wrong base, and the page rescales a copied record against it. The
+  plan expected a valid `shell` from an SSH pane to be *dropped* on terminal and
+  agent entries. GridVibe in fact refuses it
+  (`refuse_shell_families_the_origin_cannot_run`), so the remote test asserts
+  the refusal, and the sidecar README's stale "is dropped" sentence now says
+  "refused".
+- **Not done:** against a GridVibe server started before this stage,
+  `list_panes` has no `workspace_layout` until GridVibe restarts. The field is
+  additive, so nothing breaks, and the sidecar derives no fallback copy. The
+  handoff tools are untouched, so Stage 5's compatibility with that server
+  holds.
+- **Tests:** `tests/test_mcp_tools.py`: the hand-built record is replaced by a
+  real read, launch and read round trip at `[1.5, 0.5]`, through the layout
+  route's composer, the sidecar's projection and launch body, and the launch
+  route's normalizer, with only HTTP stubbed. Every `workspace_layout` that
+  `list_panes`, `list_saved_layouts` and `save_group_layout` answer is checked
+  against `WORKSPACE_LAYOUT_SCHEMA`, fed records that carry `class_name`. A
+  small validator in the test module does the check, so it runs without the
+  optional SDK. The four kinds are each tested against absent, valid and
+  invalid `shell`, with every refusal made against an opener that fails if
+  anything is sent. `tests/test_mcp_remote.py`: the real sidecar body from an
+  SSH origin is posted through the launch route. Terminal and agent entries
+  with `shell` get 400 and nothing is created, explorer and browser entries
+  are refused by the sidecar, and a control launch with no family opens as an
+  SSH group. Two identical `Content-Length` headers, in two spellings, get 400
+  and nothing is forwarded. `tests/test_pane_geometry.py` covers the composed
+  record, a preset's record, an empty group, the kept base, and the route.
+  Mutation checks: the old set in `_body_length` fails 2 tests. `class_name`
+  back in `GEOMETRY_FIELDS` fails 3, the B2 check removed fails 4, the base not
+  kept fails 2, and the record removed from the composer errors 5.
+  `tests.test_mcp_tools`, `tests.test_mcp_remote`, `tests.test_pane_geometry`,
+  `tests.test_mcp_geometry`, `tests.test_split_geometry`,
+  `tests.test_close_geometry` and `tests.test_api` pass (1257, 1 skip). The
+  adjacent `tests.test_mcp_client`, `tests.test_mcp_navigation`,
+  `tests.test_mcp_results`, `tests.test_mcp_handoff`, `tests.test_mcp_close`,
+  `tests.test_saved_sessions`, `tests.test_agent_types` and
+  `tests.test_terminal_shell_menu` pass (218). So do the doc- and
+  contract-reading `tests.test_backend_concurrency_contract`,
+  `tests.test_main`, `tests.test_version` and `tests.test_log_redaction` (57).
+  Ruff and `git diff --check` are clean.
+- **Review:** One round, by the person's rule, covering B1, B2 and the README corrections together: a Codex reviewer ran OCR delegate review with escalated permissions, and both commands succeeded. `preview` found 4 reviewable files (`gridvibe_mcp/client.py`, `gridvibe_mcp/server.py`, `web/pane_geometry.py`, `web/ssh_tunnel.py`) and covered all 4. The reviewer read the 7 other text files by hand and skipped one unrelated image. It ran the geometry and MCP suites (306), ruff and `git diff --check`. **No findings.** Its `tests.test_api` run had one error, the `TemporaryDirectory` cleanup `WinError 32` in `test_repo_git_timeout_bounds_a_remote_that_goes_quiet` that the Stage 5 review also saw. That code is untouched by this stage, and the test passed in the coder's run.
+
 **B1 — geometry round-trips**
 - Have `list_panes` emit a launch-shaped `workspace_layout`
   (`split_slot_rects`, `split_column_weights`, `split_row_weights`,

@@ -269,7 +269,8 @@ WORKSPACE_LAYOUT_SCHEMA = {
     "type": "object",
     "description": (
         "Per-pane rectangles in grid coordinates plus fractional track "
-        "weights, exactly as list_panes reports them. All-or-nothing: one "
+        "weights. Copy list_panes' layout.workspace_layout, or a saved "
+        "layout's workspace_layout, unchanged. All-or-nothing: one "
         "unrepresentable rectangle and the whole record is dropped."
     ),
     "properties": {
@@ -833,9 +834,12 @@ def tool_specs() -> List[Dict[str, Any]]:
                                     "type": "string",
                                     "enum": list(SHELL_KINDS),
                                     "description": (
-                                        "Local shell family. Omit to take "
-                                        "GridVibe's own default rather than "
-                                        "stating one the user did not choose."
+                                        "Local shell family, for terminal "
+                                        "and agent panes only: refused on "
+                                        "an explorer or browser pane. Omit "
+                                        "to take GridVibe's own default "
+                                        "rather than stating one the user "
+                                        "did not choose."
                                     ),
                                 },
                                 "url": {"type": "string", "description": "For kind='browser'."},
@@ -1380,6 +1384,13 @@ def build_pane_request(
     task = _task_for_agent_pane(pane, kind, identity or PaneIdentity())
     directory = _text(pane, "directory")
     title = _text(pane, "title")
+    # Read before the kind branches, so a stated family is never dropped by
+    # an early return. An explorer or browser pane runs no shell -- the
+    # launcher itself writes neither family for those rows -- so naming one
+    # there is refused rather than silently ignored.
+    shell = _choice(_text(pane, "shell"), SHELL_KINDS, "shell", "")
+    if shell and kind in ("explorer", "browser"):
+        raise ToolArgumentError("'shell' applies to terminal and agent panes.")
 
     request: Dict[str, Any] = {"directory": directory}
     if title:
@@ -1417,7 +1428,6 @@ def build_pane_request(
     # tool-launched pane a *stated* PowerShell pane -- saved as one, in a
     # workspace whose other panes the user runs as cmd, with nothing having
     # asked.
-    shell = _choice(_text(pane, "shell"), SHELL_KINDS, "shell", "")
     if shell:
         request["use_powershell"] = shell == "powershell"
         request["use_wsl"] = shell == "wsl"

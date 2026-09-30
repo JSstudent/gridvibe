@@ -219,21 +219,24 @@ def _body_length(headers: List[Tuple[str, str]]) -> Optional[int]:
 
     A ``Transfer-Encoding`` is refused rather than streamed: its end is
     discoverable only by parsing the chunks, and a filter that cannot say
-    where the body ends cannot say that nothing follows it.
+    where the body ends cannot say that nothing follows it. A repeated
+    ``Content-Length`` is refused as well, identical values included: the
+    filter never normalises framing, so it never picks one header of two for
+    a server that might read the other.
     """
-    lengths = set()
+    lengths: List[str] = []
     for name, value in headers:
         lowered = name.lower()
         if lowered == "transfer-encoding":
             return None
         if lowered == "content-length":
-            lengths.add(value.strip())
+            lengths.append(value.strip())
     if not lengths:
         return 0
     if len(lengths) != 1:
         return None
     try:
-        length = int(lengths.pop())
+        length = int(lengths[0])
     except ValueError:
         return None
     return length if length >= 0 else None

@@ -1522,6 +1522,13 @@ in `README.md`; state the rules a change has to keep.
   secret at any depth regardless of the list. `list_saved_layouts` is the sharp
   case: the route it reads answers with a *decrypted* SSH password by design.
   Failures are typed and carry GridVibe's own sentence verbatim, unretried.
+- **A read's geometry is a launch's input.** Every `workspace_layout` a read
+  tool answers — `list_panes`' layout block, `list_saved_layouts`,
+  `save_group_layout` — is accepted unchanged by `launch_panes`' strict
+  `WORKSPACE_LAYOUT_SCHEMA`. `compose_group_geometry` publishes it beside the
+  read-friendly `geometry` block, keeping the stored
+  `original_split_slot_count`, and `GEOMETRY_FIELDS` in `client.py` is exactly
+  the schema's keys: no `class_name`, which the store writes for itself.
 - **Eight tool tiers.** Read and create
   only ever make something new (`read_handoff` is a read: its only side effect
   is a handoff's state); `report_result`/`wait_for_results` carry a report back
@@ -1772,7 +1779,9 @@ in `README.md`; state the rules a change has to keep.
   therefore validated whole before any workspace, group or pane exists: an
   unknown or proven-absent agent, `mcp: true` on a CLI with no mechanism, a task
   for a CLI that cannot take one, and a stated local shell the origin cannot run
-  are each refused naming every offending pane. `check_failed` is not an
+  are each refused naming every offending pane. A `shell` on an explorer or
+  browser entry is refused by the sidecar before sending, since the launcher
+  writes no family for those rows. `check_failed` is not an
   absence — that pane keeps its agent, identity and task, with a warning. The
   launcher and restore keep opening an absent agent as a terminal with a
   warning; the refusal is the tool path's alone. `list_agent_types` answers from
@@ -1945,7 +1954,8 @@ in `README.md`; state the rules a change has to keep.
   `open_reverse_tunnel`, so a port opened for one pane cannot spend another's,
   and `mcp_path()` is the one spelling `tunnel_url()` also builds the remote
   config from. Framing that cannot prove where the body ends is refused rather
-  than normalized, the head and body are bounded, and refusals name nothing — the
+  than normalized — `Transfer-Encoding`, any repeated `Content-Length` even with
+  equal values, obsolete line folding — the head and body are bounded, and refusals name nothing — the
   same `404` for a wrong method and a wrong token, and only the target's first
   segment in the log, because the path is a credential (GridVibe's own handlers
   redact it too; see [Security and trust](#security-and-trust)). The still-true narrowing
