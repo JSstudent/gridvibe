@@ -265,6 +265,9 @@ def move_group_for_agent(group_id: str, payload: Mapping[str, Any]) -> Tuple[Dic
         "target_workspace_id": data.get("target_workspace_id") or data.get("workspace_id") or "",
         "new_workspace": bool(data.get("new_workspace")),
         "label": data.get("label") or data.get("workspace_label") or "",
+        # Names the move as a tool's, so the group arrives as an agent's and
+        # the destination window stays on the tab it is showing.
+        "requested_by_session_id": str(data.get("requested_by_session_id") or ""),
     }
     gated_source = str(group.workspace_id or "")
 

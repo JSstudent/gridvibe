@@ -937,6 +937,19 @@ unless the task explicitly changes this contract.
   Never retire a record whose workspace slot already holds a different window.
   The window-id ceiling has one owner (`LIFECYCLE_MAX_WINDOW_ID_LENGTH`); the
   bridge refuses an id past it rather than storing one that can match nothing.
+- A workspace has one native window, and one open at a time creates it. An open
+  that finds the slot empty reserves it (`_reserve_workspace_window`) under the
+  short `_workspace_window_lock`, creates the window outside that lock, and
+  publishes it only under its own reservation. A concurrent open waits on the
+  reservation, then reuses the published window or, when creation failed, takes
+  the reservation itself; past `WORKSPACE_WINDOW_OPENING_WAIT_SECONDS` it is
+  refused, never duplicated. A window's close and state events act on the slot
+  only while the slot holds that window, and each checks and writes in one hold
+  of the lock, because pywebview runs every event handler on its own thread:
+  `_drop_workspace_window` clears the slot, its group, fullscreen, minimized and
+  pending-zoom state and (through `on_drop`) main()'s open-window kind, and
+  `_record_window_minimized` ignores minimize, restore and maximize events from
+  a window that is closed or replaced.
 - Resolve workspace chrome per field, oldest-joined first so the newest window
   wins. Stale `active_group_id` falls back to the server hint; malformed types or
   out-of-range zoom still raise. `topbar_visible` stores only the chevron choice
@@ -1348,6 +1361,25 @@ unless the task explicitly changes this contract.
   and picking one *while* working is what a docked panel is for. Every other
   field on that row stays the dialog's answer asked for by name; a second copy
   of any of them is how one pane comes to read two ways on two surfaces.
+- **The docked row of the pane being typed into wears the input-target ring.**
+  The page's answer is `focusedTerminalSessionId()` in `terminals.js`: the
+  session of the focused slot, read when asked, and only while that slot's card
+  is in the document and holds real keyboard focus. A slot that changed hands
+  names what is there now, never what took focus. The sidebar matches rows by
+  that session id and lays `is-input-target` plus `aria-current="true"` on the
+  rows already drawn, never in the markup, so the unchanged-markup skip and the
+  rebuild rules above are untouched. The focus lifecycle calls
+  `markAgentDashboardSidebarInputTarget` on every set and clear, and the sidebar
+  marks again after every read, failed ones included. Focus loss that may fire
+  no `focusout` clears the target explicitly: a tab's cards leaving with
+  `cacheVisibleGroupView()`, `replaceSessionPaneMode()` on the focused slot
+  only, and a window switch. Output, activity and Broadcast never select a row.
+  The Broadcast button prevents its mousedown default, so pressing it keeps the
+  pane being typed into rather than refocusing the first terminal. The ring is
+  `.agent-sidebar .dash-agent.is-input-target`, an inset 2px `--gv-accent`
+  ring (the token behind `--t-accent`) and never a fill. The dialog carries no
+  ring, because it covers its own page's grid, and focus is never shared
+  across windows.
 - Dashboard layout must remain usable without horizontal overflow at narrow
   widths. A polling update that changes only a row's title, hover, status,
   progress, or idle age updates that row in place, each field on its own
@@ -1600,6 +1632,21 @@ in `README.md`; state the rules a change has to keep.
   beside it (and `true` without `mcp: true`), and the tool relaunch never
   forwards it. Relaunching the same agent keeps a grant it already holds without
   restating it, so a stale window cannot restore one dropped elsewhere.
+- **A tool's relaunch holds its gates at the commit, not only at the door.**
+  Binary detection and the cwd probe run after the gates and can take seconds,
+  so `apply_agent_pane_relaunch` hands `apply_pane_shell_change` a
+  `commit_guard` that runs under `SessionManager.lock` in the same hold as the
+  metadata write. It re-runs every gate against the live registry, including
+  the caller's override-mode grant as it stands then, with the waiver log
+  suppressed, and binds the commit to the pane it checked: the same target and
+  caller records, unchanged `_RELAUNCH_BOUND_FIELDS` and the same caller depth.
+  A gate that now refuses answers as it would have at the door, `confirm` block
+  included, attached after the lock is released. A target that changed in any
+  bound field answers 409, even under `override`, because the person's yes
+  named what was running there then. Either way nothing is written, closed or
+  restarted. Detection, the probe and teardown stay outside the lock. The
+  transport is not part of the binding, so a relaunch of the same pane by the
+  person that leaves every bound field as it was is not detected.
 - **No byte a tool supplies reaches a launch line.** A handed-over task adds
   exactly `HANDOFF_OPENING_PROMPT` (`web/agent_handoffs.py`), a constant whose
   characters are pinned to `[A-Za-z0-9 .,_]`, and the agent fetches the task
@@ -1707,6 +1754,40 @@ in `README.md`; state the rules a change has to keep.
   same place a launch would open, on the shared bounded preflight pool, and keeps
   `available`, `mcp_supported` and `task_supported` separate. A gated re-root
   that changes nothing answers `changed: false`, never a pane payload.
+- **Only an explicit focus request moves what the person sees.** No tool may
+  switch a window's session tab, move keyboard focus, or raise, restore or
+  newly show a window in front — except `focus_session` and `focus_pane`
+  (`VIEW_MOVING_TOOLS` in `gridvibe_mcp/server.py`) and `move_session`'s
+  `show` (`VIEW_MOVING_FLAGS`), whose descriptions say they are for when the
+  person asked to see, focus or bring something forward. Every other tool is
+  named in `BACKGROUND_TOOLS`: it works in any tab of a window, showing or not,
+  and leaves the person's tab, focus and window order as they were. That list
+  is spelled out name by name, not built from the tiers, and a test fails for a
+  registered tool in neither set, so a new tool has to be placed deliberately.
+  Two things are not violations: closing the tab a window shows moves that
+  window to another tab, because the tab no longer exists; and split and resize
+  need the window open and not minimized (below), which the agent asks the
+  person to fix rather than doing it with a focus tool. The rule binds what a
+  tool asks for, not what the platform does: `open_window` can still lose the
+  foreground when Windows refuses its hand-back (the immediate refusal is
+  reported as `focus_moved`; a later one is only logged),
+  and in browser mode the OS browser may show the tab it opens (below).
+- **An agent's new tab joins the strip without being shown.** Every session
+  group records `opened_by` (`normalize_group_opened_by` in
+  `web/workspaces.py`): `"agent"` for a tool launch (`tool_launch: true` or an
+  `origin_session_id`, never a restore) and for a move that names
+  `requested_by_session_id`; `"person"` for everything else, any unknown value
+  and every record that predates the field. The page's `loadSessionGroups`
+  switches to a newly seen group only when it is the person's; a window showing
+  no tab still picks the newest group, since that takes nothing away. The
+  workspace's `active_group_id` hint likewise stays put for an agent's group
+  unless it names no live group of that workspace. Once arrived, an agent's tab
+  is an ordinary tab: a click or `focus_session` shows it, and `move_session`
+  with `show` switches through its activation intent, not through this rule.
+  A tab strip rebuilt by the arrival hands keyboard focus to the rebuilt control
+  of the same tab. The field is captured with the group's snapshot, degrades to
+  `"person"` on a bad value (chrome, never a reason to drop the group) and is
+  replayed by a restore.
 - **Navigation is page-confirmed and resolved from the live registry.**
   `focus_session`/`focus_pane` record an `activate` intent only after
   `web/navigation.resolve_view_target` has checked that pane, group and
@@ -1861,6 +1942,23 @@ in `README.md`; state the rules a change has to keep.
   before the intent is recorded. A page reports only its own kind's outcomes, and
   a refusal is relayed with the axis that would have worked — never a silent
   retry on the other axis.
+- **`open_window` never brings a window forward.** The open intent carries
+  `raise`; only the `open_window` tool records `false`, while `focus_session`,
+  `focus_pane` and `move_session`'s `show` keep the raise, which is what they
+  were asked for. Without it the native bridge's reuse branch neither calls
+  `_bring_to_front` nor restores zoom, and a new window is created minimized,
+  because pywebview has no way to place a window behind another and its
+  `focus=False` makes a window that can never take keyboard focus. On Windows
+  the bridge hands the foreground back to the window that held it, only while
+  the new window holds it, so a window the person picked meanwhile stays theirs;
+  a refused immediate hand-back is reported as `focus_moved`. The hand-back is
+  tried again from the window's `shown` event, which can run after the answer
+  was sent; a refusal there is logged, not reported, because opening a window
+  does not wait for that event. A refused no-raise open never falls back to
+  `window.open`. The tool answers `already_open`,
+  `raised: false` and `minimized: true` (with a note) only from the page's own
+  window report; a page that reports none gets no such claim. In browser mode the
+  URL goes to the OS browser, which may show it, and the description says so.
 - **A split works in any tab the window holds, and never moves the view.**
   `splitBridge.owns()` claims a pane in the painted group or in a group the page
   holds in the background (`backgroundGroupHolding()`, read from the group list,
@@ -1875,25 +1973,55 @@ in `README.md`; state the rules a change has to keep.
   the tab strip; it never reaches `switchGroup`, pane focus, `initialLoad` or a
   cached-view restore. A tab opened before the request goes out is handed to the
   visible handler. From the request until the write, the tab is held:
-  `initialLoad` waits on `backgroundSplit.settled(groupId)` before its group-list
-  read and before its read of the tab, so a tab picked mid-request is never
-  painted from the pre-save arrangement or from a cache about to be dropped, and
-  every tab except the one painted loses its cached view. A pane that was created
-  is reported even when its arrangement could not be written, with a `note` the
-  sidecar relays. The page still has to poll: a hidden or minimized native window
-  answers `no_window_available`, and `NO_PAGE_HINT` says the window must be open
-  and visible, whichever tab it shows. A resize still needs its tab showing.
-- **A resize is a revisioned presentation transaction.** The tool takes a
-  group, axis, numbered track boundary, normalized position, and the revision
-  read from `list_panes`. Only the visible page can claim it. The page compares
+  `initialLoad` waits on the shared hold (`backgroundTabSettled`, over
+  `web/static/js/background-tab.js`) before its group-list read and before its
+  read of the tab, so a tab picked mid-request is never painted from the
+  pre-save arrangement or from a cache about to be dropped, and every tab except
+  the one painted loses its cached view. A pane that was created is reported
+  even when its arrangement could not be written, with a `note` the sidecar
+  relays. A split from the visible handler whose window moved to another tab
+  mid-request is placed the same way (`placeAfterMove`), from the model and cut
+  captured before the request, so its tab does not come back in the default
+  arrangement. The hold serializes loads, not edits: a divider can be moved in
+  the tab while the split's request is out, and appending a pane does not raise
+  the presentation revision, so the split answers at the revision that resize
+  was acknowledged at. Every placement model therefore carries the revision it
+  was read at (the server record's for a background read, the presentation
+  queue's acknowledged one for the visible capture). When the answer's revision
+  differs, the pane is placed on the arrangement the answer's own record holds
+  (`readSplitRecordModel()` in `terminals.js`) and the cut is planned again on
+  it; if that record no longer holds the same other panes, or its stored
+  arrangement does not fit them, nothing is written, the cached view is still
+  dropped, and the pane is reported with the not-saved `note`. A placement never
+  writes back weights it did not read.
+- **A resize is a revisioned presentation transaction, in any tab the window
+  holds.** The tool takes a group, axis, numbered track boundary, normalized
+  position, and the revision read from `list_panes`. The window that holds the
+  group claims it, whichever tab it shows. For the painted tab the page compares
   its pane order, rectangles and weights with the live group, measures the
   candidate using the pointer drag's track groups and minimum-size rule, then
   writes through the group presentation compare-and-swap before painting and
-  acknowledging it. A stale revision, missing divider, narrow viewport or
-  impossible minimum refuses without applying weights. The result carries the
-  persisted weights and pane rectangles; `list_panes` reads the same record.
-  Once a write starts, a lost or unreadable response is `unknown`, with no
-  claim that the weights stayed unchanged; read `list_panes` before retrying.
+  acknowledging it. For a tab it holds but is not painting,
+  `web/static/js/background-resize.js` does the same off the tab's model, with
+  the read, shared-grid measure, hold, write and adopt steps it shares with the
+  background split in `background-tab.js`; its minimum rule (`policy.fits`) is
+  pinned against `validateResizeCandidate`, and it never switches tabs or moves
+  focus. A tab with a pane close it has not shown since is refused, because
+  that close's pending model would replace the written weights at its next
+  load. A stale revision, missing divider, narrow viewport or impossible minimum
+  refuses without applying weights. The result carries the persisted weights and
+  pane rectangles; `list_panes` reads the same record. Once a write starts, a
+  lost or unreadable response is `unknown`, with no claim that the weights
+  stayed unchanged; read `list_panes` before retrying.
+- **Split and resize need an open, visible window, and say so.** The intent
+  poll runs nothing while the document is hidden, so a minimized, hidden or
+  closed native window ends both as `no_window_available`; nothing wakes a
+  hidden page. `VISIBLE_WINDOW_REQUIREMENT` (`gridvibe_mcp/splits.py`) is the
+  one sentence both tool descriptions, `NO_PAGE_HINT` and the resize's
+  no-intent and expired answers carry: the window must be open and not
+  minimized, any tab will do, and the agent asks the person to open or restore
+  it rather than calling a focus tool. An answer whose outcome is unknown keeps
+  its own uncertainty instead.
 - **The sidecar's wait must exceed the store's worst case, and the relation is
   pinned rather than derived.** `DEFAULT_WAIT_SECONDS` in `splits.py` and
   `windows.py` (and the resize helper that uses the split wait) is above

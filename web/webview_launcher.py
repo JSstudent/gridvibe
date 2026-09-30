@@ -57,6 +57,10 @@ _NATIVE_FRAME_COLORS = {"caption": "#111827", "text": "#f8fafc", "border": "#1f2
 # without inner scrolling; paired with the 10%-larger frame in main().
 LAUNCHER_NATIVE_ZOOM_FACTOR = 0.9
 
+# How long a second open of one workspace waits for the window another open is
+# creating. Past it the second open is refused rather than creating a duplicate.
+WORKSPACE_WINDOW_OPENING_WAIT_SECONDS = 30.0
+
 
 def _apply_windows_dark_frame_attributes(hwnd: int) -> bool:
     """Apply the complete dark DWM frame attribute set to a Windows HWND."""
@@ -129,6 +133,52 @@ def _restore_minimized_window(window) -> bool:
     except Exception:
         logger.debug("pywebview window restore failed", exc_info=True)
         return False
+
+
+def _foreground_window_handle() -> int | None:
+    """The window the person is using, on Windows; None anywhere else."""
+    if sys.platform != "win32":
+        return None
+    user32 = _windows_user32()
+    if user32 is None:
+        return None
+    try:
+        return int(user32.GetForegroundWindow() or 0) or None
+    except Exception:
+        logger.debug("Could not read the foreground window", exc_info=True)
+        return None
+
+
+def _hand_foreground_back(previous, window) -> bool | None:
+    """Give the foreground back if a window created minimized took it.
+
+    WinForms shows a minimized form with ``SW_SHOWMINIMIZED``, which activates
+    it, and focuses its page once shown: a window created so as not to come
+    forward would still take the keyboard from the person's window. Only a
+    foreground that is now the new window is handed back, so a window the
+    person picked in the meantime is never taken from them.
+
+    ``None`` when there was nothing to hand back, ``True`` when it was handed
+    back, ``False`` when the new window holds the foreground and it could not
+    be returned -- ``SetForegroundWindow`` is allowed to refuse.
+    """
+    if not previous or sys.platform != "win32":
+        return None
+    hwnd = _resolve_native_window_handle(window)
+    user32 = _windows_user32()
+    if hwnd is None or user32 is None:
+        return None
+    try:
+        if int(user32.GetForegroundWindow() or 0) != hwnd:
+            return None
+        if not user32.IsWindow(ctypes.c_void_p(previous)):
+            return None
+        if user32.SetForegroundWindow(ctypes.c_void_p(previous)):
+            return True
+    except Exception:
+        logger.debug("Could not hand the foreground back", exc_info=True)
+    logger.warning("A workspace window created minimized kept the keyboard focus")
+    return False
 
 
 # ── Where a window called up from another window belongs ──
@@ -796,6 +846,15 @@ def _should_exit_after_window_close(kind: str, open_windows: set[str]) -> bool:
     return kind == "launcher" or not set(open_windows)
 
 
+def _window_name_workspace_id(window_name: str):
+    """Return the workspace a registered window name belongs to, if any."""
+    if window_name == "session":
+        return DEFAULT_WORKSPACE_ID
+    if window_name.startswith("workspace:"):
+        return normalize_workspace_id(window_name.split(":", 1)[1])
+    return None
+
+
 def _request_native_close_prompt(window, api_bridge):
     """Open the in-page close dialog after the synchronous closing event returns."""
 
@@ -977,6 +1036,12 @@ class GridVibeApi:
         self._register_window = None
         self._window_minimized = False
         self._workspace_window_minimized = {}
+        # One open at a time creates a workspace's window: the opener holds a
+        # reservation (an Event other openers wait on) from finding the slot
+        # empty until the window is published or its creation fails. The lock
+        # covers only the slot and reservation bookkeeping, never native UI.
+        self._workspace_window_lock = threading.Lock()
+        self._workspace_window_openings = {}
         self._restarting = False
         # One re-entrancy guard for both triggers of the minimize batch (the
         # control and the cascade): minimizing the others fires *their*
@@ -1059,6 +1124,91 @@ class GridVibeApi:
         ).strip()
         self._workspace_fullscreen_states.setdefault(resolved_workspace_id, False)
         self._workspace_window_minimized.setdefault(resolved_workspace_id, False)
+
+    def _reserve_workspace_window(self, workspace_id):
+        """Return the workspace's open window, or this caller's reservation.
+
+        Answers ``(window, None)`` when the slot holds a window and
+        ``(None, opening)`` when it was empty and this caller now owns its
+        creation. A caller that finds another creation in flight waits for it
+        to settle and looks again, so two opens of one unopened workspace make
+        one window. ``(None, None)`` means that wait ran out.
+        """
+        deadline = time.monotonic() + WORKSPACE_WINDOW_OPENING_WAIT_SECONDS
+        while True:
+            with self._workspace_window_lock:
+                window = self._workspace_windows.get(workspace_id)
+                if window is not None:
+                    return window, None
+                pending = self._workspace_window_openings.get(workspace_id)
+                if pending is None:
+                    opening = threading.Event()
+                    self._workspace_window_openings[workspace_id] = opening
+                    return None, opening
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or not pending.wait(remaining):
+                return None, None
+
+    def _publish_workspace_window(self, workspace_id, opening, window, group_id):
+        """Attach a created window under the reservation that created it."""
+        with self._workspace_window_lock:
+            if self._workspace_window_openings.get(workspace_id) is not opening:
+                return False
+            self._attach_workspace_window(workspace_id, window, group_id)
+            return True
+
+    def _release_workspace_window_opening(self, workspace_id, opening):
+        """End a reservation, published or not, and wake whoever waits on it."""
+        with self._workspace_window_lock:
+            if self._workspace_window_openings.get(workspace_id) is opening:
+                del self._workspace_window_openings[workspace_id]
+        opening.set()
+
+    def _drop_workspace_window(self, workspace_id, window, on_drop=None):
+        """Clear a closed window's slot and state, unless it names another window.
+
+        A slot may already hold the window that replaced this one, and its
+        state belongs to that window, so the check and the pops happen in one
+        hold of the slot lock. ``on_drop`` runs in that same hold, so
+        bookkeeping kept by window name (main()'s open-window kinds) leaves
+        with the slot: a successor can only be published once the slot is
+        empty, so it cannot register in between and lose its entry.
+        """
+        with self._workspace_window_lock:
+            current = self._workspace_windows.get(workspace_id)
+            if current is not None and current is not window:
+                return False
+            self._workspace_windows.pop(workspace_id, None)
+            self._workspace_window_group_ids.pop(workspace_id, None)
+            self._workspace_fullscreen_states.pop(workspace_id, None)
+            self._workspace_window_minimized.pop(workspace_id, None)
+            self._pending_workspace_native_zoom_factors.pop(workspace_id, None)
+            if on_drop is not None:
+                on_drop()
+            return True
+
+    def _record_window_minimized(self, window_name: str, window, minimized: bool):
+        """Set a window's minimized flag only while it is the registered window.
+
+        Returns the previous flag, or None when the name's slot holds another
+        window or none at all: events from a closed or replaced window describe
+        only that window. The check and the write share one hold of the slot
+        lock, because pywebview runs each event handler on its own thread and a
+        close and reopen could otherwise land between them.
+        """
+        with self._workspace_window_lock:
+            if window_name == "launcher":
+                current = self._window
+            else:
+                workspace_id = _window_name_workspace_id(window_name)
+                if workspace_id is None:
+                    return None
+                current = self._workspace_windows.get(workspace_id)
+            if current is not window:
+                return None
+            previous = self._is_window_minimized(window_name)
+            self._set_window_minimized(window_name, minimized)
+            return previous
 
     def _set_register_window(self, callback):
         """Store the window registration callback shared by the launcher."""
@@ -1650,13 +1800,21 @@ class GridVibeApi:
         workspace_id,
         group_id: str = "",
         native_zoom_factor=None,
+        raise_window=True,
     ):
-        """Open or focus one workspace window, optionally restoring zoom."""
+        """Open or focus one workspace window, optionally restoring zoom.
+
+        ``raise_window=False`` is the agent's ``open_window``: nothing comes
+        forward. An open window is left exactly where it is, and a new one is
+        created minimized (see ``_open_workspace_window``). Only an explicit
+        ``False`` asks for that; every other value keeps the raise.
+        """
         return self._open_workspace_window(
             workspace_id,
             group_id,
             native_zoom_factor,
             legacy_default_url=False,
+            raise_window=raise_window is not False,
         )
 
     def _open_workspace_window(
@@ -1666,8 +1824,20 @@ class GridVibeApi:
         native_zoom_factor,
         *,
         legacy_default_url: bool,
+        raise_window: bool = True,
     ):
-        """Implementation shared by workspace-aware and legacy bridge calls."""
+        """Implementation shared by workspace-aware and legacy bridge calls.
+
+        Without ``raise_window`` a new window is created minimized rather than
+        shown without activation: pywebview's ``focus=False`` makes a window
+        that can never take keyboard focus, and none of its options places a
+        window behind the foreground one, so minimized is the only state that
+        is guaranteed not to cover what the person is looking at.
+
+        Creating the window holds the workspace's opening reservation (see
+        ``_reserve_workspace_window``), so a second open of the same unopened
+        workspace waits and then reuses the window instead of making another.
+        """
         try:
             resolved_workspace_id = normalize_workspace_id(workspace_id)
         except ValueError as exc:
@@ -1683,8 +1853,15 @@ class GridVibeApi:
         if query:
             url = f"{url}?{urlencode(query)}"
 
+        opening = None
         try:
-            window = self._workspace_windows.get(resolved_workspace_id)
+            window, opening = self._reserve_workspace_window(resolved_workspace_id)
+            if window is None and opening is None:
+                logger.warning(
+                    "Workspace %s window is still being opened by another request",
+                    resolved_workspace_id,
+                )
+                return {"ok": False, "error": "The workspace window is still opening"}
             current_group_id = self._workspace_window_group_ids.get(
                 resolved_workspace_id,
                 "",
@@ -1705,6 +1882,13 @@ class GridVibeApi:
                     logger.debug(
                         "Keeping existing workspace window open; frontend will reconcile its groups"
                     )
+                if not raise_window:
+                    return {
+                        "ok": True,
+                        "reused": True,
+                        "raised": False,
+                        "minimized": self._is_window_minimized(window_name),
+                    }
                 if requested_zoom is not None and _set_native_window_zoom(
                     window, requested_zoom
                 ) is None:
@@ -1727,6 +1911,14 @@ class GridVibeApi:
                 url,
             )
             _patch_winforms_dark_title_bar()
+            create_options = {}
+            foreground = None
+            if not raise_window:
+                create_options["minimized"] = True
+                foreground = _foreground_window_handle()
+                # Tracked minimized from before the window exists, so its own
+                # `minimized` event is an echo and never starts the cascade.
+                self._set_window_minimized(window_name, True)
             window = webview.create_window(
                 "GridVibe Workspace",
                 url,
@@ -1740,8 +1932,11 @@ class GridVibeApi:
                 text_select=True,
                 zoomable=True,
                 js_api=self,
+                **create_options,
             )
             if window is None:
+                if not raise_window:
+                    self._set_window_minimized(window_name, False)
                 logger.error("pywebview.create_window returned None for a workspace window")
                 return {"ok": False, "error": "Failed to create workspace window"}
 
@@ -1756,26 +1951,56 @@ class GridVibeApi:
                         lambda *_args, workspace_id=resolved_workspace_id:
                         self._apply_pending_workspace_native_zoom(workspace_id)
                     )
-            self._attach_workspace_window(
+            if not self._publish_workspace_window(
                 resolved_workspace_id,
+                opening,
                 window,
                 resolved_group_id,
-            )
+            ):
+                # Only the reservation holder writes an empty slot, so this is
+                # a broken invariant rather than a race: never overwrite, and
+                # never leave the unregistered window behind.
+                window.destroy()
+                raise RuntimeError("Workspace window reservation was lost")
             if self._register_window is not None:
-                self._register_window(window, window_name)
+                if raise_window:
+                    self._register_window(window, window_name)
+                else:
+                    self._register_window(window, window_name, minimized=True)
+            focus_kept = None
+            if not raise_window:
+                focus_kept = _hand_foreground_back(foreground, window)
+                shown_event = getattr(getattr(window, "events", None), "shown", None)
+                if shown_event is not None:
+                    # WinForms focuses the page from its own Shown handler,
+                    # which can run after create_window has returned.
+                    shown_event += (
+                        lambda *_args, previous=foreground, created=window:
+                        _hand_foreground_back(previous, created)
+                    )
             logger.info(
                 "Workspace window created and registered (workspace=%s group=%s)",
                 resolved_workspace_id,
                 resolved_group_id or "all",
             )
+            if not raise_window:
+                answer = {"ok": True, "reused": False, "raised": False, "minimized": True}
+                if focus_kept is False:
+                    answer["focus_moved"] = True
+                return answer
             return {"ok": True, "reused": False}
         except Exception as exc:
+            if not raise_window and resolved_workspace_id not in self._workspace_windows:
+                self._set_window_minimized(f"workspace:{resolved_workspace_id}", False)
             logger.exception(
                 "Failed to open workspace window workspace=%s group=%s",
                 resolved_workspace_id,
                 resolved_group_id or "all",
             )
             return {"ok": False, "error": str(exc)}
+        finally:
+            if opening is not None:
+                self._release_workspace_window_opening(resolved_workspace_id, opening)
 
     def open_launcher_window(self, workspace_id=""):
         """Focus the launcher window without reloading or resizing it.
@@ -2204,14 +2429,17 @@ def main():
 
     open_windows = set()
 
-    def register_window(window, kind: str):
+    def register_window(window, kind: str, minimized: bool = False):
         open_windows.add(kind)
-        api_bridge._set_window_minimized(kind, False)
+        api_bridge._set_window_minimized(kind, minimized)
 
         def _handle_minimized(*_args):
             logger.debug("GridVibe %s window minimized", kind)
-            was_tracked_minimized = api_bridge._is_window_minimized(kind)
-            api_bridge._set_window_minimized(kind, True)
+            was_tracked_minimized = api_bridge._record_window_minimized(
+                kind, window, True
+            )
+            if was_tracked_minimized is None:
+                return
             # The cascade (workspace.minimize_cascade, off by default) is the
             # 4-A control's second trigger and runs the same batch. Two guards,
             # because the events this batch provokes can land either inside it
@@ -2229,7 +2457,7 @@ def main():
 
         def _handle_restored(*_args):
             logger.debug("GridVibe %s window restored", kind)
-            api_bridge._set_window_minimized(kind, False)
+            api_bridge._record_window_minimized(kind, window, False)
 
         def _handle_maximized(*_args):
             # pywebview only fires `restored` on transitions back to Normal,
@@ -2237,37 +2465,32 @@ def main():
             # keep a stale minimized flag; a maximized window is never
             # minimized. Without this, the next workspace switch calls
             # restore() and shrinks the window out of Maximized.
-            if api_bridge._is_window_minimized(kind):
+            if api_bridge._record_window_minimized(kind, window, False):
                 logger.debug("GridVibe %s window restored to maximized", kind)
-                api_bridge._set_window_minimized(kind, False)
 
         def _handle_closed(*_args):
             logger.info("GridVibe %s window closed", kind)
-            open_windows.discard(kind)
-            api_bridge._set_window_minimized(kind, False)
-            if kind == "session":
-                workspace_id = DEFAULT_WORKSPACE_ID
-                api_bridge._forget_workspace_lifecycle_window(workspace_id, window)
-                api_bridge._workspace_windows.pop(workspace_id, None)
-                api_bridge._workspace_window_group_ids.pop(workspace_id, None)
-                api_bridge._workspace_fullscreen_states.pop(workspace_id, None)
-                api_bridge._workspace_window_minimized.pop(workspace_id, None)
-            elif kind.startswith("workspace:"):
-                workspace_id = normalize_workspace_id(kind.split(":", 1)[1])
+            workspace_id = _window_name_workspace_id(kind)
+            if workspace_id is not None:
                 # The title-bar X reaches here and nowhere else, so this is
                 # where a close the bridge verb did not make is announced.
-                # Read before the pop below: the guard inside needs the slot
+                # Read before the drop below: the guard inside needs the slot
                 # to still say which window this workspace currently has.
                 api_bridge._forget_workspace_lifecycle_window(workspace_id, window)
-                api_bridge._workspace_windows.pop(workspace_id, None)
-                api_bridge._workspace_window_group_ids.pop(workspace_id, None)
-                api_bridge._workspace_fullscreen_states.pop(workspace_id, None)
-                api_bridge._workspace_window_minimized.pop(workspace_id, None)
-                api_bridge._pending_workspace_native_zoom_factors.pop(
+                if not api_bridge._drop_workspace_window(
                     workspace_id,
-                    None,
-                )
+                    window,
+                    on_drop=lambda: open_windows.discard(kind),
+                ):
+                    # The slot, its state and the open kind all belong to the
+                    # window that replaced this one now.
+                    logger.debug("Closed %s window had already been replaced", kind)
+                    return
             else:
+                open_windows.discard(kind)
+            if workspace_id is None:
+                # A workspace's minimized flag went with the rest of its slot.
+                api_bridge._set_window_minimized(kind, False)
                 api_bridge._window = None
                 api_bridge._is_fullscreen = False
                 api_bridge._close_prompt_pending = False

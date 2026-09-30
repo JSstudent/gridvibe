@@ -115,6 +115,23 @@ as `ambiguous` with the `candidates`, and nothing happens until one is named by
 with the tabs that are open, and says so when a saved preset of that name exists
 but is not open.
 
+**Only an explicit focus request moves what the person sees.** `focus_session`
+and `focus_pane`, and `move_session` with `show`, are the only calls that
+switch a window's tab, move keyboard focus or bring a window forward, and an
+agent makes them only when the person asked to see, focus or bring something
+forward. Every other tool works in the background: in any tab of a window,
+showing or not, leaving the person's tab, focus and window order as they were.
+A new tool has to be named in one or the other (`VIEW_MOVING_TOOLS` or
+`BACKGROUND_TOOLS` in `server.py`, both spelled out name by name), and a test
+fails until it is. Closing the tab a window shows still moves that window to
+another tab, because the tab it showed is gone; and split and resize still need
+the window open and not minimized, which the agent asks the person to fix. The
+platform can still move things a tool did not ask for: when Windows refuses to
+hand the foreground back as `open_window` creates a window, the answer says
+`focus_moved`, and in browser mode the browser may show the tab it opens. Only
+that immediate hand-back is reported; a refusal after the answer, when the new
+window first takes focus from its own shown event, is logged but not reported.
+
 ### read — eight
 
 | Tool | Answers |
@@ -159,8 +176,8 @@ terminal: a report reaches the waiting agent as its own tool call's result.
 | Tool | Makes |
 | --- | --- |
 | `create_workspace` | one empty, labelled workspace. Creating it does not make a window appear, and it is refused past sixteen workspaces that are *still* empty — counted over the whole app, because the server cannot tell a tool from the launcher's own button |
-| `launch_panes` | one session (a new tab) of panes — agent, terminal, file explorer or browser preview. An agent pane may carry a `task`, and this needs no open window. The result's `session_name` is the name the tab actually got: a repeated scratch name is suffixed. The whole request is validated before anything exists — see [Where a launched pane opens](#where-a-launched-pane-opens) |
-| `open_window` | a workspace window on screen, whichever tab it shows. Reports `opened`, `blocked` or `no_window_available`. A named session is `focus_session`'s job |
+| `launch_panes` | one session (a new tab) of panes — agent, terminal, file explorer or browser preview. An agent pane may carry a `task`, and this needs no open window. In a workspace whose window already shows a tab, the new tab joins the strip without being shown; the window stays on the person's tab. The result's `session_name` is the name the tab actually got: a repeated scratch name is suffixed. The whole request is validated before anything exists — see [Where a launched pane opens](#where-a-launched-pane-opens) |
+| `open_window` | makes sure a workspace has a window, and never brings one forward: an open window is left where it is (`already_open: true`, `raised: false`), and a new one is created minimized in the taskbar (`minimized: true`, with a note). Reports `opened`, `blocked` or `no_window_available`. Showing a session is `focus_session`'s job. In browser mode it opens a browser tab, which the browser may show |
 | `split_pane` | halves one pane on a chosen axis and says what the new pane runs. With no `kind` stated it is what the 🪟 button makes: a terminal clones its source, and an explorer, browser or *agent* pane splits off a plain terminal rooted where it is showing — the kind is never cloned. A stated `directory` wins over where the source is standing. The pane may be in any session tab of its window, shown or not: the split switches no tab and moves no focus. Reports `split`, `refused` or `no_window_available`, and a `split` whose place in the layout could not be saved carries a `note`. With `kind: "agent"` it may carry a `task`, and the result's `handoff` says it is waiting. Its description states what the axis words produce: `horizontal` stacks the new pane below, `vertical` puts it to the right |
 
 ### replace — two
@@ -194,8 +211,8 @@ is a request, and a pane nobody has open resets nothing.
 | --- | --- |
 | `focus_session` | brings one session to the foreground: raises its workspace window and switches it to that tab. Named by `session_name` (or `group_id`); the workspace is found from the session, and `workspace_id` only narrows a name two workspaces share |
 | `focus_pane` | brings one pane into view: raises its window, switches to its session and gives the pane focus. The session and workspace are read from the pane itself, as they are *now* |
-| `move_session` | moves one open session — the tab and all its panes — to another workspace, named by `target_workspace_label`, `target_workspace_id`, or `new_workspace` (exactly one). With `show` the destination window is then raised on that tab |
-| `resize_divider` | moves a numbered vertical or horizontal grid divider to a normalized position, after the visible page checks minimum pane sizes and persists the result. It returns applied weights and pane rectangles, a refusal with no geometry change, or `unknown` when the write response cannot be confirmed |
+| `move_session` | moves one open session — the tab and all its panes — to another workspace, named by `target_workspace_label`, `target_workspace_id`, or `new_workspace` (exactly one). With `show` — only when the person asked to see the moved session — the destination window is then raised on that tab; without it that window stays on the tab it shows |
+| `resize_divider` | moves a numbered vertical or horizontal grid divider to a normalized position, in any session tab of its window, shown or not, after the page checks minimum pane sizes and persists the result. It returns applied weights and pane rectangles, a refusal with no geometry change, or `unknown` when the write response cannot be confirmed |
 
 None creates, ends or types anything. A moved session keeps its pane ids,
 processes, SSH connections, handoffs and result assignments; the only thing
@@ -225,7 +242,11 @@ line is between columns N and N+1; a horizontal line is between rows N and
 N+1. `position` is a fraction of the full grid width or height, strictly
 between 0 and 1. The page moves only that track boundary and refuses a stale
 revision, a divider absent from the layout, a position that violates pane
-minimums, or a narrow viewport. A native window must show the session tab.
+minimums, or a narrow viewport. The session may be any tab of its window: one
+that isn't showing is resized without switching tabs or moving focus, and has
+its new proportions the next time it is shown. Such a tab is refused while it
+holds a pane close it has not shown since, because that close would replace the
+new weights when the tab is next painted.
 After two vertical splits, moving the first and second dividers to roughly
 one-third and two-thirds can make three equal side-by-side panes. The splits
 and resizes are separate steps; a later refusal does not undo earlier splits.
@@ -308,6 +329,13 @@ builds the question from its live registry, so every agent asks the same one.
 The refusals nothing waives come first, so an agent never asks the person, gets
 a yes, and is then refused anyway.
 
+`set_pane_agent` checks its gates again when it changes the pane, because
+finding the agent binary can take seconds. If in that time the pane starts an
+agent, or the caller closes or loses override mode, the call is refused as it
+would have been at the start. A target that changed while the relaunch was being prepared is
+refused with 409 even under `override`, since the person's yes was about what was
+running there before. Either way the pane is left as it was.
+
 A pane that existed before a GridVibe restart carries no creator — `created_by_session_id`
 is deliberately absent from the runtime snapshot — so it is always refused
 without `override`. That is the honest answer: GridVibe does not know who made
@@ -353,7 +381,13 @@ Four things GridVibe cannot do from outside a browser page, and the same
 mechanism answers all of them (`web/window_intents.py`,
 `web/static/js/window-intent.js`):
 
-- **Open a window.** Nothing outside a page can open a pywebview window.
+- **Open a window.** Nothing outside a page can open a pywebview window. For
+  `open_window` the intent says not to raise it: an open window is left where it
+  is, and a new one is created minimized, because pywebview cannot place a
+  window behind another. On Windows the foreground is handed back to the window
+  that had it; if the hand-back made as the window is created is refused, the
+  answer says `focus_moved`. One refused later, when the window is first shown,
+  is only logged.
 - **Split a pane.** The axis never reaches the server. The page computes the new
   rectangles, and its refusals — the minimum columns and rows below a terminal
   header, the narrow-viewport rule, the pane cap — are measured off the live
@@ -367,6 +401,10 @@ mechanism answers all of them (`web/window_intents.py`,
 - **Resize a divider.** Only the page knows the current pixel dimensions and
   terminal cell minimums. It checks the proposed weights against the live grid,
   writes a revisioned presentation update, then acknowledges the applied layout.
+  For a tab in the background it does the same off that tab's saved arrangement
+  and the window's own grid, under the same minimums, without switching tabs or
+  moving focus (`web/static/js/background-resize.js`, sharing its tab handling
+  with the background split in `background-tab.js`).
 - **Show a session or a pane.** Raising a window is not proof that its tab
   changed; only the page that holds the tab can switch it and say so.
 
@@ -395,9 +433,12 @@ side-by-side split and got a stacked one has been lied to.
 `no_window_available` is what browser mode always answers for a split: the
 intent poll runs in a native GridVibe window only, because a browser tab must
 not pay for a poll on every page load. A hidden or minimized native window
-polls nothing either, so a split needs the workspace window open and visible;
-which tab it shows does not matter, and the answer says exactly that. Nothing
-wakes a hidden window. `open_window` has a browser-mode fallback
+polls nothing either, so a split or a resize needs the workspace window open
+and visible; which tab it shows does not matter. Both tool descriptions and
+their no-window answers carry the same sentence
+(`VISIBLE_WINDOW_REQUIREMENT` in `splits.py`), which tells the agent to ask
+the person to open or restore the window rather than calling `focus_session`
+or `focus_pane`. Nothing wakes a hidden window. `open_window` has a browser-mode fallback
 (`webbrowser.open` is a real alternative); there is no equivalent for "measure
 this pane".
 

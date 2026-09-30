@@ -17,7 +17,9 @@ transaction. What is pinned here is executed in Node, not read as source:
   build's resolution -- and never with the window's own refresh, which would
   re-point the active tab.
 - **A split whose request was in flight when the window moved on paints nothing
-  into whatever is showing.**
+  into whatever is showing.** Its pane is placed in its own tab the way a
+  split from behind places one, off the model and cut read before the request,
+  with the tab held for the write.
 """
 
 import json
@@ -32,7 +34,9 @@ from tests.test_split_geometry import RESTORE_SOURCE, RESTORE_STUBS
 
 ROOT = Path(__file__).resolve().parent.parent
 STATIC_JS = ROOT / "web" / "static" / "js"
+BACKGROUND_TAB_JS = STATIC_JS / "background-tab.js"
 BACKGROUND_SPLIT_JS = STATIC_JS / "background-split.js"
+BACKGROUND_RESIZE_JS = STATIC_JS / "background-resize.js"
 SPLIT_GEOMETRY_JS = STATIC_JS / "split-geometry.js"
 TERMINALS_JS = STATIC_JS / "terminals.js"
 TERMINALS_HTML = ROOT / "templates" / "terminals.html"
@@ -79,6 +83,7 @@ def _run_node_file(script: str) -> dict:
 
 MODULE_HARNESS = r"""
 const bg = require(MODULE_PATH);
+const backgroundTab = require(TAB_PATH);
 
 const RECT = (originSlot, x, y, w, h) => ({ originSlot, x, y, w, h });
 
@@ -89,7 +94,9 @@ function baseModel() {
         rects: [RECT(0, 1, 1, 8, 8), RECT(1, 9, 1, 8, 8)],
         columnWeights: Array.from({ length: 16 }, () => 1),
         rowWeights: Array.from({ length: 8 }, () => 1),
-        baseCount: 2
+        baseCount: 2,
+        // Current: the split below answers at this revision.
+        revision: 7
     };
 }
 
@@ -134,7 +141,7 @@ function fakePage(options = {}) {
         split: async (id, axis, request) => {
             log.push('split');
             requests.push({ id, axis, request });
-            if (options.duringSplit) options.duringSplit(api, log);
+            if (options.duringSplit) options.duringSplit(tab, log);
             if (options.splitWaits) await options.splitWaits;
             if (options.splitThrows) throw new Error('network down');
             return options.splitResult || {
@@ -155,14 +162,16 @@ function fakePage(options = {}) {
         limits: { maxPanes: options.maxPanes || 16, minCols: 8, minRows: 4 },
         onError: error => log.push(`error:${error.message}`)
     };
-    const api = bg.create(page);
-    return { page, log, saves, adopted, requests, api };
+    /* The window's one tab module, as the page builds it, under the split. */
+    const tab = backgroundTab.create(page);
+    const api = bg.create({ ...page, tab });
+    return { page, log, saves, adopted, requests, api, tab };
 }
 
 /* Whether the tab is free to load within a tick or two, or still held. */
-async function releasedSoon(api, groupId) {
+async function releasedSoon(tab, groupId) {
     return Promise.race([
-        api.settled(groupId).then(() => true),
+        tab.settled(groupId).then(() => true),
         new Promise(resolve => setTimeout(() => resolve(false), 50))
     ]);
 }
@@ -272,7 +281,7 @@ const out = {};
     {
         const t = fakePage({ splitResult: { ok: false, error: 'Split failed with status 400' } });
         const answer = await t.api.perform('pane-b', 'vertical', null);
-        out.createFailed = { answer, log: t.log, released: await releasedSoon(t.api, 'g-2') };
+        out.createFailed = { answer, log: t.log, released: await releasedSoon(t.tab, 'g-2') };
     }
     {
         /* The tab is picked while the request is out: its load asks first, and
@@ -283,32 +292,32 @@ const out = {};
         const sent = new Promise(resolve => { requestSent = resolve; });
         const t = fakePage({
             splitWaits: new Promise(resolve => { answerRequest = resolve; }),
-            duringSplit: (api, log) => {
-                load = api.settled('g-2').then(() => log.push('load'));
+            duringSplit: (tab, log) => {
+                load = tab.settled('g-2').then(() => log.push('load'));
                 requestSent();
             }
         });
         const performing = t.api.perform('pane-b', 'vertical', null);
         await sent;
-        const heldDuring = !(await releasedSoon(t.api, 'g-2'));
-        const otherTabFree = await releasedSoon(t.api, 'g-1');
+        const heldDuring = !(await releasedSoon(t.tab, 'g-2'));
+        const otherTabFree = await releasedSoon(t.tab, 'g-1');
         answerRequest();
         const answer = await performing;
         await load;
         out.openedDuringRequest = {
             answer, log: t.log, heldDuring, otherTabFree,
-            releasedAfter: await releasedSoon(t.api, 'g-2')
+            releasedAfter: await releasedSoon(t.tab, 'g-2')
         };
     }
     {
         const t = fakePage({ splitThrows: true });
         let thrown = '';
         try { await t.api.perform('pane-b', 'vertical', null); } catch (error) { thrown = error.message; }
-        out.splitThrew = { thrown, released: await releasedSoon(t.api, 'g-2') };
+        out.splitThrew = { thrown, released: await releasedSoon(t.tab, 'g-2') };
     }
     {
         const t = fakePage();
-        out.idle = await releasedSoon(t.api, 'g-2');
+        out.idle = await releasedSoon(t.tab, 'g-2');
     }
     {
         const t = fakePage({ saveResult: { ok: false, error: 'stale' } });
@@ -319,7 +328,7 @@ const out = {};
         const t = fakePage({ saveThrows: true });
         const answer = await t.api.perform('pane-b', 'vertical', null);
         out.saveThrew = {
-            answer, adopted: t.adopted, log: t.log, released: await releasedSoon(t.api, 'g-2')
+            answer, adopted: t.adopted, log: t.log, released: await releasedSoon(t.tab, 'g-2')
         };
     }
     {
@@ -360,10 +369,12 @@ ADAPTER_SOURCE_NAMES = (
     "getPaneCandidateSurface",
     "backgroundGroupHolding",
     "fetchGroupRecord",
+    "groupRecordModel",
     "readBackgroundGroupModel",
+    "readSplitRecordModel",
     "measureTerminalCell",
     "measureGridForModel",
-    "adoptBackgroundSplit",
+    "adoptBackgroundGroup",
     "discardBackgroundGroupView",
 )
 
@@ -446,7 +457,7 @@ const out = {};
 
     // ── a tab as data: the server's summary ──
     served = { ok: true, groups: [{
-        group_id: 'g-2', pane_order: ids, layout: 'vertical',
+        group_id: 'g-2', pane_order: ids, layout: 'vertical', presentation_revision: 4,
         workspace_layout: {
             split_slot_rects: [
                 { originSlot: 0, x: 1, y: 1, w: 8, h: 16 },
@@ -461,8 +472,26 @@ const out = {};
     out.stored = {
         ids: stored.ids, rects: plain(stored.rects),
         columns: stored.columnWeights.length, rows: stored.rowWeights.length,
-        firstColumnWeight: stored.columnWeights[0], baseCount: stored.baseCount
+        firstColumnWeight: stored.columnWeights[0], baseCount: stored.baseCount,
+        revision: stored.revision
     };
+
+    // ── the tab a split's answer describes, without the pane it added ──
+    const answered = { ...served.groups[0], pane_order: [...ids, 'pane-new'], presentation_revision: 6 };
+    const fromAnswer = readSplitRecordModel(answered, 'pane-new');
+    out.fromAnswer = {
+        ids: fromAnswer.ids, rects: plain(fromAnswer.rects),
+        firstColumnWeight: fromAnswer.columnWeights[0], revision: fromAnswer.revision
+    };
+    const presetAnswer = readSplitRecordModel(
+        { group_id: 'g-2', pane_order: [...ids, 'pane-new'], layout: 'vertical', workspace_layout: null, presentation_revision: 6 },
+        'pane-new'
+    );
+    out.presetAnswer = { rects: plain(presetAnswer.rects), revision: presetAnswer.revision };
+    out.misfitAnswer = readSplitRecordModel(
+        { ...answered, pane_order: ['pane-a', 'pane-b', 'pane-c', 'pane-new'] }, 'pane-new'
+    );
+    out.emptyAnswer = readSplitRecordModel({ group_id: 'g-2', pane_order: ['pane-new'] }, 'pane-new');
 
     // ── no record the page wrote: the preset its size and layout name call for ──
     served = { ok: true, groups: [{ group_id: 'g-2', pane_order: ids, layout: 'horizontal', workspace_layout: null }] };
@@ -483,7 +512,7 @@ const out = {};
     out.coarse = { box: boxOf(finer.rects), first: plain(finer.rects)[0], baseCount: finer.baseCount };
 
     // ── its cached view, while that still holds exactly the server's panes ──
-    served = { ok: true, groups: [{ group_id: 'g-2', pane_order: ['pane-a', 'pane-b', 'pane-c'], layout: 'vertical' }] };
+    served = { ok: true, groups: [{ group_id: 'g-2', pane_order: ['pane-a', 'pane-b', 'pane-c'], layout: 'vertical', presentation_revision: 9 }] };
     cachedGroupViews.set('g-2', {
         className: 'layout-split-local',
         fragment: cardsFor([2, 0, 1]),
@@ -501,7 +530,8 @@ const out = {};
     out.cached = {
         // Visual order is the cards' order, not creation order.
         ids: cached.ids, rects: plain(cached.rects),
-        weight: cached.columnWeights[0], baseCount: cached.baseCount
+        weight: cached.columnWeights[0], baseCount: cached.baseCount,
+        revision: cached.revision
     };
 
     // ── ...and not once the server lists panes it does not hold ──
@@ -529,7 +559,9 @@ const out = {};
         narrow: measured.narrow,
         widths: measured.surfaces.map(surface => Math.round(surface.width * 10) / 10),
         height: Math.round(measured.surfaces[0].height * 10) / 10,
-        cell: measured.cell, headerHeight: measured.headerHeight
+        cell: measured.cell, headerHeight: measured.headerHeight,
+        // The track sizes a divider move is planned on come with it.
+        columnSizes: measured.metrics.columnSizes.length, rowSizes: measured.metrics.rowSizes.length
     };
     terminals = [{}, { term: { _core: { _renderService: { dimensions: { css: { cell: { width: 9, height: 20 } } } } } } }];
     headerBox = { height: 40 };
@@ -546,7 +578,7 @@ const out = {};
 
     // ── the tab's record after a split the page just wrote ──
     sessionGroups = [{ group_id: 'g-2', pane_order: ['pane-a'], workspace_layout: null, presentation_revision: 3 }];
-    adoptBackgroundSplit(
+    adoptBackgroundGroup(
         { group_id: 'g-2', pane_order: ['pane-a', 'pane-new'], presentation_revision: 7, terminal_count: 2 },
         {
             ids: ['pane-a', 'pane-new'],
@@ -560,7 +592,7 @@ const out = {};
     };
     revisionsSet = [];
     sessionGroups = [{ group_id: 'g-2', pane_order: ['pane-a'] }];
-    adoptBackgroundSplit({ group_id: 'g-2', pane_order: ['pane-a', 'pane-new'], presentation_revision: 7 }, null);
+    adoptBackgroundGroup({ group_id: 'g-2', pane_order: ['pane-a', 'pane-new'], presentation_revision: 7 }, null);
     out.adoptedUnsaved = {
         order: sessionGroups[0].pane_order, layout: sessionGroups[0].workspace_layout || null,
         revision: sessionGroups[0].presentation_revision, revisions: revisionsSet.slice()
@@ -674,15 +706,85 @@ function build(options) {
 """
 
 SPLIT_IN_FLIGHT_HARNESS = r"""
+const bg = require(MODULE_PATH);
+const backgroundTab = require(TAB_PATH);
+
 /* The real `splitTerminalPane`, against a page that is only as much of a page
-   as it reads. `interrupt(context)` runs while the request is in flight, which
-   is where a tab switch or a rebuild lands. */
-async function run(interrupt) {
+   as it reads, and the real background-split module under it for a pane that
+   has to be placed in a tab no longer painted. `interrupt(context)` runs while
+   the request is in flight, which is where a tab switch or a rebuild lands. */
+async function run(interrupt, options = {}) {
     const events = [];
+    const saves = [];
+    const discarded = [];
+    const adopted = [];
     const original = { terminals: [{ _session: {} }], sessionIds: ['pane-a'] };
-    const sourceCard = { querySelectorAll: () => [], after: () => events.push('card-added') };
+    const sourceCard = {
+        dataset: { slot: '0' },
+        querySelectorAll: () => [],
+        after: () => events.push('card-added')
+    };
     const grid = { children: [sourceCard] };
+    let tab = null;
+    /* Whether a load of the tab would still be waiting while the write is
+       out: `settled` must not resolve until the write has landed. */
+    const heldDuringWrite = async groupId => {
+        let resolved = false;
+        tab.settled(groupId).then(() => { resolved = true; });
+        await new Promise(resolve => setTimeout(resolve, 5));
+        return !resolved;
+    };
+    tab = backgroundTab.create({
+        discard: groupId => { discarded.push(groupId); events.push('discarded'); },
+        saveLayout: async layout => {
+            events.push('layout-written');
+            saves.push({ ...layout, held: await heldDuringWrite(layout.groupId) });
+            return options.saveFails ? { ok: false, error: 'conflict' } : { ok: true, revision: 8 };
+        },
+        adopt: (group, saved) => {
+            events.push('adopted');
+            adopted.push({ groupId: group && group.group_id, saved });
+        }
+    });
+    const backgroundSplit = bg.create({
+        tab,
+        splitRect: (rect, axis, firstSpan) => [
+            { originSlot: 0, x: rect.x, y: rect.y, w: firstSpan, h: rect.h },
+            { originSlot: 1, x: rect.x + firstSpan, y: rect.y, w: rect.w - firstSpan, h: rect.h }
+        ],
+        /* Planned again only on an arrangement the tab was rewritten to. */
+        plan: model => {
+            events.push('cut-replanned');
+            return { firstSpan: 2, weights: null, onWeights: model.columnWeights.slice() };
+        },
+        /* The page's reading of a record, as far as these tests need it. */
+        recordModel: (group, addedId) => {
+            const layout = group && group.workspace_layout;
+            const ids = (group.pane_order || []).filter(id => id !== addedId);
+            if (!layout || layout.rects.length !== ids.length) return null;
+            return { ids, rects: layout.rects, columnWeights: layout.columnWeights,
+                rowWeights: layout.rowWeights, baseCount: layout.baseCount,
+                revision: group.presentation_revision };
+        },
+        limits: { maxPanes: 16, minCols: 20, minRows: 5 }
+    });
     const context = {
+        backgroundSplit,
+        originalSplitSlotCount: 1,
+        cloneSplitSlotRects: rects => rects.map(rect => ({ ...rect })),
+        getSplitGridSize: rects => ({
+            columns: Math.max(...rects.map(rect => rect.x + rect.w - 1)),
+            rows: Math.max(...rects.map(rect => rect.y + rect.h - 1))
+        }),
+        normalizeSplitTrackWeights: (weights, length) => Array.from(
+            { length }, (_, index) => (Array.isArray(weights) ? weights[index] : 1)
+        ),
+        /* Read before the request goes out, off the grid showing the tab
+           then: one read later would be measuring whatever shows now. */
+        planSplitSlotGeometryFor: () => {
+            events.push('cut-planned');
+            return { firstSpan: 3, weights: null };
+        },
         resizeIntentInFlight: false,
         MAX_SPLIT_TERMINALS: 16,
         activeGroupId: 'g-1',
@@ -716,7 +818,11 @@ async function run(interrupt) {
         attachTerminal: () => {},
         renderSessionTabs: () => events.push('tabs-rendered'),
         updateSessionChrome: () => {},
-        presentationController: () => ({ setGroupRevision: () => events.push('revision') }),
+        presentationController: () => ({
+            setGroupRevision: () => events.push('revision'),
+            // The revision this window last had acknowledged for the tab.
+            groupRevision: () => (options.acknowledged === undefined ? 7 : options.acknowledged)
+        }),
         noteGroupPresentationChanged: () => events.push('presentation-noted'),
         ensureAttachedTerminalsReady: async () => {},
         emitTerminalResize: () => {},
@@ -728,17 +834,30 @@ async function run(interrupt) {
                 ok: true,
                 json: async () => ({
                     session: { session_id: 'pane-new', status: 'starting' },
-                    group: { group_id: 'g-1', pane_order: ['pane-a', 'pane-new'] }
+                    group: {
+                        group_id: 'g-1',
+                        pane_order: ['pane-a', 'pane-new'],
+                        presentation_revision: 7,
+                        ...(options.answeredGroup || {})
+                    }
                 })
             };
         }
     };
     vm.runInNewContext(`${SPLIT_SOURCE}\nglobalThis.api = { splitTerminalPane };`, context);
     const answer = await context.api.splitTerminalPane(0, 'vertical', null);
+    let releasedAfter = false;
+    tab.settled('g-1').then(() => { releasedAfter = true; });
+    await new Promise(resolve => setTimeout(resolve, 5));
     return {
         ok: answer.ok,
         index: answer.index,
+        note: answer.note || '',
         sessionId: answer.session && answer.session.session_id,
+        saves,
+        discarded,
+        adopted,
+        releasedAfter,
         events,
         showingTerminals: context.terminals.length,
         showingSessionIds: context.sessionIds.slice(),
@@ -773,6 +892,54 @@ async function run(interrupt) {
         context.terminals = [{ _session: {} }];
         context.sessionIds = ['pane-a'];
     });
+    // Another tab picked, and the arrangement cannot be written.
+    out.switchedAwaySaveFailed = await run(context => {
+        context.activeGroupId = 'g-2';
+        context.visibleGroupId = 'g-2';
+        context.terminals = [{ _session: {} }];
+        context.sessionIds = ['pane-other'];
+    }, { saveFails: true });
+    const away = context => {
+        context.activeGroupId = 'g-2';
+        context.visibleGroupId = 'g-2';
+        context.terminals = [{ _session: {} }];
+        context.sessionIds = ['pane-other'];
+    };
+    // Another tab picked, and a divider in the tab left moved from behind
+    // while the request was out: the split answers at the revision that
+    // resize was acknowledged at, not the one this window read the tab at.
+    out.switchedAwayAfterResize = await run(away, {
+        acknowledged: 6,
+        answeredGroup: {
+            workspace_layout: {
+                rects: [{ originSlot: 0, x: 1, y: 1, w: 8, h: 8 }],
+                columnWeights: [1.6, 1.6, 1.2, 1.2, 0.8, 0.6, 0.5, 0.5],
+                rowWeights: [1, 1, 1, 1, 1, 1, 1, 1],
+                baseCount: 1
+            }
+        }
+    });
+    // ...and a pane was added to that tab meanwhile, so the record holds panes
+    // this placement never read.
+    out.switchedAwayAfterReshape = await run(away, {
+        acknowledged: 6,
+        answeredGroup: {
+            pane_order: ['pane-a', 'pane-other-new', 'pane-new'],
+            workspace_layout: {
+                rects: [{ originSlot: 0, x: 1, y: 1, w: 4, h: 8 }, { originSlot: 0, x: 5, y: 1, w: 4, h: 8 }],
+                columnWeights: [1, 1, 1, 1, 1, 1, 1, 1],
+                rowWeights: [1, 1, 1, 1, 1, 1, 1, 1],
+                baseCount: 1
+            }
+        }
+    });
+    // Picked away from and picked again, its load still waiting: the tab is
+    // active once more but not painted yet.
+    out.returning = await run(context => {
+        context.visibleGroupId = '';
+        context.terminals = [];
+        context.sessionIds = [];
+    });
     console.log(JSON.stringify(out));
 })().catch(error => { console.error(error); process.exitCode = 1; });
 """
@@ -790,7 +957,7 @@ async function run(scenario) {
         activeLoadToken: 0,
         activeGroupId: 'g-2',
         workspaceGone: false,
-        backgroundSplit: {
+        backgroundTab: {
             settled: async groupId => {
                 events.push(`settled:${groupId}`);
                 if (groupId === 'g-2') await held;
@@ -838,7 +1005,8 @@ class BackgroundSplitModuleTestCase(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.out = _run_node_file(
-            f"const MODULE_PATH = {json.dumps(str(BACKGROUND_SPLIT_JS))};\n" + MODULE_HARNESS
+            f"const MODULE_PATH = {json.dumps(str(BACKGROUND_SPLIT_JS))};\n"
+            f"const TAB_PATH = {json.dumps(str(BACKGROUND_TAB_JS))};\n" + MODULE_HARNESS
         )
 
     # ── the reading ──
@@ -1100,6 +1268,32 @@ class BackgroundSplitPageAdapterTestCase(unittest.TestCase):
         )
         self.assertEqual(stored["firstColumnWeight"], 1.5)
         self.assertEqual(stored["baseCount"], 2)
+        # A placement written later is checked against the revision it was read at.
+        self.assertEqual(stored["revision"], 4)
+
+    def test_a_split_answer_is_read_as_the_tab_without_the_pane_it_added(self):
+        answer = self.out["fromAnswer"]
+
+        self.assertEqual(answer["ids"], ["pane-a", "pane-b"])
+        self.assertEqual(
+            answer["rects"],
+            [{"x": 1, "y": 1, "w": 8, "h": 16}, {"x": 9, "y": 1, "w": 8, "h": 8}],
+        )
+        self.assertEqual(answer["firstColumnWeight"], 1.5)
+        self.assertEqual(answer["revision"], 6)
+
+    def test_a_split_answer_with_no_stored_arrangement_wears_its_preset(self):
+        preset = self.out["presetAnswer"]
+
+        self.assertEqual(
+            preset["rects"],
+            [{"x": 1, "y": 1, "w": 8, "h": 8}, {"x": 9, "y": 1, "w": 8, "h": 8}],
+        )
+        self.assertEqual(preset["revision"], 6)
+
+    def test_a_split_answer_whose_arrangement_fits_other_panes_is_no_arrangement(self):
+        self.assertIsNone(self.out["misfitAnswer"])
+        self.assertIsNone(self.out["emptyAnswer"])
 
     def test_a_tab_with_no_stored_arrangement_wears_its_preset(self):
         preset = self.out["preset"]
@@ -1127,6 +1321,9 @@ class BackgroundSplitPageAdapterTestCase(unittest.TestCase):
         self.assertEqual(len(cached["rects"]), 3)
         self.assertEqual(cached["weight"], 1.25)
         self.assertEqual(cached["baseCount"], 3)
+        # Its queue is settled before it is read, so it is the server's record
+        # at the revision the server lists.
+        self.assertEqual(cached["revision"], 9)
 
     def test_a_cached_view_of_other_panes_is_not_trusted(self):
         stale = self.out["staleCache"]
@@ -1149,6 +1346,7 @@ class BackgroundSplitPageAdapterTestCase(unittest.TestCase):
         # Nothing on screen to read a font off: the defaults the live reading uses.
         self.assertEqual(measured["cell"], {"width": 8, "height": 17})
         self.assertEqual(measured["headerHeight"], 34)
+        self.assertEqual((measured["columnSizes"], measured["rowSizes"]), (16, 8))
 
     def test_the_cell_and_header_are_read_off_a_live_terminal_when_there_is_one(self):
         self.assertEqual(
@@ -1262,6 +1460,8 @@ class SplitInFlightTestCase(unittest.TestCase):
         )
         cls.out = _run_node_file(
             "const vm = require('vm');\n"
+            f"const MODULE_PATH = {json.dumps(str(BACKGROUND_SPLIT_JS))};\n"
+            f"const TAB_PATH = {json.dumps(str(BACKGROUND_TAB_JS))};\n"
             f"const SPLIT_SOURCE = {json.dumps(split)};\n" + SPLIT_IN_FLIGHT_HARNESS
         )
 
@@ -1280,32 +1480,133 @@ class SplitInFlightTestCase(unittest.TestCase):
         # showing, whose own arrays are exactly as they were.
         self.assertTrue(moved["ok"])
         self.assertEqual(moved["sessionId"], "pane-new")
-        self.assertIsNone(moved["index"])
         self.assertEqual(moved["showingSessionIds"], ["pane-other"])
         self.assertEqual(moved["showingTerminals"], 1)
         self.assertNotIn("painted", moved["events"])
         self.assertNotIn("presentation-noted", moved["events"])
         # The tab it went into is still told about it, so the next intent for
-        # that pane finds its tab and a return to the tab rebuilds with it.
-        self.assertEqual(moved["groupPanes"], ["pane-a", "pane-new"])
-        self.assertIn("tabs-rendered", moved["events"])
+        # that pane finds its tab.
+        self.assertEqual(moved["adopted"][0]["groupId"], "g-1")
+
+    def test_a_tab_left_while_the_request_was_out_gets_the_pane_in_its_place(self):
+        """The arrangement the split was asked for is written for the tab it
+        was asked in, off the model and cut read before the request."""
+        moved = self.out["switchedAway"]
+
+        self.assertEqual(moved["note"], "")
+        self.assertEqual(moved["index"], 1)
+        self.assertEqual(len(moved["saves"]), 1)
+        save = moved["saves"][0]
+        self.assertEqual(save["groupId"], "g-1")
+        self.assertEqual(save["expectedRevision"], 7)
+        self.assertEqual(save["ids"], ["pane-a", "pane-new"])
+        self.assertEqual(
+            [(rect["x"], rect["w"]) for rect in save["rects"]], [(1, 3), (4, 5)]
+        )
+        self.assertEqual(save["baseCount"], 1)
+        # The cut was planned before the request went out, not after.
+        self.assertLess(moved["events"].index("cut-planned"), moved["events"].index("layout-written"))
+        # The tab's cached view goes before the write, and the record taken
+        # after it carries the arrangement that was written.
+        self.assertEqual(moved["discarded"], ["g-1"])
+        self.assertLess(moved["events"].index("discarded"), moved["events"].index("layout-written"))
+        self.assertEqual(moved["adopted"][0]["saved"]["revision"], 8)
+        self.assertEqual(moved["adopted"][0]["saved"]["ids"], ["pane-a", "pane-new"])
+
+    def test_a_divider_moved_while_the_request_was_out_is_kept(self):
+        """The acknowledged resize is the arrangement the pane is placed in:
+        the old weights read before the request are never written back."""
+        moved = self.out["switchedAwayAfterResize"]
+
+        self.assertTrue(moved["ok"])
+        self.assertEqual(moved["note"], "")
+        self.assertEqual(len(moved["saves"]), 1)
+        save = moved["saves"][0]
+        self.assertEqual(save["expectedRevision"], 7)
+        self.assertEqual(save["ids"], ["pane-a", "pane-new"])
+        self.assertEqual(
+            save["columnWeights"], [1.6, 1.6, 1.2, 1.2, 0.8, 0.6, 0.5, 0.5]
+        )
+        # The cut is planned again, on the weights that are now stored.
+        self.assertIn("cut-replanned", moved["events"])
+        self.assertEqual(
+            [(rect["x"], rect["w"]) for rect in save["rects"]], [(1, 2), (3, 6)]
+        )
+        self.assertTrue(save["held"])
+        self.assertTrue(moved["releasedAfter"])
+        self.assertEqual(moved["showingSessionIds"], ["pane-other"])
+        self.assertNotIn("painted", moved["events"])
+
+    def test_a_tab_whose_panes_changed_while_the_request_was_out_is_not_written(self):
+        reshaped = self.out["switchedAwayAfterReshape"]
+
+        self.assertTrue(reshaped["ok"])
+        self.assertEqual(reshaped["sessionId"], "pane-new")
+        self.assertIn("could not be saved", reshaped["note"])
+        self.assertEqual(reshaped["saves"], [])
+        # Its cached view still goes, and the record is taken as the server
+        # described it.
+        self.assertEqual(reshaped["discarded"], ["g-1"])
+        self.assertIsNone(reshaped["adopted"][0]["saved"])
+        self.assertTrue(reshaped["releasedAfter"])
+
+    def test_a_split_answered_at_the_revision_it_was_read_at_keeps_its_cut(self):
+        moved = self.out["switchedAway"]
+
+        self.assertNotIn("cut-replanned", moved["events"])
+
+    def test_a_return_to_the_tab_waits_for_the_write(self):
+        moved = self.out["switchedAway"]
+
+        self.assertTrue(moved["saves"][0]["held"])
+        self.assertTrue(moved["releasedAfter"])
+
+    def test_a_tab_active_again_but_not_yet_painted_is_placed_the_same_way(self):
+        returning = self.out["returning"]
+
+        self.assertEqual(len(returning["saves"]), 1)
+        self.assertTrue(returning["saves"][0]["held"])
+        self.assertNotIn("painted", returning["events"])
+
+    def test_a_pane_whose_place_could_not_be_written_says_so(self):
+        failed = self.out["switchedAwaySaveFailed"]
+
+        self.assertTrue(failed["ok"])
+        self.assertEqual(failed["sessionId"], "pane-new")
+        self.assertIn("could not be saved", failed["note"])
+        self.assertIsNone(failed["adopted"][0]["saved"])
+        self.assertTrue(failed["releasedAfter"])
 
     def test_a_tab_picked_and_picked_back_still_takes_the_pane(self):
-        """The same arrays are on screen again, so nothing was misplaced."""
+        """The same arrays are on screen again, so nothing was misplaced, and
+        the page's own presentation write is the only one."""
         back = self.out["switchedBack"]
 
         self.assertTrue(back["ok"])
         self.assertEqual(back["index"], 1)
         self.assertEqual(back["originalSessionIds"], ["pane-a", "pane-new"])
         self.assertIn("painted", back["events"])
+        self.assertIn("presentation-noted", back["events"])
+        self.assertEqual(back["saves"], [])
+        self.assertEqual(back["discarded"], [])
+
+    def test_a_split_nothing_interrupted_writes_nothing_from_behind(self):
+        steady = self.out["steady"]
+
+        self.assertEqual(steady["saves"], [])
+        self.assertEqual(steady["discarded"], [])
 
     def test_a_grid_rebuilt_in_place_gets_no_pane_painted_into_it(self):
+        """The painted tab was rebuilt from the server and owns its
+        arrangement, so it only takes the record."""
         rebuilt = self.out["rebuilt"]
 
         self.assertTrue(rebuilt["ok"])
         self.assertIsNone(rebuilt["index"])
         self.assertEqual(rebuilt["showingSessionIds"], ["pane-a"])
         self.assertNotIn("painted", rebuilt["events"])
+        self.assertEqual(rebuilt["saves"], [])
+        self.assertEqual(rebuilt["groupPanes"], ["pane-a", "pane-new"])
 
 
 @unittest.skipIf(NODE is None, "Node.js is required for the background-split suite")
@@ -1317,7 +1618,7 @@ class LoadWaitsForBackgroundSplitTestCase(unittest.TestCase):
     def setUpClass(cls):
         source = TERMINALS_JS.read_text(encoding="utf-8")
         load = "\n\n".join(
-            _function_source(source, name) for name in ("backgroundSplitSettled", "initialLoad")
+            _function_source(source, name) for name in ("backgroundTabSettled", "initialLoad")
         )
         cls.out = _run_node_file(
             "const vm = require('vm');\n"
@@ -1346,31 +1647,39 @@ class LoadWaitsForBackgroundSplitTestCase(unittest.TestCase):
 
 class BackgroundSplitWiringTestCase(unittest.TestCase):
     def test_the_workspace_page_loads_the_module_before_terminals(self):
-        """Wiring, not behaviour: `terminals.js` builds its adapter from the
-        module at load, so the tag has to be there and has to come first."""
+        """Wiring, not behaviour: `terminals.js` builds its adapters from the
+        modules at load, so the tags have to be there and have to come first."""
         markup = TERMINALS_HTML.read_text(encoding="utf-8")
         scripts = re.findall(r"filename='js/([a-z0-9\-]+\.js)'", markup)
 
-        self.assertIn("background-split.js", scripts)
-        self.assertLess(
-            scripts.index("background-split.js"), scripts.index("terminals.js")
-        )
+        for name in ("background-tab.js", "background-split.js", "background-resize.js"):
+            with self.subTest(name=name):
+                self.assertIn(name, scripts)
+                self.assertLess(scripts.index(name), scripts.index("terminals.js"))
 
-    def test_no_tab_is_switched_to_split_a_pane_in_it(self):
+    def test_no_tab_is_switched_to_edit_it_from_behind(self):
         """The whole point, stated against the source: this path must never
         reach for the tab strip's own switch, the focus bridge, or a landing on
         a pane. A source assertion because there is nothing to execute -- the
         property is an absence."""
-        module = BACKGROUND_SPLIT_JS.read_text(encoding="utf-8")
+        modules = "\n".join(
+            path.read_text(encoding="utf-8")
+            for path in (BACKGROUND_TAB_JS, BACKGROUND_SPLIT_JS, BACKGROUND_RESIZE_JS)
+        )
+        source = TERMINALS_JS.read_text(encoding="utf-8")
         adapter = _between(
-            TERMINALS_JS.read_text(encoding="utf-8"),
+            source,
             "    async function readBackgroundGroupModel(groupId) {",
             "    const splitBridge = {",
+        ) + _between(
+            source,
+            "    function backgroundGroupHeld(groupId) {",
+            "    const resizeBridge = {",
         )
 
         for forbidden in ("switchGroup", "focusPaneForArrival", "initialLoad", "restoreCachedGroupView"):
             with self.subTest(name=forbidden):
-                self.assertNotIn(forbidden, module)
+                self.assertNotIn(forbidden, modules)
                 self.assertNotIn(forbidden, adapter)
 
 

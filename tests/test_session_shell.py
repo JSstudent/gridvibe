@@ -1208,8 +1208,13 @@ class AgentRequestedRelaunchTestCase(ShellTransitionTestCase):
             api.session_manager.get_session(target.session_id),
         )
 
-    def _relaunch(self, session_id, body, detection=None):
-        """POST one agent-requested relaunch with every side effect observable."""
+    def _relaunch(self, session_id, body, detection=None, during_preflight=None):
+        """POST one agent-requested relaunch with every side effect observable.
+
+        ``during_preflight`` runs inside the agent binary detection -- past the
+        gates, before the commit -- which is where a real relaunch spends its
+        seconds and where the pane is free to change under it.
+        """
         found = dict(detection or {"found": True, "path": "/usr/bin/agent"})
 
         def _detect(target, binary):
@@ -1219,6 +1224,8 @@ class AgentRequestedRelaunchTestCase(ShellTransitionTestCase):
             }
             if binary not in registry_binaries:
                 return {"found": True, "path": f"/usr/bin/{binary}"}
+            if during_preflight is not None:
+                during_preflight()
             return dict(found)
 
         with patch.object(api.os, "name", "nt"), patch.object(
@@ -1345,8 +1352,8 @@ class AgentRequestedRelaunchTestCase(ShellTransitionTestCase):
         before = _pane_state(target.session_id)
         passes_then_closes = web_session_shell.check_lineage
 
-        def close_the_caller(session, request, wording):
-            passes_then_closes(session, request, wording)
+        def close_the_caller(session, request, wording, **kwargs):
+            passes_then_closes(session, request, wording, **kwargs)
             api.session_manager.close_session(caller.session_id)
             api.session_manager.clear_disconnected_sessions()
 
@@ -1361,6 +1368,149 @@ class AgentRequestedRelaunchTestCase(ShellTransitionTestCase):
         self.assertEqual(_pane_state(target.session_id), before)
         close_connection.assert_not_called()
         start_task.assert_not_called()
+
+    # ---------------- the gates hold at the commit, not only at the door ----------------
+
+    def _assert_left_alone(self, target_id, before, close_connection, start_task):
+        self.assertEqual(_pane_state(target_id), before)
+        close_connection.assert_not_called()
+        start_task.assert_not_called()
+
+    def test_an_agent_the_person_starts_during_preflight_is_not_replaced(self):
+        """Detection takes seconds; the person typing `claude` meanwhile wins.
+
+        The gates passed on a plain terminal. By the commit it runs Claude, and
+        nobody asked the person about ending that -- so the commit meets the
+        same waivable mode refusal the first check would have given, question
+        and all, and the pane keeps its agent.
+        """
+        caller, target = self._agent_pair()
+
+        def start_claude():
+            api.session_manager.update_session_metadata(
+                target.session_id,
+                startup_mode="agent",
+                initial_command_mode="agent",
+                agent_selection="claude",
+                initial_command="claude",
+            )
+
+        response, close_connection, start_task = self._relaunch(
+            target.session_id,
+            {"requested_by_session_id": caller.session_id, "agent": "codex"},
+            during_preflight=start_claude,
+        )
+
+        body = response.get_json()
+        self.assertEqual(response.status_code, 403, body)
+        self.assertIn("mode gate", body["error"])
+        self.assertTrue(body["waivable"])
+        self.assertEqual(body["confirm"]["ends"]["agent"], "claude")
+        updated = api.session_manager.get_session(target.session_id)
+        self.assertEqual(updated.agent_selection, "claude")
+        close_connection.assert_not_called()
+        start_task.assert_not_called()
+
+    def test_an_override_does_not_cover_a_pane_that_changed_after_it_was_asked(self):
+        """The person said yes to ending a shell, not the agent started since."""
+        caller, _target = self._agent_pair()
+        handmade, _repo = self._local_pane(repo_name="handmade")
+        before = {}
+
+        def start_claude():
+            api.session_manager.update_session_metadata(
+                handmade.session_id,
+                startup_mode="agent",
+                initial_command_mode="agent",
+                agent_selection="claude",
+                initial_command="claude",
+            )
+            before.update(_pane_state(handmade.session_id))
+
+        response, close_connection, start_task = self._relaunch(
+            handmade.session_id,
+            {
+                "requested_by_session_id": caller.session_id,
+                "agent": "codex",
+                "override": True,
+            },
+            during_preflight=start_claude,
+        )
+
+        self.assertEqual(response.status_code, 409, response.get_json())
+        self.assertIn("Nothing was changed", response.get_json()["error"])
+        self._assert_left_alone(handmade.session_id, before, close_connection, start_task)
+
+    def test_a_caller_that_closes_during_preflight_is_refused_at_the_commit(self):
+        caller, target = self._agent_pair()
+        before = _pane_state(target.session_id)
+
+        def close_the_caller():
+            api.session_manager.close_session(caller.session_id)
+            api.session_manager.clear_disconnected_sessions()
+
+        response, close_connection, start_task = self._relaunch(
+            target.session_id,
+            {"requested_by_session_id": caller.session_id, "agent": "codex"},
+            during_preflight=close_the_caller,
+        )
+
+        self.assertEqual(response.status_code, 403, response.get_json())
+        self.assertIn("lineage gate", response.get_json()["error"])
+        self._assert_left_alone(target.session_id, before, close_connection, start_task)
+
+    def test_a_standing_waiver_withdrawn_during_preflight_waives_nothing(self):
+        """Override mode is read at the commit too, from the caller as it is then."""
+        caller, _target = self._agent_pair()
+        api.session_manager.update_session_metadata(
+            caller.session_id, agent_mcp=True, agent_mcp_override=True
+        )
+        handmade, _repo = self._local_pane(repo_name="handmade")
+        before = _pane_state(handmade.session_id)
+
+        def withdraw_the_waiver():
+            api.session_manager.update_session_metadata(
+                caller.session_id, agent_mcp_override=False
+            )
+
+        response, close_connection, start_task = self._relaunch(
+            handmade.session_id,
+            {"requested_by_session_id": caller.session_id, "agent": "codex"},
+            during_preflight=withdraw_the_waiver,
+        )
+
+        body = response.get_json()
+        self.assertEqual(response.status_code, 403, body)
+        self.assertIn("lineage gate", body["error"])
+        self.assertTrue(body["waivable"])
+        self._assert_left_alone(handmade.session_id, before, close_connection, start_task)
+
+    def test_the_commit_recheck_runs_under_the_manager_lock(self):
+        """Checked and written in one hold, so nothing lands between the two."""
+        caller, target = self._agent_pair()
+        held = []
+        real_update = api.session_manager.update_session_metadata
+
+        def record_hold(session_id, **updates):
+            if session_id == target.session_id and "agent_depth" in updates:
+                held.append(api.session_manager.lock._is_owned())
+            return real_update(session_id, **updates)
+
+        with patch.object(
+            api.session_manager, "update_session_metadata", side_effect=record_hold
+        ), patch.object(
+            web_session_shell, "_check_relaunch_gates",
+            wraps=web_session_shell._check_relaunch_gates,
+        ) as gates:
+            response, _close, _start = self._relaunch(
+                target.session_id,
+                {"requested_by_session_id": caller.session_id, "agent": "codex"},
+            )
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertEqual(held, [True])
+        self.assertEqual(gates.call_count, 2)
+        self.assertEqual(gates.call_args.kwargs, {"log_waiver": False})
 
     def test_a_relaunch_can_send_a_pane_it_made_back_to_a_plain_shell(self):
         """A stated empty agent is a choice, and the gates do not forbid it."""

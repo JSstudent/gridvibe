@@ -86,6 +86,7 @@ from web.state_files import (
 )
 from web.workspaces import (
     DEFAULT_WORKSPACE_ID,
+    normalize_group_opened_by,
     normalize_workspace_id,
     normalize_workspace_label,
 )
@@ -282,6 +283,7 @@ def _snapshot_group(group: Any, sessions: List[Any]) -> Dict[str, Any]:
         # No surface_mode: chrome density is a live global setting, so a
         # restore must never replay the value a group launched with.
         "saved_session_id": data.get("saved_session_id"),
+        "opened_by": normalize_group_opened_by(data.get("opened_by")),
         "sessions": [_snapshot_session(session) for session in sessions],
     }
 
@@ -450,6 +452,9 @@ def _validate_group(group: Any) -> Optional[Dict[str, Any]]:
         # saved_sessions.json, never a shape source. Coerced, never bounded —
         # a saved-session id is any nonblank string the preset store accepted.
         "saved_session_id": str(group.get("saved_session_id") or ""),
+        # Who opened the tab. Chrome, not shape: anything but "agent" -- a
+        # slot written before the field existed included -- is the person's.
+        "opened_by": normalize_group_opened_by(group.get("opened_by")),
         "sessions": sessions,
     }
 

@@ -76,6 +76,20 @@ def generate_workspace_id() -> str:
     return uuid.uuid4().hex[:12]
 
 
+# Who asked for a session tab to be here: the person (a launch or move from a
+# window or the launcher) or an agent (an MCP tool). A window switches to a new
+# tab only when the person opened it; an agent's tab joins the tab strip and
+# waits to be clicked or focused. Every record that predates the field is the
+# person's.
+GROUP_OPENED_BY_PERSON = "person"
+GROUP_OPENED_BY_AGENT = "agent"
+
+
+def normalize_group_opened_by(value: Any) -> str:
+    """Return ``"agent"`` only when that is stated; anything else is the person's."""
+    return GROUP_OPENED_BY_AGENT if value == GROUP_OPENED_BY_AGENT else GROUP_OPENED_BY_PERSON
+
+
 def workspace_room(workspace_id: Any = None) -> str:
     """Return the Socket.IO room for a normalized workspace id."""
     return f"workspace:{normalize_workspace_id(workspace_id)}"
@@ -1380,6 +1394,7 @@ def launch_session_group(
             workspace_layout=workspace_layout,
             workspace_id=workspace_id,
             workspace_from_session_id=workspace_anchor,
+            opened_by=_launch_opened_by(data, tool_launch=tool_launch, is_restore=is_restore),
         )
         group = installation.group
         created_sessions = installation.sessions
@@ -1482,6 +1497,19 @@ def launch_session_group(
         session_manager.release_workspace_launch(reserved_workspace_id)
 
 
+def _launch_opened_by(data: Dict[str, Any], *, tool_launch: bool, is_restore: bool) -> str:
+    """Who a launch's group is opened by: an agent for every tool launch.
+
+    A restore replays the value its snapshot captured; any other launch --
+    the launcher, a window -- is the person's, whatever its body says.
+    """
+    if tool_launch:
+        return GROUP_OPENED_BY_AGENT
+    if is_restore:
+        return normalize_group_opened_by(data.get("opened_by"))
+    return GROUP_OPENED_BY_PERSON
+
+
 # ==================== Group moves ====================
 
 
@@ -1500,6 +1528,9 @@ def move_group_to_workspace(
     same hold as the move itself, so what it checked is still true when the
     group changes hands. It must be in-memory only; a refusal is returned as
     ``(payload, status)`` and nothing moves.
+
+    A body naming ``requested_by_session_id`` is a tool's move, so the group
+    arrives as an agent's: the destination window does not switch to it.
     """
     from web.terminal_io import _broadcast_session_groups_updated
 
@@ -1510,6 +1541,11 @@ def move_group_to_workspace(
         return {"error": "Session group not found"}, 404
 
     source_workspace_id = group.workspace_id
+    opened_by = (
+        GROUP_OPENED_BY_AGENT
+        if str(data.get("requested_by_session_id") or "").strip()
+        else GROUP_OPENED_BY_PERSON
+    )
     created_workspace_id = ""
     try:
         target_workspace_id, created_workspace_id = resolve_launch_destination(
@@ -1558,7 +1594,9 @@ def move_group_to_workspace(
                 moved_group = (
                     None
                     if refusal is not None
-                    else session_manager.move_group(normalized_group_id, target_workspace_id)
+                    else session_manager.move_group(
+                        normalized_group_id, target_workspace_id, opened_by=opened_by
+                    )
                 )
             if refusal is not None:
                 rollback_created_workspace(created_workspace_id)
@@ -1733,6 +1771,7 @@ def _restore_group_request(
         "workspace_layout": snapshot_group.get("workspace_layout"),
         "session_name": snapshot_group.get("name"),
         "saved_session_id": snapshot_group.get("saved_session_id") or "",
+        "opened_by": snapshot_group.get("opened_by"),
         "workspace_id": workspace_id,
         # Replay verbatim: a cold post-restart agent probe must not silently
         # clear a startup command that was working before the restart.

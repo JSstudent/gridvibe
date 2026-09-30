@@ -1256,6 +1256,11 @@
         }
 
         _stopAllVoice();
+        /* The focused pane is leaving the document with its tab, and its slot
+           number will name a pane of the tab that replaces it. Drop the input
+           target while the cards are still here to be unpainted, so neither
+           typing, voice nor the dashboard row follows the old slot across. */
+        clearActiveTerminalHighlight();
         const grid = document.getElementById('terminalsGrid');
         const fragment = document.createDocumentFragment();
 
@@ -3030,11 +3035,43 @@
         }
     }
 
+    /* The strip is rebuilt on every refresh — a tab an agent opened arriving
+       included, while the window stays where it is — so a tab control that
+       had keyboard focus is noted before the rebuild and its replacement
+       takes the focus back after it. Null when focus is anywhere else. */
+    function captureSessionTabFocus(container) {
+        const focused = document.activeElement;
+        if (!focused || !container.contains(focused)) {
+            return null;
+        }
+        const tab = focused.closest?.('.session-tab');
+        const groupId = tab?.dataset?.groupId || '';
+        if (!groupId) {
+            return null;
+        }
+        return {
+            groupId,
+            control: focused.classList?.contains('session-tab-close')
+                ? '.session-tab-close'
+                : '.session-tab-main'
+        };
+    }
+
+    function restoreSessionTabFocus(container, focus) {
+        if (!focus) {
+            return;
+        }
+        const tab = Array.from(container.children || [])
+            .find(candidate => candidate?.dataset?.groupId === focus.groupId);
+        tab?.querySelector?.(focus.control)?.focus?.({ preventScroll: true });
+    }
+
     function renderSessionTabs() {
         syncSessionMenuState();
         const container = document.getElementById('sessionTabs');
         if (!container) return;
 
+        const focus = captureSessionTabFocus(container);
         container.innerHTML = '';
 
         sessionGroups.forEach((group, index) => {
@@ -3116,6 +3153,7 @@
             wireSessionTabDragAndDrop(button, container);
             container.appendChild(button);
         });
+        restoreSessionTabFocus(container, focus);
     }
 
     function setSessionGroupsOrder(orderedGroupIds) {
@@ -3573,16 +3611,18 @@
             .filter(index => index >= 0);
     }
 
-    function getResizeTrackGroups(axis, lineIndex) {
-        if (!Array.isArray(splitSlotRects)) {
+    /* Off the painted grid's rectangles, or a tab's model's when one is
+       given: a divider moved in a tab that is not showing. */
+    function getResizeTrackGroups(axis, lineIndex, rects = splitSlotRects) {
+        if (!Array.isArray(rects)) {
             return null;
         }
-        const beforeRects = splitSlotRects.filter(rect => (
+        const beforeRects = rects.filter(rect => (
             axis === 'vertical'
                 ? rect.x + rect.w - 1 === lineIndex
                 : rect.y + rect.h - 1 === lineIndex
         ));
-        const afterRects = splitSlotRects.filter(rect => (
+        const afterRects = rects.filter(rect => (
             axis === 'vertical'
                 ? rect.x === lineIndex + 1
                 : rect.y === lineIndex + 1
@@ -5791,6 +5831,17 @@
         setBroadcastInput(!broadcastInputActive);
     }
 
+    /* Broadcast acts on the pane being typed into, so pressing it must not
+       take focus from that pane: focus landing on the button clears the input
+       target, and enabling broadcast would then focus the first terminal
+       instead of the one the reader was in — and disabling it would leave
+       none. The same rule the pane header buttons follow. */
+    function wireBroadcastButton() {
+        document.getElementById('broadcastBtn')?.addEventListener('mousedown', event => {
+            event.preventDefault();
+        });
+    }
+
     /* Mirror input into every *other* plain terminal pane while broadcast typing
        is on (explorer/browser panes have no `term` and are skipped). Shared by
        keyboard forwarding and committed voice transcripts (ISSUE-2026-026) so a
@@ -5904,6 +5955,30 @@
         }
     }
 
+    /* The input target named by session, for the docked agent dashboard: its
+       rows are sessions, and a grid slot can come to hold a different pane — a
+       relaunch into a new session, a mode switch, another tab's grid. So the
+       answer is read at the moment it is asked, from the slot's current record,
+       and only while that slot's card is in this document and still holds real
+       keyboard focus. Anything else is no target. */
+    function focusedTerminalSessionId() {
+        const index = _focusedTerminalIndex;
+        const card = index === -1 ? null : document.getElementById(`tc-${index}`);
+        if (!isPlainTerminalCard(card) || !card.contains(document.activeElement)) {
+            return '';
+        }
+        return String(terminals[index]?._session?.session_id || sessionIds[index] || '');
+    }
+
+    /* The sidebar reads the target back through `focusedTerminalSessionId`;
+       this only tells it the answer may have changed. A page without the
+       sidebar has nothing to repaint. */
+    function paintDashboardInputTarget() {
+        if (typeof markAgentDashboardSidebarInputTarget === 'function') {
+            markAgentDashboardSidebarInputTarget();
+        }
+    }
+
     /* A plain terminal gained focus: it becomes both the input target and the
        highlighted pane. An invalid target selects nothing. */
     function setFocusedTerminal(index) {
@@ -5913,6 +5988,7 @@
         }
         _focusedTerminalIndex = index;
         paintActiveTerminalCard(index);
+        paintDashboardInputTarget();
         /* Re-light the broadcast ring across panes: the CSS rule also requires
            `broadcast-input`, so if broadcast was turned off while focus sat in
            dead space only this single pane lights up (OD-10). */
@@ -5928,6 +6004,7 @@
         _focusedTerminalIndex = -1;
         paintActiveTerminalCard(-1);
         document.getElementById('terminalsGrid')?.classList.remove('terminal-focus');
+        paintDashboardInputTarget();
     }
 
     /* Leaving this workspace window: blur whatever pane holds keyboard focus so
@@ -6723,6 +6800,13 @@
         if (isExplorerPaneInstance(terminals[index])) {
             explorerReleasePaneWork(terminals[index]);
         }
+        /* The focused pane's input is about to be disposed, and removing it
+           from the document is not guaranteed to fire the focusout that
+           would clear the target. Only this slot's: replacing another pane
+           leaves the one being typed into alone. */
+        if (_focusedTerminalIndex === index) {
+            clearActiveTerminalHighlight();
+        }
         const replaced = isBrowserSession(session)
             ? replacePaneWithBrowser(index, session)
             : (isExplorerSession(session)
@@ -7077,6 +7161,45 @@
             && sessionIds[source.index] === source.sessionId;
     }
 
+    /* Where a split's pane goes in its tab, read off the grid showing it
+       before the request goes out: the tab as a model (panes in visual order,
+       one rectangle each, the two weight lists) and the cut. Taken at the same
+       point as the source, because once the window moves on the grid on screen
+       is another tab's and cannot be measured for this one. Null when the grid
+       does not describe every pane — then there is nothing to place against. */
+    function captureSplitPlacement(visualIndex, sourceRect, axis) {
+        const grid = document.getElementById('terminalsGrid');
+        const rects = cloneSplitSlotRects(ensureSplitSlotRects());
+        const ids = Array.from(grid?.children || [])
+            .map(card => sessionIds[Number(card?.dataset?.slot)]);
+        if (!rects.length || rects.length !== ids.length || ids.some(id => !id)) {
+            return null;
+        }
+        const size = getSplitGridSize(rects);
+        const columnWeights = normalizeSplitTrackWeights(splitColumnWeights, size.columns);
+        const rowWeights = normalizeSplitTrackWeights(splitRowWeights, size.rows);
+        return {
+            view: {
+                groupId: activeGroupId,
+                visualIndex,
+                model: {
+                    groupId: activeGroupId,
+                    ids,
+                    rects,
+                    columnWeights,
+                    rowWeights,
+                    baseCount: Number(originalSplitSlotCount || ids.length) || ids.length,
+                    /* The revision this window last had acknowledged for the
+                       tab: a placement written later is checked against it. */
+                    revision: presentationController()?.groupRevision?.(activeGroupId)
+                }
+            },
+            cut: planSplitSlotGeometryFor(
+                rects, visualIndex, sourceRect, axis, columnWeights, rowWeights
+            )
+        };
+    }
+
     /* The group record a split response carries: the tab strip and the
        window's own list of which tab holds which pane. */
     function adoptSplitGroupRecord(group) {
@@ -7135,6 +7258,7 @@
         }
 
         const source = captureSplitSource(index);
+        const placement = captureSplitPlacement(visualIndex, sourceRect, axis);
         splitButtons.forEach(button => { button.disabled = true; });
 
         /* An explorer pane splits off a terminal rooted where the user is
@@ -7174,10 +7298,19 @@
                    it, but the arrays, cards and rectangles this call was about
                    to extend belong to a view that is no longer the one on
                    screen, and painting into whichever group is showing now
-                   would put a pane in the wrong tab. Nothing is painted. The
-                   group record is still taken so the tab strip and a later
-                   intent know the pane; the next time that tab is shown it is
-                   rebuilt from the server, which lists the pane. */
+                   would put a pane in the wrong tab. Nothing is painted.
+
+                   A tab that is not painted now gets the pane placed the way a
+                   split from behind places one, off the placement read before
+                   the request: its arrangement written, its cached view
+                   dropped, and a return to it held until the write lands. A
+                   tab rebuilt in place was painted from the server and owns
+                   its arrangement, so it only takes the record. */
+                if (placement && backgroundSplit !== null && source.groupId !== visibleGroupId) {
+                    return backgroundSplit.placeAfterMove(
+                        placement.view, axis, placement.cut, { ok: true, session, group: data.group }
+                    );
+                }
                 adoptSplitGroupRecord(data.group);
                 return { ok: true, session, index: null };
             }
@@ -7334,37 +7467,63 @@
                     rects: cloneSplitSlotRects(rects),
                     columnWeights: normalizeSplitTrackWeights(cached.splitColumnWeights, size.columns),
                     rowWeights: normalizeSplitTrackWeights(cached.splitRowWeights, size.rows),
-                    baseCount: Number(cached.originalSplitSlotCount || cachedIds.length) || cachedIds.length
+                    baseCount: Number(cached.originalSplitSlotCount || cachedIds.length) || cachedIds.length,
+                    /* Its queued presentation is settled before this is read,
+                       so the view is the server's record at this revision. */
+                    revision: group.presentation_revision
                 };
             }
         }
 
-        const stored = resolveWorkspaceLayoutSnapshot(group.workspace_layout, serverIds.length);
+        return { groupId, ...groupRecordModel(group, serverIds) };
+    }
+
+    /* A tab as its group record describes it, for the panes `ids` names in
+       that order: the arrangement the page last wrote, or, with no record the
+       page wrote, the preset its size and layout name call for, exactly as it
+       is rebuilt when it is shown. Carries the record's presentation revision,
+       the one a model read from it is current at. */
+    function groupRecordModel(group, ids) {
+        const revision = group.presentation_revision;
+        const stored = resolveWorkspaceLayoutSnapshot(group.workspace_layout, ids.length);
         if (stored) {
             return {
-                groupId,
-                ids: serverIds,
+                ids,
                 rects: cloneSplitSlotRects(stored.rects),
                 columnWeights: stored.columnWeights,
                 rowWeights: stored.rowWeights,
-                baseCount: stored.baseCount
+                baseCount: stored.baseCount,
+                revision
             };
         }
-        /* No record the page wrote: the tab wears the preset its size and layout
-           name call for, exactly as it is rebuilt when it is shown. */
         const rects = fixedLayoutRectCoordinates(
-            serverIds.length,
-            getLayoutClass(serverIds.length, group.layout || '')
+            ids.length,
+            getLayoutClass(ids.length, group.layout || '')
         );
         const size = getSplitGridSize(rects);
         return {
-            groupId,
-            ids: serverIds,
+            ids,
             rects: cloneSplitSlotRects(rects),
             columnWeights: normalizeSplitTrackWeights(null, size.columns),
             rowWeights: normalizeSplitTrackWeights(null, size.rows),
-            baseCount: serverIds.length
+            baseCount: ids.length,
+            revision
         };
+    }
+
+    /* The tab a split's answer describes, without the pane it added: the
+       arrangement a placement is moved onto when the tab was rewritten while
+       the split was out. A stored arrangement that does not fit the record's
+       other panes is none to place a pane in; no stored one is the preset. */
+    function readSplitRecordModel(group, addedId) {
+        const ids = Array.isArray(group?.pane_order)
+            ? group.pane_order.filter(sessionId => sessionId !== addedId)
+            : [];
+        if (!ids.length || (group.workspace_layout
+            && !resolveWorkspaceLayoutSnapshot(group.workspace_layout, ids.length))) {
+            return null;
+        }
+        return groupRecordModel(group, ids);
     }
 
     /* The cell and header a terminal is drawn with, read off any live plain
@@ -7384,8 +7543,9 @@
     }
 
     /* The shared grid, measured for one tab's weights: how many pixels each
-       rectangle would span. Null when the window has no grid to measure — a
-       collapsed or hidden one — which is a refusal, never a guess. */
+       rectangle would span, and the track sizes and gaps a divider move is
+       planned on. Null when the window has no grid to measure — a collapsed
+       or hidden one — which is a refusal, never a guess. */
     function measureGridForModel(model) {
         const grid = document.getElementById('terminalsGrid');
         const metrics = grid
@@ -7396,6 +7556,7 @@
         }
         return {
             narrow: window.innerWidth <= 700,
+            metrics,
             surfaces: model.rects.map(rect => getPaneCandidateSurface(
                 rect, model.columnWeights, model.rowWeights, metrics
             )),
@@ -7403,11 +7564,11 @@
         };
     }
 
-    /* The tab's record, and its stored arrangement, after a split the page has
-       just written: what `loadSessionGroups` would hand back once the write
-       landed, taken now so the next reading of this tab does not start from the
-       arrangement it had before. */
-    function adoptBackgroundSplit(group, saved) {
+    /* The tab's record, and its stored arrangement, after a split or resize
+       the page has just written from behind: what `loadSessionGroups` would
+       hand back once the write landed, taken now so the next reading of this
+       tab does not start from the arrangement it had before. */
+    function adoptBackgroundGroup(group, saved) {
         if (!group) {
             return;
         }
@@ -7428,35 +7589,80 @@
         adoptSplitGroupRecord(record);
     }
 
-    /* A background split's tab loses its cached view: it is rebuilt from what
+    /* A tab edited from behind loses its cached view: it is rebuilt from what
        the server holds the next time it is shown. Every tab but the painted one
-       — including a tab picked while the split was in flight, which is active
-       but whose load is waiting for the split and has not reached the cache. */
+       — including a tab picked while the edit was in flight, which is active
+       but whose load is waiting for the edit and has not reached the cache. */
     function discardBackgroundGroupView(groupId) {
         if (groupId !== visibleGroupId) {
             dropCachedGroupView(groupId);
         }
     }
 
-    /* A load of a tab a background split is writing waits for that write, so
-       the tab is painted with the pane in its place rather than from the
-       server's arrangement before the split's was saved. */
-    async function backgroundSplitSettled(groupId) {
-        if (backgroundSplit !== null && groupId) {
-            await backgroundSplit.settled(groupId);
+    /* A load of a tab a split or resize from behind is writing waits for that
+       write, so the tab is painted with its new arrangement rather than from
+       the server's arrangement before it was saved. */
+    async function backgroundTabSettled(groupId) {
+        if (backgroundTab !== null && groupId) {
+            await backgroundTab.settled(groupId);
         }
     }
+
+    /* A tab this window holds without showing it, read and written as data
+       (`background-tab.js`): one per window, under both the split and the
+       resize, so a load waits for either. */
+    const backgroundTab = window.GridVibeBackgroundTab
+        ? window.GridVibeBackgroundTab.create({
+            settle: groupId => presentationController()?.settleGroup(groupId),
+            readModel: readBackgroundGroupModel,
+            measure: measureGridForModel,
+            discard: discardBackgroundGroupView,
+            saveLayout: async ({ groupId, expectedRevision, ids, rects, columnWeights, rowWeights, baseCount }) => {
+                const group = getGroupById(groupId);
+                const workspaceLayout = buildWorkspaceLayoutSnapshotFromState(
+                    ids.length, 'layout-split-local', rects, columnWeights, rowWeights, baseCount
+                );
+                if (!group || !workspaceLayout) {
+                    return { ok: false, error: 'The arrangement could not be described.' };
+                }
+                /* Panes named by id alone: a pane entry with no fields leaves
+                   whatever the server holds for that pane exactly as it is. */
+                const response = await postPresentation('/api/session-presentation', {
+                    workspace_id: currentWorkspaceId,
+                    group_id: groupId,
+                    expected_revision: expectedRevision,
+                    pane_order: ids,
+                    panes: ids.map(sessionId => ({ session_id: sessionId })),
+                    workspace_layout: workspaceLayout
+                });
+                const body = await response.json().catch(() => ({}));
+                if (!response.ok) {
+                    return { ok: false, error: body.error || `Layout save failed with status ${response.status}` };
+                }
+                /* Accepted, but with no revision to show for it: the write may
+                   have landed. */
+                if (!Number.isInteger(body.presentation_revision)) {
+                    return { ok: false, unknown: true, error: 'The layout save returned no revision.' };
+                }
+                return { ok: true, revision: body.presentation_revision };
+            },
+            adopt: adoptBackgroundGroup,
+            onError: error => console.error(
+                '[GridVibe Sessions] presentation write failed for a tab edited from behind', error
+            )
+        })
+        : null;
+
+    const backgroundTabShown = groupId => groupId === visibleGroupId || groupId === activeGroupId;
 
     /* `background-split.js` owns the sequence and the rules; this is the
        window under it. A tab is split without being shown: nothing here
        switches a tab, moves focus, or repaints the grid that is on screen. */
-    const backgroundSplit = window.GridVibeBackgroundSplit
+    const backgroundSplit = backgroundTab !== null && window.GridVibeBackgroundSplit
         ? window.GridVibeBackgroundSplit.create({
+            tab: backgroundTab,
             groupOf: backgroundGroupHolding,
-            isShown: groupId => groupId === visibleGroupId || groupId === activeGroupId,
-            settle: groupId => presentationController()?.settleGroup(groupId),
-            readModel: readBackgroundGroupModel,
-            measure: measureGridForModel,
+            isShown: backgroundTabShown,
             plan: (model, visualIndex, axis) => planSplitSlotGeometryFor(
                 model.rects, visualIndex, model.rects[visualIndex], axis,
                 model.columnWeights, model.rowWeights
@@ -7491,32 +7697,7 @@
                 }
                 return { ok: true, session: data.session, group: data.group };
             },
-            discard: discardBackgroundGroupView,
-            saveLayout: async ({ groupId, expectedRevision, ids, rects, columnWeights, rowWeights, baseCount }) => {
-                const group = getGroupById(groupId);
-                const workspaceLayout = buildWorkspaceLayoutSnapshotFromState(
-                    ids.length, 'layout-split-local', rects, columnWeights, rowWeights, baseCount
-                );
-                if (!group || !workspaceLayout) {
-                    return { ok: false, error: 'The arrangement could not be described.' };
-                }
-                /* Panes named by id alone: a pane entry with no fields leaves
-                   whatever the server holds for that pane exactly as it is. */
-                const response = await postPresentation('/api/session-presentation', {
-                    workspace_id: currentWorkspaceId,
-                    group_id: groupId,
-                    expected_revision: expectedRevision,
-                    pane_order: ids,
-                    panes: ids.map(sessionId => ({ session_id: sessionId })),
-                    workspace_layout: workspaceLayout
-                });
-                const body = await response.json().catch(() => ({}));
-                if (!response.ok || !Number.isInteger(body.presentation_revision)) {
-                    return { ok: false, error: body.error || `Layout save failed with status ${response.status}` };
-                }
-                return { ok: true, revision: body.presentation_revision };
-            },
-            adopt: adoptBackgroundSplit,
+            recordModel: readSplitRecordModel,
             performShown: async (sessionId, axis, request) => {
                 const index = sessionIds.indexOf(sessionId);
                 return index < 0
@@ -7527,10 +7708,7 @@
                 maxPanes: MAX_SPLIT_TERMINALS,
                 minCols: MIN_SPLIT_COLS,
                 minRows: MIN_SPLIT_ROWS
-            },
-            onError: error => console.error(
-                '[GridVibe Sessions] presentation write failed before a background split', error
-            )
+            }
         })
         : null;
 
@@ -7596,6 +7774,59 @@
     };
     window.GridVibeSplitBridge = splitBridge;
 
+    /* A tab this window holds and is not showing, with the window settled on
+       the one it is showing — the same condition `backgroundGroupHolding`
+       puts on a pane: mid-load the window cannot say what it shows. */
+    function backgroundGroupHeld(groupId) {
+        const id = String(groupId || '');
+        return Boolean(id) && gridBuilt && Boolean(visibleGroupId)
+            && activeGroupId === visibleGroupId && id !== visibleGroupId
+            && sessionGroups.some(group => group.group_id === id);
+    }
+
+    /* `background-resize.js` owns the sequence and the rules; this is the
+       window under it. A divider is moved in a tab without showing it: nothing
+       here switches a tab, moves focus, or repaints the grid on screen. */
+    const backgroundResize = backgroundTab !== null && window.GridVibeBackgroundResize
+        ? window.GridVibeBackgroundResize.create({
+            tab: backgroundTab,
+            holds: backgroundGroupHeld,
+            isShown: backgroundTabShown,
+            readLayout: async groupId => {
+                const response = await fetch(`/api/panes/layout?group_id=${encodeURIComponent(groupId)}`);
+                const body = await response.json().catch(() => ({}));
+                return response.ok
+                    ? { ...body, ok: true }
+                    : { ok: false, error: body.error || 'The session is no longer open.' };
+            },
+            /* The server's own record of each pane: a tab never shown has no
+               pane objects to ask. */
+            readExemptions: async (groupId, ids) => {
+                const response = await fetch(getSessionApiPath(groupId));
+                const body = await response.json().catch(() => ({}));
+                if (!response.ok) {
+                    throw new Error(body.error || `Session list failed with status ${response.status}`);
+                }
+                const sessions = Array.isArray(body.sessions) ? body.sessions : [];
+                return ids.map(sessionId => isExplorerSession(
+                    sessions.find(session => session.session_id === sessionId)
+                ));
+            },
+            trackGroups: (rects, axis, lineIndex) => getResizeTrackGroups(axis, lineIndex, rects),
+            sharedEdges: getSharedGridEdgeSegments,
+            planResize: (...args) => window.GridVibeSplitGeometry?.planDividerResize(...args) || null,
+            groupRecord: getGroupById,
+            closeEpoch: groupId => closeGeometryCoordinator.epoch(groupId),
+            closePending: groupId => Boolean(closeGeometryCoordinator.peek(groupId)),
+            performShown: intent => resizeBridge.performShown(intent),
+            limits: {
+                minCols: MIN_SPLIT_COLS,
+                minRows: MIN_SPLIT_ROWS,
+                minSurfaceRatio: MIN_RESIZE_SURFACE_RATIO
+            }
+        })
+        : null;
+
     /* One page owns measurement, minimums and the compare-and-swap write.
        The server never invents pixel geometry. Nothing is painted until the
        live presentation transaction acknowledges the new weights. */
@@ -7605,7 +7836,16 @@
                 && sessionGroups.some(group => group.group_id === String(groupId || ''));
         },
 
+        /* A tab the window holds without showing is resized from behind, off
+           its model; the painted tab by the handler that owns its grid. */
         async perform(intent) {
+            if (backgroundResize !== null && backgroundGroupHeld(intent.group_id)) {
+                return backgroundResize.perform(intent);
+            }
+            return resizeBridge.performShown(intent);
+        },
+
+        async performShown(intent) {
             const groupId = String(intent.group_id || '');
             const axis = String(intent.axis || '');
             const lineIndex = Number(intent.line_index);
@@ -7614,7 +7854,9 @@
             const refuse = error => ({ ok: false, error: `${error} Nothing changed.` });
             if (resizeIntentInFlight || activeGridResize) return refuse('Another resize is in progress.');
             if (groupId !== activeGroupId || groupId !== visibleGroupId || !gridBuilt) {
-                return refuse('Open this session tab before resizing its divider.');
+                /* Held and not showing goes from behind; here the window is
+                   between tabs and cannot say which grid it would measure. */
+                return refuse('This window is switching session tabs; try the resize again shortly.');
             }
             const grid = document.getElementById('terminalsGrid');
             if (!grid || grid.children.length < 2 || window.innerWidth <= 700) {
@@ -8428,9 +8670,10 @@
         try {
             label.textContent = 'Loading…';
             /* Before the group list as well as before the tab's own read: a
-               list read ahead of a split's layout write would hand the tab
-               strip the arrangement that write is replacing. */
-            await backgroundSplitSettled(activeGroupId);
+               list read ahead of a split's or resize's layout write from
+               behind would hand the tab strip the arrangement that write is
+               replacing. */
+            await backgroundTabSettled(activeGroupId);
             if (loadToken !== activeLoadToken) {
                 return;
             }
@@ -8444,7 +8687,7 @@
             }
 
             const requestedGroupId = activeGroupId;
-            await backgroundSplitSettled(requestedGroupId);
+            await backgroundTabSettled(requestedGroupId);
             if (loadToken !== activeLoadToken || requestedGroupId !== activeGroupId) {
                 return;
             }
@@ -8884,16 +9127,29 @@
         const newestGroupId = sessionGroups.length
             ? sessionGroups[sessionGroups.length - 1].group_id
             : '';
-        const hasNewGroup = previousGroupIds.length > 0
-            && knownGroupIds.some(groupId => !previousGroupIds.includes(groupId));
+        /* A tab that appeared since the last read takes the window over only
+           when the person opened it — from this window or the launcher. A tab
+           an agent launched or moved here joins the strip and waits to be
+           clicked or focused: an agent working in one tab never changes what
+           the person is looking at. A window showing nothing still picks the
+           newest tab, since that takes nothing away. */
+        const personOpenedNewGroups = previousGroupIds.length > 0
+            ? sessionGroups.filter(group => (
+                !previousGroupIds.includes(group.group_id)
+                && group.opened_by !== 'agent'
+            ))
+            : [];
+        const newestPersonOpenedGroupId = personOpenedNewGroups.length
+            ? personOpenedNewGroups[personOpenedNewGroups.length - 1].group_id
+            : '';
 
         if (activeGroupId && !getGroupById(activeGroupId)) {
             activeGroupId = '';
         }
         if (!activeGroupId && sessionGroups.length > 0) {
             activeGroupId = newestGroupId;
-        } else if (hasNewGroup && newestGroupId && activeGroupId !== newestGroupId) {
-            activeGroupId = newestGroupId;
+        } else if (newestPersonOpenedGroupId && activeGroupId !== newestPersonOpenedGroupId) {
+            activeGroupId = newestPersonOpenedGroupId;
         }
         syncLocationToGroup(activeGroupId);
         renderSessionTabs();
@@ -9656,6 +9912,7 @@
         typeof AGENT_SIDEBAR_SIDE === 'string' ? AGENT_SIDEBAR_SIDE : 'left'
     );
     wireAgentDashboardSidebar();
+    wireBroadcastButton();
     topbarPeek.attach();
     applyTopbarVisibility(getStoredTopbarVisible());
     setupAppConfigUpdateListeners();

@@ -49,6 +49,13 @@
        panel it had — on whichever edge the setting says today. Swapping sides
        changes nothing else: same markup, same one toggle wearing the same two
        marks, same open/shut state and the same width.
+     · **It marks the pane you are typing into.** The row whose session holds
+       this window's keyboard focus wears the terminal's own active ring. That
+       is the page's answer, read by session and never by slot, and it is laid
+       on the rows already drawn rather than written into the markup — so it
+       moves without rebuilding a button, and a repaint puts it straight back.
+       The dialog does not carry it: it covers the grid of the page it is on,
+       so no terminal there can hold focus while it is up.
 
    Two halves, the split `minimize-all.js` and `dashboard-close.js` use:
    `policy` is pure — no DOM, no globals, no page — so the markup and the
@@ -188,6 +195,13 @@
                 root.refitAttachedTerminalsForSurfaceMode();
             }
         },
+        /* The session of the terminal holding this window's keyboard focus,
+           or nothing. `terminals.js` owns the answer and calls back through
+           `markAgentDashboardSidebarInputTarget` whenever it may have moved. */
+        inputTarget: () => (
+            typeof root.focusedTerminalSessionId === 'function'
+                ? root.focusedTerminalSessionId() : ''
+        ),
         logError: (message, error) => console.error(message, error)
     });
 
@@ -203,6 +217,7 @@
     root.applyAgentDashboardSidebarSide = value => controller.setSide(value);
     root.agentDashboardSidebarSide = () => controller.getSide();
     root.refreshAgentDashboardSidebar = () => controller.refresh();
+    root.markAgentDashboardSidebarInputTarget = () => controller.markInputTarget();
 }(typeof window !== 'undefined' ? window : null, function () {
     const SHELL_ID = 'agentSidebar';
     const BODY_ID = 'agentSidebarBody';
@@ -215,6 +230,7 @@
     const RESIZER_ID = 'agentSidebarResizer';
     const OPEN_BODY_CLASS = 'agent-sidebar-open';
     const RIGHT_BODY_CLASS = 'agent-sidebar-right';
+    const INPUT_TARGET_CLASS = 'is-input-target';
     const SIDEBAR_SCALE_MIN = 100;
     const SIDEBAR_SCALE_MAX = 200;
 
@@ -429,6 +445,7 @@
         SIDEBAR_HIDE_ICON,
         OPEN_BODY_CLASS,
         RIGHT_BODY_CLASS,
+        INPUT_TARGET_CLASS,
         SIDEBAR_SIDE_LEFT,
         SIDEBAR_SIDE_RIGHT,
         normalizeSide,
@@ -463,6 +480,7 @@
             writeStored = () => {},
             report = () => {},
             onLayoutChanged = () => {},
+            inputTarget = () => '',
             logError = () => {}
         } = runtime || {};
 
@@ -537,6 +555,25 @@
             return true;
         }
 
+        /* Which row is the pane the reader is typing into. Every call re-reads
+           the page's answer, so one that has gone stale — the pane replaced,
+           closed, or left behind by a tab switch — clears the next time
+           anything asks. A shut panel is marked too: it is a few rows, and a
+           column reopened over a stale ring would show it until the read. */
+        function markInputTarget() {
+            const target = String(inputTarget() || '');
+            body()?.querySelectorAll?.('.dash-agent[data-session-id]').forEach(row => {
+                const current = Boolean(target) && row.dataset?.sessionId === target;
+                row.classList?.toggle(INPUT_TARGET_CLASS, current);
+                if (current) {
+                    row.setAttribute('aria-current', 'true');
+                } else {
+                    row.removeAttribute('aria-current');
+                }
+            });
+            return target;
+        }
+
         async function refresh() {
             if (!isOpen()) return false;
             const id = ++requestId;
@@ -570,12 +607,19 @@
             }
             if (id !== requestId) return false;
             setNotice(failure, 'error', 'read');
+            /* A failed read still reconciles the mark on the tree it leaves
+               up, or a target that went away between readings would keep its
+               ring for as long as the server stays unreachable. */
+            if (!snapshot) markInputTarget();
             /* The last good tree stays behind the notice: a reading from four
                seconds ago beats a blank column, as long as it says it is old. */
             if (!snapshot) return false;
             const totals = getElement(TOTALS_ID);
             if (totals) totals.textContent = render.totals(snapshot);
             paint(bodyHtml(snapshot, render, getCloseActions()));
+            /* After every reading, repainted or not: an unchanged tree keeps
+               its rows, but the pane that was the target may not be any more. */
+            markInputTarget();
             return true;
         }
 
@@ -772,7 +816,7 @@
 
         return {
             wire, apply, toggle, isOpen, refresh, schedule, handleRow, setNotice, syncToggle,
-            setSide,
+            setSide, markInputTarget,
             getSide: () => side,
             getScale: () => scale
         };

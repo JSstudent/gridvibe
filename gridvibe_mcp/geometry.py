@@ -4,7 +4,11 @@ import time
 from typing import Any, Dict
 
 from gridvibe_mcp.client import GridVibeClient, GridVibeError, project
-from gridvibe_mcp.splits import DEFAULT_POLL_SECONDS, DEFAULT_WAIT_SECONDS
+from gridvibe_mcp.splits import (
+    DEFAULT_POLL_SECONDS,
+    DEFAULT_WAIT_SECONDS,
+    VISIBLE_WINDOW_REQUIREMENT,
+)
 
 _RESULT_FIELDS = ("group_id", "revision", "column_weights", "row_weights", "panes")
 _PANE_FIELDS = ("session_id", "index", "rect")
@@ -23,7 +27,10 @@ def resize_divider(
     })
     intent_id = str(intent.get("intent_id") or "")
     if not intent_id:
-        return {"status": "no_window_available", "detail": "No resize was recorded; nothing changed."}
+        return {
+            "status": "no_window_available",
+            "detail": f"No resize was recorded; nothing changed. {VISIBLE_WINDOW_REQUIREMENT}",
+        }
     deadline = time.monotonic() + wait_seconds
     read_error = ""
     while True:
@@ -54,7 +61,8 @@ def resize_divider(
                 "status": "no_window_available",
                 "detail": (
                     "No page reported a completed resize before the request expired. "
-                    "A page may have claimed it; read list_panes before retrying."
+                    "A page may have claimed it; read list_panes before retrying. "
+                    f"{VISIBLE_WINDOW_REQUIREMENT}"
                 ),
             }
         if time.monotonic() >= deadline:

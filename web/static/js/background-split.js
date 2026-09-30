@@ -17,6 +17,9 @@
       transaction, and drop the tab's cached view so it is rebuilt from what
       the server now holds the next time it is shown.
 
+   Reading, measuring, the hold and the write are the tab's, shared with the
+   divider resize: `background-tab.js`, handed in as `page.tab`.
+
    Two halves, the same split every other module here uses:
 
    - `policy` is pure: which rule refuses a pane, and what the tab looks like
@@ -36,12 +39,22 @@
      instead: it owns a live grid, and this path does not.
    - **A tab opened while its split is in flight waits for it.** From the moment
      the request goes out until the arrangement is written, the tab is held:
-     the page's load asks `settled` first, so it never paints the new pane from
-     the server before its place in the layout exists, nor restores a cached
-     view the split is about to drop.
+     the page's load asks the tab's `settled` first, so it never paints the new
+     pane from the server before its place in the layout exists, nor restores a
+     cached view the split is about to drop.
    - **A pane that exists is reported, whatever happened to its layout.** The
      server has made it. If the arrangement could not be saved the result says
-     so, and the tab comes back with the default arrangement for its size. */
+     so, and the tab comes back with the default arrangement for its size.
+   - **A placement never puts back an arrangement it did not read.** A model
+     carries the presentation revision it was read at. When the split answers
+     at another one -- a divider was moved while the request was out -- the
+     pane is placed on the arrangement the answer's record holds instead, and
+     the cut planned again; a record that no longer holds the same panes is not
+     written to at all.
+   - **The visible handler places the same way when its window moves on.** A
+     split asked for in the showing tab whose request was still out when
+     another tab was picked hands its pane to `placeAfterMove`, with the model
+     and cut it read before the request, and the tab is held for that write. */
 (function (root, factory) {
     const api = factory(root);
     if (typeof module === 'object' && module.exports) module.exports = api;
@@ -135,22 +148,15 @@
 
     function create(page) {
         const {
+            /* The window's `GridVibeBackgroundTab`: the tab's reading,
+               measuring, hold and write, shared with the divider resize. */
+            tab,
             /* The session tab this window holds a pane in without showing it,
                or '' — for a pane on screen, one this window does not hold, or
                a window that has not settled on a tab. */
             groupOf,
             /* Whether the tab is now the shown one, or about to be. */
             isShown,
-            /* Resolves once the tab's queued presentation has landed. */
-            settle,
-            /* The tab as the server would rebuild it: `{ groupId, ids,
-               rects, columnWeights, rowWeights, baseCount }`, panes in visual
-               order. Null when the tab is gone. */
-            readModel,
-            /* The shared grid, measured for this model's weights:
-               `{ narrow, surfaces, cell, headerHeight }`, one surface per
-               rectangle. Null when there is nothing to measure. */
-            measure,
             /* Where the cut lands and what the axis weights become. */
             plan,
             splitRect,
@@ -159,50 +165,24 @@
             unmeasurable,
             /* Create the pane on the server: `{ ok, session, group, error }`. */
             split,
-            /* Drop the tab's cached view, unless it is the one painted. */
-            discard,
-            /* Write the arrangement through the revisioned transaction:
-               `{ ok, revision, error }`. */
-            saveLayout,
-            /* Take the server's record of the tab into the tab strip. */
-            adopt,
+            /* The tab as a group record describes it, without the pane just
+               added: `{ ids, rects, columnWeights, rowWeights, baseCount }`,
+               or null when the record has no arrangement for those panes. */
+            recordModel,
             /* The visible handler, for a tab that was opened meanwhile. */
             performShown,
-            limits,
-            onError = () => {}
+            limits
         } = page || {};
-
-        /* The splits in flight, per tab. More than one can be out for the same
-           tab when two intents land together, so it is a set, not a flag. */
-        const inFlight = new Map();
-
-        function hold(groupId) {
-            let release = null;
-            const pending = new Promise(resolve => { release = resolve; });
-            const held = inFlight.get(groupId) || new Set();
-            held.add(pending);
-            inFlight.set(groupId, held);
-            return () => {
-                held.delete(pending);
-                if (!held.size && inFlight.get(groupId) === held) {
-                    inFlight.delete(groupId);
-                }
-                release();
-            };
-        }
 
         async function inspect(sessionId) {
             const id = String(sessionId || '');
             const groupId = String(groupOf(id) || '');
             if (!groupId) return null;
-            /* Best effort: the write sends only the arrangement, so a queued
-               presentation that failed to land is reported and not fatal. */
-            try { await settle(groupId); } catch (error) { onError(error); }
-            const model = await readModel(groupId);
+            const model = await tab.read(groupId);
             if (!model) return null;
             const visualIndex = model.ids.indexOf(id);
             if (visualIndex < 0) return null;
-            const measured = measure(model);
+            const measured = tab.measure(model);
             if (!measured) {
                 return { groupId, model, visualIndex, measured: null, blockers: null, candidates: [] };
             }
@@ -227,8 +207,7 @@
             };
         }
 
-        /* The split itself, once the tab is held: create, drop the cache, write
-           the arrangement, take the record. */
+        /* The split itself, once the tab is held: create, then place. */
         async function splitBehind(id, axis, request, view) {
             const cut = plan(view.model, view.visualIndex, axis);
             const posted = await split(id, axis, request);
@@ -238,9 +217,58 @@
                     error: String((posted && posted.error) || 'The split failed in this window.')
                 };
             }
+            return place(view, axis, cut, posted);
+        }
 
+        /* The placement to write, brought up to the arrangement the server
+           held when the split answered. A split does not move the tab's
+           presentation revision, so the revision the response carries is the
+           one a write compares against -- and a divider moved while the request
+           was out has already raised it. Written unchanged, the model read
+           before the request would pass that check and put the old weights
+           back. So a model read at another revision is replaced by the record
+           the response carries, and the cut is planned again on it. A record
+           that no longer holds the same panes, or has no arrangement for them,
+           cannot be placed: null. */
+        function current(view, axis, cut, posted) {
+            const group = posted.group || null;
+            const revision = group && group.presentation_revision;
+            if (Number.isInteger(view.model.revision) && view.model.revision === revision) {
+                return { view, cut };
+            }
+            const sourceId = view.model.ids[view.visualIndex];
+            const stored = typeof recordModel === 'function'
+                ? recordModel(group, posted.session.session_id)
+                : null;
+            if (!stored || !Number.isInteger(revision)) return null;
+            const sameSessions = stored.ids.length === view.model.ids.length
+                && view.model.ids.every(id => stored.ids.includes(id));
+            const visualIndex = stored.ids.indexOf(sourceId);
+            if (!sameSessions || visualIndex < 0) return null;
+            const model = { ...stored, groupId: view.groupId, revision };
+            return {
+                view: { ...view, model, visualIndex },
+                cut: plan(model, visualIndex, axis)
+            };
+        }
+
+        /* A pane the server has made, put in its place in a tab that is not
+           painted: drop the cache, write the arrangement against the revision
+           the split returned, take the record. The tab is held by the caller. */
+        async function place(requested, axis, requestedCut, posted) {
             /* From here the pane exists whatever else happens. */
-            discard(view.groupId);
+            const placement = current(requested, axis, requestedCut, posted);
+            if (!placement) {
+                tab.discard(requested.groupId);
+                tab.adopt(posted.group, null, null);
+                return {
+                    ok: true,
+                    session: posted.session,
+                    index: null,
+                    note: SAVE_FAILED_NOTE
+                };
+            }
+            const { view, cut } = placement;
             const arranged = policy.arrange({
                 ids: view.model.ids,
                 rects: view.model.rects,
@@ -252,37 +280,17 @@
                 newId: posted.session.session_id,
                 splitRect
             });
-            let saved = { ok: false };
-            const revision = posted.group && posted.group.presentation_revision;
-            if (Number.isInteger(revision)) {
-                try {
-                    saved = await saveLayout({
-                        groupId: view.groupId,
-                        expectedRevision: revision,
-                        ids: arranged.ids,
-                        rects: arranged.rects,
-                        columnWeights: arranged.columnWeights,
-                        rowWeights: arranged.rowWeights,
-                        baseCount: view.model.baseCount
-                    }) || { ok: false };
-                } catch (error) {
-                    onError(error);
-                    saved = { ok: false };
-                }
-            }
-            adopt(
-                posted.group,
-                saved.ok
-                    ? {
-                        ids: arranged.ids,
-                        rects: arranged.rects,
-                        columnWeights: arranged.columnWeights,
-                        rowWeights: arranged.rowWeights,
-                        baseCount: view.model.baseCount,
-                        revision: saved.revision
-                    }
-                    : null
+            const layout = {
+                ids: arranged.ids,
+                rects: arranged.rects,
+                columnWeights: arranged.columnWeights,
+                rowWeights: arranged.rowWeights,
+                baseCount: view.model.baseCount
+            };
+            const saved = await tab.write(
+                view.groupId, posted.group && posted.group.presentation_revision, layout
             );
+            tab.adopt(posted.group, layout, saved);
             return {
                 ok: true,
                 session: posted.session,
@@ -297,17 +305,6 @@
                 return Boolean(groupOf(String(sessionId || '')));
             },
 
-            /* Resolves once no split of this tab is in flight: the one thing a
-               load of the tab has to wait for. Immediately, almost always. */
-            async settled(groupId) {
-                const id = String(groupId || '');
-                let held = inFlight.get(id);
-                while (held && held.size) {
-                    await Promise.all(Array.from(held));
-                    held = inFlight.get(id);
-                }
-            },
-
             /* The axes the pane could be halved on, or null when it is not in
                a tab this window holds. */
             async candidates(sessionId) {
@@ -320,6 +317,21 @@
                 if (!view) return reason(axis, '', 0);
                 if (!view.measured) return unmeasurable();
                 return reason(axis, view.blockers[axis], view.model.ids.length);
+            },
+
+            /* A split the visible handler made, whose window moved on while
+               its request was out — a tab picked, or the tab left loading. The
+               pane exists; it is placed the way a split from behind places
+               one, off the model and the cut read *before* the request, since
+               the grid now showing is another tab's. Held from the call, with
+               nothing before it, so a return to the tab waits for the write. */
+            async placeAfterMove(view, axis, cut, posted) {
+                const release = tab.hold(String((view && view.groupId) || ''));
+                try {
+                    return await place(view, axis, cut, posted);
+                } finally {
+                    release();
+                }
             },
 
             async perform(sessionId, axis, request) {
@@ -356,7 +368,7 @@
                 }
                 /* Held from here, with nothing between the check and the hold:
                    a tab opened from now on waits in its load for the write. */
-                const release = hold(view.groupId);
+                const release = tab.hold(view.groupId);
                 try {
                     return await splitBehind(id, axis, request, view);
                 } finally {

@@ -52,6 +52,7 @@ from gridvibe_mcp.identity import (
     depth_budget,
     read_identity,
 )
+from gridvibe_mcp.splits import VISIBLE_WINDOW_REQUIREMENT
 from gridvibe_mcp.splits import split_pane as split_pane_for
 from gridvibe_mcp.windows import open_window as open_window_for
 
@@ -114,6 +115,53 @@ DISPLAY_TOOLS = ("clear_pane",)
 NAVIGATION_TOOLS = ("focus_session", "focus_pane", "move_session", "resize_divider")
 SAVE_TOOLS = ("save_group_layout",)
 CLOSE_TOOLS = ("close_pane", "close_group", "close_workspace")
+
+#: The only tools that may change what the person is looking at: switch a
+#: window's session tab, move keyboard focus, or raise, restore or show a
+#: window in front. Each is how the person's own "focus it" or "bring it
+#: forward" reaches GridVibe, so an agent calls them only when asked.
+VIEW_MOVING_TOOLS = ("focus_session", "focus_pane")
+
+#: A background tool whose one argument makes that call view-moving, and the
+#: argument. It carries the same rule as the two tools above.
+VIEW_MOVING_FLAGS = {"move_session": "show"}
+
+#: Every other tool works in the background: in any tab of a window, showing
+#: or not, and it leaves the person's tab, focus and window order as they
+#: were. A new tab an agent opens arrives in the strip without being shown,
+#: and `open_window` creates a window minimized rather than in front. Closing
+#: the tab a window shows moves that window to another tab, because the tab
+#: it showed no longer exists; that is not moving the view. `split_pane` and
+#: `resize_divider` need the window open and not minimized, and when it is
+#: not they ask the person rather than bring it forward themselves.
+#:
+#: Spelled out name by name rather than built from the tiers, so that a tool
+#: added to any tier is in neither set until someone decides which it is.
+BACKGROUND_TOOLS = (
+    "gridvibe_status",
+    "list_workspaces",
+    "list_panes",
+    "list_agents",
+    "list_agent_types",
+    "list_saved_layouts",
+    "whoami",
+    "read_handoff",
+    "report_result",
+    "wait_for_results",
+    "create_workspace",
+    "launch_panes",
+    "open_window",
+    "split_pane",
+    "set_pane_agent",
+    "set_pane_mode",
+    "clear_pane",
+    "move_session",
+    "resize_divider",
+    "save_group_layout",
+    "close_pane",
+    "close_group",
+    "close_workspace",
+)
 
 #: The keys GridVibe's routes use for a pane, and the name each takes in a tool
 #: result. Explicit rather than a substring rule: ``saved_session_id`` names a
@@ -710,7 +758,7 @@ def tool_specs() -> List[Dict[str, Any]]:
             "name": "create_workspace",
             "description": (
                 "Create one empty, labelled workspace. Creating it does not "
-                "make a window appear -- call open_window for that."
+                "open a window -- call open_window for that."
             ),
             "inputSchema": {
                 "type": "object",
@@ -735,7 +783,11 @@ def tool_specs() -> List[Dict[str, Any]]:
                 "starts working on it instead of waiting at an empty prompt; "
                 "each pane's result says whether its handoff is waiting. This "
                 "needs no open window, so it also works where split_pane "
-                "cannot."
+                "cannot. A new tab in a workspace whose window already shows "
+                "a tab appears in its tab strip without being shown: the "
+                "window stays on the tab the person is looking at. Use "
+                "focus_session afterwards only when the person asked to see "
+                "it."
             ),
             "inputSchema": {
                 "type": "object",
@@ -815,11 +867,15 @@ def tool_specs() -> List[Dict[str, Any]]:
         {
             "name": "open_window",
             "description": (
-                "Make a workspace window appear on screen, whichever session "
-                "tab it shows. To bring a named session (tab) forward use "
-                "focus_session; for one pane use focus_pane. Reports opened, "
-                "blocked, or no_window_available -- it never retries and never "
-                "pretends."
+                "Make sure a workspace has a window. It never brings a window "
+                "forward: one that is already open is left where it is "
+                "(already_open: true), and a new one is created minimized in "
+                "the taskbar (minimized: true), so the person's tab, focus and "
+                "window order stay as they were. When the person asks to see "
+                "or bring forward a session (tab) use focus_session; for one "
+                "pane use focus_pane. In browser mode it opens a browser tab, "
+                "which the browser may show. Reports opened, blocked, or "
+                "no_window_available -- it never retries and never pretends."
             ),
             "inputSchema": {
                 "type": "object",
@@ -841,6 +897,7 @@ def tool_specs() -> List[Dict[str, Any]]:
                 "The pane may be in any session tab of that window, shown or "
                 "not: the split is made without switching tabs or moving "
                 "focus, so the person sees nothing change. "
+                f"{VISIBLE_WINDOW_REQUIREMENT} "
                 "Reports split, refused, or no_window_available. The result "
                 "names the new pane, so splits can be chained. With "
                 "kind='agent' the new agent can be handed a 'task' in the same "
@@ -1117,12 +1174,16 @@ def _resize_spec() -> Dict[str, Any]:
     return {
         "name": "resize_divider",
         "description": (
-            "Move one live grid track boundary in a session. Read list_panes first for "
+            "Move one grid track boundary in a session. The session may be any tab "
+            "of its workspace window, showing or not: the window does not switch "
+            "tabs or move focus, and a tab that isn't showing has its new "
+            "proportions the next time it is shown. Read list_panes first for "
             "group_id, layout.presentation_revision and geometry. A vertical boundary "
             "between columns N and N+1 has line_index N; horizontal is between "
             "rows N and N+1. Position is a fraction of the full grid width or "
-            "height, strictly between 0 and 1. The visible native page checks "
-            "pane minimums and persists before reporting resized. A stale layout, "
+            "height, strictly between 0 and 1. The open native window measures "
+            "pane minimums and persists before reporting resized. "
+            f"{VISIBLE_WINDOW_REQUIREMENT} A stale layout, "
             "impossible size, or missing page changes nothing. If a write response "
             "cannot be confirmed, the result is unknown; read list_panes before retrying. For three equal "
             "side-by-side panes, split twice, then position the two boundaries "
@@ -1262,7 +1323,13 @@ def _navigation_specs() -> List[Dict[str, Any]]:
                     },
                     "show": {
                         "type": "boolean",
-                        "description": "Afterwards, raise the destination window on this tab.",
+                        "description": (
+                            "Afterwards, raise the destination window and "
+                            "switch it to this tab. Only when the person "
+                            "asked to see or focus the moved session; "
+                            "without it the destination window stays on the "
+                            "tab it shows."
+                        ),
                     },
                     "override": {
                         "type": "boolean",
@@ -2139,7 +2206,7 @@ def _run(
         workspace_id = _text(args, "workspace_id")
         if not workspace_id:
             raise ToolArgumentError("open_window needs a 'workspace_id'.")
-        return window_opener(client, workspace_id)
+        return window_opener(client, workspace_id, raise_window=False)
 
     if name == "focus_session":
         return _focus_session(args, client=client, window_opener=window_opener)

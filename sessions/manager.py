@@ -25,7 +25,10 @@ from web.session_presentation import (
 )
 from web.workspaces import (
     DEFAULT_WORKSPACE_ID,
+    GROUP_OPENED_BY_AGENT,
+    GROUP_OPENED_BY_PERSON,
     generate_workspace_id,
+    normalize_group_opened_by,
     normalize_workspace_id,
 )
 
@@ -338,6 +341,10 @@ class SessionGroup:
     pane_order: List[str] = field(default_factory=list)
     presentation_revision: int = 0
     created_at: float = field(default_factory=time.time)
+    # "person" or "agent": who asked for this tab to be in its workspace, set
+    # by the launch or move that put it there. A window switches to a new tab
+    # only when the person opened it.
+    opened_by: str = GROUP_OPENED_BY_PERSON
 
     def to_dict(self) -> dict:
         """Convert to dictionary."""
@@ -354,6 +361,7 @@ class SessionGroup:
             "pane_order": list(self.pane_order),
             "presentation_revision": self.presentation_revision,
             "created_at": self.created_at,
+            "opened_by": self.opened_by,
         }
 
 
@@ -405,6 +413,7 @@ class SessionManager:
         saved_session_id: str = "",
         workspace_layout: Optional[Dict[str, Any]] = None,
         workspace_id: str = DEFAULT_WORKSPACE_ID,
+        opened_by: str = GROUP_OPENED_BY_PERSON,
     ) -> SessionGroup:
         """Create one group of launched sessions.
 
@@ -425,6 +434,7 @@ class SessionManager:
                 saved_session_id=saved_session_id,
                 workspace_layout=workspace_layout,
                 workspace_id=resolved_workspace_id,
+                opened_by=opened_by,
             )
 
     def _create_group_locked(
@@ -438,6 +448,7 @@ class SessionManager:
         saved_session_id: str = "",
         workspace_layout: Optional[Dict[str, Any]] = None,
         workspace_id: str = DEFAULT_WORKSPACE_ID,
+        opened_by: str = GROUP_OPENED_BY_PERSON,
     ) -> SessionGroup:
         """Publish one group record.
 
@@ -481,12 +492,23 @@ class SessionManager:
             workspace_id=resolved_workspace_id,
             saved_session_id=str(saved_session_id or "").strip(),
             workspace_layout=workspace_layout,
+            opened_by=normalize_group_opened_by(opened_by),
         )
         self.groups[resolved_group_id] = group
-        # The session window switches to a newly launched group, so mirror
-        # that here: the hint is then right even before a window reports.
+        # The session window switches to a group the person launched, so
+        # mirror that here: the hint is then right even before a window
+        # reports. A window stays where it is for an agent's group, so the
+        # hint does too -- unless it names no live group of this workspace,
+        # when the new one is what an empty window will show.
         workspace = self.workspaces[resolved_workspace_id]
-        workspace.active_group_id = resolved_group_id
+        current_active = self.groups.get(workspace.active_group_id or "")
+        if (
+            group.opened_by != GROUP_OPENED_BY_AGENT
+            or current_active is None
+            or current_active is group
+            or current_active.workspace_id != resolved_workspace_id
+        ):
+            workspace.active_group_id = resolved_group_id
         # The workspace now holds content, so normal empty-workspace
         # pruning applies again from here on.
         workspace.retain_when_empty = False
@@ -1089,6 +1111,7 @@ class SessionManager:
         workspace_layout: Optional[Dict[str, Any]] = None,
         workspace_id: str = DEFAULT_WORKSPACE_ID,
         workspace_from_session_id: str = "",
+        opened_by: str = GROUP_OPENED_BY_PERSON,
     ) -> GroupInstallation:
         """Install one complete group and every one of its panes atomically.
 
@@ -1183,6 +1206,7 @@ class SessionManager:
                 saved_session_id=resolved_saved_session_id,
                 workspace_layout=workspace_layout,
                 workspace_id=resolved_workspace_id,
+                opened_by=opened_by,
             )
             sessions = []
             for fields in staged_fields:
@@ -1664,8 +1688,14 @@ class SessionManager:
         self,
         group_id: str,
         target_workspace_id: str,
+        opened_by: str = GROUP_OPENED_BY_PERSON,
     ) -> Optional[SessionGroup]:
-        """Move a group without recreating any of its terminal sessions."""
+        """Move a group without recreating any of its terminal sessions.
+
+        ``opened_by`` is who asked for the move: the destination is a window
+        the group is new to, and it switches to the group only when the person
+        moved it there.
+        """
         resolved_target_id = normalize_workspace_id(target_workspace_id)
         with self.lock:
             group = self.groups.get(str(group_id or "").strip())
@@ -1687,6 +1717,7 @@ class SessionManager:
             ) + 1
             group.workspace_id = resolved_target_id
             group.display_order = next_order
+            group.opened_by = normalize_group_opened_by(opened_by)
             # The destination now holds content: a deliberately empty workspace
             # stops being retained the moment its first group arrives.
             self.workspaces[resolved_target_id].retain_when_empty = False

@@ -172,8 +172,8 @@ var SESSIONS = [];
 
 /* ── Everything the two load paths call and this test does not decide ── */
 async function loadSessionGroups() { return false; }
-/* No background split is ever in flight here. */
-async function backgroundSplitSettled() {}
+/* No split or resize from behind is ever in flight here. */
+async function backgroundTabSettled() {}
 async function resetSessionView() {}
 function getSessionApiPath() { return '/api/sessions'; }
 async function fetch() {

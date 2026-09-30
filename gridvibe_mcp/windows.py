@@ -90,6 +90,7 @@ def open_window(
     group_id: str = "",
     *,
     session_id: str = "",
+    raise_window: bool = True,
     window_mode: str = "",
     wait_seconds: float = DEFAULT_WAIT_SECONDS,
     poll_seconds: float = DEFAULT_POLL_SECONDS,
@@ -98,7 +99,12 @@ def open_window(
     sleep: Optional[Callable[[float], None]] = None,
     monotonic: Optional[Callable[[], float]] = None,
 ) -> Dict[str, Any]:
-    """Open one workspace window, by whichever route this runtime mode has."""
+    """Open one workspace window, by whichever route this runtime mode has.
+
+    ``raise_window=False`` is the ``open_window`` tool: in native mode nothing
+    comes forward (see :func:`_open_native`). The focus tools keep the raise,
+    because bringing the window forward is what they were asked for.
+    """
     resolved_workspace_id = str(workspace_id or "").strip()
     if not resolved_workspace_id:
         return {"status": BLOCKED, "detail": "No workspace was named."}
@@ -125,6 +131,7 @@ def open_window(
             client,
             resolved_workspace_id,
             resolved_group_id,
+            raise_window=raise_window,
             wait_seconds=min(float(wait_seconds), budget),
             **timing,
         )
@@ -196,12 +203,13 @@ def _open_native(
     workspace_id: str,
     group_id: str,
     *,
+    raise_window: bool = True,
     wait_seconds: float,
     poll_seconds: float,
     sleep: Callable[[float], None],
     monotonic: Callable[[], float],
 ) -> Dict[str, Any]:
-    intent = client.open_window_intent(workspace_id, group_id)
+    intent = client.open_window_intent(workspace_id, group_id, raise_window=raise_window)
     intent_id = str(intent.get("intent_id") or "").strip()
     if not intent_id:
         return {
@@ -210,7 +218,7 @@ def _open_native(
             "detail": f"GridVibe did not record the request. {FALLBACK_HINT}",
         }
 
-    state, detail, _result, read_error, _store_state = _wait_for_intent(
+    state, detail, result, read_error, _store_state = _wait_for_intent(
         client,
         intent_id,
         (OPENED, BLOCKED),
@@ -221,7 +229,10 @@ def _open_native(
     )
 
     if state == OPENED:
-        return {"status": OPENED, "window_mode": "native", "intent_id": intent_id}
+        answer = {"status": OPENED, "window_mode": "native", "intent_id": intent_id}
+        if not raise_window:
+            answer.update(_left_in_place(result))
+        return answer
     if state == BLOCKED:
         return {
             "status": BLOCKED,
@@ -248,6 +259,44 @@ def _open_native(
             "No GridVibe window was open to hand the request to. " + FALLBACK_HINT
         ),
     }
+
+
+def _left_in_place(result: Dict[str, Any]) -> Dict[str, Any]:
+    """How an open that was not allowed to raise left the window.
+
+    Read from the page's report: ``already_open`` when an open window was
+    reused, ``raised`` false, and ``minimized`` when the window sits in the
+    taskbar -- a new one is created that way so it cannot cover what the
+    person is looking at, and an open one may already have been. A page that
+    did not say how it left the window is not answered for.
+    """
+    if result.get("raised") is not False:
+        return {
+            "note": "The GridVibe page did not say how it left the window, "
+            "so whether it came forward is not known here."
+        }
+    answer: Dict[str, Any] = {
+        "already_open": result.get("reused") is True,
+        "raised": False,
+    }
+    if result.get("focus_moved") is True:
+        answer["minimized"] = True
+        answer["focus_moved"] = True
+        answer["note"] = (
+            "The window was created minimized in the taskbar, but it kept the "
+            "keyboard focus it took from the person's window: tell the person."
+        )
+    elif result.get("minimized") is True:
+        answer["minimized"] = True
+        answer["note"] = (
+            ("The window is open but minimized in the taskbar"
+             if answer["already_open"]
+             else "The window was created minimized in the taskbar, so it did "
+             "not cover what the person is looking at")
+            + ". split_pane and resize_divider need it restored: ask the person "
+            "to restore it rather than calling focus_session or focus_pane."
+        )
+    return answer
 
 
 def _wait_for_intent(

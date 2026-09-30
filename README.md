@@ -123,17 +123,17 @@ Until it is installed the checkbox still appears and the agent simply finds no t
 | --- | --- | --- |
 | **Read** | `gridvibe_status` `list_workspaces` `list_panes` `list_agents` `list_agent_types` `list_saved_layouts` `whoami` `read_handoff` | See every workspace and the session tabs in it, every pane and where it sits in the grid, every agent and whether it is working, which agent CLIs it can start, every saved preset, which pane it is itself in, and the task another agent handed it |
 | **Hand back** | `report_result` `wait_for_results` | Report the outcome of a handed-over task to the agent that asked for it, and wait for the reports of the agents it handed tasks to |
-| **Create** | `create_workspace` `launch_panes` `open_window` `split_pane` | Make a workspace, launch a group of panes into it, put it on screen, split any pane side-by-side or stacked, and hand a new agent its task |
+| **Create** | `create_workspace` `launch_panes` `open_window` `split_pane` | Make a workspace, launch a group of panes into it, give it a window, split any pane side-by-side or stacked, and hand a new agent its task |
 | **Replace** | `set_pane_agent` `set_pane_mode` | Relaunch a pane under a different agent (optionally with a task) or back to a plain shell, or turn it into a file explorer or a browser preview |
 | **Clear** | `clear_pane` | Clear one terminal pane and its replay buffer, exactly as the 🧹 button does |
-| **Navigate** | `focus_session` `focus_pane` `move_session` `resize_divider` | Bring a session tab or a single pane to the foreground, move a session to another workspace, and resize a divider in an open session |
+| **Navigate** | `focus_session` `focus_pane` `move_session` `resize_divider` | Bring a session tab or a single pane to the foreground, move a session to another workspace, and resize a divider in any session tab |
 | **Save** | `save_group_layout` | Save an open session's pane types and layout as a named preset for later launches |
 | **Close** | `close_pane` `close_group` `close_workspace` | End a worker pane, a session tab, or a live workspace; saved workspace snapshots remain available |
 
 - **Agents can close finished work.** An agent can close panes it created, or whole session tabs and workspaces after every affected pane passes the checks. Closing one pane preserves the tab's existing arrangement and divider proportions exactly as its **×** button does; an agent still cannot close its own pane or a container holding it.
 - **Sessions by the name on their tab.** Ask for *"bring the gridvibe_main session forward"* or *"move test_session to the gridvibe_2 workspace and show it"*. Two tabs with the same name are never guessed between, and the agent only reports a tab as shown once the window confirms it.
 - **New panes start where you say.** A stated folder is checked on the pane's own machine and wins over where the pane is standing, including a folder above the one a Files pane is showing.
-- **Agents can shape the grid.** Ask an agent to split a pane, then set a divider to a fraction of the open session's width or height. GridVibe checks each pane's minimum size before applying it.
+- **Agents can shape the grid.** Ask an agent to split a pane, then set a divider to a fraction of the session's width or height. GridVibe checks each pane's minimum size before applying it.
 - **Agents can save a session layout.** Ask an agent to save the current session as a named preset, optionally rooted at a stated folder. The session's window must be open so GridVibe can capture its latest layout.
 - **Every installed agent, not just the MCP ones.** An agent can list which agent CLIs are available and launch any of them. A missing agent is refused rather than quietly opened as a plain terminal.
 - **An agent only touches panes it made.** Replace, clear and close tools refuse the agent's own pane, and refuse panes it did not create — including panes from before a restart — unless you authorize that specific action in the conversation. Moving a session it did not make needs your word the same way.
@@ -145,7 +145,8 @@ Until it is installed the checkbox still appears and the agent simply finds no t
 - **New panes open where the asking agent is.** A tool called from an SSH pane opens its panes on that same host over the same connection, and refuses rather than quietly falling back to this machine. They land in the workspace that agent's tab is in *now*, so moving a session between workspaces takes its agent with it.
 - **SSH panes get the tools too**, with nothing installed on the remote host. The pane reaches GridVibe back down its own connection, on a port that exists only while the pane does, is reachable only from that host, and answers only that pane's own requests.
 - **No credential ever reaches an agent.** Saved presets come back as shapes — layout, pane count, what each pane is — never as a connection.
-- **Splitting a pane needs a window open.** An agent can split a pane in any session tab of an open, unminimized workspace window without switching you to it; a split in browser mode is refused as *no window available* rather than guessed at. Opening a workspace works in either mode.
+- **Agents work in the background.** In the native window, an agent's splits, resizes and new tabs never switch your tab or bring a window forward, and a window it opens starts minimized; only asking an agent to focus or show something moves your view.
+- **Splitting and resizing need a window open.** An agent can split a pane or move a divider in any session tab of an open, unminimized workspace window without switching you to it, and asks you to restore the window rather than bringing it forward itself; a split in browser mode is refused as *no window available* rather than guessed at. Opening a workspace works in either mode.
 
 ### In use
 
@@ -190,6 +191,7 @@ Closing a workspace asks first and offers **Cancel**, **Save and close**, or **C
 See **every session in every workspace**, agents first. Open the dashboard dialog with `Alt+A` or the dashboard button, or keep it beside your panes with the sidebar handle at the start of the session tab line.
 
 - **Keep the overview beside your work** — the docked sidebar stays open as you work or switch windows. Each workspace remembers whether it is open.
+- **See which agent you are typing into** — the sidebar row of the agent pane holding your keyboard focus wears the same accent ring as the pane, and follows you as you click between panes.
 - **Widen it when you need more room** — drag the sidebar's inner edge from its default width up to twice that width. The chosen scale is saved with the workspace and adapts to the window size.
 - **Put it on the side you want** — **App Settings ▸ Agents ▸ Agent Dashboard Side** docks the sidebar left or right — pick the card that shows it on that edge — and every open window moves as soon as you save. The handle, its marks and the rows are the same either way.
 - **Three levels** — a workspace is a titled band, a session tab is a card inside it drawn in that tab's own colour, and each agent is one row inside the card.
