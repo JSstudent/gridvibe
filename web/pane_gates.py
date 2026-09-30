@@ -404,12 +404,18 @@ def check_lineage(
     session: Any,
     request: AgentPaneRequest,
     wording: GateWording,
+    *,
+    log_waiver: bool = True,
 ) -> None:
     """The lineage gate: a pane this agent's own pane created, or `override`.
 
     A pane that existed before a GridVibe restart carries no creator and is
     refused for that reason, which is the honest answer -- GridVibe does not
     know who made it, so it does not guess.
+
+    ``log_waiver=False`` is for a transaction re-running the gate under the
+    manager lock at its commit point: the waiver was logged by the first
+    check, and a log write does not belong inside that hold.
     """
     creator = str(getattr(session, "created_by_session_id", "") or "")
     if not request.override:
@@ -430,7 +436,7 @@ def check_lineage(
             )
         return
 
-    if not creator or creator != request.caller_session_id:
+    if log_waiver and (not creator or creator != request.caller_session_id):
         # Logged rather than counted: the waiver is the interesting event, and
         # the record has to name both panes -- and whether the person granted
         # it for this call or at launch -- for it to be readable afterwards.

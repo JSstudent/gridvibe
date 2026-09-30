@@ -400,6 +400,7 @@ def apply_pane_shell_change(
     payload: Dict[str, Any],
     effects: ShellTransitionEffects,
     metadata_overrides: Optional[Dict[str, Any]] = None,
+    commit_guard: Optional[Callable[[], None]] = None,
 ) -> Dict[str, Any]:
     """Relaunch one terminal pane under a stated shell family and/or agent.
 
@@ -414,6 +415,13 @@ def apply_pane_shell_change(
     started, because the spawn reads them: setting them afterwards would race
     the connector that is already reading the pane. A refusal writes none of
     them, exactly like a refusal writes none of the payload's own.
+
+    ``commit_guard`` is a caller's precondition, run under the manager lock in
+    the same hold as the metadata write. Binary detection and the cwd probe
+    below can take seconds, and nothing holds the pane still while they run,
+    so a caller whose checks must still be true when the pane changes re-runs
+    them there. It must be in-memory only; it refuses by raising, and then
+    nothing has been written, closed or restarted.
     """
     session = session_manager.get_session(session_id)
     if not session:
@@ -513,8 +521,11 @@ def apply_pane_shell_change(
     updates.update(
         fresh_conversation_fields(_relaunched_shape(session, updates), AGENT_REGISTRY)
     )
-    if updates:
-        session_manager.update_session_metadata(session_id, **updates)
+    with session_manager.lock:
+        if commit_guard is not None:
+            commit_guard()
+        if updates:
+            session_manager.update_session_metadata(session_id, **updates)
     logger.info(
         "Pane relaunch session_id=%s shell=%s distribution=%s agent=%s directory=%s",
         session_id,
@@ -626,6 +637,120 @@ def _requested_task(payload: Dict[str, Any]) -> Optional[str]:
 
 
 
+#: The target fields a relaunch is planned and confirmed against. The plan
+#: `apply_pane_shell_change` builds reads them (whether auto mode and MCP carry
+#: over, which shell the preflight looked in), and the question a person
+#: answered named what was running there, so a commit after any of them moved
+#: would carry out a request nobody made.
+_RELAUNCH_BOUND_FIELDS = (
+    "mode",
+    "startup_mode",
+    "agent_selection",
+    "custom_agent",
+    "created_by_session_id",
+    "use_wsl",
+    "use_powershell",
+    "distribution",
+    "agent_auto_mode",
+    "agent_mcp",
+    "agent_mcp_override",
+)
+
+
+def _relaunch_binding(target: Any, caller: Any) -> tuple:
+    """What the commit has to find unchanged: the target, and the budget handed down."""
+    return (
+        tuple(getattr(target, field, None) for field in _RELAUNCH_BOUND_FIELDS),
+        getattr(caller, "agent_depth", 0),
+    )
+
+
+def _check_relaunch_gates(
+    session_id: str,
+    payload: Dict[str, Any],
+    task: Optional[str],
+    *,
+    log_waiver: bool = True,
+) -> tuple:
+    """Every gate a tool's relaunch passes, against the live registry.
+
+    Returns ``(target, caller)``. Run twice: once before the slow preflight,
+    and again under the manager lock at the commit point (``log_waiver=False``
+    there), because nothing holds the pane still in between -- the person can
+    start an agent in it, the caller can close, and a standing waiver can be
+    taken away. The request is re-read too, so an override-mode grant is
+    whatever the caller holds *now*.
+    """
+    request = read_agent_request(payload, RELAUNCH_WORDING)
+    session = session_manager.get_session(session_id)
+    if not session:
+        raise PaneGateRefusal("Session not found", 404)
+
+    check_caller(session_id, request, RELAUNCH_WORDING)
+
+    startup_mode = str(getattr(session, "startup_mode", "") or "")
+    already_agent = startup_mode == "agent" and bool(_pane_agent_key(session))
+    if startup_mode not in ("terminal", "agent"):
+        raise refuse(
+            MODE_GATE,
+            f"This pane is a {startup_mode or 'non-terminal'} pane. Only a "
+            "plain terminal pane is relaunched by a tool; split off a new "
+            "pane instead.",
+        )
+    if task is not None:
+        # Every refusal nothing can waive comes before the ones `override`
+        # can: an agent that asked the person, got a yes and retried must
+        # not then meet a refusal it could have been told about first.
+        caller_pane = session_manager.get_session(request.caller_session_id)
+        if not same_machine(caller_pane, session):
+            raise refuse(MACHINE_GATE, machine_refusal(caller_pane, session))
+    if already_agent and not request.override:
+        raise refuse(
+            MODE_GATE,
+            "This pane is already running an agent. Only a plain terminal "
+            "pane is relaunched by a tool; split off a new pane instead, "
+            "unless the user explicitly asked to override this pane.",
+            waivable=True,
+        )
+
+    check_lineage(session, request, RELAUNCH_WORDING, log_waiver=log_waiver)
+
+    # Read again rather than carried down from `check_caller`: nothing held
+    # the caller open in between, and a caller that has gone is the same
+    # fact that gate already refuses on. Without this,
+    # `getattr(None, "agent_depth", 0) + 1` is 1, so a caller closing
+    # mid-call silently *resets* the chain's budget instead of ending it.
+    caller = session_manager.get_session(request.caller_session_id)
+    if caller is None:
+        raise refuse(
+            LINEAGE_GATE,
+            "The pane this request came from closed while its request was "
+            "being checked, so GridVibe cannot tell what depth budget the "
+            "replacement agent should inherit.",
+        )
+    return session, caller
+
+
+def _relaunch_refusal(
+    exc: PaneGateRefusal,
+    session_id: str,
+    payload: Dict[str, Any],
+    task: Optional[str],
+) -> ShellTransitionError:
+    """One gate refusal as the route's error, carrying its question.
+
+    Called with no shared lock held: the question reads the pane's activity,
+    which takes ``connection_lock``, and that lock orders before the manager's.
+    """
+    requested_agent = _normalize_agent_key(payload.get("agent"))
+    attach_confirmation(
+        exc,
+        session_manager.get_session(session_id),
+        lambda facts: _relaunch_question(facts, requested_agent, task is not None),
+    )
+    return ShellTransitionError(exc.message, exc.status_code, exc.details())
+
+
 def apply_agent_pane_relaunch(
     session_id: str,
     payload: Dict[str, Any],
@@ -635,75 +760,42 @@ def apply_agent_pane_relaunch(
 
     Every gate is checked before anything is mutated, closed or restarted, so a
     refusal leaves the pane exactly as it was found -- which is what the
-    whole-pane snapshot assertions in the tests pin.
+    whole-pane snapshot assertions in the tests pin. The gates are checked
+    again at the commit point, bound to the pane they passed on: a pane that
+    started an agent, a caller that closed or lost its waiver, or a target that
+    changed at all while the relaunch was being prepared refuses there, and the
+    pane is still exactly as it was found.
     """
     # One translation point for the whole gate sequence: every refusal below
     # is a `PaneGateRefusal` carrying the status the route should answer, and
-    # this is where it becomes the one exception `web/api.py` maps.
-    session = None
+    # `_relaunch_refusal` is where it becomes the one exception `web/api.py`
+    # maps.
     task: Optional[str] = None
     try:
-        request = read_agent_request(payload, RELAUNCH_WORDING)
+        read_agent_request(payload, RELAUNCH_WORDING)
         # Before any gate: a task that could never be delivered is refused
         # for what it is, not for where it was aimed.
         task = _requested_task(payload)
-
-        session = session_manager.get_session(session_id)
-        if not session:
-            raise PaneGateRefusal("Session not found", 404)
-
-        check_caller(session_id, request, RELAUNCH_WORDING)
-
-        startup_mode = str(getattr(session, "startup_mode", "") or "")
-        already_agent = startup_mode == "agent" and bool(_pane_agent_key(session))
-        if startup_mode not in ("terminal", "agent"):
-            raise refuse(
-                MODE_GATE,
-                f"This pane is a {startup_mode or 'non-terminal'} pane. Only a "
-                "plain terminal pane is relaunched by a tool; split off a new "
-                "pane instead.",
-            )
-        if task is not None:
-            # Every refusal nothing can waive comes before the ones `override`
-            # can: an agent that asked the person, got a yes and retried must
-            # not then meet a refusal it could have been told about first.
-            caller_pane = session_manager.get_session(request.caller_session_id)
-            if not same_machine(caller_pane, session):
-                raise refuse(MACHINE_GATE, machine_refusal(caller_pane, session))
-        if already_agent and not request.override:
-            raise refuse(
-                MODE_GATE,
-                "This pane is already running an agent. Only a plain terminal "
-                "pane is relaunched by a tool; split off a new pane instead, "
-                "unless the user explicitly asked to override this pane.",
-                waivable=True,
-            )
-
-        check_lineage(session, request, RELAUNCH_WORDING)
-
-        # Read again rather than carried down from `check_caller`: nothing held
-        # the caller open in between, and a caller that has gone is the same
-        # fact that gate already refuses on. Without this,
-        # `getattr(None, "agent_depth", 0) + 1` is 1, so a caller closing
-        # mid-call silently *resets* the chain's budget instead of ending it.
-        caller = session_manager.get_session(request.caller_session_id)
-        if caller is None:
-            raise refuse(
-                LINEAGE_GATE,
-                "The pane this request came from closed while its request was "
-                "being checked, so GridVibe cannot tell what depth budget the "
-                "replacement agent should inherit.",
-            )
+        target, caller = _check_relaunch_gates(session_id, payload, task)
     except PaneGateRefusal as exc:
-        requested_agent = _normalize_agent_key(payload.get("agent"))
-        attach_confirmation(
-            exc,
-            session,
-            lambda facts: _relaunch_question(facts, requested_agent, task is not None),
+        raise _relaunch_refusal(exc, session_id, payload, task) from exc
+    binding = _relaunch_binding(target, caller)
+
+    def recheck_at_commit() -> None:
+        # Under the manager lock, in the same hold as the metadata write.
+        live_target, live_caller = _check_relaunch_gates(
+            session_id, payload, task, log_waiver=False
         )
-        raise ShellTransitionError(
-            exc.message, exc.status_code, exc.details()
-        ) from exc
+        if (
+            live_target is not target
+            or live_caller is not caller
+            or _relaunch_binding(live_target, live_caller) != binding
+        ):
+            raise PaneGateRefusal(
+                "This pane changed while the relaunch was being prepared. "
+                "Nothing was changed; read it again and ask again.",
+                409,
+            )
 
     # Past the gates this is the ordinary relaunch, with the ordinary refusals:
     # an unknown agent key, a binary that is not installed, a pane with no shell.
@@ -718,17 +810,29 @@ def apply_agent_pane_relaunch(
         # an explicit `mcp: false` beside it was already refused above.
         relaunch["mcp"] = True
         effects = _with_task_binding(effects, task, caller)
-    result = apply_pane_shell_change(
-        session_id,
-        relaunch,
-        effects,
-        # Bounded by the same normalizer every other write of this field uses
-        # (`create_session`, and the split route). `update_session_metadata` is
-        # a raw `setattr` over an allowlist and normalizes nothing, so without
-        # it this is the one write path that could persist a depth past
-        # `_MAX_AGENT_DEPTH` into `runtime_state.json`.
-        {"agent_depth": _normalize_agent_depth(int(getattr(caller, "agent_depth", 0)) + 1)},
-    )
+    try:
+        result = apply_pane_shell_change(
+            session_id,
+            relaunch,
+            effects,
+            # Bounded by the same normalizer every other write of this field
+            # uses (`create_session`, and the split route).
+            # `update_session_metadata` is a raw `setattr` over an allowlist and
+            # normalizes nothing, so without it this is the one write path that
+            # could persist a depth past `_MAX_AGENT_DEPTH` into
+            # `runtime_state.json`.
+            {"agent_depth": _normalize_agent_depth(int(getattr(caller, "agent_depth", 0)) + 1)},
+            commit_guard=recheck_at_commit,
+        )
+    except PaneGateRefusal as exc:
+        logger.info(
+            "Agent pane relaunch refused at commit session_id=%s "
+            "requested_by_session_id=%s status=%s",
+            session_id,
+            str(payload.get("requested_by_session_id") or "-"),
+            exc.status_code,
+        )
+        raise _relaunch_refusal(exc, session_id, payload, task) from exc
     if task is not None:
         result["handoff"] = agent_handoffs.public_state(session_id)
     return result

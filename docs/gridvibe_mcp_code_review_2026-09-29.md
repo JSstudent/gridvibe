@@ -37,6 +37,14 @@ That function can spend time on binary detection and cwd probing before it rewri
 - **Scenario:** An agent calls `set_pane_agent` without `override` on a plain terminal it created. While detection is pending, the person starts Claude in that terminal. The relaunch then goes ahead: it replaces Claude with Codex and closes the transport, without ever asking the running-agent confirmation. A caller that closes, or loses its standing override, in the same window of time is not rechecked either.
 - **Evidence:** An isolated test built on the `AgentRequestedRelaunchTestCase` fixture mutated the target during the preflight callback. The call still returned HTTP 200, the target became Codex, and `close_connection` was called. The coordinator confirmed that no recheck exists between the gate block and the `apply_pane_shell_change` call.
 - **Fix:** Pass a guarded commit callback into the shared transition. It captures the target, caller and transport identity, and just before mutation it rechecks liveness, current kind, lineage, the machine restriction and the live waiver. Keep detection, I/O and teardown outside shared locks.
+- **Status: fixed 2026-09-30** on `szua_gridvibe-wrk-focus`.
+  - `apply_pane_shell_change` takes a `commit_guard`, which runs under `SessionManager.lock` in the same hold as the metadata write.
+  - `apply_agent_pane_relaunch` moves its gates into `_check_relaunch_gates`. They run once before preflight and again from that guard, with the waiver log suppressed there (the new `log_waiver` flag on `check_lineage`). The second run re-reads the request, so an override-mode grant is checked as it stands at commit.
+  - The commit is bound to the same target and caller records, unchanged `_RELAUNCH_BOUND_FIELDS` and the same caller depth. A gate that now refuses answers as it would have at first, `confirm` block included, attached after the lock is released. A changed target answers 409 even under `override`.
+  - **Not done:** transport identity is not part of the binding. Reading the connection needs `connection_lock`, which orders before the manager lock. Checking it would also refuse a pane that was still connecting when it was checked, which is the usual `split_pane` → `set_pane_agent` sequence. A person relaunching the pane to the same configuration during preflight is therefore not detected. This is recorded as a limitation in the contract.
+  - **Tests:** four new `AgentRequestedRelaunchTestCase` cases change the pane during detection: the person starts Claude, an override target changes, the caller closes, and the standing waiver is withdrawn. All four fail without the guard. A fifth pins the locked hold and the second, non-logging gate run. `tests.test_session_shell` passes (100), and so do the adjacent gate, MCP, handoff and API suites (1445, 1 skip). Ruff is clean.
+  - **Docs:** CHANGELOG, the [Agent tools (MCP)](engineering_contracts.md#agent-tools-mcp) contract and `gridvibe_mcp/README.md` (gates section).
+  - **Review of the fix:** a Codex reviewer ran OCR delegate review with escalated permissions, and this time both commands succeeded. `preview` found 7 changed files, 2 of them reviewable, and it covered both. The reviewer also read the other 5 by hand, and it ran the focused suite, ruff and `git diff --check`. With the guard bypassed, the four race tests failed. **No findings.** The coordinator confirmed that nothing the guard calls logs, does I/O or takes `connection_lock` inside the manager-lock hold. The reviewer's only caveat is the undetected transport identity, which is disclosed above.
 
 #### C1 — Concurrent native opens create duplicate windows, and closing the older one unregisters the survivor (pre-existing; the no-raise path inherits it)
 `web/webview_launcher.py:1749` (lookup), `:1807` (`create_window`), `:1839` (`_attach_workspace_window`); close cleanup at `:2362–2366`
@@ -130,7 +138,7 @@ The `shown` callback calls `_hand_foreground_back` and discards its failure. `fo
 
 | Where | Mismatch | Finding |
 | --- | --- | --- |
-| Security guardrail and ownership contract | Gate-before-mutation is not held across relaunch preflight | A1 |
+| Security guardrail and ownership contract | Gate-before-mutation is not held across relaunch preflight (fixed 2026-09-30) | A1 |
 | Security contract | Credentials must not be logged, but `/mcp/<token>` is | A2 |
 | Handoff/result contract | Protection against a replaced agent's in-flight report stops before the successor reads its task | A3 |
 | Ownership contract | Native close cleanup ignores captured identity | C1 |
@@ -144,7 +152,7 @@ The `shown` callback calls `_hand_foreground_back` and discards its failure. `fo
 
 ## Test coverage gaps
 
-- Target starts an agent, caller closes, or waiver is revoked during relaunch preflight (A1).
+- ~~Target starts an agent, caller closes, or waiver is revoked during relaunch preflight (A1).~~ Covered 2026-09-30.
 - HTTP logging redaction for access, error and origin-rejection records (A2).
 - Delayed report from agent A after successor B reads its task (A3).
 - Identical duplicated `Content-Length` (the existing test uses conflicting values).
@@ -192,7 +200,7 @@ The `shown` callback calls `_hand_foreground_back` and discards its failure. `fo
 
 ## Suggested order of work
 
-1. **A1, C1:** gate recheck at commit, and window-slot reservation plus identity-checked cleanup. Both are ownership-contract violations with user-visible damage.
+1. **A1 (done), C1:** gate recheck at commit, and window-slot reservation plus identity-checked cleanup. Both are ownership-contract violations with user-visible damage.
 2. **C2, C3:** fix before merging this branch; both are regressions or incomplete fixes introduced here.
 3. **B3:** a one-line description change plus a test assertion; it belongs to this branch's intent.
 4. **A2, A3:** credential redaction and assignment receipts.

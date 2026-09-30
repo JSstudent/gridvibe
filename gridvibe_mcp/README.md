@@ -327,6 +327,13 @@ builds the question from its live registry, so every agent asks the same one.
 The refusals nothing waives come first, so an agent never asks the person, gets
 a yes, and is then refused anyway.
 
+`set_pane_agent` checks its gates again when it changes the pane, because
+finding the agent binary can take seconds. If in that time the pane starts an
+agent, or the caller closes or loses override mode, the call is refused as it
+would have been at the start. A target that changed while the relaunch was being prepared is
+refused with 409 even under `override`, since the person's yes was about what was
+running there before. Either way the pane is left as it was.
+
 A pane that existed before a GridVibe restart carries no creator — `created_by_session_id`
 is deliberately absent from the runtime snapshot — so it is always refused
 without `override`. That is the honest answer: GridVibe does not know who made

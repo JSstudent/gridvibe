@@ -1600,6 +1600,21 @@ in `README.md`; state the rules a change has to keep.
   beside it (and `true` without `mcp: true`), and the tool relaunch never
   forwards it. Relaunching the same agent keeps a grant it already holds without
   restating it, so a stale window cannot restore one dropped elsewhere.
+- **A tool's relaunch holds its gates at the commit, not only at the door.**
+  Binary detection and the cwd probe run after the gates and can take seconds,
+  so `apply_agent_pane_relaunch` hands `apply_pane_shell_change` a
+  `commit_guard` that runs under `SessionManager.lock` in the same hold as the
+  metadata write. It re-runs every gate against the live registry, including
+  the caller's override-mode grant as it stands then, with the waiver log
+  suppressed, and binds the commit to the pane it checked: the same target and
+  caller records, unchanged `_RELAUNCH_BOUND_FIELDS` and the same caller depth.
+  A gate that now refuses answers as it would have at the door, `confirm` block
+  included, attached after the lock is released. A target that changed in any
+  bound field answers 409, even under `override`, because the person's yes
+  named what was running there then. Either way nothing is written, closed or
+  restarted. Detection, the probe and teardown stay outside the lock. The
+  transport is not part of the binding, so a relaunch of the same pane by the
+  person that leaves every bound field as it was is not detected.
 - **No byte a tool supplies reaches a launch line.** A handed-over task adds
   exactly `HANDOFF_OPENING_PROMPT` (`web/agent_handoffs.py`), a constant whose
   characters are pinned to `[A-Za-z0-9 .,_]`, and the agent fetches the task
