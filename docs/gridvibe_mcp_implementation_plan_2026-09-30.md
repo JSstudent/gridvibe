@@ -157,6 +157,37 @@ today's code.
 
 ### Stage 2 — C3: a visible split holds its tab until its placement is written
 
+**Status: implemented 2026-09-30** on `szua_gridvibe-mcp-review` from `1fc190b`.
+It is uncommitted. One Codex review (OCR delegate, 2 of 2 reviewable files
+covered) found nothing.
+- **Done:** steps 1–4. The hold is taken after `captureSplitPlacement` and
+  released in a `finally`, and a painted split releases it before its fit
+  waits. Every moved-on case with a captured placement goes to
+  `placeAfterMove`, a rebuilt tab included. The request is bounded by
+  `SPLIT_REQUEST_TIMEOUT_MS` (20 s) and answers unknown on an abort. Nothing
+  between hold and release awaits `initialLoad`.
+- **Changed from the plan:** step 2's premise holds only for a load that
+  reaches its barrier after the hold. A load whose read was already out could
+  still rebuild during the POST. `background-tab.js` now counts holds
+  (`holdCount`). `initialLoad` reads the tab again when a hold began during its
+  read or is still taken, up to `LOAD_HELD_READ_ATTEMPTS` (3) for holds that
+  came and went. A rebuild during the POST therefore waits, and the answer
+  paints into the grid it read. The page's own presentation write is the
+  placement, so the rewritten test asserts that and not a background save. The
+  rebuilt-in-place branch is kept for a load past those reads, and it also
+  schedules a status refresh. A moved-on split with no captured placement
+  now carries a note.
+- **Not done:** a split intent has no `unknown` outcome, so a timeout reaches
+  the agent as `refused`, with the unknown-outcome sentence. The full-reload
+  limitation below is recorded in the contract.
+- **Tests:** as listed below, plus the three re-read cases in
+  `LoadWaitsForBackgroundSplitTestCase`, and `holdCount` in
+  `tests/test_background_tab.py`. The validation suites and the adjacent
+  `test_background_resize`, `test_resize_bridge`, `test_pane_connecting_overlay`,
+  `test_api`, `test_multi_workspace`, `test_session_modes` and both
+  window-intent suites pass (1518, 1 skip). Ruff is clean. The review
+  document records the details under C3.
+
 **Goal:** the captured cut is either applied or reported, never dropped silently.
 
 **Change** (`web/static/js/terminals.js`, visible split handler around `:7255–7313`)

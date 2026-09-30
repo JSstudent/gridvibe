@@ -713,7 +713,8 @@ const backgroundTab = require(TAB_PATH);
 /* The real `splitTerminalPane`, against a page that is only as much of a page
    as it reads, and the real background-split module under it for a pane that
    has to be placed in a tab no longer painted. `interrupt(context)` runs while
-   the request is in flight, which is where a tab switch or a rebuild lands. */
+   the request is in flight, which is where a tab switch or a rebuild lands; it
+   may be async, and the request answers once it has finished. */
 async function run(interrupt, options = {}) {
     const events = [];
     const saves = [];
@@ -725,7 +726,9 @@ async function run(interrupt, options = {}) {
         querySelectorAll: () => [],
         after: () => events.push('card-added')
     };
-    const grid = { children: [sourceCard] };
+    /* A card the page cannot name a pane for: the grid no longer describes
+       every pane, so there is no placement to write. */
+    const grid = { children: options.noPlacement ? [sourceCard, { dataset: { slot: '9' } }] : [sourceCard] };
     let tab = null;
     /* Whether a load of the tab would still be waiting while the write is
        out: `settled` must not resolve until the write has landed. */
@@ -769,8 +772,20 @@ async function run(interrupt, options = {}) {
         },
         limits: { maxPanes: 16, minCols: 20, minRows: 5 }
     });
+    /* Whether the tab was held when the request went out. */
+    let heldAtRequest = null;
     const context = {
         backgroundSplit,
+        backgroundTab: tab,
+        SPLIT_REQUEST_TIMEOUT_MS: 20,
+        SPLIT_TIMED_OUT_ERROR: 'timed out',
+        SPLIT_NOT_PLACED_NOTE: 'not placed',
+        AbortController,
+        setTimeout,
+        clearTimeout,
+        scheduleStatusRefresh: () => events.push('refresh-scheduled'),
+        // What an interruption itself records, in the same order.
+        rebuildEvents: events,
         originalSplitSlotCount: 1,
         cloneSplitSlotRects: rects => rects.map(rect => ({ ...rect })),
         getSplitGridSize: rects => ({
@@ -825,15 +840,26 @@ async function run(interrupt, options = {}) {
             groupRevision: () => (options.acknowledged === undefined ? 7 : options.acknowledged)
         }),
         noteGroupPresentationChanged: () => events.push('presentation-noted'),
-        ensureAttachedTerminalsReady: async () => {},
+        ensureAttachedTerminalsReady: async () => {
+            events.push(tab.held('g-1') ? 'fitted-while-held' : 'fitted');
+        },
         emitTerminalResize: () => {},
         setWorkspaceSaveMessage: () => {},
         console: { error: () => {} },
-        fetch: async () => {
-            interrupt(context, original);
+        fetch: async (url, init) => {
+            heldAtRequest = tab.held('g-1');
+            const aborted = () => new Promise((_, reject) => {
+                init.signal.addEventListener('abort', () => reject(new Error('aborted')));
+            });
+            await interrupt(context, original);
+            if (options.networkFails) throw new Error('network down');
+            if (options.hangs) return aborted();
+            if (options.refused) {
+                return { ok: false, status: 400, json: async () => ({ error: 'refused' }) };
+            }
             return {
                 ok: true,
-                json: async () => ({
+                json: options.bodyHangs ? aborted : async () => ({
                     session: { session_id: 'pane-new', status: 'starting' },
                     group: {
                         group_id: 'g-1',
@@ -847,11 +873,15 @@ async function run(interrupt, options = {}) {
     };
     vm.runInNewContext(`${SPLIT_SOURCE}\nglobalThis.api = { splitTerminalPane };`, context);
     const answer = await context.api.splitTerminalPane(0, 'vertical', null);
+    events.push('answered');
     let releasedAfter = false;
     tab.settled('g-1').then(() => { releasedAfter = true; });
     await new Promise(resolve => setTimeout(resolve, 5));
     return {
         ok: answer.ok,
+        unknown: Boolean(answer.unknown),
+        error: answer.error || '',
+        heldAtRequest,
         index: answer.index,
         note: answer.note || '',
         sessionId: answer.session && answer.session.session_id,
@@ -888,11 +918,40 @@ async function run(interrupt, options = {}) {
         context.terminals = original.terminals;
         context.sessionIds = original.sessionIds;
     });
-    // The same tab is rebuilt from the server: new arrays, same group id.
+    // The same tab is rebuilt from the server while the request is out: new
+    // arrays, same group id. Only a load whose read outlasted every retry
+    // gets this far, since every other one waits for the hold.
     out.rebuilt = await run(context => {
         context.terminals = [{ _session: {} }];
         context.sessionIds = ['pane-a'];
     });
+    // A rebuild asked for while the request is out, the way a load asks: it
+    // waits for the tab, and only then rebuilds.
+    out.rebuildWaits = await run(context => {
+        context.backgroundTab.settled('g-1').then(() => {
+            context.rebuildEvents.push('rebuild-proceeds');
+            context.terminals = [{ _session: {} }, { _session: {} }];
+            context.sessionIds = ['pane-a', 'pane-new'];
+        });
+    });
+    // Left for another tab and picked again before the answer: the return's
+    // load is waiting on the tab, with the other tab still painted.
+    out.leftAndReturned = await run(async context => {
+        context.activeGroupId = 'g-2';
+        context.visibleGroupId = 'g-2';
+        context.terminals = [{ _session: {} }];
+        context.sessionIds = ['pane-other'];
+        context.activeGroupId = 'g-1';
+        context.backgroundTab.settled('g-1').then(() => context.rebuildEvents.push('return-load-proceeds'));
+        await new Promise(resolve => setTimeout(resolve, 5));
+        context.rebuildEvents.push('request-answers');
+    });
+    // No answer, then no body, within the bound; a request that failed; a
+    // refusal. None of them may leave the tab held.
+    out.timedOut = await run(() => {}, { hangs: true });
+    out.bodyTimedOut = await run(() => {}, { bodyHangs: true });
+    out.networkFailed = await run(() => {}, { networkFails: true });
+    out.refused = await run(() => {}, { refused: true });
     // Another tab picked, and the arrangement cannot be written.
     out.switchedAwaySaveFailed = await run(context => {
         context.activeGroupId = 'g-2';
@@ -941,6 +1000,9 @@ async function run(interrupt, options = {}) {
         context.terminals = [];
         context.sessionIds = [];
     });
+    // Another tab picked, with nothing read that the pane could be placed
+    // against.
+    out.switchedAwayUnplaced = await run(away, { noPlacement: true });
     console.log(JSON.stringify(out));
 })().catch(error => { console.error(error); process.exitCode = 1; });
 """
@@ -949,20 +1011,34 @@ async function run(interrupt, options = {}) {
 LOAD_GATE_HARNESS = r"""
 /* The real `initialLoad`, as far as its first reads, against a tab whose split
    is in flight. The tab has no panes on the server, so a load that gets past
-   the hold ends in `resetSessionView` rather than building a grid. */
+   the hold ends in `resetSessionView` rather than building a grid.
+
+   `overlapped`: an edit of the tab starts and ends while the first read is
+   out. `heldAtEnd`: one is still holding the tab when that read answers.
+   `outraced`: one starts during every read. */
 async function run(scenario) {
     const events = [];
     let release = null;
     const held = new Promise(resolve => { release = resolve; });
+    let holds = 0;
+    let holdingNow = false;
+    let reads = 0;
     const context = {
         activeLoadToken: 0,
         activeGroupId: 'g-2',
         workspaceGone: false,
+        LOAD_HELD_READ_ATTEMPTS,
         backgroundTab: {
             settled: async groupId => {
                 events.push(`settled:${groupId}`);
                 if (groupId === 'g-2') await held;
-            }
+                if (holdingNow) {
+                    await new Promise(resolve => setTimeout(resolve, 5));
+                    holdingNow = false;
+                }
+            },
+            held: () => holdingNow,
+            holdCount: () => holds
         },
         document: {
             getElementById: () => ({ textContent: '', style: {}, classList: { add: () => {} } })
@@ -971,6 +1047,12 @@ async function run(scenario) {
         getSessionApiPath: groupId => `/api/sessions?group_id=${groupId}`,
         fetch: async url => {
             events.push(`fetch:${url}`);
+            reads += 1;
+            if ((scenario === 'overlapped' && reads === 1) || scenario === 'outraced') holds += 1;
+            if (scenario === 'heldAtEnd' && reads === 1) {
+                holds += 1;
+                holdingNow = true;
+            }
             return { ok: true, json: async () => ({ sessions: [] }) };
         },
         resetSessionView: async () => { events.push('reset'); },
@@ -993,6 +1075,9 @@ async function run(scenario) {
     const out = {};
     out.held = await run('held');
     out.superseded = await run('superseded');
+    out.overlapped = await run('overlapped');
+    out.heldAtEnd = await run('heldAtEnd');
+    out.outraced = await run('outraced');
     console.log(JSON.stringify(out));
 })().catch(error => { console.error(error); process.exitCode = 1; });
 """
@@ -1597,17 +1682,106 @@ class SplitInFlightTestCase(unittest.TestCase):
         self.assertEqual(steady["saves"], [])
         self.assertEqual(steady["discarded"], [])
 
-    def test_a_grid_rebuilt_in_place_gets_no_pane_painted_into_it(self):
-        """The painted tab was rebuilt from the server and owns its
-        arrangement, so it only takes the record."""
+    def test_a_grid_rebuilt_in_place_still_gets_the_pane_in_its_place(self):
+        """No pane is painted into arrays the call did not read, but the
+        captured cut is written for the tab, and the painted tab is read
+        again once the write has landed."""
         rebuilt = self.out["rebuilt"]
 
         self.assertTrue(rebuilt["ok"])
-        self.assertIsNone(rebuilt["index"])
+        self.assertEqual(rebuilt["note"], "")
+        self.assertEqual(rebuilt["index"], 1)
         self.assertEqual(rebuilt["showingSessionIds"], ["pane-a"])
         self.assertNotIn("painted", rebuilt["events"])
-        self.assertEqual(rebuilt["saves"], [])
-        self.assertEqual(rebuilt["groupPanes"], ["pane-a", "pane-new"])
+        self.assertEqual(len(rebuilt["saves"]), 1)
+        save = rebuilt["saves"][0]
+        self.assertEqual(save["ids"], ["pane-a", "pane-new"])
+        self.assertEqual(
+            [(rect["x"], rect["w"]) for rect in save["rects"]], [(1, 3), (4, 5)]
+        )
+        self.assertTrue(save["held"])
+        self.assertLess(
+            rebuilt["events"].index("layout-written"),
+            rebuilt["events"].index("refresh-scheduled"),
+        )
+        self.assertEqual(rebuilt["adopted"][0]["saved"]["revision"], 8)
+        self.assertTrue(rebuilt["releasedAfter"])
+
+    def test_a_rebuild_asked_for_while_the_request_is_out_waits_for_the_pane(self):
+        """The rebuild's load waits for the hold, so the answer finds the grid
+        it read and paints the pane there; the rebuild runs after that."""
+        waited = self.out["rebuildWaits"]
+        events = waited["events"]
+
+        self.assertTrue(waited["ok"])
+        self.assertEqual(waited["index"], 1)
+        self.assertIn("painted", events)
+        self.assertIn("presentation-noted", events)
+        self.assertLess(events.index("painted"), events.index("rebuild-proceeds"))
+        self.assertEqual(waited["saves"], [])
+        self.assertTrue(waited["releasedAfter"])
+
+    def test_a_return_before_the_answer_waits_until_the_pane_is_placed(self):
+        returned = self.out["leftAndReturned"]
+        events = returned["events"]
+
+        self.assertTrue(returned["ok"])
+        self.assertEqual(returned["note"], "")
+        # Still waiting when the request answered, and after the write.
+        self.assertLess(events.index("request-answers"), events.index("return-load-proceeds"))
+        self.assertLess(events.index("adopted"), events.index("return-load-proceeds"))
+        self.assertEqual(len(returned["saves"]), 1)
+        self.assertEqual(returned["saves"][0]["ids"], ["pane-a", "pane-new"])
+        self.assertEqual(
+            [(rect["x"], rect["w"]) for rect in returned["saves"][0]["rects"]], [(1, 3), (4, 5)]
+        )
+        self.assertNotIn("painted", events)
+
+    def test_the_tab_is_held_from_before_the_request(self):
+        for name, result in self.out.items():
+            with self.subTest(name):
+                self.assertTrue(result["heldAtRequest"])
+
+    def test_the_tab_is_never_left_held_by_a_visible_split(self):
+        """Every return releases the hold: painted, placed, timed out, thrown
+        or refused."""
+        for name, result in self.out.items():
+            with self.subTest(name):
+                self.assertTrue(result["releasedAfter"])
+
+    def test_a_painted_split_releases_the_tab_before_the_fit_waits(self):
+        steady = self.out["steady"]
+
+        self.assertIn("fitted", steady["events"])
+        self.assertNotIn("fitted-while-held", steady["events"])
+
+    def test_a_request_that_does_not_answer_in_time_is_an_unknown_outcome(self):
+        for name in ("timedOut", "bodyTimedOut"):
+            with self.subTest(name):
+                result = self.out[name]
+                self.assertFalse(result["ok"])
+                self.assertTrue(result["unknown"])
+                self.assertEqual(result["error"], "timed out")
+                self.assertEqual(result["saves"], [])
+                self.assertNotIn("painted", result["events"])
+
+    def test_a_pane_with_no_placement_to_write_says_so(self):
+        unplaced = self.out["switchedAwayUnplaced"]
+
+        self.assertTrue(unplaced["ok"])
+        self.assertEqual(unplaced["sessionId"], "pane-new")
+        self.assertEqual(unplaced["note"], "not placed")
+        self.assertEqual(unplaced["saves"], [])
+        self.assertEqual(unplaced["groupPanes"], ["pane-a", "pane-new"])
+
+    def test_a_failed_or_refused_request_is_an_error_not_an_unknown(self):
+        for name, error in (("networkFailed", "network down"), ("refused", "refused")):
+            with self.subTest(name):
+                result = self.out[name]
+                self.assertFalse(result["ok"])
+                self.assertFalse(result["unknown"])
+                self.assertEqual(result["error"], error)
+                self.assertEqual(result["saves"], [])
 
 
 @unittest.skipIf(NODE is None, "Node.js is required for the background-split suite")
@@ -1619,10 +1793,15 @@ class LoadWaitsForBackgroundSplitTestCase(unittest.TestCase):
     def setUpClass(cls):
         source = TERMINALS_JS.read_text(encoding="utf-8")
         load = "\n\n".join(
-            _function_source(source, name) for name in ("backgroundTabSettled", "initialLoad")
+            _function_source(source, name)
+            for name in (
+                "backgroundTabSettled", "backgroundTabHoldCount", "backgroundTabHeld", "initialLoad"
+            )
         )
+        cls.attempts = int(re.search(r"const LOAD_HELD_READ_ATTEMPTS = (\d+);", source).group(1))
         cls.out = _run_node_file(
             "const vm = require('vm');\n"
+            f"const LOAD_HELD_READ_ATTEMPTS = {cls.attempts};\n"
             f"const LOAD_SOURCE = {json.dumps(load)};\n" + LOAD_GATE_HARNESS
         )
 
@@ -1644,6 +1823,21 @@ class LoadWaitsForBackgroundSplitTestCase(unittest.TestCase):
         superseded = self.out["superseded"]
 
         self.assertEqual(superseded["after"], ["settled:g-2"])
+
+    def test_a_read_an_edit_began_during_is_made_again_after_it(self):
+        read = "fetch:/api/sessions?group_id=g-2"
+        for name in ("overlapped", "heldAtEnd"):
+            with self.subTest(name):
+                self.assertEqual(
+                    self.out[name]["after"],
+                    ["settled:g-2", "groups", "settled:g-2", read, "settled:g-2", read, "reset"],
+                )
+
+    def test_a_load_outraced_on_every_read_takes_the_last_one(self):
+        after = self.out["outraced"]["after"]
+
+        self.assertEqual(after.count("fetch:/api/sessions?group_id=g-2"), self.attempts)
+        self.assertEqual(after[-1], "reset")
 
 
 class BackgroundSplitWiringTestCase(unittest.TestCase):

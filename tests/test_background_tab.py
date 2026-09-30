@@ -95,6 +95,7 @@ const out = {};
         const { tab } = fakePage();
         out.idle = await freeSoon(tab, 'g-2');
         const heldBefore = tab.held('g-2');
+        const countBefore = tab.holdCount('g-2');
         const first = tab.hold('g-2');
         const second = tab.hold('g-2');
         const heldByTwo = !(await freeSoon(tab, 'g-2'));
@@ -108,7 +109,9 @@ const out = {};
         second();
         out.hold = {
             heldByTwo, otherFree, heldByOne, free, stillFree: await freeSoon(tab, 'g-2'),
-            heldBefore, heldNow, heldAfter: tab.held('g-2')
+            heldBefore, heldNow, heldAfter: tab.held('g-2'),
+            // Counted per tab, and never taken back by a release.
+            counts: [countBefore, tab.holdCount('g-2'), tab.holdCount('g-3')]
         };
     }
     {
@@ -238,6 +241,11 @@ class BackgroundTabTestCase(unittest.TestCase):
         self.assertFalse(hold["heldBefore"])
         self.assertTrue(hold["heldNow"])
         self.assertFalse(hold["heldAfter"])
+
+    def test_every_hold_of_a_tab_is_counted_even_once_released(self):
+        """A load compares the count across its read: a hold that began and
+        ended while the read was out still shows."""
+        self.assertEqual(self.out["hold"]["counts"], [0, 2, 0])
 
     def test_a_load_waits_for_an_edit_that_started_while_it_waited(self):
         self.assertEqual(self.out["chained"], ["second-released", "load"])

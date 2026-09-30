@@ -620,6 +620,20 @@
     let savedSessionResolver = null;
     let saveSessionAsResolver = null;
     const MAX_SPLIT_TERMINALS = Math.min(16, Number(MAX_SESSIONS || 16));
+    /* How long a split's request may stay out. Its tab is held until the
+       answer, so a request that never answers would block every load of it.
+       The same bound the server gives a page to report a claimed split
+       (`CLAIM_TTL_SECONDS` in `web/window_intents.py`). */
+    const SPLIT_REQUEST_TIMEOUT_MS = 20000;
+    const SPLIT_TIMED_OUT_ERROR = `The split did not answer within ${SPLIT_REQUEST_TIMEOUT_MS / 1000} seconds, `
+        + 'so a pane may still have been added. The outcome is unknown: read list_panes before retrying.';
+    /* A split whose window moved on with no placement to write: the pane
+       exists, and the tab shows it in the default arrangement for its size. */
+    const SPLIT_NOT_PLACED_NOTE = 'The pane was created, but the window moved on before its place in the layout could be written, so it will appear with the default arrangement.';
+    /* Reads of a tab a load makes again when an edit began while one was
+       out, before it takes the latest; a read under a hold is always made
+       again, since the hold ends. */
+    const LOAD_HELD_READ_ATTEMPTS = 3;
 
     function isSessionModeSwitchPending(sessionId) {
         return pendingModeSwitchSessionIds.has(sessionId);
@@ -7290,13 +7304,18 @@
             }
         }
 
+        /* Held from here until the pane is painted or placed: a return to the
+           tab, or a rebuild of it, waits in its load for the answer, so the
+           placement read above is either applied or reported, never left
+           behind by a grid painted from the server first. */
+        const release = holdSplitTab(source.groupId);
         try {
-            const response = await fetch(`/api/sessions/${encodeURIComponent(sourceSessionId)}/split`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(payload)
-            });
-            const data = await response.json().catch(() => ({}));
+            const answered = await postSplitRequest(sourceSessionId, payload);
+            if (!answered) {
+                setWorkspaceSaveMessage(SPLIT_TIMED_OUT_ERROR, 'error');
+                return { ok: false, unknown: true, error: SPLIT_TIMED_OUT_ERROR };
+            }
+            const { response, data } = answered;
             if (!response.ok) {
                 throw new Error(data.error || `Split failed with status ${response.status}`);
             }
@@ -7308,25 +7327,33 @@
 
             if (!splitSourceStillShown(source)) {
                 /* The window moved on while the request was in flight — a tab
-                   picked, or the grid rebuilt. The pane exists, the server made
-                   it, but the arrays, cards and rectangles this call was about
-                   to extend belong to a view that is no longer the one on
-                   screen, and painting into whichever group is showing now
-                   would put a pane in the wrong tab. Nothing is painted.
+                   picked, left and picked again, or the grid torn down. The
+                   pane exists, the server made it, but the arrays, cards and
+                   rectangles this call was about to extend belong to a view
+                   that is no longer the one on screen, and painting into
+                   whichever group is showing now would put a pane in the
+                   wrong tab. Nothing is painted.
 
-                   A tab that is not painted now gets the pane placed the way a
-                   split from behind places one, off the placement read before
-                   the request: its arrangement written, its cached view
-                   dropped, and a return to it held until the write lands. A
-                   tab rebuilt in place was painted from the server and owns
-                   its arrangement, so it only takes the record. */
-                if (placement && backgroundSplit !== null && source.groupId !== visibleGroupId) {
-                    return backgroundSplit.placeAfterMove(
+                   The tab gets the pane placed the way a split from behind
+                   places one, off the placement read before the request: its
+                   arrangement written, its cached view dropped, and its load
+                   held until the write lands. The hold taken above means a
+                   load of this tab has painted nothing since the request went
+                   out. The one exception is a load whose read outlasted every
+                   retry (`LOAD_HELD_READ_ATTEMPTS`); the tab it painted is
+                   read again once the write has landed. */
+                if (placement && backgroundSplit !== null) {
+                    const rebuiltInPlace = source.groupId === visibleGroupId;
+                    const placed = await backgroundSplit.placeAfterMove(
                         placement.view, axis, placement.cut, { ok: true, session, group: data.group }
                     );
+                    if (rebuiltInPlace) {
+                        scheduleStatusRefresh();
+                    }
+                    return placed;
                 }
                 adoptSplitGroupRecord(data.group);
-                return { ok: true, session, index: null };
+                return { ok: true, session, index: null, note: SPLIT_NOT_PLACED_NOTE };
             }
 
             const newIndex = terminals.length;
@@ -7372,6 +7399,10 @@
                 data.group?.presentation_revision
             );
             noteGroupPresentationChanged(activeGroupId);
+            /* Painted: a load waiting on the tab now finds the pane in the
+               grid it shows. Released before the fit waits, which have
+               nothing to do with the tab's arrangement. */
+            release();
             await ensureAttachedTerminalsReady([index, newIndex]);
             emitTerminalResize(index, true);
             emitTerminalResize(newIndex, true);
@@ -7381,7 +7412,48 @@
             setWorkspaceSaveMessage(`Split failed: ${error.message}`, 'error');
             return { ok: false, error: error.message };
         } finally {
+            release();
             updateAllSplitButtonStates();
+        }
+    }
+
+    /* The split's hold on its tab, as a release that can be called more than
+       once. No hold without the tab module: there is no load barrier then. */
+    function holdSplitTab(groupId) {
+        const releaseHold = backgroundTab !== null && groupId ? backgroundTab.hold(groupId) : null;
+        let released = false;
+        return () => {
+            if (!released) {
+                released = true;
+                if (releaseHold) releaseHold();
+            }
+        };
+    }
+
+    /* The split request, bounded by `SPLIT_REQUEST_TIMEOUT_MS`, body read
+       included. Null when it did not answer in time: the server may still
+       make the pane, so the outcome is unknown rather than a failure. */
+    async function postSplitRequest(sessionId, payload) {
+        const controller = typeof AbortController === 'function' ? new AbortController() : null;
+        const timer = controller ? setTimeout(() => controller.abort(), SPLIT_REQUEST_TIMEOUT_MS) : null;
+        try {
+            const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/split`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
+                signal: controller ? controller.signal : undefined
+            });
+            const data = await response.json().catch(() => ({}));
+            return controller && controller.signal.aborted ? null : { response, data };
+        } catch (error) {
+            if (controller && controller.signal.aborted) {
+                return null;
+            }
+            throw error;
+        } finally {
+            if (timer !== null) {
+                clearTimeout(timer);
+            }
         }
     }
 
@@ -7736,6 +7808,15 @@
         if (backgroundTab !== null && groupId) {
             await backgroundTab.settled(groupId);
         }
+    }
+
+    /* How many edits have held the tab so far, compared across a read. */
+    function backgroundTabHoldCount(groupId) {
+        return backgroundTab !== null && groupId ? backgroundTab.holdCount(groupId) : 0;
+    }
+
+    function backgroundTabHeld(groupId) {
+        return backgroundTab !== null && Boolean(groupId) && backgroundTab.held(groupId);
     }
 
     /* A tab this window holds without showing it, read and written as data
@@ -8819,15 +8900,28 @@
             }
 
             const requestedGroupId = activeGroupId;
-            await backgroundTabSettled(requestedGroupId);
-            if (loadToken !== activeLoadToken || requestedGroupId !== activeGroupId) {
-                return;
-            }
-            const resp = await fetch(getSessionApiPath(requestedGroupId));
-            if (!resp.ok) throw new Error(`Server returned ${resp.status}`);
-            const data = await resp.json();
-            if (loadToken !== activeLoadToken || requestedGroupId !== activeGroupId) {
-                return;
+            /* An edit of the tab that began while it was being read -- a
+               split's request going out, say -- makes that read older than
+               what the edit writes: wait for it and read again, rather than
+               paint a grid the edit is about to change. */
+            let data = null;
+            for (let attempt = 1; ; attempt += 1) {
+                await backgroundTabSettled(requestedGroupId);
+                if (loadToken !== activeLoadToken || requestedGroupId !== activeGroupId) {
+                    return;
+                }
+                const holdsBefore = backgroundTabHoldCount(requestedGroupId);
+                const resp = await fetch(getSessionApiPath(requestedGroupId));
+                if (!resp.ok) throw new Error(`Server returned ${resp.status}`);
+                data = await resp.json();
+                if (loadToken !== activeLoadToken || requestedGroupId !== activeGroupId) {
+                    return;
+                }
+                const editedMeanwhile = backgroundTabHoldCount(requestedGroupId) !== holdsBefore;
+                if (!backgroundTabHeld(requestedGroupId)
+                    && (!editedMeanwhile || attempt >= LOAD_HELD_READ_ATTEMPTS)) {
+                    break;
+                }
             }
 
             if (!data.sessions || data.sessions.length === 0) {

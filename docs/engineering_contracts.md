@@ -1979,10 +1979,28 @@ in `README.md`; state the rules a change has to keep.
   pre-save arrangement or from a cache about to be dropped, and every tab except
   the one painted loses its cached view. A pane that was created is reported
   even when its arrangement could not be written, with a `note` the sidecar
-  relays. A split from the visible handler whose window moved to another tab
-  mid-request is placed the same way (`placeAfterMove`), from the model and cut
+  relays. The visible handler (`splitTerminalPane`) holds its own tab the same
+  way, from just after it captures the model and cut until the new pane is
+  painted or placed, so a return to the tab or a rebuild of it waits for the
+  answer. `initialLoad` also compares the tab's hold count
+  (`backgroundTabHoldCount`) across its read of the tab and reads again when a
+  hold began meanwhile or is still taken, up to `LOAD_HELD_READ_ATTEMPTS`
+  reads for holds that came and went. A painted split releases the hold once
+  the pane is in the grid, before its fit waits; nothing between hold and
+  release awaits `initialLoad`. A split whose window moved on mid-request (another
+  tab painted, the grid torn down, or, past those reads, rebuilt) is placed the
+  same way as a background split (`placeAfterMove`), from the model and cut
   captured before the request, so its tab does not come back in the default
-  arrangement. The hold serializes loads, not edits: a divider can be moved in
+  arrangement. A tab rebuilt in place is read again after the write
+  (`scheduleStatusRefresh`). With no captured placement, the pane is reported
+  with a `note` that it was not placed. The request is bounded by
+  `SPLIT_REQUEST_TIMEOUT_MS` (20 s, the claim TTL), body included. On timeout
+  the hold is released and the split answers `unknown: true` with "read
+  list_panes before retrying". The intent reports that as `refused`, because a
+  split intent has no `unknown` outcome. **Not covered:** a full browser reload
+  drops the page's in-memory capture, and the server then holds the new pane
+  with the pre-split layout. A fix would need the server to take the cut. The
+  hold serializes loads, not edits: a divider can be moved in
   the tab while the split's request is out, and appending a pane does not raise
   the presentation revision, so the split answers at the revision that resize
   was acknowledged at. Every placement model therefore carries the revision it

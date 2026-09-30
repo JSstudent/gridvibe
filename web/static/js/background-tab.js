@@ -14,7 +14,10 @@
      its arrangement is written, a load of that tab waits (`settled`), so a tab
      picked mid-edit is never painted from the arrangement being replaced nor
      restored from a cached view about to be dropped, and the page does not
-     publish the arrangement of a view a write is replacing (`held`);
+     publish the arrangement of a view a write is replacing (`held`). A load
+     whose read was out when a hold was taken reads again (`holdCount`). The
+     visible split handler holds its own tab the same way, from before its
+     request until the new pane is painted or placed;
    - **the writes**, both through the group's revisioned presentation
      transaction, then taking the server's record into the tab strip. A write
      that changes the pane set (`write`, the split's) drops the tab's cached
@@ -68,6 +71,9 @@
         /* The edits in flight, per tab. More than one can be out for the same
            tab when two intents land together, so it is a set, not a flag. */
         const inFlight = new Map();
+        /* Every hold ever taken, per tab. A read that saw no hold at either
+           end can still have had one start and finish while it was out. */
+        const holdCounts = new Map();
 
         async function save(groupId, expectedRevision, layout) {
             if (!Number.isInteger(expectedRevision)) {
@@ -92,6 +98,7 @@
                 const held = inFlight.get(id) || new Set();
                 held.add(pending);
                 inFlight.set(id, held);
+                holdCounts.set(id, (holdCounts.get(id) || 0) + 1);
                 return () => {
                     held.delete(pending);
                     if (!held.size && inFlight.get(id) === held) {
@@ -106,6 +113,13 @@
             held(groupId) {
                 const held = inFlight.get(String(groupId || ''));
                 return Boolean(held && held.size);
+            },
+
+            /* How many holds the tab has been taken under so far. A load that
+               reads the tab compares it before and after: a change means an
+               edit began while the read was out, so the read may predate it. */
+            holdCount(groupId) {
+                return holdCounts.get(String(groupId || '')) || 0;
             },
 
             /* Resolves once no edit of this tab is in flight: the one thing a
