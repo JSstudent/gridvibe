@@ -30,19 +30,23 @@ from typing import Iterable, List, Optional
 #: What a redacted token segment reads as.
 REDACTED_MCP_PATH = "/mcp/<redacted>"
 
-# `/mcp` and its separator, then the token: everything up to the next path,
-# query or fragment separator, whitespace, quote or angle bracket. The
-# separator is matched every way a request line can carry one that still
+# A separator, `mcp`, a separator, then the token: everything up to the next
+# path, query or fragment separator, whitespace, quote or angle bracket. Both
+# separators are matched every way a request line can carry one that still
 # reaches, or redirects to, the route: `/`, a repeated `/` (Werkzeug answers
 # `/mcp//<token>` with a redirect and logs the original), and `%2F` (routing
-# decodes it, the access line keeps it encoded), double-encoded included. Case
-# is ignored for the same reason. Anchored so that `/api/mcp/...` -- the
-# sidecar's own routes -- is left alone, and so that the literal placeholder
-# `/mcp/<token>` in prose (and an already-redacted `/mcp/<redacted>`) does not
-# match. A full URL (`http://host:port/mcp/...`) matches too, which is how the
-# remote config names it.
+# decodes it, the access line keeps it encoded), double-encoded included. The
+# leading one matters as much as the trailing one: `/%2Fmcp/<token>` decodes
+# to `//mcp/<token>` and is served by the route. Case is ignored for the same
+# reason. Anchored so that `/api/mcp/...` -- the sidecar's own routes -- is
+# left alone, and so that the literal placeholder `/mcp/<token>` in prose (and
+# an already-redacted `/mcp/<redacted>`) does not match. A full URL
+# (`http://host:port/mcp/...`) matches too, which is how the remote config
+# names it.
+_MCP_SEPARATOR = r"(?:/|%(?:25)*2f)"
 _MCP_TOKEN_RE = re.compile(
-    r"(?<!/api)/mcp(?:/|%(?:25)*2f)+[^/?#\s\"'<>\\]+", re.IGNORECASE
+    rf"(?<!/api){_MCP_SEPARATOR}+mcp{_MCP_SEPARATOR}+[^/?#\s\"'<>\\]+",
+    re.IGNORECASE,
 )
 
 

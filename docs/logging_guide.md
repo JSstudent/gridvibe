@@ -62,8 +62,8 @@ those emit before a record propagates to the root. So every
 record — werkzeug access and error lines, Flask's `Exception on <path>` record,
 anything propagated from a child logger, and the traceback text the formatter
 appends — reads `/mcp/<redacted>` before any handler formats it. A separator
-spelled `%2F` (routing decodes it, the access line keeps it) or `//` (a redirect
-to the route) is matched too. Records that
+before or after `mcp` spelled `%2F` (routing decodes it, the access line keeps
+it) or `//` (a redirect to the route) is matched too. Records that
 name no token are left exactly as they came. `/api/mcp/...` routes are keyed by
 pane id, not a secret, and are not rewritten.
 

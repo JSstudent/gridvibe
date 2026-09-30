@@ -54,8 +54,8 @@ Regression history and audit narratives do not belong in this reference.
   engineio and socketio put on their own loggers at import; the debug entry
   points' `basicConfig` handlers too), so access, error and propagated records
   and their tracebacks read `/mcp/<redacted>` before any handler formats them.
-  Every separator spelling that still reaches the route (`%2F`, `//`) is
-  redacted. A call site that logs a request path still passes it through
+  Every separator spelling that still reaches the route (`%2F`, `//`), before
+  `mcp` or after it, is redacted. A call site that logs a request path still passes it through
   `redact_mcp_path()`. A handler added later installs the filter first;
   `/api/mcp/...` is not a credential and is left alone.
 - `POST /api/sessions/<id>/agent-conversation` is the one route an agent's own

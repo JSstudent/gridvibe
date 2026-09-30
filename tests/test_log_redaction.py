@@ -51,6 +51,13 @@ class RedactMcpPathTestCase(unittest.TestCase):
             f"POST /mcp//{TOKEN} HTTP/1.1": f"POST {REDACTED_MCP_PATH} HTTP/1.1",
             f"POST /mcp/%2F{TOKEN} HTTP/1.1": f"POST {REDACTED_MCP_PATH} HTTP/1.1",
             f"POST /MCP/{TOKEN} HTTP/1.1": f"POST {REDACTED_MCP_PATH} HTTP/1.1",
+            # An encoded separator before `mcp` reaches the route too.
+            f"POST /%2Fmcp/{TOKEN} HTTP/1.1": f"POST {REDACTED_MCP_PATH} HTTP/1.1",
+            f"POST /%2fmcp/{TOKEN} HTTP/1.1": f"POST {REDACTED_MCP_PATH} HTTP/1.1",
+            f"POST /%252Fmcp/{TOKEN} HTTP/1.1": f"POST {REDACTED_MCP_PATH} HTTP/1.1",
+            f"POST /%2F%2Fmcp/{TOKEN} HTTP/1.1": f"POST {REDACTED_MCP_PATH} HTTP/1.1",
+            f"POST /%2F/mcp/{TOKEN} HTTP/1.1": f"POST {REDACTED_MCP_PATH} HTTP/1.1",
+            f"POST /%2Fmcp%2F{TOKEN} HTTP/1.1": f"POST {REDACTED_MCP_PATH} HTTP/1.1",
         }
         for text, expected in cases.items():
             with self.subTest(text=text):
@@ -60,6 +67,7 @@ class RedactMcpPathTestCase(unittest.TestCase):
     def test_other_paths_pass_through_unchanged(self):
         for text in (
             "POST /api/mcp/close/pane/abc123 HTTP/1.1",
+            "POST /api%2Fmcp/close/pane/abc123 HTTP/1.1",
             "GET /api/sessions HTTP/1.1",
             "the route is POST /mcp/<token>",
             REDACTED_MCP_PATH,
@@ -342,19 +350,28 @@ class RealAccessLogTestCase(_ConfiguredHandlers, unittest.TestCase):
             connection.close()
 
     def test_every_request_line_that_reaches_the_route_is_redacted(self):
-        # The plain route and an encoded separator both reach the MCP handler
-        # (an unknown token answers 404 there); a doubled slash redirects to it.
-        statuses = {
-            path: self.post(path)
-            for path in (f"/mcp/{TOKEN}", f"/mcp%2F{TOKEN}", f"/mcp//{TOKEN}")
-        }
+        # The plain route and an encoded separator on either side of `mcp`
+        # reach the MCP handler (an unknown token answers 404 there); a
+        # doubled slash redirects to it.
+        paths = (
+            f"/mcp/{TOKEN}",
+            f"/mcp%2F{TOKEN}",
+            f"/%2Fmcp/{TOKEN}",
+            f"/%2Fmcp%2F{TOKEN}",
+            f"/mcp//{TOKEN}",
+        )
+        statuses = {path: self.post(path) for path in paths}
 
         self.assertEqual(statuses[f"/mcp/{TOKEN}"], 404)
         self.assertEqual(statuses[f"/mcp%2F{TOKEN}"], 404)
+        self.assertEqual(statuses[f"/%2Fmcp/{TOKEN}"], 404)
+        self.assertEqual(statuses[f"/%2Fmcp%2F{TOKEN}"], 404)
         self.assertEqual(statuses[f"/mcp//{TOKEN}"], 308)
         for output in self.written():
             self.assertNotIn(TOKEN, output)
-            self.assertEqual(output.count(f"POST {REDACTED_MCP_PATH} HTTP/1.1"), 3)
+            self.assertEqual(
+                output.count(f"POST {REDACTED_MCP_PATH} HTTP/1.1"), len(paths)
+            )
 
 
 class LibraryHandlerTestCase(_ConfiguredHandlers, unittest.TestCase):
