@@ -122,6 +122,9 @@ CLOSE_TOOLS = ("close_pane", "close_group", "close_workspace")
 #: forward" reaches GridVibe, so an agent calls them only when asked.
 VIEW_MOVING_TOOLS = ("focus_session", "focus_pane")
 
+#: The rule above as the agent reads it, in both focus tools' descriptions.
+EXPLICIT_FOCUS_RULE = "Call only when the person asked to see, focus or bring it forward."
+
 #: A background tool whose one argument makes that call view-moving, and the
 #: argument. It carries the same rule as the two tools above.
 VIEW_MOVING_FLAGS = {"move_session": "show"}
@@ -1211,7 +1214,9 @@ def _navigation_specs() -> List[Dict[str, Any]]:
             "description": (
                 "Bring one session to the foreground: raise its workspace "
                 "window and switch that window to the session's tab -- e.g. "
-                "'bring the gridvibe_main session to the foreground'. Name it "
+                "'bring the gridvibe_main session to the foreground'. "
+                + EXPLICIT_FOCUS_RULE
+                + " Name it "
                 "by 'session_name', the exact text its tab shows; the "
                 "workspace is found from the session, so none is needed. Two "
                 "open tabs sharing the name are refused with the candidates "
@@ -1251,7 +1256,9 @@ def _navigation_specs() -> List[Dict[str, Any]]:
             "description": (
                 "Bring one pane into view: raise its workspace window, switch "
                 "to the session (tab) it is in and give the pane focus -- e.g. "
-                "after split_pane or launch_panes made it. The session and "
+                "'show me the new review pane'. "
+                + EXPLICIT_FOCUS_RULE
+                + " The session and "
                 "workspace are read from the pane itself. For 'the review "
                 "agent in the gridvibe_main session', call list_panes with "
                 "session_name='gridvibe_main' first and pass the pane_id "

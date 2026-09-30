@@ -239,6 +239,30 @@ limitation. A fix would need the server to take the cut, which is out of scope.
 
 ### Stage 3 — B3 and C4: the advertised text says what the code does
 
+**Status: implemented 2026-09-30** on `szua_gridvibe-mcp-review` from `df46b9c`.
+It is uncommitted. One Codex review (OCR delegate, 1 of 1 reviewable file
+covered, the 4 others read by hand) found nothing.
+- **Done:** the B3 change as written. `EXPLICIT_FOCUS_RULE` sits beside
+  `VIEW_MOVING_TOOLS` and is carried by both focus descriptions.
+  `focus_pane`'s example is "e.g. 'show me the new review pane'". The test
+  asserts the rule for each `VIEW_MOVING_TOOLS` entry and rejects "after
+  split_pane" and "after launch_panes".
+- **Changed from the plan:** the rule follows each description's opening
+  example rather than being appended at the end, so a client that shortens a
+  long description still shows it. For C4, the README at both places and most
+  of the CHANGELOG note had already been qualified by `6def41f`, after this
+  plan's revalidation at `b4080a9`. So the README is unchanged. The CHANGELOG
+  note was only tightened in place: `focus_moved: true` is tied to "that
+  immediate hand-back", and the note says `focus_moved` reports only that
+  check. `test_open_window_no_raise` already pinned the logged-not-reported
+  refusal from the `shown` callback.
+- **Not done:** `move_session`'s `show` keeps its own, already correct
+  sentence. There is no bounded `shown` wait ([decision 1](#decisions)).
+- **Tests:** `tests.test_mcp_tools`, `tests.test_open_window_no_raise` and
+  `tests.test_webview_launcher` pass (265, 1 skip), and so do the adjacent
+  `tests.test_mcp_navigation` and `tests.test_mcp_geometry` (61). Ruff is
+  clean. The review document records the details under B3 and C4.
+
 **B3 change** (`gridvibe_mcp/server.py`)
 - Add one shared constant, for example `EXPLICIT_FOCUS_RULE = "Call only when
   the person asked to see, focus or bring it forward."`. Append it to the

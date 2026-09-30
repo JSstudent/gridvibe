@@ -34,6 +34,7 @@ from gridvibe_mcp.server import (  # noqa: E402
     CLOSE_TOOLS,
     CREATE_TOOLS,
     DISPLAY_TOOLS,
+    EXPLICIT_FOCUS_RULE,
     HANDBACK_TOOLS,
     LAYOUTS,
     NAVIGATION_TOOLS,
@@ -125,8 +126,9 @@ class ToolSurfaceTestCase(unittest.TestCase):
 
         Every registered tool is either one of the two focus tools or a
         background tool, never both and never neither, so a new tool has to
-        choose. The one flag that makes a background call view-moving is
-        `move_session`'s `show`, and it says it is only for the person's ask.
+        choose. Both focus tools say they are only for the person's ask, and
+        so does the one flag that makes a background call view-moving,
+        `move_session`'s `show`.
         """
         names = tool_names()
         background = set(BACKGROUND_TOOLS)
@@ -140,7 +142,13 @@ class ToolSurfaceTestCase(unittest.TestCase):
         specs = {spec["name"]: spec for spec in tool_specs()}
         for name in VIEW_MOVING_TOOLS:
             with self.subTest(tool=name):
-                self.assertIn("raise its workspace window", specs[name]["description"])
+                description = specs[name]["description"]
+                self.assertIn("raise its workspace window", description)
+                # The rule itself reaches the agent, and no example invites
+                # focusing a pane just because a tool made it.
+                self.assertIn(EXPLICIT_FOCUS_RULE, description)
+                self.assertNotIn("after split_pane", description)
+                self.assertNotIn("after launch_panes", description)
         self.assertEqual(VIEW_MOVING_FLAGS, {"move_session": "show"})
         for name, flag in VIEW_MOVING_FLAGS.items():
             with self.subTest(tool=name, flag=flag):

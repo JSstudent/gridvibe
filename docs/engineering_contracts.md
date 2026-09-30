@@ -1759,7 +1759,9 @@ in `README.md`; state the rules a change has to keep.
   newly show a window in front — except `focus_session` and `focus_pane`
   (`VIEW_MOVING_TOOLS` in `gridvibe_mcp/server.py`) and `move_session`'s
   `show` (`VIEW_MOVING_FLAGS`), whose descriptions say they are for when the
-  person asked to see, focus or bring something forward. Every other tool is
+  person asked to see, focus or bring something forward: both focus tools
+  carry the one sentence `EXPLICIT_FOCUS_RULE`, and their examples are the
+  person's own asks, never "after a tool made it". Every other tool is
   named in `BACKGROUND_TOOLS`: it works in any tab of a window, showing or not,
   and leaves the person's tab, focus and window order as they were. That list
   is spelled out name by name, not built from the tiers, and a test fails for a
