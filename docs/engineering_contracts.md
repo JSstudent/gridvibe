@@ -937,6 +937,19 @@ unless the task explicitly changes this contract.
   Never retire a record whose workspace slot already holds a different window.
   The window-id ceiling has one owner (`LIFECYCLE_MAX_WINDOW_ID_LENGTH`); the
   bridge refuses an id past it rather than storing one that can match nothing.
+- A workspace has one native window, and one open at a time creates it. An open
+  that finds the slot empty reserves it (`_reserve_workspace_window`) under the
+  short `_workspace_window_lock`, creates the window outside that lock, and
+  publishes it only under its own reservation. A concurrent open waits on the
+  reservation, then reuses the published window or, when creation failed, takes
+  the reservation itself; past `WORKSPACE_WINDOW_OPENING_WAIT_SECONDS` it is
+  refused, never duplicated. A window's close and state events act on the slot
+  only while the slot holds that window, and each checks and writes in one hold
+  of the lock, because pywebview runs every event handler on its own thread:
+  `_drop_workspace_window` clears the slot, its group, fullscreen, minimized and
+  pending-zoom state and (through `on_drop`) main()'s open-window kind, and
+  `_record_window_minimized` ignores minimize, restore and maximize events from
+  a window that is closed or replaced.
 - Resolve workspace chrome per field, oldest-joined first so the newest window
   wins. Stale `active_group_id` falls back to the server hint; malformed types or
   out-of-range zoom still raise. `topbar_visible` stores only the chevron choice

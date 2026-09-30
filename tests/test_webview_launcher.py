@@ -2,6 +2,7 @@ import io
 import os
 import signal
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -1588,6 +1589,215 @@ class LifecycleWindowRegistrationTestCase(unittest.TestCase):
             webview_launcher.LIFECYCLE_MAX_WINDOW_ID_LENGTH,
             web_lifecycle.LIFECYCLE_MAX_WINDOW_ID_LENGTH,
         )
+
+
+class WorkspaceWindowOwnershipTestCase(unittest.TestCase):
+    """One workspace slot, one window: opens are reserved, cleanup is identity-checked.
+
+    Two opens of one unopened workspace used to both find the slot empty, both
+    create a window and overwrite each other's registration; closing the older
+    one then emptied the slot the survivor was living in.
+    """
+
+    WORKSPACE = "aaaaaaaaaaaa"
+
+    def setUp(self):
+        webview_launcher.lifecycle_coordinator.reset()
+        self.addCleanup(webview_launcher.lifecycle_coordinator.reset)
+        self.bridge = webview_launcher.GridVibeApi("http://127.0.0.1:5050")
+        self.bridge._set_register_window(Mock())
+        for name in ("_foreground_window_handle", "_hand_foreground_back"):
+            patcher = patch.object(webview_launcher, name, return_value=None)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def _signal_when_waited_on(self):
+        """Report when an opener parks on the reservation the first open holds."""
+        waiting = threading.Event()
+        opening = self.bridge._workspace_window_openings[self.WORKSPACE]
+        original_wait = opening.wait
+
+        def wait(timeout=None):
+            waiting.set()
+            return original_wait(timeout)
+
+        opening.wait = wait
+        return waiting
+
+    def _open_in_thread(self, results, key):
+        thread = threading.Thread(
+            target=lambda: results.__setitem__(
+                key, self.bridge.open_workspace_window(self.WORKSPACE, "", None, False)
+            ),
+            daemon=True,
+        )
+        thread.start()
+        return thread
+
+    def _race_two_opens(self, windows):
+        """Run two opens of one unopened workspace, the second while the first creates.
+
+        create_window blocks until the second open is parked on the first
+        one's reservation, then hands out `windows` in order. The threads are
+        always released and joined, so a failing assertion cannot leave one
+        running.
+        """
+        entered = threading.Event()
+        release = threading.Event()
+        fake_webview = Mock()
+
+        def create_window(*_args, **_kwargs):
+            entered.set()
+            release.wait(5)
+            return windows.pop(0)
+
+        fake_webview.create_window.side_effect = create_window
+        results = {}
+        threads = []
+        try:
+            with patch.object(webview_launcher, "webview", fake_webview):
+                threads.append(self._open_in_thread(results, "first"))
+                self.assertTrue(entered.wait(5))
+                waiting = self._signal_when_waited_on()
+                threads.append(self._open_in_thread(results, "second"))
+                # The second open is parked on the first one's reservation,
+                # not inside a create_window of its own.
+                self.assertTrue(waiting.wait(5))
+                release.set()
+                for thread in threads:
+                    thread.join(5)
+        finally:
+            release.set()
+            for thread in threads:
+                thread.join(5)
+        self.assertFalse(any(thread.is_alive() for thread in threads))
+        return fake_webview, results
+
+    def test_two_opens_of_one_unopened_workspace_create_one_window(self):
+        window = _FakeWindow()
+        fake_webview, results = self._race_two_opens([window, _FakeWindow()])
+
+        self.assertEqual(fake_webview.create_window.call_count, 1)
+        self.assertEqual(
+            results["first"], {"ok": True, "reused": False, "raised": False, "minimized": True}
+        )
+        self.assertEqual(
+            results["second"], {"ok": True, "reused": True, "raised": False, "minimized": True}
+        )
+        self.assertIs(self.bridge._workspace_windows[self.WORKSPACE], window)
+        self.assertEqual(self.bridge._workspace_window_openings, {})
+
+    def test_a_failed_creation_lets_the_waiting_open_create_the_window(self):
+        window = _FakeWindow()
+        with self.assertLogs(webview_launcher.logger, level="ERROR"):
+            fake_webview, results = self._race_two_opens([None, window])
+
+        self.assertFalse(results["first"]["ok"])
+        self.assertEqual(results["second"]["reused"], False)
+        self.assertEqual(fake_webview.create_window.call_count, 2)
+        self.assertIs(self.bridge._workspace_windows[self.WORKSPACE], window)
+
+    def test_an_open_that_outwaits_the_reservation_is_refused_not_duplicated(self):
+        fake_webview = Mock()
+        self.bridge._workspace_window_openings[self.WORKSPACE] = threading.Event()
+
+        with patch.object(webview_launcher, "webview", fake_webview), patch.object(
+            webview_launcher, "WORKSPACE_WINDOW_OPENING_WAIT_SECONDS", 0.01
+        ), self.assertLogs(webview_launcher.logger, level="WARNING"):
+            result = self.bridge.open_workspace_window(self.WORKSPACE, "", None, False)
+
+        self.assertEqual(result, {"ok": False, "error": "The workspace window is still opening"})
+        fake_webview.create_window.assert_not_called()
+
+    def _registered_workspace_window(self):
+        """A workspace window wired to main()'s real event handlers."""
+        api_bridge = webview_launcher.GridVibeApi("http://127.0.0.1:5050")
+        _register_launcher_window(api_bridge, _FakeWindow())
+        old_window = _FakeWindow()
+        api_bridge._attach_workspace_window(self.WORKSPACE, old_window, "g-old")
+        api_bridge._register_window(old_window, f"workspace:{self.WORKSPACE}")
+        return api_bridge, old_window
+
+    def test_closing_a_replaced_window_leaves_the_replacements_slot_alone(self):
+        api_bridge, old_window = self._registered_workspace_window()
+        replacement = _FakeWindow()
+        api_bridge._attach_workspace_window(self.WORKSPACE, replacement, "g-new")
+        api_bridge._set_window_minimized(f"workspace:{self.WORKSPACE}", True)
+        api_bridge._workspace_fullscreen_states[self.WORKSPACE] = True
+
+        with patch.object(webview_launcher.os, "_exit") as exit_process:
+            old_window.events.closed.handlers[0]()
+
+        self.assertIs(api_bridge._workspace_windows[self.WORKSPACE], replacement)
+        self.assertEqual(api_bridge._workspace_window_group_ids[self.WORKSPACE], "g-new")
+        self.assertTrue(api_bridge._is_window_minimized(f"workspace:{self.WORKSPACE}"))
+        self.assertTrue(api_bridge._workspace_fullscreen_states[self.WORKSPACE])
+        exit_process.assert_not_called()
+
+    def test_closing_the_current_window_still_clears_its_slot(self):
+        api_bridge, old_window = self._registered_workspace_window()
+        api_bridge._pending_workspace_native_zoom_factors[self.WORKSPACE] = 1.2
+
+        old_window.events.closed.handlers[0]()
+
+        self.assertNotIn(self.WORKSPACE, api_bridge._workspace_windows)
+        self.assertNotIn(self.WORKSPACE, api_bridge._workspace_window_group_ids)
+        self.assertNotIn(self.WORKSPACE, api_bridge._workspace_window_minimized)
+        self.assertNotIn(self.WORKSPACE, api_bridge._pending_workspace_native_zoom_factors)
+
+    def test_a_window_reopened_during_the_old_close_stays_counted_open(self):
+        """The old close's bookkeeping leaves with its slot, before any successor."""
+        api_bridge, old_window = self._registered_workspace_window()
+        replacement = _FakeWindow()
+        fake_webview = Mock()
+        fake_webview.create_window.return_value = replacement
+        original_drop = api_bridge._drop_workspace_window
+        reopened = []
+
+        def drop_then_reopen(*args, **kwargs):
+            dropped = original_drop(*args, **kwargs)
+            # The earliest a successor can exist: the slot is empty again.
+            reopened.append(api_bridge.open_workspace_window(self.WORKSPACE, "g-new"))
+            return dropped
+
+        open_at_exit_check = []
+        api_bridge._drop_workspace_window = drop_then_reopen
+        with patch.object(webview_launcher, "webview", fake_webview), patch.object(
+            webview_launcher,
+            "_should_exit_after_window_close",
+            side_effect=lambda _kind, windows: open_at_exit_check.append(set(windows)),
+        ):
+            old_window.events.closed.handlers[0]()
+
+        self.assertEqual(reopened, [{"ok": True, "reused": False}])
+        self.assertIs(api_bridge._workspace_windows[self.WORKSPACE], replacement)
+        self.assertEqual(
+            open_at_exit_check, [{"launcher", f"workspace:{self.WORKSPACE}"}]
+        )
+
+    def test_a_closed_windows_late_state_event_writes_nothing(self):
+        api_bridge, old_window = self._registered_workspace_window()
+        name = f"workspace:{self.WORKSPACE}"
+        old_window.events.closed.handlers[0]()
+
+        old_window.events.minimized.handlers[0]()
+
+        # Nothing was left behind for the next window of this workspace.
+        self.assertNotIn(self.WORKSPACE, api_bridge._workspace_window_minimized)
+        self.assertFalse(api_bridge._is_window_minimized(name))
+
+    def test_a_replaced_windows_state_events_do_not_touch_the_replacement(self):
+        api_bridge, old_window = self._registered_workspace_window()
+        api_bridge._attach_workspace_window(self.WORKSPACE, _FakeWindow())
+        name = f"workspace:{self.WORKSPACE}"
+
+        old_window.events.minimized.handlers[0]()
+        self.assertFalse(api_bridge._is_window_minimized(name))
+
+        api_bridge._set_window_minimized(name, True)
+        old_window.events.restored.handlers[0]()
+        old_window.events.maximized.handlers[0]()
+        self.assertTrue(api_bridge._is_window_minimized(name))
 
 
 class MinimizeCascadeEventTestCase(unittest.TestCase):

@@ -54,6 +54,28 @@ The lookup of `_workspace_windows[workspace]` and the publication of the new win
 - **Scenario:** Closing the older duplicate unregisters the live window. The next open then creates a third window, and lifecycle retirement drifts.
 - **Evidence:** Two `open_workspace_window(..., False)` calls met at a barrier inside a mocked `create_window`. Both returned `reused:false`, two windows were created, and only one was left in the registry. The coordinator confirmed that the close pops have no identity check.
 - **Fix:** Reserve creation per workspace under a short registry lock, with native UI outside the lock. Publish only the captured reservation. Identity-check every close or event cleanup (`slot is window`) before touching the slot or its metadata. This is the ownership contract's "a registry key may name a replacement" rule.
+- **Status: fixed 2026-09-30** on `szua_gridvibe-wrk-focus`.
+  - `_open_workspace_window` reserves the empty slot through `_reserve_workspace_window`. The reservation is an `Event` in `_workspace_window_openings`, taken under the new `_workspace_window_lock`. `create_window`, registration and the foreground hand-back all run outside the lock. The window is published by `_publish_workspace_window` only while this open's reservation still holds the slot, and a `finally` releases the reservation and wakes any waiters.
+  - A concurrent open waits on the reservation, then looks again. It reuses the published window, or takes the reservation itself if creation failed. If the window is still not ready after `WORKSPACE_WINDOW_OPENING_WAIT_SECONDS` (30 s), it answers `{"ok": false, "error": "The workspace window is still opening"}` and does not create a duplicate.
+  - `_handle_closed` announces the close through `_forget_workspace_lifecycle_window` as before. It then calls `_drop_workspace_window`, which checks the slot and clears it in one lock hold, together with its group, fullscreen, minimized and pending-zoom state and, through `on_drop`, main()'s `open_windows` kind. If the slot holds a different window, the close returns without touching the slot, `open_windows` or the exit check. The `minimized`, `restored` and `maximized` handlers go through `_record_window_minimized`. It checks that the window is still the registered one and writes the flag in the same hold, and it ignores events from a window that is closed (empty slot) or replaced. The legacy `session` kind now goes through the same path, and so it also drops its pending zoom.
+  - **Tests:** a new `WorkspaceWindowOwnershipTestCase` in `tests/test_webview_launcher.py` has eight cases:
+    - Two concurrent no-raise opens create one window. The second open is parked on the reservation while `create_window` is held.
+    - A failed first creation lets the waiting open create the window.
+    - An open that outwaits the reservation is refused without creating a window.
+    - Closing a replaced window leaves the successor's slot, group, minimized and fullscreen state alone.
+    - Closing the current window still clears everything.
+    - A replaced window's minimize, restore and maximize events leave the successor alone.
+    - A window reopened during the old close's drop stays counted in `open_windows`.
+    - A closed window's late minimize event writes nothing.
+
+    The threaded cases always release and join their threads. Against the unfixed launcher, five of the first six fail; the ordinary close passes both ways. The reopen case also fails with the pre-review close ordering. `tests.test_webview_launcher` and `tests.test_open_window_no_raise` pass (136, 1 skip), and so do `tests.test_api`, `tests.test_multi_workspace` and `tests.test_lifecycle` (1275, 1 skip). Ruff is clean.
+  - **Docs:** CHANGELOG and [Workspace lifecycle and windows](engineering_contracts.md#workspace-lifecycle-and-windows).
+  - **Not covered:** `close_workspace_window` destroys the window but leaves the slot filled until the `closed` event arrives. An open in that gap still reuses the dying window. This is outside C1 and unchanged.
+  - **Review of the fix:** a Codex reviewer ran OCR delegate review with escalated permissions, and both commands succeeded. `preview` found 5 changed files, one of them reviewable (`web/webview_launcher.py`), and it covered that file fully. The reviewer read all 5 by hand, ran the focused suites, ruff and `git diff --check`, and left `git status` unchanged. It found no problems in the reservation, wait, release or timeout path, and found nothing held under the lock that should not be. It reported two findings, both reproduced in memory, which the coordinator confirmed against the source and fixed:
+    - **Medium: state events checked identity and wrote the minimized flag as two separate unlocked steps.** pywebview runs each event handler on its own thread. An old window's `minimized` handler could pass the check, then the old window could close and the workspace reopen, and the handler would then mark the replacement minimized. A later focus would then restore a window that was already normal or maximized. **Fixed:** `_record_window_minimized` checks and writes in one hold, and it also ignores events from a closed window whose slot is empty.
+    - **Low: the close removed its kind from `open_windows` after the drop had released the lock.** A replacement registered in that gap lost its entry. **Fixed:** the removal runs inside the drop's hold through `on_drop`. A successor can only be published once the slot is empty, so it always registers after the removal.
+    - **Caveat:** the threaded tests did not always release and join their threads when an assertion failed. They now do.
+    - **Not tested:** no test deterministically interleaves the medium finding's two steps, because the check and the write now share one lock hold and a test has no seam inside it. The late-event test covers the empty-slot half.
 
 ### MEDIUM
 
@@ -141,7 +163,7 @@ The `shown` callback calls `_hand_foreground_back` and discards its failure. `fo
 | Security guardrail and ownership contract | Gate-before-mutation is not held across relaunch preflight (fixed 2026-09-30) | A1 |
 | Security contract | Credentials must not be logged, but `/mcp/<token>` is | A2 |
 | Handoff/result contract | Protection against a replaced agent's in-flight report stops before the successor reads its task | A3 |
-| Ownership contract | Native close cleanup ignores captured identity | C1 |
+| Ownership contract | Native close cleanup ignores captured identity (fixed 2026-09-30) | C1 |
 | Performance guardrail ("preserve scroll/focus") and the resize refusal's "Nothing changed" | Pre-CAS discard | C2 |
 | CHANGELOG, visible split | Omits the return/rebuild-before-response case | C3 |
 | CHANGELOG, `focus_moved` | Promises more than the immediate-only check delivers (the contract is accurate) | C4 |
@@ -156,7 +178,7 @@ The `shown` callback calls `_hand_foreground_back` and discards its failure. `fo
 - HTTP logging redaction for access, error and origin-rejection records (A2).
 - Delayed report from agent A after successor B reads its task (A3).
 - Identical duplicated `Content-Length` (the existing test uses conflicting values).
-- Two different open intents for one unopened workspace, and closing the older duplicate after the replacement is published (C1).
+- ~~Two different open intents for one unopened workspace, and closing the older duplicate after the replacement is published (C1).~~ Covered 2026-09-30.
 - Background resize against a real cached terminal, browser or explorer view, including CAS rejection. Current resize tests mostly stub `discard` (C2).
 - Visible split held across the whole POST, with the tab left and returned to or rebuilt before the response (C3). The existing "rebuilt in place" test accepts the defect.
 - Delayed `shown` focus failure (C4).
@@ -200,7 +222,7 @@ The `shown` callback calls `_hand_foreground_back` and discards its failure. `fo
 
 ## Suggested order of work
 
-1. **A1 (done), C1:** gate recheck at commit, and window-slot reservation plus identity-checked cleanup. Both are ownership-contract violations with user-visible damage.
+1. **A1 (done), C1 (done):** gate recheck at commit, and window-slot reservation plus identity-checked cleanup. Both are ownership-contract violations with user-visible damage.
 2. **C2, C3:** fix before merging this branch; both are regressions or incomplete fixes introduced here.
 3. **B3:** a one-line description change plus a test assertion; it belongs to this branch's intent.
 4. **A2, A3:** credential redaction and assignment receipts.
