@@ -444,6 +444,9 @@ class GridVibeClient:
         self.timeout = max(0.1, float(timeout))
         # Injected in tests; urllib's own opener otherwise.
         self._opener = opener or urllib.request.build_opener()
+        # The receipt each pane's last `read_handoff` answer carried, sent back
+        # by `report_result`. Held here, never projected to the agent.
+        self._handoff_receipts: Dict[str, str] = {}
 
     # ---------------- transport ----------------
 
@@ -687,12 +690,24 @@ class GridVibeClient:
         payload = self.request("GET", f"/api/sessions/{urllib.parse.quote(session_id)}")
         return project_pane(payload)
 
+    def handoff_receipt(self, session_id: str) -> str:
+        """The receipt this pane's last ``read_handoff`` answer carried, or ``""``."""
+        return self._handoff_receipts.get(str(session_id or ""), "")
+
+    def remember_handoff_receipt(self, session_id: str, receipt: Any) -> None:
+        """Keep a receipt for ``report_result``. An empty one changes nothing."""
+        if isinstance(receipt, str) and receipt:
+            self._handoff_receipts[str(session_id or "")] = receipt
+
     def read_handoff(self, session_id: str, offset: Optional[int] = None) -> Dict[str, Any]:
         """The task handed to *this* pane, from ``HANDOFF_FIELDS`` only.
 
         ``session_id`` is always the caller's own pane -- the tool takes no
         pane argument -- so another pane's brief is not something a tool call
-        can name.
+        can name. The answer's ``receipt`` is kept on this client for
+        ``report_result`` and is not in ``HANDOFF_FIELDS``, so the agent never
+        sees it. An answer without one (nobody waits for a report, or a
+        GridVibe older than receipts) leaves the kept one as it was.
         """
         params: Dict[str, Any] = {}
         if offset is not None:
@@ -702,6 +717,8 @@ class GridVibeClient:
             f"/api/sessions/{urllib.parse.quote(session_id)}/handoff",
             params=params,
         )
+        if isinstance(payload, Mapping):
+            self.remember_handoff_receipt(session_id, payload.get("receipt"))
         result = project(payload, HANDOFF_FIELDS)
         if isinstance(result.get("from"), Mapping):
             result["from"] = project(result["from"], ("session_id", "title", "agent"))
@@ -717,11 +734,16 @@ class GridVibeClient:
 
         ``session_id`` is always the caller's own pane, exactly as for
         ``read_handoff``: which agent receives the report is GridVibe's record
-        of who handed the task over, never an argument.
+        of who handed the task over, never an argument. The receipt that read
+        kept is sent with it, and only when there is one, so a GridVibe that
+        never issued one is sent exactly the body it has always taken.
         """
         body: Dict[str, Any] = {"result": result}
         if status:
             body["status"] = status
+        receipt = self.handoff_receipt(session_id)
+        if receipt:
+            body["receipt"] = receipt
         payload = self.request(
             "POST",
             f"/api/sessions/{urllib.parse.quote(session_id)}/handoff-report",

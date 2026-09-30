@@ -387,6 +387,93 @@ described as a credential (`web/ssh_tunnel.py:140` wording).
 
 ### Stage 5 — A3: a report settles only the assignment its agent read
 
+**Status: implemented 2026-09-30** on `szua_gridvibe-mcp-review` from `aedfa80`.
+It is uncommitted. One Codex review (OCR delegate, 5 of 5 reviewable files
+covered, the 8 other text files read by hand) found one medium issue. It was
+confirmed and fixed after the review, so that fix is unreviewed.
+- **Done:** the recommended design as written. `ResultStore.mark_read` mints
+  the assignment's receipt (`secrets.token_urlsafe(32)`) on the first read and
+  returns the same one on every read after it. `ResultStore.report` takes a
+  `receipt` and settles only on an exact match through
+  `secrets.compare_digest`. A missing, empty, non-text or different receipt is
+  refused 409 with `STALE_RECEIPT_MESSAGE`, which tells a legitimate agent to
+  call `read_handoff` again. `UNREAD_TASK_MESSAGE` still answers a report sent
+  before the read. The receipt field is `repr=False` and never logged.
+  `HandoffStore.read` adds `receipt` to its answer only when an assignment is
+  tracked. The report route passes `receipt` from the body.
+  `GridVibeClient.read_handoff` keeps the receipt per pane on the client, and
+  `receipt` is not in `HANDOFF_FIELDS`, so the agent never sees it.
+  `report_result` sends it only when it holds one. On the HTTP path
+  `PaneTokenRegistry.remember_receipt` holds it on the live token's record.
+  `handle_message` takes a `token`, starts each tool call's client with the
+  record's receipt, and writes a newly read one back.
+- **Changed from the plan:** nothing in the design. `handle_message` gained a
+  `token` keyword, and the registry gained `remember_receipt` (the registry's
+  surface test now lists it: it writes to a live record and looks nothing up).
+  A request's own record copy also takes the receipt, so a batch that reads and
+  then reports works. After review, it takes the receipt only when the token
+  took it.
+- **Live compatibility:** the running GridVibe keeps the old server code while
+  new agents' stdio sidecars load this `gridvibe_mcp/` from disk. Against a
+  server that issues no receipt, the new client keeps nothing and posts exactly
+  `{"result", "status"}`, which the old route accepts. This is pinned by
+  `ReceiptTestCase.test_a_gridvibe_that_issues_no_receipt_is_sent_the_body_it_always_took`.
+  It was also checked end to end: the new `gridvibe_mcp` drove `read_handoff`
+  then `report_result` through `dispatch` against the Flask app extracted from
+  `aedfa80`, and the report was recorded. The Stage 5 reviewer, launched after
+  the change, fetched its task and reported through the new client against
+  the live old server.
+- **Not done:** an agent whose MCP server restarts after reading loses the
+  receipt, and its next report is refused until it reads again, as the design
+  accepts. A stale in-flight `read_handoff` from the replaced agent still reads
+  the successor's brief through the pane-id route. It cannot report with the
+  successor's receipt (review fix), but reading the brief is the pre-existing
+  behaviour and is not addressed here. Over stdio, the relaunch ends the old
+  sidecar's process.
+- **Tests:** `tests/test_agent_results.py` covers the A3 case the plan asked
+  for. After B's read, A's delayed report with A's receipt is refused, B stays
+  `working`, and B's own report settles it. It also covers missing, empty,
+  different, non-text and non-ASCII receipts, a re-read returning the same
+  receipt, a receipt kept out of rows, logs and `repr`, and no receipt when
+  nothing is tracked. Store-level cases report through a `_report` helper that
+  re-reads the receipt.
+  `tests/test_agent_result_routes.py` covers a receipt required at the route
+  and absent from pane and wait payloads, and A3 through the routes.
+  `tests/test_mcp_results.py` `ReceiptTestCase` checks that the receipt is off
+  the projected answer and sent with the report, the old-server body, a
+  receipt-less read keeping the held one, and a later read replacing it.
+  `tests/test_mcp_handoff.py` covers the receipt carried across two separate
+  `/mcp/<token>` requests and a relaunch's new token starting without it, where
+  the stale in-flight report is refused and the successor's report settles.
+  It also covers a batch that reads and then reports. After review, it covers
+  a revoked token's batch that reads the successor's task and cannot report
+  with its receipt. `tests/test_mcp_remote.py` checks that the receipt lives
+  on the token and goes with it. With the receipt comparison disabled, the 5
+  store, route and tunnel A3 tests fail (7 failures across subtests, 1 error).
+  With the pre-review write-back, the post-review batch test fails.
+  `tests.test_agent_results`, `tests.test_agent_handoffs`,
+  `tests.test_mcp_tools`, `tests.test_mcp_remote` and `tests.test_api` pass
+  (1263, 1 skip). With `tests.test_agent_result_routes`,
+  `tests.test_agent_handoff_routes`, `tests.test_mcp_results`,
+  `tests.test_mcp_handoff`, `tests.test_mcp_close` and
+  `tests.test_mcp_client`, 1421 pass (1 skip). Ruff and `git diff --check` are
+  clean.
+- **Review:** the reviewer ran `ocr delegate preview` and `rule` with escalated
+  permissions, and both succeeded. It found one medium issue and reproduced it
+  with the real loopback and store. `handle_request` resolves a token once per
+  request. A batch whose token was revoked, with the successor's task announced
+  before the batch's `read_handoff` ran, read that task through the pane-id
+  route. `handle_message` then copied the successor's receipt into the batch's
+  record before the (refused) write-back, so the batch's `report_result`
+  settled the successor's task. **Fixed:** the record copy takes a receipt
+  only when `remember_receipt` succeeds on a live token. A relaunch revokes the
+  old token before the new connection announces the new task, so a read that
+  finds the successor's task always has a revoked token. The fix is
+  unreviewed, by the one-round rule. The reviewer also saw one `tests.test_api`
+  error in `test_repo_git_timeout_bounds_a_remote_that_goes_quiet`, a
+  `TemporaryDirectory` cleanup `WinError 32`. That code is untouched by this
+  stage, and the test passed in the coder's runs.
+
 **Design (recommended)**
 - **Receipt.** When `agent_handoffs.read` first moves a handoff to `READ`, the
   result store mints an opaque random receipt on that assignment

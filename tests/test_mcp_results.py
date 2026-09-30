@@ -9,6 +9,9 @@ the wire:
   own pane and GridVibe decides who receives it; ``wait_for_results`` reads only
   what is owed to the caller's own pane.
 - **Results are built from field lists**, like every other.
+- **The handoff receipt stays in the sidecar.** ``read_handoff`` keeps it off
+  the agent's answer and ``report_result`` sends it back; a GridVibe that never
+  issued one is sent exactly the body it has always taken.
 - **A tunnelled wait blocks on the store in-process**, and asks the route with
   ``wait=0`` -- never a request held open against the server it runs in.
 - **The sidecar's ceilings equal GridVibe's**, since ``web/`` cannot be imported
@@ -248,6 +251,67 @@ class WireTestCase(unittest.TestCase):
 
         self.assertEqual(_query(opener.requests[0])["wait"], "55")
         self.assertEqual(_query(opener.requests[0])["until"], "all")
+
+
+class ReceiptTestCase(unittest.TestCase):
+    READ = {"delivery": "inline", "task": "Review it.", "chars": 10, "receipt": "r-first"}
+    RECORDED = {"recorded": True, "revision": 1, "status": "done", "chars": 5}
+
+    def _read_then_report(self, answers, status=""):
+        opener = StubOpener(answers)
+        client = client_for(opener)
+        identity = read_identity(INSIDE_PANE)
+        read = dispatch("read_handoff", {}, client=client, identity=identity)
+        arguments = {"result": "Done."}
+        if status:
+            arguments["status"] = status
+        report = dispatch("report_result", arguments, client=client, identity=identity)
+        return opener, read, report
+
+    def test_the_receipt_is_kept_from_the_agent_and_sent_with_the_report(self):
+        opener, read, report = self._read_then_report([self.READ, self.RECORDED])
+
+        self.assertEqual(read["task"], "Review it.")
+        self.assertNotIn("receipt", read)
+        self.assertNotIn("receipt", HANDOFF_FIELDS)
+        self.assertNotIn("r-first", json.dumps(read))
+        self.assertEqual(json.loads(opener.requests[1].data), {"result": "Done.", "receipt": "r-first"})
+        self.assertTrue(report["recorded"])
+        self.assertNotIn("r-first", json.dumps(report))
+
+    def test_a_gridvibe_that_issues_no_receipt_is_sent_the_body_it_always_took(self):
+        """The GridVibe already running when this sidecar is loaded may predate
+        receipts: its read carries none, and its report route must be sent
+        nothing it does not know."""
+        old_read = {key: value for key, value in self.READ.items() if key != "receipt"}
+
+        opener, read, report = self._read_then_report([old_read, self.RECORDED], status="done")
+
+        self.assertEqual(read["task"], "Review it.")
+        self.assertEqual(json.loads(opener.requests[1].data), {"result": "Done.", "status": "done"})
+        self.assertTrue(report["recorded"])
+
+    def test_a_read_that_carries_no_receipt_keeps_the_one_held(self):
+        opener = StubOpener([self.READ, {"handoff": None, "message": "No task."}, self.RECORDED])
+        client = client_for(opener)
+        identity = read_identity(INSIDE_PANE)
+
+        dispatch("read_handoff", {}, client=client, identity=identity)
+        dispatch("read_handoff", {}, client=client, identity=identity)
+        dispatch("report_result", {"result": "Done."}, client=client, identity=identity)
+
+        self.assertEqual(json.loads(opener.requests[2].data)["receipt"], "r-first")
+
+    def test_a_later_read_replaces_the_receipt_held(self):
+        opener = StubOpener([self.READ, {**self.READ, "receipt": "r-second"}, self.RECORDED])
+        client = client_for(opener)
+        identity = read_identity(INSIDE_PANE)
+
+        dispatch("read_handoff", {}, client=client, identity=identity)
+        dispatch("read_handoff", {}, client=client, identity=identity)
+        dispatch("report_result", {"result": "Done."}, client=client, identity=identity)
+
+        self.assertEqual(json.loads(opener.requests[2].data)["receipt"], "r-second")
 
 
 class TunnelledWaitTestCase(unittest.TestCase):

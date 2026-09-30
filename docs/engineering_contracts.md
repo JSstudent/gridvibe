@@ -1702,8 +1702,24 @@ in `README.md`; state the rules a change has to keep.
   it halved. `report_result` names no recipient — the caller's own pane is the
   path and the assignment's requester receives it — and `wait_for_results`
   reads only what is owed to the caller's pane. A report settles an assignment
-  only once its handoff has been read: a relaunch keeps the pane's id, so the
-  replaced agent's in-flight report must not answer the new task. Every way a
+  only with that assignment's receipt. The first `read_handoff` mints an opaque
+  random receipt (`secrets.token_urlsafe`), every re-read returns the same one,
+  and a report sent before the read, without a receipt or with any other one is
+  refused 409 with nothing kept; the match is exact, through
+  `secrets.compare_digest`. A relaunch keeps the pane's id, so the id alone
+  cannot tell the replaced agent's in-flight report from its successor's, even
+  after the successor has read its task; the receipt can. The sidecar keeps the
+  receipt off the agent's answer (it is not in `HANDOFF_FIELDS`) and sends it
+  with `report_result` only when it holds one. Over the tunnel each request
+  builds its own client, so the receipt is held on the pane-token record in
+  `web/mcp_http.py`; a relaunch revokes the token and mints another, which
+  starts without it. A write-back to a revoked token lands nowhere, and a
+  request whose token was revoked after it resolved it keeps no receipt it
+  reads, so a later message of its batch cannot report with the successor's. A
+  receipt is never logged and never appears in a collected row, a pane read, a
+  dashboard payload or a snapshot. An agent whose sidecar restarted after
+  reading is refused and told to call `read_handoff` again, which re-issues the
+  same receipt; the replaced agent cannot, because its process is gone. Every way a
   handoff goes before a report (connection closed, pane closed, relaunch, mode switch, replaced,
   undeliverable) ends its assignment with the reason and stops it taking
   reports, so whatever the pane runs next cannot answer for it; a report

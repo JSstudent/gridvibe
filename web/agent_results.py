@@ -16,10 +16,13 @@ written to and neither is the requester's.
 The lifecycle of one assignment:
 
 * **Pending** -- recorded when the handoff is bound to its pane. The worker is
-  working, or has not started yet. A report is taken only once the worker has
-  fetched the task with ``read_handoff``: a pane relaunched with a new task
-  keeps its session id, so a report still in flight from the agent it
-  replaced -- which was never handed the new task -- must not settle it.
+  working, or has not started yet. A report is taken only from the agent that
+  fetched the task with ``read_handoff``. That read mints the assignment's
+  *receipt*, an opaque random string, and a report settles the assignment only
+  when it carries that receipt back. A pane relaunched with a new task keeps
+  its session id, so the pane id cannot tell a report still in flight from the
+  agent it replaced -- which read the old task, never this one -- from one by
+  the agent that did read it. The receipt can.
 * **Reported** -- the worker called ``report_result``. A second report replaces
   the first and makes it new again, so the requester reads the latest -- but
   only while the handoff is still live. Once it goes (the pane closed, was
@@ -40,16 +43,19 @@ oldest settled one.
 (``include_collected``) or the worker reports again.
 
 Never persisted, never logged in full: log lines carry ids, a character count
-and a status, never the text. No Flask, no I/O and no import from the rest of
-``web/``, so the store is tested directly.
+and a status, never the text. A receipt is never logged and never leaves this
+store except in the ``read_handoff`` answer to the pane it was minted for, whose
+sidecar keeps it rather than showing it to the agent. No Flask, no I/O and no
+import from the rest of ``web/``, so the store is tested directly.
 """
 
 import datetime
 import logging
+import secrets
 import threading
 import time
 import unicodedata
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
@@ -109,6 +115,18 @@ UNREAD_TASK_MESSAGE = (
     "report cannot be answering it: the pane was handed a new task after this "
     "agent's, or this agent has not read its task yet. Nothing was recorded."
 )
+
+STALE_RECEIPT_MESSAGE = (
+    "This report does not carry the receipt of the task this pane was last "
+    "handed, so it cannot be answering it: the pane was handed a new task after "
+    "this agent's, or this agent's GridVibe tools restarted since it read its "
+    "task. If this agent is the one working on the pane's current task, call "
+    "read_handoff again, then report again. Nothing was recorded."
+)
+
+#: Bytes of entropy behind one receipt. It stands between a replaced agent's
+#: late report and its successor's task, so it is not guessable.
+_RECEIPT_BYTES = 32
 
 NOTHING_HANDED_OUT_MESSAGE = (
     "This pane has not handed a task to any agent that is still tracked, so "
@@ -254,6 +272,9 @@ class _Assignment:
     #: Whether the worker has fetched this task. Until it has, whatever calls
     #: from the pane is not the agent the task was handed to.
     read: bool = False
+    #: Minted by the first read and returned by every read after it; a report
+    #: must carry it back. Never logged, never in a collected row.
+    receipt: str = field(default="", repr=False)
 
     @property
     def settled(self) -> bool:
@@ -338,35 +359,54 @@ class ResultStore:
         )
         return True
 
-    def mark_read(self, handoff_id: str) -> bool:
-        """The worker fetched its task: from now on a report can settle it."""
+    def mark_read(self, handoff_id: str) -> str:
+        """The worker fetched its task: from now on its report can settle it.
+
+        Returns the assignment's receipt, minted by the first read and the same
+        on every read after it, so reading twice still returns the same brief.
+        ``""`` when no assignment is tracked for this handoff -- nobody is
+        waiting for a report then, and there is nothing to settle.
+        """
         with self._changed:
             record = self._records.get(str(handoff_id or ""))
             if record is None:
-                return False
+                return ""
             record.read = True
-            return True
+            if not record.receipt:
+                record.receipt = secrets.token_urlsafe(_RECEIPT_BYTES)
+            return record.receipt
 
     # ---------------- the worker ----------------
 
-    def report(self, worker_session_id: str, text: Any, status: Any = None) -> Dict[str, Any]:
+    def report(
+        self,
+        worker_session_id: str,
+        text: Any,
+        status: Any = None,
+        receipt: Any = None,
+    ) -> Dict[str, Any]:
         """Record the worker's report against its live assignment.
 
         Validated before anything is looked up, so a refused report changes
         nothing. Answers what the worker is told: who is waiting and whether
-        this replaced an earlier report. An assignment whose task has not been
-        read is refused rather than settled: the pane's id is all a report
-        carries, and it names the agent a relaunch replaced as well.
+        this replaced an earlier report. The pane's id names the agent a
+        relaunch replaced as well as its successor, so it only finds the
+        assignment. What settles it is ``receipt``, which must be exactly the
+        one this assignment's read minted: an assignment nobody has read, and a
+        report with a missing or different receipt, are refused.
         """
         body = validate_result(text)
         outcome = validate_status(status)
         worker = str(worker_session_id or "")
+        offered = receipt if isinstance(receipt, str) else ""
         with self._changed:
             record = self._live_for_worker_locked(worker)
             if record is None:
                 raise ResultError(NOBODY_WAITING_MESSAGE, 409)
             if not record.read:
                 raise ResultError(UNREAD_TASK_MESSAGE, 409)
+            if not _receipt_matches(offered, record.receipt):
+                raise ResultError(STALE_RECEIPT_MESSAGE, 409)
             replaced = record.state == REPORTED
             record.state = REPORTED
             record.status = outcome
@@ -615,6 +655,13 @@ class ResultStore:
             oldest.requester_session_id,
             oldest.state,
         )
+
+
+def _receipt_matches(offered: str, expected: str) -> bool:
+    """Exact match, in constant time; an empty receipt never matches."""
+    if not offered or not expected:
+        return False
+    return secrets.compare_digest(offered.encode("utf-8"), expected.encode("utf-8"))
 
 
 def _plan_texts(

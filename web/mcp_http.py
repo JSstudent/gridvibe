@@ -40,6 +40,15 @@ token per pane, bakes it into the URL written on the remote host, and resolves
 it back to the same :class:`~gridvibe_mcp.identity.PaneIdentity` the stdio path
 builds from the environment. The token dies with the pane.
 
+**The handoff receipt lives on the token, because the client does not.** The
+stdio sidecar keeps the receipt ``read_handoff`` returned on its one long-lived
+client and sends it back with ``report_result``. Here a client is built per
+request, so the token's record holds it instead: each ``tools/call`` hands the
+client the record's receipt and writes back a new one the call read. A relaunch
+revokes the token and mints another, so the new agent starts with none, and a
+request still in flight that resolved the old record carries only the old
+receipt, which the results store refuses.
+
 **This is a deliberate, bounded weakening of the local-bind guarantee, and it
 is opt-in per pane.** While a tunnelled pane is open, anything on that remote
 host that can reach the forwarded port can spend that pane's token, and the
@@ -187,6 +196,23 @@ class PaneTokenRegistry:
             record = self._tokens.get(resolved)
             return dict(record) if record else {}
 
+    def remember_receipt(self, token: str, receipt: str) -> bool:
+        """Keep the handoff receipt a call over this token read.
+
+        Only while the token is live: a write-back from a request that outlived
+        its token's revocation lands nowhere, so a relaunched pane's new token
+        never inherits its predecessor's receipt.
+        """
+        resolved = str(token or "").strip()
+        if not (resolved and isinstance(receipt, str) and receipt):
+            return False
+        with self._lock:
+            record = self._tokens.get(resolved)
+            if record is None:
+                return False
+            record["handoff_receipt"] = receipt
+            return True
+
     def revoke(self, session_id: str) -> bool:
         """Drop the token for one pane. Returns whether there was one."""
         resolved = str(session_id or "").strip()
@@ -304,12 +330,19 @@ def handle_message(
     base_url: str,
     max_agent_depth: int,
     version: str = "",
+    token: str = "",
 ) -> Optional[Dict[str, Any]]:
     """Answer one JSON-RPC message, or ``None`` for a notification.
 
     Notifications carry no ``id`` and get no reply -- the caller turns that
     into ``202 Accepted`` rather than an empty JSON body, which is what the
     transport asks for.
+
+    ``record`` is this request's copy of the token's record. A tool call
+    starts its client with the record's handoff receipt and, when the call read
+    a new one, writes it back to the token (``token``) and, only if the token
+    is still live, to this copy, so a later message of the same batch sends it
+    too.
     """
     if not isinstance(message, dict):
         return _error(None, _INVALID_REQUEST, "A JSON-RPC message must be an object.")
@@ -357,6 +390,9 @@ def handle_message(
         name = str(params.get("name") or "")
         arguments = params.get("arguments") or {}
         client = _in_process_client_type()(base_url)
+        session_id = str(record.get("session_id") or "")
+        held_receipt = str(record.get("handoff_receipt") or "")
+        client.remember_handoff_receipt(session_id, held_receipt)
         try:
             payload = dispatch(
                 name,
@@ -368,6 +404,17 @@ def handle_message(
         except Exception:  # pragma: no cover - dispatch answers its own refusals
             logger.exception("MCP tool %s failed over HTTP", name)
             return _error(request_id, _INTERNAL_ERROR, "The tool could not be run.")
+        read_receipt = client.handoff_receipt(session_id)
+        # This request's copy takes the receipt only when its token took it.
+        # A token revoked since the request resolved it belongs to an agent a
+        # relaunch replaced; a read it makes now can find the successor's task,
+        # and a later message of its batch must not report with that receipt.
+        if (
+            read_receipt
+            and read_receipt != held_receipt
+            and pane_tokens.remember_receipt(token, read_receipt)
+        ):
+            record["handoff_receipt"] = read_receipt
         # `dispatch` never raises for an ordinary refusal; it returns an
         # `{"error": ...}` payload. That travels as tool content with
         # `isError`, not as a protocol error -- the agent should read
@@ -416,6 +463,7 @@ def handle_request(
                     record=record,
                     base_url=base_url,
                     max_agent_depth=max_agent_depth,
+                    token=token,
                 )
             )
             is not None
@@ -427,5 +475,6 @@ def handle_request(
         record=record,
         base_url=base_url,
         max_agent_depth=max_agent_depth,
+        token=token,
     )
     return (reply, 200) if reply is not None else (None, 202)

@@ -216,7 +216,8 @@ class PaneTokenRegistryTestCase(unittest.TestCase):
 
         `mint` is already idempotent per pane, which is the need a `token_for`
         would have served -- and a live credential wants one way in, not two
-        that have to agree.
+        that have to agree. `remember_receipt` writes to a live token's record
+        and looks nothing up.
         """
         token = self.registry.mint(session_id="pane-1")
 
@@ -228,8 +229,28 @@ class PaneTokenRegistryTestCase(unittest.TestCase):
                 if not name.startswith("_")
                 and callable(getattr(self.registry, name))
             ),
-            ["clear", "mint", "resolve", "revoke"],
+            ["clear", "mint", "remember_receipt", "resolve", "revoke"],
         )
+
+    def test_a_handoff_receipt_lives_on_the_token_and_goes_with_it(self):
+        """A tunnelled request builds its own client, so the receipt a read
+        returned is held on the token between requests. A relaunch revokes the
+        token and mints another, which starts without it."""
+        token = self.registry.mint(session_id="pane-1")
+
+        self.assertTrue(self.registry.remember_receipt(token, "r-1"))
+        self.assertEqual(self.registry.resolve(token)["handoff_receipt"], "r-1")
+        self.assertEqual(self.registry.mint(session_id="pane-1"), token)
+        self.assertEqual(self.registry.resolve(token)["handoff_receipt"], "r-1")
+        self.assertFalse(self.registry.remember_receipt(token, ""))
+        self.assertEqual(self.registry.resolve(token)["handoff_receipt"], "r-1")
+
+        self.assertTrue(self.registry.revoke("pane-1"))
+        self.assertFalse(self.registry.remember_receipt(token, "r-late"))
+        fresh = self.registry.mint(session_id="pane-1")
+        self.assertNotEqual(fresh, token)
+        self.assertNotIn("handoff_receipt", self.registry.resolve(fresh))
+        self.assertFalse(self.registry.remember_receipt("made-up", "r-1"))
 
     def test_a_pane_with_no_id_mints_nothing(self):
         self.assertEqual(self.registry.mint(session_id=""), "")
