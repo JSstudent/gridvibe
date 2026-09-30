@@ -1256,6 +1256,11 @@
         }
 
         _stopAllVoice();
+        /* The focused pane is leaving the document with its tab, and its slot
+           number will name a pane of the tab that replaces it. Drop the input
+           target while the cards are still here to be unpainted, so neither
+           typing, voice nor the dashboard row follows the old slot across. */
+        clearActiveTerminalHighlight();
         const grid = document.getElementById('terminalsGrid');
         const fragment = document.createDocumentFragment();
 
@@ -5826,6 +5831,17 @@
         setBroadcastInput(!broadcastInputActive);
     }
 
+    /* Broadcast acts on the pane being typed into, so pressing it must not
+       take focus from that pane: focus landing on the button clears the input
+       target, and enabling broadcast would then focus the first terminal
+       instead of the one the reader was in — and disabling it would leave
+       none. The same rule the pane header buttons follow. */
+    function wireBroadcastButton() {
+        document.getElementById('broadcastBtn')?.addEventListener('mousedown', event => {
+            event.preventDefault();
+        });
+    }
+
     /* Mirror input into every *other* plain terminal pane while broadcast typing
        is on (explorer/browser panes have no `term` and are skipped). Shared by
        keyboard forwarding and committed voice transcripts (ISSUE-2026-026) so a
@@ -5939,6 +5955,30 @@
         }
     }
 
+    /* The input target named by session, for the docked agent dashboard: its
+       rows are sessions, and a grid slot can come to hold a different pane — a
+       relaunch into a new session, a mode switch, another tab's grid. So the
+       answer is read at the moment it is asked, from the slot's current record,
+       and only while that slot's card is in this document and still holds real
+       keyboard focus. Anything else is no target. */
+    function focusedTerminalSessionId() {
+        const index = _focusedTerminalIndex;
+        const card = index === -1 ? null : document.getElementById(`tc-${index}`);
+        if (!isPlainTerminalCard(card) || !card.contains(document.activeElement)) {
+            return '';
+        }
+        return String(terminals[index]?._session?.session_id || sessionIds[index] || '');
+    }
+
+    /* The sidebar reads the target back through `focusedTerminalSessionId`;
+       this only tells it the answer may have changed. A page without the
+       sidebar has nothing to repaint. */
+    function paintDashboardInputTarget() {
+        if (typeof markAgentDashboardSidebarInputTarget === 'function') {
+            markAgentDashboardSidebarInputTarget();
+        }
+    }
+
     /* A plain terminal gained focus: it becomes both the input target and the
        highlighted pane. An invalid target selects nothing. */
     function setFocusedTerminal(index) {
@@ -5948,6 +5988,7 @@
         }
         _focusedTerminalIndex = index;
         paintActiveTerminalCard(index);
+        paintDashboardInputTarget();
         /* Re-light the broadcast ring across panes: the CSS rule also requires
            `broadcast-input`, so if broadcast was turned off while focus sat in
            dead space only this single pane lights up (OD-10). */
@@ -5963,6 +6004,7 @@
         _focusedTerminalIndex = -1;
         paintActiveTerminalCard(-1);
         document.getElementById('terminalsGrid')?.classList.remove('terminal-focus');
+        paintDashboardInputTarget();
     }
 
     /* Leaving this workspace window: blur whatever pane holds keyboard focus so
@@ -6757,6 +6799,13 @@
         }
         if (isExplorerPaneInstance(terminals[index])) {
             explorerReleasePaneWork(terminals[index]);
+        }
+        /* The focused pane's input is about to be disposed, and removing it
+           from the document is not guaranteed to fire the focusout that
+           would clear the target. Only this slot's: replacing another pane
+           leaves the one being typed into alone. */
+        if (_focusedTerminalIndex === index) {
+            clearActiveTerminalHighlight();
         }
         const replaced = isBrowserSession(session)
             ? replacePaneWithBrowser(index, session)
@@ -9833,6 +9882,7 @@
         typeof AGENT_SIDEBAR_SIDE === 'string' ? AGENT_SIDEBAR_SIDE : 'left'
     );
     wireAgentDashboardSidebar();
+    wireBroadcastButton();
     topbarPeek.attach();
     applyTopbarVisibility(getStoredTopbarVisible());
     setupAppConfigUpdateListeners();

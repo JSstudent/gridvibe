@@ -1361,6 +1361,25 @@ unless the task explicitly changes this contract.
   and picking one *while* working is what a docked panel is for. Every other
   field on that row stays the dialog's answer asked for by name; a second copy
   of any of them is how one pane comes to read two ways on two surfaces.
+- **The docked row of the pane being typed into wears the input-target ring.**
+  The page's answer is `focusedTerminalSessionId()` in `terminals.js`: the
+  session of the focused slot, read when asked, and only while that slot's card
+  is in the document and holds real keyboard focus. A slot that changed hands
+  names what is there now, never what took focus. The sidebar matches rows by
+  that session id and lays `is-input-target` plus `aria-current="true"` on the
+  rows already drawn, never in the markup, so the unchanged-markup skip and the
+  rebuild rules above are untouched. The focus lifecycle calls
+  `markAgentDashboardSidebarInputTarget` on every set and clear, and the sidebar
+  marks again after every read, failed ones included. Focus loss that may fire
+  no `focusout` clears the target explicitly: a tab's cards leaving with
+  `cacheVisibleGroupView()`, `replaceSessionPaneMode()` on the focused slot
+  only, and a window switch. Output, activity and Broadcast never select a row.
+  The Broadcast button prevents its mousedown default, so pressing it keeps the
+  pane being typed into rather than refocusing the first terminal. The ring is
+  `.agent-sidebar .dash-agent.is-input-target`, an inset 2px `--gv-accent`
+  ring (the token behind `--t-accent`) and never a fill. The dialog carries no
+  ring, because it covers its own page's grid, and focus is never shared
+  across windows.
 - Dashboard layout must remain usable without horizontal overflow at narrow
   widths. A polling update that changes only a row's title, hover, status,
   progress, or idle age updates that row in place, each field on its own

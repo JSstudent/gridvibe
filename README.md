@@ -191,6 +191,7 @@ Closing a workspace asks first and offers **Cancel**, **Save and close**, or **C
 See **every session in every workspace**, agents first. Open the dashboard dialog with `Alt+A` or the dashboard button, or keep it beside your panes with the sidebar handle at the start of the session tab line.
 
 - **Keep the overview beside your work** — the docked sidebar stays open as you work or switch windows. Each workspace remembers whether it is open.
+- **See which agent you are typing into** — the sidebar row of the agent pane holding your keyboard focus wears the same accent ring as the pane, and follows you as you click between panes.
 - **Widen it when you need more room** — drag the sidebar's inner edge from its default width up to twice that width. The chosen scale is saved with the workspace and adapts to the window size.
 - **Put it on the side you want** — **App Settings ▸ Agents ▸ Agent Dashboard Side** docks the sidebar left or right — pick the card that shows it on that edge — and every open window moves as soon as you save. The handle, its marks and the rows are the same either way.
 - **Three levels** — a workspace is a titled band, a session tab is a card inside it drawn in that tab's own colour, and each agent is one row inside the card.

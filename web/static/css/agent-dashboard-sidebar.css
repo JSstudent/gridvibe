@@ -315,6 +315,15 @@ body.agent-sidebar-right .agent-sidebar-resizer {
     padding: 5px 6px;
 }
 
+/* The pane the reader is typing into: the terminal's own active ring, on its
+   row. The same accent token the pane border wears, so both follow the theme
+   together, and inset, so it takes no width. A ring and not a fill, so it
+   never reads as the row's hover or keyboard-focus wash, and it leaves the
+   activity dot's colour alone. */
+.agent-sidebar .dash-agent.is-input-target {
+    box-shadow: inset 0 0 0 2px var(--gv-accent);
+}
+
 .agent-sidebar .dash-agent-line {
     flex: 1 1 auto;
     flex-basis: auto;

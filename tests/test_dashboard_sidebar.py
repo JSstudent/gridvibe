@@ -196,6 +196,12 @@ const aborts = { created: 0, aborted: 0 };
 let fetchAnswer = null;
 let fetchDelay = 0;
 
+/* The page's answer to "which session is being typed into". A plain value for
+   the cases about the column; the page-half cases below hand it the real
+   `focusedTerminalSessionId` lifted out of `terminals.js`. */
+let inputTargetAnswer = '';
+let inputTargetSource = () => inputTargetAnswer;
+
 const windowListeners = fakeListeners();
 const closeCalls = { requests: [], prompts: 0, notices: [], refreshes: 0 };
 let bridge = null;
@@ -282,6 +288,7 @@ const sidebar = GridVibeDashboardSidebar.create({
     writeStored: open => { calls.stored.push(open); },
     report: () => { calls.reports += 1; },
     onLayoutChanged: () => { calls.layouts += 1; },
+    inputTarget: () => inputTargetSource(),
     logError: () => {}
 });
 
@@ -479,6 +486,37 @@ function snapshot(groups, overrides) {
    cached-state apply and a fetch spent before they have set one up. */
 function sidebarShown() {
     shell().classList.add('visible');
+}
+
+/* The drawn rows as elements: one object per row, kept for as long as the
+   markup that drew it is -- so a decoration survives a reading that repaints
+   nothing and goes with its row on one that does, as it would on a page. */
+let drawnRows = { html: null, rows: [] };
+function drawnAgentRows() {
+    const html = body().innerHTML;
+    if (drawnRows.html !== html) {
+        drawnRows = {
+            html,
+            rows: parseAgentRows().map(row => {
+                const element = fakeElement('');
+                element.dataset = row.dataset;
+                element.state = row.state;
+                element.removeAttribute = function (name) { delete this.attributes[name]; };
+                return element;
+            })
+        };
+    }
+    return drawnRows.rows;
+}
+body().querySelectorAll = selector => (
+    selector === '.dash-agent[data-session-id]' ? drawnAgentRows() : []
+);
+
+/* Which rows wear the input-target mark, and what they say about it. */
+function inputTargetMarks() {
+    return drawnAgentRows()
+        .filter(row => row.classList.contains('is-input-target') || row.attributes['aria-current'])
+        .map(row => [row.dataset.sessionId, row.attributes['aria-current'] || null]);
 }
 
 function report(value) { process.stdout.write(JSON.stringify(value)); }
@@ -1094,6 +1132,549 @@ class DashboardSidebarSurfaceTestCase(DashboardSidebarNodeTestCase):
             self.assertNotIn(absent, source)
 
 
+def _js_function_source(script: str, name: str) -> str:
+    """One top-level JS function's source, brace-matched."""
+    start = script.index(f"function {name}(")
+    depth = 0
+    for index in range(script.index("{", script.index(")", start)), len(script)):
+        if script[index] == "{":
+            depth += 1
+        elif script[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return script[start:index + 1]
+    raise AssertionError(f"unbalanced braces in {name}")
+
+
+def _js_listener_source(script: str, marker: str) -> str:
+    """One `addEventListener(...)` statement whose handler body opens after
+    `marker`, brace-matched and closed at its `);`."""
+    start = script.index(marker)
+    depth = 0
+    for index in range(script.index("{", start), len(script)):
+        if script[index] == "{":
+            depth += 1
+        elif script[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return script[start:script.index(");", index) + 2]
+    raise AssertionError(f"unbalanced braces after {marker}")
+
+
+TERMINALS_JS = (STATIC_JS / "terminals.js").read_text(encoding="utf-8")
+
+# The page half of the mark, lifted whole out of `terminals.js`: the focus
+# lifecycle that decides which pane is the input target, and the tab switch that
+# carries a grid out of the document.
+TERMINAL_FOCUS_SOURCE = "\n".join(
+    [
+        _js_function_source(TERMINALS_JS, name)
+        for name in (
+            "isPlainTerminalCard",
+            "terminalCardSlot",
+            "explorerPaneIndexFromTarget",
+            "paintActiveTerminalCard",
+            "focusedTerminalSessionId",
+            "paintDashboardInputTarget",
+            "setFocusedTerminal",
+            "clearActiveTerminalHighlight",
+            "dropTerminalFocusForWindowSwitch",
+            "resetFocusedTerminal",
+            "focusPaneForArrival",
+            "cacheVisibleGroupView",
+            "replaceSessionPaneMode",
+            "firstAttachedPlainTerminalIndex",
+            "focusActiveOrDefaultTerminal",
+            "setBroadcastInput",
+            "toggleBroadcastInput",
+            "wireBroadcastButton",
+        )
+    ]
+    + [
+        _js_listener_source(TERMINALS_JS, "document.addEventListener('focusin', event =>"),
+        _js_listener_source(TERMINALS_JS, "document.addEventListener('focusout', event =>"),
+    ]
+)
+
+# A workspace page with a grid of cards, each with the one element inside it
+# that takes keyboard focus. Only what the lifted functions touch is modelled.
+TERMINAL_FOCUS_PAGE = r"""
+class HTMLElement {}
+const documentListeners = fakeListeners();
+let activeElement = null;
+const outside = { closest: () => null };
+
+class FakeCard extends HTMLElement {
+    constructor(slot) {
+        super();
+        this.id = `tc-${slot}`;
+        this.dataset = { slot: String(slot) };
+        this.classList = fakeClassList();
+        this.classList.add('terminal-container');
+        this.attributes = {};
+        this.input = new FakeInput(this);
+    }
+    setAttribute(name, value) { this.attributes[name] = value; }
+    removeAttribute(name) { delete this.attributes[name]; }
+    contains(node) { return node === this || node === this.input; }
+    closest(selector) { return selector === '.terminal-container' ? this : null; }
+    scrollIntoView() {}
+    focus() { moveFocus(this.input); }
+}
+
+class FakeInput extends HTMLElement {
+    constructor(card) { super(); this.card = card; }
+    closest(selector) { return this.card.closest(selector); }
+    blur() {
+        if (activeElement !== this) return;
+        activeElement = null;
+        documentListeners.fire('focusout', { target: this, relatedTarget: null });
+    }
+}
+
+/* Focus moving the way the browser moves it: focusout from what had it, naming
+   where it is going, then focusin on the new holder. */
+function moveFocus(next) {
+    const previous = activeElement;
+    if (previous === next) return;
+    activeElement = next;
+    if (previous) documentListeners.fire('focusout', { target: previous, relatedTarget: next });
+    documentListeners.fire('focusin', { target: next });
+}
+
+/* The top bar's Broadcast button, which a press would focus unless its
+   mousedown default is prevented. */
+const broadcastButton = {
+    id: 'broadcastBtn',
+    classList: fakeClassList(),
+    attributes: {},
+    title: '',
+    setAttribute(name, value) { this.attributes[name] = value; },
+    closest: () => null,
+    ...fakeListeners()
+};
+
+/* A pointer press the way the browser runs one: mousedown, focus moving to the
+   button unless that was prevented, then the button's inline onclick. */
+function pressBroadcast() {
+    const press = { defaultPrevented: false, preventDefault() { this.defaultPrevented = true; } };
+    broadcastButton.fire('mousedown', press);
+    if (!press.defaultPrevented) moveFocus(broadcastButton);
+    toggleBroadcastInput();
+}
+
+const grid = {
+    classList: fakeClassList(),
+    className: '',
+    style: { getPropertyValue: () => '', removeProperty() {} },
+    children: [],
+    get firstChild() { return this.children.find(Boolean) || null; }
+};
+
+const document = {
+    get activeElement() { return activeElement; },
+    getElementById: id => {
+        if (id === 'terminalsGrid') return grid;
+        if (id === 'broadcastBtn') return broadcastButton;
+        /* Every mounted card has its body wrapper, `tw-N` beside `tc-N`. */
+        const cardId = id.startsWith('tw-') ? `tc-${id.slice(3)}` : id;
+        return grid.children.find(card => card && card.id === cardId) || null;
+    },
+    querySelectorAll: selector => (
+        selector === '.terminal-container.terminal-active'
+            ? grid.children.filter(card => card && card.classList.contains('terminal-active'))
+            : []
+    ),
+    createDocumentFragment: () => ({
+        nodes: [],
+        appendChild(node) {
+            grid.children = grid.children.filter(card => card !== node);
+            this.nodes.push(node);
+        }
+    }),
+    addEventListener: documentListeners.addEventListener
+};
+
+let terminals = [];
+let sessionIds = [];
+let gridBuilt = true;
+let visibleGroupId = 'g1';
+let _focusedTerminalIndex = -1;
+let _activeExplorerIndex = -1;
+let resizeObservers = [];
+let cachedGroupViews = new Map();
+let splitSlotRects = null;
+let splitColumnWeights = null;
+let splitRowWeights = null;
+let originalSplitSlotCount = 0;
+function _stopAllVoice() {}
+function clearActiveGridResize() {}
+function clearResizeHandles() {}
+function captureCachedPaneUiState() {}
+function noteGroupPresentationChanged() {}
+function clearFitTimers() {}
+function disconnectObservers() {}
+function cloneSplitSlotRects() { return null; }
+function cloneSplitTrackWeights() { return null; }
+function isExplorerSession(session) { return session?.mode === 'explorer'; }
+function isBrowserSession(session) { return session?.mode === 'browser'; }
+function isExplorerPaneInstance(pane) { return pane?._paneType === 'explorer'; }
+function explorerReleasePaneWork() {}
+let broadcastInputActive = false;
+let _broadcastIdleTimer = null;
+function _noteBroadcastActivity() {}
+
+/* A pane switched to Files: its xterm is disposed and its input leaves the
+   document, and -- as a browser may -- no focusout says so. */
+function replacePaneWithExplorer(index, session) {
+    const card = grid.children[index];
+    card.input = new FakeInput(card);
+    card.classList.add('explorer-pane');
+    terminals[index] = { _session: session, _paneType: 'explorer' };
+    sessionIds[index] = session.session_id;
+    return true;
+}
+function replacePaneWithBrowser() { return false; }
+function replacePaneWithTerminal() { return false; }
+
+/* The page's own names for the sidebar: the module's browser half binds these
+   to the same controller the harness drives. */
+function markAgentDashboardSidebarInputTarget() { return sidebar.markInputTarget(); }
+inputTargetSource = () => focusedTerminalSessionId();
+
+/* One pane in a slot: an agent terminal by default, or an explorer card. */
+function mountPane(slot, sessionId, kind = '') {
+    const card = new FakeCard(slot);
+    if (kind) card.classList.add(kind);
+    grid.children[slot] = card;
+    terminals[slot] = {
+        _session: { session_id: sessionId, mode: kind === 'explorer-pane' ? 'explorer' : 'ssh' },
+        term: kind ? null : { focus: () => moveFocus(card.input) }
+    };
+    sessionIds[slot] = sessionId;
+    return card;
+}
+
+function activeCards() {
+    return grid.children
+        .filter(card => card && card.classList.contains('terminal-active'))
+        .map(card => card.id);
+}
+"""
+
+
+class DashboardSidebarInputTargetTestCase(DashboardSidebarNodeTestCase):
+    """The row of the pane the reader is typing into.
+
+    The page answers which session holds keyboard focus; the column lays a
+    mark on the row that names it. The mark is a decoration on rows already
+    drawn and never part of the markup, so moving it rebuilds no button, and
+    every reading puts it back on whatever row is the target *now*."""
+
+    TWO_AGENTS = """
+        fetchAnswer = snapshot([group([
+            pane({ activity: activity({ title: 'First', state: 'working' }) }),
+            pane({ session_id: 's2', index: 1, activity: activity({ state: 'idle' }) })
+        ])]);
+    """
+
+    def test_the_row_of_the_pane_being_typed_into_is_marked_and_follows_it(self):
+        result = self._run_node(
+            "sidebarShown();\n" + self.TWO_AGENTS + """
+            inputTargetAnswer = 's1';
+            await sidebar.refresh();
+            const first = inputTargetMarks();
+            inputTargetAnswer = 's2';
+            const named = sidebar.markInputTarget();
+            const second = inputTargetMarks();
+            inputTargetAnswer = '';
+            sidebar.markInputTarget();
+            report({
+                first, named, second,
+                none: inputTargetMarks(),
+                inMarkup: /is-input-target|aria-current/.test(body().innerHTML)
+            });
+            """
+        )
+        self.assertEqual(result["first"], [["s1", "true"]])
+        self.assertEqual(result["named"], "s2")
+        self.assertEqual(result["second"], [["s2", "true"]])
+        self.assertEqual(result["none"], [])
+        # A decoration, not markup: the reading's own comparison never sees it.
+        self.assertFalse(result["inMarkup"])
+
+    def test_a_reading_keeps_the_mark_and_a_rebuilt_row_gets_it_back(self):
+        result = self._run_node(
+            "sidebarShown();\n" + self.TWO_AGENTS + """
+            inputTargetAnswer = 's1';
+            await sidebar.refresh();
+            const before = drawnAgentRows()[0];
+            await sidebar.refresh();
+            const kept = drawnAgentRows()[0] === before
+                && before.classList.contains('is-input-target');
+            fetchAnswer = snapshot([group([
+                pane({ activity: activity({ title: 'Second' }) }),
+                pane({ session_id: 's2', index: 1 })
+            ])]);
+            await sidebar.refresh();
+            report({
+                kept,
+                rebuilt: drawnAgentRows()[0] !== before,
+                marks: inputTargetMarks()
+            });
+            """
+        )
+        self.assertTrue(result["kept"])
+        self.assertTrue(result["rebuilt"])
+        self.assertEqual(result["marks"], [["s1", "true"]])
+
+    def test_a_target_with_no_row_marks_nothing(self):
+        """A plain shell, or an agent pane the reading has not listed yet: the
+        page names it, and no row is it, so no row is marked — least of all
+        the one that used to be."""
+        result = self._run_node(
+            "sidebarShown();\n" + self.TWO_AGENTS + """
+            inputTargetAnswer = 's1';
+            await sidebar.refresh();
+            inputTargetAnswer = 's9';
+            sidebar.markInputTarget();
+            const unlisted = inputTargetMarks();
+            inputTargetAnswer = 's2';
+            sidebar.markInputTarget();
+            fetchAnswer = snapshot([group([pane()])]);
+            await sidebar.refresh();
+            report({ unlisted, departed: inputTargetMarks() });
+            """
+        )
+        self.assertEqual(result["unlisted"], [])
+        self.assertEqual(result["departed"], [])
+
+    def test_the_mark_leaves_the_activity_reading_alone(self):
+        """Being typed into and working are two facts. The idle row that is the
+        target stays idle, and the working one that is not stays working."""
+        result = self._run_node(
+            "sidebarShown();\n" + self.TWO_AGENTS + """
+            await sidebar.refresh();
+            const markup = body().innerHTML;
+            const states = drawnAgentRows().map(row => row.state);
+            inputTargetAnswer = 's2';
+            sidebar.markInputTarget();
+            report({
+                states,
+                after: parseAgentRows().map(row => row.state),
+                unchanged: body().innerHTML === markup,
+                marks: inputTargetMarks()
+            });
+            """
+        )
+        self.assertEqual(result["states"], ["working", "idle"])
+        self.assertEqual(result["after"], ["working", "idle"])
+        self.assertTrue(result["unchanged"])
+        self.assertEqual(result["marks"], [["s2", "true"]])
+
+
+class DashboardSidebarInputTargetPageTestCase(DashboardSidebarNodeTestCase):
+    """The page half, executed: the focus lifecycle lifted out of
+    `terminals.js`, driven with focus events on a stub grid, answering the real
+    column. Two agent panes (`s1`, `s2`), a plain shell with no row (`s3`) and
+    an explorer card (`s4`)."""
+
+    SETUP = TERMINAL_FOCUS_PAGE + TERMINAL_FOCUS_SOURCE + """
+        sidebarShown();
+        mountPane(0, 's1');
+        mountPane(1, 's2');
+        mountPane(2, 's3');
+        mountPane(3, 's4', 'explorer-pane');
+        fetchAnswer = snapshot([group([
+            pane(),
+            pane({ session_id: 's2', index: 1 })
+        ], { pane_count: 4 })]);
+        await sidebar.refresh();
+    """
+
+    def _run_page(self, body: str):
+        return self._run_node(self.SETUP + body)
+
+    def test_focus_moving_between_agent_panes_moves_the_row(self):
+        result = self._run_page(
+            """
+            moveFocus(grid.children[0].input);
+            const first = { marks: inputTargetMarks(), cards: activeCards() };
+            moveFocus(grid.children[1].input);
+            report({ first, second: { marks: inputTargetMarks(), cards: activeCards() } });
+            """
+        )
+        self.assertEqual(result["first"], {"marks": [["s1", "true"]], "cards": ["tc-0"]})
+        self.assertEqual(result["second"], {"marks": [["s2", "true"]], "cards": ["tc-1"]})
+
+    def test_focus_leaving_for_anything_but_an_agent_terminal_clears_the_row(self):
+        result = self._run_page(
+            """
+            moveFocus(grid.children[0].input);
+            moveFocus(outside);
+            const chrome = inputTargetMarks();
+            moveFocus(grid.children[1].input);
+            moveFocus(grid.children[3].input);
+            const explorer = { marks: inputTargetMarks(), cards: activeCards() };
+            moveFocus(grid.children[0].input);
+            moveFocus(grid.children[2].input);
+            report({
+                chrome, explorer,
+                shell: { marks: inputTargetMarks(), cards: activeCards() }
+            });
+            """
+        )
+        self.assertEqual(result["chrome"], [])
+        self.assertEqual(result["explorer"], {"marks": [], "cards": []})
+        # A plain shell is the input target and its pane says so; it has no row.
+        self.assertEqual(result["shell"], {"marks": [], "cards": ["tc-2"]})
+
+    def test_a_dashboard_landing_marks_the_row_it_landed_on(self):
+        result = self._run_page(
+            """
+            moveFocus(outside);
+            focusPaneForArrival(1);
+            report(inputTargetMarks());
+            """
+        )
+        self.assertEqual(result, [["s2", "true"]])
+
+    def test_a_pane_replaced_or_removed_under_focus_is_answered_by_what_is_there(self):
+        """The slot is not the identity. A relaunch into a new session keeps the
+        pane focused and names the new session; a card that has left the
+        document names nothing, whatever the slot number now holds."""
+        result = self._run_page(
+            """
+            moveFocus(grid.children[0].input);
+            terminals[0]._session.session_id = 's9';
+            sessionIds[0] = 's9';
+            await sidebar.refresh();
+            const unlisted = { target: focusedTerminalSessionId(), marks: inputTargetMarks() };
+            terminals[0]._session.session_id = 's1';
+            sessionIds[0] = 's1';
+            await sidebar.refresh();
+            const back = inputTargetMarks();
+            const removed = grid.children[0];
+            grid.children[0] = new FakeCard(0);
+            terminals[0] = { _session: { session_id: 's2', mode: 'ssh' } };
+            await sidebar.refresh();
+            report({
+                unlisted, back,
+                stillHeld: activeElement === removed.input,
+                afterRemoval: { target: focusedTerminalSessionId(), marks: inputTargetMarks() }
+            });
+            """
+        )
+        self.assertEqual(result["unlisted"], {"target": "s9", "marks": []})
+        self.assertEqual(result["back"], [["s1", "true"]])
+        self.assertTrue(result["stillHeld"])
+        self.assertEqual(result["afterRemoval"], {"target": "", "marks": []})
+
+    def test_switching_the_focused_pane_to_files_clears_the_row_before_any_reading(self):
+        """The mode switch replaces the pane's input without a focusout, so the
+        target is dropped by the switch itself -- not left for the next poll,
+        which may fail -- and only for the pane being switched."""
+        result = self._run_page(
+            """
+            moveFocus(grid.children[0].input);
+            replaceSessionPaneMode(1, { session_id: 's2', mode: 'explorer' });
+            const other = { marks: inputTargetMarks(), index: _focusedTerminalIndex };
+            replaceSessionPaneMode(0, { session_id: 's1', mode: 'explorer' });
+            const switched = {
+                marks: inputTargetMarks(),
+                index: _focusedTerminalIndex,
+                cards: activeCards()
+            };
+            fetchAnswer = null;
+            await sidebar.refresh();
+            report({ other, switched, afterFailedRead: inputTargetMarks() });
+            """
+        )
+        self.assertEqual(result["other"], {"marks": [["s1", "true"]], "index": 0})
+        self.assertEqual(result["switched"], {"marks": [], "index": -1, "cards": []})
+        self.assertEqual(result["afterFailedRead"], [])
+
+    def test_a_failed_reading_still_unmarks_a_target_that_went_away(self):
+        result = self._run_page(
+            """
+            moveFocus(grid.children[0].input);
+            const removed = grid.children[0];
+            grid.children[0] = new FakeCard(0);
+            fetchAnswer = null;
+            await sidebar.refresh();
+            report({ stillHeld: activeElement === removed.input, marks: inputTargetMarks() });
+            """
+        )
+        self.assertTrue(result["stillHeld"])
+        self.assertEqual(result["marks"], [])
+
+    def test_leaving_the_window_or_the_tab_clears_the_row(self):
+        result = self._run_page(
+            """
+            moveFocus(grid.children[0].input);
+            dropTerminalFocusForWindowSwitch();
+            const windowSwitch = {
+                marks: inputTargetMarks(), cards: activeCards(), focus: activeElement
+            };
+            moveFocus(grid.children[1].input);
+            const card = grid.children[1];
+            cacheVisibleGroupView('g1');
+            report({
+                windowSwitch,
+                tabSwitch: {
+                    marks: inputTargetMarks(),
+                    index: _focusedTerminalIndex,
+                    cardStillActive: card.classList.contains('terminal-active'),
+                    cached: cachedGroupViews.has('g1')
+                }
+            });
+            """
+        )
+        self.assertEqual(
+            result["windowSwitch"], {"marks": [], "cards": [], "focus": None}
+        )
+        self.assertEqual(
+            result["tabSwitch"],
+            {"marks": [], "index": -1, "cardStillActive": False, "cached": True},
+        )
+
+    def test_pressing_broadcast_keeps_the_pane_being_typed_into(self):
+        """Broadcast rings every plain pane; it neither makes every agent the
+        pane being typed into nor moves which one is. The press does not take
+        focus, so turning it on keeps the second pane rather than falling back
+        to the first, and turning it off leaves that pane where it was."""
+        result = self._run_page(
+            """
+            wireBroadcastButton();
+            moveFocus(grid.children[1].input);
+            pressBroadcast();
+            const on = {
+                broadcast: grid.classList.contains('broadcast-input'),
+                ring: grid.classList.contains('terminal-focus'),
+                marks: inputTargetMarks(),
+                cards: activeCards()
+            };
+            pressBroadcast();
+            report({
+                on,
+                off: {
+                    broadcast: grid.classList.contains('broadcast-input'),
+                    marks: inputTargetMarks(),
+                    cards: activeCards()
+                }
+            });
+            """
+        )
+        self.assertEqual(
+            result["on"],
+            {"broadcast": True, "ring": True, "marks": [["s2", "true"]], "cards": ["tc-1"]},
+        )
+        self.assertEqual(
+            result["off"],
+            {"broadcast": False, "marks": [["s2", "true"]], "cards": ["tc-1"]},
+        )
+
+
 PAGE_WIRING_STUBS = r"""
 /* The page, as `dashboard-sidebar.js` finds it when it loads itself. Loaded
    *before* the module, because the browser half of the UMD wrapper wires a
@@ -1242,12 +1823,17 @@ class DashboardSidebarPageWiringTestCase(unittest.TestCase):
                 /* The side is a fourth name the page calls — at boot, off its
                    own constant, and again on every app-config delivery. */
                 'applyAgentDashboardSidebarSide',
-                'agentDashboardSidebarSide'
+                'agentDashboardSidebarSide',
+                /* terminals.js calls this on every focus change, and the
+                   column reads the answer back off the page's own name. */
+                'markAgentDashboardSidebarInputTarget'
             ];
             wireAgentDashboardSidebar();
             applyAgentDashboardSidebar(true, { persist: false });
             applyAgentDashboardSidebarSide('right');
+            window.focusedTerminalSessionId = () => 's4';
             process.stdout.write(JSON.stringify({
+                inputTarget: markAgentDashboardSidebarInputTarget(),
                 callable: named.filter(name => typeof window[name] === 'function'),
                 applied: agentDashboardSidebarOpen(),
                 side: agentDashboardSidebarSide(),
@@ -1258,7 +1844,8 @@ class DashboardSidebarPageWiringTestCase(unittest.TestCase):
             }));
             """
         )
-        self.assertEqual(len(result["callable"]), 7)
+        self.assertEqual(len(result["callable"]), 8)
+        self.assertEqual(result["inputTarget"], "s4")
         self.assertTrue(result["applied"])
         self.assertEqual(result["side"], "right")
         self.assertEqual(result["writes"], [])
@@ -2340,6 +2927,27 @@ class DashboardSidebarPageTestCase(unittest.TestCase):
         for literal in re.findall(r"#[0-9a-fA-F]{3,8}\b", css):
             self.fail(f"palette literal in agent-dashboard-sidebar.css: {literal}")
         self.assertNotIn("rgb(", css)
+
+    def test_the_input_target_ring_is_the_panes_own_accent_in_both_themes(self):
+        """The row wears the ring its terminal wears: the accent token both
+        pages theme, inset and not a fill, so it stays apart from the hover and
+        keyboard-focus wash. The token is defined for the dark root and again
+        for the light theme, so the ring follows the theme with the pane."""
+        css = self._static("css/agent-dashboard-sidebar.css")
+        rule = re.search(
+            r"\.agent-sidebar \.dash-agent\.is-input-target\s*\{([^}]*)\}", css
+        )
+        self.assertIsNotNone(rule)
+        self.assertIn("box-shadow: inset 0 0 0 2px var(--gv-accent)", rule.group(1))
+        self.assertNotIn("background", rule.group(1))
+
+        tokens = self._static("css/tokens.css")
+        dark = tokens[tokens.index(":root {"):]
+        light = tokens[tokens.index('[data-theme="light"] {'):]
+        self.assertRegex(dark[:dark.index("}")], r"--gv-accent:\s*#")
+        self.assertRegex(light[:light.index("}")], r"--gv-accent:\s*#")
+        # The terminal's active border reads the same token.
+        self.assertIn("--t-accent: var(--gv-accent);", self._static("css/terminals.css"))
 
     def test_the_module_is_loaded_after_the_dialog_whose_renderers_it_uses(self):
         html = self._page()
