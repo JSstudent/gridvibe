@@ -243,11 +243,11 @@ class ToolLaunchValidationTestCase(_Case):
         origin = self._pane()
 
         response, groups, workspaces = self._launch(
-            [self._agent("opencode", agent_mcp=True)], origin
+            [self._agent("kilo", agent_mcp=True)], origin
         )
 
         self._assert_nothing_launched(response, groups, workspaces)
-        self.assertIn("opencode cannot be given GridVibe's tools", response.get_json()["error"])
+        self.assertIn("kilo cannot be given GridVibe's tools", response.get_json()["error"])
 
     def test_every_pane_whose_agent_cannot_take_a_task_is_named_together(self):
         origin = self._pane(startup_mode="agent", agent_selection="claude",
@@ -308,11 +308,11 @@ class SplitMcpRefusalTestCase(_Case):
 
         response = self.client.post(
             f"/api/sessions/{source.session_id}/split-intent",
-            json={"axis": "vertical", "kind": "agent", "agent": "opencode", "mcp": True},
+            json={"axis": "vertical", "kind": "agent", "agent": "kilo", "mcp": True},
         )
 
         self.assertEqual(response.status_code, 400)
-        self.assertIn("opencode cannot be given GridVibe's tools", response.get_json()["error"])
+        self.assertIn("kilo cannot be given GridVibe's tools", response.get_json()["error"])
 
 
 # ==================== the sidecar ====================

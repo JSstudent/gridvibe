@@ -27,10 +27,10 @@ from web.agent_conversations import (
     compose_conversation_command,
 )
 from web.agent_handoffs import HANDOFF_OPENING_PROMPT
-from web.agent_session_hooks import claude_settings_fragment
+from web.agent_session_hooks import UNQUOTABLE_PATH_CHARACTERS, claude_settings_fragment
 from web.config import _load_json_file, runtime_config
 from web.hostkeys import _apply_host_key_policy
-from web.mcp_launch import pane_can_run_the_sidecar
+from web.mcp_launch import OPENCODE_CONFIG_STYLE, pane_can_run_the_sidecar
 from web.paths import BASE_DIR
 from web.saved_sessions import _normalize_connection_mode
 
@@ -163,6 +163,15 @@ _MCP_FLAG_TEMPLATE = re.compile(r"^--?[A-Za-z0-9][A-Za-z0-9_-]*\s@?\{config\}$")
 #: keep off the launch line.
 _MCP_STYLE_INLINE_TOML = "inline_toml"
 
+#: opencode takes no config flag either. It reads one more config file, merged
+#: over the user's own, from the path in ``OPENCODE_CONFIG`` -- so the sidecar
+#: rides in as an environment variable set *ahead of* the binary. The same
+#: value ``web.ssh_tunnel`` compares against when it picks the remote shape.
+_MCP_STYLE_OPENCODE_CONFIG = OPENCODE_CONFIG_STYLE
+
+#: The variable opencode reads that path from.
+_OPENCODE_CONFIG_VARIABLE = "OPENCODE_CONFIG"
+
 #: A server name is a TOML bare key here, so it may hold nothing that would
 #: need quoting or open a second table.
 _MCP_SERVER_NAME = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
@@ -205,15 +214,18 @@ def _agent_mcp_flag(agent_key: Any) -> str:
 def _agent_supports_mcp(agent_key: Any) -> bool:
     """Whether this CLI can be handed the sidecar at launch, by any shape.
 
-    The one question the checkbox asks. Five of the eight registered CLIs can
-    only register an MCP server by *mutating the user's own config* (an
-    ``<agent> mcp add`` subcommand), which a checkbox on a pane has no business
-    doing and which would outlive the pane that asked. Those publish nothing
-    here and get no checkbox.
+    The one question the checkbox asks. Four of the eight registered CLIs can
+    be handed the sidecar for one launch: a config-file flag (Claude,
+    Copilot), ``-c`` overrides (Codex) or a per-process config variable
+    (opencode). The other four can only register an MCP server by *mutating
+    the user's own config* (an ``<agent> mcp add`` subcommand), which a
+    checkbox on a pane has no business doing and which would outlive the pane
+    that asked. Those publish nothing here and get no checkbox.
     """
     return bool(
         _agent_mcp_flag(agent_key)
-        or _agent_mcp_style(agent_key) == _MCP_STYLE_INLINE_TOML
+        or _agent_mcp_style(agent_key)
+        in (_MCP_STYLE_INLINE_TOML, _MCP_STYLE_OPENCODE_CONFIG)
     )
 
 
@@ -523,10 +535,11 @@ def _agent_mcp_command_fragment(
 ) -> str:
     """Return the composed MCP launch fragment for one agent, or "".
 
-    Two shapes, because the CLIs have two. Most take a config *file*
+    Two suffix shapes. Most take a config *file*
     (``--mcp-config "<path>"``; Copilot's ``@`` marks the argument as a path
     rather than inline JSON), and Codex takes the servers themselves as
-    ``-c`` overrides.
+    ``-c`` overrides. opencode's shape is a *prefix*, so it is
+    :func:`_agent_mcp_env_prefix`'s and this returns "" for it.
 
     Empty whenever the result cannot be trusted to work: no registry block, no
     generated config on disk (the write failed, or this is a checkout that has
@@ -580,6 +593,70 @@ def _agent_mcp_command_fragment(
     placeholder = _MCP_MARKER_PLACEHOLDER if marked else _MCP_CONFIG_PLACEHOLDER
     value = f'"@{resolved}"' if marked else f'"{resolved}"'
     return template.replace(placeholder, value)
+
+
+def _opencode_config_prefix(path: Any, shell_family: str, *, wsl: bool = False) -> str:
+    """The ``OPENCODE_CONFIG`` assignment typed in front of ``opencode``, or "".
+
+    POSIX ``env`` scopes the variable to the one process and reads the same in
+    every login shell an SSH host might hold. PowerShell and cmd have no
+    per-command form, so there it stays in the pane's shell until the next
+    relaunch restarts that shell.
+
+    ``wsl`` is a local WSL pane, whose ``opencode`` is the Windows binary
+    reached through interop: a variable set on the Linux side crosses to it
+    only when ``WSLENV`` names it. GridVibe always sets ``WSLENV`` in such a
+    pane, so the appended entry never starts an empty list.
+
+    A path holding a character that cannot sit inside double quotes in all
+    three shells resolves to no prefix: the agent still starts, without tools.
+    """
+    target = str(path or "")
+    if not target or any(ch in UNQUOTABLE_PATH_CHARACTERS for ch in target):
+        return ""
+    variable = _OPENCODE_CONFIG_VARIABLE
+    if shell_family == "powershell":
+        return f'$env:{variable}="{target}"; '
+    if shell_family == "cmd":
+        return f'set "{variable}={target}" & '
+    if wsl:
+        return f'env WSLENV="$WSLENV:{variable}" {variable}="{target}" '
+    return f'env {variable}="{target}" '
+
+
+def _agent_mcp_env_prefix(
+    agent_key: Any,
+    config_path: Optional[str] = None,
+    shell_family: str = "",
+    *,
+    remote: bool = False,
+    wsl: bool = False,
+) -> str:
+    """Return what goes *in front of* the binary to hand it the sidecar, or "".
+
+    Only the opencode style has one; every other shape is a suffix from
+    :func:`_agent_mcp_command_fragment`. Kept apart from that function so no
+    caller can append a variable assignment after the binary it is meant for.
+
+    A local pane names the generated opencode document on this machine, which
+    must exist -- the same "costs the tools, never the agent" rule as the
+    suffix. A ``remote`` pane names what its tunnel wrote on its own host, in
+    the POSIX form, unchecked for the same reason the suffix's remote path is.
+    """
+    if _agent_mcp_style(agent_key) != _MCP_STYLE_OPENCODE_CONFIG:
+        return ""
+    if remote:
+        return _opencode_config_prefix(config_path, "posix")
+    if config_path is None:
+        from web.mcp_launch import opencode_config_path
+
+        try:
+            config_path = opencode_config_path()
+        except RuntimeError:
+            return ""
+    if not os.path.isfile(str(config_path or "")):
+        return ""
+    return _opencode_config_prefix(config_path, shell_family, wsl=wsl)
 
 
 def _agent_options() -> List[Dict[str, str]]:
@@ -691,6 +768,9 @@ def _compose_agent_startup_command(
     # set (a fresh Claude `--session-id` is a create, and takes a prompt).
     resumed = command != base and bool(getattr(session, CONVERSATION_RESUME_FIELD, False))
     mcp_fragment_placed = False
+    # opencode's config variable goes in front of the whole line, so it is
+    # applied last: the opening prompt below is placed relative to `base`.
+    env_prefix = ""
     if agent_key == "codex":
         # Launch-only override: the CLI's default title contains the project,
         # while thread-title follows the active conversation and /rename.
@@ -721,6 +801,11 @@ def _compose_agent_startup_command(
             fragment = _agent_mcp_command_fragment(
                 agent_key, shell_family=shell_family, identity=identity
             )
+            env_prefix = _agent_mcp_env_prefix(
+                agent_key,
+                shell_family=shell_family,
+                wsl=bool(getattr(session, "use_wsl", False)),
+            )
         elif remote_config_path:
             fragment = _agent_mcp_command_fragment(
                 agent_key,
@@ -728,10 +813,15 @@ def _compose_agent_startup_command(
                 shell_family="posix",
                 remote_url=remote_url or "",
             )
+            env_prefix = _agent_mcp_env_prefix(
+                agent_key, remote_config_path, remote=True
+            )
         else:
             fragment = ""
         if fragment:
             command += f" {fragment}"
+            mcp_fragment_placed = True
+        if env_prefix:
             mcp_fragment_placed = True
     if (
         opening_prompt
@@ -742,7 +832,7 @@ def _compose_agent_startup_command(
         prompt = _opening_prompt_fragment(agent_key)
         if prompt:
             command = f"{base} {prompt}{command[len(base):]}"
-    return command
+    return f"{env_prefix}{command}"
 
 
 def _normalize_agent_key(value: Any) -> str:

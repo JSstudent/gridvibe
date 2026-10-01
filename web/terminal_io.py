@@ -3485,7 +3485,7 @@ def _establish_mcp_tunnel(
     )
     if not _agent_supports_mcp(agent_key):
         # The last place this is asked, and the only one with a cost attached
-        # -- the flag is refused at every write. Five of the eight registered
+        # -- the flag is refused at every write. Four of the eight registered
         # CLIs can register an MCP
         # server only by mutating the user's own config, so their launch line
         # carries nothing -- and a reverse forward, a minted token and a file

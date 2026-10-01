@@ -22690,7 +22690,7 @@ class SettingsLauncherConfigTestCase(unittest.TestCase):
         self.assertEqual(options["codex"]["mcp_flag"], "")
         self.assertTrue(options["codex"]["mcp_supported"])
 
-        for key in ("claude", "copilot", "codex"):
+        for key in ("claude", "copilot", "codex", "opencode"):
             with self.subTest(supported=key):
                 self.assertTrue(options[key]["mcp_supported"])
                 self.assertTrue(options[key]["mcp_description"])
@@ -22698,7 +22698,7 @@ class SettingsLauncherConfigTestCase(unittest.TestCase):
         # The rest can only register a server by editing the user's own config
         # (an `<agent> mcp add` subcommand), which would outlive the pane that
         # asked. No launch-time mechanism, so no checkbox.
-        for key in ("kimi", "kilo", "grok", "hermes", "opencode", "other"):
+        for key in ("kimi", "kilo", "grok", "hermes", "other"):
             with self.subTest(agent=key):
                 self.assertEqual(options[key]["mcp_flag"], "")
                 self.assertFalse(options[key]["mcp_supported"])

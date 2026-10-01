@@ -251,7 +251,12 @@
     "update": {
       "command": "opencode upgrade"
     },
-    "post_install": "Run opencode and complete /connect."
+    "post_install": "Run opencode and complete /connect.",
+    "mcp": {
+      "style": "opencode_config",
+      "description": "Gives this agent tools to see and build GridVibe workspaces.",
+      "verified": true
+    }
   },
   "kilo": {
     "label": "kilo",

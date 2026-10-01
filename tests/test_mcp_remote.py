@@ -1375,9 +1375,9 @@ class EstablishTunnelTestCase(unittest.TestCase):
         self.assertEqual(mcp_http.pane_tokens.resolve(self._minted_token()), {})
 
     def test_an_agent_with_no_mechanism_asks_the_remote_host_for_nothing(self):
-        """No port, no token, no file -- for five of the eight registered CLIs,
+        """No port, no token, no file -- for four of the eight registered CLIs,
         whose launch line carries nothing whatever this flag says."""
-        for agent in ("grok", "hermes", "opencode", "kilo", "kimi"):
+        for agent in ("grok", "hermes", "kilo", "kimi"):
             with self.subTest(agent=agent):
                 connection = self._open_pane(f"pane-{agent}")
 
@@ -1389,8 +1389,8 @@ class EstablishTunnelTestCase(unittest.TestCase):
                 self.assertNotIn("mcp_tunnel", connection)
                 self.client.open_sftp.assert_not_called()
 
-    def test_the_three_that_can_take_one_still_do(self):
-        for agent in ("claude", "copilot", "codex"):
+    def test_the_four_that_can_take_one_still_do(self):
+        for agent in ("claude", "copilot", "codex", "opencode"):
             with self.subTest(agent=agent):
                 self.establish.reset_mock()
                 connection = self._open_pane(f"pane-{agent}")
@@ -1416,14 +1416,12 @@ class EstablishTunnelTestCase(unittest.TestCase):
                     web_agents._agent_mcp_style(agent),
                 )
 
-        # An agent whose registry block names the opencode format gets it.
+        # opencode's registry block names its own format, so the remote host
+        # is written the document opencode reads.
         connection = self._open_pane("pane-oc")
-        with patch.object(web_agents, "_agent_supports_mcp", return_value=True), \
-                patch.object(web_agents, "_agent_mcp_style",
-                             return_value=mcp_launch.OPENCODE_CONFIG_STYLE):
-            self.terminal._establish_mcp_tunnel(
-                "pane-oc", self._session("opencode"), connection, self.client
-            )
+        self.terminal._establish_mcp_tunnel(
+            "pane-oc", self._session("opencode"), connection, self.client
+        )
 
         self.assertEqual(
             self.establish.call_args.kwargs["style"], mcp_launch.OPENCODE_CONFIG_STYLE
@@ -1588,6 +1586,22 @@ class RemoteLaunchLineTestCase(unittest.TestCase):
         )
 
         self.assertIn('-c "mcp_servers.gridvibe.url=', command)
+
+    def test_opencode_is_pointed_at_its_own_document_by_a_posix_env_prefix(self):
+        # POSIX even on a Windows host: the remote shell reads this line, and
+        # no WSLENV entry, because the pane's opencode is not reached by interop.
+        with patch.object(web_agents.os, "name", "nt"):
+            command = web_agents._compose_agent_startup_command(
+                self._pane("opencode"), remote_config_path=self.REMOTE, remote_url=self.URL
+            )
+
+        self.assertEqual(command, f'env OPENCODE_CONFIG="{self.REMOTE}" opencode')
+
+    def test_opencode_with_no_tunnel_gets_no_prefix(self):
+        self.assertEqual(
+            web_agents._compose_agent_startup_command(self._pane("opencode")),
+            "opencode",
+        )
 
     def test_no_tunnel_means_no_fragment_rather_than_a_local_path(self):
         command = web_agents._compose_agent_startup_command(self._pane())
