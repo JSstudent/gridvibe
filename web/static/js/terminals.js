@@ -646,7 +646,9 @@
        still be stacked two or three deep instead of only side-by-side; a terminal
        narrower/shorter than the floors simply can't be split further. */
     const MIN_SPLIT_ROWS = 4;
-    const MIN_RESIZE_SURFACE_RATIO = 1 / 16;
+    /* A divider may not shrink a pane below this share of the grid's width
+       (vertical divider) or height (horizontal divider). */
+    const MIN_RESIZE_AXIS_RATIO = 1 / 16;
     /* Grid-unit size of one base layout cell. Larger = more headroom to keep
        halving a pane before the integer-grid `>= 2` guard bites, so splitting is
        gated by the real character-size minimum rather than the coordinate
@@ -3515,43 +3517,50 @@
         };
     }
 
-    function validateResizeCandidate(axis, candidateWeights) {
+    /* Whether moving a divider to `candidateWeights` keeps every pane it
+       shrinks at its minimum. Each pane is compared with the arrangement the
+       move started from — `startWeights` on the same axis, the painted
+       weights by default — so a pane already at or below its floor blocks
+       only the dividers that would shrink it further. The rule is
+       `GridVibeBackgroundResize.policy.fits`, shared with a resize from
+       behind; this measures the live grid for it, pane by pane, at each
+       pane's own cell and header size. */
+    function validateResizeCandidate(axis, candidateWeights, startWeights = null) {
         const grid = document.getElementById('terminalsGrid');
         const rects = splitSlotRects;
-        if (!grid || !Array.isArray(rects) || rects.length !== grid.children.length) {
+        const policy = window.GridVibeBackgroundResize?.policy;
+        if (!grid || !policy || !Array.isArray(rects) || rects.length !== grid.children.length) {
             return false;
         }
 
-        const columnWeights = axis === 'vertical' ? candidateWeights : splitColumnWeights;
-        const rowWeights = axis === 'horizontal' ? candidateWeights : splitRowWeights;
+        const vertical = axis === 'vertical';
+        const columnWeights = vertical ? candidateWeights : splitColumnWeights;
+        const rowWeights = vertical ? splitRowWeights : candidateWeights;
+        const startColumnWeights = vertical ? (startWeights || splitColumnWeights) : splitColumnWeights;
+        const startRowWeights = vertical ? splitRowWeights : (startWeights || splitRowWeights);
         const metrics = getResizableGridMetrics(grid, columnWeights, rowWeights);
-        if (!metrics || metrics.gridContentWidth <= 0 || metrics.gridContentHeight <= 0) {
+        const startMetrics = getResizableGridMetrics(grid, startColumnWeights, startRowWeights);
+        if (!metrics || !startMetrics || metrics.gridContentWidth <= 0 || metrics.gridContentHeight <= 0) {
             return false;
         }
 
-        const minimumSurface = metrics.columnTrackSpace * metrics.rowTrackSpace * MIN_RESIZE_SURFACE_RATIO;
         return rects.every((rect, visualIndex) => {
-            const surface = getPaneCandidateSurface(rect, columnWeights, rowWeights, metrics);
-            if (surface.width * surface.height < minimumSurface) {
-                return false;
-            }
-
             const card = grid.children[visualIndex];
             const slotIndex = Number(card?.dataset?.slot);
             const terminal = Number.isInteger(slotIndex) ? terminals[slotIndex] : null;
-            if (isExplorerPaneInstance(terminal) || isExplorerSession(terminal?._session)) {
-                return true;
-            }
-
-            const headerHeight = card?.querySelector('.terminal-header')?.getBoundingClientRect()?.height || 34;
-            const term = terminal?.term;
-            const cell = term?._core?._renderService?.dimensions?.css?.cell || {};
-            const cellWidth = Number(cell.width || 8);
-            const cellHeight = Number(cell.height || 17);
-            const availableWidth = Math.max(0, surface.width - 2);
-            const availableHeight = Math.max(0, surface.height - headerHeight - 2);
-            return Math.floor(availableWidth / cellWidth) >= MIN_SPLIT_COLS
-                && Math.floor(availableHeight / cellHeight) >= MIN_SPLIT_ROWS;
+            const cell = terminal?.term?._core?._renderService?.dimensions?.css?.cell || {};
+            return policy.fits({
+                surfaces: [getPaneCandidateSurface(rect, columnWeights, rowWeights, metrics)],
+                previous: [getPaneCandidateSurface(rect, startColumnWeights, startRowWeights, startMetrics)],
+                columnTrackSpace: metrics.columnTrackSpace,
+                rowTrackSpace: metrics.rowTrackSpace,
+                exempt: [isExplorerPaneInstance(terminal) || isExplorerSession(terminal?._session)],
+                cell,
+                headerHeight: card?.querySelector('.terminal-header')?.getBoundingClientRect()?.height || 34,
+                minCols: MIN_SPLIT_COLS,
+                minRows: MIN_SPLIT_ROWS,
+                minAxisRatio: MIN_RESIZE_AXIS_RATIO
+            });
         });
     }
 
@@ -3619,11 +3628,17 @@
         return trackTotal + Math.max(0, lineIndex - 1) * gap + (gap / 2);
     }
 
+    /* The panes a move of this divider can resize: every pane holding a track
+       of the two groups `getResizeTrackGroups` rescales, not only the panes
+       on the line — in a nested layout a pane further along a group changes
+       size too. */
     function affectedResizeIndices(axis, lineIndex) {
         const grid = document.getElementById('terminalsGrid');
-        if (!grid || !Array.isArray(splitSlotRects)) {
+        const groups = getResizeTrackGroups(axis, lineIndex);
+        if (!grid || !Array.isArray(splitSlotRects) || !groups) {
             return terminals.map((_, index) => index);
         }
+        const changed = new Set([...groups.before, ...groups.after]);
         return Array.from(grid.children)
             .map((card, visualIndex) => {
                 const rect = splitSlotRects[visualIndex];
@@ -3631,10 +3646,14 @@
                 if (!rect || !Number.isInteger(slotIndex)) {
                     return -1;
                 }
-                const containsLineNeighbor = axis === 'vertical'
-                    ? rect.x <= lineIndex + 1 && rect.x + rect.w - 1 >= lineIndex
-                    : rect.y <= lineIndex + 1 && rect.y + rect.h - 1 >= lineIndex;
-                return containsLineNeighbor ? slotIndex : -1;
+                const start = (axis === 'vertical' ? rect.x : rect.y) - 1;
+                const span = axis === 'vertical' ? rect.w : rect.h;
+                for (let track = start; track < start + span; track++) {
+                    if (changed.has(track)) {
+                        return slotIndex;
+                    }
+                }
+                return -1;
             })
             .filter(index => index >= 0);
     }
@@ -3791,6 +3810,8 @@
             trackGroups,
             affectedIndices: affectedResizeIndices(axis, lineIndex),
             handle,
+            startHandleOffset: parseFloat(axis === 'vertical' ? handle.style.left : handle.style.top) || 0,
+            appliedDelta: 0,
             fitFrame: null,
         };
     }
@@ -3805,7 +3826,15 @@
                 return;
             }
             resize.fitFrame = null;
-            resize.affectedIndices.forEach(index => scheduleFit(index));
+            resize.affectedIndices.forEach(index => {
+                scheduleFit(index);
+                /* A terminal's resize observer refreshes its own header and
+                   split buttons; an explorer or browser pane has none. */
+                if (!terminals[index]?._resizeObserved) {
+                    updateSplitButtonState(index);
+                    updatePaneHeaderLayout(index);
+                }
+            });
         });
     }
 
@@ -3817,40 +3846,41 @@
         event.preventDefault();
         event.stopPropagation();
 
+        const geometry = window.GridVibeSplitGeometry;
+        if (!geometry) {
+            return;
+        }
         const isVertical = resize.axis === 'vertical';
-        const delta = isVertical
+        const pointerDelta = isVertical
             ? event.clientX - resize.startClientX
             : event.clientY - resize.startClientY;
         const sizes = isVertical ? resize.startColumnSizes : resize.startRowSizes;
         const weights = isVertical ? resize.startColumnWeights : resize.startRowWeights;
-        const beforeIndexes = resize.trackGroups.before;
-        const afterIndexes = resize.trackGroups.after;
-        const beforeStartSize = beforeIndexes.reduce((sum, index) => sum + (sizes[index] || 0), 0) || 1;
-        const afterStartSize = afterIndexes.reduce((sum, index) => sum + (sizes[index] || 0), 0) || 1;
-        const beforeSize = Math.max(1, beforeStartSize + delta);
-        const afterSize = Math.max(1, afterStartSize - delta);
-        const beforeScale = beforeSize / beforeStartSize;
-        const afterScale = afterSize / afterStartSize;
-        const candidateWeights = weights.slice();
-        beforeIndexes.forEach(index => {
-            candidateWeights[index] = Math.max(0.01, weights[index] * beforeScale);
-        });
-        afterIndexes.forEach(index => {
-            candidateWeights[index] = Math.max(0.01, weights[index] * afterScale);
-        });
-
-        if (!validateResizeCandidate(resize.axis, candidateWeights)) {
+        const weightsFor = delta => geometry.dragDividerWeights(weights, sizes, resize.trackGroups, delta);
+        const reach = geometry.dividerDragRange(weights, sizes, resize.trackGroups);
+        /* Past a pane's minimum the divider stops at it rather than where the
+           last accepted event left it; the pointer can come back and resume. */
+        const delta = geometry.clampDividerDelta(
+            Math.min(reach.max, Math.max(reach.min, pointerDelta)),
+            candidate => validateResizeCandidate(resize.axis, weightsFor(candidate), weights)
+        );
+        if (delta === resize.appliedDelta) {
             return;
         }
+        resize.appliedDelta = delta;
+        const candidateWeights = weightsFor(delta);
 
         if (isVertical) {
             splitColumnWeights = candidateWeights;
-            resize.handle.style.left = `${event.clientX}px`;
+            resize.handle.style.left = `${resize.startHandleOffset + delta}px`;
         } else {
             splitRowWeights = candidateWeights;
-            resize.handle.style.top = `${event.clientY}px`;
+            resize.handle.style.top = `${resize.startHandleOffset + delta}px`;
         }
-        applySplitSlotGeometry({ fit: false, renderHandles: false });
+        /* Only the panes beside the line refresh their headers and split
+           buttons, once a frame (`scheduleActiveGridResizeFits`); re-measuring
+           every pane on every pointer event made the drag lag the pointer. */
+        applySplitSlotGeometry({ fit: false, renderHandles: false, refreshPanes: false });
         scheduleActiveGridResizeFits();
     }
 
@@ -4099,7 +4129,7 @@
         return splitSlotRects;
     }
 
-    function applySplitSlotGeometry({ fit = true, renderHandles = true } = {}) {
+    function applySplitSlotGeometry({ fit = true, renderHandles = true, refreshPanes = true } = {}) {
         const grid = document.getElementById('terminalsGrid');
         if (!grid || !Array.isArray(splitSlotRects) || splitSlotRects.length !== grid.children.length) {
             return false;
@@ -4126,7 +4156,9 @@
                 }
             }
         });
-        updateAllSplitButtonStates();
+        if (refreshPanes) {
+            updateAllSplitButtonStates();
+        }
         if (renderHandles) {
             renderResizeHandles();
         }
@@ -8035,7 +8067,7 @@
             limits: {
                 minCols: MIN_SPLIT_COLS,
                 minRows: MIN_SPLIT_ROWS,
-                minSurfaceRatio: MIN_RESIZE_SURFACE_RATIO
+                minAxisRatio: MIN_RESIZE_AXIS_RATIO
             }
         })
         : null;

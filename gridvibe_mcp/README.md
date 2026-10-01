@@ -242,8 +242,10 @@ refused as `ambiguous`; a missing one is `not_found` and suggests
 line is between columns N and N+1; a horizontal line is between rows N and
 N+1. `position` is a fraction of the full grid width or height, strictly
 between 0 and 1. The page moves only that track boundary and refuses a stale
-revision, a divider absent from the layout, a position that violates pane
-minimums, or a narrow viewport. The session may be any tab of its window: one
+revision, a divider absent from the layout, a position that would shrink a pane
+below its minimum (1/16 of the grid's width or height, or the terminal's column
+or row floor; a pane the move does not shrink is never the reason), or a narrow
+viewport. The session may be any tab of its window: one
 that isn't showing is resized without switching tabs or moving focus, and has
 its new proportions the next time it is shown. Such a tab is refused while it
 holds a pane close it has not shown since, because that close would replace the

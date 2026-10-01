@@ -294,7 +294,7 @@ GridVibe does not proxy pages or bypass `X-Frame-Options`/CSP, so sites that blo
 | **Window** | |
 | `Alt+X` | Minimize every GridVibe window (native window only) |
 
-**Mouse:** `Alt`+click folds a whole sibling level in the Files tree, or collapses every commit in the Git graph. `Ctrl`+click and `Shift`+click extend the explorer selection. Drag the dividers between panes to resize them.
+**Mouse:** `Alt`+click folds a whole sibling level in the Files tree, or collapses every commit in the Git graph. `Ctrl`+click and `Shift`+click extend the explorer selection. Drag the dividers between panes to resize them; a divider stops where it would make a pane narrower or shorter than 1/16 of the grid, and a pane at that limit can still be made larger.
 
 The one configurable chord in GridVibe is voice push-to-talk, set in App Settings.
 

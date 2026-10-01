@@ -2061,8 +2061,9 @@ in `README.md`; state the rules a change has to keep.
   acknowledging it. For a tab it holds but is not painting,
   `web/static/js/background-resize.js` does the same off the tab's model, with
   the read, shared-grid measure, hold, write and adopt steps it shares with the
-  background split in `background-tab.js`; its minimum rule (`policy.fits`) is
-  pinned against `validateResizeCandidate`, and it never switches tabs or moves
+  background split in `background-tab.js`; its minimum rule is the same
+  `policy.fits` the pointer drag applies (see the divider rule under
+  [UI and styling](#ui-and-styling)), and it never switches tabs or moves
   focus. Unlike the split's write, the resize's (`writeGeometry`) changes no
   panes, so it never drops the tab's cached view: its terminals, browser
   documents and explorer views survive every outcome. A write that lands with a
@@ -2240,6 +2241,24 @@ in `README.md`; state the rules a change has to keep.
   the sidecar relays GridVibe's own words rather than the likeliest guess. The
   grid is tested before the measurement: a pane with no line left to halve has
   no halves to measure.
+- A divider's floor limits shrinking, per pane and per axis. A move may not
+  make a pane narrower than 1/16 of the grid's column track space or shorter
+  than 1/16 of its row track space (`MIN_RESIZE_AXIS_RATIO`), nor, for a pane
+  that draws a terminal, take it below `MIN_SPLIT_COLS` or `MIN_SPLIT_ROWS` on
+  that axis. Only a dimension the move shrinks is checked, measured against the
+  arrangement the move started from, so a pane already under its floor blocks
+  only the moves that would shrink it further in that dimension and can always
+  be made larger, and the rest of the grid stays resizable. A single rule,
+  `policy.fits` in `background-resize.js`, serves the pointer drag
+  (`validateResizeCandidate`), the visible `resize_divider` and the resize from
+  behind. A drag rescales the two track groups beside the line as wholes
+  (`getResizeTrackGroups`), so every pane in either group is held to the rule,
+  not only the panes on the line. The drag arithmetic is `split-geometry.js`:
+  `dividerDragRange` bounds a move to where the rescale stays exact and inside
+  the stored weight bounds, and `clampDividerDelta` stops a refused move at the
+  floor it crossed rather than dropping it. While dragging, only the panes those
+  groups resize (`affectedResizeIndices`) are refit and have their headers and
+  split buttons refreshed, once a frame; the release repaints every pane.
 
 - `agent-dashboard.css` dresses one dialog on two pages and states no page's
   palette: no `color-scheme`, no `body` rule, no full-height frame. It reads the

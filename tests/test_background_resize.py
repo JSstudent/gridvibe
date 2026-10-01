@@ -139,7 +139,7 @@ function fakePage(options = {}) {
         },
         adopt: (group, saved) => { log.push('adopt'); adopted.push({ group, saved }); },
         performShown: async intent => { log.push('performShown'); return { ok: true, viaVisible: true, intent }; },
-        limits: { minCols: 8, minRows: 4, minSurfaceRatio: 1 / 16 },
+        limits: { minCols: 8, minRows: 4, minAxisRatio: 1 / 16 },
         onError: error => log.push(`error:${error.message}`)
     };
     tab = backgroundTab.create(page);
@@ -278,8 +278,10 @@ for (const [name, rects] of Object.entries(layouts)) {
                             const columns = axis === 'vertical' ? candidate : splitColumnWeights;
                             const rows = axis === 'horizontal' ? candidate : splitRowWeights;
                             const metrics = getResizableGridMetrics(grid, columns, rows);
+                            const startMetrics = getResizableGridMetrics(grid, ones(16), ones(8));
                             const pure = resize.policy.fits({
                                 surfaces: rects.map(rect => getPaneCandidateSurface(rect, columns, rows, metrics)),
+                                previous: rects.map(rect => getPaneCandidateSurface(rect, ones(16), ones(8), startMetrics)),
                                 columnTrackSpace: metrics.columnTrackSpace,
                                 rowTrackSpace: metrics.rowTrackSpace,
                                 exempt: rects.map((_rect, index) => explorerFirst && index === 0),
@@ -287,7 +289,7 @@ for (const [name, rects] of Object.entries(layouts)) {
                                 headerHeight: header,
                                 minCols: MIN_SPLIT_COLS,
                                 minRows: MIN_SPLIT_ROWS,
-                                minSurfaceRatio: MIN_RESIZE_SURFACE_RATIO
+                                minAxisRatio: MIN_RESIZE_AXIS_RATIO
                             });
                             cases.push({ name, box, cell, header, explorerFirst, skew, axis, page, pure });
                         }
@@ -501,7 +503,7 @@ function world() {
         },
         reason: () => 'refused',
         unmeasurable: () => 'unmeasurable',
-        limits: { maxPanes: 16, minCols: 8, minRows: 4, minSurfaceRatio: 1 / 16 },
+        limits: { maxPanes: 16, minCols: 8, minRows: 4, minAxisRatio: 1 / 16 },
         onError: error => log.push(`error:${error.message}`)
     };
     const tab = backgroundTab.create(page);
@@ -1305,7 +1307,7 @@ class BackgroundResizeMinimumParityTestCase(unittest.TestCase):
     def setUpClass(cls):
         source = _terminals_source()
         lifted = "\n\n".join(
-            [_js_const_source(source, "MIN_SPLIT_COLS", "MIN_SPLIT_ROWS", "MIN_RESIZE_SURFACE_RATIO")]
+            [_js_const_source(source, "MIN_SPLIT_COLS", "MIN_SPLIT_ROWS", "MIN_RESIZE_AXIS_RATIO")]
             + [_function_source(source, name) for name in PARITY_SOURCE_NAMES]
         )
         harness = PARITY_HARNESS.replace("var window = globalThis;", "")
