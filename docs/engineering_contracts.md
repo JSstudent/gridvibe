@@ -1916,7 +1916,11 @@ in `README.md`; state the rules a change has to keep.
   one resolved interpreter, sidecar entry and URL, so they cannot disagree. The
   first carries no `env` block. The second is opencode's schema (`mcp`, `type`,
   a `command` array) and states the identity variables as `{env:<name>}`
-  references, so one file still serves every pane. A failed write costs only that
+  references, so one file still serves every pane. Its `timeout`
+  (`OPENCODE_MCP_TIMEOUT_MS`) is also stated on an SSH pane's remote opencode
+  document. opencode applies that one value to startup, tool listing and every
+  tool call, so it must outlast the longest request deadline the sidecar sets;
+  shorter, a bounded wait or focus is abandoned before it answers. A failed write costs only that
   file. Composition is registry-driven: `_MCP_FLAG_TEMPLATE` admits one option token and
   one placeholder so a registry typo cannot smuggle a second command onto the
   launch line, `_toml_override_flag` owns the per-shell quoting Codex needs, and

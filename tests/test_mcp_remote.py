@@ -468,8 +468,17 @@ class RemoteConfigTestCase(unittest.TestCase):
         self.assertNotIn("mcpServers", document)
         self.assertEqual(
             document["mcp"]["gridvibe"],
-            # No OAuth probe against an endpoint whose token is in the URL.
-            {"type": "remote", "url": url, "oauth": False},
+            {
+                "type": "remote",
+                "url": url,
+                # No OAuth probe against an endpoint whose token is in the URL.
+                "oauth": False,
+                # opencode applies it to every tool call; unset, a remote
+                # call is cut at the SDK's 60 s or a user's shorter default.
+                "timeout": mcp_launch.build_opencode_config(
+                    interpreter="python", url=url
+                )["mcp"]["gridvibe"]["timeout"],
+            },
         )
 
     def test_the_url_is_the_remote_hosts_own_loopback(self):

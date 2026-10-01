@@ -757,9 +757,12 @@ remote agent ──HTTP──▶ 127.0.0.1:<assigned>   (on the remote host)
 Nothing is installed on the remote host. The config written there names a URL,
 not a command, which is why Codex gets `-c mcp_servers.gridvibe.url=` rather
 than the inline command-and-args form a local pane gets. For opencode it is
-written in opencode's own shape, `{"mcp":{"gridvibe":{"type":"remote","url":…,"oauth":false}}}`.
+written in opencode's own shape, `{"mcp":{"gridvibe":{"type":"remote","url":…,"oauth":false,"timeout":150000}}}`.
 `oauth: false` stops opencode from probing for OAuth on an endpoint that has
-none, and the pane's line gets `env OPENCODE_CONFIG="<remote path>"`.
+none, and the pane's line gets `env OPENCODE_CONFIG="<remote path>"`. The
+`timeout` is the local document's own: opencode applies it to every tool call,
+so it outlasts the longest deadline a tool sets rather than cutting a 55 s wait
+short.
 
 Every failure costs the pane its tools and never its shell: a forward the remote
 sshd refuses, or a config that cannot be written, leaves the pane running and

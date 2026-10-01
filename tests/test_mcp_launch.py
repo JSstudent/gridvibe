@@ -50,8 +50,10 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 import tests  # noqa: E402,F401 - redirects durable state away from the real files
-from gridvibe_mcp.client import normalize_base_url  # noqa: E402
+from gridvibe_mcp import server as mcp_server  # noqa: E402
+from gridvibe_mcp.client import GridVibeClient, normalize_base_url  # noqa: E402
 from gridvibe_mcp.identity import IDENTITY_VARIABLES  # noqa: E402
+from gridvibe_mcp.windows import FOCUS_BUDGET_SECONDS  # noqa: E402
 from sessions.manager import SessionStatus  # noqa: E402
 from web import agents as web_agents  # noqa: E402
 from web import (  # noqa: E402
@@ -227,10 +229,25 @@ class OpencodeConfigTestCase(unittest.TestCase):
         for name, value in environment.items():
             self.assertEqual(value, "{env:%s}" % name)
 
-    def test_the_tool_list_gets_longer_than_opencodes_default(self):
+    def test_every_bounded_tool_call_answers_inside_opencodes_timeout(self):
+        """opencode hands this one value to every tool call, not only to the
+        tool listing, so it must outlast the longest deadline the sidecar puts
+        on a request -- a 55 s wait or focus cut at 15 s lost its answer."""
+        deadlines = []
+        client = GridVibeClient("http://127.0.0.1:5051")
+        client.request = lambda *args, **kwargs: deadlines.append(kwargs.get("timeout", client.timeout)) or {}
+
+        client.wait_for_results(
+            "pane-1", wait_seconds=mcp_server._wait_seconds({"wait_seconds": 10_000})
+        )
+        client.agent_types("pane-1")
+        client.save_group_layout("group-1", "Layout", None)
         self.write_both()
 
-        self.assertGreater(self.read()["mcp"]["gridvibe"]["timeout"], 5000)
+        timeout_seconds = self.read()["mcp"]["gridvibe"]["timeout"] / 1000
+        self.assertEqual(len(deadlines), 3)
+        self.assertGreater(timeout_seconds, max([client.timeout, *deadlines]))
+        self.assertGreater(timeout_seconds, FOCUS_BUDGET_SECONDS)
 
     def test_a_windows_interpreter_path_round_trips_unchanged(self):
         interpreter = r"C:\Program Files\Grid Vibe\.venv\Scripts\python.exe"

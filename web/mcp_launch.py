@@ -75,10 +75,17 @@ PRODUCTION_OPENCODE_CONFIG_PATH = os.path.join(BASE_DIR, OPENCODE_CONFIG_FILENAM
 #: name it too once verified.
 OPENCODE_CONFIG_STYLE = "opencode_config"
 
-#: How long opencode waits for the sidecar to *list* its tools, in ms. Its own
-#: default is 5 s, which a cold venv start on Windows can approach -- and past
-#: it the tools are silently absent for the whole session.
-OPENCODE_TOOL_LIST_TIMEOUT_MS = 15000
+#: opencode's per-server ``timeout``, in ms. One value bounds three things:
+#: starting the server, listing its tools, and *every tool call* -- so it is
+#: sized for the calls, not the start. It is longer than the longest request
+#: deadline the sidecar sets (``save_group_layout``'s 120 s), so a call GridVibe
+#: bounds -- a 55 s ``wait_for_results`` or focus, a 50 s agent-type probe --
+#: answers before opencode abandons it, and a GridVibe that stops answering is
+#: reported by the sidecar's own error rather than a bare timeout. Unset, a
+#: tool call falls to the MCP SDK's 60 s, or to a user's
+#: ``experimental.mcp_timeout``, which can be shorter. The local and the remote
+#: (SSH) document both state it.
+OPENCODE_MCP_TIMEOUT_MS = 150_000
 
 
 def mcp_config_path() -> str:
@@ -217,7 +224,7 @@ def build_opencode_config(*, interpreter: str, url: str) -> Dict[str, Any]:
                 "type": "local",
                 "command": [interpreter, SIDECAR_ENTRY, "--url", url],
                 "environment": {name: f"{{env:{name}}}" for name in identity_names},
-                "timeout": OPENCODE_TOOL_LIST_TIMEOUT_MS,
+                "timeout": OPENCODE_MCP_TIMEOUT_MS,
             }
         },
     }

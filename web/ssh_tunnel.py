@@ -37,7 +37,7 @@ import socket
 import threading
 from typing import Any, Dict, List, Optional, Tuple
 
-from web.mcp_launch import MCP_SERVER_NAME, OPENCODE_CONFIG_STYLE
+from web.mcp_launch import MCP_SERVER_NAME, OPENCODE_CONFIG_STYLE, OPENCODE_MCP_TIMEOUT_MS
 
 logger = logging.getLogger(__name__)
 
@@ -542,8 +542,9 @@ def remote_mcp_document(url: str, style: str = "") -> Dict[str, Any]:
     opencode reads neither: its servers live under ``mcp`` with
     ``type: "remote"``. ``oauth: false`` stops it probing for an OAuth flow
     the endpoint does not have -- the token in the URL is the whole of its
-    authentication. One pane runs one agent per connection, so one shape is
-    written, never both.
+    authentication. ``timeout`` is the local document's own, because opencode
+    applies it to every tool call over this URL too. One pane runs one agent
+    per connection, so one shape is written, never both.
     """
     if style == OPENCODE_CONFIG_STYLE:
         return {
@@ -552,6 +553,7 @@ def remote_mcp_document(url: str, style: str = "") -> Dict[str, Any]:
                     "type": "remote",
                     "url": url,
                     "oauth": False,
+                    "timeout": OPENCODE_MCP_TIMEOUT_MS,
                 }
             }
         }
