@@ -240,6 +240,8 @@ class PlacementTestCase(unittest.TestCase):
         tokens = shlex.split(command)
         self.assertEqual(tokens[:2], ["env", f"OPENCODE_CONFIG={self.opencode_path}"])
         self.assertEqual(tokens[2:5], ["opencode", "--prompt", HANDOFF_OPENING_PROMPT])
+        # Auto mode's flag follows the prompt, as every other suffix does.
+        self.assertEqual(tokens[5:], ["--auto"])
         self.assertTrue(web_agents.launch_line_carries_opening_prompt(command))
 
     def test_not_asked_means_not_placed(self):

@@ -16,7 +16,8 @@ Four properties, each of which has a way of silently not happening:
   writing its own value drops the other's.
 - **The flag is composed only when the pane asks and the agent publishes one.**
   Four of the eight registered CLIs publish no MCP block, and their checkbox
-  is simply absent — the same thing `opencode` already does for Auto mode.
+  is simply absent — the same thing a CLI with no auto-approval flag does for
+  Auto mode.
 - **A remote pane names the config on its *own* host.** The composed line is
   typed into whatever shell the pane holds. A local pane names the generated
   file here; a tunnelled SSH pane names what its tunnel wrote over there. A

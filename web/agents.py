@@ -191,9 +191,9 @@ def _agent_mcp_style(agent_key: Any) -> str:
 def _agent_mcp_flag(agent_key: Any) -> str:
     """Return the registry-defined MCP flag *template* for one agent, or "".
 
-    An agent with no block published here has no checkbox -- the same thing
-    ``opencode`` already does for Auto mode, and the reason a CLI whose MCP
-    mechanism has not been verified needs no code.
+    An agent with no block published here has no checkbox -- the same thing a
+    CLI with no ``auto_mode`` block does for Auto mode, and the reason a CLI
+    whose MCP mechanism has not been verified needs no code.
 
     Empty is not the same as "no MCP": an agent composed by *style* rather
     than by template has no flag string to publish. Ask

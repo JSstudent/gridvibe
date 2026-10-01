@@ -22209,16 +22209,17 @@ class SettingsLauncherConfigTestCase(unittest.TestCase):
         self.assertEqual(options["kilo"]["auto_mode_flag"], "--yolo")
         self.assertEqual(options["grok"]["auto_mode_flag"], "--always-approve")
         self.assertEqual(options["hermes"]["auto_mode_flag"], "--yolo")
-        self.assertEqual(options["opencode"]["auto_mode_flag"], "")
+        self.assertEqual(options["opencode"]["auto_mode_flag"], "--auto")
         self.assertEqual(options["other"]["auto_mode_flag"], "")
 
     def test_agent_options_expose_registry_auto_mode_descriptions(self):
         """Wave 4 / 7.b: every flag-carrying agent surfaces its helper text."""
         options = {item["value"]: item for item in web_agents._agent_options()}
-        for key in ("claude", "codex", "copilot", "kimi", "kilo", "grok", "hermes"):
+        for key in (
+            "claude", "codex", "copilot", "opencode", "kimi", "kilo", "grok", "hermes",
+        ):
             with self.subTest(agent=key):
                 self.assertTrue(options[key]["auto_mode_description"])
-        self.assertEqual(options["opencode"]["auto_mode_description"], "")
         self.assertEqual(options["other"]["auto_mode_description"], "")
 
     def test_agent_registry_includes_kimi_entry(self):
@@ -22364,8 +22365,14 @@ class SettingsLauncherConfigTestCase(unittest.TestCase):
         self.assertEqual(compose(session(agent_auto_mode=False)), "claude")
         self.assertEqual(
             compose(session(initial_command="opencode", agent_selection="opencode")),
-            "opencode",
+            "opencode --auto",
         )
+        # A CLI that publishes no flag launches bare, with the toggle on.
+        with patch.dict(web_agents.AGENT_REGISTRY, {"noflag": {"binary": "noflag"}}):
+            self.assertEqual(
+                compose(session(initial_command="noflag", agent_selection="noflag")),
+                "noflag",
+            )
         # A custom command never gains flags, even with the toggle persisted.
         self.assertEqual(
             compose(

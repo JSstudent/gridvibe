@@ -105,6 +105,7 @@ class AgentTypeRowsTestCase(_Case):
         self.assertTrue(rows["claude"]["task_supported"])
         self.assertTrue(rows["opencode"]["task_supported"])
         self.assertFalse(rows["kilo"]["task_supported"])
+        self.assertTrue(rows["opencode"]["auto_mode_supported"])
         self.assertNotIn("detection", rows["claude"])
 
     def test_a_single_probe_failure_answers_check_failed_for_that_agent_only(self):

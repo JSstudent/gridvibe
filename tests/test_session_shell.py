@@ -1354,21 +1354,25 @@ class AgentRequestedRelaunchTestCase(ShellTransitionTestCase):
     def test_auto_mode_is_dropped_for_a_cli_with_no_auto_approval_flag(self):
         """The field would otherwise claim a mode the launch line never carries."""
         caller, target = self._agent_pair()
-        self.assertEqual(web_agents._agent_auto_mode_flag("opencode"), "")
+        # Every registered CLI publishes a flag today, so strip one.
+        spec = dict(web_agents.AGENT_REGISTRY["kilo"])
+        spec.pop("auto_mode", None)
 
-        response, _close, start_task = self._relaunch(
-            target.session_id,
-            {
-                "requested_by_session_id": caller.session_id,
-                "agent": "opencode",
-                "auto_mode": True,
-            },
-        )
+        with patch.dict(web_agents.AGENT_REGISTRY, {"kilo": spec}):
+            self.assertEqual(web_agents._agent_auto_mode_flag("kilo"), "")
+            response, _close, start_task = self._relaunch(
+                target.session_id,
+                {
+                    "requested_by_session_id": caller.session_id,
+                    "agent": "kilo",
+                    "auto_mode": True,
+                },
+            )
 
         self.assertEqual(response.status_code, 200, response.get_json())
         start_task.assert_called_once()
         updated = api.session_manager.get_session(target.session_id)
-        self.assertEqual(updated.agent_selection, "opencode")
+        self.assertEqual(updated.agent_selection, "kilo")
         self.assertIs(updated.agent_auto_mode, False)
 
     def test_auto_mode_is_dropped_when_the_pane_returns_to_a_plain_shell(self):
