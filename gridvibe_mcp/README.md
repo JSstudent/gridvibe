@@ -90,7 +90,10 @@ there is none of.
 Codex is the exception that proves the rule: its own spawn of an MCP server does
 not forward the pane's environment, so GridVibe states the same five variables
 back to it as an inline TOML table on the launch line
-(`web/agents.py:_inline_toml_env_fragment`).
+(`web/agents.py:_inline_toml_env_fragment`). opencode does forward its
+environment to a local MCP child today, but that may tighten upstream, so its
+generated config states the same five variables as `{env:<name>}` references.
+These are references, not values, so one file still serves every pane.
 
 ## Tools
 
@@ -489,7 +492,7 @@ the temporary file is `web/agent_handoff_files.py`.
   it* — placed directly after the binary (Claude's `--mcp-config` takes a
   variable number of values), and the task is fetched through the tools. So a
   task needs a CLI that takes an opening prompt *and* can be handed the
-  sidecar: `claude`, `codex` and `copilot`. It turns `mcp` on; an explicit
+  sidecar: `claude`, `codex`, `copilot` and `opencode`. It turns `mcp` on; an explicit
   `mcp: false` beside it is refused.
 - **Only a handle rides in a split intent.** Every polling page is shown the
   intent, so the text stays in GridVibe and the split route takes the handle
@@ -621,7 +624,7 @@ handoff is bound and when one goes.
   case: the route it reads answers with a *decrypted* SSH password by design,
   and `SAVED_LAYOUT_FIELDS` is what stops it.
 - **The MCP endpoint is the POST half of streamable HTTP.** No SSE `GET`
-  stream, no `DELETE`, no `Mcp-Session-Id`. The three CLIs that are handed a URL
+  stream, no `DELETE`, no `Mcp-Session-Id`. The four CLIs that are handed a URL
   today are content with request/response. Both verbs are answered with a
   deliberate `405` and `Allow: POST`, naming what the endpoint is and why the
   other half is absent, rather than Flask's bare method-not-allowed — decided
@@ -631,7 +634,7 @@ handoff is bound and when one goes.
 
 ## Which CLIs can be handed the sidecar
 
-Three of the eight, and the mechanism differs for each. Every row was checked
+Four of the eight, and the mechanism differs for each. Every row was checked
 against the installed CLI's own `--help`, which is what `"verified": true` in
 `agent_registry.json` records.
 
@@ -640,9 +643,10 @@ against the installed CLI's own `--help`, which is what `"verified": true` in
 | `claude` | `--mcp-config "<path>"` | `flag` template | positional, directly after the binary |
 | `copilot` | `--additional-mcp-config "@<path>"` — `@` marks a path rather than inline JSON, and it *augments* `~/.copilot/mcp-config.json` for the session | `flag` template | `-i "<sentence>"`, directly after the binary |
 | `codex` | `-c mcp_servers.gridvibe.…` overrides — it takes no config file at all | `style: inline_toml` | positional, directly after the binary |
+| `opencode` | an `OPENCODE_CONFIG="<path>"` prefix naming the generated `.gridvibe_opencode.json`, which opencode merges over the user's own config | `style: opencode_config` | `--prompt "<sentence>"`, directly after the binary |
 
 The opening prompt is an `opening_prompt` block in `agent_registry.json`, held to
-the same `verified` bar; the other five CLIs publish none and cannot be handed a
+the same `verified` bar; the other four CLIs publish none and cannot be handed a
 task.
 
 The quote opens *before* Copilot's `@`: `@"C:\…"` starts a here-string in
@@ -667,7 +671,42 @@ thing a torn-apart argument cannot do. Which is also why nothing rendered into
 an override carries a space it does not need: the inline identity table is
 written without one so it keeps the bare form wherever it can.
 
-`grok`, `hermes`, `opencode`, `kilo` and `kimi` publish nothing. Their only
+opencode takes no config flag. It reads one more config file, merged over the
+user's global config, from the path in `OPENCODE_CONFIG`. So the sidecar rides
+in as a variable typed **in front of** the binary, and the composer applies it
+last, after the opening prompt is placed. The form depends on the shell:
+
+| Shell | Line |
+| --- | --- |
+| POSIX (SSH, non-Windows) | `env OPENCODE_CONFIG="<p>" opencode …` |
+| WSL pane | `env WSLENV="$WSLENV:OPENCODE_CONFIG" OPENCODE_CONFIG="<p>" opencode …` |
+| PowerShell | `$env:OPENCODE_CONFIG="<p>"; opencode …` |
+| cmd | `set "OPENCODE_CONFIG=<p>" & opencode …` |
+
+`env` scopes the variable to one process in every login shell. A WSL pane's
+`opencode` is normally the Windows binary reached through interop, and a
+variable crosses to it only when `WSLENV` names it. PowerShell and cmd have no
+per-command form, so there the variable stays in the pane's shell until the next
+relaunch restarts it. A path holding `"`, `$`, a backtick or `%` cannot sit
+inside double quotes in all three shells, so it gives no prefix. The same goes
+for a generated file that is missing. Either way the agent starts without its
+tools.
+
+Known limits of that route:
+
+- **A user's own `OPENCODE_CONFIG` is replaced** in an opencode pane with the
+  box ticked. There is one variable and opencode has no include mechanism. The
+  user's global and project configs still apply.
+- **A project `opencode.json` that defines its own `mcp.gridvibe` wins**,
+  because project config ranks above `OPENCODE_CONFIG`.
+- **On PowerShell and cmd the variable outlives opencode** in that pane's shell,
+  so a hand-typed `opencode` there also gets the tools until the pane is
+  relaunched or closed.
+- **`--prompt` auto-submits only in the current TUI.** opencode's reworked TUI
+  v2, not yet its `latest` release, only prefills it. Re-verify the
+  `opening_prompt` block before trusting a newer opencode with a task.
+
+`grok`, `hermes`, `kilo` and `kimi` publish nothing. Their only
 mechanism is an `<agent> mcp add` subcommand that edits the user's own config
 permanently — a change that would outlive the pane whose checkbox asked for it,
 which is why it is absent rather than pending.
@@ -687,7 +726,7 @@ a remote pane) under its shell family, or a stated local `shell`.
 | --- | --- |
 | `available` | `true` installed, `false` missing or unsupported there (the reason in `message`), `null` the check could not run — a launch still tries |
 | `mcp_supported` | the CLI can be given GridVibe's tools |
-| `task_supported` | the CLI can be handed a `task` (`claude`, `codex`, `copilot`) |
+| `task_supported` | the CLI can be handed a `task` (`claude`, `codex`, `copilot`, `opencode`) |
 | `auto_mode_supported` | the CLI has an auto-approval flag |
 
 Preflights run on a shared, bounded four-worker pool, and the sidecar gives
@@ -717,7 +756,10 @@ remote agent ──HTTP──▶ 127.0.0.1:<assigned>   (on the remote host)
 
 Nothing is installed on the remote host. The config written there names a URL,
 not a command, which is why Codex gets `-c mcp_servers.gridvibe.url=` rather
-than the inline command-and-args form a local pane gets.
+than the inline command-and-args form a local pane gets. For opencode it is
+written in opencode's own shape, `{"mcp":{"gridvibe":{"type":"remote","url":…,"oauth":false}}}`.
+`oauth: false` stops opencode from probing for OAuth on an endpoint that has
+none, and the pane's line gets `env OPENCODE_CONFIG="<remote path>"`.
 
 Every failure costs the pane its tools and never its shell: a forward the remote
 sshd refuses, or a config that cannot be written, leaves the pane running and

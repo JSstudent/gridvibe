@@ -92,19 +92,19 @@ Pick an agent per pane from the launcher's **Startup Mode** list, where each age
 | Claude Code | `claude` | Yes | Yes |
 | OpenAI Codex CLI | `codex` | Yes | Yes |
 | GitHub Copilot CLI | `copilot` | Yes | Yes |
-| OpenCode CLI | `opencode` | — | — |
+| OpenCode CLI | `opencode` | Yes | Yes |
 | Kilo CLI | `kilo` | Yes | — |
 | Kimi Code CLI | `kimi` | Yes | — |
 | Grok Build (xAI) | `grok` | Yes | — |
 | Hermes Agent | `hermes` | Yes | — |
 
-**GridVibe tools** is the MCP checkbox — [the section below](#gridvibe-tools-mcp) is what it gives the agent. The five agents without it have no way to register a server for one session only; theirs would edit your own config permanently, so GridVibe does not offer it.
+**GridVibe tools** is the MCP checkbox — [the section below](#gridvibe-tools-mcp) is what it gives the agent. The four agents without it have no way to register a server for one session only; theirs would edit your own config permanently, so GridVibe does not offer it.
 
 GridVibe does not bundle the CLIs. If everything shows `Missing`, install it and put its folder on `PATH` — for npm-installed agents on Windows that is usually `%APPDATA%\npm` (check with `npm prefix -g`). Restart GridVibe after PATH changes.
 
 ## GridVibe Tools (MCP)
 
-Give an agent the **MCP** checkbox and it can see and build GridVibe workspaces from inside its own pane — so you stop describing your grid to it and start asking for the grid you want. Tick **MCP** beside the agent in the launcher, or press the **MCP** button on a row in a pane's 🔄 dropdown. Claude Code, Codex, and Copilot support it.
+Give an agent the **MCP** checkbox and it can see and build GridVibe workspaces from inside its own pane — so you stop describing your grid to it and start asking for the grid you want. Tick **MCP** beside the agent in the launcher, or press the **MCP** button on a row in a pane's 🔄 dropdown. Claude Code, Codex, Copilot and OpenCode support it.
 
 **Install it first.** The tools ship with GridVibe; the package they need does not, so a normal install leaves them out.
 
@@ -137,7 +137,7 @@ Until it is installed the checkbox still appears and the agent simply finds no t
 - **Agents can save a session layout.** Ask an agent to save the current session as a named preset, optionally rooted at a stated folder. The session's window must be open so GridVibe can capture its latest layout.
 - **Every installed agent, not just the MCP ones.** An agent can list which agent CLIs are available and launch any of them. A missing agent is refused rather than quietly opened as a plain terminal.
 - **An agent only touches panes it made.** Replace, clear and close tools refuse the agent's own pane, and refuse panes it did not create — including panes from before a restart — unless you authorize that specific action in the conversation. Moving a session it did not make needs your word the same way.
-- **Agents hand each other tasks.** An agent that splits off or launches a Claude Code, Codex or Copilot pane can give it a task, and the new agent starts on it rather than waiting — ask for *"hand the findings to a new Codex agent below this one."* The task never goes to another machine, and nothing is typed into an agent that is already running.
+- **Agents hand each other tasks.** An agent that splits off or launches a Claude Code, Codex, Copilot or OpenCode pane can give it a task, and the new agent starts on it rather than waiting — ask for *"hand the findings to a new Codex agent below this one."* The task never goes to another machine, and nothing is typed into an agent that is already running.
 - **Agents report back.** An agent handed a task reports its outcome to the agent that handed it over, which can wait for several at once — ask for *"hand this to three Codex agents beside this one and wait for their results."* A pane closed before it reported is reported as ended, so nothing waits forever.
 - **It asks before it replaces.** Refused a pane it did not make, an agent gets GridVibe's own question to put to you — which pane, and what it would end — and acts only on your yes.
 - **Override mode, when you want it to stop asking.** Tick **Override** beside **MCP** in the launcher, or pick **Override** on the pane's 🔄 dropdown, and after a warning that agent closes, moves, relaunches, re-modes and clears panes it did not create without asking. It still never touches its own pane or sends a task to another machine, and its MCP frame and dashboard chip turn red.

@@ -1911,13 +1911,28 @@ in `README.md`; state the rules a change has to keep.
   URL. The predicate is held there rather than at the launcher checkbox because a
   saved preset, a restored snapshot and the relaunch route all carry `agent_mcp`
   forward.
-- **The generated `.gridvibe_mcp.json` is per install and rewritten on every app
-  start**, gitignored, carrying no `env` block so one file serves every pane.
-  Composition is registry-driven: `_MCP_FLAG_TEMPLATE` admits one option token and
+- **The generated `.gridvibe_mcp.json` and `.gridvibe_opencode.json` are per
+  install and rewritten on every app start**, both gitignored and both built from
+  one resolved interpreter, sidecar entry and URL, so they cannot disagree. The
+  first carries no `env` block. The second is opencode's schema (`mcp`, `type`,
+  a `command` array) and states the identity variables as `{env:<name>}`
+  references, so one file still serves every pane. A failed write costs only that
+  file. Composition is registry-driven: `_MCP_FLAG_TEMPLATE` admits one option token and
   one placeholder so a registry typo cannot smuggle a second command onto the
   launch line, `_toml_override_flag` owns the per-shell quoting Codex needs, and
   anything that cannot be composed safely resolves to *no fragment* — costing the
-  pane its tools, never its agent. A test-mode process refuses the production path.
+  pane its tools, never its agent. A test-mode process refuses both production
+  paths.
+- **opencode's `OPENCODE_CONFIG` is a prefix, applied last.**
+  `_agent_mcp_env_prefix` is its only source, kept apart from the suffix
+  fragment so no caller can append a variable after the binary.
+  `_compose_agent_startup_command` places the opening prompt relative to the bare
+  binary first and prepends the prefix at the very end; the clear and update
+  prefixes still go in front of the whole line. The path passes the shared
+  `UNQUOTABLE_PATH_CHARACTERS` guard and, locally, must exist. Otherwise there is
+  no prefix and no prompt, rather than a broken line. A WSL pane also names the
+  variable in `WSLENV` so it crosses interop to the Windows binary, and an SSH
+  pane always gets the POSIX `env` form naming its tunnel's remote file.
 - **The two Windows shells disagree about Codex's `-c` overrides, and the bare
   form is not always available.** `_toml_override_flag` is the one owner: cmd
   must see the TOML literal quotes bare (wrapped, the override is silently
