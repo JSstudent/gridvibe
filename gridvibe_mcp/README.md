@@ -186,7 +186,11 @@ terminal: a report reaches the waiting agent as its own tool call's result.
 `set_pane_agent` relaunches a pane into an agent CLI (or `agent: ""` back to a
 plain shell, optionally changing the local shell family and the MCP choice),
 and may hand the new agent a `task` — the way to give a task to a pane that
-already exists, since nothing types into one.
+already exists, since nothing types into one. A stated `auto_mode` starts the
+agent with its auto-approval flag, under the same rule as `launch_panes` and
+`split_pane`: only when the person asked for an autonomous agent. Unstated, the
+pane keeps auto mode only for the agent it was already running; a CLI without
+`auto_mode_supported` drops it.
 `set_pane_mode` turns a pane into a file explorer, a browser preview or a plain
 terminal, and with a stated `directory` re-roots it there — see
 [A stated directory](#a-stated-directory). A call that changes nothing answers

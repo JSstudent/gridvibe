@@ -499,6 +499,12 @@ changing any field that survives restart; it owns the complete save/restore flow
   by the pane header — `agent-relaunch`, `agent-mode-switch`, `clear` — and the
   rules those add are in [Agent tools (MCP)](#agent-tools-mcp). Everything in
   this section holds for both halves; the gates run before any of it.
+- **Only the tool's relaunch can state auto mode.** `agent-relaunch` reads a
+  boolean `auto_mode` with the same tri-state as `mcp`: unstated keeps the
+  carry-forward above, stated wins over it, and a stated `true` is dropped for
+  a pane with no agent or a CLI that registers no auto-approval flag, so the
+  field never claims a mode the launch line lacks. The header's `shell` route
+  has no auto-mode row and ignores the key.
 - **A split with no stated `kind` is a plain terminal, and its metadata has to
   say so.** The pane kind is deliberately not cloned: an explorer, browser or
   agent source all split off a terminal rooted where the source is showing. The

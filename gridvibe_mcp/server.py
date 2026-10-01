@@ -976,6 +976,18 @@ def tool_specs() -> List[Dict[str, Any]]:
                         "type": "boolean",
                         "description": "Give that agent these same GridVibe tools.",
                     },
+                    "auto_mode": {
+                        "type": "boolean",
+                        "description": (
+                            "Start that agent with its auto-approval flag. "
+                            "Only when the person asked for an autonomous "
+                            "agent; a task never implies it. Omit to keep "
+                            "the pane's own setting, which follows the agent "
+                            "it was chosen for. Dropped for a CLI "
+                            "list_agent_types reports without "
+                            "auto_mode_supported."
+                        ),
+                    },
                     "shell": {
                         "type": "string",
                         "enum": list(SHELL_KINDS),
@@ -2334,6 +2346,10 @@ def _run(
         }
         if args.get("mcp") is not None:
             body["mcp"] = _flag(args, "mcp", False)
+        if args.get("auto_mode") is not None:
+            # A tri-state like `mcp`: absent leaves the route's own rule, which
+            # carries auto mode forward only for the agent it was chosen for.
+            body["auto_mode"] = _flag(args, "auto_mode", False)
         if task is not None:
             body["task"] = task
             body["mcp"] = True

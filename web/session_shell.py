@@ -57,6 +57,7 @@ from web.agent_updates import request_update
 from web.agents import (
     AGENT_REGISTRY,
     _agent_absent_reason,
+    _agent_auto_mode_flag,
     _agent_supports_mcp,
     _agent_update_command,
     _normalize_agent_key,
@@ -410,7 +411,8 @@ def apply_pane_shell_change(
     mutation, so a refusal leaves the pane exactly as it was found.
 
     ``metadata_overrides`` are fields the *caller* owns rather than the payload
-    -- today only the agent depth an agent-requested relaunch hands down. They
+    -- the agent depth an agent-requested relaunch hands down, and the auto
+    mode a tool stated. They
     are written inside this transaction, before the replacement shell is
     started, because the spawn reads them: setting them afterwards would race
     the connector that is already reading the pane. A refusal writes none of
@@ -635,6 +637,36 @@ def _requested_task(payload: Dict[str, Any]) -> Optional[str]:
     return text
 
 
+def _requested_auto_mode(payload: Dict[str, Any]) -> Optional[bool]:
+    """The auto mode a tool's relaunch states, or ``None`` when unstated.
+
+    The same tri-state as ``mcp``, read only on the tool's route: the header
+    menu has no auto-mode row, so ``apply_pane_shell_change`` never reads it
+    and an unstated value keeps the rule there -- auto mode follows the agent
+    it was chosen for. Refused, not dropped, when it is not a boolean, exactly
+    as the split route refuses one.
+    """
+    value = payload.get("auto_mode")
+    if value is None:
+        return None
+    if not isinstance(value, bool):
+        raise ShellTransitionError("auto_mode must be true or false")
+    return value
+
+
+def _stated_auto_mode(target: Any, payload: Dict[str, Any], auto_mode: bool) -> bool:
+    """What a stated auto mode becomes on the relaunched pane.
+
+    Dropped for a pane with no agent, or one whose CLI registers no
+    auto-approval flag: ``agent_auto_mode`` would then claim a mode the launch
+    line never carries. Read against the agent the pane is moving to, or the
+    one it keeps when the request names none.
+    """
+    if payload.get("agent") is None:
+        agent_key = _pane_agent_key(target)
+    else:
+        agent_key = _normalize_agent_key(payload.get("agent"))
+    return auto_mode and bool(agent_key) and bool(_agent_auto_mode_flag(agent_key))
 
 
 #: The target fields a relaunch is planned and confirmed against. The plan
@@ -771,6 +803,7 @@ def apply_agent_pane_relaunch(
     # `_relaunch_refusal` is where it becomes the one exception `web/api.py`
     # maps.
     task: Optional[str] = None
+    auto_mode = _requested_auto_mode(payload)
     try:
         read_agent_request(payload, RELAUNCH_WORDING)
         # Before any gate: a task that could never be delivered is refused
@@ -810,18 +843,25 @@ def apply_agent_pane_relaunch(
         # an explicit `mcp: false` beside it was already refused above.
         relaunch["mcp"] = True
         effects = _with_task_binding(effects, task, caller)
+    overrides: Dict[str, Any] = {
+        # Bounded by the same normalizer every other write of this field
+        # uses (`create_session`, and the split route).
+        # `update_session_metadata` is a raw `setattr` over an allowlist and
+        # normalizes nothing, so without it this is the one write path that
+        # could persist a depth past `_MAX_AGENT_DEPTH` into
+        # `runtime_state.json`.
+        "agent_depth": _normalize_agent_depth(int(getattr(caller, "agent_depth", 0)) + 1),
+    }
+    if auto_mode is not None:
+        # Written with the overrides, after the agent change, so a stated
+        # value wins over the one `_agent_updates` carried forward.
+        overrides["agent_auto_mode"] = _stated_auto_mode(target, payload, auto_mode)
     try:
         result = apply_pane_shell_change(
             session_id,
             relaunch,
             effects,
-            # Bounded by the same normalizer every other write of this field
-            # uses (`create_session`, and the split route).
-            # `update_session_metadata` is a raw `setattr` over an allowlist and
-            # normalizes nothing, so without it this is the one write path that
-            # could persist a depth past `_MAX_AGENT_DEPTH` into
-            # `runtime_state.json`.
-            {"agent_depth": _normalize_agent_depth(int(getattr(caller, "agent_depth", 0)) + 1)},
+            overrides,
             commit_guard=recheck_at_commit,
         )
     except PaneGateRefusal as exc:

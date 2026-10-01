@@ -2165,6 +2165,41 @@ class SetPaneAgentTestCase(unittest.TestCase):
         self.assertTrue(body["mcp"])
         self.assertEqual(body["shell"], "wsl")
 
+    def test_an_unstated_auto_mode_is_left_out_of_the_body(self):
+        """Absent keeps the route's rule: auto mode follows the agent."""
+        _result, opener = self.relaunch({"pane_id": "pane-4", "agent": "claude"})
+
+        body = json.loads(opener.requests[0].data.decode("utf-8"))
+        self.assertNotIn("auto_mode", body)
+
+    def test_a_stated_auto_mode_travels_either_way(self):
+        for value in (True, False):
+            with self.subTest(auto_mode=value):
+                _result, opener = self.relaunch({
+                    "pane_id": "pane-4", "agent": "claude", "auto_mode": value,
+                })
+
+                body = json.loads(opener.requests[0].data.decode("utf-8"))
+                self.assertIs(body["auto_mode"], value)
+
+    def test_a_task_does_not_turn_on_auto_mode(self):
+        _result, opener = self.relaunch({
+            "pane_id": "pane-4", "agent": "claude", "task": "Review the diff.",
+        })
+
+        body = json.loads(opener.requests[0].data.decode("utf-8"))
+        self.assertNotIn("auto_mode", body)
+
+    def test_a_non_boolean_auto_mode_is_refused_before_any_http(self):
+        result = dispatch(
+            "set_pane_agent",
+            {"pane_id": "pane-4", "agent": "claude", "auto_mode": "yes"},
+            client=client_for(RefusingOpener(self)),
+            identity=read_identity(INSIDE_PANE),
+        )
+
+        self.assertEqual(result["kind"], "invalid_arguments")
+
     def test_an_unstated_override_is_left_out_of_the_body(self):
         """Absent, not `False` -- the server's own default is the same thing."""
         _result, opener = self.relaunch({"pane_id": "pane-4", "agent": "claude"})

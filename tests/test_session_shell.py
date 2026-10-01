@@ -1294,6 +1294,132 @@ class AgentRequestedRelaunchTestCase(ShellTransitionTestCase):
         self.assertTrue(updated.agent_mcp)
         self.assertIs(updated.agent_mcp_override, False)
 
+    def test_a_stated_auto_mode_starts_the_new_agent_with_its_flag(self):
+        """A plain terminal has no auto mode to carry, so only stating it works."""
+        caller, target = self._agent_pair()
+
+        response, _close, start_task = self._relaunch(
+            target.session_id,
+            {
+                "requested_by_session_id": caller.session_id,
+                "agent": "claude",
+                "auto_mode": True,
+            },
+        )
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        start_task.assert_called_once()
+        updated = api.session_manager.get_session(target.session_id)
+        self.assertEqual(updated.agent_selection, "claude")
+        self.assertIs(updated.agent_auto_mode, True)
+
+    def test_an_unstated_auto_mode_leaves_a_new_agent_in_its_plain_launch(self):
+        caller, target = self._agent_pair()
+
+        response, _close, _start = self._relaunch(
+            target.session_id,
+            {"requested_by_session_id": caller.session_id, "agent": "claude"},
+        )
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertIs(
+            api.session_manager.get_session(target.session_id).agent_auto_mode, False
+        )
+
+    def test_a_stated_false_auto_mode_turns_it_off_for_the_same_agent(self):
+        """Stated wins over the value the same agent would carry forward."""
+        caller, target = self._agent_pair(
+            startup_mode="agent",
+            initial_command_mode="agent",
+            agent_selection="claude",
+            initial_command="claude",
+            agent_auto_mode=True,
+        )
+
+        response, _close, _start = self._relaunch(
+            target.session_id,
+            {
+                "requested_by_session_id": caller.session_id,
+                "agent": "claude",
+                "auto_mode": False,
+                "override": True,
+            },
+        )
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertIs(
+            api.session_manager.get_session(target.session_id).agent_auto_mode, False
+        )
+
+    def test_auto_mode_is_dropped_for_a_cli_with_no_auto_approval_flag(self):
+        """The field would otherwise claim a mode the launch line never carries."""
+        caller, target = self._agent_pair()
+        self.assertEqual(web_agents._agent_auto_mode_flag("opencode"), "")
+
+        response, _close, start_task = self._relaunch(
+            target.session_id,
+            {
+                "requested_by_session_id": caller.session_id,
+                "agent": "opencode",
+                "auto_mode": True,
+            },
+        )
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        start_task.assert_called_once()
+        updated = api.session_manager.get_session(target.session_id)
+        self.assertEqual(updated.agent_selection, "opencode")
+        self.assertIs(updated.agent_auto_mode, False)
+
+    def test_auto_mode_is_dropped_when_the_pane_returns_to_a_plain_shell(self):
+        caller, target = self._agent_pair()
+
+        response, _close, _start = self._relaunch(
+            target.session_id,
+            {
+                "requested_by_session_id": caller.session_id,
+                "agent": "",
+                "auto_mode": True,
+            },
+        )
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        updated = api.session_manager.get_session(target.session_id)
+        self.assertEqual(updated.startup_mode, "terminal")
+        self.assertIs(updated.agent_auto_mode, False)
+
+    def test_a_non_boolean_auto_mode_is_refused_before_anything_moves(self):
+        caller, target = self._agent_pair()
+        before = _pane_state(target.session_id)
+
+        response, close_connection, start_task = self._relaunch(
+            target.session_id,
+            {
+                "requested_by_session_id": caller.session_id,
+                "agent": "claude",
+                "auto_mode": "yes",
+            },
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("auto_mode", response.get_json()["error"])
+        close_connection.assert_not_called()
+        start_task.assert_not_called()
+        self.assertEqual(_pane_state(target.session_id), before)
+
+    def test_the_header_route_does_not_read_auto_mode(self):
+        """The pane menu has no auto-mode row; only the tool states one."""
+        session, _repo = self._local_pane()
+
+        response, _close, _start = self._post_shell(
+            session.session_id, {"agent": "claude", "auto_mode": True}
+        )
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        self.assertIs(
+            api.session_manager.get_session(session.session_id).agent_auto_mode, False
+        )
+
     def test_the_relaunched_pane_inherits_the_callers_depth_budget(self):
         """An agent that turns a pane into an agent hands down a budget.
 
