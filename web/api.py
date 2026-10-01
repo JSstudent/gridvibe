@@ -3260,7 +3260,8 @@ def read_session_handoff(session_id: str):
     registry. Like every loopback route it is not a confidentiality boundary
     (``gridvibe_mcp/README.md`` states that), which is why a caller is told to
     leave credentials out of a task. Its one side effect is the handoff's state
-    becoming ``read``. ``offset`` pages a task delivered in pages.
+    becoming ``read``, which mints the ``receipt`` its report must carry back.
+    ``offset`` pages a task delivered in pages.
     """
     if session_manager.get_session(session_id) is None:
         return jsonify({"error": "Session not found"}), 404
@@ -3285,13 +3286,18 @@ def report_session_handoff(session_id: str):
     What ``report_result`` posts. The pane is always the caller's own -- the
     tool takes no pane argument -- and the report goes to whichever agent handed
     this pane its task, never to a pane the caller names. The text is validated
-    before anything is looked up, and never logged.
+    before anything is looked up, and never logged. ``receipt`` is the one this
+    pane's ``read_handoff`` answer carried; without the current one the report
+    settles nothing, so a relaunched pane's replaced agent cannot answer for its
+    successor.
     """
     if session_manager.get_session(session_id) is None:
         return jsonify({"error": "Session not found"}), 404
     data = request.get_json(silent=True) or {}
     try:
-        payload = agent_results.report(session_id, data.get("result"), data.get("status"))
+        payload = agent_results.report(
+            session_id, data.get("result"), data.get("status"), data.get("receipt")
+        )
     except ResultError as exc:
         return jsonify({"error": exc.message}), exc.status_code
     requester = session_manager.get_session(payload.pop("requester_session_id", ""))
@@ -4923,4 +4929,7 @@ if __name__ == '__main__':
         level=logging.INFO,
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
     )
+    from web.log_redaction import install_mcp_token_redaction
+
+    install_mcp_token_redaction()
     run_server(debug=True)

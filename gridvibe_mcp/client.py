@@ -224,6 +224,7 @@ LAYOUT_FIELDS = (
     "layout_advisory",
     "terminal_count",
     "geometry",
+    "workspace_layout",
     "presentation_revision",
 )
 
@@ -247,14 +248,20 @@ SAVED_LAYOUT_PANE_FIELDS = (
     "agent_selection",
 )
 
-#: The geometry record itself, as `_normalize_workspace_layout` validates it.
+#: The geometry record itself, as `_normalize_workspace_layout` validates it,
+#: and exactly the keys `launch_panes`' `workspace_layout` takes -- so every
+#: record a read answers can be passed straight back to a launch. No
+#: `class_name`: the normalizer writes its own, and the launch schema, which
+#: allows no other key, would refuse a record that carried one.
 GEOMETRY_FIELDS = (
-    "class_name",
     "split_slot_rects",
     "split_column_weights",
     "split_row_weights",
     "original_split_slot_count",
 )
+
+#: One rectangle of that record, under the same rule.
+GEOMETRY_RECT_FIELDS = ("x", "y", "w", "h", "originSlot")
 
 SAVE_LAYOUT_FIELDS = ("saved", "group_id", "workspace_id", "id", "name")
 SAVE_LAYOUT_SHAPE_FIELDS = ("layout", "pane_count")
@@ -357,6 +364,18 @@ def project_all(payloads: Any, fields: Iterable[str]) -> List[Dict[str, Any]]:
     return [project(item, fields) for item in payloads]
 
 
+def project_geometry(payload: Any) -> Optional[Dict[str, Any]]:
+    """A geometry record in the launch schema's shape, or ``None`` for none."""
+    if not isinstance(payload, Mapping):
+        return None
+    record = project(payload, GEOMETRY_FIELDS)
+    if "split_slot_rects" in record:
+        record["split_slot_rects"] = project_all(
+            record["split_slot_rects"], GEOMETRY_RECT_FIELDS
+        )
+    return record
+
+
 def project_pane(payload: Any) -> Dict[str, Any]:
     """One pane, from ``PANE_FIELDS``, with its handoff narrowed to its state."""
     pane = project(payload, PANE_FIELDS)
@@ -444,6 +463,9 @@ class GridVibeClient:
         self.timeout = max(0.1, float(timeout))
         # Injected in tests; urllib's own opener otherwise.
         self._opener = opener or urllib.request.build_opener()
+        # The receipt each pane's last `read_handoff` answer carried, sent back
+        # by `report_result`. Held here, never projected to the agent.
+        self._handoff_receipts: Dict[str, str] = {}
 
     # ---------------- transport ----------------
 
@@ -629,6 +651,10 @@ class GridVibeClient:
             # reader could tell -- and a reader who reads the field name instead
             # of the group id could not.
             result["layout"] = project(layout, LAYOUT_FIELDS)
+            if "workspace_layout" in result["layout"]:
+                result["layout"]["workspace_layout"] = project_geometry(
+                    layout.get("workspace_layout")
+                )
         return result
 
     def pane_layout(self, group_id: str) -> Dict[str, Any]:
@@ -687,12 +713,24 @@ class GridVibeClient:
         payload = self.request("GET", f"/api/sessions/{urllib.parse.quote(session_id)}")
         return project_pane(payload)
 
+    def handoff_receipt(self, session_id: str) -> str:
+        """The receipt this pane's last ``read_handoff`` answer carried, or ``""``."""
+        return self._handoff_receipts.get(str(session_id or ""), "")
+
+    def remember_handoff_receipt(self, session_id: str, receipt: Any) -> None:
+        """Keep a receipt for ``report_result``. An empty one changes nothing."""
+        if isinstance(receipt, str) and receipt:
+            self._handoff_receipts[str(session_id or "")] = receipt
+
     def read_handoff(self, session_id: str, offset: Optional[int] = None) -> Dict[str, Any]:
         """The task handed to *this* pane, from ``HANDOFF_FIELDS`` only.
 
         ``session_id`` is always the caller's own pane -- the tool takes no
         pane argument -- so another pane's brief is not something a tool call
-        can name.
+        can name. The answer's ``receipt`` is kept on this client for
+        ``report_result`` and is not in ``HANDOFF_FIELDS``, so the agent never
+        sees it. An answer without one (nobody waits for a report, or a
+        GridVibe older than receipts) leaves the kept one as it was.
         """
         params: Dict[str, Any] = {}
         if offset is not None:
@@ -702,6 +740,8 @@ class GridVibeClient:
             f"/api/sessions/{urllib.parse.quote(session_id)}/handoff",
             params=params,
         )
+        if isinstance(payload, Mapping):
+            self.remember_handoff_receipt(session_id, payload.get("receipt"))
         result = project(payload, HANDOFF_FIELDS)
         if isinstance(result.get("from"), Mapping):
             result["from"] = project(result["from"], ("session_id", "title", "agent"))
@@ -717,11 +757,16 @@ class GridVibeClient:
 
         ``session_id`` is always the caller's own pane, exactly as for
         ``read_handoff``: which agent receives the report is GridVibe's record
-        of who handed the task over, never an argument.
+        of who handed the task over, never an argument. The receipt that read
+        kept is sent with it, and only when there is one, so a GridVibe that
+        never issued one is sent exactly the body it has always taken.
         """
         body: Dict[str, Any] = {"result": result}
         if status:
             body["status"] = status
+        receipt = self.handoff_receipt(session_id)
+        if receipt:
+            body["receipt"] = receipt
         payload = self.request(
             "POST",
             f"/api/sessions/{urllib.parse.quote(session_id)}/handoff-report",
@@ -818,10 +863,7 @@ class GridVibeClient:
         shape = payload.get("shape") if isinstance(payload, Mapping) else None
         if isinstance(shape, Mapping):
             projected = project(shape, SAVE_LAYOUT_SHAPE_FIELDS)
-            geometry = shape.get("workspace_layout")
-            projected["workspace_layout"] = (
-                project(geometry, GEOMETRY_FIELDS) if isinstance(geometry, Mapping) else None
-            )
+            projected["workspace_layout"] = project_geometry(shape.get("workspace_layout"))
             projected["panes"] = project_all(shape.get("panes"), SAVE_LAYOUT_PANE_FIELDS)
             result["shape"] = projected
         return result
@@ -848,10 +890,7 @@ class GridVibeClient:
             SAVED_LAYOUT_PANE_FIELDS,
         )
         shape: Dict[str, Any] = {"panes": panes}
-        geometry = config.get("workspace_layout")
-        shape["workspace_layout"] = (
-            project(geometry, GEOMETRY_FIELDS) if isinstance(geometry, Mapping) else None
-        )
+        shape["workspace_layout"] = project_geometry(config.get("workspace_layout"))
         return shape
 
     def agents(self) -> Dict[str, Any]:

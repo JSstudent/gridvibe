@@ -12,8 +12,9 @@ reads all three. Pinned here through the real split-intent and split routes:
   *after* it reported keeps its report.
 - **The requester's pane closing drops what it was owed**, so a late report is
   told nobody is listening.
-- **A report settles only a task its agent has read**, so the agent a relaunch
-  replaced cannot answer for the new one.
+- **A report settles only a task its agent has read**, carrying the receipt
+  that read returned, so the agent a relaunch replaced cannot answer for the
+  new one even after its successor has read it.
 """
 
 import json
@@ -35,7 +36,13 @@ from web import api  # noqa: E402
 from web import terminal_io as web_terminal_io  # noqa: E402
 from web.agent_handoffs import INLINE  # noqa: E402
 from web.agent_handoffs import handoffs as handoff_store  # noqa: E402
-from web.agent_results import ENDED, MAX_RESULT_CHARS, REPORTED, WORKING  # noqa: E402
+from web.agent_results import (  # noqa: E402
+    ENDED,
+    MAX_RESULT_CHARS,
+    REPORTED,
+    STALE_RECEIPT_MESSAGE,
+    WORKING,
+)
 from web.agent_results import results as result_store  # noqa: E402
 
 
@@ -79,10 +86,13 @@ class _ResultRouteCase(_RouteCase):
         return self.client.get(f"/api/sessions/{pane_id}/handoff")
 
     def _report(self, pane_id, result, status=None):
-        self._fetch_task(pane_id)
+        """Read, then report with the receipt the read carried, as the sidecar does."""
+        read = self._fetch_task(pane_id).get_json() or {}
         body = {"result": result}
         if status is not None:
             body["status"] = status
+        if read.get("receipt"):
+            body["receipt"] = read["receipt"]
         return self.client.post(f"/api/sessions/{pane_id}/handoff-report", json=body)
 
     def _wait(self, pane_id, **params):
@@ -131,10 +141,10 @@ class ThreeAgentsTestCase(_ResultRouteCase):
         caller = self._agent_pane()
         first, second = (self._split_agent(caller) for _ in range(2))
         self.assertEqual(self._report(first, "One done.").status_code, 200)
-        self._fetch_task(second)
+        receipt = self._fetch_task(second).get_json()["receipt"]
         # A report through the store rather than a second test client call,
         # so the request under test is the only one in flight.
-        timer = threading.Timer(0.2, result_store.report, args=(second, "Two done."))
+        timer = threading.Timer(0.2, result_store.report, args=(second, "Two done.", None, receipt))
         timer.start()
         self.addCleanup(timer.cancel)
 
@@ -241,6 +251,61 @@ class ReportRouteTestCase(_ResultRouteCase):
         self.assertIn("read_handoff", response.get_json()["error"])
         self.assertEqual(self._wait(caller.session_id).get_json()["counts"][WORKING], 1)
         self.assertEqual(self._report(worker, "Read it, then did it.").status_code, 200)
+
+    def test_a_report_settles_only_with_the_receipt_its_read_carried(self):
+        caller = self._agent_pane()
+        worker = self._split_agent(caller)
+        receipt = self._fetch_task(worker).get_json()["receipt"]
+
+        for label, body in (
+            ("missing", {"result": "Done."}),
+            ("different", {"result": "Done.", "receipt": "not-" + receipt}),
+        ):
+            with self.subTest(label):
+                response = self.client.post(f"/api/sessions/{worker}/handoff-report", json=body)
+                self.assertEqual(response.status_code, 409)
+                self.assertEqual(response.get_json()["error"], STALE_RECEIPT_MESSAGE)
+        self.assertEqual(self._wait(caller.session_id).get_json()["counts"][WORKING], 1)
+        surfaces = (
+            self.client.get("/api/sessions").get_json(),
+            self.client.get(f"/api/sessions/{worker}").get_json(),
+            self._wait(caller.session_id).get_json(),
+        )
+        self.assertNotIn(receipt, json.dumps(surfaces))
+
+        response = self.client.post(
+            f"/api/sessions/{worker}/handoff-report", json={"result": "Done.", "receipt": receipt}
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(self._fetch_task(worker).get_json()["receipt"], receipt)
+
+    def test_a_replaced_agents_late_report_cannot_settle_its_successors_read_task(self):
+        """A3, through the routes: the pane is handed a new task, its new agent
+        reads it, and only then does the old agent's report arrive."""
+        caller = self._agent_pane()
+        worker = self._split_agent(caller)
+        old_receipt = self._fetch_task(worker).get_json()["receipt"]
+        successor = handoff_store.create(
+            "The second brief.", source_session_id=caller.session_id, session_id=worker
+        )
+        handoff_store.announce(successor, delivery=INLINE)
+        new_read = self.client.get(f"/api/sessions/{worker}/handoff").get_json()
+        self.assertEqual(new_read["task"], "The second brief.")
+
+        late = self.client.post(
+            f"/api/sessions/{worker}/handoff-report",
+            json={"result": "The first task's findings.", "receipt": old_receipt},
+        )
+
+        self.assertEqual(late.status_code, 409)
+        self.assertEqual(late.get_json()["error"], STALE_RECEIPT_MESSAGE)
+        self.assertEqual(result_store.state_for(successor), WORKING)
+        own = self.client.post(
+            f"/api/sessions/{worker}/handoff-report",
+            json={"result": "The second task's findings.", "receipt": new_read["receipt"]},
+        )
+        self.assertEqual(own.status_code, 200)
+        self.assertEqual(result_store.state_for(successor), REPORTED)
 
     def test_a_refused_report_records_nothing(self):
         caller = self._agent_pane()

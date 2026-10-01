@@ -620,6 +620,20 @@
     let savedSessionResolver = null;
     let saveSessionAsResolver = null;
     const MAX_SPLIT_TERMINALS = Math.min(16, Number(MAX_SESSIONS || 16));
+    /* How long a split's request may stay out. Its tab is held until the
+       answer, so a request that never answers would block every load of it.
+       The same bound the server gives a page to report a claimed split
+       (`CLAIM_TTL_SECONDS` in `web/window_intents.py`). */
+    const SPLIT_REQUEST_TIMEOUT_MS = 20000;
+    const SPLIT_TIMED_OUT_ERROR = `The split did not answer within ${SPLIT_REQUEST_TIMEOUT_MS / 1000} seconds, `
+        + 'so a pane may still have been added. The outcome is unknown: read list_panes before retrying.';
+    /* A split whose window moved on with no placement to write: the pane
+       exists, and the tab shows it in the default arrangement for its size. */
+    const SPLIT_NOT_PLACED_NOTE = 'The pane was created, but the window moved on before its place in the layout could be written, so it will appear with the default arrangement.';
+    /* Reads of a tab a load makes again when an edit began while one was
+       out, before it takes the latest; a read under a hold is always made
+       again, since the hold ends. */
+    const LOAD_HELD_READ_ATTEMPTS = 3;
 
     function isSessionModeSwitchPending(sessionId) {
         return pendingModeSwitchSessionIds.has(sessionId);
@@ -632,7 +646,9 @@
        still be stacked two or three deep instead of only side-by-side; a terminal
        narrower/shorter than the floors simply can't be split further. */
     const MIN_SPLIT_ROWS = 4;
-    const MIN_RESIZE_SURFACE_RATIO = 1 / 16;
+    /* A divider may not shrink a pane below this share of the grid's width
+       (vertical divider) or height (horizontal divider). */
+    const MIN_RESIZE_AXIS_RATIO = 1 / 16;
     /* Grid-unit size of one base layout cell. Larger = more headroom to keep
        halving a pane before the integer-grid `>= 2` guard bites, so splitting is
        gated by the real character-size minimum rather than the coordinate
@@ -2431,6 +2447,13 @@
        for no gain. Omitting the field leaves the stored geometry untouched. */
     function customSplitLayoutSnapshot(groupId) {
         const isVisible = visibleGroupId === groupId && gridBuilt;
+        /* A view marked stale may hold the arrangement a geometry write
+           replaced, and a held one the arrangement a write in flight is
+           replacing; sent, even a conflict's recapture would write it back. */
+        if (!isVisible && (cachedGroupViews.get(groupId)?.geometryStale
+            || backgroundTab?.held(groupId))) {
+            return null;
+        }
         const className = isVisible
             ? document.getElementById('terminalsGrid')?.className
             : cachedGroupViews.get(groupId)?.className;
@@ -2807,6 +2830,13 @@
         const promptForName = Boolean(options.promptForName);
         const createNewSession = Boolean(options.createNewSession);
         const group = getGroupById(targetGroupId);
+        if (!(await settleStaleGroupGeometry(targetGroupId))) {
+            const error = 'This session\'s arrangement could not be read after a resize. Try saving again.';
+            if (!silent) {
+                setWorkspaceSaveMessage(error, 'error');
+            }
+            return { ok: false, error };
+        }
         const config = buildActiveWorkspaceSessionConfig(targetGroupId);
         if (!config.terminals.length) {
             if (!silent) {
@@ -3487,43 +3517,50 @@
         };
     }
 
-    function validateResizeCandidate(axis, candidateWeights) {
+    /* Whether moving a divider to `candidateWeights` keeps every pane it
+       shrinks at its minimum. Each pane is compared with the arrangement the
+       move started from — `startWeights` on the same axis, the painted
+       weights by default — so a pane already at or below its floor blocks
+       only the dividers that would shrink it further. The rule is
+       `GridVibeBackgroundResize.policy.fits`, shared with a resize from
+       behind; this measures the live grid for it, pane by pane, at each
+       pane's own cell and header size. */
+    function validateResizeCandidate(axis, candidateWeights, startWeights = null) {
         const grid = document.getElementById('terminalsGrid');
         const rects = splitSlotRects;
-        if (!grid || !Array.isArray(rects) || rects.length !== grid.children.length) {
+        const policy = window.GridVibeBackgroundResize?.policy;
+        if (!grid || !policy || !Array.isArray(rects) || rects.length !== grid.children.length) {
             return false;
         }
 
-        const columnWeights = axis === 'vertical' ? candidateWeights : splitColumnWeights;
-        const rowWeights = axis === 'horizontal' ? candidateWeights : splitRowWeights;
+        const vertical = axis === 'vertical';
+        const columnWeights = vertical ? candidateWeights : splitColumnWeights;
+        const rowWeights = vertical ? splitRowWeights : candidateWeights;
+        const startColumnWeights = vertical ? (startWeights || splitColumnWeights) : splitColumnWeights;
+        const startRowWeights = vertical ? splitRowWeights : (startWeights || splitRowWeights);
         const metrics = getResizableGridMetrics(grid, columnWeights, rowWeights);
-        if (!metrics || metrics.gridContentWidth <= 0 || metrics.gridContentHeight <= 0) {
+        const startMetrics = getResizableGridMetrics(grid, startColumnWeights, startRowWeights);
+        if (!metrics || !startMetrics || metrics.gridContentWidth <= 0 || metrics.gridContentHeight <= 0) {
             return false;
         }
 
-        const minimumSurface = metrics.columnTrackSpace * metrics.rowTrackSpace * MIN_RESIZE_SURFACE_RATIO;
         return rects.every((rect, visualIndex) => {
-            const surface = getPaneCandidateSurface(rect, columnWeights, rowWeights, metrics);
-            if (surface.width * surface.height < minimumSurface) {
-                return false;
-            }
-
             const card = grid.children[visualIndex];
             const slotIndex = Number(card?.dataset?.slot);
             const terminal = Number.isInteger(slotIndex) ? terminals[slotIndex] : null;
-            if (isExplorerPaneInstance(terminal) || isExplorerSession(terminal?._session)) {
-                return true;
-            }
-
-            const headerHeight = card?.querySelector('.terminal-header')?.getBoundingClientRect()?.height || 34;
-            const term = terminal?.term;
-            const cell = term?._core?._renderService?.dimensions?.css?.cell || {};
-            const cellWidth = Number(cell.width || 8);
-            const cellHeight = Number(cell.height || 17);
-            const availableWidth = Math.max(0, surface.width - 2);
-            const availableHeight = Math.max(0, surface.height - headerHeight - 2);
-            return Math.floor(availableWidth / cellWidth) >= MIN_SPLIT_COLS
-                && Math.floor(availableHeight / cellHeight) >= MIN_SPLIT_ROWS;
+            const cell = terminal?.term?._core?._renderService?.dimensions?.css?.cell || {};
+            return policy.fits({
+                surfaces: [getPaneCandidateSurface(rect, columnWeights, rowWeights, metrics)],
+                previous: [getPaneCandidateSurface(rect, startColumnWeights, startRowWeights, startMetrics)],
+                columnTrackSpace: metrics.columnTrackSpace,
+                rowTrackSpace: metrics.rowTrackSpace,
+                exempt: [isExplorerPaneInstance(terminal) || isExplorerSession(terminal?._session)],
+                cell,
+                headerHeight: card?.querySelector('.terminal-header')?.getBoundingClientRect()?.height || 34,
+                minCols: MIN_SPLIT_COLS,
+                minRows: MIN_SPLIT_ROWS,
+                minAxisRatio: MIN_RESIZE_AXIS_RATIO
+            });
         });
     }
 
@@ -3591,11 +3628,17 @@
         return trackTotal + Math.max(0, lineIndex - 1) * gap + (gap / 2);
     }
 
+    /* The panes a move of this divider can resize: every pane holding a track
+       of the two groups `getResizeTrackGroups` rescales, not only the panes
+       on the line — in a nested layout a pane further along a group changes
+       size too. */
     function affectedResizeIndices(axis, lineIndex) {
         const grid = document.getElementById('terminalsGrid');
-        if (!grid || !Array.isArray(splitSlotRects)) {
+        const groups = getResizeTrackGroups(axis, lineIndex);
+        if (!grid || !Array.isArray(splitSlotRects) || !groups) {
             return terminals.map((_, index) => index);
         }
+        const changed = new Set([...groups.before, ...groups.after]);
         return Array.from(grid.children)
             .map((card, visualIndex) => {
                 const rect = splitSlotRects[visualIndex];
@@ -3603,10 +3646,14 @@
                 if (!rect || !Number.isInteger(slotIndex)) {
                     return -1;
                 }
-                const containsLineNeighbor = axis === 'vertical'
-                    ? rect.x <= lineIndex + 1 && rect.x + rect.w - 1 >= lineIndex
-                    : rect.y <= lineIndex + 1 && rect.y + rect.h - 1 >= lineIndex;
-                return containsLineNeighbor ? slotIndex : -1;
+                const start = (axis === 'vertical' ? rect.x : rect.y) - 1;
+                const span = axis === 'vertical' ? rect.w : rect.h;
+                for (let track = start; track < start + span; track++) {
+                    if (changed.has(track)) {
+                        return slotIndex;
+                    }
+                }
+                return -1;
             })
             .filter(index => index >= 0);
     }
@@ -3763,6 +3810,8 @@
             trackGroups,
             affectedIndices: affectedResizeIndices(axis, lineIndex),
             handle,
+            startHandleOffset: parseFloat(axis === 'vertical' ? handle.style.left : handle.style.top) || 0,
+            appliedDelta: 0,
             fitFrame: null,
         };
     }
@@ -3777,7 +3826,15 @@
                 return;
             }
             resize.fitFrame = null;
-            resize.affectedIndices.forEach(index => scheduleFit(index));
+            resize.affectedIndices.forEach(index => {
+                scheduleFit(index);
+                /* A terminal's resize observer refreshes its own header and
+                   split buttons; an explorer or browser pane has none. */
+                if (!terminals[index]?._resizeObserved) {
+                    updateSplitButtonState(index);
+                    updatePaneHeaderLayout(index);
+                }
+            });
         });
     }
 
@@ -3789,40 +3846,41 @@
         event.preventDefault();
         event.stopPropagation();
 
+        const geometry = window.GridVibeSplitGeometry;
+        if (!geometry) {
+            return;
+        }
         const isVertical = resize.axis === 'vertical';
-        const delta = isVertical
+        const pointerDelta = isVertical
             ? event.clientX - resize.startClientX
             : event.clientY - resize.startClientY;
         const sizes = isVertical ? resize.startColumnSizes : resize.startRowSizes;
         const weights = isVertical ? resize.startColumnWeights : resize.startRowWeights;
-        const beforeIndexes = resize.trackGroups.before;
-        const afterIndexes = resize.trackGroups.after;
-        const beforeStartSize = beforeIndexes.reduce((sum, index) => sum + (sizes[index] || 0), 0) || 1;
-        const afterStartSize = afterIndexes.reduce((sum, index) => sum + (sizes[index] || 0), 0) || 1;
-        const beforeSize = Math.max(1, beforeStartSize + delta);
-        const afterSize = Math.max(1, afterStartSize - delta);
-        const beforeScale = beforeSize / beforeStartSize;
-        const afterScale = afterSize / afterStartSize;
-        const candidateWeights = weights.slice();
-        beforeIndexes.forEach(index => {
-            candidateWeights[index] = Math.max(0.01, weights[index] * beforeScale);
-        });
-        afterIndexes.forEach(index => {
-            candidateWeights[index] = Math.max(0.01, weights[index] * afterScale);
-        });
-
-        if (!validateResizeCandidate(resize.axis, candidateWeights)) {
+        const weightsFor = delta => geometry.dragDividerWeights(weights, sizes, resize.trackGroups, delta);
+        const reach = geometry.dividerDragRange(weights, sizes, resize.trackGroups);
+        /* Past a pane's minimum the divider stops at it rather than where the
+           last accepted event left it; the pointer can come back and resume. */
+        const delta = geometry.clampDividerDelta(
+            Math.min(reach.max, Math.max(reach.min, pointerDelta)),
+            candidate => validateResizeCandidate(resize.axis, weightsFor(candidate), weights)
+        );
+        if (delta === resize.appliedDelta) {
             return;
         }
+        resize.appliedDelta = delta;
+        const candidateWeights = weightsFor(delta);
 
         if (isVertical) {
             splitColumnWeights = candidateWeights;
-            resize.handle.style.left = `${event.clientX}px`;
+            resize.handle.style.left = `${resize.startHandleOffset + delta}px`;
         } else {
             splitRowWeights = candidateWeights;
-            resize.handle.style.top = `${event.clientY}px`;
+            resize.handle.style.top = `${resize.startHandleOffset + delta}px`;
         }
-        applySplitSlotGeometry({ fit: false, renderHandles: false });
+        /* Only the panes beside the line refresh their headers and split
+           buttons, once a frame (`scheduleActiveGridResizeFits`); re-measuring
+           every pane on every pointer event made the drag lag the pointer. */
+        applySplitSlotGeometry({ fit: false, renderHandles: false, refreshPanes: false });
         scheduleActiveGridResizeFits();
     }
 
@@ -4071,7 +4129,7 @@
         return splitSlotRects;
     }
 
-    function applySplitSlotGeometry({ fit = true, renderHandles = true } = {}) {
+    function applySplitSlotGeometry({ fit = true, renderHandles = true, refreshPanes = true } = {}) {
         const grid = document.getElementById('terminalsGrid');
         if (!grid || !Array.isArray(splitSlotRects) || splitSlotRects.length !== grid.children.length) {
             return false;
@@ -4098,7 +4156,9 @@
                 }
             }
         });
-        updateAllSplitButtonStates();
+        if (refreshPanes) {
+            updateAllSplitButtonStates();
+        }
         if (renderHandles) {
             renderResizeHandles();
         }
@@ -7276,13 +7336,18 @@
             }
         }
 
+        /* Held from here until the pane is painted or placed: a return to the
+           tab, or a rebuild of it, waits in its load for the answer, so the
+           placement read above is either applied or reported, never left
+           behind by a grid painted from the server first. */
+        const release = holdSplitTab(source.groupId);
         try {
-            const response = await fetch(`/api/sessions/${encodeURIComponent(sourceSessionId)}/split`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(payload)
-            });
-            const data = await response.json().catch(() => ({}));
+            const answered = await postSplitRequest(sourceSessionId, payload);
+            if (!answered) {
+                setWorkspaceSaveMessage(SPLIT_TIMED_OUT_ERROR, 'error');
+                return { ok: false, unknown: true, error: SPLIT_TIMED_OUT_ERROR };
+            }
+            const { response, data } = answered;
             if (!response.ok) {
                 throw new Error(data.error || `Split failed with status ${response.status}`);
             }
@@ -7294,25 +7359,33 @@
 
             if (!splitSourceStillShown(source)) {
                 /* The window moved on while the request was in flight — a tab
-                   picked, or the grid rebuilt. The pane exists, the server made
-                   it, but the arrays, cards and rectangles this call was about
-                   to extend belong to a view that is no longer the one on
-                   screen, and painting into whichever group is showing now
-                   would put a pane in the wrong tab. Nothing is painted.
+                   picked, left and picked again, or the grid torn down. The
+                   pane exists, the server made it, but the arrays, cards and
+                   rectangles this call was about to extend belong to a view
+                   that is no longer the one on screen, and painting into
+                   whichever group is showing now would put a pane in the
+                   wrong tab. Nothing is painted.
 
-                   A tab that is not painted now gets the pane placed the way a
-                   split from behind places one, off the placement read before
-                   the request: its arrangement written, its cached view
-                   dropped, and a return to it held until the write lands. A
-                   tab rebuilt in place was painted from the server and owns
-                   its arrangement, so it only takes the record. */
-                if (placement && backgroundSplit !== null && source.groupId !== visibleGroupId) {
-                    return backgroundSplit.placeAfterMove(
+                   The tab gets the pane placed the way a split from behind
+                   places one, off the placement read before the request: its
+                   arrangement written, its cached view dropped, and its load
+                   held until the write lands. The hold taken above means a
+                   load of this tab has painted nothing since the request went
+                   out. The one exception is a load whose read outlasted every
+                   retry (`LOAD_HELD_READ_ATTEMPTS`); the tab it painted is
+                   read again once the write has landed. */
+                if (placement && backgroundSplit !== null) {
+                    const rebuiltInPlace = source.groupId === visibleGroupId;
+                    const placed = await backgroundSplit.placeAfterMove(
                         placement.view, axis, placement.cut, { ok: true, session, group: data.group }
                     );
+                    if (rebuiltInPlace) {
+                        scheduleStatusRefresh();
+                    }
+                    return placed;
                 }
                 adoptSplitGroupRecord(data.group);
-                return { ok: true, session, index: null };
+                return { ok: true, session, index: null, note: SPLIT_NOT_PLACED_NOTE };
             }
 
             const newIndex = terminals.length;
@@ -7358,6 +7431,10 @@
                 data.group?.presentation_revision
             );
             noteGroupPresentationChanged(activeGroupId);
+            /* Painted: a load waiting on the tab now finds the pane in the
+               grid it shows. Released before the fit waits, which have
+               nothing to do with the tab's arrangement. */
+            release();
             await ensureAttachedTerminalsReady([index, newIndex]);
             emitTerminalResize(index, true);
             emitTerminalResize(newIndex, true);
@@ -7367,7 +7444,48 @@
             setWorkspaceSaveMessage(`Split failed: ${error.message}`, 'error');
             return { ok: false, error: error.message };
         } finally {
+            release();
             updateAllSplitButtonStates();
+        }
+    }
+
+    /* The split's hold on its tab, as a release that can be called more than
+       once. No hold without the tab module: there is no load barrier then. */
+    function holdSplitTab(groupId) {
+        const releaseHold = backgroundTab !== null && groupId ? backgroundTab.hold(groupId) : null;
+        let released = false;
+        return () => {
+            if (!released) {
+                released = true;
+                if (releaseHold) releaseHold();
+            }
+        };
+    }
+
+    /* The split request, bounded by `SPLIT_REQUEST_TIMEOUT_MS`, body read
+       included. Null when it did not answer in time: the server may still
+       make the pane, so the outcome is unknown rather than a failure. */
+    async function postSplitRequest(sessionId, payload) {
+        const controller = typeof AbortController === 'function' ? new AbortController() : null;
+        const timer = controller ? setTimeout(() => controller.abort(), SPLIT_REQUEST_TIMEOUT_MS) : null;
+        try {
+            const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/split`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
+                signal: controller ? controller.signal : undefined
+            });
+            const data = await response.json().catch(() => ({}));
+            return controller && controller.signal.aborted ? null : { response, data };
+        } catch (error) {
+            if (controller && controller.signal.aborted) {
+                return null;
+            }
+            throw error;
+        } finally {
+            if (timer !== null) {
+                clearTimeout(timer);
+            }
         }
     }
 
@@ -7448,12 +7566,11 @@
             return null;
         }
 
+        /* A view marked stale may hold an arrangement the server no longer
+           does: the record is the model until the view is painted again. */
         const cached = cachedGroupViews.get(groupId);
-        if (cached) {
-            const cards = Array.from(cached.fragment?.children || []);
-            const cachedIds = cards
-                .map(card => (cached.sessionIds || [])[Number(card.dataset.slot)])
-                .filter(Boolean);
+        if (cached && !cached.geometryStale) {
+            const cachedIds = cachedGroupCardIds(cached).filter(Boolean);
             const rects = cached.className === 'layout-split-local'
                 ? cached.splitSlotRects
                 : fixedLayoutRectCoordinates(cachedIds.length, cached.className || '');
@@ -7599,6 +7716,123 @@
         }
     }
 
+    /* The session ids of a cached view's cards, in the order they are painted. */
+    function cachedGroupCardIds(cached) {
+        return Array.from(cached.fragment?.children || [])
+            .map(card => (cached.sessionIds || [])[Number(card.dataset.slot)]);
+    }
+
+    /* Write an arrangement into a cached view, in the fields its restore
+       paints from: the restore's `applySplitSlotGeometry` then places every
+       card and turns the weights into the track templates, exactly as a
+       divider moved on screen does. A fixed-layout view becomes a split one,
+       as the on-screen resize makes it. False, and nothing written, when the
+       view's cards are not these panes in this order. */
+    function writeCachedGroupGeometry(cached, ids, geometry) {
+        const cardIds = cachedGroupCardIds(cached);
+        const rects = geometry?.rects;
+        if (!Array.isArray(ids) || !Array.isArray(rects) || rects.length !== ids.length
+            || cardIds.length !== ids.length || cardIds.some((sessionId, index) => sessionId !== ids[index])) {
+            return false;
+        }
+        const size = getSplitGridSize(rects);
+        cached.className = 'layout-split-local';
+        cached.gridColumns = '';
+        cached.gridRows = '';
+        cached.splitGridColumns = String(size.columns);
+        cached.splitGridRows = String(size.rows);
+        cached.splitSlotRects = cloneSplitSlotRects(rects);
+        cached.splitColumnWeights = normalizeSplitTrackWeights(geometry.columnWeights, size.columns);
+        cached.splitRowWeights = normalizeSplitTrackWeights(geometry.rowWeights, size.rows);
+        cached.originalSplitSlotCount = Number(geometry.baseCount) || ids.length;
+        cached.geometryStale = false;
+        return true;
+    }
+
+    /* A divider moved from behind changes the arrangement, not the panes: the
+       tab's cached view keeps its terminals, pages and explorer views and
+       takes the arrangement just written. One whose cards are no longer the
+       panes written is dropped, as before, and rebuilt from the server. */
+    function updateBackgroundGroupGeometry(groupId, layout) {
+        const cached = groupId !== visibleGroupId ? cachedGroupViews.get(groupId) : null;
+        if (!cached) {
+            return;
+        }
+        noteCachedGeometryWrite(cached);
+        if (!writeCachedGroupGeometry(cached, layout?.ids, layout)) {
+            dropCachedGroupView(groupId);
+        }
+    }
+
+    /* A geometry write whose outcome is unknown: the view keeps its panes and
+       reads the stored arrangement when it is next restored. */
+    function markBackgroundGroupGeometryStale(groupId) {
+        const cached = groupId !== visibleGroupId ? cachedGroupViews.get(groupId) : null;
+        if (cached) {
+            noteCachedGeometryWrite(cached);
+            cached.geometryStale = true;
+        }
+    }
+
+    /* Every geometry write that reached a view, landed or not, counted: a read
+       of the server started before one is older than what it may have written. */
+    function noteCachedGeometryWrite(cached) {
+        cached.geometryGeneration = (cached.geometryGeneration || 0) + 1;
+    }
+
+    /* A stale view takes the arrangement the server holds for panes `ids`,
+       in their order, and is no longer stale. No stored arrangement means no
+       geometry write landed, so the view is still the record. False, with the
+       view left as it was, when the stored one does not fit its cards. */
+    function adoptStoredGeometryForStaleView(cached, ids, workspaceLayout) {
+        if (!workspaceLayout) {
+            cached.geometryStale = false;
+            return true;
+        }
+        const stored = resolveWorkspaceLayoutSnapshot(workspaceLayout, ids.length);
+        return Boolean(stored) && writeCachedGroupGeometry(cached, ids, stored);
+    }
+
+    /* Before a tab's view is described for a save, which writes its
+       arrangement onto the live group without a revision: an edit in flight
+       is waited for, then a stale view reads the server's arrangement. False
+       when it could not, and the save must not go ahead with an arrangement a
+       geometry write may have replaced. */
+    async function settleStaleGroupGeometry(groupId) {
+        /* A write that started or ended while the record was being read makes
+           that record older than the view's last write: read again, a few
+           times, rather than take it. */
+        for (let attempt = 0; attempt < STALE_GEOMETRY_READ_ATTEMPTS; attempt += 1) {
+            await backgroundTabSettled(groupId);
+            const cached = groupId !== visibleGroupId ? cachedGroupViews.get(groupId) : null;
+            if (!cached?.geometryStale) {
+                return true;
+            }
+            const generation = cached.geometryGeneration;
+            let group = null;
+            try {
+                group = await fetchGroupRecord(groupId);
+            } catch (error) {
+                console.error('[GridVibe Sessions] could not read a tab resized from behind', error);
+                return false;
+            }
+            if (cachedGroupViews.get(groupId) !== cached) {
+                return true;
+            }
+            if (backgroundTab?.held(groupId) || cached.geometryGeneration !== generation) {
+                continue;
+            }
+            if (!cached.geometryStale) {
+                return true;
+            }
+            const ids = Array.isArray(group?.pane_order) ? group.pane_order : [];
+            return Boolean(group) && adoptStoredGeometryForStaleView(cached, ids, group.workspace_layout);
+        }
+        return false;
+    }
+
+    const STALE_GEOMETRY_READ_ATTEMPTS = 3;
+
     /* A load of a tab a split or resize from behind is writing waits for that
        write, so the tab is painted with its new arrangement rather than from
        the server's arrangement before it was saved. */
@@ -7606,6 +7840,15 @@
         if (backgroundTab !== null && groupId) {
             await backgroundTab.settled(groupId);
         }
+    }
+
+    /* How many edits have held the tab so far, compared across a read. */
+    function backgroundTabHoldCount(groupId) {
+        return backgroundTab !== null && groupId ? backgroundTab.holdCount(groupId) : 0;
+    }
+
+    function backgroundTabHeld(groupId) {
+        return backgroundTab !== null && Boolean(groupId) && backgroundTab.held(groupId);
     }
 
     /* A tab this window holds without showing it, read and written as data
@@ -7617,6 +7860,8 @@
             readModel: readBackgroundGroupModel,
             measure: measureGridForModel,
             discard: discardBackgroundGroupView,
+            updateGeometry: updateBackgroundGroupGeometry,
+            markGeometryStale: markBackgroundGroupGeometryStale,
             saveLayout: async ({ groupId, expectedRevision, ids, rects, columnWeights, rowWeights, baseCount }) => {
                 const group = getGroupById(groupId);
                 const workspaceLayout = buildWorkspaceLayoutSnapshotFromState(
@@ -7822,7 +8067,7 @@
             limits: {
                 minCols: MIN_SPLIT_COLS,
                 minRows: MIN_SPLIT_ROWS,
-                minSurfaceRatio: MIN_RESIZE_SURFACE_RATIO
+                minAxisRatio: MIN_RESIZE_AXIS_RATIO
             }
         })
         : null;
@@ -8687,15 +8932,28 @@
             }
 
             const requestedGroupId = activeGroupId;
-            await backgroundTabSettled(requestedGroupId);
-            if (loadToken !== activeLoadToken || requestedGroupId !== activeGroupId) {
-                return;
-            }
-            const resp = await fetch(getSessionApiPath(requestedGroupId));
-            if (!resp.ok) throw new Error(`Server returned ${resp.status}`);
-            const data = await resp.json();
-            if (loadToken !== activeLoadToken || requestedGroupId !== activeGroupId) {
-                return;
+            /* An edit of the tab that began while it was being read -- a
+               split's request going out, say -- makes that read older than
+               what the edit writes: wait for it and read again, rather than
+               paint a grid the edit is about to change. */
+            let data = null;
+            for (let attempt = 1; ; attempt += 1) {
+                await backgroundTabSettled(requestedGroupId);
+                if (loadToken !== activeLoadToken || requestedGroupId !== activeGroupId) {
+                    return;
+                }
+                const holdsBefore = backgroundTabHoldCount(requestedGroupId);
+                const resp = await fetch(getSessionApiPath(requestedGroupId));
+                if (!resp.ok) throw new Error(`Server returned ${resp.status}`);
+                data = await resp.json();
+                if (loadToken !== activeLoadToken || requestedGroupId !== activeGroupId) {
+                    return;
+                }
+                const editedMeanwhile = backgroundTabHoldCount(requestedGroupId) !== holdsBefore;
+                if (!backgroundTabHeld(requestedGroupId)
+                    && (!editedMeanwhile || attempt >= LOAD_HELD_READ_ATTEMPTS)) {
+                    break;
+                }
             }
 
             if (!data.sessions || data.sessions.length === 0) {
@@ -8798,6 +9056,11 @@
                         cached.terminals?.length === data.sessions.length
                         && (cached.className === expectedLayoutClass || cached.className === 'layout-split-local')
                         && hasMatchingSessionViews(cached.sessionIds || [], cached.terminals || [], data.sessions)
+                        && (!cached.geometryStale || adoptStoredGeometryForStaleView(
+                            cached,
+                            data.sessions.map(session => session.session_id),
+                            data.workspace_layout
+                        ))
                     );
                     if (cachedMatches) {
                         restoredFromCache = restoreCachedGroupView(requestedGroupId);

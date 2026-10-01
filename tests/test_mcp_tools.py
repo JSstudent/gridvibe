@@ -34,6 +34,7 @@ from gridvibe_mcp.server import (  # noqa: E402
     CLOSE_TOOLS,
     CREATE_TOOLS,
     DISPLAY_TOOLS,
+    EXPLICIT_FOCUS_RULE,
     HANDBACK_TOOLS,
     LAYOUTS,
     NAVIGATION_TOOLS,
@@ -43,6 +44,7 @@ from gridvibe_mcp.server import (  # noqa: E402
     SAVE_TOOLS,
     VIEW_MOVING_FLAGS,
     VIEW_MOVING_TOOLS,
+    WORKSPACE_LAYOUT_SCHEMA,
     dispatch,
     tool_names,
     tool_specs,
@@ -56,6 +58,8 @@ from gridvibe_mcp.windows import (  # noqa: E402
     open_window,
 )
 from tests.test_mcp_client import StubOpener, client_for, http_error  # noqa: E402
+from web.pane_geometry import compose_group_geometry  # noqa: E402
+from web.session_presentation import _normalize_workspace_layout  # noqa: E402
 from web.window_intents import CLAIM_TTL_SECONDS, INTENT_TTL_SECONDS  # noqa: E402
 
 #: Every tool this phase deliberately does not build. Naming them is the point:
@@ -95,6 +99,48 @@ class RefusingOpener:
         self.testcase.fail(f"a refusal reached the wire: {request.full_url}")
 
 
+_JSON_TYPES = {
+    "object": dict,
+    "array": list,
+    "string": str,
+    "boolean": bool,
+    "integer": int,
+    "number": (int, float),
+}
+
+
+def schema_errors(schema, value, where="$"):
+    """What a strict MCP client would refuse in ``value``, as a list of paths.
+
+    The subset the tool schemas use -- type, properties, required,
+    additionalProperties, items and minimum -- so the check runs without the
+    optional SDK and its validator installed.
+    """
+    expected = schema.get("type")
+    if expected:
+        if isinstance(value, bool) and expected in ("integer", "number"):
+            return [f"{where}: a boolean is not {expected}"]
+        if not isinstance(value, _JSON_TYPES[expected]):
+            return [f"{where}: not {expected}"]
+    errors = []
+    if "minimum" in schema and value < schema["minimum"]:
+        errors.append(f"{where}: below {schema['minimum']}")
+    if isinstance(value, dict):
+        properties = schema.get("properties", {})
+        for name in schema.get("required", []):
+            if name not in value:
+                errors.append(f"{where}.{name}: required")
+        for name, item in value.items():
+            if name in properties:
+                errors.extend(schema_errors(properties[name], item, f"{where}.{name}"))
+            elif schema.get("additionalProperties") is False:
+                errors.append(f"{where}.{name}: not allowed")
+    if isinstance(value, list) and "items" in schema:
+        for index, item in enumerate(value):
+            errors.extend(schema_errors(schema["items"], item, f"{where}[{index}]"))
+    return errors
+
+
 class ToolSurfaceTestCase(unittest.TestCase):
     def test_the_registered_surface_is_exactly_twenty_five(self):
         """Eight read, two hand back, four create, two replace, one erases,
@@ -125,8 +171,9 @@ class ToolSurfaceTestCase(unittest.TestCase):
 
         Every registered tool is either one of the two focus tools or a
         background tool, never both and never neither, so a new tool has to
-        choose. The one flag that makes a background call view-moving is
-        `move_session`'s `show`, and it says it is only for the person's ask.
+        choose. Both focus tools say they are only for the person's ask, and
+        so does the one flag that makes a background call view-moving,
+        `move_session`'s `show`.
         """
         names = tool_names()
         background = set(BACKGROUND_TOOLS)
@@ -140,7 +187,13 @@ class ToolSurfaceTestCase(unittest.TestCase):
         specs = {spec["name"]: spec for spec in tool_specs()}
         for name in VIEW_MOVING_TOOLS:
             with self.subTest(tool=name):
-                self.assertIn("raise its workspace window", specs[name]["description"])
+                description = specs[name]["description"]
+                self.assertIn("raise its workspace window", description)
+                # The rule itself reaches the agent, and no example invites
+                # focusing a pane just because a tool made it.
+                self.assertIn(EXPLICIT_FOCUS_RULE, description)
+                self.assertNotIn("after split_pane", description)
+                self.assertNotIn("after launch_panes", description)
         self.assertEqual(VIEW_MOVING_FLAGS, {"move_session": "show"})
         for name, flag in VIEW_MOVING_FLAGS.items():
             with self.subTest(tool=name, flag=flag):
@@ -466,6 +519,67 @@ class LaunchRequestTestCase(unittest.TestCase):
         session = json.loads(opener.requests[-1].data.decode("utf-8"))["sessions"][0]
         self.assertTrue(session["use_powershell"])
         self.assertFalse(session["use_wsl"])
+
+    def test_a_shell_is_carried_on_terminal_and_agent_panes_and_refused_elsewhere(self):
+        """Every kind against an absent, a valid and an invalid `shell`.
+
+        An explorer or browser pane runs no shell -- the launcher writes no
+        family for those rows -- so a family stated there is refused before
+        anything is sent, where it used to be dropped without a word.
+        """
+        entries = {
+            "terminal": {"kind": "terminal"},
+            "agent": {"kind": "agent", "agent": "claude"},
+            "explorer": {"kind": "explorer", "directory": "C:/project"},
+            "browser": {"kind": "browser", "url": "http://localhost:3000"},
+        }
+        for kind, entry in entries.items():
+            with self.subTest(kind=kind, shell="absent"):
+                _result, opener = self.launch({"panes": [dict(entry)]})
+
+                session = json.loads(opener.requests[-1].data.decode("utf-8"))["sessions"][0]
+                self.assertNotIn("use_powershell", session)
+                self.assertNotIn("use_wsl", session)
+
+            with self.subTest(kind=kind, shell="wsl"):
+                arguments = {"panes": [{**entry, "shell": "wsl"}]}
+                if kind in ("terminal", "agent"):
+                    _result, opener = self.launch(arguments)
+
+                    session = json.loads(opener.requests[-1].data.decode("utf-8"))["sessions"][0]
+                    self.assertEqual(
+                        (session["use_powershell"], session["use_wsl"]), (False, True)
+                    )
+                else:
+                    result = dispatch(
+                        "launch_panes",
+                        arguments,
+                        client=client_for(RefusingOpener(self)),
+                        identity=read_identity(INSIDE_PANE),
+                    )
+
+                    self.assertEqual(result["kind"], "invalid_arguments")
+                    self.assertEqual(
+                        result["error"],
+                        "Pane 1: 'shell' applies to terminal and agent panes.",
+                    )
+
+            with self.subTest(kind=kind, shell="bash"):
+                result = dispatch(
+                    "launch_panes",
+                    {"panes": [{**entry, "shell": "bash"}]},
+                    client=client_for(RefusingOpener(self)),
+                    identity=read_identity(INSIDE_PANE),
+                )
+
+                self.assertEqual(result["kind"], "invalid_arguments")
+                self.assertIn("'shell' must be one of", result["error"])
+
+    def test_the_shell_description_names_the_panes_it_applies_to(self):
+        launch = next(spec for spec in tool_specs() if spec["name"] == "launch_panes")
+        pane = launch["inputSchema"]["properties"]["panes"]["items"]
+
+        self.assertIn("terminal and agent panes only", pane["properties"]["shell"]["description"])
 
     def test_a_launch_from_inside_a_pane_names_the_pane_it_came_from(self):
         """Where, not what -- GridVibe reads the connection, the agent cannot."""
@@ -1057,13 +1171,16 @@ class PanePositionTestCase(unittest.TestCase):
 class LaunchGeometryTestCase(unittest.TestCase):
     """Prompt A's write half: the field the sidecar used to drop."""
 
-    GEOMETRY = {
+    #: What the page wrote for a two-pane group dragged off even: unequal
+    #: columns, so a round trip that lost the weights would show.
+    WRITTEN = {
+        "class_name": "layout-split-local",
         "split_slot_rects": [
-            {"originSlot": 0, "x": 1, "y": 1, "w": 2, "h": 2},
-            {"originSlot": 1, "x": 3, "y": 1, "w": 1, "h": 1},
+            {"originSlot": 0, "x": 1, "y": 1, "w": 1, "h": 1},
+            {"originSlot": 1, "x": 2, "y": 1, "w": 1, "h": 1},
         ],
-        "split_column_weights": [1.4, 1.4, 0.8],
-        "split_row_weights": [1, 1],
+        "split_column_weights": [1.5, 0.5],
+        "split_row_weights": [1],
         "original_split_slot_count": 2,
     }
 
@@ -1081,13 +1198,79 @@ class LaunchGeometryTestCase(unittest.TestCase):
         )
         return json.loads(opener.requests[-1].data.decode("utf-8"))
 
-    def test_a_stated_geometry_reaches_the_launch_body(self):
+    def read(self, session_ids, workspace_layout):
+        """`list_panes` over what `GET /api/panes/layout` composes for a group."""
+        composed = compose_group_geometry(session_ids, "vertical", workspace_layout)
+        opener = StubOpener([
+            {**composed, "group_id": "group-1", "workspace_id": "ws-1",
+             "presentation_revision": 4},
+            {"sessions": [
+                {"session_id": session_id, "group_id": "group-1"}
+                for session_id in session_ids
+            ]},
+        ])
+        return dispatch(
+            "list_panes",
+            {},
+            client=client_for(opener),
+            identity=read_identity(INSIDE_PANE),
+        )
+
+    def test_a_layout_read_launches_and_reads_back_unchanged(self):
+        """Read, launch, read: the second read is the first, weights included.
+
+        Each hop is the real one -- the composer the layout route answers
+        with, the sidecar's projection and launch body, and the normalizer the
+        launch route stores through -- with only the HTTP between them stubbed.
+        """
+        first = self.read(["pane-1", "pane-2"], self.WRITTEN)["layout"]["workspace_layout"]
+        self.assertEqual(schema_errors(WORKSPACE_LAYOUT_SCHEMA, first), [])
+
         body = self.launch({
             "panes": [{"kind": "terminal"}, {"kind": "terminal"}],
-            "workspace_layout": self.GEOMETRY,
+            "workspace_layout": first,
         })
+        self.assertEqual(body["workspace_layout"], first)
+        stored = _normalize_workspace_layout(body["workspace_layout"], 2)
+        self.assertIsNotNone(stored)
 
-        self.assertEqual(body["workspace_layout"], self.GEOMETRY)
+        second = self.read(["pane-7", "pane-8"], stored)["layout"]
+        self.assertEqual(second["workspace_layout"], first)
+        self.assertEqual(second["workspace_layout"]["split_column_weights"], [1.5, 0.5])
+        self.assertFalse(second["geometry"]["implied"])
+
+    def test_every_layout_a_read_tool_answers_is_one_launch_panes_accepts(self):
+        """`list_panes`, `list_saved_layouts` and `save_group_layout`.
+
+        Each is fed what GridVibe stores, `class_name` included, because that
+        is the key the strict launch schema used to refuse.
+        """
+        written = dict(self.WRITTEN)
+        saved = SavedLayoutTestCase.DETAIL
+        answers = {
+            "list_panes": self.read(["pane-1", "pane-2"], written)["layout"]["workspace_layout"],
+            "list_saved_layouts": dispatch(
+                "list_saved_layouts",
+                {},
+                client=client_for(StubOpener([SavedLayoutTestCase.LIST, saved])),
+                identity=read_identity(INSIDE_PANE),
+            )["layouts"][0]["workspace_layout"],
+            "save_group_layout": dispatch(
+                "save_group_layout",
+                {"group_id": "group-1", "name": "Review"},
+                client=client_for(StubOpener([{
+                    "saved": True,
+                    "id": "layout-1",
+                    "shape": {"layout": "vertical", "pane_count": 2,
+                              "workspace_layout": written, "panes": []},
+                }])),
+                identity=read_identity(INSIDE_PANE),
+            )["shape"]["workspace_layout"],
+        }
+        for tool, record in answers.items():
+            with self.subTest(tool=tool):
+                self.assertIsInstance(record, dict)
+                self.assertEqual(schema_errors(WORKSPACE_LAYOUT_SCHEMA, record), [])
 
     def test_a_launch_that_states_none_sends_none(self):
         body = self.launch({"panes": [{"kind": "terminal"}]})
@@ -1187,7 +1370,12 @@ class SavedLayoutTestCase(unittest.TestCase):
         self.assertEqual(result["count"], 1)
         self.assertEqual(preset["name"], "review")
         self.assertEqual(preset["layout"], "split")
-        self.assertEqual(preset["workspace_layout"]["class_name"], "layout-split-local")
+        self.assertEqual(
+            preset["workspace_layout"]["split_slot_rects"],
+            [{"originSlot": 0, "x": 1, "y": 1, "w": 1, "h": 1}],
+        )
+        # The store writes its own class name; the launch schema refuses one.
+        self.assertNotIn("class_name", preset["workspace_layout"])
         self.assertEqual(
             [pane["startup_mode"] for pane in preset["panes"]], ["agent", "explorer"]
         )
@@ -1976,6 +2164,41 @@ class SetPaneAgentTestCase(unittest.TestCase):
         body = json.loads(opener.requests[0].data.decode("utf-8"))
         self.assertTrue(body["mcp"])
         self.assertEqual(body["shell"], "wsl")
+
+    def test_an_unstated_auto_mode_is_left_out_of_the_body(self):
+        """Absent keeps the route's rule: auto mode follows the agent."""
+        _result, opener = self.relaunch({"pane_id": "pane-4", "agent": "claude"})
+
+        body = json.loads(opener.requests[0].data.decode("utf-8"))
+        self.assertNotIn("auto_mode", body)
+
+    def test_a_stated_auto_mode_travels_either_way(self):
+        for value in (True, False):
+            with self.subTest(auto_mode=value):
+                _result, opener = self.relaunch({
+                    "pane_id": "pane-4", "agent": "claude", "auto_mode": value,
+                })
+
+                body = json.loads(opener.requests[0].data.decode("utf-8"))
+                self.assertIs(body["auto_mode"], value)
+
+    def test_a_task_does_not_turn_on_auto_mode(self):
+        _result, opener = self.relaunch({
+            "pane_id": "pane-4", "agent": "claude", "task": "Review the diff.",
+        })
+
+        body = json.loads(opener.requests[0].data.decode("utf-8"))
+        self.assertNotIn("auto_mode", body)
+
+    def test_a_non_boolean_auto_mode_is_refused_before_any_http(self):
+        result = dispatch(
+            "set_pane_agent",
+            {"pane_id": "pane-4", "agent": "claude", "auto_mode": "yes"},
+            client=client_for(RefusingOpener(self)),
+            identity=read_identity(INSIDE_PANE),
+        )
+
+        self.assertEqual(result["kind"], "invalid_arguments")
 
     def test_an_unstated_override_is_left_out_of_the_body(self):
         """Absent, not `False` -- the server's own default is the same thing."""

@@ -251,6 +251,15 @@ def read_geometry(
                 _weights(stored.get("split_column_weights"), columns),
                 _weights(stored.get("split_row_weights"), rows),
             )
+            # The base the page read the rectangles against. It is not always
+            # the pane count, and a copy launched without it is rescaled on a
+            # different unit.
+            try:
+                base = int(stored.get("original_split_slot_count") or 0)
+            except (TypeError, ValueError):
+                base = 0
+            if base >= 1:
+                geometry["original_split_slot_count"] = base
             geometry["implied"] = False
             return geometry
 
@@ -259,6 +268,26 @@ def read_geometry(
         return None
     geometry["implied"] = True
     return geometry
+
+
+#: The keys `launch_panes` takes as ``workspace_layout``. The read-friendly
+#: ``geometry`` block names the weights for a reader; this record names them
+#: the way the launch schema does, so a read can be passed straight back.
+LAUNCH_LAYOUT_FIELDS = (
+    "split_slot_rects",
+    "split_column_weights",
+    "split_row_weights",
+    "original_split_slot_count",
+)
+
+
+def launch_layout(geometry: Mapping[str, Any]) -> Dict[str, Any]:
+    """The arrangement as a ``workspace_layout`` record a launch accepts."""
+    record = {
+        key: geometry[key] for key in LAUNCH_LAYOUT_FIELDS if key in geometry
+    }
+    record["split_slot_rects"] = [dict(rect) for rect in record["split_slot_rects"]]
+    return record
 
 
 def relative_areas(geometry: Mapping[str, Any]) -> List[float]:
@@ -349,6 +378,7 @@ def compose_group_geometry(
             "layout_advisory": layout_is_advisory(count),
             "terminal_count": 0,
             "geometry": None,
+            "workspace_layout": None,
             "panes": [],
         }
 
@@ -384,5 +414,8 @@ def compose_group_geometry(
             "row_weights": geometry["split_row_weights"],
             "split_slot_rects": rects,
         },
+        # The same arrangement in the launch schema's own names, so a read is
+        # a record `launch_panes` takes unchanged, weights included.
+        "workspace_layout": launch_layout(geometry),
         "panes": panes,
     }

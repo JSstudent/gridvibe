@@ -13,11 +13,19 @@
    - **the hold**: from the moment an edit commits to changing the tab until
      its arrangement is written, a load of that tab waits (`settled`), so a tab
      picked mid-edit is never painted from the arrangement being replaced nor
-     restored from a cached view about to be dropped;
-   - **the write**: drop the tab's cached view (the page keeps the painted
-     one), then write the arrangement through the group's revisioned
-     presentation transaction, then take the server's record into the tab
-     strip.
+     restored from a cached view about to be dropped, and the page does not
+     publish the arrangement of a view a write is replacing (`held`). A load
+     whose read was out when a hold was taken reads again (`holdCount`). The
+     visible split handler holds its own tab the same way, from before its
+     request until the new pane is painted or placed;
+   - **the writes**, both through the group's revisioned presentation
+     transaction, then taking the server's record into the tab strip. A write
+     that changes the pane set (`write`, the split's) drops the tab's cached
+     view first (the page keeps the painted one): its panes are rebuilt from
+     the server. A write of geometry alone (`writeGeometry`, the resize's)
+     drops nothing: the cached view keeps its panes, scrollback and pages and
+     takes the new arrangement, or, when the outcome is unknown, reads the
+     stored one before it is next painted. A refused one leaves it as it was.
 
    `background-split.js` and `background-resize.js` are the two edits on top.
    One instance per window is shared by both, so a load waits for either.
@@ -45,6 +53,12 @@
             measure,
             /* Drop the tab's cached view, unless it is the one painted. */
             discard,
+            /* Write an arrangement that landed into the tab's cached view,
+               unless it is the one painted: `(groupId, layout)`. */
+            updateGeometry,
+            /* The tab's cached view may no longer match its stored
+               arrangement: read that before the view is next painted. */
+            markGeometryStale,
             /* Write the arrangement through the revisioned transaction:
                `{ ok, revision, error, unknown }`. */
             saveLayout,
@@ -57,6 +71,21 @@
         /* The edits in flight, per tab. More than one can be out for the same
            tab when two intents land together, so it is a set, not a flag. */
         const inFlight = new Map();
+        /* Every hold ever taken, per tab. A read that saw no hold at either
+           end can still have had one start and finish while it was out. */
+        const holdCounts = new Map();
+
+        async function save(groupId, expectedRevision, layout) {
+            if (!Number.isInteger(expectedRevision)) {
+                return { ok: false, error: 'No revision to write the arrangement against.' };
+            }
+            try {
+                return await saveLayout({ groupId, expectedRevision, ...layout }) || { ok: false };
+            } catch (error) {
+                onError(error);
+                return { ok: false, thrown: true, error: String((error && error.message) || error) };
+            }
+        }
 
         return {
             /* Hold the tab until the returned release is called. Taken with
@@ -69,6 +98,7 @@
                 const held = inFlight.get(id) || new Set();
                 held.add(pending);
                 inFlight.set(id, held);
+                holdCounts.set(id, (holdCounts.get(id) || 0) + 1);
                 return () => {
                     held.delete(pending);
                     if (!held.size && inFlight.get(id) === held) {
@@ -76,6 +106,20 @@
                     }
                     release();
                 };
+            },
+
+            /* Whether an edit of this tab is in flight right now: its cached
+               view may be about to take, or to lose, the arrangement it shows. */
+            held(groupId) {
+                const held = inFlight.get(String(groupId || ''));
+                return Boolean(held && held.size);
+            },
+
+            /* How many holds the tab has been taken under so far. A load that
+               reads the tab compares it before and after: a change means an
+               edit began while the read was out, so the read may predate it. */
+            holdCount(groupId) {
+                return holdCounts.get(String(groupId || '')) || 0;
             },
 
             /* Resolves once no edit of this tab is in flight: the one thing a
@@ -109,21 +153,30 @@
                 discard(String(groupId || ''));
             },
 
-            /* Drop the cache, then write. From the drop on, the tab is rebuilt
-               from what the server holds the next time it is shown, whatever
-               the write answers. A write that threw is `{ ok: false, thrown }`:
-               it may have landed. No revision to write against writes nothing. */
+            /* The pane-set-changing write: drop the cache, then write. From
+               the drop on, the tab is rebuilt from what the server holds the
+               next time it is shown, whatever the write answers. A write that
+               threw is `{ ok: false, thrown }`: it may have landed. No
+               revision to write against writes nothing. */
             async write(groupId, expectedRevision, layout) {
                 discard(groupId);
-                if (!Number.isInteger(expectedRevision)) {
-                    return { ok: false, error: 'No revision to write the arrangement against.' };
+                return save(groupId, expectedRevision, layout);
+            },
+
+            /* The geometry-only write: the same panes, new rectangles or
+               weights. Nothing is dropped. Landed, the cached view takes the
+               arrangement; possibly landed (thrown, unknown, or accepted with
+               no newer revision), it is marked to read the stored one; refused
+               or never sent, it is left exactly as it was. Same answer as
+               `write`. */
+            async writeGeometry(groupId, expectedRevision, layout) {
+                const saved = await save(groupId, expectedRevision, layout);
+                if (saved.ok && Number.isInteger(saved.revision) && saved.revision > expectedRevision) {
+                    updateGeometry(groupId, layout);
+                } else if (saved.ok || saved.thrown || saved.unknown) {
+                    markGeometryStale(groupId);
                 }
-                try {
-                    return await saveLayout({ groupId, expectedRevision, ...layout }) || { ok: false };
-                } catch (error) {
-                    onError(error);
-                    return { ok: false, thrown: true, error: String((error && error.message) || error) };
-                }
+                return saved;
             },
 
             /* The server's record, with the arrangement just written when the

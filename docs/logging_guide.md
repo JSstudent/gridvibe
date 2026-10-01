@@ -51,6 +51,33 @@ don't attach a new file handler without this filter.
 
 ---
 
+## Credential Redaction
+
+A remote pane's agent reaches its tools at `POST /mcp/<token>`, and that path
+segment is the pane's credential. `RedactMcpTokenFilter` (`web/log_redaction.py`)
+is the **first** filter on both handlers `setup_logging` installs, and on every
+handler already attached to a named logger when it runs — python-engineio and
+python-socketio each put a stderr handler on their server loggers at import, and
+those emit before a record propagates to the root. So every
+record — werkzeug access and error lines, Flask's `Exception on <path>` record,
+anything propagated from a child logger, and the traceback text the formatter
+appends — reads `/mcp/<redacted>` before any handler formats it. A separator
+before or after `mcp` spelled `%2F` (routing decodes it, the access line keeps
+it) or `//` (a redirect to the route) is matched too. Records that
+name no token are left exactly as they came. `/api/mcp/...` routes are keyed by
+pane id, not a secret, and are not rewritten.
+
+It sits on the handlers rather than on the `werkzeug` logger because a logger
+filter sees only that logger's own records. A code path that logs a request path
+itself (the cross-origin write guard in `web/app.py`) also passes it through
+`redact_mcp_path()`, so its text is right under any handler. A handler added
+after `setup_logging` — including one a debug entry point creates through
+`basicConfig` — gets the filter through `install_mcp_token_redaction()`, which
+with no argument covers every handler attached at that moment. This is part of the
+[Security and trust](engineering_contracts.md#security-and-trust) contract.
+
+---
+
 ## Noise Suppression
 
 The `werkzeug` logger emits an `INFO` line for every HTTP request. A few families of endpoints are polled by the frontend every few seconds and would flood the log with identical entries:

@@ -14,10 +14,13 @@ Pinned here against the store itself, with no Flask and no HTTP:
 - **A report is held to the rules a task is**, refused rather than repaired or
   truncated, and a refusal records nothing.
 - **Only the agent that read the task answers it.** A pane relaunched with a
-  new task keeps its id, so a report arriving before that task was fetched is
-  the replaced agent's, and it is refused.
+  new task keeps its id, so the id cannot tell the replaced agent's late
+  report from its successor's. The read mints a receipt, and a report settles
+  its assignment only with that receipt: one sent before the task was read,
+  without a receipt, or with the replaced agent's, is refused.
 """
 
+import json
 import sys
 import threading
 import time
@@ -39,6 +42,7 @@ from web.agent_results import (  # noqa: E402
     MAX_RESULT_CHARS,
     NOBODY_WAITING_MESSAGE,
     REPORTED,
+    STALE_RECEIPT_MESSAGE,
     UNREAD_TASK_MESSAGE,
     WORKING,
     ResultError,
@@ -65,6 +69,15 @@ def _store_with(*workers, requester=REQUESTER):
     return store
 
 
+def _report(store, worker, text, status=None):
+    """Report as the worker's own agent: with the receipt its read was given.
+
+    Asked for again through ``mark_read`` -- a re-read returns the same
+    receipt -- so a case about something else need not carry it around.
+    """
+    return store.report(worker, text, status, receipt=store.mark_read(f"h-{worker}"))
+
+
 def _rows(payload):
     return {row["session_id"]: row for row in payload["agents"]}
 
@@ -73,7 +86,7 @@ class ReportAndCollectTestCase(unittest.TestCase):
     def test_a_report_is_returned_whole_once_and_then_bookmarked(self):
         store = _store_with("worker-a")
 
-        answer = store.report("worker-a", "Found two bugs in sync.py.", "done")
+        answer = _report(store, "worker-a", "Found two bugs in sync.py.", "done")
         first = store.collect(REQUESTER)
         second = store.collect(REQUESTER)
 
@@ -92,7 +105,7 @@ class ReportAndCollectTestCase(unittest.TestCase):
 
     def test_include_collected_returns_a_report_again(self):
         store = _store_with("worker-a")
-        store.report("worker-a", "Done.")
+        _report(store, "worker-a", "Done.")
         store.collect(REQUESTER)
 
         payload = store.collect(REQUESTER, include_collected=True)
@@ -101,10 +114,10 @@ class ReportAndCollectTestCase(unittest.TestCase):
 
     def test_a_second_report_replaces_the_first_and_is_new_again(self):
         store = _store_with("worker-a")
-        store.report("worker-a", "First pass.")
+        _report(store, "worker-a", "First pass.")
         store.collect(REQUESTER)
 
-        answer = store.report("worker-a", "Final answer.", "failed")
+        answer = _report(store, "worker-a", "Final answer.", "failed")
         row = _rows(store.collect(REQUESTER))["worker-a"]
 
         self.assertTrue(answer["replaced_earlier_report"])
@@ -114,7 +127,7 @@ class ReportAndCollectTestCase(unittest.TestCase):
         store = _store_with("worker-a")
 
         with self.assertRaises(ResultError) as refused:
-            store.report("stranger", "Hello.")
+            _report(store, "stranger", "Hello.")
 
         self.assertEqual(refused.exception.status_code, 409)
         self.assertEqual(refused.exception.message, NOBODY_WAITING_MESSAGE)
@@ -130,14 +143,14 @@ class ReportAndCollectTestCase(unittest.TestCase):
         self.assertEqual(refused.exception.status_code, 409)
         self.assertEqual(refused.exception.message, UNREAD_TASK_MESSAGE)
         self.assertEqual(store.state_for("h-a"), WORKING)
-        self.assertTrue(store.mark_read("h-a"))
-        self.assertEqual(store.report("worker-a", "Done.")["revision"], 1)
+        receipt = store.mark_read("h-a")
+        self.assertTrue(receipt)
+        self.assertEqual(store.report("worker-a", "Done.", receipt=receipt)["revision"], 1)
 
     def test_another_requesters_reports_are_never_returned(self):
         store = _store_with("worker-a")
         store.expect("h-x", requester_session_id="someone-else", worker_session_id="worker-x")
-        store.mark_read("h-x")
-        store.report("worker-x", "Not for you.")
+        store.report("worker-x", "Not for you.", receipt=store.mark_read("h-x"))
 
         payload = store.collect(REQUESTER)
 
@@ -157,14 +170,14 @@ class ReportAndCollectTestCase(unittest.TestCase):
         for label, (text, status, expected) in cases.items():
             with self.subTest(label):
                 with self.assertRaises(ResultError) as refused:
-                    store.report("worker-a", text, status)
+                    _report(store, "worker-a", text, status)
                 self.assertIn(expected, refused.exception.message)
                 self.assertEqual(refused.exception.status_code, 400)
                 self.assertEqual(_rows(store.collect(REQUESTER))["worker-a"]["state"], WORKING)
 
     def test_crlf_is_read_as_lf_and_nothing_else_changes(self):
         store = _store_with("worker-a")
-        store.report("worker-a", "line one\r\n\tline two")
+        _report(store, "worker-a", "line one\r\n\tline two")
 
         self.assertEqual(_rows(store.collect(REQUESTER))["worker-a"]["result"], "line one\n\tline two")
 
@@ -186,7 +199,7 @@ class ReportAndCollectTestCase(unittest.TestCase):
     def test_reports_past_the_budget_wait_for_the_next_call(self):
         store = _store_with(*WORKERS)
         for worker in WORKERS:
-            store.report(worker, worker[-1] * 30)
+            _report(store, worker, worker[-1] * 30)
 
         first = store.collect(REQUESTER, chars_budget=50)
         second = store.collect(REQUESTER, chars_budget=50)
@@ -197,7 +210,7 @@ class ReportAndCollectTestCase(unittest.TestCase):
         self.assertEqual([("result" in row) for row in second["agents"]], [False, True, False])
         # The first report always fits, however long, or nothing would move.
         long_store = _store_with("worker-a")
-        long_store.report("worker-a", "z" * 200)
+        _report(long_store, "worker-a", "z" * 200)
         self.assertEqual(len(_rows(long_store.collect(REQUESTER, chars_budget=10))["worker-a"]["result"]), 200)
 
     def test_include_collected_never_starves_an_unseen_report(self):
@@ -206,9 +219,9 @@ class ReportAndCollectTestCase(unittest.TestCase):
         workers = ("w1", "w2", "w3", "w4")
         store = _store_with(*workers)
         for worker in workers[:3]:
-            store.report(worker, worker * 10)
+            _report(store, worker, worker * 10)
         store.collect(REQUESTER)
-        store.report("w4", "new " * 10)
+        _report(store, "w4", "new " * 10)
 
         payload = store.collect(REQUESTER, include_collected=True, chars_budget=50)
 
@@ -240,7 +253,7 @@ class EndingTestCase(unittest.TestCase):
 
     def test_an_ending_never_undoes_a_report(self):
         store = _store_with("worker-a")
-        store.report("worker-a", "Done.")
+        _report(store, "worker-a", "Done.")
 
         self.assertFalse(store.end("h-worker-a", "connection closed"))
         self.assertEqual(_rows(store.collect(REQUESTER))["worker-a"]["result"], "Done.")
@@ -249,11 +262,11 @@ class EndingTestCase(unittest.TestCase):
         """A pane relaunched after it reported runs an agent that was never
         handed the task; it used to be able to overwrite the report."""
         store = _store_with("worker-a")
-        store.report("worker-a", "The original findings.")
+        _report(store, "worker-a", "The original findings.")
 
         store.end("h-worker-a", "pane relaunched")
         with self.assertRaises(ResultError) as refused:
-            store.report("worker-a", "Something else entirely.")
+            _report(store, "worker-a", "Something else entirely.")
 
         self.assertEqual(refused.exception.status_code, 409)
         row = _rows(store.collect(REQUESTER))["worker-a"]
@@ -261,32 +274,32 @@ class EndingTestCase(unittest.TestCase):
 
     def test_a_closed_workers_report_takes_no_further_writes(self):
         store = _store_with("worker-a")
-        store.report("worker-a", "Done.")
+        _report(store, "worker-a", "Done.")
 
         store.forget_session("worker-a")
 
         with self.assertRaises(ResultError):
-            store.report("worker-a", "Again.")
+            _report(store, "worker-a", "Again.")
 
     def test_an_ended_assignment_takes_no_report(self):
         store = _store_with("worker-a")
         store.end("h-worker-a", "pane relaunched")
 
         with self.assertRaises(ResultError):
-            store.report("worker-a", "Too late.")
+            _report(store, "worker-a", "Too late.")
 
     def test_the_requesters_pane_closing_drops_what_it_was_owed(self):
         store = _store_with("worker-a", "worker-b")
-        store.report("worker-a", "Done.")
+        _report(store, "worker-a", "Done.")
 
         self.assertEqual(store.forget_session(REQUESTER), 2)
         self.assertEqual(store.count(), 0)
         with self.assertRaises(ResultError):
-            store.report("worker-b", "Nobody is listening.")
+            _report(store, "worker-b", "Nobody is listening.")
 
     def test_a_workers_pane_closing_ends_it_and_keeps_a_report(self):
         store = _store_with("worker-a", "worker-b")
-        store.report("worker-a", "Done.")
+        _report(store, "worker-a", "Done.")
 
         store.forget_session("worker-a")
         store.forget_session("worker-b")
@@ -317,7 +330,7 @@ class EndingTestCase(unittest.TestCase):
 
 class WaitTestCase(unittest.TestCase):
     def _report_later(self, store, worker, text, delay=0.05):
-        timer = threading.Timer(delay, store.report, args=(worker, text))
+        timer = threading.Timer(delay, _report, args=(store, worker, text))
         timer.start()
         self.addCleanup(timer.cancel)
         return timer
@@ -364,7 +377,7 @@ class WaitTestCase(unittest.TestCase):
 
     def test_a_wait_that_runs_out_says_so_and_keeps_what_arrived(self):
         store = _store_with("worker-a", "worker-b")
-        store.report("worker-a", "a done")
+        _report(store, "worker-a", "a done")
 
         settled = store.wait_until_settled(REQUESTER, until="all", timeout=0.05)
         payload = store.collect(REQUESTER)
@@ -375,7 +388,7 @@ class WaitTestCase(unittest.TestCase):
 
     def test_a_wait_narrowed_to_named_panes_ignores_the_rest(self):
         store = _store_with("worker-a", "worker-b")
-        store.report("worker-a", "a done")
+        _report(store, "worker-a", "a done")
 
         self.assertTrue(store.wait_until_settled(REQUESTER, ["worker-a"], timeout=0.05))
         self.assertEqual(list(_rows(store.collect(REQUESTER, ["worker-a"]))), ["worker-a"])
@@ -414,8 +427,8 @@ class HandoffStoreWiringTestCase(unittest.TestCase):
         handoff_id = self.handoffs.create("Review.", source_session_id=REQUESTER, session_id="worker-a")
 
         self.assertEqual(self.results.state_for(handoff_id), WORKING)
-        self._fetch(handoff_id)
-        self.results.report("worker-a", "Reviewed.")
+        receipt = self._fetch(handoff_id)["receipt"]
+        self.results.report("worker-a", "Reviewed.", receipt=receipt)
         self.assertEqual(_rows(self.results.collect(REQUESTER))["worker-a"]["result"], "Reviewed.")
 
     def test_a_split_reports_to_the_agent_that_asked_not_the_pane_it_halved(self):
@@ -425,9 +438,9 @@ class HandoffStoreWiringTestCase(unittest.TestCase):
         self.assertIsNone(self.results.state_for(handoff_id))
         self.handoffs.take(handoff_id, "neighbour")
         self.handoffs.bind(handoff_id, "worker-a")
-        self._fetch(handoff_id)
+        receipt = self._fetch(handoff_id)["receipt"]
 
-        self.results.report("worker-a", "Reviewed.")
+        self.results.report("worker-a", "Reviewed.", receipt=receipt)
 
         self.assertEqual(list(_rows(self.results.collect(REQUESTER))), ["worker-a"])
         self.assertEqual(self.results.collect("neighbour")["agents"], [])
@@ -493,9 +506,9 @@ class HandoffStoreWiringTestCase(unittest.TestCase):
     def test_a_replaced_task_takes_the_next_report(self):
         self.handoffs.create("First.", source_session_id=REQUESTER, session_id="worker-a", now=1.0)
         second = self.handoffs.create("Second.", source_session_id=REQUESTER, session_id="worker-a", now=2.0)
-        self._fetch(second)
+        receipt = self._fetch(second)["receipt"]
 
-        self.results.report("worker-a", "Did the second.")
+        self.results.report("worker-a", "Did the second.", receipt=receipt)
 
         self.assertEqual(self.results.state_for(second), REPORTED)
 
@@ -503,18 +516,91 @@ class HandoffStoreWiringTestCase(unittest.TestCase):
         """A relaunch keeps the pane's id, so the replaced agent's report --
         still in flight when the new task was bound -- used to settle it."""
         first = self.handoffs.create("First.", source_session_id=REQUESTER, session_id="worker-a", now=1.0)
-        self._fetch(first)
+        first_receipt = self._fetch(first)["receipt"]
         second = self.handoffs.create("Second.", source_session_id=REQUESTER, session_id="worker-a", now=2.0)
 
         with self.assertRaises(ResultError) as refused:
-            self.results.report("worker-a", "Did the first.")
+            self.results.report("worker-a", "Did the first.", receipt=first_receipt)
 
         self.assertEqual(refused.exception.message, UNREAD_TASK_MESSAGE)
         self.assertEqual(self.results.state_for(first), ENDED)
         self.assertEqual(self.results.state_for(second), WORKING)
-        self.assertEqual(self._fetch(second)["task"], "Second.")
-        self.results.report("worker-a", "Did the second.")
+        read = self._fetch(second)
+        self.assertEqual(read["task"], "Second.")
+        self.results.report("worker-a", "Did the second.", receipt=read["receipt"])
         self.assertEqual(self.results.state_for(second), REPORTED)
+
+    def test_the_replaced_agents_late_report_cannot_settle_a_task_its_successor_read(self):
+        """A3. Once the successor has read its task the pane's assignment is
+        read, so a late report from the agent the relaunch replaced -- which
+        carries only its own receipt -- used to be recorded as the successor's."""
+        first = self.handoffs.create("First.", source_session_id=REQUESTER, session_id="worker-a", now=1.0)
+        first_receipt = self._fetch(first)["receipt"]
+        second = self.handoffs.create("Second.", source_session_id=REQUESTER, session_id="worker-a", now=2.0)
+        second_receipt = self._fetch(second)["receipt"]
+
+        with self.assertRaises(ResultError) as refused:
+            self.results.report("worker-a", "Did the first.", receipt=first_receipt)
+
+        self.assertEqual(refused.exception.status_code, 409)
+        self.assertEqual(refused.exception.message, STALE_RECEIPT_MESSAGE)
+        self.assertIn("read_handoff", refused.exception.message)
+        self.assertNotEqual(first_receipt, second_receipt)
+        self.assertEqual(self.results.state_for(second), WORKING)
+        self.assertEqual(self.results.collect(REQUESTER)["counts"][WORKING], 1)
+
+        self.results.report("worker-a", "Did the second.", receipt=second_receipt)
+
+        self.assertEqual(self.results.state_for(second), REPORTED)
+        row = _rows(self.results.collect(REQUESTER))["worker-a"]
+        self.assertEqual(row["result"], "Did the second.")
+
+    def test_a_read_task_takes_no_report_without_its_receipt(self):
+        handoff_id = self.handoffs.create("Review.", source_session_id=REQUESTER, session_id="worker-a")
+        receipt = self._fetch(handoff_id)["receipt"]
+
+        for label, offered in {
+            "missing": None,
+            "empty": "",
+            "different": receipt[:-1] + ("A" if receipt[-1] != "A" else "B"),
+            "not text": ["x"],
+            "not ascii": receipt + "\u00e9",
+        }.items():
+            with self.subTest(label), self.assertRaises(ResultError) as refused:
+                self.results.report("worker-a", "Done.", receipt=offered)
+            self.assertEqual(refused.exception.message, STALE_RECEIPT_MESSAGE)
+        self.assertEqual(self.results.state_for(handoff_id), WORKING)
+
+    def test_reading_again_returns_the_same_receipt(self):
+        """What an agent whose tools restarted does when its report is refused."""
+        handoff_id = self.handoffs.create("Review.", source_session_id=REQUESTER, session_id="worker-a")
+
+        first = self._fetch(handoff_id)
+        again = self.handoffs.read("worker-a")
+
+        self.assertTrue(first["receipt"])
+        self.assertEqual(again["receipt"], first["receipt"])
+        self.assertEqual(again["task"], first["task"])
+        self.results.report("worker-a", "Done.", receipt=again["receipt"])
+        self.assertEqual(self.results.state_for(handoff_id), REPORTED)
+
+    def test_a_receipt_never_reaches_a_collected_row_or_a_log(self):
+        handoff_id = self.handoffs.create("Review.", source_session_id=REQUESTER, session_id="worker-a")
+        with self.assertLogs("web", level="DEBUG") as logs:
+            receipt = self._fetch(handoff_id)["receipt"]
+            self.results.report("worker-a", "Done.", receipt=receipt)
+            payload = self.results.collect(REQUESTER)
+
+        self.assertNotIn(receipt, json.dumps(payload))
+        self.assertNotIn(receipt, "\n".join(logs.output))
+        self.assertNotIn(receipt, repr(self.results._records[handoff_id]))
+
+    def test_a_handoff_nobody_waits_on_is_read_without_a_receipt(self):
+        handoffs = HandoffStore(results=None)
+        handoff_id = handoffs.create("Review.", source_session_id=REQUESTER, session_id="worker-a")
+        handoffs.announce(handoff_id, delivery=INLINE)
+
+        self.assertNotIn("receipt", handoffs.read("worker-a"))
 
     def test_the_brief_tells_its_reader_how_to_report_back(self):
         handoff_id = self.handoffs.create(

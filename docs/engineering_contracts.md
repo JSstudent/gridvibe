@@ -48,6 +48,16 @@ Regression history and audit narratives do not belong in this reference.
   `.encryption_key` creation is exclusive and atomic so concurrent processes
   converge on one complete key. Never put credentials into new state files,
   responses, logs, or browser storage. Flag any intended weakening explicitly.
+- A remote pane's `/mcp/<token>` path is a credential. `web/log_redaction.py` is
+  its one log owner: `RedactMcpTokenFilter` sits first on every handler attached
+  when `setup_logging()` runs (its own two, and those libraries such as
+  engineio and socketio put on their own loggers at import; the debug entry
+  points' `basicConfig` handlers too), so access, error and propagated records
+  and their tracebacks read `/mcp/<redacted>` before any handler formats them.
+  Every separator spelling that still reaches the route (`%2F`, `//`), before
+  `mcp` or after it, is redacted. A call site that logs a request path still passes it through
+  `redact_mcp_path()`. A handler added later installs the filter first;
+  `/api/mcp/...` is not a credential and is left alone.
 - `POST /api/sessions/<id>/agent-conversation` is the one route an agent's own
   process calls without a page. It is authorised by a per-connection pane token
   rather than by origin; see
@@ -489,6 +499,12 @@ changing any field that survives restart; it owns the complete save/restore flow
   by the pane header — `agent-relaunch`, `agent-mode-switch`, `clear` — and the
   rules those add are in [Agent tools (MCP)](#agent-tools-mcp). Everything in
   this section holds for both halves; the gates run before any of it.
+- **Only the tool's relaunch can state auto mode.** `agent-relaunch` reads a
+  boolean `auto_mode` with the same tri-state as `mcp`: unstated keeps the
+  carry-forward above, stated wins over it, and a stated `true` is dropped for
+  a pane with no agent or a CLI that registers no auto-approval flag, so the
+  field never claims a mode the launch line lacks. The header's `shell` route
+  has no auto-mode row and ignores the key.
 - **A split with no stated `kind` is a plain terminal, and its metadata has to
   say so.** The pane kind is deliberately not cloned: an explorer, browser or
   agent source all split off a terminal rooted where the source is showing. The
@@ -1512,6 +1528,13 @@ in `README.md`; state the rules a change has to keep.
   secret at any depth regardless of the list. `list_saved_layouts` is the sharp
   case: the route it reads answers with a *decrypted* SSH password by design.
   Failures are typed and carry GridVibe's own sentence verbatim, unretried.
+- **A read's geometry is a launch's input.** Every `workspace_layout` a read
+  tool answers — `list_panes`' layout block, `list_saved_layouts`,
+  `save_group_layout` — is accepted unchanged by `launch_panes`' strict
+  `WORKSPACE_LAYOUT_SCHEMA`. `compose_group_geometry` publishes it beside the
+  read-friendly `geometry` block, keeping the stored
+  `original_split_slot_count`, and `GEOMETRY_FIELDS` in `client.py` is exactly
+  the schema's keys: no `class_name`, which the store writes for itself.
 - **Eight tool tiers.** Read and create
   only ever make something new (`read_handoff` is a read: its only side effect
   is a handoff's state); `report_result`/`wait_for_results` carry a report back
@@ -1692,8 +1715,24 @@ in `README.md`; state the rules a change has to keep.
   it halved. `report_result` names no recipient — the caller's own pane is the
   path and the assignment's requester receives it — and `wait_for_results`
   reads only what is owed to the caller's pane. A report settles an assignment
-  only once its handoff has been read: a relaunch keeps the pane's id, so the
-  replaced agent's in-flight report must not answer the new task. Every way a
+  only with that assignment's receipt. The first `read_handoff` mints an opaque
+  random receipt (`secrets.token_urlsafe`), every re-read returns the same one,
+  and a report sent before the read, without a receipt or with any other one is
+  refused 409 with nothing kept; the match is exact, through
+  `secrets.compare_digest`. A relaunch keeps the pane's id, so the id alone
+  cannot tell the replaced agent's in-flight report from its successor's, even
+  after the successor has read its task; the receipt can. The sidecar keeps the
+  receipt off the agent's answer (it is not in `HANDOFF_FIELDS`) and sends it
+  with `report_result` only when it holds one. Over the tunnel each request
+  builds its own client, so the receipt is held on the pane-token record in
+  `web/mcp_http.py`; a relaunch revokes the token and mints another, which
+  starts without it. A write-back to a revoked token lands nowhere, and a
+  request whose token was revoked after it resolved it keeps no receipt it
+  reads, so a later message of its batch cannot report with the successor's. A
+  receipt is never logged and never appears in a collected row, a pane read, a
+  dashboard payload or a snapshot. An agent whose sidecar restarted after
+  reading is refused and told to call `read_handoff` again, which re-issues the
+  same receipt; the replaced agent cannot, because its process is gone. Every way a
   handoff goes before a report (connection closed, pane closed, relaunch, mode switch, replaced,
   undeliverable) ends its assignment with the reason and stops it taking
   reports, so whatever the pane runs next cannot answer for it; a report
@@ -1746,7 +1785,9 @@ in `README.md`; state the rules a change has to keep.
   therefore validated whole before any workspace, group or pane exists: an
   unknown or proven-absent agent, `mcp: true` on a CLI with no mechanism, a task
   for a CLI that cannot take one, and a stated local shell the origin cannot run
-  are each refused naming every offending pane. `check_failed` is not an
+  are each refused naming every offending pane. A `shell` on an explorer or
+  browser entry is refused by the sidecar before sending, since the launcher
+  writes no family for those rows. `check_failed` is not an
   absence — that pane keeps its agent, identity and task, with a warning. The
   launcher and restore keep opening an absent agent as a terminal with a
   warning; the refusal is the tool path's alone. `list_agent_types` answers from
@@ -1759,7 +1800,9 @@ in `README.md`; state the rules a change has to keep.
   newly show a window in front — except `focus_session` and `focus_pane`
   (`VIEW_MOVING_TOOLS` in `gridvibe_mcp/server.py`) and `move_session`'s
   `show` (`VIEW_MOVING_FLAGS`), whose descriptions say they are for when the
-  person asked to see, focus or bring something forward. Every other tool is
+  person asked to see, focus or bring something forward: both focus tools
+  carry the one sentence `EXPLICIT_FOCUS_RULE`, and their examples are the
+  person's own asks, never "after a tool made it". Every other tool is
   named in `BACKGROUND_TOOLS`: it works in any tab of a window, showing or not,
   and leaves the person's tab, focus and window order as they were. That list
   is spelled out name by name, not built from the tiers, and a test fails for a
@@ -1917,9 +1960,11 @@ in `README.md`; state the rules a change has to keep.
   `open_reverse_tunnel`, so a port opened for one pane cannot spend another's,
   and `mcp_path()` is the one spelling `tunnel_url()` also builds the remote
   config from. Framing that cannot prove where the body ends is refused rather
-  than normalized, the head and body are bounded, and refusals name nothing — the
+  than normalized — `Transfer-Encoding`, any repeated `Content-Length` even with
+  equal values, obsolete line folding — the head and body are bounded, and refusals name nothing — the
   same `404` for a wrong method and a wrong token, and only the target's first
-  segment in the log, because the path is a credential. The still-true narrowing
+  segment in the log, because the path is a credential (GridVibe's own handlers
+  redact it too; see [Security and trust](#security-and-trust)). The still-true narrowing
   is what it now is: a remote process reaches this pane's tool surface, acting on
   this machine, and nothing else on the API.
 - **The channels that filter are bounded, and handed off at once.** Paramiko
@@ -1979,10 +2024,28 @@ in `README.md`; state the rules a change has to keep.
   pre-save arrangement or from a cache about to be dropped, and every tab except
   the one painted loses its cached view. A pane that was created is reported
   even when its arrangement could not be written, with a `note` the sidecar
-  relays. A split from the visible handler whose window moved to another tab
-  mid-request is placed the same way (`placeAfterMove`), from the model and cut
+  relays. The visible handler (`splitTerminalPane`) holds its own tab the same
+  way, from just after it captures the model and cut until the new pane is
+  painted or placed, so a return to the tab or a rebuild of it waits for the
+  answer. `initialLoad` also compares the tab's hold count
+  (`backgroundTabHoldCount`) across its read of the tab and reads again when a
+  hold began meanwhile or is still taken, up to `LOAD_HELD_READ_ATTEMPTS`
+  reads for holds that came and went. A painted split releases the hold once
+  the pane is in the grid, before its fit waits; nothing between hold and
+  release awaits `initialLoad`. A split whose window moved on mid-request (another
+  tab painted, the grid torn down, or, past those reads, rebuilt) is placed the
+  same way as a background split (`placeAfterMove`), from the model and cut
   captured before the request, so its tab does not come back in the default
-  arrangement. The hold serializes loads, not edits: a divider can be moved in
+  arrangement. A tab rebuilt in place is read again after the write
+  (`scheduleStatusRefresh`). With no captured placement, the pane is reported
+  with a `note` that it was not placed. The request is bounded by
+  `SPLIT_REQUEST_TIMEOUT_MS` (20 s, the claim TTL), body included. On timeout
+  the hold is released and the split answers `unknown: true` with "read
+  list_panes before retrying". The intent reports that as `refused`, because a
+  split intent has no `unknown` outcome. **Not covered:** a full browser reload
+  drops the page's in-memory capture, and the server then holds the new pane
+  with the pre-split layout. A fix would need the server to take the cut. The
+  hold serializes loads, not edits: a divider can be moved in
   the tab while the split's request is out, and appending a pane does not raise
   the presentation revision, so the split answers at the revision that resize
   was acknowledged at. Every placement model therefore carries the revision it
@@ -2004,9 +2067,34 @@ in `README.md`; state the rules a change has to keep.
   acknowledging it. For a tab it holds but is not painting,
   `web/static/js/background-resize.js` does the same off the tab's model, with
   the read, shared-grid measure, hold, write and adopt steps it shares with the
-  background split in `background-tab.js`; its minimum rule (`policy.fits`) is
-  pinned against `validateResizeCandidate`, and it never switches tabs or moves
-  focus. A tab with a pane close it has not shown since is refused, because
+  background split in `background-tab.js`; its minimum rule is the same
+  `policy.fits` the pointer drag applies (see the divider rule under
+  [UI and styling](#ui-and-styling)), and it never switches tabs or moves
+  focus. Unlike the split's write, the resize's (`writeGeometry`) changes no
+  panes, so it never drops the tab's cached view: its terminals, browser
+  documents and explorer views survive every outcome. A write that lands with a
+  newer revision is written into the view (`updateBackgroundGroupGeometry()` in
+  `terminals.js`: rectangles, weights and split class, which the restore's
+  `applySplitSlotGeometry` paints, so a fixed-layout view becomes a split one as
+  an on-screen resize makes it). A refusal or a missing revision leaves the view
+  untouched. A thrown write, an `unknown` answer, or one accepted without a
+  newer revision marks the view stale. Until it is painted again, reads of the
+  tab take the server's record. Its presentation captures omit the
+  arrangement, and so do captures of any background tab while an edit holds
+  it (`held()`), before the answer has updated or marked the view. A queued
+  write's conflict recapture therefore cannot rebase the replaced weights
+  onto the new revision. A save of the tab waits for that hold, then reads the
+  server's arrangement into a stale view (`settleStaleGroupGeometry()`). It
+  does this because the saved-session route writes the live group's layout
+  without a revision. A geometry write that reaches the view while that read
+  is out, or holds it when the read returns, makes the record older than the
+  view's last write: the view counts its writes (`geometryGeneration`), and
+  the settle reads the record again, up to three times. The save is refused
+  when the read fails or keeps being outraced. Its next restore applies the
+  arrangement its load just read before first paint, and drops the view only
+  when that arrangement does not fit its cards. A view whose cards are not the panes
+  written is dropped, as before. An unmarked restore is unchanged. A tab with a
+  pane close it has not shown since is refused, because
   that close's pending model would replace the written weights at its next
   load. A stale revision, missing divider, narrow viewport or impossible minimum
   refuses without applying weights. The result carries the persisted weights and
@@ -2159,6 +2247,24 @@ in `README.md`; state the rules a change has to keep.
   the sidecar relays GridVibe's own words rather than the likeliest guess. The
   grid is tested before the measurement: a pane with no line left to halve has
   no halves to measure.
+- A divider's floor limits shrinking, per pane and per axis. A move may not
+  make a pane narrower than 1/16 of the grid's column track space or shorter
+  than 1/16 of its row track space (`MIN_RESIZE_AXIS_RATIO`), nor, for a pane
+  that draws a terminal, take it below `MIN_SPLIT_COLS` or `MIN_SPLIT_ROWS` on
+  that axis. Only a dimension the move shrinks is checked, measured against the
+  arrangement the move started from, so a pane already under its floor blocks
+  only the moves that would shrink it further in that dimension and can always
+  be made larger, and the rest of the grid stays resizable. A single rule,
+  `policy.fits` in `background-resize.js`, serves the pointer drag
+  (`validateResizeCandidate`), the visible `resize_divider` and the resize from
+  behind. A drag rescales the two track groups beside the line as wholes
+  (`getResizeTrackGroups`), so every pane in either group is held to the rule,
+  not only the panes on the line. The drag arithmetic is `split-geometry.js`:
+  `dividerDragRange` bounds a move to where the rescale stays exact and inside
+  the stored weight bounds, and `clampDividerDelta` stops a refused move at the
+  floor it crossed rather than dropping it. While dragging, only the panes those
+  groups resize (`affectedResizeIndices`) are refit and have their headers and
+  split buttons refreshed, once a frame; the release repaints every pane.
 
 - `agent-dashboard.css` dresses one dialog on two pages and states no page's
   palette: no `color-scheme`, no `body` rule, no full-height frame. It reads the
@@ -2206,6 +2312,8 @@ Follow [logging_guide.md](logging_guide.md).
   budgets to compensate for library chatter.
 - Lifecycle logging is shape-only: ids, revisions, counts and failure categories;
   never paths, commands, file contents, credentials or payloads.
+- Every handler carries the MCP token redaction filter first; see
+  [Security and trust](#security-and-trust).
 
 ## Launcher setup and voice
 

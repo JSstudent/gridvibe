@@ -14,6 +14,7 @@ offers it ticks it; and the row states ``agent_mcp_override`` only beside
 """
 
 import json
+import re
 import shutil
 import subprocess
 import unittest
@@ -499,6 +500,22 @@ class LauncherOverrideWiringTestCase(unittest.TestCase):
     def test_disabled_override_has_a_greyed_style(self):
         css = LAUNCHER_CSS.read_text(encoding="utf-8")
         self.assertIn(".t-agent-mcp-override-field.is-disabled", css)
+
+    def test_a_hidden_check_field_is_not_displayed(self):
+        """The row hides the Auto mode, MCP and Override boxes by adding
+        ``hidden`` to their ``.check-field`` label, which sets its own
+        ``display``; without an unscoped rule naming the pair, the class is
+        inert and every agent is offered all three boxes."""
+        css = re.sub(r"/\*.*?\*/", "", LAUNCHER_CSS.read_text(encoding="utf-8"), flags=re.S)
+        hiding = [
+            body
+            for selectors, body in re.findall(r"([^{}]+)\{([^{}]*)\}", css)
+            if ".check-field.hidden" in {s.strip() for s in selectors.split(",")}
+        ]
+        self.assertTrue(
+            any(re.search(r"display\s*:\s*none\b", body) for body in hiding),
+            "launcher.css must hide .check-field.hidden",
+        )
 
 
 if __name__ == "__main__":

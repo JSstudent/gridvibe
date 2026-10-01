@@ -122,6 +122,9 @@ CLOSE_TOOLS = ("close_pane", "close_group", "close_workspace")
 #: forward" reaches GridVibe, so an agent calls them only when asked.
 VIEW_MOVING_TOOLS = ("focus_session", "focus_pane")
 
+#: The rule above as the agent reads it, in both focus tools' descriptions.
+EXPLICIT_FOCUS_RULE = "Call only when the person asked to see, focus or bring it forward."
+
 #: A background tool whose one argument makes that call view-moving, and the
 #: argument. It carries the same rule as the two tools above.
 VIEW_MOVING_FLAGS = {"move_session": "show"}
@@ -266,7 +269,8 @@ WORKSPACE_LAYOUT_SCHEMA = {
     "type": "object",
     "description": (
         "Per-pane rectangles in grid coordinates plus fractional track "
-        "weights, exactly as list_panes reports them. All-or-nothing: one "
+        "weights. Copy list_panes' layout.workspace_layout, or a saved "
+        "layout's workspace_layout, unchanged. All-or-nothing: one "
         "unrepresentable rectangle and the whole record is dropped."
     ),
     "properties": {
@@ -830,9 +834,12 @@ def tool_specs() -> List[Dict[str, Any]]:
                                     "type": "string",
                                     "enum": list(SHELL_KINDS),
                                     "description": (
-                                        "Local shell family. Omit to take "
-                                        "GridVibe's own default rather than "
-                                        "stating one the user did not choose."
+                                        "Local shell family, for terminal "
+                                        "and agent panes only: refused on "
+                                        "an explorer or browser pane. Omit "
+                                        "to take GridVibe's own default "
+                                        "rather than stating one the user "
+                                        "did not choose."
                                     ),
                                 },
                                 "url": {"type": "string", "description": "For kind='browser'."},
@@ -968,6 +975,18 @@ def tool_specs() -> List[Dict[str, Any]]:
                     "mcp": {
                         "type": "boolean",
                         "description": "Give that agent these same GridVibe tools.",
+                    },
+                    "auto_mode": {
+                        "type": "boolean",
+                        "description": (
+                            "Start that agent with its auto-approval flag. "
+                            "Only when the person asked for an autonomous "
+                            "agent; a task never implies it. Omit to keep "
+                            "the pane's own setting, which follows the agent "
+                            "it was chosen for. Dropped for a CLI "
+                            "list_agent_types reports without "
+                            "auto_mode_supported."
+                        ),
                     },
                     "shell": {
                         "type": "string",
@@ -1211,7 +1230,9 @@ def _navigation_specs() -> List[Dict[str, Any]]:
             "description": (
                 "Bring one session to the foreground: raise its workspace "
                 "window and switch that window to the session's tab -- e.g. "
-                "'bring the gridvibe_main session to the foreground'. Name it "
+                "'bring the gridvibe_main session to the foreground'. "
+                + EXPLICIT_FOCUS_RULE
+                + " Name it "
                 "by 'session_name', the exact text its tab shows; the "
                 "workspace is found from the session, so none is needed. Two "
                 "open tabs sharing the name are refused with the candidates "
@@ -1251,7 +1272,9 @@ def _navigation_specs() -> List[Dict[str, Any]]:
             "description": (
                 "Bring one pane into view: raise its workspace window, switch "
                 "to the session (tab) it is in and give the pane focus -- e.g. "
-                "after split_pane or launch_panes made it. The session and "
+                "'show me the new review pane'. "
+                + EXPLICIT_FOCUS_RULE
+                + " The session and "
                 "workspace are read from the pane itself. For 'the review "
                 "agent in the gridvibe_main session', call list_panes with "
                 "session_name='gridvibe_main' first and pass the pane_id "
@@ -1373,6 +1396,13 @@ def build_pane_request(
     task = _task_for_agent_pane(pane, kind, identity or PaneIdentity())
     directory = _text(pane, "directory")
     title = _text(pane, "title")
+    # Read before the kind branches, so a stated family is never dropped by
+    # an early return. An explorer or browser pane runs no shell -- the
+    # launcher itself writes neither family for those rows -- so naming one
+    # there is refused rather than silently ignored.
+    shell = _choice(_text(pane, "shell"), SHELL_KINDS, "shell", "")
+    if shell and kind in ("explorer", "browser"):
+        raise ToolArgumentError("'shell' applies to terminal and agent panes.")
 
     request: Dict[str, Any] = {"directory": directory}
     if title:
@@ -1410,7 +1440,6 @@ def build_pane_request(
     # tool-launched pane a *stated* PowerShell pane -- saved as one, in a
     # workspace whose other panes the user runs as cmd, with nothing having
     # asked.
-    shell = _choice(_text(pane, "shell"), SHELL_KINDS, "shell", "")
     if shell:
         request["use_powershell"] = shell == "powershell"
         request["use_wsl"] = shell == "wsl"
@@ -2317,6 +2346,10 @@ def _run(
         }
         if args.get("mcp") is not None:
             body["mcp"] = _flag(args, "mcp", False)
+        if args.get("auto_mode") is not None:
+            # A tri-state like `mcp`: absent leaves the route's own rule, which
+            # carries auto mode forward only for the agent it was chosen for.
+            body["auto_mode"] = _flag(args, "auto_mode", False)
         if task is not None:
             body["task"] = task
             body["mcp"] = True

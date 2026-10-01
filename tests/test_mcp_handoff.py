@@ -10,6 +10,9 @@ test if a refusal ever reaches the wire:
 - **``read_handoff`` only ever names the caller's own pane** -- on stdio from
   its environment, over the tunnel from its token -- and its result is built
   from a field list, like every other.
+- **Over the tunnel the handoff receipt lives on the token**, because each
+  request builds its own client: it carries from the read to the report, and a
+  relaunch's new token starts without the old one.
 - **A refusal's structure survives the wire**, so an agent can put GridVibe's
   own question to the person before it ever sets ``override``.
 - **The split description settles what the axis words mean.**
@@ -43,7 +46,8 @@ from gridvibe_mcp.splits import (  # noqa: E402
     split_pane,
 )
 from tests.test_mcp_client import StubOpener, client_for, http_error  # noqa: E402
-from web import agent_handoffs  # noqa: E402
+from web import agent_handoffs, agent_results, mcp_http  # noqa: E402
+from web.agent_results import STALE_RECEIPT_MESSAGE  # noqa: E402
 
 INSIDE_PANE = {
     "GRIDVIBE_URL": "http://127.0.0.1:5050",
@@ -406,6 +410,8 @@ class TunnelReadHandoffTestCase(unittest.TestCase):
         self.addCleanup(api.session_manager.reset_sessions)
         agent_handoffs.handoffs.reset()
         self.addCleanup(agent_handoffs.handoffs.reset)
+        agent_results.results.reset()
+        self.addCleanup(agent_results.results.reset)
         mcp_http.pane_tokens.clear()
         self.addCleanup(mcp_http.pane_tokens.clear)
         group = api.session_manager.create_group(
@@ -452,6 +458,147 @@ class TunnelReadHandoffTestCase(unittest.TestCase):
         self.assertEqual(
             agent_handoffs.handoffs.public_state(self.panes[1].session_id)["state"], "announced"
         )
+
+    def _call(self, token, name, arguments=None, *, request_id=1):
+        loopback = self._loopback
+        with patch.object(GridVibeClient, "request", lambda client_self, *a, **k: loopback(client_self, *a, **k)):
+            response = self.client.post(
+                f"/mcp/{token}",
+                data=json.dumps({
+                    "jsonrpc": "2.0", "id": request_id, "method": "tools/call",
+                    "params": {"name": name, "arguments": arguments or {}},
+                }),
+                content_type="application/json",
+            )
+        self.assertEqual(response.status_code, 200, response.get_data(as_text=True))
+        return response, json.loads(response.get_json()["result"]["content"][0]["text"])
+
+    def _handoff_of(self, pane):
+        return next(
+            handoff_id
+            for handoff_id, record in agent_handoffs.handoffs._records.items()
+            if record.session_id == pane.session_id
+        )
+
+    def test_the_receipt_is_held_on_the_token_from_the_read_to_the_report(self):
+        """Each request builds its own client, so the receipt a read returned
+        has to outlive it somewhere other than the client."""
+        read_response, read = self._call(self.token, "read_handoff")
+        receipt = mcp_http.pane_tokens.resolve(self.token).get("handoff_receipt")
+
+        self.assertTrue(receipt)
+        self.assertNotIn("receipt", read)
+        self.assertNotIn(receipt, read_response.get_data(as_text=True))
+        report_response, report = self._call(self.token, "report_result", {"result": "Done."}, request_id=2)
+
+        self.assertTrue(report.get("recorded"), report)
+        self.assertNotIn(receipt, report_response.get_data(as_text=True))
+        handoff_id = self._handoff_of(self.panes[0])
+        self.assertEqual(agent_results.results.state_for(handoff_id), agent_results.REPORTED)
+
+    def test_a_relaunched_panes_new_token_starts_without_the_old_receipt(self):
+        pane = self.panes[0]
+        _, _ = self._call(self.token, "read_handoff")
+        stale_record = mcp_http.pane_tokens.resolve(self.token)
+        self.assertTrue(stale_record.get("handoff_receipt"))
+
+        # The relaunch: the old token is revoked, the pane is handed a new task
+        # and the new transport mints a new token.
+        self.assertTrue(mcp_http.pane_tokens.revoke(pane.session_id))
+        self.assertEqual(mcp_http.pane_tokens.resolve(self.token), {})
+        successor = agent_handoffs.handoffs.create(
+            "the successor's brief", source_session_id="caller", session_id=pane.session_id
+        )
+        agent_handoffs.handoffs.announce(successor, delivery="inline")
+        new_token = mcp_http.pane_tokens.mint(
+            session_id=pane.session_id, group_id=pane.group_id, workspace_id="default"
+        )
+        self.assertNotIn("handoff_receipt", mcp_http.pane_tokens.resolve(new_token))
+
+        _, refused = self._call(new_token, "report_result", {"result": "Too soon."})
+        self.assertIn("read_handoff", refused["error"])
+        _, read = self._call(new_token, "read_handoff")
+        self.assertEqual(read["task"], "the successor's brief")
+
+        # The old agent's request was already in flight: it resolved the old
+        # record before the revoke, so it carries the old receipt.
+        loopback = self._loopback
+        with patch.object(GridVibeClient, "request", lambda client_self, *a, **k: loopback(client_self, *a, **k)):
+            reply = mcp_http.handle_message(
+                {"jsonrpc": "2.0", "id": 9, "method": "tools/call",
+                 "params": {"name": "report_result", "arguments": {"result": "The first task's findings."}}},
+                record=stale_record,
+                base_url="http://127.0.0.1:5050",
+                max_agent_depth=3,
+                token=self.token,
+            )
+        late = json.loads(reply["result"]["content"][0]["text"])
+        self.assertTrue(reply["result"]["isError"])
+        self.assertEqual(late["error"], STALE_RECEIPT_MESSAGE)
+        self.assertEqual(agent_results.results.state_for(successor), agent_results.WORKING)
+        self.assertEqual(mcp_http.pane_tokens.resolve(self.token), {})
+
+        _, own = self._call(new_token, "report_result", {"result": "The successor's findings."})
+        self.assertTrue(own.get("recorded"), own)
+        self.assertEqual(agent_results.results.state_for(successor), agent_results.REPORTED)
+
+    def test_a_revoked_tokens_batch_cannot_read_the_successors_receipt_and_report_with_it(self):
+        """Review finding: a batch resolves its token once. Revoked and replaced
+        before its read ran, the predecessor's batch read the successor's task
+        through the pane-id route, kept the new receipt on its own record copy
+        and reported with it, settling the successor's task."""
+        pane = self.panes[0]
+        self._call(self.token, "read_handoff")
+        stale_record = mcp_http.pane_tokens.resolve(self.token)
+        mcp_http.pane_tokens.revoke(pane.session_id)
+        successor = agent_handoffs.handoffs.create(
+            "the successor's brief", source_session_id="caller", session_id=pane.session_id
+        )
+        agent_handoffs.handoffs.announce(successor, delivery="inline")
+
+        loopback = self._loopback
+        replies = []
+        with patch.object(GridVibeClient, "request", lambda client_self, *a, **k: loopback(client_self, *a, **k)):
+            for request_id, name, arguments in (
+                (1, "read_handoff", {}),
+                (2, "report_result", {"result": "Predecessor findings."}),
+            ):
+                replies.append(mcp_http.handle_message(
+                    {"jsonrpc": "2.0", "id": request_id, "method": "tools/call",
+                     "params": {"name": name, "arguments": arguments}},
+                    record=stale_record,
+                    base_url="http://127.0.0.1:5050",
+                    max_agent_depth=3,
+                    token=self.token,
+                ))
+
+        report = json.loads(replies[1]["result"]["content"][0]["text"])
+        self.assertTrue(replies[1]["result"]["isError"], report)
+        self.assertEqual(report["error"], STALE_RECEIPT_MESSAGE)
+        self.assertEqual(agent_results.results.state_for(successor), agent_results.WORKING)
+        self.assertEqual(mcp_http.pane_tokens.resolve(self.token), {})
+        new_token = mcp_http.pane_tokens.mint(
+            session_id=pane.session_id, group_id=pane.group_id, workspace_id="default"
+        )
+        self._call(new_token, "read_handoff")
+        _, own = self._call(new_token, "report_result", {"result": "The successor's findings."})
+        self.assertTrue(own.get("recorded"), own)
+
+    def test_a_batch_reads_and_reports_in_one_request(self):
+        loopback = self._loopback
+        batch = [
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+             "params": {"name": "read_handoff", "arguments": {}}},
+            {"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+             "params": {"name": "report_result", "arguments": {"result": "Done."}}},
+        ]
+        with patch.object(GridVibeClient, "request", lambda client_self, *a, **k: loopback(client_self, *a, **k)):
+            response = self.client.post(
+                f"/mcp/{self.token}", data=json.dumps(batch), content_type="application/json"
+            )
+
+        replies = {reply["id"]: json.loads(reply["result"]["content"][0]["text"]) for reply in response.get_json()}
+        self.assertTrue(replies[2].get("recorded"), replies[2])
 
 
 if __name__ == "__main__":

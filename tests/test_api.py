@@ -15414,22 +15414,15 @@ class ApiRoutesTestCase(unittest.TestCase):
     def test_terminals_page_resize_validation_enforces_minimums(self):
         response = self.client.get("/terminals")
         html = self._page_html(response)
-        self.assertIn("const MIN_RESIZE_SURFACE_RATIO = 1 / 16;", html)
-        self.assertIn(
-            "const minimumSurface = metrics.columnTrackSpace * metrics.rowTrackSpace * MIN_RESIZE_SURFACE_RATIO;",
-            html,
-        )
-        self.assertIn("surface.width * surface.height < minimumSurface", html)
-        self.assertIn("Math.floor(availableWidth / cellWidth) >= MIN_SPLIT_COLS", html)
-        self.assertIn("Math.floor(availableHeight / cellHeight) >= MIN_SPLIT_ROWS", html)
+        # The rule itself is executed in tests/test_divider_drag.py and
+        # tests/test_background_resize.py; this pins the named floor.
+        self.assertIn("const MIN_RESIZE_AXIS_RATIO = 1 / 16;", html)
 
     def test_terminals_page_resize_drag_refits_and_forces_final_resize(self):
         response = self.client.get("/terminals")
         html = self._page_html(response)
         self.assertIn("window.addEventListener('pointermove', updateGridResize);", html)
         self.assertIn("window.addEventListener('pointerup', finishGridResize);", html)
-        self.assertIn("const beforeIndexes = resize.trackGroups.before;", html)
-        self.assertIn("resize.affectedIndices.forEach(index => scheduleFit(index));", html)
         self.assertIn("redrawAttachedTerminals(affectedIndices, { forceResize: true });", html)
         self.assertIn("if (activeGridResize) {\n                event.preventDefault();", html)
 

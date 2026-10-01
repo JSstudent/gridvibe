@@ -1060,7 +1060,11 @@
             gap: 7px;
         }
 
-        .field.hidden {
+        /* `.check-field` sets its own display, so a hidden one needs naming
+           here too: the agent row's Auto mode, MCP and Override boxes hide
+           through this class for an agent that cannot use them. */
+        .field.hidden,
+        .check-field.hidden {
             display: none;
         }
 

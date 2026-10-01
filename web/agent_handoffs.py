@@ -583,9 +583,12 @@ class HandoffStore:
         """What ``read_handoff`` answers for this pane.
 
         Its only side effect is the state becoming ``read`` -- which is also
-        what lets the reader's report settle the assignment. Reading twice
-        returns the same brief, for as long as the connection that announced it
-        lives.
+        what lets the reader's report settle the assignment. The answer carries
+        that assignment's ``receipt`` when one is tracked: the reader's sidecar
+        keeps it, never shows it to the agent, and sends it back with the
+        report, which is what tells the reader's report from the one a relaunch
+        replaced. Reading twice returns the same brief and the same receipt,
+        for as long as the connection that announced it lives.
         """
         with self._lock:
             record = next(
@@ -600,8 +603,11 @@ class HandoffStore:
                 return self._nothing_to_read(record)
             payload = self._read_payload(record, offset)
             record.phase = READ
-            if self.results is not None:
+            receipt = (
                 self.results.mark_read(record.handoff_id)
+                if self.results is not None
+                else ""
+            )
             chars = record.chars
             delivery = record.delivery
         logger.info(
@@ -613,6 +619,8 @@ class HandoffStore:
             payload.get("offset", 0),
         )
         payload.pop("handoff_id", None)
+        if receipt:
+            payload["receipt"] = receipt
         return payload
 
     @staticmethod

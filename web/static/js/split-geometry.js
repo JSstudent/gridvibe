@@ -97,6 +97,96 @@
         return candidate;
     }
 
+    /* How far, in px, a pointer drag may move the line: `{ min, max }`, with
+       0 always inside. Each track group beside the line is rescaled as one,
+       and the range stops where a track of either group would leave the
+       stored weight bounds. Inside it the rescale is exact: the px one group
+       gains the other gives up, the axis total is unchanged, no track outside
+       the two groups moves, and every pane's size is linear in the move —
+       which is what lets `clampDividerDelta` bisect. */
+    function dividerDragRange(weights, sizes, groups) {
+        const before = (groups && groups.before) || [];
+        const after = (groups && groups.after) || [];
+        const sum = indexes => indexes.reduce((total, index) => total + (Number(sizes[index]) || 0), 0);
+        const beforeSize = sum(before);
+        const afterSize = sum(after);
+        if (!before.length || !after.length || !isPositiveNumber(beforeSize) || !isPositiveNumber(afterSize)) {
+            return { min: 0, max: 0 };
+        }
+        /* The scales a group may take before one of its tracks leaves the
+           bounds, never past 1 either way so the drag's start stays legal. */
+        const scaleBounds = indexes => indexes.reduce((bounds, index) => {
+            const weight = Number(weights[index]);
+            if (!isPositiveNumber(weight)) {
+                return { low: 1, high: 1 };
+            }
+            return {
+                low: Math.max(bounds.low, MIN_TRACK_WEIGHT / weight),
+                high: Math.min(bounds.high, MAX_TRACK_WEIGHT / weight)
+            };
+        }, { low: 0, high: Infinity });
+        const beforeScale = scaleBounds(before);
+        const afterScale = scaleBounds(after);
+        return {
+            min: Math.min(0, Math.max(
+                beforeSize * (beforeScale.low - 1),
+                -afterSize * (afterScale.high - 1)
+            )),
+            max: Math.max(0, Math.min(
+                beforeSize * (beforeScale.high - 1),
+                afterSize * (1 - afterScale.low)
+            ))
+        };
+    }
+
+    /* The weights a pointer drag of `delta` px gives the axis, the move first
+       held to `dividerDragRange`. A move of 0 returns the weights unchanged. */
+    function dragDividerWeights(weights, sizes, groups, delta) {
+        const before = (groups && groups.before) || [];
+        const after = (groups && groups.after) || [];
+        const range = dividerDragRange(weights, sizes, groups);
+        const move = Math.min(range.max, Math.max(range.min, Number(delta) || 0));
+        const candidate = weights.slice();
+        if (move === 0) {
+            return candidate;
+        }
+        const sum = indexes => indexes.reduce((total, index) => total + (Number(sizes[index]) || 0), 0);
+        const beforeSize = sum(before);
+        const afterSize = sum(after);
+        const beforeScale = (beforeSize + move) / beforeSize;
+        const afterScale = (afterSize - move) / afterSize;
+        before.forEach(index => { candidate[index] = weights[index] * beforeScale; });
+        after.forEach(index => { candidate[index] = weights[index] * afterScale; });
+        return candidate;
+    }
+
+    /* How far a divider may follow the pointer: `delta` itself when
+       `accepts(delta)`, otherwise the furthest move toward it that is
+       accepted, to within `tolerance` px. A divider pushed past a pane's
+       minimum stops at the minimum instead of staying wherever the last
+       accepted pointer event left it, however fast the pointer went past.
+
+       Within `dividerDragRange` each pane's size is linear in the move, so
+       acceptance is monotone along one direction and a bisection finds the
+       edge; the caller holds `delta` to that range first. `accepts(0)` is
+       assumed: the arrangement the drag started from. */
+    function clampDividerDelta(delta, accepts, tolerance = 0.5) {
+        if (!Number.isFinite(delta) || delta === 0 || accepts(delta)) {
+            return Number.isFinite(delta) ? delta : 0;
+        }
+        let allowed = 0;
+        let refused = delta;
+        while (Math.abs(refused - allowed) > tolerance) {
+            const middle = (allowed + refused) / 2;
+            if (accepts(middle)) {
+                allowed = middle;
+            } else {
+                refused = middle;
+            }
+        }
+        return allowed;
+    }
+
     /* Every line strictly inside [start, start + span) that some other
        rectangle begins or ends on — the dividers this split is not allowed to
        move. Offsets are relative to the span, so 1 is the line after its first
@@ -402,6 +492,9 @@
         MAX_TRACK_WEIGHT,
         trackSpan,
         planDividerResize,
+        dividerDragRange,
+        dragDividerWeights,
+        clampDividerDelta,
         foreignEdgeOffsets,
         planSplit,
         snapshotGridBox,

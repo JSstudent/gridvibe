@@ -45,6 +45,9 @@
 
     /* Hairline borders around a terminal: the live minimum check's allowance. */
     const EDGE_PX = 2;
+    /* Rescaling weights is not exact to the last bit: a pane the move does not
+       touch can measure a hair smaller, and must not be read as shrunk. */
+    const SHRINK_TOLERANCE_PX = 0.01;
 
     const positive = (value, fallback) => (Number(value) > 0 ? Number(value) : fallback);
 
@@ -73,30 +76,44 @@
                 && ids.every((id, index) => id === (panes[index] && panes[index].session_id));
         },
 
-        /* Whether every pane still holds its minimum at the candidate weights:
-           an area no smaller than a sixteenth of the grid's track space, and,
-           for a pane that draws a terminal, the character floor at the
-           window's cell and header size. An explorer pane has no character
-           floor. The rule `validateResizeCandidate` applies to the live grid. */
+        /* Whether a move keeps every pane it shrinks at its minimum, measured
+           per axis: a width no smaller than a sixteenth of the grid's column
+           track space and a height no smaller than a sixteenth of its row
+           track space, and, for a pane that draws a terminal, the column and
+           row floor at the window's cell and header size. An explorer pane
+           has no character floor.
+
+           The floor limits making a pane smaller, one dimension at a time. A
+           dimension the move leaves no smaller than `previous` records is not
+           checked, so a pane at or below its floor (a window made smaller, a
+           deep split) blocks only the dividers that would shrink it further in
+           that dimension: elsewhere the grid stays resizable, the pane itself
+           can still be made larger, and a short pane can still be made
+           narrower. Without `previous` both dimensions of every pane are held
+           to the floor. The rule `validateResizeCandidate` applies to the live
+           grid. */
         fits({
-            surfaces, columnTrackSpace, rowTrackSpace, exempt, cell, headerHeight,
-            minCols, minRows, minSurfaceRatio
+            surfaces, previous, columnTrackSpace, rowTrackSpace, exempt, cell, headerHeight,
+            minCols, minRows, minAxisRatio
         }) {
-            const minimumSurface = Number(columnTrackSpace) * Number(rowTrackSpace) * Number(minSurfaceRatio);
+            const minimumWidth = Number(columnTrackSpace) * Number(minAxisRatio);
+            const minimumHeight = Number(rowTrackSpace) * Number(minAxisRatio);
             const cellWidth = positive(cell && cell.width, 8);
             const cellHeight = positive(cell && cell.height, 17);
             const header = positive(headerHeight, 34);
             return (Array.isArray(surfaces) ? surfaces : []).every((surface, index) => {
                 const width = Number(surface && surface.width) || 0;
                 const height = Number(surface && surface.height) || 0;
-                if (width * height < minimumSurface) {
+                const before = Array.isArray(previous) ? previous[index] : null;
+                const charFloor = !(exempt && exempt[index]);
+                const widthShrank = !before || width < (Number(before.width) || 0) - SHRINK_TOLERANCE_PX;
+                const heightShrank = !before || height < (Number(before.height) || 0) - SHRINK_TOLERANCE_PX;
+                if (widthShrank && (width < minimumWidth
+                    || (charFloor && Math.floor(Math.max(0, width - EDGE_PX) / cellWidth) < minCols))) {
                     return false;
                 }
-                if (exempt && exempt[index]) {
-                    return true;
-                }
-                return Math.floor(Math.max(0, width - EDGE_PX) / cellWidth) >= minCols
-                    && Math.floor(Math.max(0, height - header - EDGE_PX) / cellHeight) >= minRows;
+                return !(heightShrank && (height < minimumHeight
+                    || (charFloor && Math.floor(Math.max(0, height - header - EDGE_PX) / cellHeight) < minRows)));
             });
         }
     };
@@ -198,6 +215,7 @@
             if (closed()) return { answer: refuse('A pane closed while the resize was being prepared.') };
             const fits = Boolean(after && after.metrics) && policy.fits({
                 surfaces: after.surfaces,
+                previous: measured.surfaces,
                 columnTrackSpace: after.metrics.columnTrackSpace,
                 rowTrackSpace: after.metrics.rowTrackSpace,
                 exempt,
@@ -205,7 +223,7 @@
                 headerHeight: after.headerHeight,
                 minCols: limits.minCols,
                 minRows: limits.minRows,
-                minSurfaceRatio: limits.minSurfaceRatio
+                minAxisRatio: limits.minAxisRatio
             });
             if (!fits) {
                 return { answer: refuse('That position would make a pane smaller than its minimum width or height.') };
@@ -222,7 +240,7 @@
            is `unknown`, never "nothing changed". */
         async function commit(groupId, epoch, plan) {
             const { expectedRevision, layout } = plan;
-            const saved = await tab.write(groupId, expectedRevision, layout);
+            const saved = await tab.writeGeometry(groupId, expectedRevision, layout);
             if (closeEpoch(groupId) !== epoch) {
                 return {
                     ok: false,

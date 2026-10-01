@@ -216,7 +216,8 @@ class PaneTokenRegistryTestCase(unittest.TestCase):
 
         `mint` is already idempotent per pane, which is the need a `token_for`
         would have served -- and a live credential wants one way in, not two
-        that have to agree.
+        that have to agree. `remember_receipt` writes to a live token's record
+        and looks nothing up.
         """
         token = self.registry.mint(session_id="pane-1")
 
@@ -228,8 +229,28 @@ class PaneTokenRegistryTestCase(unittest.TestCase):
                 if not name.startswith("_")
                 and callable(getattr(self.registry, name))
             ),
-            ["clear", "mint", "resolve", "revoke"],
+            ["clear", "mint", "remember_receipt", "resolve", "revoke"],
         )
+
+    def test_a_handoff_receipt_lives_on_the_token_and_goes_with_it(self):
+        """A tunnelled request builds its own client, so the receipt a read
+        returned is held on the token between requests. A relaunch revokes the
+        token and mints another, which starts without it."""
+        token = self.registry.mint(session_id="pane-1")
+
+        self.assertTrue(self.registry.remember_receipt(token, "r-1"))
+        self.assertEqual(self.registry.resolve(token)["handoff_receipt"], "r-1")
+        self.assertEqual(self.registry.mint(session_id="pane-1"), token)
+        self.assertEqual(self.registry.resolve(token)["handoff_receipt"], "r-1")
+        self.assertFalse(self.registry.remember_receipt(token, ""))
+        self.assertEqual(self.registry.resolve(token)["handoff_receipt"], "r-1")
+
+        self.assertTrue(self.registry.revoke("pane-1"))
+        self.assertFalse(self.registry.remember_receipt(token, "r-late"))
+        fresh = self.registry.mint(session_id="pane-1")
+        self.assertNotEqual(fresh, token)
+        self.assertNotIn("handoff_receipt", self.registry.resolve(fresh))
+        self.assertFalse(self.registry.remember_receipt("made-up", "r-1"))
 
     def test_a_pane_with_no_id_mints_nothing(self):
         self.assertEqual(self.registry.mint(session_id=""), "")
@@ -965,6 +986,24 @@ class ForwardedRequestFilterTestCase(unittest.TestCase):
 
         self.assertEqual(channel.status, 400)
         self.assertEqual(self.gridvibe.requests, [])
+
+    def test_a_repeated_content_length_is_refused_even_when_the_values_agree(self):
+        """The filter does not normalise framing, so it never picks one header of two."""
+        for spelling in ("Content-Length: 4", "content-length:4"):
+            with self.subTest(spelling=spelling):
+                self.gridvibe.requests.clear()
+                channel = self.serve(
+                    (
+                        f"POST {self.path} HTTP/1.1\r\n"
+                        "Host: 127.0.0.1:41234\r\n"
+                        "Content-Length: 4\r\n"
+                        f"{spelling}\r\n\r\n"
+                    ).encode("latin-1")
+                    + b"ping"
+                )
+
+                self.assertEqual(channel.status, 400)
+                self.assertEqual(self.gridvibe.requests, [])
 
     def test_an_obsolete_folded_header_is_refused_rather_than_rejoined(self):
         channel = self.serve(
@@ -1750,6 +1789,75 @@ class AgentLaunchDestinationTestCase(unittest.TestCase):
 
         pane = self.api.session_manager.get_session(body["sessions"][0]["session_id"])
         self.assertNotIn("origin_session_id", pane.to_dict())
+
+    def test_a_stated_shell_from_an_ssh_pane_is_refused_for_every_kind(self):
+        """The body the sidecar really builds, sent from an SSH pane.
+
+        On a terminal or agent entry the family reaches GridVibe, which
+        refuses it: the group opens on the remote host, where a local family
+        names nothing. On an explorer or browser entry the sidecar refuses it
+        before anything is sent, exactly as it does locally.
+        """
+        from gridvibe_mcp.identity import read_identity
+        from gridvibe_mcp.server import ToolArgumentError, build_launch_request
+
+        origin = self._origin()
+        identity = read_identity({
+            "GRIDVIBE_URL": "http://127.0.0.1:5050",
+            "GRIDVIBE_SESSION_ID": origin.session_id,
+            "GRIDVIBE_AGENT_DEPTH": "0",
+        })
+
+        def body_for(entry):
+            return build_launch_request(
+                {
+                    "new_workspace": True,
+                    "workspace_label": "remote",
+                    "panes": [{"title": "Asked", "directory": "/srv/app", **entry}],
+                },
+                identity=identity,
+            )
+
+        for entry in (
+            {"kind": "terminal", "shell": "cmd"},
+            {"kind": "agent", "agent": "claude", "shell": "cmd"},
+        ):
+            with self.subTest(kind=entry["kind"]):
+                status, answer = self._launch(body_for(entry))
+
+                self.assertEqual(status, 400)
+                self.assertIn("Asked: shell 'cmd' was refused", answer["error"])
+                self.assertIn("saso-workstation over SSH", answer["error"])
+                self.assertEqual(len(self.api.session_manager.get_all_sessions()), 1)
+
+        for entry in (
+            {"kind": "explorer", "shell": "cmd"},
+            {"kind": "browser", "url": "http://localhost:3000", "shell": "cmd"},
+        ):
+            with self.subTest(kind=entry["kind"]):
+                with self.assertRaises(ToolArgumentError) as caught:
+                    body_for(entry)
+
+                self.assertIn(
+                    "'shell' applies to terminal and agent panes.", str(caught.exception)
+                )
+
+        # The control: the same panes with no family open on the remote host.
+        status, answer = self._launch(
+            build_launch_request(
+                {
+                    "new_workspace": True,
+                    "workspace_label": "remote",
+                    "panes": [
+                        {"kind": "terminal", "directory": "/srv/app"},
+                        {"kind": "explorer", "directory": "/srv/app"},
+                    ],
+                },
+                identity=identity,
+            )
+        )
+        self.assertEqual(status, 201)
+        self.assertEqual(answer["connection_mode"], "ssh")
 
 
 if __name__ == "__main__":

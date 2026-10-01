@@ -22,6 +22,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from gridvibe_version import __version__ as _GRIDVIBE_VERSION
 from web.api import load_config, resolve_server_settings, run_server, session_manager
+from web.log_redaction import install_mcp_token_redaction
 
 __version__ = _GRIDVIBE_VERSION
 
@@ -71,6 +72,9 @@ def setup_logging(debug: bool = False):
     High-frequency polling requests to /api/sessions and /api/session-groups are
     suppressed so they don't flood the log, and paramiko's per-channel INFO
     chatter is muted to WARNING outside debug mode for the same reason.
+    Every handler, these two and any a library already attached to its own
+    logger, redacts a remote pane's MCP token (``/mcp/<token>``) before anything
+    else sees the record, because that path is a credential.
     """
     level = logging.DEBUG if debug else logging.INFO
 
@@ -93,6 +97,12 @@ def setup_logging(debug: bool = False):
     root.handlers.clear()
     root.addHandler(stream_handler)
     root.addHandler(file_handler)
+    # First on both handlers, not on the werkzeug logger: a handler filter sees
+    # every record -- Flask's exception records and anything propagated from a
+    # child logger included -- before either handler formats it. Also on the
+    # handlers libraries attached to their own loggers at import (engineio's and
+    # socketio's stderr handlers), which emit before a record reaches the root.
+    install_mcp_token_redaction()
 
     # Suppress noisy polling GETs from werkzeug across all handlers
     logging.getLogger("werkzeug").addFilter(_SuppressPollLogs())

@@ -8,8 +8,9 @@ it — `README.md`, `CLAUDE.md`, `docs/engineering_contracts.md` — says what i
 does at its own altitude and points here rather than repeating it.
 
 It is a **sibling** of GridVibe, not a part of it. Nothing under `web/` or
-`sessions/` imports this package, and this package imports nothing from
-GridVibe — it speaks only HTTP to the loopback API. That boundary is what keeps
+`sessions/` imports this package at module level. `web/mcp_http.py` imports its
+client inside a function, to serve the tunnelled path. This package imports
+nothing from GridVibe — it speaks only HTTP to the loopback API. That boundary is what keeps
 the asyncio-native MCP SDK out of the threading-mode Flask-SocketIO process.
 
 ## Install
@@ -138,10 +139,10 @@ window first takes focus from its own shown event, is logged but not reported.
 | --- | --- |
 | `gridvibe_status` | is GridVibe running, which version, how many workspaces |
 | `list_workspaces` | every live workspace (window) and the sessions open in it — each tab's `session_name`, `group_id`, `pane_count`, and whether it is the tab the window shows (`active`) |
-| `list_panes` | the panes in one workspace or one session: what each is, where it points, what it runs on, which session it is in (`session_name`), and where it sits — `index`, `rect`, `relative_area`, and the `neighbours` above, below, left and right. Narrowed by `session_name`, it finds that tab in any workspace |
+| `list_panes` | the panes in one workspace or one session: what each is, where it points, what it runs on, which session it is in (`session_name`), and where it sits — `index`, `rect`, `relative_area`, and the `neighbours` above, below, left and right. Its `layout` block carries the arrangement twice: `geometry` to read, and `workspace_layout` to pass straight to `launch_panes`, weights included. Narrowed by `session_name`, it finds that tab in any workspace |
 | `list_agents` | every agent anywhere, with a working/idle reading, under the workspace and session holding it |
 | `list_agent_types` | every agent CLI in the registry, and whether each can start where a launch or split from this pane would put it — see [Which agents a tool can start](#which-agents-a-tool-can-start) |
-| `list_saved_layouts` | every saved launcher preset as a *shape* — name, layout, pane count, geometry, and what each pane is. Never a connection |
+| `list_saved_layouts` | every saved launcher preset as a *shape* — name, layout, pane count, geometry, and what each pane is. Never a connection. Its `workspace_layout` is one `launch_panes` accepts unchanged |
 | `whoami` | which pane this agent is in (`pane_id`), the session it is in (`session_name`, `group_id`), its directory, **which machine that directory is on**, how deep it is, where it sits, and whether it may still launch (`may_launch_panes`) or split (`may_split_panes`) — a refusal of the first carries a `split_note` saying the second is still open |
 | `read_handoff` | the task another agent handed to *this* pane — see [Handing an agent its task](#handing-an-agent-its-task). Its only side effect is the handoff's state becoming `read` |
 
@@ -185,7 +186,11 @@ terminal: a report reaches the waiting agent as its own tool call's result.
 `set_pane_agent` relaunches a pane into an agent CLI (or `agent: ""` back to a
 plain shell, optionally changing the local shell family and the MCP choice),
 and may hand the new agent a `task` — the way to give a task to a pane that
-already exists, since nothing types into one.
+already exists, since nothing types into one. A stated `auto_mode` starts the
+agent with its auto-approval flag, under the same rule as `launch_panes` and
+`split_pane`: only when the person asked for an autonomous agent. Unstated, the
+pane keeps auto mode only for the agent it was already running; a CLI without
+`auto_mode_supported` drops it.
 `set_pane_mode` turns a pane into a file explorer, a browser preview or a plain
 terminal, and with a stated `directory` re-roots it there — see
 [A stated directory](#a-stated-directory). A call that changes nothing answers
@@ -241,8 +246,10 @@ refused as `ambiguous`; a missing one is `not_found` and suggests
 line is between columns N and N+1; a horizontal line is between rows N and
 N+1. `position` is a fraction of the full grid width or height, strictly
 between 0 and 1. The page moves only that track boundary and refuses a stale
-revision, a divider absent from the layout, a position that violates pane
-minimums, or a narrow viewport. The session may be any tab of its window: one
+revision, a divider absent from the layout, a position that would shrink a pane
+below its minimum (1/16 of the grid's width or height, or the terminal's column
+or row floor; a pane the move does not shrink is never the reason), or a narrow
+viewport. The session may be any tab of its window: one
 that isn't showing is resized without switching tabs or moving focus, and has
 its new proportions the next time it is shown. Such a tab is refused while it
 holds a pane close it has not shown since, because that close would replace the
@@ -270,7 +277,8 @@ name or failed durable write saves nothing and leaves the live session open.
 Names are checked case-insensitively inside the saved-session transaction, so
 a retry cannot create an indistinguishable second preset. Success returns
 the preset id, name, pane types, shell families and persisted geometry after
-the atomic saved-session commit. It omits paths, connection details,
+the atomic saved-session commit. That geometry, like every `workspace_layout` a
+read answers, can be passed to `launch_panes` unchanged. It omits paths, connection details,
 credentials, handoff tasks and active processes. `list_saved_layouts` then
 shows the new preset, and the launcher can open it as a fresh session.
 
@@ -528,10 +536,18 @@ handoff is bound and when one goes.
   or whose requester has closed, is told nobody is waiting and nothing is kept.
   Reporting again replaces the report and makes it new again, but only while
   the handoff lives: once the pane closes, is relaunched or is re-tasked, its
-  report stands and whatever the pane runs next cannot write over it. A report
-  settles a task only once the task has been fetched with `read_handoff`: a
-  relaunched pane keeps its id, so a report sent before then is the replaced
-  agent's, and it is refused with nothing kept.
+  report stands and whatever the pane runs next cannot write over it.
+- **A report settles only the task its agent read.** `read_handoff` answers
+  with an opaque receipt beside the task. The sidecar keeps it rather than
+  showing it to the agent — over the tunnel it is held on the pane's token,
+  because each request builds its own client — and `report_result` sends it
+  back. A relaunched pane keeps its id, so a report without the current
+  receipt is refused with nothing kept: one sent before the task was read, and
+  one from the agent the relaunch replaced, even after its successor has read
+  its task. An agent whose tools restarted after reading is told to call
+  `read_handoff` again, which returns the same receipt. A receipt is never
+  logged or shown in any listing. Against a GridVibe that predates receipts the
+  sidecar sends none, and that GridVibe settles on the pane id as before.
 - **Held to a task's rules, with a smaller ceiling.** Printable text, newlines
   and tabs; control characters refused by name; up to 16,000 characters,
   refused above that — never truncated. Anything longer goes in a file on the
@@ -738,14 +754,18 @@ socket to GridVibe is opened only for a request that survives it: one request pe
 connection, `POST`, and a target equal to *this pane's own* `/mcp/<token>`,
 compared with `secrets.compare_digest` on bytes. Exactly `Content-Length` bytes
 are read and nothing behind them is forwarded; `Transfer-Encoding`, a repeated
-`Content-Length` and obsolete line folding are refused rather than normalised,
+`Content-Length` (identical values included) and obsolete line folding are
+refused rather than normalised,
 because a filter that cannot say where the body ends cannot say that nothing
 rides behind it. Bounded at 16 KiB of head, 1 MiB of body, 30s. Refusals say
 nothing — `404` for a method or path that is not this pane's, the same answer
 either way, so a caller learns neither which routes exist nor whether it guessed
 a live token; `400` for framing, `413` for an oversized declared body, `502` when
 GridVibe itself cannot be reached — and the warning log prints only the target's
-first segment, because `/mcp/<token>` is a credential.
+first segment, because `/mcp/<token>` is a credential. GridVibe's own log treats
+it the same way: its access lines, error records and cross-origin warnings name
+the route as `/mcp/<redacted>`, so a log copied into a bug report carries no live
+token.
 
 Connections are bounded as well as requests, and they have to be handed off at
 once. Paramiko calls the forward handler on the transport's own packet thread,
@@ -784,9 +804,9 @@ snapshot.
 
 A remote origin therefore produces an *SSH* group, and two things follow. A
 browser pane is refused there rather than silently downgraded to a terminal,
-because GridVibe draws that surface locally. The per-pane `shell` choice is
-dropped, because a local shell family names a machine the group is not opening
-on. An origin pane that has closed is a refusal, not a fall back to this
+because GridVibe draws that surface locally. A stated per-pane `shell` is
+refused, because a local shell family names a machine the group is not opening
+on; leave it out and the panes run the remote host's own shell. An origin pane that has closed is a refusal, not a fall back to this
 machine: "here" is exactly the wrong answer, and the one that used to open a
 PowerShell pane on a `/home/...` path.
 
@@ -807,7 +827,9 @@ pane names an unknown CLI or one whose preflight proves it absent, states
 `mcp: true` for a CLI with no MCP mechanism, carries a `task` for a CLI that
 cannot take one (the answer lists the three that can), or states a local
 `shell` the asking pane cannot honour — any family from an SSH pane, PowerShell
-or cmd from a WSL pane, any family on a non-Windows host. An agent is never
+or cmd from a WSL pane, any family on a non-Windows host. A `shell` on an
+explorer or browser pane is refused by the sidecar before anything is sent,
+because those panes run no shell. An agent is never
 quietly opened as a plain terminal for a tool. A preflight that *could not run*
 is not an absence: that pane keeps its agent, its identity and its task, and
 gets a warning. The launcher and restore keep their own behaviour, where an

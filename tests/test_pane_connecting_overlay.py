@@ -174,6 +174,9 @@ var SESSIONS = [];
 async function loadSessionGroups() { return false; }
 /* No split or resize from behind is ever in flight here. */
 async function backgroundTabSettled() {}
+function backgroundTabHoldCount() { return 0; }
+function backgroundTabHeld() { return false; }
+var LOAD_HELD_READ_ATTEMPTS = 3;
 async function resetSessionView() {}
 function getSessionApiPath() { return '/api/sessions'; }
 async function fetch() {
