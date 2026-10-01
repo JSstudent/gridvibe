@@ -736,11 +736,11 @@ def _compose_agent_startup_command(
     ``opening_prompt`` asks for :data:`HANDOFF_OPENING_PROMPT`, because this
     connection's pane holds a handed-over task. It belongs to the connection
     for the same reason -- a relaunch never replays it -- and it is placed only
-    beside a non-empty MCP fragment (an agent told to call a tool it does not
-    have is the outcome this prevents) and never beside a resume. It goes
-    directly after the binary: Claude's ``--mcp-config`` takes a variable
-    number of values, so a prompt appended at the end would be read as a
-    second config path.
+    beside GridVibe's tools, a non-empty MCP fragment or opencode's prefix (an
+    agent told to call a tool it does not have is the outcome this prevents),
+    and never beside a resume. It goes directly after the binary: Claude's
+    ``--mcp-config`` takes a variable number of values, so a prompt appended
+    at the end would be read as a second config path.
     """
     base = str(getattr(session, "initial_command", "") or "").strip()
     if not base:

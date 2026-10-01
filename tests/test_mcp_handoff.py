@@ -19,6 +19,7 @@ test if a refusal ever reaches the wire:
 """
 
 import json
+import re
 import sys
 import unittest
 from pathlib import Path
@@ -47,6 +48,7 @@ from gridvibe_mcp.splits import (  # noqa: E402
 )
 from tests.test_mcp_client import StubOpener, client_for, http_error  # noqa: E402
 from web import agent_handoffs, agent_results, mcp_http  # noqa: E402
+from web import agents as web_agents  # noqa: E402
 from web.agent_results import STALE_RECEIPT_MESSAGE  # noqa: E402
 
 INSIDE_PANE = {
@@ -95,6 +97,16 @@ class SurfaceTestCase(unittest.TestCase):
     def test_the_task_ceiling_is_gridvibes_own(self):
         """`web/` cannot be imported by the sidecar, so the two are pinned here."""
         self.assertEqual(sidecar.MAX_TASK_BYTES, agent_handoffs.MAX_TASK_BYTES)
+
+    def test_the_task_description_names_exactly_the_clis_that_take_a_task(self):
+        """The sidecar never reads the registry, so its list is pinned here."""
+        named = re.search(r"hand a task to \(([^)]*)\)", sidecar.TASK_DESCRIPTION)
+
+        self.assertIsNotNone(named)
+        self.assertEqual(
+            sorted(name.strip() for name in named.group(1).split(",")),
+            web_agents.task_capable_agents(),
+        )
 
     def test_the_split_description_says_what_each_axis_word_produces(self):
         description = _spec("split_pane")["description"]

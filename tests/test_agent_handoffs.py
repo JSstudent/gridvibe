@@ -135,10 +135,11 @@ class OpeningPromptConstantTestCase(unittest.TestCase):
     def test_it_names_the_tool_and_starts_with_no_subcommand(self):
         self.assertIn("read_handoff", HANDOFF_OPENING_PROMPT)
         first_word = HANDOFF_OPENING_PROMPT.split()[0].lower()
-        # Words the three CLIs take as subcommands in first position.
+        # Words the CLIs that take a task read as subcommands in first position.
         self.assertNotIn(
             first_word,
-            {"exec", "resume", "fork", "mcp", "login", "logout", "apply", "config", "help", "update"},
+            {"exec", "resume", "fork", "mcp", "login", "logout", "apply", "config", "help", "update",
+             "run", "serve", "auth", "upgrade", "models", "session"},
         )
 
 

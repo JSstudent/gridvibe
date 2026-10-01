@@ -58,6 +58,7 @@ from web import (  # noqa: E402
     saved_sessions,
 )
 from web import terminal_io as terminal  # noqa: E402
+from web.agent_handoffs import HANDOFF_OPENING_PROMPT  # noqa: E402
 from web.agent_session_hooks import PANE_TOKEN_VARIABLE  # noqa: E402
 from web.terminal_cwd import (  # noqa: E402
     WSLENV_VARIABLE,
@@ -1001,14 +1002,15 @@ class OpencodePrefixCompositionTestCase(unittest.TestCase):
     def test_an_opening_prompt_follows_the_binary_behind_the_prefix(self):
         """The prefix is a placed MCP fragment, so a prompt may go beside it --
         directly after the binary, never in front of the assignment."""
-        with patch.object(web_agents, "_opening_prompt_fragment", return_value='--prompt "go"'):
-            command = self._compose(self._pane(), os_name="posix", opening_prompt=True)
-            without_tools = self._compose(
-                self._pane(agent_mcp=False), os_name="posix", opening_prompt=True
-            )
+        command = self._compose(self._pane(), os_name="posix", opening_prompt=True)
+        without_tools = self._compose(
+            self._pane(agent_mcp=False), os_name="posix", opening_prompt=True
+        )
 
         self.assertEqual(
-            command, f'env OPENCODE_CONFIG="{self.config_path}" opencode --prompt "go"'
+            command,
+            f'env OPENCODE_CONFIG="{self.config_path}" '
+            f'opencode --prompt "{HANDOFF_OPENING_PROMPT}"',
         )
         self.assertEqual(without_tools, "opencode")
 

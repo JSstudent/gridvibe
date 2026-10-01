@@ -60,8 +60,8 @@ logger = logging.getLogger(__name__)
 #: The whole of what a task adds to a launch line. Restricted by test to
 #: ``[A-Za-z0-9 .,_]`` -- no quote, ``%``, ``!``, ``^``, ``&``, ``$`` or
 #: backtick -- so double quotes around it read identically in cmd, PowerShell,
-#: POSIX shells and both npm shims, and it starts with no word any of the three
-#: CLIs takes as a subcommand.
+#: POSIX shells and both npm shims, and it starts with no word any CLI that
+#: takes a task reads as a subcommand.
 HANDOFF_OPENING_PROMPT = (
     "GridVibe handed this pane a task from another agent. Call the gridvibe "
     "tool read_handoff to fetch it, then carry it out. When done, call "

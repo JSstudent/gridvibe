@@ -242,7 +242,7 @@ REPORT_STATUSES = ("done", "failed", "blocked")
 RESULTS_UNTIL = ("all", "any")
 
 #: Said wherever a tool takes a task, so every one describes it the same way.
-#: Any registry CLI, not only the three that take a task: list_agent_types says
+#: Any registry CLI, not only the ones that take a task: list_agent_types says
 #: which of them can start here, and a launch refuses one that cannot.
 AGENT_KEY_DESCRIPTION = (
     "Agent CLI key for kind='agent', e.g. 'claude' -- any key list_agent_types "
@@ -253,13 +253,13 @@ AGENT_KEY_DESCRIPTION = (
 TASK_DESCRIPTION = (
     "A task for the new agent: what it should do, in your own words, as its "
     "first instruction. Only for an agent pane, and only an agent GridVibe can "
-    "hand a task to (claude, codex, copilot); it turns on 'mcp', because the "
-    "agent fetches it with the read_handoff tool. Plain text, newlines and "
-    "tabs, up to 512 KiB -- never truncated, refused above that. It is not "
-    "confidential: leave credentials out. Only on this agent's own machine. "
-    "Setting a task never implies auto_mode: set that only when the person "
-    "asked for an autonomous agent. The new agent is asked to report back "
-    "with report_result; collect its report with wait_for_results."
+    "hand a task to (claude, codex, copilot, opencode); it turns on 'mcp', "
+    "because the agent fetches it with the read_handoff tool. Plain text, "
+    "newlines and tabs, up to 512 KiB -- never truncated, refused above that. "
+    "It is not confidential: leave credentials out. Only on this agent's own "
+    "machine. Setting a task never implies auto_mode: set that only when the "
+    "person asked for an autonomous agent. The new agent is asked to report "
+    "back with report_result; collect its report with wait_for_results."
 )
 
 #: The geometry record `POST /api/sessions` already validates and the sidecar

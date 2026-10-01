@@ -256,6 +256,11 @@
       "style": "opencode_config",
       "description": "Gives this agent tools to see and build GridVibe workspaces.",
       "verified": true
+    },
+    "opening_prompt": {
+      "flag": "--prompt {prompt}",
+      "description": "Starts the TUI and submits this as the first message.",
+      "verified": true
     }
   },
   "kilo": {
