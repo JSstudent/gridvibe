@@ -11,6 +11,15 @@ It carries no ``env`` block. The URL is baked into ``args`` by the process that
 owns the port, and identity arrives by inheritance -- so the file is identical
 for every pane, and one file serves them all.
 
+**The opencode config.** ``<BASE_DIR>/.gridvibe_opencode.json``, written beside
+it from the same interpreter and URL. opencode reads a different schema (an
+``mcp`` table, a ``type``, a ``command`` *array*), so it gets its own file
+rather than a second key in the one Claude and Copilot read. Unlike the first
+file it states the identity, as ``{env:NAME}`` references opencode resolves
+from its own environment: what an MCP child inherits is opencode's choice, not
+a guarantee. References rather than values, so one file still serves every
+pane.
+
 **Pane identity.** Five variables merged into a local pane's spawn environment.
 They go in at the call site in ``_connect_local_session``, *not* through
 ``_local_shell_integration``: that function opens by returning unchanged when
@@ -24,7 +33,7 @@ import json
 import logging
 import os
 import sys
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 from web.paths import BASE_DIR
 from web.terminal_cwd import WSLENV_VARIABLE, merge_wslenv
@@ -57,6 +66,20 @@ _server_base_url = ""
 #: could not reach GridVibe, until the next app start rewrote it.
 PRODUCTION_MCP_CONFIG_PATH = os.path.join(BASE_DIR, MCP_CONFIG_FILENAME)
 
+#: The opencode document, beside the first and overridable for the same reason.
+OPENCODE_CONFIG_FILENAME = ".gridvibe_opencode.json"
+PRODUCTION_OPENCODE_CONFIG_PATH = os.path.join(BASE_DIR, OPENCODE_CONFIG_FILENAME)
+
+#: The registry ``mcp.style`` naming opencode's config *format*, local or
+#: remote. A format rather than a CLI, so a fork that reads the same schema can
+#: name it too once verified.
+OPENCODE_CONFIG_STYLE = "opencode_config"
+
+#: How long opencode waits for the sidecar to *list* its tools, in ms. Its own
+#: default is 5 s, which a cold venv start on Windows can approach -- and past
+#: it the tools are silently absent for the whole session.
+OPENCODE_TOOL_LIST_TIMEOUT_MS = 15000
+
 
 def mcp_config_path() -> str:
     """Where the generated config lives, refusing production state in tests.
@@ -74,6 +97,23 @@ def mcp_config_path() -> str:
             "GRIDVIBE_MCP_CONFIG_PATH (tests/__init__.py does this)."
         )
     return PRODUCTION_MCP_CONFIG_PATH
+
+
+def opencode_config_path() -> str:
+    """Where the opencode document lives, refusing production state in tests.
+
+    The same rule as :func:`mcp_config_path`, for the same reason:
+    ``run_server`` writes it with a plain ``open()``.
+    """
+    override = os.environ.get("GRIDVIBE_OPENCODE_CONFIG_PATH")
+    if override:
+        return override
+    if os.environ.get("GRIDVIBE_TEST_MODE"):
+        raise RuntimeError(
+            "Refusing the production .gridvibe_opencode.json in test mode; set "
+            "GRIDVIBE_OPENCODE_CONFIG_PATH (tests/__init__.py does this)."
+        )
+    return PRODUCTION_OPENCODE_CONFIG_PATH
 
 
 #: The one ``TerminalSession.mode`` whose shell runs on the machine GridVibe
@@ -161,6 +201,51 @@ def build_mcp_config(*, interpreter: str, url: str) -> Dict[str, Any]:
     }
 
 
+def build_opencode_config(*, interpreter: str, url: str) -> Dict[str, Any]:
+    """The opencode document, as data.
+
+    ``command`` holds the same three values as :func:`build_mcp_config`'s
+    ``command`` and ``args``, so the two files cannot name different things.
+    The identity names are the ones the spawn writes, read from
+    :func:`pane_identity_environment` rather than listed again here.
+    """
+    identity_names = pane_identity_environment(session_id="", base_url=url)
+    return {
+        "$schema": "https://opencode.ai/config.json",
+        "mcp": {
+            MCP_SERVER_NAME: {
+                "type": "local",
+                "command": [interpreter, SIDECAR_ENTRY, "--url", url],
+                "environment": {name: f"{{env:{name}}}" for name in identity_names},
+                "timeout": OPENCODE_TOOL_LIST_TIMEOUT_MS,
+            }
+        },
+    }
+
+
+def _launch_values(host: Any, port: Any, interpreter: Optional[str]) -> Tuple[str, str]:
+    """The interpreter and URL every generated document names."""
+    url = set_server_address(host, port) if host is not None or port is not None else server_base_url()
+    return interpreter or sys.executable or "python", url
+
+
+def _write_document(target: str, document: Dict[str, Any], url: str) -> str:
+    """Write one generated document. Returns the path, or "" if it could not.
+
+    Always through ``json.dump``: a Windows path holds backslashes, and a
+    single one written by hand is invalid JSON the CLI rejects.
+    """
+    try:
+        with open(target, "w", encoding="utf-8") as handle:
+            json.dump(document, handle, indent=2)
+            handle.write("\n")
+    except OSError as exc:
+        logger.warning("Could not write %s: %s", target, exc)
+        return ""
+    logger.info("MCP sidecar config written to %s (url=%s)", target, url)
+    return target
+
+
 def write_mcp_config(
     host: Any = None,
     port: Any = None,
@@ -173,21 +258,29 @@ def write_mcp_config(
     A failure here costs the MCP checkbox and nothing else, so it is logged and
     reported rather than raised: GridVibe still starts.
     """
-    url = set_server_address(host, port) if host is not None or port is not None else server_base_url()
+    resolved_interpreter, url = _launch_values(host, port, interpreter)
     target = path or mcp_config_path()
-    document = build_mcp_config(
-        interpreter=interpreter or sys.executable or "python",
-        url=url,
-    )
-    try:
-        with open(target, "w", encoding="utf-8") as handle:
-            json.dump(document, handle, indent=2)
-            handle.write("\n")
-    except OSError as exc:
-        logger.warning("Could not write %s: %s", target, exc)
-        return ""
-    logger.info("MCP sidecar config written to %s (url=%s)", target, url)
-    return target
+    document = build_mcp_config(interpreter=resolved_interpreter, url=url)
+    return _write_document(target, document, url)
+
+
+def write_opencode_config(
+    host: Any = None,
+    port: Any = None,
+    *,
+    interpreter: Optional[str] = None,
+    path: Optional[str] = None,
+) -> str:
+    """Rewrite the opencode document. Returns the path, or "" if it could not.
+
+    Called beside :func:`write_mcp_config` with the same arguments, so both
+    files name one interpreter and one URL. A failure costs opencode its tools
+    and leaves the other file alone.
+    """
+    resolved_interpreter, url = _launch_values(host, port, interpreter)
+    target = path or opencode_config_path()
+    document = build_opencode_config(interpreter=resolved_interpreter, url=url)
+    return _write_document(target, document, url)
 
 
 def read_mcp_server_block(path: Optional[str] = None) -> Dict[str, Any]:

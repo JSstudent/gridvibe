@@ -184,6 +184,91 @@ class GeneratedConfigTestCase(unittest.TestCase):
         self.assertIn(mcp_launch.MCP_CONFIG_FILENAME, ignored)
 
 
+class OpencodeConfigTestCase(unittest.TestCase):
+    """The second generated document: the same server, in opencode's schema."""
+
+    def setUp(self):
+        self.temp_dir = TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        self.mcp_path = str(Path(self.temp_dir.name) / ".gridvibe_mcp.json")
+        self.path = str(Path(self.temp_dir.name) / ".gridvibe_opencode.json")
+
+    def read(self, path=None):
+        with io.open(path or self.path, encoding="utf-8") as handle:
+            return json.load(handle)
+
+    def write_both(self, **kwargs):
+        mcp_launch.write_mcp_config("127.0.0.1", 5051, path=self.mcp_path, **kwargs)
+        return mcp_launch.write_opencode_config(
+            "127.0.0.1", 5051, path=self.path, **kwargs
+        )
+
+    def test_both_files_name_the_same_interpreter_entry_and_url(self):
+        self.assertEqual(self.write_both(), self.path)
+
+        shared = self.read(self.mcp_path)["mcpServers"]["gridvibe"]
+        server = self.read()["mcp"]["gridvibe"]
+        self.assertEqual(server["type"], "local")
+        self.assertEqual(server["command"], [shared["command"], *shared["args"]])
+        self.assertEqual(
+            server["command"],
+            [sys.executable, mcp_launch.SIDECAR_ENTRY, "--url", "http://127.0.0.1:5051"],
+        )
+
+    def test_the_identity_is_stated_as_references_to_itself(self):
+        """Exactly the names the sidecar reads, each resolved by opencode from
+        its own environment -- so one file still serves every pane."""
+        self.write_both()
+
+        environment = self.read()["mcp"]["gridvibe"]["environment"]
+        self.assertEqual(set(environment), set(IDENTITY_VARIABLES))
+        for name, value in environment.items():
+            self.assertEqual(value, "{env:%s}" % name)
+
+    def test_the_tool_list_gets_longer_than_opencodes_default(self):
+        self.write_both()
+
+        self.assertGreater(self.read()["mcp"]["gridvibe"]["timeout"], 5000)
+
+    def test_a_windows_interpreter_path_round_trips_unchanged(self):
+        interpreter = r"C:\Program Files\Grid Vibe\.venv\Scripts\python.exe"
+
+        self.write_both(interpreter=interpreter)
+
+        self.assertEqual(self.read()["mcp"]["gridvibe"]["command"][0], interpreter)
+        self.assertEqual(self.read(self.mcp_path)["mcpServers"]["gridvibe"]["command"],
+                         interpreter)
+
+    def test_a_write_that_fails_costs_only_that_file(self):
+        unwritable = str(Path(self.temp_dir.name) / "missing" / "dir" / "opencode.json")
+
+        self.assertEqual(
+            mcp_launch.write_opencode_config("127.0.0.1", 5050, path=unwritable), ""
+        )
+        self.assertEqual(
+            mcp_launch.write_mcp_config("127.0.0.1", 5050, path=self.mcp_path),
+            self.mcp_path,
+        )
+
+    def test_the_suite_can_never_write_the_developers_own_file(self):
+        self.assertTrue(os.environ.get("GRIDVIBE_TEST_MODE"))
+        self.assertNotEqual(
+            os.path.abspath(mcp_launch.opencode_config_path()),
+            os.path.abspath(mcp_launch.PRODUCTION_OPENCODE_CONFIG_PATH),
+        )
+
+    def test_test_mode_without_a_redirect_refuses_rather_than_writing(self):
+        with patch.dict(os.environ, {"GRIDVIBE_OPENCODE_CONFIG_PATH": ""}):
+            with self.assertRaises(RuntimeError):
+                mcp_launch.opencode_config_path()
+
+    def test_the_generated_file_is_gitignored(self):
+        with io.open(PROJECT_ROOT / ".gitignore", encoding="utf-8") as handle:
+            ignored = handle.read()
+
+        self.assertIn(mcp_launch.OPENCODE_CONFIG_FILENAME, ignored)
+
+
 class PaneIdentityEnvironmentTestCase(unittest.TestCase):
     """The five variables, at the spawn that carries them."""
 

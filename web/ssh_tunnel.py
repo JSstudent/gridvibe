@@ -37,6 +37,8 @@ import socket
 import threading
 from typing import Any, Dict, List, Optional, Tuple
 
+from web.mcp_launch import MCP_SERVER_NAME, OPENCODE_CONFIG_STYLE
+
 logger = logging.getLogger(__name__)
 
 #: The address sshd is asked to bind on the remote host. Loopback on purpose:
@@ -529,17 +531,33 @@ def tunnel_url(remote_port: int, token: str) -> str:
     return f"http://{REMOTE_BIND_ADDRESS}:{int(remote_port)}{path}"
 
 
-def remote_mcp_document(url: str) -> Dict[str, Any]:
-    """The config written on the remote host.
+def remote_mcp_document(url: str, style: str = "") -> Dict[str, Any]:
+    """The config written on the remote host, in the shape ``style`` reads.
 
     Streamable HTTP rather than a stdio command, which is the point: nothing
     is installed on the remote host, so there is no command for it to name.
     Both ``type`` and ``transport`` are stated because the CLIs disagree about
     which key they read, and an extra key is ignored by the one that does not.
+
+    opencode reads neither: its servers live under ``mcp`` with
+    ``type: "remote"``. ``oauth: false`` stops it probing for an OAuth flow
+    the endpoint does not have -- the token in the URL is the whole of its
+    authentication. One pane runs one agent per connection, so one shape is
+    written, never both.
     """
+    if style == OPENCODE_CONFIG_STYLE:
+        return {
+            "mcp": {
+                MCP_SERVER_NAME: {
+                    "type": "remote",
+                    "url": url,
+                    "oauth": False,
+                }
+            }
+        }
     return {
         "mcpServers": {
-            "gridvibe": {
+            MCP_SERVER_NAME: {
                 "type": "http",
                 "transport": "http",
                 "url": url,
@@ -605,6 +623,7 @@ def write_remote_config(
     sftp: Any,
     remote_path: str,
     url: str,
+    style: str = "",
 ) -> bool:
     """Place the generated config on the remote host. Returns success.
 
@@ -622,7 +641,7 @@ def write_remote_config(
         return False
     try:
         with sftp.open(remote_path, "w") as handle:
-            handle.write(json.dumps(remote_mcp_document(url), indent=2) + "\n")
+            handle.write(json.dumps(remote_mcp_document(url, style), indent=2) + "\n")
     except Exception as exc:
         logger.warning("Could not write the remote MCP config %s: %s", remote_path, exc)
         return False
@@ -696,8 +715,12 @@ def establish(
     token: str,
     local_host: str,
     local_port: int,
+    style: str = "",
 ) -> Optional[Dict[str, Any]]:
     """Open the tunnel and place the config. Returns the record, or ``None``.
+
+    ``style`` is the agent's registry ``mcp.style``, which picks the shape of
+    the document written (see :func:`remote_mcp_document`).
 
     Every failure costs the pane its tools and nothing else: the shell has
     already been opened by the caller and is never torn down for this.
@@ -726,7 +749,7 @@ def establish(
         remote_path = remote_config_path(resolve_remote_home(sftp), session_id)
         if not remote_path or not ensure_remote_directory(sftp, remote_path):
             raise OSError("no writable location for the remote MCP config")
-        if not write_remote_config(sftp, remote_path, url):
+        if not write_remote_config(sftp, remote_path, url, style):
             raise OSError("the remote MCP config could not be written")
     except Exception as exc:
         logger.warning("[%s] MCP tunnel setup failed: %s", session_id, exc)

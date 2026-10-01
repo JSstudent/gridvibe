@@ -38,7 +38,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 import tests  # noqa: E402,F401 - redirects durable state away from the real files
 from web import agents as web_agents  # noqa: E402
-from web import mcp_http, ssh_tunnel  # noqa: E402
+from web import mcp_http, mcp_launch, ssh_tunnel  # noqa: E402
 from web.window_intents import OPENED, SPLIT, window_intents  # noqa: E402
 
 
@@ -446,6 +446,32 @@ class RemoteConfigTestCase(unittest.TestCase):
         self.assertEqual(server["type"], "http")
         self.assertEqual(server["transport"], "http")
 
+    def test_an_unnamed_style_writes_the_same_document_as_before(self):
+        url = "http://127.0.0.1:4111/mcp/TOK"
+
+        self.assertEqual(
+            ssh_tunnel.remote_mcp_document(url, ""),
+            ssh_tunnel.remote_mcp_document(url),
+        )
+        self.assertEqual(
+            ssh_tunnel.remote_mcp_document(url, "inline_toml"),
+            ssh_tunnel.remote_mcp_document(url),
+        )
+
+    def test_the_opencode_style_writes_the_shape_opencode_reads(self):
+        """opencode reads servers under `mcp`, not `mcpServers`, and wants
+        `type: "remote"` -- the shared shape would load as no server at all."""
+        url = "http://127.0.0.1:4111/mcp/TOK"
+
+        document = ssh_tunnel.remote_mcp_document(url, mcp_launch.OPENCODE_CONFIG_STYLE)
+
+        self.assertNotIn("mcpServers", document)
+        self.assertEqual(
+            document["mcp"]["gridvibe"],
+            # No OAuth probe against an endpoint whose token is in the URL.
+            {"type": "remote", "url": url, "oauth": False},
+        )
+
     def test_the_url_is_the_remote_hosts_own_loopback(self):
         url = ssh_tunnel.tunnel_url(4111, "TOK")
 
@@ -497,6 +523,30 @@ class RemoteConfigTestCase(unittest.TestCase):
         # answered without applying anything is the case this catches.
         sftp.stat.assert_called_with(self.PATH)
         self.assertIn("mcpServers", sftp.handle.write.call_args.args[0])
+
+    def test_establish_writes_the_document_in_the_agents_style(self):
+        client = MagicMock()
+        client.get_transport.return_value.request_port_forward.return_value = 41234
+        sftp = self._sftp()
+        sftp.normalize.return_value = "/home/u"
+        sftp.stat.side_effect = lambda path: SimpleNamespace(
+            st_mode=0o40700 if path.endswith(".gridvibe") else 0o100600
+        )
+        client.open_sftp.return_value = sftp
+
+        record = ssh_tunnel.establish(
+            client,
+            session_id="pane-1",
+            token="TOK",
+            local_host="127.0.0.1",
+            local_port=5050,
+            style=mcp_launch.OPENCODE_CONFIG_STYLE,
+        )
+
+        self.assertIsNotNone(record)
+        written = json.loads(sftp.handle.write.call_args.args[0])
+        self.assertEqual(written["mcp"]["gridvibe"]["url"], record["url"])
+        self.assertEqual(written["mcp"]["gridvibe"]["type"], "remote")
 
     def test_a_write_that_fails_reports_rather_than_raises(self):
         sftp = MagicMock()
@@ -1350,6 +1400,34 @@ class EstablishTunnelTestCase(unittest.TestCase):
                 )
 
                 self.assertIs(connection["mcp_tunnel"], self.record)
+
+    def test_the_tunnel_is_asked_for_the_agents_own_document_shape(self):
+        for agent in ("claude", "copilot", "codex"):
+            with self.subTest(agent=agent):
+                self.establish.reset_mock()
+                connection = self._open_pane(f"pane-{agent}")
+
+                self.terminal._establish_mcp_tunnel(
+                    f"pane-{agent}", self._session(agent), connection, self.client
+                )
+
+                self.assertEqual(
+                    self.establish.call_args.kwargs["style"],
+                    web_agents._agent_mcp_style(agent),
+                )
+
+        # An agent whose registry block names the opencode format gets it.
+        connection = self._open_pane("pane-oc")
+        with patch.object(web_agents, "_agent_supports_mcp", return_value=True), \
+                patch.object(web_agents, "_agent_mcp_style",
+                             return_value=mcp_launch.OPENCODE_CONFIG_STYLE):
+            self.terminal._establish_mcp_tunnel(
+                "pane-oc", self._session("opencode"), connection, self.client
+            )
+
+        self.assertEqual(
+            self.establish.call_args.kwargs["style"], mcp_launch.OPENCODE_CONFIG_STYLE
+        )
 
 
 class InProcessIntentPollTestCase(unittest.TestCase):

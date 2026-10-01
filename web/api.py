@@ -218,6 +218,7 @@ from web.mcp_launch import (  # noqa: F401 - mcp_config_path re-exported for tes
     server_base_url,
     set_server_address,
     write_mcp_config,
+    write_opencode_config,
 )
 from web.navigation import NavigationRefusal, move_group_for_agent, resolve_view_target
 from web.pane_directory import resolve_stated_directory
@@ -4904,6 +4905,9 @@ def run_server(
     # self-heals with no user action.
     set_server_address(host, port)
     write_mcp_config(host, port)
+    # opencode reads a different schema, so it gets its own file -- from the
+    # same interpreter and the same URL.
+    write_opencode_config(host, port)
     # Same reason, one file over: the Claude session hook names this
     # interpreter. The URL and the token reach it through the pane instead.
     write_claude_settings()

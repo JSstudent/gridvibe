@@ -3474,7 +3474,7 @@ def _establish_mcp_tunnel(
 
     from urllib.parse import urlparse
 
-    from web.agents import _agent_supports_mcp
+    from web.agents import _agent_mcp_style, _agent_supports_mcp
     from web.mcp_http import pane_tokens
     from web.mcp_launch import server_base_url
     from web.ssh_tunnel import establish
@@ -3521,6 +3521,8 @@ def _establish_mcp_tunnel(
         token=token,
         local_host=parsed.hostname or "127.0.0.1",
         local_port=int(parsed.port or 5050),
+        # The remote document is written in the shape this agent reads.
+        style=_agent_mcp_style(agent_key),
     )
     if record is None:
         # Nothing to spend the token on, so it is not left standing.
