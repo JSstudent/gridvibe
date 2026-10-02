@@ -4,6 +4,8 @@ All notable changes to GridVibe will be documented in this file.
 
 ## Unreleased
 
+## 1.15.0 - 2026-10-2
+
 - **(feat) HTML files preview as pages in the file explorer, with their own saved zoom.** An `.html` or `.htm` file opened only as Source, so a mockup or report in the repository could not be looked at without leaving GridVibe. It now gets a Preview tab, like Markdown, that shows the page itself, its own scripts and `https:` fonts, styles and images included. The page runs in a sandboxed iframe served by `GET .../file/html` under a strict CSP: an opaque origin with no network connections and no `http://` loads, so it can reach neither GridVibe's routes nor anything else. The frame is bound to the revision Source is showing: if the file changes in between, Preview shows the same "file changed" notice and Refresh as the Markdown preview rather than newer bytes, and a preview that failed to load is retried on refresh instead of kept. Find, line wrap and the Markdown appearance options stand down on it, and relative links to neighbouring files do not load.
   **Zoom.** While the HTML Preview is showing, the header's -/+ buttons zoom the page from 25% to 300% instead of changing the editor font size. The zoom is per tab and is saved with the workspace as the tab view's `html_zoom`, so it survives save, autosave and restore. A font-size step now also saves at once; it used to wait for the next unrelated save. The sandbox and the persisted field are in the engineering contracts' Security, Explorer and Presentation persistence sections.
 
