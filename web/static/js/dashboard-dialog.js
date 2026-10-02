@@ -169,6 +169,10 @@
         return typeof window !== 'undefined' ? window.GridVibeSessionColour : undefined;
     }
 
+    function dashboardCrewModel() {
+        return typeof window !== 'undefined' ? window.GridVibeAgentCrews : undefined;
+    }
+
     /* ── The reading, as words ── */
 
     function dashboardWorkspaceLabel(workspace, index) {
@@ -293,16 +297,90 @@
         return identity.paneChatLine(pane, Number(pane?.index) || 0, dashboardAgentOptions());
     }
 
-    function dashboardPaneHover(pane) {
+    /* `crew` is optional: `dashboardCrewContext()`'s answer, handed in by a
+       surface that draws crews. A worker's hover then gains the line naming
+       who it is working for, after the chat line and its path and before the
+       shell. */
+    function dashboardPaneHover(pane, crew) {
         const identity = dashboardIdentity();
+        const working = dashboardCrewHoverLine(pane, crew);
         if (!identity) {
-            return dashboardPaneLine(pane);
+            return [dashboardPaneLine(pane), working].filter(Boolean).join('\n');
         }
         const chat = identity.paneChatTooltip(
             pane, Number(pane?.index) || 0, dashboardAgentOptions()
         );
-        const transport = dashboardTransportLabel(pane);
-        return transport ? `${chat}\n${transport}` : chat;
+        return [chat, working, dashboardTransportLabel(pane)].filter(Boolean).join('\n');
+    }
+
+    /* ── Crews ──
+
+       Which agent handed a task to which is `agent-crews.js`'s reading of the
+       payload's `links`; what a row *says* about it is this module's, like
+       every other field on a row, so the docked sidebar asks for these by name
+       too. None of them is part of a row's markup on the sidebar: they change
+       on a report or a new round, and a row is not rebuilt for either. */
+
+    /* The crew index plus every listed pane by session id, which is what the
+       worker's hover needs to name its orchestrator. Null when the crew module
+       is not on the page. */
+    function dashboardCrewContext(snapshot) {
+        const model = dashboardCrewModel();
+        if (!model) return null;
+        const panes = new Map();
+        (snapshot?.workspaces || []).forEach(workspace => {
+            (workspace?.groups || []).forEach(group => {
+                (group?.panes || []).forEach(pane => {
+                    const id = String(pane?.session_id || '');
+                    if (id) panes.set(id, pane);
+                });
+            });
+        });
+        return { crews: model.indexCrews(snapshot), panes };
+    }
+
+    /* "Working for <agent> · <its chat line>", plus the round from round 2. */
+    function dashboardCrewHoverLine(pane, crew) {
+        const link = crew?.crews?.byWorker?.get(String(pane?.session_id || ''));
+        const requester = link
+            ? crew.panes?.get(String(link.requester_session_id || ''))
+            : null;
+        if (!requester) return '';
+        const round = Number(link.round) || 1;
+        return `Working for ${dashboardAgentName(requester)} · ${dashboardPaneLine(requester)}`
+            + (round >= 2 ? ` · round ${round}` : '');
+    }
+
+    /* A dot with three strokes fanning right: tasks handed out. */
+    const DASHBOARD_CREW_GLYPH = '<svg class="dash-crew-glyph" viewBox="0 0 12 12"'
+        + ' aria-hidden="true" focusable="false">'
+        + '<circle cx="2.5" cy="6" r="1.8" fill="currentColor"/>'
+        + '<path d="M4 6 L10 2 M4 6 H10 M4 6 L10 10" stroke="currentColor"'
+        + ' stroke-width="1.3" fill="none" stroke-linecap="round"/></svg>';
+
+    /* The orchestrator's chip: how many of the agents it handed tasks to have
+       reported, as `reported/total`, counted per worker. The count is drawn and
+       the sentence is the chip's hover and, out of flow, the row's accessible
+       name, so the fraction is never the only statement of it. Empty on every
+       row that handed nothing out. */
+    function dashboardCrewChipHtml(pane, crews) {
+        const model = dashboardCrewModel();
+        if (!model || !crews) return '';
+        const { total, reported } = model.crewSummary(crews, pane?.session_id);
+        if (!total) return '';
+        const words = `Handed ${total === 1 ? 'a task to 1 agent' : `tasks to ${total} agents`}; `
+            + `${reported} reported`;
+        return `<span class="dash-crew-chip" title="${escHtml(words)}">${DASHBOARD_CREW_GLYPH}`
+            + `<span class="dash-crew-count" aria-hidden="true">${reported}/${total}</span>`
+            + `<span class="dash-crew-word">${escHtml(words)}</span></span>`;
+    }
+
+    /* Waiting on another agent -- an orchestrator in `wait_for_results`, or a
+       worker standing by in `wait_for_task` -- in the crew module's words.
+       Empty when the pane is not waiting, or the module is not on the page. */
+    function dashboardPaneWaitingWord(pane) {
+        const model = dashboardCrewModel();
+        return model ? model.waitingWord(pane?.waiting) : '';
     }
 
     function dashboardStateWord(activity) {
@@ -320,7 +398,10 @@
 
     /* A pane that is not connected has nothing to say about what its agent is
        doing, and saying "no output yet" about it would be answering a
-       different question. The transport's own word wins while there is one. */
+       different question. The transport's own word wins while there is one.
+       After it, waiting on another agent wins over the activity reading: an
+       agent CLI blocked in a GridVibe tool call can look busy, and it is not
+       working -- the server already leaves it out of `totals.working`. */
     function dashboardPaneStateWord(pane) {
         const status = String(pane?.status || '');
         if (status === 'error') {
@@ -332,12 +413,12 @@
         if (status === 'connecting' || status === 'pending') {
             return 'Connecting';
         }
-        return dashboardStateWord(pane?.activity);
+        return dashboardPaneWaitingWord(pane) || dashboardStateWord(pane?.activity);
     }
 
-    /* Which of the three state hues the dot wears. Kept separate from the word
+    /* Which of the state hues the dot wears. Kept separate from the word
        above because an unreachable pane and a quiet one are the same colour
-       only by accident. */
+       only by accident. Same order: transport, then waiting, then activity. */
     function dashboardPaneStateKey(pane) {
         const status = String(pane?.status || '');
         if (status === 'error' || status === 'disconnected') {
@@ -345,6 +426,9 @@
         }
         if (status === 'connecting' || status === 'pending') {
             return 'unknown';
+        }
+        if (dashboardPaneWaitingWord(pane)) {
+            return 'waiting';
         }
         return String(pane?.activity?.state || 'unknown');
     }
@@ -760,7 +844,9 @@
                 ...group,
                 panes: group.panes.map(pane => {
                     rows.set(pane.session_id, pane);
-                    const { activity, title, directory, status, ...identity } = pane;
+                    /* `waiting` is a reading like `activity`: it only changes
+                       which mark the dot wears. */
+                    const { activity, title, directory, status, waiting, ...identity } = pane;
                     return identity;
                 })
             }))

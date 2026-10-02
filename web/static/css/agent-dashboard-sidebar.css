@@ -324,6 +324,32 @@ body.agent-sidebar-right .agent-sidebar-resizer {
     box-shadow: inset 0 0 0 2px var(--gv-accent);
 }
 
+/* ── Crews ──
+
+   The lane gutter: 18px more on the scroller's left, only while the reading
+   holds a crew, so a column with no crews is as wide inside as it always was.
+   The wires themselves are `agent-crews.js`'s layer, dressed in
+   `agent-dashboard.css`; they leave each card's edge into this space. */
+.agent-sidebar.has-crews .agent-sidebar-body {
+    padding-left: 28px;
+}
+
+/* Hovering or focusing a crew's row dims every row outside the crew and rings
+   the crew's own. The dim is on a row's contents and not on the row, so the
+   input-target ring (the row's own box-shadow) stays at full strength on a
+   dimmed row, and keeps its own ring on a crew row. */
+.agent-sidebar .dash-agent > * {
+    transition: opacity .2s;
+}
+
+.agent-sidebar.is-crew-highlight .dash-agent:not(.is-crew-member) > * {
+    opacity: .32;
+}
+
+.agent-sidebar.is-crew-highlight .dash-agent.is-crew-member:not(.is-input-target) {
+    box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--gv-accent) 75%, transparent);
+}
+
 .agent-sidebar .dash-agent-line {
     flex: 1 1 auto;
     flex-basis: auto;

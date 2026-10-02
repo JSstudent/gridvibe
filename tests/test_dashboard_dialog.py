@@ -82,6 +82,7 @@ STATIC_JS = REPO_ROOT / "web" / "static" / "js"
 AGENT_IDENTITY_JS = STATIC_JS / "agent-identity.js"
 AGENT_GLYPHS_JS = STATIC_JS / "agent-glyphs.js"
 SESSION_COLOUR_JS = STATIC_JS / "session-colour.js"
+AGENT_CREWS_JS = STATIC_JS / "agent-crews.js"
 DASHBOARD_DIALOG_JS = STATIC_JS / "dashboard-dialog.js"
 
 NODE = shutil.which("node")
@@ -624,6 +625,7 @@ class DashboardDialogTestCase(unittest.TestCase):
             + AGENT_IDENTITY_JS.read_text(encoding="utf-8")
             + AGENT_GLYPHS_JS.read_text(encoding="utf-8")
             + SESSION_COLOUR_JS.read_text(encoding="utf-8")
+            + AGENT_CREWS_JS.read_text(encoding="utf-8")
             + DASHBOARD_DIALOG_JS.read_text(encoding="utf-8")
             + "\n(async () => {\n"
             + body
@@ -708,6 +710,46 @@ class DashboardDialogStructureTestCase(DashboardDialogTestCase):
         self.assertEqual(result["tooltip"], "Renamed chat\n10.0.0.5: /srv/app\nSSH")
         self.assertIn("Idle 1m", result["reading"])
         self.assertEqual(result["scroll"], 123)
+
+    def test_waiting_on_another_agent_is_a_reading_updated_in_place(self):
+        """`waiting` overrides the activity reading after the transport, in the
+        crew module's words, and it is a reading: an agent entering
+        `wait_for_results` changes its dot and never rebuilds its row."""
+        result = self._run_node(
+            """
+            dashboardShown();
+            const busy = pane({ activity: activity({ state: 'working' }) });
+            fetchAnswer = snapshot([group([busy])]);
+            await refreshAgentDashboard();
+            const originalHtml = body().innerHTML;
+            const reading = { innerHTML: dashboardActivityHtml(busy) };
+            const progress = { innerHTML: dashboardProgressHtml(busy) };
+            const row = { dataset: { sessionId: 's1' }, title: dashboardPaneHover(busy),
+                querySelector: selector => ({
+                    '.dash-agent-line': { textContent: '' },
+                    '.dash-agent-reading': reading,
+                    '.dash-agent-progress': progress
+                }[selector]) };
+            body().querySelectorAll = () => [row];
+            fetchAnswer = snapshot([group([pane({ waiting: 'crew', activity: activity({ state: 'working' }) })])]);
+            await refreshAgentDashboard();
+            const words = ['task', 'crew', ''].map(waiting => dashboardPaneStateWord(pane({ waiting })));
+            report({
+                sameButtons: body().innerHTML === originalHtml,
+                reading: reading.innerHTML,
+                words,
+                disconnected: dashboardPaneStateKey(pane({ waiting: 'crew', status: 'disconnected' }))
+            });
+            """
+        )
+        self.assertTrue(result["sameButtons"])
+        self.assertIn("dash-state-waiting", result["reading"])
+        self.assertIn("Waiting on its crew", result["reading"])
+        self.assertEqual(
+            result["words"],
+            ["Standing by for its next task", "Waiting on its crew", "No output yet"],
+        )
+        self.assertEqual(result["disconnected"], "error")
 
     def test_a_pane_that_only_moved_updates_the_hover_its_line_does_not_show(self):
         """`directory` is deliberately absent from the structure key, so a pane

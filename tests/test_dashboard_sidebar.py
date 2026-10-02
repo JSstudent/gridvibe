@@ -61,6 +61,7 @@ TEMPLATES = REPO_ROOT / "templates"
 AGENT_IDENTITY_JS = STATIC_JS / "agent-identity.js"
 AGENT_GLYPHS_JS = STATIC_JS / "agent-glyphs.js"
 SESSION_COLOUR_JS = STATIC_JS / "session-colour.js"
+AGENT_CREWS_JS = STATIC_JS / "agent-crews.js"
 DASHBOARD_DIALOG_JS = STATIC_JS / "dashboard-dialog.js"
 DASHBOARD_SIDEBAR_JS = STATIC_JS / "dashboard-sidebar.js"
 DASHBOARD_CLOSE_JS = STATIC_JS / "dashboard-close.js"
@@ -202,6 +203,11 @@ let fetchDelay = 0;
 let inputTargetAnswer = '';
 let inputTargetSource = () => inputTargetAnswer;
 
+/* The crew wire layer, recorded rather than drawn: `agent-crews.js` is
+   exercised against a DOM stub of its own (`test_agent_crews.py`), and what is
+   pinned here is when the column asks it to do what. */
+const wireCalls = { created: [], paints: [], highlights: [], paused: [] };
+
 const windowListeners = fakeListeners();
 const closeCalls = { requests: [], prompts: 0, notices: [], refreshes: 0 };
 let bridge = null;
@@ -276,6 +282,8 @@ const sidebar = GridVibeDashboardSidebar.create({
         hover: dashboardPaneHover,
         agentName: dashboardAgentName,
         mcp: dashboardMcpTagHtml,
+        crewContext: dashboardCrewContext,
+        crewChip: dashboardCrewChipHtml,
         workspaceLabel: dashboardWorkspaceLabel,
         sessionColourStyle: dashboardSessionColourStyle,
         totals: dashboardTotalsText
@@ -289,6 +297,15 @@ const sidebar = GridVibeDashboardSidebar.create({
     report: () => { calls.reports += 1; },
     onLayoutChanged: () => { calls.layouts += 1; },
     inputTarget: () => inputTargetSource(),
+    createWireLayer: options => {
+        wireCalls.created.push({ mode: options.mode, container: options.container === body() });
+        return {
+            paint: reading => { wireCalls.paints.push(reading); },
+            highlight: crew => { wireCalls.highlights.push(crew); },
+            setPaused: on => { wireCalls.paused.push(on); },
+            dispose() {}
+        };
+    },
     logError: () => {}
 });
 
@@ -490,8 +507,19 @@ function sidebarShown() {
 
 /* The drawn rows as elements: one object per row, kept for as long as the
    markup that drew it is -- so a decoration survives a reading that repaints
-   nothing and goes with its row on one that does, as it would on a page. */
+   nothing and goes with its row on one that does, as it would on a page. Each
+   carries its title from the markup and its (empty) crew chip slot, whose
+   writes are counted. */
 let drawnRows = { html: null, rows: [] };
+function fakeSlot() {
+    let html = '';
+    const slot = { writes: 0 };
+    Object.defineProperty(slot, 'innerHTML', {
+        get: () => html,
+        set: value => { html = String(value); slot.writes += 1; }
+    });
+    return slot;
+}
 function drawnAgentRows() {
     const html = body().innerHTML;
     if (drawnRows.html !== html) {
@@ -501,12 +529,48 @@ function drawnAgentRows() {
                 const element = fakeElement('');
                 element.dataset = row.dataset;
                 element.state = row.state;
+                element.title = row.hover;
+                element.crewSlot = /<span class="dash-agent-crew"><\/span>/.test(row.html)
+                    ? fakeSlot() : null;
+                /* The reading and the bar, as the markup drew them, so an
+                   in-place write is told apart from a rebuilt row. */
+                element.readingSlot = fakeSlot();
+                element.progressSlot = fakeSlot();
+                element.querySelector = selector => ({
+                    '.dash-agent-crew': element.crewSlot,
+                    '.dash-agent-reading': element.readingSlot,
+                    '.dash-agent-progress': element.progressSlot
+                }[selector] || null);
+                element.closest = selector => (
+                    selector === '.dash-agent[data-session-id]' ? element : null
+                );
                 element.removeAttribute = function (name) { delete this.attributes[name]; };
                 return element;
             })
         };
     }
     return drawnRows.rows;
+}
+
+/* The drawn row for one session. */
+function drawnRow(sessionId) {
+    return drawnAgentRows().find(row => row.dataset.sessionId === sessionId) || null;
+}
+
+/* One assignment, as `GET /api/dashboard` lists it. */
+function link(requester, worker, extra) {
+    return Object.assign({
+        link_id: `${requester}-${worker}`,
+        requester_session_id: requester,
+        worker_session_id: worker,
+        state: 'working',
+        read: true,
+        status: '',
+        collected: false,
+        round: 1,
+        reason: '',
+        worker_agent: { agent_selection: 'claude', custom_agent: '', group_id: 'g1' }
+    }, extra || {});
 }
 body().querySelectorAll = selector => (
     selector === '.dash-agent[data-session-id]' ? drawnAgentRows() : []
@@ -532,6 +596,7 @@ class DashboardSidebarNodeTestCase(unittest.TestCase):
             + AGENT_IDENTITY_JS.read_text(encoding="utf-8")
             + AGENT_GLYPHS_JS.read_text(encoding="utf-8")
             + SESSION_COLOUR_JS.read_text(encoding="utf-8")
+            + AGENT_CREWS_JS.read_text(encoding="utf-8")
             + DASHBOARD_DIALOG_JS.read_text(encoding="utf-8")
             + DASHBOARD_SIDEBAR_JS.read_text(encoding="utf-8")
             + HARNESS_STUBS
@@ -1471,6 +1536,348 @@ class DashboardSidebarInputTargetTestCase(DashboardSidebarNodeTestCase):
         self.assertEqual(result["after"], ["working", "idle"])
         self.assertTrue(result["unchanged"])
         self.assertEqual(result["marks"], [["s2", "true"]])
+
+
+class DashboardSidebarCrewTestCase(DashboardSidebarNodeTestCase):
+    """Which agent handed a task to which, on the column.
+
+    Everything a crew adds is laid on rows already drawn: the lane gutter is a
+    class on the panel, the orchestrator's chip is written into its row's own
+    slot, a worker's hover gains one line, and hovering or focusing a crew's
+    row highlights it. None of it is in the markup a reading is compared by, so
+    a report, a phase change or a new round never rebuilds a row. Four panes:
+    an orchestrator (`s1`), two agents (`s2`, `s3`) and one more (`s4`)."""
+
+    READING = """
+        function crewReading(links, titles) {
+            const named = titles || {};
+            return snapshot([group([
+                pane({ activity: activity({ title: named.s1 || 'Plan the release', state: 'idle' }) }),
+                pane({ session_id: 's2', index: 1, agent_selection: 'codex',
+                    activity: activity({ title: named.s2 || 'Review the parser' }) }),
+                pane({ session_id: 's3', index: 2,
+                    activity: activity({ title: named.s3 || 'Write the tests' }) }),
+                pane({ session_id: 's4', index: 3,
+                    activity: activity({ title: named.s4 || 'On its own' }) })
+            ])], { links });
+        }
+        function members() {
+            return drawnAgentRows()
+                .filter(row => row.classList.contains('is-crew-member'))
+                .map(row => row.dataset.sessionId);
+        }
+    """
+
+    def test_the_gutter_opens_only_while_there_is_a_crew(self):
+        result = self._run_node(
+            self.READING + """
+            sidebarShown();
+            fetchAnswer = crewReading([]);
+            await sidebar.refresh();
+            const none = shell().classList.contains('has-crews');
+            const markup = body().innerHTML;
+            fetchAnswer = crewReading([link('s1', 's2')]);
+            await sidebar.refresh();
+            const some = shell().classList.contains('has-crews');
+            const sameMarkup = body().innerHTML === markup;
+            fetchAnswer = crewReading([]);
+            await sidebar.refresh();
+            report({ none, some, sameMarkup, gone: shell().classList.contains('has-crews') });
+            """
+        )
+        self.assertFalse(result["none"])
+        self.assertTrue(result["some"])
+        # The gutter is the panel's class, not a row's markup.
+        self.assertTrue(result["sameMarkup"])
+        self.assertFalse(result["gone"])
+
+    def test_the_orchestrators_chip_is_the_dialogs_own_builder(self):
+        """`reported/total` per worker, a closed worker included, on the
+        orchestrator's row only, and stated in words for a reader hearing the
+        row."""
+        result = self._run_node(
+            self.READING + """
+            sidebarShown();
+            fetchAnswer = crewReading([
+                link('s1', 's2', { state: 'reported', status: 'done' }),
+                link('s1', 's3'),
+                link('s1', 's9', { state: 'reported', status: 'failed', collected: true })
+            ]);
+            await sidebar.refresh();
+            const reading = fetchAnswer;
+            report({
+                chip: drawnRow('s1').crewSlot.innerHTML,
+                dialog: dashboardCrewChipHtml(
+                    reading.workspaces[0].groups[0].panes[0],
+                    GridVibeAgentCrews.indexCrews(reading)
+                ),
+                others: ['s2', 's3', 's4'].map(id => drawnRow(id).crewSlot.innerHTML),
+                inMarkup: body().innerHTML.includes('dash-crew-chip'),
+                columns: parseAgentRows()[0].columns
+            });
+            """
+        )
+        self.assertEqual(result["chip"], result["dialog"])
+        self.assertIn('<span class="dash-crew-count" aria-hidden="true">2/3</span>', result["chip"])
+        self.assertIn('title="Handed tasks to 3 agents; 2 reported"', result["chip"])
+        self.assertIn(
+            '<span class="dash-crew-word">Handed tasks to 3 agents; 2 reported</span>',
+            result["chip"],
+        )
+        self.assertIn('class="dash-crew-glyph"', result["chip"])
+        self.assertEqual(result["others"], ["", "", ""])
+        self.assertFalse(result["inMarkup"])
+        # The slot sits after the title, before the bar.
+        columns = result["columns"]
+        self.assertEqual(
+            columns[columns.index("dash-agent-line") + 1], "dash-agent-crew"
+        )
+
+    def test_a_report_updates_the_chip_in_place(self):
+        """A report changes a chip, and nothing else: the row element, the
+        markup and the scroller all stay, and an unchanged poll writes
+        nothing."""
+        result = self._run_node(
+            self.READING + """
+            sidebarShown();
+            fetchAnswer = crewReading([link('s1', 's2'), link('s1', 's3')]);
+            await sidebar.refresh();
+            const row = drawnRow('s1');
+            const slot = row.crewSlot;
+            const markup = body().innerHTML;
+            const first = slot.innerHTML;
+            body().scrollTop = 55;
+            fetchAnswer = crewReading([
+                link('s1', 's2', { state: 'reported', status: 'done' }),
+                link('s1', 's3')
+            ]);
+            await sidebar.refresh();
+            const reported = {
+                sameRow: drawnRow('s1') === row,
+                sameMarkup: body().innerHTML === markup,
+                chip: slot.innerHTML,
+                writes: slot.writes,
+                scroll: body().scrollTop
+            };
+            await sidebar.refresh();
+            report({ first, reported, idleWrites: slot.writes,
+                workerWrites: drawnRow('s2').crewSlot.writes });
+            """
+        )
+        self.assertIn(">0/2<", result["first"])
+        self.assertTrue(result["reported"]["sameRow"])
+        self.assertTrue(result["reported"]["sameMarkup"])
+        self.assertIn(">1/2<", result["reported"]["chip"])
+        self.assertEqual(result["reported"]["writes"], 2)
+        self.assertEqual(result["reported"]["scroll"], 55)
+        self.assertEqual(result["idleWrites"], 2)
+        self.assertEqual(result["workerWrites"], 0)
+
+    def test_a_worker_hover_names_its_orchestrator_and_the_round_from_two(self):
+        result = self._run_node(
+            self.READING + """
+            sidebarShown();
+            fetchAnswer = crewReading([link('s1', 's2')]);
+            await sidebar.refresh();
+            const worker = drawnRow('s2');
+            const round1 = worker.title;
+            const orchestrator = drawnRow('s1').title;
+            const alone = drawnRow('s4').title;
+            const plain = dashboardPaneHover(fetchAnswer.workspaces[0].groups[0].panes[3]);
+            const markup = body().innerHTML;
+            fetchAnswer = crewReading([link('s1', 's2', { link_id: 'next-round', round: 2 })]);
+            await sidebar.refresh();
+            const round2 = worker.title;
+            const sameRow = drawnRow('s2') === worker && body().innerHTML === markup;
+            fetchAnswer = crewReading([link('s1', 's2', { round: 2 })], { s1: 'Ship it' });
+            await sidebar.refresh();
+            report({ round1, round2, sameRow, orchestrator, alone, plain,
+                renamed: drawnRow('s2').title });
+            """
+        )
+        self.assertEqual(
+            result["round1"].split("\n")[-2], "Working for Claude Code · Plan the release"
+        )
+        self.assertNotIn("round", result["round1"])
+        self.assertEqual(
+            result["round2"].split("\n")[-2],
+            "Working for Claude Code · Plan the release · round 2",
+        )
+        # Under the chat line and its path, above the shell, which stays the
+        # hover's last line.
+        self.assertTrue(result["round2"].endswith("SSH"))
+        self.assertTrue(result["sameRow"])
+        self.assertNotIn("Working for", result["orchestrator"])
+        self.assertEqual(result["alone"], result["plain"])
+        # The orchestrator's own line is read again on every reading.
+        self.assertIn("Working for Claude Code · Ship it · round 2", result["renamed"])
+
+    def test_hover_or_focus_highlights_one_crew_and_the_input_ring_stays(self):
+        """Two crews. The highlighted one's rows are members, the panel says a
+        crew is highlighted, the wires are told which, and the row being typed
+        into keeps its ring whichever crew is lit. A reading that rebuilds the
+        rows puts the highlight straight back."""
+        result = self._run_node(
+            self.READING + """
+            storedSidebar = true;
+            inputTargetAnswer = 's3';
+            fetchAnswer = crewReading([link('s1', 's2'), link('s3', 's4')]);
+            sidebar.wire();
+            await settle();
+            body().fire('pointerover', { target: drawnRow('s2') });
+            const hovered = {
+                panel: shell().classList.contains('is-crew-highlight'),
+                members: members(),
+                wires: wireCalls.highlights[wireCalls.highlights.length - 1],
+                ring: drawnRow('s3').classList.contains('is-input-target')
+            };
+            fetchAnswer = crewReading([link('s1', 's2'), link('s3', 's4')], { s2: 'Renamed' });
+            await sidebar.refresh();
+            const rebuilt = { members: members(), ring: drawnRow('s3').classList.contains('is-input-target') };
+            body().fire('pointerleave', {});
+            const left = { panel: shell().classList.contains('is-crew-highlight'), members: members(),
+                wires: wireCalls.highlights[wireCalls.highlights.length - 1] };
+            body().fire('focusin', { target: drawnRow('s4') });
+            const focused = { members: members(), wires: wireCalls.highlights[wireCalls.highlights.length - 1] };
+            body().fire('pointerover', { target: drawnRow('s1') });
+            const pointerWins = members();
+            body().fire('pointerover', { target: { closest: () => null } });
+            const backToFocus = members();
+            body().fire('focusout', { relatedTarget: null });
+            report({ hovered, rebuilt, left, focused, pointerWins, backToFocus,
+                cleared: { panel: shell().classList.contains('is-crew-highlight'), members: members() },
+                inMarkup: /is-crew-member|is-crew-highlight/.test(body().innerHTML) });
+            """
+        )
+        self.assertTrue(result["hovered"]["panel"])
+        self.assertEqual(result["hovered"]["members"], ["s1", "s2"])
+        self.assertEqual(result["hovered"]["wires"], "s1")
+        self.assertTrue(result["hovered"]["ring"])
+        self.assertEqual(result["rebuilt"]["members"], ["s1", "s2"])
+        self.assertTrue(result["rebuilt"]["ring"])
+        self.assertFalse(result["left"]["panel"])
+        self.assertEqual(result["left"]["members"], [])
+        self.assertEqual(result["left"]["wires"], "")
+        self.assertEqual(result["focused"]["members"], ["s3", "s4"])
+        self.assertEqual(result["focused"]["wires"], "s3")
+        self.assertEqual(result["pointerWins"], ["s1", "s2"])
+        self.assertEqual(result["backToFocus"], ["s3", "s4"])
+        self.assertFalse(result["cleared"]["panel"])
+        self.assertEqual(result["cleared"]["members"], [])
+        self.assertFalse(result["inMarkup"])
+
+    def test_the_wires_follow_every_reading_and_stand_down_with_the_poll(self):
+        result = self._run_node(
+            self.READING + """
+            storedSidebar = true;
+            fetchAnswer = crewReading([link('s1', 's2')]);
+            sidebar.wire();
+            await settle();
+            await sidebar.refresh();
+            const painted = {
+                created: wireCalls.created,
+                paints: wireCalls.paints.length,
+                last: wireCalls.paints[wireCalls.paints.length - 1] === fetchAnswer
+            };
+            documentIsHidden = true;
+            visibilityListeners.fire('v');
+            documentIsHidden = false;
+            visibilityListeners.fire('v');
+            await settle();
+            sidebar.apply(false);
+            report({ painted, paused: wireCalls.paused, paints: wireCalls.paints.length });
+            """
+        )
+        self.assertEqual(result["painted"]["created"], [{"mode": "lane", "container": True}])
+        self.assertEqual(result["painted"]["paints"], 2)
+        self.assertTrue(result["painted"]["last"])
+        # Created running; held while the document is hidden; running again
+        # when it is back; held when the panel is shut.
+        self.assertEqual(result["paused"], [False, True, False, True])
+        self.assertEqual(result["paints"], 3)
+
+    def test_a_waiting_agent_wears_the_waiting_mark_and_says_why(self):
+        """Waiting overrides the activity reading, after the transport: an
+        orchestrator in `wait_for_results` and a worker standing by in
+        `wait_for_task` wear the one mark, in their own words, and no bar. It
+        is laid on the drawn row: the markup keeps the plain reading."""
+        result = self._run_node(
+            """
+            sidebarShown();
+            const panes = [
+                pane({ waiting: 'crew', activity: activity({ progress_state: 'indeterminate' }) }),
+                pane({ session_id: 's2', index: 1, waiting: 'task', activity: activity() }),
+                pane({ session_id: 's3', index: 2, waiting: 'crew', status: 'disconnected' }),
+                pane({ session_id: 's4', index: 3, waiting: '', activity: activity() })
+            ];
+            fetchAnswer = snapshot([group(panes)]);
+            await sidebar.refresh();
+            const shown = drawnAgentRows().map((row, index) => {
+                const reading = row.readingSlot.writes
+                    ? row.readingSlot.innerHTML : dashboardActivityHtml({ ...panes[index], waiting: '' });
+                return [
+                    /dash-state-([a-z]+)/.exec(reading)[1],
+                    /<span class="dash-state-word">([^<]*)<\\/span>/.exec(reading)[1],
+                    row.progressSlot.writes ? row.progressSlot.innerHTML.includes('dash-progress-fill') : null
+                ];
+            });
+            report({ shown, inMarkup: /dash-state-waiting/.test(body().innerHTML) });
+            """
+        )
+        self.assertEqual(result["shown"], [
+            # The bar the plain reading drew is taken off.
+            ["waiting", "Waiting on its crew", False],
+            ["waiting", "Standing by for its next task", None],
+            ["error", "Disconnected", None],
+            ["working", "Working", None],
+        ])
+        self.assertFalse(result["inMarkup"])
+
+    def test_entering_and_leaving_a_wait_rewrites_the_dot_not_the_row(self):
+        """An orchestrator enters `wait_for_results` and leaves it again many
+        times a task, so each flip rewrites its reading slot and its bar and
+        keeps the row, the markup and the scroller."""
+        result = self._run_node(
+            self.READING + """
+            sidebarShown();
+            const reading = waiting => {
+                const next = crewReading([link('s1', 's2')]);
+                next.workspaces[0].groups[0].panes[0] = pane({
+                    waiting,
+                    activity: activity({ title: 'Plan the release', progress_state: 'indeterminate' })
+                });
+                return next;
+            };
+            fetchAnswer = reading('');
+            await sidebar.refresh();
+            const row = drawnRow('s1');
+            const markup = body().innerHTML;
+            body().scrollTop = 40;
+            const steps = [];
+            for (const waiting of ['crew', 'task', '']) {
+                fetchAnswer = reading(waiting);
+                await sidebar.refresh();
+                steps.push({
+                    sameRow: drawnRow('s1') === row,
+                    sameMarkup: body().innerHTML === markup,
+                    word: /<span class="dash-state-word">([^<]*)<\\/span>/.exec(row.readingSlot.innerHTML)[1],
+                    bar: row.progressSlot.innerHTML.includes('dash-progress-fill')
+                });
+            }
+            const writes = row.readingSlot.writes;
+            await sidebar.refresh();
+            report({ steps, scroll: body().scrollTop, idle: row.readingSlot.writes === writes,
+                plain: row.readingSlot.innerHTML === dashboardActivityHtml(fetchAnswer.workspaces[0].groups[0].panes[0]) });
+            """
+        )
+        self.assertEqual(result["steps"], [
+            {"sameRow": True, "sameMarkup": True, "word": "Waiting on its crew", "bar": False},
+            {"sameRow": True, "sameMarkup": True, "word": "Standing by for its next task", "bar": False},
+            {"sameRow": True, "sameMarkup": True, "word": "Working", "bar": True},
+        ])
+        self.assertEqual(result["scroll"], 40)
+        self.assertTrue(result["idle"])
+        self.assertTrue(result["plain"])
 
 
 class DashboardSidebarInputTargetPageTestCase(DashboardSidebarNodeTestCase):
@@ -2948,6 +3355,43 @@ class DashboardSidebarPageTestCase(unittest.TestCase):
         self.assertRegex(light[:light.index("}")], r"--gv-accent:\s*#")
         # The terminal's active border reads the same token.
         self.assertIn("--t-accent: var(--gv-accent);", self._static("css/terminals.css"))
+
+    def test_the_crew_gutter_highlight_and_chip_are_drawn_as_planned(self):
+        """The gutter is 18px more padding behind `has-crews` only. The
+        highlight dims a row's *contents*, never the row, so the input-target
+        ring (the row's own box-shadow) is never dimmed, and a crew row's ring
+        gives way to it. The chip is accent on accent-soft, mono 9.5px/600."""
+        css = self._static("css/agent-dashboard-sidebar.css")
+
+        def rule(selector, sheet=css):
+            found = re.search(re.escape(selector) + r"\s*\{([^}]*)\}", sheet)
+            self.assertIsNotNone(found, selector)
+            return found.group(1)
+
+        self.assertIn(
+            "padding-left: 28px",
+            rule(".agent-sidebar.has-crews .agent-sidebar-body"),
+        )
+        self.assertIn(
+            "opacity: .32",
+            rule(".agent-sidebar.is-crew-highlight .dash-agent:not(.is-crew-member) > *"),
+        )
+        self.assertNotRegex(
+            css, r"is-crew-highlight \.dash-agent:not\(\.is-crew-member\)\s*\{"
+        )
+        self.assertIn(
+            "inset 0 0 0 1.5px color-mix(in srgb, var(--gv-accent) 75%, transparent)",
+            rule(".agent-sidebar.is-crew-highlight "
+                 ".dash-agent.is-crew-member:not(.is-input-target)"),
+        )
+
+        shared = self._static("css/agent-dashboard.css")
+        chip = rule(".dash-crew-chip", shared)
+        self.assertIn("background: var(--gv-accent-soft)", chip)
+        self.assertIn("color: var(--gv-accent)", chip)
+        self.assertIn("font: 600 9.5px/1", chip)
+        self.assertNotIn("border:", chip)
+        self.assertIn("display: none", rule(".dash-agent-crew:empty", shared))
 
     def test_the_module_is_loaded_after_the_dialog_whose_renderers_it_uses(self):
         html = self._page()

@@ -133,9 +133,20 @@
                 typeof root.dashboardPaneLine === 'function'
                     ? root.dashboardPaneLine(pane) : ''
             ),
-            hover: pane => (
+            hover: (pane, crew) => (
                 typeof root.dashboardPaneHover === 'function'
-                    ? root.dashboardPaneHover(pane) : ''
+                    ? root.dashboardPaneHover(pane, crew) : ''
+            ),
+            /* The crew reading and the orchestrator's chip, the dialog's
+               answers like the rest. A page without the crew module answers
+               no crews, which draws a row exactly as it was before. */
+            crewContext: snapshot => (
+                typeof root.dashboardCrewContext === 'function'
+                    ? root.dashboardCrewContext(snapshot) : null
+            ),
+            crewChip: (pane, crews) => (
+                typeof root.dashboardCrewChipHtml === 'function'
+                    ? root.dashboardCrewChipHtml(pane, crews) : ''
             ),
             agentName: pane => (
                 typeof root.dashboardAgentName === 'function'
@@ -202,6 +213,10 @@
             typeof root.focusedTerminalSessionId === 'function'
                 ? root.focusedTerminalSessionId() : ''
         ),
+        /* The crew wires, drawn by `agent-crews.js` inside the scroller. */
+        createWireLayer: options => (
+            root.GridVibeAgentCrews?.createWireLayer?.(options) || null
+        ),
         logError: (message, error) => console.error(message, error)
     });
 
@@ -231,6 +246,17 @@
     const OPEN_BODY_CLASS = 'agent-sidebar-open';
     const RIGHT_BODY_CLASS = 'agent-sidebar-right';
     const INPUT_TARGET_CLASS = 'is-input-target';
+    /* Crews. `has-crews` opens the lane gutter on the panel, and only while the
+       reading holds a crew, so a column with no crews is exactly as wide
+       inside as it always was. The other two are the hover/focus highlight: one on
+       the panel, one on each row of the highlighted crew. */
+    const CREWS_CLASS = 'has-crews';
+    const CREW_HIGHLIGHT_CLASS = 'is-crew-highlight';
+    const CREW_MEMBER_CLASS = 'is-crew-member';
+    const AGENT_ROW_SELECTOR = '.dash-agent[data-session-id]';
+    const CREW_SLOT_SELECTOR = '.dash-agent-crew';
+    const READING_SLOT_SELECTOR = '.dash-agent-reading';
+    const PROGRESS_SLOT_SELECTOR = '.dash-agent-progress';
     const SIDEBAR_SCALE_MIN = 100;
     const SIDEBAR_SCALE_MAX = 200;
 
@@ -298,7 +324,11 @@
        agent can create workspaces, launch panes and split the grid. That is
        what a reader is choosing between when they pick a pane to instruct, and
        a panel meant to be up *while* they work is exactly where that choice is
-       made. Three characters, from the dialog's own builder. */
+       made. Three characters, from the dialog's own builder.
+
+       `dash-agent-crew` is drawn empty. The orchestrator's crew chip is filled
+       into it after every reading (`decorateCrews` below), so a report or a new
+       round changes a chip and never the markup a repaint compares. */
     function agentRowHtml(pane, render) {
         const esc = render.esc;
         return `
@@ -317,6 +347,7 @@
                 <span class="dash-agent-icon" aria-hidden="true">${render.glyph(pane)}</span>
                 <span class="dash-agent-who">${esc(render.agentName(pane))}</span>
                 <span class="dash-agent-line">${esc(render.line(pane))}</span>
+                <span class="dash-agent-crew"></span>
                 ${render.mcp(pane)}
                 <span class="dash-agent-progress">${render.progress(pane)}</span>
             </button>
@@ -427,6 +458,23 @@
             .join('');
     }
 
+    /* The reading the row markup is drawn from: every pane's `waiting` left
+       out. Waiting on another agent changes only a row's dot and bar, and an
+       orchestrator enters and leaves `wait_for_results` all the time, so it is
+       laid on the drawn rows (`decorateCrews`) instead of rebuilding them. */
+    function withoutWaiting(snapshot) {
+        return {
+            ...snapshot,
+            workspaces: (snapshot?.workspaces || []).map(workspace => ({
+                ...workspace,
+                groups: (workspace?.groups || []).map(group => ({
+                    ...group,
+                    panes: (group?.panes || []).map(pane => ({ ...pane, waiting: '' }))
+                }))
+            }))
+        };
+    }
+
     /* Which mark the one control wears and what it says it will do: "Show"
        while it is shut, "Hide" while it is up. */
     function toggleFace(open) {
@@ -446,6 +494,9 @@
         OPEN_BODY_CLASS,
         RIGHT_BODY_CLASS,
         INPUT_TARGET_CLASS,
+        CREWS_CLASS,
+        CREW_HIGHLIGHT_CLASS,
+        CREW_MEMBER_CLASS,
         SIDEBAR_SIDE_LEFT,
         SIDEBAR_SIDE_RIGHT,
         normalizeSide,
@@ -454,6 +505,7 @@
         sessionHtml,
         workspaceHtml,
         bodyHtml,
+        withoutWaiting,
         toggleFace
     };
 
@@ -481,6 +533,7 @@
             report = () => {},
             onLayoutChanged = () => {},
             inputTarget = () => '',
+            createWireLayer = () => null,
             logError = () => {}
         } = runtime || {};
 
@@ -495,6 +548,17 @@
         let actionNotice = '';
         let actionTone = 'error';
         let readNotice = '';
+        /* The last reading's crews (`dashboardCrewContext`), the wire layer,
+           and the rows the pointer and the caret are on, which pick the crew
+           to highlight. */
+        let crewContext = null;
+        let wires = null;
+        let pointerRow = '';
+        let focusRow = '';
+        /* What each decorated slot (chip, reading, bar) last had written into
+           it, so an unchanged one is not rewritten every four seconds. Keyed
+           by the slot element, so a rebuilt row starts from its markup. */
+        const writtenSlots = new WeakMap();
 
         function shell() { return getElement(SHELL_ID); }
         function body() { return getElement(BODY_ID); }
@@ -574,6 +638,88 @@
             return target;
         }
 
+        /* ── Crews ──
+
+           Everything a crew puts on the column is laid on the rows already
+           drawn, the way the input-target ring is: the chip in its slot, the
+           waiting mark in the reading slot, the worker's "Working for" hover
+           line, the highlight classes and the wires. None of it is in the
+           markup `paint` compares, so a report, a phase change, a new round or
+           a wait never rebuilds a row, and scroll, focus and the input-target
+           ring stay where they were. A reading that does
+           rebuild the rows gets all of it straight back. */
+
+        function wireLayer() {
+            const panel = body();
+            if (!wires && panel) {
+                wires = createWireLayer({ container: panel, mode: 'lane' }) || null;
+                wires?.setPaused(!isOpen() || documentHidden());
+            }
+            return wires;
+        }
+
+        function crewOf(id) {
+            return (id && crewContext?.crews?.rootOf?.get(id)) || '';
+        }
+
+        /* The pointer's row wins over the caret's, as on the mockup: hovering
+           another crew moves the highlight, and leaving the panel hands it
+           back to the row that has focus. A row outside every crew clears it. */
+        function applyHighlight() {
+            const crew = crewOf(pointerRow || focusRow);
+            shell()?.classList?.toggle(CREW_HIGHLIGHT_CLASS, Boolean(crew));
+            body()?.querySelectorAll?.(AGENT_ROW_SELECTOR).forEach(row => {
+                row.classList?.toggle(
+                    CREW_MEMBER_CLASS,
+                    Boolean(crew) && crewOf(row.dataset?.sessionId || '') === crew
+                );
+            });
+            wires?.highlight(crew);
+            return crew;
+        }
+
+        /* `drawn` is what the row's markup put in the slot; once written, the
+           slot holds the last write instead. */
+        function writeSlot(slot, html, drawn) {
+            if (!slot) return;
+            const current = writtenSlots.has(slot) ? writtenSlots.get(slot) : drawn;
+            if (current === html) return;
+            slot.innerHTML = html;
+            writtenSlots.set(slot, html);
+        }
+
+        function decorateCrews(snapshot) {
+            crewContext = render.crewContext ? render.crewContext(snapshot) : null;
+            const crews = crewContext?.crews || null;
+            shell()?.classList?.toggle(CREWS_CLASS, Boolean(crews?.edges?.length));
+            if (!crewContext) return;
+            body()?.querySelectorAll?.(AGENT_ROW_SELECTOR).forEach(row => {
+                const pane = crewContext.panes?.get(row.dataset?.sessionId || '');
+                if (!pane) return;
+                writeSlot(row.querySelector?.(CREW_SLOT_SELECTOR), render.crewChip(pane, crews) || '', '');
+                /* The waiting mark: the markup was drawn from the reading
+                   without `waiting` (`withoutWaiting`), so a pane entering or
+                   leaving a wait rewrites its dot and its bar, not its row. */
+                const drawn = { ...pane, waiting: '' };
+                writeSlot(
+                    row.querySelector?.(READING_SLOT_SELECTOR),
+                    render.activity(pane),
+                    render.activity(drawn)
+                );
+                writeSlot(
+                    row.querySelector?.(PROGRESS_SLOT_SELECTOR),
+                    render.progress(pane),
+                    render.progress(drawn)
+                );
+                const hover = render.hover(pane, crewContext);
+                if (row.title !== hover) row.title = hover;
+            });
+        }
+
+        function rowIdAt(target) {
+            return target?.closest?.(AGENT_ROW_SELECTOR)?.dataset?.sessionId || '';
+        }
+
         async function refresh() {
             if (!isOpen()) return false;
             const id = ++requestId;
@@ -616,10 +762,15 @@
             if (!snapshot) return false;
             const totals = getElement(TOTALS_ID);
             if (totals) totals.textContent = render.totals(snapshot);
-            paint(bodyHtml(snapshot, render, getCloseActions()));
+            paint(bodyHtml(withoutWaiting(snapshot), render, getCloseActions()));
             /* After every reading, repainted or not: an unchanged tree keeps
                its rows, but the pane that was the target may not be any more. */
             markInputTarget();
+            /* The same rule for the crews, and the wires last, so they measure
+               the rows with their chips in. */
+            decorateCrews(snapshot);
+            applyHighlight();
+            wireLayer()?.paint(snapshot);
             return true;
         }
 
@@ -632,6 +783,8 @@
                 disarmTimer(timer);
                 timer = null;
             }
+            /* The wires stop flowing whenever the poll stands down. */
+            wires?.setPaused(!isOpen() || documentHidden());
             if (!isOpen() || documentHidden()) {
                 ++requestId;
                 inFlight?.abort();
@@ -790,6 +943,25 @@
                 if (!row) return;
                 event.preventDefault();
                 handleRow(row.dataset, row);
+            });
+            /* Hovering or focusing a crew's row highlights that crew. Also
+               delegated, for the same reason, and both only toggle classes. */
+            panel.addEventListener('pointerover', event => {
+                pointerRow = rowIdAt(event.target);
+                applyHighlight();
+            });
+            panel.addEventListener('pointerleave', () => {
+                pointerRow = '';
+                applyHighlight();
+            });
+            panel.addEventListener('focusin', event => {
+                focusRow = rowIdAt(event.target);
+                applyHighlight();
+            });
+            panel.addEventListener('focusout', event => {
+                if (panel.contains?.(event.relatedTarget)) return;
+                focusRow = '';
+                applyHighlight();
             });
             getElement(REFRESH_BTN_ID)?.addEventListener('click', () => refresh());
             getElement(CLOSE_BTN_ID)?.addEventListener('click', () => {

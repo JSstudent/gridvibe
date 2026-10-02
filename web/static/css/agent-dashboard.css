@@ -529,6 +529,51 @@
     color: var(--gv-bg-app);
 }
 
+/* The crew chip on an orchestrator's row: a fan glyph and "reported/total".
+   Its slot is on every row and is empty on every row that handed nothing out,
+   so it takes no gap there. */
+.dash-agent-crew {
+    display: inline-flex;
+    flex: 0 0 auto;
+}
+
+.dash-agent-crew:empty {
+    display: none;
+}
+
+.dash-crew-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    flex: 0 0 auto;
+    padding: 3px 5px;
+    border-radius: 4px;
+    background: var(--gv-accent-soft);
+    color: var(--gv-accent);
+    font: 600 9.5px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+
+.dash-crew-glyph {
+    width: 11px;
+    height: 11px;
+    flex: 0 0 auto;
+}
+
+/* The count in words, for a reader hearing the row: out of flow, like the
+   state word. */
+.dash-crew-word {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+}
+
 /* ── The activity reading ──
    One mark, at the head of the row, and the word it used to be drawn beside.
    The slot is a fixed box whatever the state draws inside it, so a spinner, a
