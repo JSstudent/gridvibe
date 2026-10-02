@@ -634,6 +634,20 @@
     background: var(--gv-danger);
 }
 
+/* Waiting is blocked inside a tool call on another agent: an orchestrator in
+   `wait_for_results`, or a worker standing by in `wait_for_task`. It is not
+   work, so it never borrows working's green ring: a dotted accent ring that
+   turns once every few seconds, slow enough that the two never read alike. */
+.dash-state-waiting .dash-state-dot {
+    box-sizing: border-box;
+    width: 12px;
+    height: 12px;
+    background: none;
+    border: 2px dotted var(--gv-accent);
+    box-shadow: 0 0 6px color-mix(in srgb, var(--gv-accent) 35%, transparent);
+    animation: dash-spin 3.2s linear infinite;
+}
+
 @keyframes dash-spin {
     to { transform: rotate(360deg); }
 }
@@ -690,6 +704,7 @@
 @media (prefers-reduced-motion: reduce) {
     /* Still, and still distinct: an open ring and three z's, not a dot. */
     .dash-state-working .dash-state-dot,
+    .dash-state-waiting .dash-state-dot,
     .dash-state-idle .dash-state-dot::before,
     .dash-state-idle .dash-state-dot::after,
     .dash-activity.dash-state-idle::after { animation: none; }
@@ -831,4 +846,132 @@
     .dash-body { padding: 12px; }
     .dash-workspace-head { flex-wrap: wrap; gap: 4px 8px; }
     .dash-workspace-actions { margin-left: 0; }
+}
+
+/* ── Crew wires ──
+
+   Who handed a task to whom, drawn by `agent-crews.js` as one SVG inside the
+   scroller. It is a decoration: it never takes a pointer, never holds focus and
+   is hidden from assistive technology, because the rows already say in words
+   which crew they belong to. Colours are the status tokens and nothing else;
+   session hues already use the whole wheel. */
+
+.has-dash-wires {
+    position: relative;
+}
+
+/* One pixel, drawn past its own box: the wires sit inside the rows' extent, and
+   a layer sized to the content would feed back into the size it measured. */
+.dash-wires {
+    position: absolute;
+    left: 0;
+    top: 0;
+    z-index: 1;
+    width: 1px;
+    height: 1px;
+    overflow: visible;
+    pointer-events: none;
+}
+
+.dash-wire {
+    fill: none;
+    stroke: var(--gv-accent);
+    stroke-width: 1.7;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+}
+
+.dash-wire-group,
+.dash-wire-pulse {
+    transition: opacity .2s;
+}
+
+/* Outside the highlighted crew. */
+.dash-wire-group.is-dimmed,
+.dash-wire-pulse.is-dimmed {
+    opacity: .14;
+}
+
+/* Handed, not yet read. */
+.dash-wire.is-handed {
+    stroke-opacity: .6;
+    stroke-dasharray: 2 4;
+}
+
+/* Working: the dashes flow toward the worker. */
+.dash-wire.is-working {
+    stroke-dasharray: 6 6;
+    animation: dash-wire-flow .9s linear infinite;
+}
+
+/* ...and glow while the orchestrator sits waiting on it. */
+.dash-wire.is-working.is-awaited {
+    stroke-width: 2.1;
+    filter: drop-shadow(0 0 3px color-mix(in srgb, var(--gv-accent) 70%, transparent));
+}
+
+.dash-wire.is-done {
+    stroke: var(--gv-success);
+    stroke-width: 2;
+}
+
+.dash-wire.is-blocked {
+    stroke: var(--gv-warning);
+    stroke-width: 2;
+}
+
+.dash-wire.is-failed {
+    stroke: var(--gv-danger);
+    stroke-width: 2;
+}
+
+/* Collected fades back, and keeps the hue of what it reported. */
+.dash-wire.is-collected {
+    stroke: var(--gv-success);
+    stroke-opacity: .45;
+}
+
+.dash-wire.is-collected.is-tone-blocked { stroke: var(--gv-warning); }
+.dash-wire.is-collected.is-tone-failed { stroke: var(--gv-danger); }
+
+.dash-wire.is-ended {
+    stroke: var(--gv-dialog-muted);
+    stroke-dasharray: 1 4;
+}
+
+/* The dot at each end: accent where the task came from, the phase's own colour
+   where it went. */
+.dash-wire-end {
+    stroke: none;
+    fill: var(--gv-accent);
+}
+
+.dash-wire-end.is-done,
+.dash-wire-end.is-collected { fill: var(--gv-success); }
+.dash-wire-end.is-blocked,
+.dash-wire-end.is-collected.is-tone-blocked { fill: var(--gv-warning); }
+.dash-wire-end.is-failed,
+.dash-wire-end.is-collected.is-tone-failed { fill: var(--gv-danger); }
+.dash-wire-end.is-ended { fill: var(--gv-dialog-muted); }
+
+/* A report on its way back to the orchestrator, until it is collected. */
+.dash-wire-pulse {
+    fill: var(--gv-success);
+    filter: drop-shadow(0 0 4px var(--gv-success));
+}
+
+@keyframes dash-wire-flow {
+    from { stroke-dashoffset: 12; }
+    to { stroke-dashoffset: 0; }
+}
+
+/* The page stops polling while it is hidden, and the wires stop with it. */
+.dash-wires-paused .dash-wire {
+    animation-play-state: paused;
+}
+
+/* Still, and still readable from colour and dash pattern alone. */
+@media (prefers-reduced-motion: reduce) {
+    .dash-wire.is-working { animation: none; }
+    .dash-wire-pulse { display: none; }
 }
