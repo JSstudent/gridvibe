@@ -88,8 +88,17 @@ class ExplorerPresentationRecordTestCase(_NodeHarnessMixin, unittest.TestCase):
                 } },
                 folds: [12, 44],
                 foldRevision: 'file:old',
+                htmlZoom: 1.5,
                 wrap: { source: false, preview: true, diff: false }
             });
+            const zoomKept = persistence.normalizeRecord({
+                version: 2, intent: { mode: 'preview' }, html_zoom: 0.67
+            }).html_zoom;
+            const zoomJunk = ['x', -1, 0, Infinity, null].map(html_zoom => (
+                'html_zoom' in persistence.normalizeRecord({
+                    version: 2, intent: { mode: 'preview' }, html_zoom
+                })
+            ));
             const stale = persistence.resolveRecord(record, {
                 source: 'file:new', preview: 'file:new', diff: 'diff:new'
             });
@@ -107,7 +116,7 @@ class ExplorerPresentationRecordTestCase(_NodeHarnessMixin, unittest.TestCase):
                 { directory: 'dir:1' }
             );
             process.stdout.write(JSON.stringify({
-                legacy, record, stale, partial, directory,
+                legacy, record, stale, partial, directory, zoomKept, zoomJunk,
                 sameDiff: persistence.diffContentRevision({
                     path: 'a.js', diffMode: 'staged', renderedDiff: 'one'
                 }) === persistence.diffContentRevision({
@@ -159,6 +168,13 @@ class ExplorerPresentationRecordTestCase(_NodeHarnessMixin, unittest.TestCase):
             0.15,
         )
 
+    def test_v2_records_carry_the_html_preview_zoom(self):
+        result = self._exercise_records()
+
+        self.assertEqual(result["record"]["html_zoom"], 1.5)
+        self.assertEqual(result["zoomKept"], 0.67)
+        self.assertEqual(result["zoomJunk"], [False] * 5)
+
     def test_flat_records_remain_readable_and_diff_identity_tracks_rendered_data(self):
         result = self._exercise_records()
 
@@ -166,6 +182,45 @@ class ExplorerPresentationRecordTestCase(_NodeHarnessMixin, unittest.TestCase):
         self.assertEqual(result["legacy"]["intent"], {"mode": "preview"})
         self.assertTrue(result["sameDiff"])
         self.assertTrue(result["changedDiff"])
+
+
+class ExplorerHtmlZoomPresentationTestCase(unittest.TestCase):
+    """The server half of the HTML preview zoom's saved view field."""
+
+    def _view(self, **fields):
+        return {"version": 2, "intent": {"mode": "preview"}, **fields}
+
+    def test_the_zoom_is_bounded_and_the_default_persists_nothing(self):
+        from web.session_presentation import _normalize_explorer_tab_views
+
+        views = _normalize_explorer_tab_views(
+            {
+                "__preview__": self._view(html_zoom=1.25),
+                "a.html": self._view(html_zoom=9),
+                "b.html": self._view(html_zoom=0.01),
+                "c.html": self._view(html_zoom=1),
+                "d.html": self._view(html_zoom=0.666666),
+            },
+            ["a.html", "b.html", "c.html", "d.html"],
+        )
+        self.assertEqual(views["__preview__"]["html_zoom"], 1.25)
+        self.assertEqual(views["a.html"]["html_zoom"], 3.0)
+        self.assertEqual(views["b.html"]["html_zoom"], 0.25)
+        self.assertNotIn("html_zoom", views["c.html"])
+        self.assertEqual(views["d.html"]["html_zoom"], 0.67)
+
+    def test_a_non_numeric_zoom_is_refused_not_coerced(self):
+        from web.session_presentation import (
+            PresentationValidationError,
+            _require_view_types,
+        )
+
+        _require_view_types(self._view(html_zoom=1.5))
+        _require_view_types(self._view(html_zoom=2))
+        for bad in (True, "1.5", None, float("nan"), float("inf")):
+            with self.subTest(value=bad):
+                with self.assertRaises(PresentationValidationError):
+                    _require_view_types(self._view(html_zoom=bad))
 
 
 class GroupPresentationTransactionTestCase(unittest.TestCase):

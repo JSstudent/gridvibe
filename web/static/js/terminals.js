@@ -7054,6 +7054,7 @@
                         id: tab.id,
                         view: tab.view || null,
                         fontSize: tab.fontSize || 0,
+                        htmlZoom: tab.htmlZoom || 0,
                         preferredMode: tab.preferredMode || '',
                         dirPath: tab.dirPath || '',
                         hasDirPath: Object.prototype.hasOwnProperty.call(tab, 'dirPath')
@@ -7093,6 +7094,9 @@
                 }
                 if (saved.fontSize) {
                     tab.fontSize = saved.fontSize;
+                }
+                if (saved.htmlZoom) {
+                    tab.htmlZoom = saved.htmlZoom;
                 }
                 if (saved.preferredMode) {
                     tab.preferredMode = saved.preferredMode;

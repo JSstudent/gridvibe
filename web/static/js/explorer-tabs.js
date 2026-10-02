@@ -667,6 +667,9 @@
         if (preview.fontSize) {
             pinnedTab.fontSize = preview.fontSize;
         }
+        if (preview.htmlZoom) {
+            pinnedTab.htmlZoom = preview.htmlZoom;
+        }
         if (preview.lineWrap) {
             pinnedTab.lineWrap = { ...preview.lineWrap };
         }
@@ -858,6 +861,7 @@
             ? window.GridVibeExplorerPersistence?.normalizeRecord(view.persistedRecord)
             : null;
         const fontSize = tab.fontSize ? clampExplorerEditorFontSize(tab.fontSize) : 0;
+        const htmlZoom = tab.htmlZoom ? clampExplorerHtmlZoom(tab.htmlZoom) : 0;
         if (!record && view) {
             record = window.GridVibeExplorerPersistence?.buildRecord({
                 mode: view.mode,
@@ -874,6 +878,9 @@
         if (!record) return null;
         if (fontSize && fontSize !== EXPLORER_EDITOR_FONT_DEFAULT) record.font_size = fontSize;
         else delete record.font_size;
+        // The HTML preview's zoom, on the same terms: 100% persists nothing.
+        if (htmlZoom && htmlZoom !== EXPLORER_HTML_ZOOM_DEFAULT) record.html_zoom = htmlZoom;
+        else delete record.html_zoom;
         record.wrap = { ...ensureExplorerTabLineWrap(tab) };
         const folds = Array.from(tab.collapsedLines || [])
             .filter(line => Number.isInteger(line) && line > 0)
@@ -897,6 +904,15 @@
             return 0;
         }
         return clampExplorerEditorFontSize(fontSize);
+    }
+
+    /* Snapped HTML preview zoom from one persisted tab view record; 0 = unset. */
+    function explorerPersistedTabHtmlZoom(raw) {
+        const zoom = Number(raw && typeof raw === 'object' ? raw.html_zoom : 0);
+        if (!Number.isFinite(zoom) || zoom <= 0) {
+            return 0;
+        }
+        return clampExplorerHtmlZoom(zoom);
     }
 
     /* Per-tab line-wrap flags from one persisted tab view record. Wrapping is
@@ -1075,6 +1091,10 @@
         if (previewFont) {
             previewTab.fontSize = previewFont;
         }
+        const previewZoom = explorerPersistedTabHtmlZoom(rawPreviewView);
+        if (previewZoom) {
+            previewTab.htmlZoom = previewZoom;
+        }
         previewTab.lineWrap = explorerPersistedTabLineWrap(rawPreviewView);
         previewTab.collapsedLines = explorerPersistedMarkdownFolds(rawPreviewView);
         previewTab.collapsedIdentity = explorerPersistedMarkdownFoldIdentity(rawPreviewView);
@@ -1153,6 +1173,10 @@
             const fontSize = explorerPersistedTabFontSize(rawViews[key]);
             if (fontSize) {
                 record.fontSize = fontSize;
+            }
+            const htmlZoom = explorerPersistedTabHtmlZoom(rawViews[key]);
+            if (htmlZoom) {
+                record.htmlZoom = htmlZoom;
             }
             record.lineWrap = explorerPersistedTabLineWrap(rawViews[key]);
             record.collapsedLines = explorerPersistedMarkdownFolds(rawViews[key]);

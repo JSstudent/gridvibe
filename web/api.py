@@ -4,7 +4,9 @@ Provides REST endpoints and WebSocket support for terminal sessions.
 """
 
 import contextlib
+import html
 import io
+import json
 import logging
 import os
 import re
@@ -13,7 +15,7 @@ import time
 import uuid
 from typing import Any, Dict, Optional, Tuple
 
-from flask import jsonify, render_template, request, send_file, send_from_directory
+from flask import Response, jsonify, render_template, request, send_file, send_from_directory
 from flask_socketio import emit, join_room, leave_room
 
 from gridvibe_mcp.identity import DEFAULT_MAX_AGENT_DEPTH
@@ -176,6 +178,7 @@ from web.explorer import (  # noqa: F401 - some names re-exported for backwards 
     normalized_git_log_limit,
     open_path_in_os_file_manager,
     read_explorer_file_preview,
+    read_explorer_html_document,
     save_explorer_file_payload,
 )
 from web.explorer_download import (
@@ -1829,6 +1832,95 @@ def get_explorer_image(session_id: str):
     response.headers["Content-Security-Policy"] = "default-src 'none'; style-src 'unsafe-inline'; sandbox"
     response.headers["X-Content-Type-Options"] = "nosniff"
     return response
+
+
+# The HTML preview runs the file's own scripts, so the document is fenced off
+# from GridVibe rather than cleaned: `sandbox allow-scripts` without
+# `allow-same-origin` gives it an opaque origin (no cookies, no storage, no
+# access to the parent page, and every write route already refuses
+# `Origin: null`); `connect-src 'none'` takes away fetch/XHR/WebSocket/beacon;
+# and only `https:` subresources may load, which keeps every `http://` URL
+# (GridVibe's own routes included) out of reach. Forms, popups, workers and
+# nested frames stay off. The iframe repeats the sandbox; this header is what
+# still holds when the route is opened directly in a tab.
+EXPLORER_HTML_PREVIEW_CSP = "; ".join((
+    "sandbox allow-scripts",
+    "default-src 'none'",
+    "script-src 'unsafe-inline' 'unsafe-eval' https: data: blob:",
+    "style-src 'unsafe-inline' https: data:",
+    "img-src https: data: blob:",
+    "font-src https: data:",
+    "media-src https: data: blob:",
+    "connect-src 'none'",
+    "form-action 'none'",
+    "frame-src 'none'",
+    "worker-src 'none'",
+    "base-uri 'none'",
+    "frame-ancestors 'self'",
+))
+
+
+def _explorer_html_preview_response(body: bytes, status: int = 200):
+    """Wrap an HTML preview body (document or refusal) in the sandbox headers."""
+    response = Response(body, status=status, mimetype="text/html")
+    response.headers["Content-Security-Policy"] = EXPLORER_HTML_PREVIEW_CSP
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+# The one message a refusal page sends its embedding Preview panel. The frame
+# is opaque, so this is how the panel learns that it holds a refusal rather than
+# the document: a 409 shows the panel's "file changed" notice, anything else
+# drops the panel's reuse stamp so a refresh or revisit loads it again. The
+# page's own scripts could post the same shape, which can only ever get that
+# page reloaded or the notice shown; the panel accepts it from its own frame
+# only and reads nothing else from it.
+EXPLORER_HTML_PREVIEW_MESSAGE_SOURCE = "gridvibe-html-preview"
+
+
+def _explorer_html_preview_error(message: str, status: int):
+    """Render a refusal inside the preview frame, where the reader is looking.
+
+    The frame is the only surface this route answers to and its document is
+    opaque to the page, so a JSON error would paint as raw text there.
+    """
+    notice = json.dumps({"source": EXPLORER_HTML_PREVIEW_MESSAGE_SOURCE, "status": status})
+    body = (
+        "<!doctype html><meta charset=\"utf-8\">"
+        "<body style=\"font:13px system-ui,sans-serif;color:#888;padding:16px\">"
+        f"{html.escape(message)}"
+        f"<script>parent.postMessage({notice}, '*')</script></body>"
+    )
+    return _explorer_html_preview_response(body.encode("utf-8"), status)
+
+
+@app.route('/api/explorer/<session_id>/file/html', methods=['GET'])
+def get_explorer_html_preview(session_id: str):
+    """Serve one explorer HTML file as a sandboxed document for the Preview panel."""
+    session = session_manager.get_session(session_id)
+    if session is None:
+        return _explorer_html_preview_error("Session not found", 404)
+    requested_path = request.args.get("path", "")
+    expected_revision = request.args.get("revision", "")
+    error_types = (
+        _sftp_request_error_types()
+        if _is_remote_explorer_session(session)
+        else (OSError,)
+    )
+    try:
+        with _explorer_backend(session) as backend:
+            content = read_explorer_html_document(
+                backend, requested_path, expected_revision
+            )
+    except ExplorerRouteError as exc:
+        return _explorer_html_preview_error(str(exc), exc.status_code)
+    except ValueError as exc:
+        return _explorer_html_preview_error(str(exc), 400)
+    except error_types as exc:
+        return _explorer_html_preview_error(str(exc), 500)
+    return _explorer_html_preview_response(content)
 
 
 @app.route('/api/explorer/<session_id>/reveal', methods=['POST'])

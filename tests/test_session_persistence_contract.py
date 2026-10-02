@@ -117,6 +117,7 @@ EXPLORER_PRESENTATION_FIXTURE = {
             "content_revisions": {"directory": "sha256:dir-guides"},
             "dir": "docs/guides",
             "font_size": 16,
+            "html_zoom": 0.75,
             "wrap": {"source": True, "preview": True, "diff": False},
             "scroll": {"directory": {"x": 0.0, "y": 0.25}},
         },
@@ -129,6 +130,7 @@ EXPLORER_PRESENTATION_FIXTURE = {
                 "preview": "sha256:intro",
             },
             "font_size": 18,
+            "html_zoom": 1.5,
             "wrap": {"source": False, "preview": True, "diff": False},
             "scroll": {
                 "source": {"x": 0.1, "y": 0.30},

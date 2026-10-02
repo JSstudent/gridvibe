@@ -58,6 +58,19 @@ Regression history and audit narratives do not belong in this reference.
   `mcp` or after it, is redacted. A call site that logs a request path still passes it through
   `redact_mcp_path()`. A handler added later installs the filter first;
   `/api/mcp/...` is not a credential and is left alone.
+- The explorer's HTML preview is the one place a repository's own scripts run
+  inside GridVibe, so it is fenced, never sanitized. `GET .../file/html` serves
+  the document under `EXPLORER_HTML_PREVIEW_CSP` (`web/api.py`): `sandbox
+  allow-scripts` without `allow-same-origin` (an opaque origin, which every
+  write route and Socket.IO already refuse), `connect-src 'none'`, `form-action
+  'none'`, and subresources from `https:`/`data:`/`blob:` only, so no `http://`
+  URL — GridVibe's routes included — is reachable. The iframe repeats
+  `sandbox="allow-scripts"`. Adding `allow-same-origin`, `'self'`, `http:` or a
+  connect source to either is a weakening and must be flagged. The page-to-panel
+  channel is one fixed `postMessage` shape (`EXPLORER_HTML_PREVIEW_MESSAGE_SOURCE`)
+  accepted only from the panel's own frame and read for its status alone; the
+  page can forge it, so it may never do more than reload that frame or show the
+  stale notice.
 - `POST /api/sessions/<id>/agent-conversation` is the one route an agent's own
   process calls without a page. It is authorised by a per-connection pane token
   rather than by origin; see
@@ -655,7 +668,14 @@ unless the task explicitly changes this contract.
   `Content-Security-Policy` and `X-Content-Type-Options: nosniff`.
 - Markdown preview is a lazy `GET .../file/preview`, root-confined and ≤10 MiB;
   refuse non-Markdown. The file/save payload always states `preview_type`
-  independently of fetched HTML. Source opens must not render/sanitize an unused
+  (`markdown`, `html`, `image` or null) independently of fetched HTML.
+- HTML preview (`.html`/`.htm`) is `GET .../file/html`, root-confined and whole
+  or nothing: a file over 10 MiB is refused, never truncated into a document it
+  does not contain. It is bound to Source's `state_revision` (`revision=`); a
+  mismatch is a 409, never the newer bytes. Its refusals are escaped HTML under
+  the same sandbox headers, because the frame is the only surface it answers
+  to, and each posts its status to the panel. See
+  [Security](#security-and-trust) for the sandbox itself. Source opens must not render/sanitize an unused
   preview. `GET .../find` searches names only; repository search may read content.
 - `git/state` and `file/state` are bounded read polls. Share Git-state changes
   across sidebar, tree/listing refresh and Source marks. External file changes may
@@ -801,6 +821,17 @@ unless the task explicitly changes this contract.
 
 ## Explorer rendering and scroll
 
+- An HTML Preview panel holds one sandboxed iframe, painted by
+  `paintExplorerHtmlPreview()` and stamped with the Source content identity and
+  revision, so a revisit keeps the frame and only changed bytes reload it. A
+  refusal the frame reports takes the stamp off (a 409 also shows the stale
+  notice), so refresh or a revisit retries instead of keeping the error. A pane's
+  `_explorerPreviewKind` (from `preview_type`) decides the panel; a kind change
+  is a shape change and rebuilds, never updates in place. The page is opaque to
+  GridVibe, so Find, line wrap and Markdown appearance stand down on it, while
+  the header's -/+ pair drives the tab's HTML zoom there (a CSS scale of the
+  frame, 25%–300% on a fixed step ladder) and the editor font size everywhere
+  else.
 - `explorer-repaint.js` owns skip/decorate/rebuild decisions. Rebuild Source rows
   only for document/language/fold changes; repaint changed code cells for marks
   or syntax color, using a document-scaled ceiling and one row walk. Decorations
@@ -886,6 +917,11 @@ unless the task explicitly changes this contract.
   Which side the panel docks to is not among them: it is the global
   `workspace.agent_sidebar_side` setting (see [Agent dashboard](#agent-dashboard)),
   and the transaction refuses it as an unknown field.
+- A tab view's `font_size` (integer) and `html_zoom` (finite number; v2 only)
+  persist only away from their defaults. The server clamps `html_zoom` to
+  0.25–3 and drops 1; the client snaps it onto the step ladder on restore. Each
+  -/+ step goes through `persistExplorerTabsToSession()`, and both survive
+  Preview-tab promotion and the close-rebuild snapshot.
 - Persist durable tabs/mode/Diff/navigation intent separately from revision-bound
   per-panel scroll/folds. Never persist fetched content, search query/results or
   dirty buffers. Viewer find is runtime state of tab + path, reapplied on render

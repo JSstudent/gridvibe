@@ -31,6 +31,9 @@ EXPLORER_MAX_MARKDOWN_LINE = 1_000_000
 EXPLORER_PREVIEW_TAB_KEY = "__preview__"
 EXPLORER_EDITOR_FONT_MIN = 10
 EXPLORER_EDITOR_FONT_MAX = 24
+# The HTML preview's zoom factor (1 = 100%), the client's step ladder ends.
+EXPLORER_HTML_ZOOM_MIN = 0.25
+EXPLORER_HTML_ZOOM_MAX = 3.0
 EXPLORER_PRESENTATION_VERSION = 2
 EXPLORER_MAX_CONTENT_REVISION_LENGTH = 128
 EXPLORER_MAX_EXPANDED_PATHS = 128
@@ -152,6 +155,7 @@ _VIEW_V2_FIELDS = frozenset(
         "content_revision",
         "content_revisions",
         "font_size",
+        "html_zoom",
         "wrap",
         "scroll",
         "path",
@@ -333,6 +337,22 @@ def _normalize_explorer_tab_font_size(value: Any) -> int:
     return max(EXPLORER_EDITOR_FONT_MIN, min(EXPLORER_EDITOR_FONT_MAX, font_size))
 
 
+def _normalize_explorer_tab_html_zoom(value: Any) -> float:
+    """Return a bounded HTML preview zoom, or 0.0 for unset/the default.
+
+    Only a v2 field: the zoom arrived after v2, so no v1 record carries one.
+    The default (1.0) normalizes to unset, matching how an unzoomed tab
+    persists nothing.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return 0.0
+    zoom = float(value)
+    if not math.isfinite(zoom) or zoom <= 0:
+        return 0.0
+    zoom = round(max(EXPLORER_HTML_ZOOM_MIN, min(EXPLORER_HTML_ZOOM_MAX, zoom)), 2)
+    return 0.0 if zoom == 1.0 else zoom
+
+
 def _normalize_explorer_line_wrap(raw_view: Dict[str, Any]) -> Dict[str, bool]:
     return {
         key: False
@@ -500,6 +520,9 @@ def _normalize_explorer_view_snapshot(raw_view: Dict[str, Any]) -> Dict[str, Any
         font_size = _normalize_explorer_tab_font_size(raw_view.get("font_size"))
         if font_size:
             record["font_size"] = font_size
+        html_zoom = _normalize_explorer_tab_html_zoom(raw_view.get("html_zoom"))
+        if html_zoom:
+            record["html_zoom"] = html_zoom
         raw_wrap = raw_view.get("wrap")
         if isinstance(raw_wrap, dict):
             wrap = {
@@ -779,6 +802,12 @@ def _require_view_types(value: Dict[str, Any]) -> None:
             or not isinstance(value["font_size"], int)
         ):
             raise PresentationValidationError("'font_size' must be an integer")
+        if "html_zoom" in value and (
+            isinstance(value["html_zoom"], bool)
+            or not isinstance(value["html_zoom"], (int, float))
+            or not math.isfinite(value["html_zoom"])
+        ):
+            raise PresentationValidationError("'html_zoom' must be a finite number")
         if "folds" in value:
             folds = value["folds"]
             if not isinstance(folds, list) or any(

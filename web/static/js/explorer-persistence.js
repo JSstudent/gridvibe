@@ -75,6 +75,7 @@
             if (!Object.keys(normalized.scroll).length) delete normalized.scroll;
         }
         if (Number.isInteger(raw.font_size)) normalized.font_size = raw.font_size;
+        if (Number.isFinite(raw.html_zoom) && raw.html_zoom > 0) normalized.html_zoom = raw.html_zoom;
         if (raw.wrap && typeof raw.wrap === 'object') {
             normalized.wrap = {};
             ['source', 'preview', 'diff'].forEach(panel => {
@@ -148,6 +149,7 @@
         Object.keys(points).forEach(panel => { if (!points[panel]) delete points[panel]; });
         if (Object.keys(points).length) record.scroll = points;
         if (Number.isInteger(opts.fontSize)) record.font_size = opts.fontSize;
+        if (Number.isFinite(opts.htmlZoom) && opts.htmlZoom > 0) record.html_zoom = opts.htmlZoom;
         if (opts.wrap && typeof opts.wrap === 'object') {
             record.wrap = {
                 source: opts.wrap.source !== false,

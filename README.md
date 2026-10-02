@@ -218,6 +218,7 @@ Swap any pane between a terminal and a file explorer with one button — same di
 
 - **Files follows your shell** — opening the explorer roots on the Git repository your terminal is standing in, whatever root the pane had before. `cd` somewhere else and open Files again to re-root there.
 - **Browse & preview** — breadcrumbs, a lazy Files tree, draggable file tabs, syntax-coloured source, rendered Markdown and Mermaid, and inline images.
+- **Preview HTML pages** — an `.html` file's Preview shows the page itself, scripts and web fonts included, sealed off from GridVibe and your network. The zoom buttons zoom the page, separately from the editor font size.
 - **Edit in place** — open any UTF-8 text file, edit it, and save with `Ctrl+S`. Saves are atomic, and a conflict prompt protects files that changed on disk.
 - **Search the repo** (`Ctrl+Shift+F`) — case, whole-word, regex, file-pattern, scope, and `.gitignore` controls, with results marked when a limit is hit.
 - **Find a file** — the Files tree's filter box finds files and folders by name anywhere under the root, with the matched part highlighted in place.
@@ -227,7 +228,7 @@ Swap any pane between a terminal and a file explorer with one button — same di
 - **Download files & folders** — save files directly, or right-click any folder in Files or Preview to save it as one ZIP. Local and SFTP downloads are capped at 100 MB; multi-selected files still download individually.
 - **Select several** — `Ctrl`-click to add or remove rows, `Shift`-click for a range. Copy, Cut, Delete, Download, and Copy path act on the whole selection with one confirmation.
 - **Big files stay usable** — very large files open in a plain fast view with a notice saying what is turned off, and large diffs keep side-by-side layout, line numbers, and undo.
-- **Restores with your workspace** — root, ordered tabs, view mode, scroll, wrapping, folds, sidebar width, theme, and Markdown appearance.
+- **Restores with your workspace** — root, ordered tabs, view mode, scroll, wrapping, folds, font size and page zoom, sidebar width, theme, and Markdown appearance.
 
 ### Git sidebar
 
@@ -284,7 +285,7 @@ GridVibe does not proxy pages or bypass `X-Frame-Options`/CSP, so sites that blo
 | **Explorer** | |
 | `Ctrl+F` | Find in the open file |
 | `Ctrl+Shift+F` | Toggle repository search |
-| `Ctrl+Shift+V` | Toggle the Markdown preview |
+| `Ctrl+Shift+V` | Toggle the Markdown or HTML preview |
 | `F5` | Refresh the focused explorer |
 | `Enter` / `Shift+Enter` / `↑` / `↓` | Step through find matches (in any find bar) |
 | `Esc` | Drop the selection, or close the open menu |
