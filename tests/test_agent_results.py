@@ -39,11 +39,14 @@ from web.agent_handoffs import (  # noqa: E402
 )
 from web.agent_results import (  # noqa: E402
     ENDED,
+    LINK_FIELDS,
     MAX_RESULT_CHARS,
+    MAX_WAIT_SECONDS,
     NOBODY_WAITING_MESSAGE,
     REPORTED,
     STALE_RECEIPT_MESSAGE,
     UNREAD_TASK_MESSAGE,
+    WAIT_GRACE_SECONDS,
     WORKING,
     ResultError,
     ResultStore,
@@ -633,6 +636,224 @@ class HandoffStoreWiringTestCase(unittest.TestCase):
         handoff_id = handoffs.create("Review.", source_session_id=REQUESTER, session_id="worker-a")
 
         self.assertTrue(handoffs.drop(handoff_id, "connection closed"))
+
+
+def _walk(value):
+    """Every key and every string value, at any depth."""
+    if isinstance(value, dict):
+        for key, item in value.items():
+            yield key
+            yield from _walk(item)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            yield from _walk(item)
+    elif isinstance(value, str):
+        yield value
+
+
+class LinksSnapshotTestCase(unittest.TestCase):
+    """What the dashboard is told about who handed a task to whom."""
+
+    def test_a_link_carries_exactly_its_fields(self):
+        store = ResultStore()
+        store.expect(
+            "h-a",
+            requester_session_id=REQUESTER,
+            worker_session_id="worker-a",
+            worker_agent={"agent_selection": "codex", "group_id": "g1", "password": "hunter2"},
+        )
+
+        (link,) = store.links_snapshot()
+
+        self.assertEqual(tuple(link), LINK_FIELDS)
+        self.assertEqual(link["requester_session_id"], REQUESTER)
+        self.assertEqual(link["worker_session_id"], "worker-a")
+        self.assertEqual(link["state"], WORKING)
+        self.assertFalse(link["read"])
+        self.assertEqual(link["status"], "")
+        self.assertFalse(link["collected"])
+        self.assertTrue(link["handed_at"])
+        self.assertEqual(link["reported_at"], "")
+        self.assertEqual(link["reason"], "")
+        self.assertEqual(link["round"], 1)
+        # Only the worker facts the dashboard draws from, whatever was offered.
+        self.assertEqual(
+            link["worker_agent"],
+            {"agent_selection": "codex", "custom_agent": "", "group_id": "g1"},
+        )
+        self.assertRegex(link["link_id"], r"^[0-9a-f]{16}$")
+
+    def test_no_text_receipt_or_handoff_id_at_any_depth(self):
+        handoffs = HandoffStore(results=ResultStore())
+        store = handoffs.results
+        handoff_id = handoffs.create("Secret brief.", source_session_id=REQUESTER, session_id="worker-a")
+        handoffs.announce(handoff_id, delivery=INLINE)
+        receipt = handoffs.read("worker-a")["receipt"]
+        store.report("worker-a", "Secret report.", receipt=receipt)
+
+        links = store.links_snapshot()
+        found = set(_walk(links))
+
+        for forbidden_key in ("text", "receipt", "handoff_id", "result"):
+            self.assertNotIn(forbidden_key, found)
+        for forbidden_value in (receipt, handoff_id, "Secret report.", "Secret brief."):
+            self.assertNotIn(forbidden_value, found)
+            self.assertNotIn(forbidden_value, json.dumps(links))
+        self.assertNotEqual(links[0]["link_id"], handoff_id)
+
+    def test_a_link_id_is_stable_across_reads_and_settling(self):
+        store = _store_with("worker-a")
+        first = store.links_snapshot()[0]["link_id"]
+        _report(store, "worker-a", "Done.")
+        store.collect(REQUESTER)
+
+        self.assertEqual(store.links_snapshot()[0]["link_id"], first)
+
+    def test_links_come_oldest_handed_first(self):
+        store = ResultStore()
+        store.expect("h-b", requester_session_id=REQUESTER, worker_session_id="worker-b", now=2.0)
+        store.expect("h-a", requester_session_id=REQUESTER, worker_session_id="worker-a", now=1.0)
+
+        self.assertEqual(
+            [link["worker_session_id"] for link in store.links_snapshot()],
+            ["worker-a", "worker-b"],
+        )
+
+    def test_a_settled_link_names_its_outcome(self):
+        store = _store_with("worker-a", "worker-b")
+        _report(store, "worker-a", "Stuck.", status="blocked")
+        store.end("h-worker-b", "pane relaunched")
+
+        reported, ended = store.links_snapshot()
+
+        self.assertEqual((reported["state"], reported["status"]), (REPORTED, "blocked"))
+        self.assertTrue(reported["reported_at"])
+        self.assertTrue(reported["read"])
+        # The key, never the sentence the requester is shown.
+        self.assertEqual((ended["state"], ended["reason"]), (ENDED, "pane relaunched"))
+
+    def test_an_end_reason_is_always_a_key(self):
+        store = _store_with("worker-a", "worker-b", "worker-c")
+        store.end("h-worker-a", "its agent could not be handed the task: no tools", key="undeliverable")
+        store.end("h-worker-b", "something new")
+        store.forget_session("worker-c")
+
+        self.assertEqual(
+            [link["reason"] for link in store.links_snapshot()],
+            ["undeliverable", "other", "pane closed"],
+        )
+
+    def test_an_uncollected_round_and_its_follow_up_are_both_listed(self):
+        store = _store_with("worker-a")
+        _report(store, "worker-a", "Round one.")
+        store.end("h-worker-a", "replaced")
+        store.expect(
+            "h-2", requester_session_id=REQUESTER, worker_session_id="worker-a",
+            continues="h-worker-a", now=5.0,
+        )
+
+        links = store.links_snapshot()
+
+        self.assertEqual([link["round"] for link in links], [1, 2])
+        self.assertEqual([link["state"] for link in links], [REPORTED, WORKING])
+        self.assertNotEqual(links[0]["link_id"], links[1]["link_id"])
+
+    def test_a_link_goes_with_its_requesters_pane(self):
+        store = _store_with("worker-a")
+        store.forget_session(REQUESTER)
+
+        self.assertEqual(store.links_snapshot(), [])
+
+
+class RoundTestCase(unittest.TestCase):
+    """Only a follow-up advances the round, and it is read before the drop."""
+
+    def _followup(self, store, previous, handoff_id, now):
+        store.end(previous, "replaced")
+        store.expect(
+            handoff_id, requester_session_id=REQUESTER, worker_session_id="worker-a",
+            continues=previous, now=now,
+        )
+        store.mark_read(handoff_id)
+
+    def test_a_task_that_starts_an_agent_is_round_one(self):
+        store = _store_with("worker-a")
+
+        self.assertEqual(store.links_snapshot()[0]["round"], 1)
+
+    def test_a_follow_up_is_the_round_it_continues_plus_one(self):
+        store = _store_with("worker-a")
+        _report(store, "worker-a", "One.")
+        self._followup(store, "h-worker-a", "h-2", 5.0)
+
+        self.assertEqual(store.links_snapshot()[-1]["round"], 2)
+
+    def test_the_round_survives_the_continued_round_being_dropped_by_the_same_call(self):
+        store = _store_with("worker-a")
+        _report(store, "worker-a", "One.")
+        store.collect(REQUESTER)
+        self._followup(store, "h-worker-a", "h-2", 5.0)
+
+        links = store.links_snapshot()
+
+        # The collected round went in that very `expect`, after its round was read.
+        self.assertEqual([link["round"] for link in links], [2])
+
+    def test_a_follow_up_whose_round_was_evicted_is_round_two(self):
+        store = ResultStore()
+        store.expect(
+            "h-2", requester_session_id=REQUESTER, worker_session_id="worker-a",
+            continues="h-gone",
+        )
+
+        self.assertEqual(store.links_snapshot()[0]["round"], 2)
+
+
+class WaitingReadingTestCase(unittest.TestCase):
+    """Which requesters are waiting on their crew, for the dashboard."""
+
+    def test_the_grace_window_is_pinned(self):
+        self.assertEqual(WAIT_GRACE_SECONDS, 5.0)
+        self.assertLess(WAIT_GRACE_SECONDS, MAX_WAIT_SECONDS)
+
+    def test_an_open_wait_counts_while_it_blocks(self):
+        store = _store_with("worker-a")
+        thread = threading.Thread(
+            target=store.wait_until_settled, args=(REQUESTER,), kwargs={"timeout": 5}
+        )
+        thread.start()
+        try:
+            deadline = time.monotonic() + 2
+            while REQUESTER not in store.waiting_requesters() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertEqual(store.waiting_requesters(), {REQUESTER})
+            self.assertEqual(store._waits_open, {REQUESTER: 1})
+        finally:
+            _report(store, "worker-a", "Done.")
+            thread.join(5)
+        self.assertEqual(store._waits_open, {})
+
+    def test_a_wait_that_ended_still_counts_for_the_grace_window(self):
+        store = _store_with("worker-a")
+        store.wait_until_settled(REQUESTER, timeout=0.01)
+        ended = time.monotonic()
+
+        self.assertIn(REQUESTER, store.waiting_requesters(ended + WAIT_GRACE_SECONDS - 0.5))
+        self.assertNotIn(REQUESTER, store.waiting_requesters(ended + WAIT_GRACE_SECONDS + 0.5))
+
+    def test_a_wait_zero_read_does_not_open_the_grace_window(self):
+        store = _store_with("worker-a")
+        store.wait_until_settled(REQUESTER, timeout=0)
+
+        self.assertEqual(store.waiting_requesters(), frozenset())
+        self.assertEqual(store._waits_open, {})
+
+    def test_a_requesters_pane_closing_ends_its_grace(self):
+        store = _store_with("worker-a")
+        store.wait_until_settled(REQUESTER, timeout=0.01)
+        store.forget_session(REQUESTER)
+
+        self.assertEqual(store.waiting_requesters(), frozenset())
 
 
 if __name__ == "__main__":

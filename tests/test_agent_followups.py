@@ -56,9 +56,11 @@ from web.agent_handoffs import handoffs as handoff_store  # noqa: E402
 from web.agent_results import (  # noqa: E402
     MAX_WAIT_SECONDS,
     REPORTED,
+    WAIT_GRACE_SECONDS,
     WORKING,
     ResultStore,
 )
+from web.agent_results import results as result_store  # noqa: E402
 
 
 def _until(condition, seconds=5.0):
@@ -206,6 +208,98 @@ class WaitForNextTaskTestCase(_StoreCase):
         self.assertLess(time.monotonic() - started, 4)
 
 
+class StandingByReadingTestCase(_StoreCase):
+    """The dashboard's reading of a worker inside ``wait_for_task``."""
+
+    def _reported(self):
+        first, receipt = self._read_task()
+        self.results.report("worker", "Done.", None, receipt)
+        return first
+
+    def test_an_open_wait_reads_as_standing_by_and_awaiting(self):
+        first = self._reported()
+        waiter = threading.Thread(target=self.store.wait_for_next_task, args=("worker", 10))
+        waiter.start()
+        try:
+            self.assertTrue(_until(lambda: self.store.awaiting_task(["worker"])["worker"]))
+            self.assertEqual(self.store.standing_by(), {"worker"})
+        finally:
+            self._followup(first)
+            waiter.join(5)
+
+    def test_the_grace_window_is_the_dashboards_and_awaiting_task_stays_exact(self):
+        self._reported()
+        self.store.wait_for_next_task("worker", 0.05)
+        ended = time.monotonic()
+
+        # send_task's answer: the agent is not in a call now.
+        self.assertFalse(self.store.awaiting_task(["worker"])["worker"])
+        # The dashboard's: it is between two calls of one loop.
+        self.assertIn("worker", self.store.standing_by(ended + WAIT_GRACE_SECONDS - 0.5))
+        self.assertNotIn("worker", self.store.standing_by(ended + WAIT_GRACE_SECONDS + 0.5))
+
+    def test_a_wait_zero_read_does_not_open_the_grace_window(self):
+        self._reported()
+        self.store.wait_for_next_task("worker", 0)
+
+        self.assertEqual(self.store.standing_by(), frozenset())
+
+    def test_a_closed_pane_ends_its_grace(self):
+        self._reported()
+        self.store.wait_for_next_task("worker", 0.05)
+        self.store.forget_session("worker")
+
+        self.assertEqual(self.store.standing_by(), frozenset())
+
+
+class FollowupRoundTestCase(_StoreCase):
+    """Only a follow-up to the same running agent advances the round."""
+
+    def _rounds(self):
+        return [
+            link["round"]
+            for link in self.results.links_snapshot()
+            if link["worker_session_id"] == "worker"
+        ]
+
+    def test_three_rounds_read_one_to_three_and_a_fresh_agent_is_round_one(self):
+        handoff_id, receipt = self._read_task()
+        seen = [self._rounds()]
+        for _ in range(2):
+            self.results.report("worker", "Done.", None, receipt)
+            self.results.collect("caller")
+            handoff_id = self._followup(handoff_id).handoff_id
+            receipt = self.store.read("worker")["receipt"]
+            seen.append(self._rounds())
+        # Each collected round goes as the next starts, so one link at a time.
+        self.assertEqual(seen, [[1], [2], [3]])
+
+        # set_pane_agent with a task binds through `create`: a new agent,
+        # whoever asked, so the count starts again.
+        self.results.report("worker", "Done.", None, receipt)
+        self.results.collect("caller")
+        self.store.create("Start over.", source_session_id="caller", session_id="worker")
+
+        self.assertEqual(self._rounds(), [1])
+
+    def test_worker_agent_is_carried_onto_a_follow_up(self):
+        first, receipt = self._read_task()
+        self.results.report("worker", "Done.", None, receipt)
+
+        self.store.create_followup(
+            "Next.",
+            session_id="worker",
+            previous_handoff_id=first,
+            source_session_id="caller",
+            worker_agent={"agent_selection": "codex", "custom_agent": "", "group_id": "g1"},
+        )
+
+        self.assertEqual(
+            self.results.links_snapshot()[-1]["worker_agent"],
+            {"agent_selection": "codex", "custom_agent": "", "group_id": "g1"},
+        )
+
+
 class SupersededAssignmentTestCase(unittest.TestCase):
     def setUp(self):
         self.results = ResultStore()
@@ -302,6 +396,26 @@ class GuessingGameTestCase(_FollowupRouteCase):
         rows = self._wait(caller.session_id).get_json()["agents"]
         self.assertEqual([row["state"] for row in rows], [WORKING])
         self.assertEqual(handoff_store.count(), 1)
+
+    def test_each_send_task_round_is_counted_and_names_its_worker(self):
+        caller = self._agent_pane(title="Claude 1")
+        worker, _connection, receipt = self._start_worker(caller)
+        group_id = api.session_manager.get_session(worker).group_id
+        rounds = []
+        for _ in range(2):
+            self._report_with(worker, "7", receipt)
+            self._wait(caller.session_id)
+            self.assertEqual(self._send(caller.session_id, worker).status_code, 200)
+            receipt = self._next(worker).get_json()["receipt"]
+            rounds.append([link["round"] for link in result_store.links_snapshot()])
+
+        self.assertEqual(rounds, [[2], [3]])
+        (link,) = result_store.links_snapshot()
+        self.assertEqual(
+            link["worker_agent"],
+            {"agent_selection": "codex", "custom_agent": "", "group_id": group_id},
+        )
+        self.assertEqual(link["requester_session_id"], caller.session_id)
 
     def test_a_report_says_how_to_stand_by(self):
         caller = self._agent_pane()

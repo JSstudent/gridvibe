@@ -47,9 +47,11 @@ manager is touched at all.
 """
 
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Set
 
 from web.agent_activity import ACTIVITY_WORKING, describe_agent_activity
+from web.agent_handoffs import handoffs as agent_handoffs
+from web.agent_results import results as agent_results
 
 #: The one marker of an agent pane, mirroring ``agentKeyForSession`` on the
 #: client: a startup *command* is not an agent, and neither is a terminal that
@@ -99,6 +101,13 @@ def is_agent_pane(session: Dict[str, Any]) -> bool:
     return str(session.get("startup_mode") or "") == AGENT_STARTUP_MODE
 
 
+#: ``pane["waiting"]``: an orchestrator inside ``wait_for_results`` (or just out
+#: of one), and a worker standing by inside ``wait_for_task``. Anything else is
+#: ``""``.
+WAITING_CREW = "crew"
+WAITING_TASK = "task"
+
+
 def is_working_pane(pane: Dict[str, Any]) -> bool:
     """Whether this *composed* row is an agent doing something right now.
 
@@ -113,8 +122,15 @@ def is_working_pane(pane: Dict[str, Any]) -> bool:
     the answer are there: the transport status and the reading
     :func:`~web.agent_activity.describe_agent_activity` already made. ``None``
     activity is a pane with no transport to observe and is never working.
+
+    A waiting pane is not working either, whatever its CLI shows: an agent
+    blocked inside ``wait_for_results`` or ``wait_for_task`` is in a tool call,
+    which reads as work, and the badge would count every orchestrator sitting
+    on its crew. The same override, after transport, as the row's state key.
     """
     if str(pane.get("status") or "") != CONNECTED_STATUS:
+        return False
+    if pane.get("waiting"):
         return False
     activity = pane.get("activity")
     if not isinstance(activity, dict):
@@ -206,6 +222,20 @@ def compose_group(
     }
 
 
+def _waiting_kind(session_id: str, waiting: Set[str], standing_by: Set[str]) -> str:
+    """Which waiting mark a pane wears, if any.
+
+    A pane that is both an orchestrator and a worker makes one tool call at a
+    time, so the two readings overlap only inside their grace windows; the
+    crew it is waiting on wins then.
+    """
+    if session_id in waiting:
+        return WAITING_CREW
+    if session_id in standing_by:
+        return WAITING_TASK
+    return ""
+
+
 def agents_first(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Rows holding an agent, then rows holding none, each half as handed in.
 
@@ -231,6 +261,9 @@ def compose_dashboard(
     sessions_by_group: Dict[str, List[Dict[str, Any]]],
     activity: Dict[str, Any],
     now: float,
+    links: Iterable[Dict[str, Any]] = (),
+    waiting: Iterable[str] = (),
+    standing_by: Iterable[str] = (),
 ) -> Dict[str, Any]:
     """Compose the whole reading from data already gathered.
 
@@ -241,7 +274,15 @@ def compose_dashboard(
     then moves the rows holding no agent to the end of their own level, and
     only those: this is the agent surface, so an empty session is a place to
     navigate to rather than something to read past on the way to the agents.
+
+    ``links`` is the results store's reading of who handed a task to whom,
+    and ``waiting`` / ``standing_by`` the two stores' waiting readings, all
+    read by the caller. Each pane gains ``waiting``, and the reading gains a
+    top-level ``links`` list -- outside ``workspaces``, so it never enters a
+    row's structure.
     """
+    waiting_requesters = {str(item) for item in waiting or ()}
+    standing_workers = {str(item) for item in standing_by or ()}
     composed_workspaces = []
     for workspace in workspaces:
         workspace_id = str(workspace.get("workspace_id") or "")
@@ -278,9 +319,22 @@ def compose_dashboard(
         for group in workspace["groups"]
         for pane in group["panes"]
     ]
+    for pane in panes:
+        pane["waiting"] = _waiting_kind(
+            str(pane.get("session_id") or ""), waiting_requesters, standing_workers
+        )
+    agent_ids = {str(pane.get("session_id") or "") for pane in panes}
     return {
         "generated_at": now,
         "workspaces": agents_first(composed_workspaces),
+        # Only links an agent row asked for: a crew is drawn from its
+        # orchestrator. The worker may have no row -- closed, or no longer an
+        # agent -- and its link stays, because the board draws it as a ghost.
+        "links": [
+            dict(link)
+            for link in links or ()
+            if str(link.get("requester_session_id") or "") in agent_ids
+        ],
         # Counted here rather than in the page so every surface that shows a
         # badge counts the same way, and a page that has not scrolled the tree
         # still knows what is in it. The first two are counts of what is
@@ -307,6 +361,11 @@ def build_dashboard_snapshot(session_manager: Any, activity: Dict[str, Any]) -> 
     takes ``connection_lock``, and taking that inside the manager lock would
     invert the one ordering the whole backend depends on. The caller reads it
     first, releases, and hands it in.
+
+    The links and the two waiting readings are read here, after the manager
+    lock is released, each under its own store's lock alone: neither store's
+    lock is ever held with the manager's or ``connection_lock``, nor with the
+    other store's.
     """
     from web.workspaces import list_live_workspaces
 
@@ -323,10 +382,16 @@ def build_dashboard_snapshot(session_manager: Any, activity: Dict[str, Any]) -> 
                     session.to_dict()
                     for session in session_manager.get_group_sessions(group.group_id)
                 ]
+    links = agent_results.links_snapshot()
+    waiting = agent_results.waiting_requesters()
+    standing_by = agent_handoffs.standing_by()
     return compose_dashboard(
         workspaces=workspaces,
         groups_by_workspace=groups_by_workspace,
         sessions_by_group=sessions_by_group,
         activity=activity,
         now=time.time(),
+        links=links,
+        waiting=waiting,
+        standing_by=standing_by,
     )

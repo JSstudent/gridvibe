@@ -60,7 +60,8 @@ import threading
 import time
 import unicodedata
 from dataclasses import dataclass, field
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from types import MappingProxyType
+from typing import Any, Dict, FrozenSet, Iterable, List, Mapping, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +90,41 @@ DEFAULT_WAIT_SECONDS = 45.0
 #: the log names, rather than refuse to record a handoff whose pane already
 #: exists.
 MAX_ASSIGNMENTS = 256
+
+#: How long a requester still reads as waiting after one ``wait_for_results``
+#: call ends. That tool is a loop of calls of up to :data:`MAX_WAIT_SECONDS`
+#: each, with a short gap between one call and the next; without this the
+#: dashboard's waiting mark would blink off in every gap. The handoff store
+#: reuses it for an agent standing by inside ``wait_for_task``.
+WAIT_GRACE_SECONDS = 5.0
+
+#: What the dashboard is told about one assignment, built field by field so a
+#: field added to ``_Assignment`` later cannot leak into it -- the report text,
+#: the receipt and the handoff id least of all. ``reason`` is the end-reason
+#: key, never the sentence the requester is shown.
+LINK_FIELDS = (
+    "link_id",
+    "requester_session_id",
+    "worker_session_id",
+    "state",
+    "read",
+    "status",
+    "collected",
+    "handed_at",
+    "reported_at",
+    "reason",
+    "round",
+    "worker_agent",
+)
+
+#: What a link says about the worker, captured once when its task was bound:
+#: enough for the dashboard to draw a closed pane's agent and session. Not kept
+#: in step with the pane afterwards.
+WORKER_AGENT_FIELDS = ("agent_selection", "custom_agent", "group_id")
+
+#: Bytes of entropy behind one ``link_id``. It names an assignment on the
+#: dashboard and is a capability for nothing.
+_LINK_ID_BYTES = 8
 
 # Assignment states, as ``wait_for_results`` reports them.
 WORKING = "working"
@@ -249,6 +285,14 @@ RESULT_NOTE = (
 )
 
 
+def worker_agent_mapping(values: Optional[Mapping[str, Any]]) -> Mapping[str, str]:
+    """A frozen copy of the worker facts a link carries, and nothing else."""
+    source = values or {}
+    return MappingProxyType(
+        {name: str(source.get(name) or "") for name in WORKER_AGENT_FIELDS}
+    )
+
+
 def _now_iso() -> str:
     return (
         datetime.datetime.now(datetime.timezone.utc)
@@ -270,7 +314,17 @@ class _Assignment:
     reported_at: str = ""
     revision: int = 0
     reason: str = ""
+    #: The key ``reason`` was looked up by (``pane closed``, ``replaced`` ...),
+    #: which is what the dashboard is told; ``reason`` is the sentence.
+    reason_key: str = ""
     collected: bool = False
+    #: Opaque and minted per assignment, so a follow-up round gets a new one.
+    #: Never the handoff id, which is a capability for ``take``.
+    link_id: str = ""
+    #: 1 for a task that started the agent, +1 for each follow-up to it.
+    round: int = 1
+    #: :data:`WORKER_AGENT_FIELDS` of the worker when its task was bound.
+    worker_agent: Mapping[str, str] = field(default_factory=lambda: worker_agent_mapping(None))
     #: Whether a report may still be written: true until the handoff goes.
     #: Separate from ``state`` because a reported assignment keeps its report
     #: after that -- it just stops taking new ones.
@@ -294,6 +348,11 @@ class ResultStore:
         self.max_assignments = max(1, int(max_assignments))
         self._changed = threading.Condition(threading.Lock())
         self._records: Dict[str, _Assignment] = {}
+        #: Requesters inside a ``wait_for_results`` call now, by count, and the
+        #: monotonic time each one's last call ended. Only calls that can
+        #: block are counted (see :meth:`wait_until_settled`).
+        self._waits_open: Dict[str, int] = {}
+        self._wait_ended: Dict[str, float] = {}
 
     # ---------------- written by the handoff store ----------------
 
@@ -303,6 +362,8 @@ class ResultStore:
         *,
         requester_session_id: str,
         worker_session_id: str,
+        worker_agent: Optional[Mapping[str, Any]] = None,
+        continues: str = "",
         now: Optional[float] = None,
     ) -> bool:
         """A handoff was bound to its pane: its requester may now wait on it.
@@ -311,6 +372,11 @@ class ResultStore:
         task has had its old one replaced, and the handoff store ends that one
         first. A handoff with no requester is not tracked: nobody could
         collect its report.
+
+        ``continues`` is the handoff a follow-up task follows up, and only a
+        follow-up passes it: the new assignment's round is that one's + 1, or
+        2 when the store has already evicted it -- a follow-up is never round
+        1. Every other task starts a fresh agent and is round 1.
         """
         requester = str(requester_session_id or "")
         worker = str(worker_session_id or "")
@@ -318,7 +384,16 @@ class ResultStore:
         if not (requester and worker and resolved):
             return False
         moment = time.monotonic() if now is None else float(now)
+        identity = worker_agent_mapping(worker_agent)
+        continued_id = str(continues or "")
         with self._changed:
+            # Read before the loop below, which deletes the continued round
+            # when its report has been collected.
+            continued = self._records.get(continued_id) if continued_id else None
+            if continued is not None:
+                round_number = continued.round + 1
+            else:
+                round_number = 2 if continued_id else 1
             # A follow-up task supersedes the one before it between the same
             # two panes. Once its report has been collected the earlier
             # assignment says nothing the requester has not read, so it goes
@@ -341,6 +416,9 @@ class ResultStore:
                 worker_session_id=worker,
                 handed_at=_now_iso(),
                 created_mono=moment,
+                link_id=secrets.token_hex(_LINK_ID_BYTES),
+                round=round_number,
+                worker_agent=identity,
             )
             self._changed.notify_all()
         logger.info(
@@ -351,11 +429,13 @@ class ResultStore:
         )
         return True
 
-    def end(self, handoff_id: str, reason: str = "") -> bool:
+    def end(self, handoff_id: str, reason: str = "", *, key: str = "") -> bool:
         """The handoff went. Settles a pending assignment; a report stands.
 
         Either way the assignment stops taking reports: the pane's next agent
         was not handed this task and must not be able to answer for it.
+        ``key`` names the reason for the dashboard when ``reason`` is a
+        sentence of its own rather than one of the known keys.
         """
         resolved = str(handoff_id or "")
         with self._changed:
@@ -368,6 +448,7 @@ class ResultStore:
             record.state = ENDED
             raw = str(reason or "").strip()
             record.reason = _ENDED_REASONS.get(raw, raw or "its task went before it reported")
+            record.reason_key = str(key or "").strip() or _reason_key(raw)
             record.collected = False
             self._changed.notify_all()
             worker = record.worker_session_id
@@ -474,16 +555,32 @@ class ResultStore:
         requester = str(requester_session_id or "")
         wanted = _wanted(worker_session_ids)
         mode = validate_until(until)
+        seconds = max(0.0, min(float(timeout), MAX_WAIT_SECONDS))
+        # Only a call that can block is a wait. A ``wait=0`` read -- the
+        # tunnelled client's route read after its own wait, or an agent
+        # polling -- would otherwise restart the grace window on every call.
+        counted = bool(requester) and seconds > 0
         with self._changed:
-            deadline = time.monotonic() + max(0.0, min(float(timeout), MAX_WAIT_SECONDS))
-            while True:
-                matched = self._matched_locked(requester, wanted)
-                if self._ready(matched, mode):
-                    return True
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    return False
-                self._changed.wait(remaining)
+            if counted:
+                self._waits_open[requester] = self._waits_open.get(requester, 0) + 1
+            try:
+                deadline = time.monotonic() + seconds
+                while True:
+                    matched = self._matched_locked(requester, wanted)
+                    if self._ready(matched, mode):
+                        return True
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        return False
+                    self._changed.wait(remaining)
+            finally:
+                if counted:
+                    left = self._waits_open.get(requester, 1) - 1
+                    if left > 0:
+                        self._waits_open[requester] = left
+                    else:
+                        self._waits_open.pop(requester, None)
+                    self._wait_ended[requester] = time.monotonic()
 
     def collect(
         self,
@@ -595,6 +692,7 @@ class ResultStore:
             ]
             for handoff_id in doomed:
                 del self._records[handoff_id]
+            self._wait_ended.pop(resolved, None)
             for record in self._records.values():
                 if record.worker_session_id != resolved:
                     continue
@@ -602,6 +700,7 @@ class ResultStore:
                 if record.state == WORKING:
                     record.state = ENDED
                     record.reason = _ENDED_REASONS["pane closed"]
+                    record.reason_key = "pane closed"
                     record.collected = False
             self._changed.notify_all()
         if doomed:
@@ -642,9 +741,40 @@ class ResultStore:
                 "read": record.read,
             }
 
+    def links_snapshot(self) -> List[Dict[str, Any]]:
+        """Every assignment as a dashboard link, oldest-handed first.
+
+        Built from :data:`LINK_FIELDS` only: never the report text, the
+        receipt or the handoff id. A requester and a worker can hold two at
+        once -- an uncollected report and the follow-up round after it -- and
+        both are listed; the dashboard draws the newest.
+        """
+        with self._changed:
+            records = sorted(self._records.values(), key=lambda record: record.created_mono)
+            return [_link(record) for record in records]
+
+    def waiting_requesters(self, now: Optional[float] = None) -> FrozenSet[str]:
+        """Requesters inside a ``wait_for_results`` call, or just out of one.
+
+        A wait that ended within :data:`WAIT_GRACE_SECONDS` of ``now`` (a
+        ``time.monotonic()`` reading) still counts, so the gap between one
+        bounded call and the next does not read as a pause.
+        """
+        moment = time.monotonic() if now is None else float(now)
+        with self._changed:
+            for requester, ended in list(self._wait_ended.items()):
+                if moment - ended > WAIT_GRACE_SECONDS:
+                    del self._wait_ended[requester]
+            return frozenset(
+                [requester for requester, count in self._waits_open.items() if count > 0]
+                + list(self._wait_ended)
+            )
+
     def reset(self) -> None:
         with self._changed:
             self._records.clear()
+            self._waits_open.clear()
+            self._wait_ended.clear()
             self._changed.notify_all()
 
     # ---------------- internals ----------------
@@ -694,6 +824,24 @@ class ResultStore:
             oldest.requester_session_id,
             oldest.state,
         )
+
+
+def _reason_key(raw: str) -> str:
+    """The key the dashboard is told for an end reason that came without one."""
+    if raw in _ENDED_REASONS:
+        return raw
+    return "other" if raw else ""
+
+
+#: Where a :data:`LINK_FIELDS` name is read from, when it is not the attribute
+#: of the same name.
+_LINK_SOURCES = {"reason": "reason_key"}
+
+
+def _link(record: _Assignment) -> Dict[str, Any]:
+    link = {name: getattr(record, _LINK_SOURCES.get(name, name)) for name in LINK_FIELDS}
+    link["worker_agent"] = {name: record.worker_agent.get(name, "") for name in WORKER_AGENT_FIELDS}
+    return link
 
 
 def _receipt_matches(offered: str, expected: str) -> bool:

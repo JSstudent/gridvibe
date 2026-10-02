@@ -58,9 +58,15 @@ import threading
 import time
 import unicodedata
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
+from typing import Any, Callable, Dict, FrozenSet, List, Mapping, Optional, Tuple
 
-from web.agent_results import MAX_RESULT_CHARS, WORKING, ResultStore
+from web.agent_results import (
+    MAX_RESULT_CHARS,
+    WAIT_GRACE_SECONDS,
+    WORKING,
+    ResultStore,
+    worker_agent_mapping,
+)
 from web.agent_results import results as agent_results
 
 logger = logging.getLogger(__name__)
@@ -398,6 +404,10 @@ class HandoffStore:
         self._records: Dict[str, _Handoff] = {}
         #: Panes whose agent is inside a ``wait_for_task`` call now, by count.
         self._task_waiters: Dict[str, int] = {}
+        #: When each pane's last ``wait_for_task`` call that could block
+        #: ended, by ``time.monotonic()`` -- the grace :meth:`standing_by`
+        #: reads, and only that.
+        self._task_wait_ended: Dict[str, float] = {}
 
     # ---------------- creation ----------------
 
@@ -410,6 +420,7 @@ class HandoffStore:
         from_agent: str = "",
         session_id: str = "",
         requester_session_id: str = "",
+        worker_agent: Optional[Mapping[str, Any]] = None,
         now: Optional[float] = None,
     ) -> str:
         """Record one validated task. Returns its ``handoff_id``.
@@ -422,6 +433,9 @@ class HandoffStore:
         report, when that is not ``source_session_id``: a split records the
         pane being halved as its source, and the agent that asked may be
         beside it.
+
+        ``worker_agent`` is :func:`worker_description` of the pane it is bound
+        to, recorded with the assignment for the dashboard.
         """
         moment = time.monotonic() if now is None else float(now)
         handoff_id = secrets.token_hex(16)
@@ -456,7 +470,7 @@ class HandoffStore:
                 )
             self._records[handoff_id] = record
             if session_id:
-                cleanups = self._bind_locked(record, str(session_id))
+                cleanups = self._bind_locked(record, str(session_id), worker_agent)
         _run_cleanups(cleanups)
         logger.info(
             "Handoff %s created source=%s session=%s chars=%d",
@@ -500,18 +514,30 @@ class HandoffStore:
             record.phase = _TAKEN
         logger.info("Handoff %s taken source=%s", resolved, source_session_id)
 
-    def bind(self, handoff_id: str, session_id: str) -> None:
+    def bind(
+        self,
+        handoff_id: str,
+        session_id: str,
+        *,
+        worker_agent: Optional[Mapping[str, Any]] = None,
+    ) -> None:
         """Attach a taken handoff to the pane the split just created."""
         cleanups: List[Callable[[], Any]] = []
         with self._lock:
             record = self._records.get(str(handoff_id or ""))
             if record is None or record.phase != _TAKEN:
                 raise HandoffError("That task is no longer waiting for a pane.", 409)
-            cleanups = self._bind_locked(record, str(session_id))
+            cleanups = self._bind_locked(record, str(session_id), worker_agent)
         _run_cleanups(cleanups)
         logger.info("Handoff %s bound session=%s", handoff_id, session_id)
 
-    def _bind_locked(self, record: _Handoff, session_id: str) -> List[Callable[[], Any]]:
+    def _bind_locked(
+        self,
+        record: _Handoff,
+        session_id: str,
+        worker_agent: Optional[Mapping[str, Any]] = None,
+        continues: str = "",
+    ) -> List[Callable[[], Any]]:
         """One handoff per pane: binding a new one drops whatever it held.
 
         Returns the replaced handoffs' file cleanups, to run once the lock is
@@ -519,6 +545,10 @@ class HandoffStore:
         under the lock and in that order: recorded after the lock was released,
         a drop landing in between would end nothing and leave the requester
         waiting on an assignment that could never be reported.
+
+        ``worker_agent`` and ``continues`` go to the assignment as they came:
+        who the worker is, and -- for a follow-up only -- the handoff whose
+        round this one continues.
         """
         cleanups: List[Callable[[], Any]] = []
         for other_id, other in list(self._records.items()):
@@ -538,15 +568,17 @@ class HandoffStore:
                 record.handoff_id,
                 requester_session_id=record.requester_session_id,
                 worker_session_id=session_id,
+                worker_agent=worker_agent,
+                continues=continues,
             )
         return cleanups
 
-    def _result_ending(self, handoff_id: str, reason: str) -> Callable[[], Any]:
+    def _result_ending(self, handoff_id: str, reason: str, key: str = "") -> Callable[[], Any]:
         """The call that ends a handoff's assignment."""
         results = self.results
         if results is None:
             return lambda: None
-        return lambda: results.end(handoff_id, reason)
+        return lambda: results.end(handoff_id, reason, key=key)
 
     # ---------------- the startup sequence ----------------
 
@@ -613,6 +645,7 @@ class HandoffStore:
                 str(handoff_id),
                 "its agent could not be handed the task: "
                 f"{reason or 'it started without GridVibe tools'}",
+                key=UNDELIVERABLE,
             )
         ])
         logger.warning(
@@ -634,6 +667,7 @@ class HandoffStore:
         source_session_id: str,
         from_title: str = "",
         from_agent: str = "",
+        worker_agent: Optional[Mapping[str, Any]] = None,
         now: Optional[float] = None,
     ) -> HandoffView:
         """Hand the agent already running in a pane its next task.
@@ -672,7 +706,9 @@ class HandoffStore:
             if previous is None or previous.session_id != resolved or previous.phase != READ:
                 raise HandoffError(FOLLOWUP_STALE_MESSAGE, 409)
             self._records[handoff_id] = record
-            cleanups = self._bind_locked(record, resolved)
+            cleanups = self._bind_locked(
+                record, resolved, worker_agent, continues=previous.handoff_id
+            )
             record.phase = ANNOUNCED
             record.delivery = PAGED if planned_delivery(record.chars) == FILE else INLINE
             view = record.view()
@@ -704,7 +740,8 @@ class HandoffStore:
         assignment, once its report is in.
         """
         resolved = str(session_id or "")
-        deadline = time.monotonic() + max(0.0, float(timeout))
+        seconds = max(0.0, float(timeout))
+        deadline = time.monotonic() + seconds
         with self._lock:
             self._task_waiters[resolved] = self._task_waiters.get(resolved, 0) + 1
             try:
@@ -730,6 +767,11 @@ class HandoffStore:
                     self._task_waiters[resolved] = left
                 else:
                     self._task_waiters.pop(resolved, None)
+                # Only a call that could block opens the grace window: the
+                # tunnelled client's `wait=0` route read after its own wait
+                # would otherwise restart it.
+                if seconds > 0:
+                    self._task_wait_ended[resolved] = time.monotonic()
 
     def _no_followup_reason(self, session_id: str) -> str:
         """Why no follow-up can reach this pane, or ``""`` while one can."""
@@ -745,6 +787,25 @@ class HandoffStore:
         wanted = {str(item or "") for item in session_ids or ()}
         with self._lock:
             return {item: self._task_waiters.get(item, 0) > 0 for item in wanted}
+
+    def standing_by(self, now: Optional[float] = None) -> FrozenSet[str]:
+        """Panes whose agent is inside a ``wait_for_task`` call, or just out of one.
+
+        The dashboard's reading, with the same :data:`WAIT_GRACE_SECONDS` as a
+        requester's: an agent standing by calls again and again, and the gap
+        between two calls is not a change of state. :meth:`awaiting_task` stays
+        exact, because ``send_task`` tells its sender whether the agent is in a
+        call *now*. ``now`` is a ``time.monotonic()`` reading.
+        """
+        moment = time.monotonic() if now is None else float(now)
+        with self._lock:
+            for session_id, ended in list(self._task_wait_ended.items()):
+                if moment - ended > WAIT_GRACE_SECONDS:
+                    del self._task_wait_ended[session_id]
+            return frozenset(
+                [session_id for session_id, count in self._task_waiters.items() if count > 0]
+                + list(self._task_wait_ended)
+            )
 
     # ---------------- the receiving agent ----------------
 
@@ -912,6 +973,7 @@ class HandoffStore:
         if not resolved:
             return 0
         with self._lock:
+            self._task_wait_ended.pop(resolved, None)
             doomed = [
                 handoff_id
                 for handoff_id, record in self._records.items()
@@ -948,6 +1010,7 @@ class HandoffStore:
         with self._lock:
             records = list(self._records.values())
             self._records.clear()
+            self._task_wait_ended.clear()
             self._lock.notify_all()
         _run_cleanups([record.cleanup for record in records if record.cleanup is not None])
 
@@ -1000,6 +1063,20 @@ def pane_description(session: Any) -> Mapping[str, str]:
         "from_title": str(getattr(session, "title", "") or ""),
         "from_agent": agent,
     }
+
+
+def worker_description(session: Any) -> Mapping[str, str]:
+    """Who a pane handed a task is, as its assignment records it at bind time.
+
+    Its agent and its session, read once from the record the binding route
+    already holds. A later move or agent swap is not followed: this is what
+    the dashboard draws for a pane that has since closed.
+    """
+    return worker_agent_mapping({
+        "agent_selection": getattr(session, "agent_selection", ""),
+        "custom_agent": getattr(session, "custom_agent", ""),
+        "group_id": getattr(session, "group_id", ""),
+    })
 
 
 #: The one store every route and the startup sequence read and write.

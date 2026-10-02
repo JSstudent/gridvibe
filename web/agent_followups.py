@@ -45,6 +45,7 @@ from web.agent_handoffs import (
     HandoffError,
     pane_description,
     validate_task,
+    worker_description,
 )
 from web.agent_handoffs import handoffs as agent_handoffs
 from web.agent_results import REPORTED
@@ -89,7 +90,7 @@ def _refused(exc: PaneGateRefusal) -> FollowupError:
 
 
 def _check_followup(worker_session_id: str, payload: Mapping[str, Any]) -> tuple:
-    """Every rule a follow-up passes. Returns ``(caller, live assignment)``."""
+    """Every rule a follow-up passes. Returns ``(caller, worker, live assignment)``."""
     request = read_caller_request(payload, "a follow-up task")
     caller_id = request.caller_session_id
     if worker_session_id == caller_id:
@@ -137,7 +138,7 @@ def _check_followup(worker_session_id: str, payload: Mapping[str, Any]) -> tuple
             "Collect its report with wait_for_results, then send the next task.",
             409,
         )
-    return caller, live
+    return caller, worker, live
 
 
 def hand_followup_task(
@@ -158,11 +159,12 @@ def hand_followup_task(
     except HandoffError as exc:
         raise FollowupError(exc.message, exc.status_code) from exc
     try:
-        caller, live = _check_followup(str(worker_session_id or ""), data)
+        caller, worker, live = _check_followup(str(worker_session_id or ""), data)
     except PaneGateRefusal as exc:
         raise _refused(exc) from exc
 
     caller_id = str(getattr(caller, "session_id", "") or "")
+    worker_agent = worker_description(worker)
     created = {}
 
     def create() -> str:
@@ -171,6 +173,7 @@ def hand_followup_task(
             session_id=worker_session_id,
             previous_handoff_id=live["handoff_id"],
             source_session_id=caller_id,
+            worker_agent=worker_agent,
             **pane_description(caller),
         )
         created["view"] = view

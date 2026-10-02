@@ -44,6 +44,7 @@ from web.agent_handoffs import (
     pane_description,
     same_machine,
     validate_task,
+    worker_description,
 )
 from web.agent_handoffs import handoffs as agent_handoffs
 from web.mcp_launch import LOCAL_PANE_MODE
@@ -1139,6 +1140,7 @@ def _bind_pane_tasks(
             text,
             source_session_id=creator_session_id,
             session_id=session.session_id,
+            worker_agent=worker_description(session),
             **origin,
         )
     return warnings

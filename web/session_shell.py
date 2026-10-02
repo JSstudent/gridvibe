@@ -51,6 +51,7 @@ from web.agent_handoffs import (
     pane_description,
     same_machine,
     validate_task,
+    worker_description,
 )
 from web.agent_handoffs import handoffs as agent_handoffs
 from web.agent_updates import request_update
@@ -902,6 +903,9 @@ def _with_task_binding(
             task,
             source_session_id=caller_session_id,
             session_id=pane_session_id,
+            # The record already carries the new agent: the relaunch wrote
+            # it before the old connection closed and this runs.
+            worker_agent=worker_description(session_manager.get_session(pane_session_id)),
             **origin,
         )
 

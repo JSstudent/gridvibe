@@ -52,6 +52,7 @@ from web.agent_handoffs import (  # noqa: E402
     WAITING,
 )
 from web.agent_handoffs import handoffs as store  # noqa: E402
+from web.agent_results import results as result_store  # noqa: E402
 from web.window_intents import window_intents  # noqa: E402
 
 QUOTED = f'"{HANDOFF_OPENING_PROMPT}"'
@@ -60,6 +61,15 @@ BRIEF = "Findings: the retry loop in sync.py never backs off. Proposed fix: cap 
 
 def _detect_found(target, binary):
     return {"found": True, "path": f"/usr/bin/{binary}"}
+
+
+def _worker_agent(session_id):
+    """What the dashboard link for this worker says about it."""
+    links = [
+        link for link in result_store.links_snapshot()
+        if link["worker_session_id"] == session_id
+    ]
+    return links[-1]["worker_agent"] if links else None
 
 
 class _RouteCase(unittest.TestCase):
@@ -268,11 +278,22 @@ class SplitTakesTheHandleTestCase(_RouteCase):
         self.assertEqual(started[0]["state"], WAITING)
         self.assertNotIn("task", json.dumps(created))
 
+    def test_the_link_records_the_new_pane_as_it_was_bound(self):
+        caller = self._agent_pane()
+        split_request = self._record(caller)
+
+        created = self._split(caller, split_request).get_json()["session"]
+
+        self.assertEqual(
+            _worker_agent(created["session_id"]),
+            {"agent_selection": "codex", "custom_agent": "", "group_id": caller.group_id},
+        )
+
     def test_a_source_that_closes_between_take_and_bind_costs_the_task_not_the_split(self):
         caller = self._agent_pane()
         split_request = self._record(caller)
 
-        def gone(handoff_id, session_id):
+        def gone(handoff_id, session_id, **_kwargs):
             store.forget_session(caller.session_id)
             raise api.HandoffError("That task is no longer waiting for a pane.", 409)
 
@@ -414,6 +435,21 @@ class LaunchTaskTestCase(_RouteCase):
         ):
             self.assertNotIn(second_brief, surface)
             self.assertNotIn('"task"', surface)
+
+    def test_each_link_records_the_pane_it_was_bound_to(self):
+        caller = self._agent_pane()
+
+        status, payload = self._launch(
+            self._body(caller, [self._agent_config("claude", "One."),
+                                self._agent_config("codex", "Two.")])
+        )
+
+        self.assertEqual(status, 201, payload)
+        for created, agent in zip(payload["sessions"], ("claude", "codex")):
+            self.assertEqual(
+                _worker_agent(created["session_id"]),
+                {"agent_selection": agent, "custom_agent": "", "group_id": created["group_id"]},
+            )
 
     def test_a_pane_without_a_task_is_launched_as_before(self):
         caller = self._agent_pane()
@@ -917,6 +953,19 @@ class RelaunchWithTaskTestCase(shell_tests.ShellTransitionTestCase):
         self.assertEqual(started, [payload["handoff"]])
         self.assertEqual(store.pending_for(target.session_id).source_session_id, caller.session_id)
         self.assertNotIn(BRIEF, json.dumps(payload))
+
+    def test_the_link_records_the_agent_the_pane_was_relaunched_into(self):
+        caller, repo = self._caller()
+        target = self._target(caller, repo)
+
+        response, _started = self._relaunch(target.session_id, self._body(caller))
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        # The record already names the new agent by the time the task binds.
+        self.assertEqual(
+            _worker_agent(target.session_id),
+            {"agent_selection": "codex", "custom_agent": "", "group_id": caller.group_id},
+        )
 
     def test_a_task_turns_the_tools_on(self):
         caller, repo = self._caller()
