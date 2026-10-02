@@ -4,7 +4,9 @@ Provides REST endpoints and WebSocket support for terminal sessions.
 """
 
 import contextlib
+import html
 import io
+import json
 import logging
 import os
 import re
@@ -13,7 +15,7 @@ import time
 import uuid
 from typing import Any, Dict, Optional, Tuple
 
-from flask import jsonify, render_template, request, send_file, send_from_directory
+from flask import Response, jsonify, render_template, request, send_file, send_from_directory
 from flask_socketio import emit, join_room, leave_room
 
 from gridvibe_mcp.identity import DEFAULT_MAX_AGENT_DEPTH
@@ -25,6 +27,7 @@ from sessions.manager import (  # noqa: F401 - re-exported for backwards compati
 )
 from web import mcp_http
 from web.agent_conversations import prepare_conversation_launch_fields
+from web.agent_followups import FollowupError, hand_followup_task, next_task
 from web.agent_handoff_files import sweep_local_handoffs
 from web.agent_handoffs import (
     HandoffError,
@@ -175,6 +178,7 @@ from web.explorer import (  # noqa: F401 - some names re-exported for backwards 
     normalized_git_log_limit,
     open_path_in_os_file_manager,
     read_explorer_file_preview,
+    read_explorer_html_document,
     save_explorer_file_payload,
 )
 from web.explorer_download import (
@@ -218,6 +222,7 @@ from web.mcp_launch import (  # noqa: F401 - mcp_config_path re-exported for tes
     server_base_url,
     set_server_address,
     write_mcp_config,
+    write_opencode_config,
 )
 from web.navigation import NavigationRefusal, move_group_for_agent, resolve_view_target
 from web.pane_directory import resolve_stated_directory
@@ -321,6 +326,7 @@ from web.terminal_io import (  # noqa: F401 - re-exported for backwards compatib
     TERMINAL_OUTPUT_BUFFER_MAX_CHARS,
     WINDOWS_DEVICE_ATTRIBUTES_RESPONSE,
     _agent_from_terminal_command,
+    _bind_followup_handoff,
     _broadcast_session_groups_updated,
     _broadcast_session_status,
     _broadcast_terminal_cleared,
@@ -1828,6 +1834,95 @@ def get_explorer_image(session_id: str):
     return response
 
 
+# The HTML preview runs the file's own scripts, so the document is fenced off
+# from GridVibe rather than cleaned: `sandbox allow-scripts` without
+# `allow-same-origin` gives it an opaque origin (no cookies, no storage, no
+# access to the parent page, and every write route already refuses
+# `Origin: null`); `connect-src 'none'` takes away fetch/XHR/WebSocket/beacon;
+# and only `https:` subresources may load, which keeps every `http://` URL
+# (GridVibe's own routes included) out of reach. Forms, popups, workers and
+# nested frames stay off. The iframe repeats the sandbox; this header is what
+# still holds when the route is opened directly in a tab.
+EXPLORER_HTML_PREVIEW_CSP = "; ".join((
+    "sandbox allow-scripts",
+    "default-src 'none'",
+    "script-src 'unsafe-inline' 'unsafe-eval' https: data: blob:",
+    "style-src 'unsafe-inline' https: data:",
+    "img-src https: data: blob:",
+    "font-src https: data:",
+    "media-src https: data: blob:",
+    "connect-src 'none'",
+    "form-action 'none'",
+    "frame-src 'none'",
+    "worker-src 'none'",
+    "base-uri 'none'",
+    "frame-ancestors 'self'",
+))
+
+
+def _explorer_html_preview_response(body: bytes, status: int = 200):
+    """Wrap an HTML preview body (document or refusal) in the sandbox headers."""
+    response = Response(body, status=status, mimetype="text/html")
+    response.headers["Content-Security-Policy"] = EXPLORER_HTML_PREVIEW_CSP
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+# The one message a refusal page sends its embedding Preview panel. The frame
+# is opaque, so this is how the panel learns that it holds a refusal rather than
+# the document: a 409 shows the panel's "file changed" notice, anything else
+# drops the panel's reuse stamp so a refresh or revisit loads it again. The
+# page's own scripts could post the same shape, which can only ever get that
+# page reloaded or the notice shown; the panel accepts it from its own frame
+# only and reads nothing else from it.
+EXPLORER_HTML_PREVIEW_MESSAGE_SOURCE = "gridvibe-html-preview"
+
+
+def _explorer_html_preview_error(message: str, status: int):
+    """Render a refusal inside the preview frame, where the reader is looking.
+
+    The frame is the only surface this route answers to and its document is
+    opaque to the page, so a JSON error would paint as raw text there.
+    """
+    notice = json.dumps({"source": EXPLORER_HTML_PREVIEW_MESSAGE_SOURCE, "status": status})
+    body = (
+        "<!doctype html><meta charset=\"utf-8\">"
+        "<body style=\"font:13px system-ui,sans-serif;color:#888;padding:16px\">"
+        f"{html.escape(message)}"
+        f"<script>parent.postMessage({notice}, '*')</script></body>"
+    )
+    return _explorer_html_preview_response(body.encode("utf-8"), status)
+
+
+@app.route('/api/explorer/<session_id>/file/html', methods=['GET'])
+def get_explorer_html_preview(session_id: str):
+    """Serve one explorer HTML file as a sandboxed document for the Preview panel."""
+    session = session_manager.get_session(session_id)
+    if session is None:
+        return _explorer_html_preview_error("Session not found", 404)
+    requested_path = request.args.get("path", "")
+    expected_revision = request.args.get("revision", "")
+    error_types = (
+        _sftp_request_error_types()
+        if _is_remote_explorer_session(session)
+        else (OSError,)
+    )
+    try:
+        with _explorer_backend(session) as backend:
+            content = read_explorer_html_document(
+                backend, requested_path, expected_revision
+            )
+    except ExplorerRouteError as exc:
+        return _explorer_html_preview_error(str(exc), exc.status_code)
+    except ValueError as exc:
+        return _explorer_html_preview_error(str(exc), 400)
+    except error_types as exc:
+        return _explorer_html_preview_error(str(exc), 500)
+    return _explorer_html_preview_response(content)
+
+
 @app.route('/api/explorer/<session_id>/reveal', methods=['POST'])
 def reveal_explorer_path(session_id: str):
     """Open the host OS file manager at the explorer pane's current path.
@@ -3305,6 +3400,10 @@ def report_session_handoff(session_id: str):
         "session_id": getattr(requester, "session_id", "") or "",
         "title": str(getattr(requester, "title", "") or ""),
     }
+    payload["instructions"] = (
+        "If your task asked you to stand by for a next one, call wait_for_task "
+        "now. Otherwise you are finished with this task."
+    )
     return jsonify(payload)
 
 
@@ -3351,6 +3450,7 @@ def collect_session_handoff_reports(session_id: str):
     # while its agent works, and one closed since reporting still has a report.
     rows = payload.get("agents") or []
     task_states = agent_handoffs.public_states(row["session_id"] for row in rows)
+    standing_by = agent_handoffs.awaiting_task(row["session_id"] for row in rows)
     for row in rows:
         worker = session_manager.get_session(row["session_id"])
         described = pane_description(worker) if worker is not None else {}
@@ -3359,6 +3459,47 @@ def collect_session_handoff_reports(session_id: str):
         row["pane_open"] = worker is not None
         task_state = task_states.get(row["session_id"])
         row["task_state"] = task_state.get("state") if task_state else None
+        # The agent is inside wait_for_task: a send_task reaches it at once.
+        row["standing_by"] = standing_by.get(row["session_id"], False)
+    return jsonify(payload)
+
+
+@app.route('/api/sessions/<session_id>/handoff-followup', methods=['POST'])
+def send_session_followup(session_id: str):
+    """Hand the agent already running in this pane its next task -- ``send_task``.
+
+    Only the pane that handed it its current task may, only once that task is
+    reported, and only while the agent that read it is still the one running;
+    nothing is relaunched and nothing is typed. The rules live in
+    ``web/agent_followups.py``; the connection bind is this process's.
+    """
+    try:
+        payload = hand_followup_task(
+            session_id, request.get_json(silent=True) or {}, _bind_followup_handoff
+        )
+    except FollowupError as exc:
+        return jsonify({"error": exc.message, **exc.details}), exc.status_code
+    return jsonify(payload)
+
+
+@app.route('/api/sessions/<session_id>/handoff-next', methods=['GET'])
+def wait_session_next_task(session_id: str):
+    """The next task handed to this pane's agent -- ``wait_for_task``.
+
+    ``wait`` blocks this request until a task the agent has not read is there,
+    bounded by ``MAX_WAIT_SECONDS``; ``wait=0`` answers at once, which is how the
+    tunnelled tools ask after waiting on the store in-process. A task comes
+    back exactly as ``read_handoff`` returns it, receipt included.
+    """
+    if session_manager.get_session(session_id) is None:
+        return jsonify({"error": "Session not found"}), 404
+    try:
+        wait_seconds = clamp_wait(request.args.get("wait"))
+    except ResultError as exc:
+        return jsonify({"error": exc.message}), exc.status_code
+    started = time.monotonic()
+    payload = next_task(session_id, wait_seconds)
+    payload["waited_seconds"] = round(time.monotonic() - started, 1)
     return jsonify(payload)
 
 
@@ -4904,6 +5045,9 @@ def run_server(
     # self-heals with no user action.
     set_server_address(host, port)
     write_mcp_config(host, port)
+    # opencode reads a different schema, so it gets its own file -- from the
+    # same interpreter and the same URL.
+    write_opencode_config(host, port)
     # Same reason, one file over: the Claude session hook names this
     # interpreter. The URL and the token reach it through the pane instead.
     write_claude_settings()

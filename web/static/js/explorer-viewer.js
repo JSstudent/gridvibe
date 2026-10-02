@@ -157,6 +157,11 @@
         if (view === 'diff') {
             return true;
         }
+        // An HTML preview is a sandboxed document the page cannot reach into,
+        // so there is nothing in it for the find to mark.
+        if (view === 'preview' && pane?._explorerPreviewKind === 'html') {
+            return false;
+        }
         const policy = explorerTierPolicy();
         return policy
             ? policy.sourceTierAllows(explorerPaneSourceTier(pane), 'find')
@@ -2868,6 +2873,7 @@
            here, so the shell has to be hidden or shown before the query below
            is applied against it. */
         syncExplorerFindAvailability(index, selectedMode);
+        syncExplorerZoomControls(index);
         // First visit to Preview is where the render cost now lands; later
         // visits reuse the pane's cached HTML and are instant.
         if (selectedMode === 'preview') {
@@ -2949,6 +2955,101 @@
         return tab.fontSize;
     }
 
+    /* The HTML preview's zoom, one value per explorer tab like the font size.
+       A sandboxed page cannot be reached into, so its text never sees the
+       editor font size; it is scaled from outside instead, which is what a
+       browser's own zoom looks like to the page (its viewport shrinks or grows
+       by the same factor). The steps are the browser's familiar ladder. */
+    const EXPLORER_HTML_ZOOM_STEPS = Object.freeze([
+        0.25, 0.33, 0.5, 0.67, 0.75, 0.8, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2, 2.5, 3
+    ]);
+    const EXPLORER_HTML_ZOOM_DEFAULT = 1;
+
+    function clampExplorerHtmlZoom(value) {
+        const zoom = Number(value);
+        if (!Number.isFinite(zoom) || zoom <= 0) {
+            return EXPLORER_HTML_ZOOM_DEFAULT;
+        }
+        // Snap to the nearest step so stepping always lands on the ladder.
+        return EXPLORER_HTML_ZOOM_STEPS.reduce((best, step) => (
+            Math.abs(step - zoom) < Math.abs(best - zoom) ? step : best
+        ), EXPLORER_HTML_ZOOM_DEFAULT);
+    }
+
+    function ensureExplorerHtmlZoom(pane) {
+        if (!pane) {
+            return EXPLORER_HTML_ZOOM_DEFAULT;
+        }
+        const tab = explorerActiveTab(pane);
+        tab.htmlZoom = clampExplorerHtmlZoom(tab.htmlZoom || EXPLORER_HTML_ZOOM_DEFAULT);
+        return tab.htmlZoom;
+    }
+
+    /* The header's -/+ pair answers for the panel on screen: the HTML
+       preview's zoom while that frame is showing, the editor font size
+       everywhere else. Two values, never one shared. */
+    function explorerHtmlZoomActive(index) {
+        return terminals[index]?._explorerPreviewKind === 'html'
+            && activeExplorerFileView(index) === 'preview';
+    }
+
+    function applyExplorerHtmlPreviewZoom(index) {
+        const preview = document.getElementById(`explorer-preview-${index}`);
+        if (!preview || preview.dataset?.explorerPreviewKind !== 'html') {
+            return;
+        }
+        preview.style.setProperty(
+            '--explorer-html-preview-zoom',
+            String(ensureExplorerHtmlZoom(terminals[index]))
+        );
+    }
+
+    /* Label, limits and wording of the -/+ pair for whichever value it is
+       driving right now. Called on every view switch as well as every step,
+       because the header is not rebuilt when the panel changes. */
+    function syncExplorerZoomControls(index) {
+        const pane = terminals[index];
+        const list = document.getElementById(`explorer-list-${index}`);
+        if (!pane || !list) {
+            return;
+        }
+        const htmlZoom = explorerHtmlZoomActive(index);
+        let label;
+        let atMin;
+        let atMax;
+        if (htmlZoom) {
+            const zoom = ensureExplorerHtmlZoom(pane);
+            label = `${Math.round(zoom * 100)}%`;
+            atMin = zoom <= EXPLORER_HTML_ZOOM_STEPS[0];
+            atMax = zoom >= EXPLORER_HTML_ZOOM_STEPS[EXPLORER_HTML_ZOOM_STEPS.length - 1];
+        } else {
+            const fontSize = ensureExplorerEditorFontSize(pane);
+            label = `${fontSize}px`;
+            atMin = fontSize <= EXPLORER_EDITOR_FONT_MIN;
+            atMax = fontSize >= EXPLORER_EDITOR_FONT_MAX;
+        }
+        const value = list.querySelector(`[data-explorer-zoom-value="${index}"]`);
+        if (value) {
+            value.textContent = label;
+        }
+        const controls = [
+            [list.querySelector(`[data-explorer-zoom-decrease="${index}"]`), atMin,
+                htmlZoom ? 'Zoom out preview' : 'Decrease font size',
+                htmlZoom ? 'Zoom out HTML preview' : 'Decrease editor font size'],
+            [list.querySelector(`[data-explorer-zoom-increase="${index}"]`), atMax,
+                htmlZoom ? 'Zoom in preview' : 'Increase font size',
+                htmlZoom ? 'Zoom in HTML preview' : 'Increase editor font size'],
+        ];
+        controls.forEach(([button, disabled, title, ariaLabel]) => {
+            if (!button) {
+                return;
+            }
+            button.disabled = disabled;
+            button.setAttribute('title', title);
+            button.setAttribute('aria-label', ariaLabel);
+        });
+    }
+
     function applyExplorerEditorFontSize(index) {
         const pane = terminals[index];
         const list = document.getElementById(`explorer-list-${index}`);
@@ -2959,19 +3060,8 @@
         const fontSize = ensureExplorerEditorFontSize(pane);
         list.style.setProperty('--explorer-editor-font-size', `${fontSize}px`);
         scheduleExplorerDiffScrollbarSync(list.querySelector('.explorer-diff2html'));
-
-        const value = list.querySelector(`[data-explorer-zoom-value="${index}"]`);
-        if (value) {
-            value.textContent = `${fontSize}px`;
-        }
-        const decrease = list.querySelector(`[data-explorer-zoom-decrease="${index}"]`);
-        const increase = list.querySelector(`[data-explorer-zoom-increase="${index}"]`);
-        if (decrease) {
-            decrease.disabled = fontSize <= EXPLORER_EDITOR_FONT_MIN;
-        }
-        if (increase) {
-            increase.disabled = fontSize >= EXPLORER_EDITOR_FONT_MAX;
-        }
+        applyExplorerHtmlPreviewZoom(index);
+        syncExplorerZoomControls(index);
     }
 
     function stepExplorerEditorFontSize(index, delta) {
@@ -2987,6 +3077,31 @@
         applyExplorerEditorFontSize(index);
     }
 
+    function stepExplorerHtmlZoom(index, direction) {
+        const pane = terminals[index];
+        if (!pane) {
+            return;
+        }
+        const steps = EXPLORER_HTML_ZOOM_STEPS;
+        const position = steps.indexOf(ensureExplorerHtmlZoom(pane));
+        const next = Math.min(steps.length - 1, Math.max(0, position + (direction < 0 ? -1 : 1)));
+        explorerActiveTab(pane).htmlZoom = steps[next];
+        applyExplorerHtmlPreviewZoom(index);
+        syncExplorerZoomControls(index);
+    }
+
+    /* Either value is part of the tab's saved view, so a step goes through
+       the same funnel as a wrap or fold change and the workspace restores
+       it. */
+    function stepExplorerZoom(index, direction) {
+        if (explorerHtmlZoomActive(index)) {
+            stepExplorerHtmlZoom(index, direction);
+        } else {
+            stepExplorerEditorFontSize(index, direction * EXPLORER_EDITOR_FONT_STEP);
+        }
+        persistExplorerTabsToSession(index);
+    }
+
     function wireExplorerEditorZoomControls(index) {
         const list = document.getElementById(`explorer-list-${index}`);
         if (!list) {
@@ -2997,13 +3112,13 @@
         if (decrease && !decrease.dataset.bound) {
             decrease.dataset.bound = 'true';
             decrease.addEventListener('click', () => {
-                stepExplorerEditorFontSize(index, -EXPLORER_EDITOR_FONT_STEP);
+                stepExplorerZoom(index, -1);
             });
         }
         if (increase && !increase.dataset.bound) {
             increase.dataset.bound = 'true';
             increase.addEventListener('click', () => {
-                stepExplorerEditorFontSize(index, EXPLORER_EDITOR_FONT_STEP);
+                stepExplorerZoom(index, 1);
             });
         }
         applyExplorerEditorFontSize(index);
@@ -3124,8 +3239,10 @@
         if (!button) {
             return;
         }
+        // An HTML document lays itself out; wrapping is not GridVibe's to set.
         const modeAvailable = EXPLORER_LINE_WRAP_MODES.includes(selectedMode)
-            && Boolean(panels[selectedMode]);
+            && Boolean(panels[selectedMode])
+            && panels[selectedMode].dataset?.explorerPreviewKind !== 'html';
         button.hidden = !modeAvailable;
         if (!modeAvailable) {
             button.dataset.explorerWrapMode = '';
@@ -4656,6 +4773,15 @@
         container.addEventListener('pointercancel', endDrag);
     }
 
+    /* The Preview panel a file payload offers: 'markdown', 'html' or ''.
+       Read from `preview_type`, never from the HTML string (see
+       renderExplorerFile); every other value — 'image' included, which has
+       its own viewer — offers no panel. */
+    function explorerPreviewKindForPayload(data) {
+        const kind = data?.preview_type;
+        return kind === 'markdown' || kind === 'html' ? kind : '';
+    }
+
     /* Paint whatever preview HTML the pane already holds. Split out of
        restoreExplorerPreview() so the fetch path and the restore path share
        one insertion, one highlight pass and one Mermaid pass. */
@@ -4711,6 +4837,9 @@
         if (!pane || !preview) {
             return null;
         }
+        if (pane._explorerPreviewKind === 'html') {
+            return paintExplorerHtmlPreview(index, pane, preview);
+        }
         const token = explorerPreviewRenderToken(pane);
         const stale = preview.dataset.explorerPreviewRender !== token;
         if (stale) {
@@ -4733,6 +4862,93 @@
             renderExplorerMermaid(preview);
         }
         return preview;
+    }
+
+    /* An HTML file previews as itself, in a frame, never through innerHTML.
+
+       The document comes from `.../file/html`, which serves it under a CSP
+       sandbox; the iframe states the same sandbox so the fence holds even
+       before the response headers do. `allow-scripts` without
+       `allow-same-origin` is the point: the page's own scripts run, in an
+       opaque origin that can reach neither this page nor GridVibe's routes.
+
+       Stamped like the Markdown render so a revisit of the same bytes keeps
+       the frame (and the reader's place in it) instead of reloading. The token
+       is the content identity Source already uses plus the revision the frame
+       is bound to, so an in-place refresh or a save that changes the bytes
+       reloads it and nothing else does — unless the frame reported a refusal
+       (handleExplorerHtmlPreviewMessage), which takes the stamp off so the
+       next refresh or visit asks again.
+
+       The request carries Source's `state_revision`: the frame is a second
+       read, and the server refuses to serve bytes Source is not showing. */
+    function paintExplorerHtmlPreview(index, pane, preview) {
+        const sessionId = sessionIds[index];
+        const path = pane._explorerFilePath || '';
+        if (!sessionId || !path) {
+            return preview;
+        }
+        const revision = pane._explorerFileStateRevision || '';
+        const token = `${explorerFileContentIdentity(path, pane._explorerFileContent)}@${revision}`;
+        if (preview.dataset.explorerPreviewRender === token && preview.querySelector('iframe')) {
+            return preview;
+        }
+        ensureExplorerHtmlPreviewMessages();
+        const frame = document.createElement('iframe');
+        frame.className = 'explorer-html-preview-frame';
+        frame.setAttribute('sandbox', 'allow-scripts');
+        frame.setAttribute('referrerpolicy', 'no-referrer');
+        frame.title = `Preview of ${pane._explorerFileName || path}`;
+        frame.src = `/api/explorer/${encodeURIComponent(sessionId)}/file/html`
+            + `?path=${encodeURIComponent(path)}&revision=${encodeURIComponent(revision)}`;
+        preview.replaceChildren(frame);
+        preview.dataset.explorerPreviewRender = token;
+        applyExplorerHtmlPreviewZoom(index);
+        return preview;
+    }
+
+    /* A refusal page served into an HTML Preview frame says so with one
+       fixed message (EXPLORER_HTML_PREVIEW_MESSAGE_SOURCE in web/api.py),
+       because the frame's status and document are opaque to this page.
+
+       Accepted only from a frame this viewer painted, and nothing is read
+       from it beyond the status. The page's own scripts can post the same
+       shape; the worst they can do is get themselves reloaded or show the
+       notice below, both of which are the reader's to dismiss with Refresh.
+       A 409 means the file moved on after Source read it: the same notice and
+       whole-file Refresh the Markdown preview uses. Anything else only takes
+       the stamp off, so the next refresh or visit loads the document again
+       instead of keeping the error on screen. */
+    const EXPLORER_HTML_PREVIEW_MESSAGE_SOURCE = 'gridvibe-html-preview';
+    let explorerHtmlPreviewMessagesBound = false;
+
+    function handleExplorerHtmlPreviewMessage(event) {
+        const data = event?.data;
+        if (!data || typeof data !== 'object'
+            || data.source !== EXPLORER_HTML_PREVIEW_MESSAGE_SOURCE) {
+            return;
+        }
+        for (let index = 0; index < terminals.length; index += 1) {
+            const preview = document.getElementById(`explorer-preview-${index}`);
+            const frame = preview?.querySelector?.('iframe');
+            if (!frame || frame.contentWindow !== event.source) {
+                continue;
+            }
+            if (data.status === 409) {
+                paintExplorerPreviewStale(index, preview);
+            } else {
+                invalidateExplorerPreviewRender(preview);
+            }
+            return;
+        }
+    }
+
+    function ensureExplorerHtmlPreviewMessages() {
+        if (explorerHtmlPreviewMessagesBound) {
+            return;
+        }
+        explorerHtmlPreviewMessagesBound = true;
+        window.addEventListener('message', handleExplorerHtmlPreviewMessage);
     }
 
     /* The find's <mark> wrappers, taken out without touching anything else.
@@ -4828,6 +5044,11 @@
         const content = pane._explorerFileContent;
         if (!path) {
             return preview;
+        }
+        // The frame fetches its own document; there is nothing to wait for.
+        if (pane._explorerPreviewKind === 'html') {
+            pane._explorerPreviewLoaded = true;
+            return paintExplorerPreview(index);
         }
         /* The same in-flight join loadExplorerDiff() carries, for the same
            reason. `_explorerPreviewLoaded` is set only once the response has
@@ -6720,6 +6941,7 @@
         pane._explorerFileContent = '';
         pane._explorerFileLanguage = '';
         applyExplorerSourceTier(pane, '');
+        pane._explorerPreviewKind = '';
         pane._explorerPreviewHtml = '';
         pane._explorerPreviewLoaded = false;
         pane._explorerGit = null;
@@ -6850,7 +7072,8 @@
            blink out of existence on every load — and, since a save answers with
            the same payload shape, would make every save on a Markdown file
            bail updateExplorerFileInPlace() into a full pane rebuild. */
-        const hasPreview = data.preview_type === 'markdown';
+        const previewKind = explorerPreviewKindForPayload(data);
+        const hasPreview = Boolean(previewKind);
         const requestedDiffCommit = String(diffCommit || '');
         const requestedDiffMode = requestedDiffCommit ? '' : String(diffMode || '');
         const hasGitDiff = explorerHasGitDiff(data.git) || Boolean(requestedDiffCommit);
@@ -6950,6 +7173,7 @@
         pane._explorerFileUtf8Bom = Boolean(data.utf8_bom);
         pane._explorerFileTruncated = Boolean(data.truncated);
         pane._explorerFileLanguage = codeLanguage;
+        pane._explorerPreviewKind = previewKind;
         applyExplorerSourceTier(pane, pane._explorerFileContent);
         /* Read *after* the tier is recomputed for the incoming content, never
            before: the large tier renders no per-line rows for a find to
@@ -7051,7 +7275,7 @@
                 <div class="explorer-editor-body${keepDiffSplit ? ' split-diff' : ''}">
                     <div class="explorer-editor-main">
                         <div class="explorer-source-frame explorer-editor-panel" data-explorer-file-panel="source" ${initialFileView === 'source' ? '' : 'hidden'}><div class="explorer-source-view" id="explorer-code-${index}" tabindex="-1"></div>${explorerOverviewHtml(index)}</div>
-                        ${hasPreview ? `<div class="explorer-markdown-preview explorer-editor-panel" id="explorer-preview-${index}" data-explorer-file-panel="preview" ${initialFileView === 'preview' ? '' : 'hidden'}></div>` : ''}
+                        ${hasPreview ? `<div class="${previewKind === 'html' ? 'explorer-html-preview' : 'explorer-markdown-preview'} explorer-editor-panel" id="explorer-preview-${index}" data-explorer-file-panel="preview" data-explorer-preview-kind="${previewKind}" ${initialFileView === 'preview' ? '' : 'hidden'}></div>` : ''}
                     </div>
                     ${hasGitDiff ? `<aside class="explorer-diff-split" id="explorer-diff-panel-${index}" data-explorer-file-panel="diff" ${keepDiffSplit ? '' : 'hidden'}><div class="explorer-diff-content" id="explorer-diff-code-${index}"></div></aside>` : ''}
                 </div>
@@ -7082,7 +7306,7 @@
                 if (document.getElementById('explorer-md-menu')) {
                     dismissExplorerMarkdownAppearanceMenu();
                 } else {
-                    showExplorerMarkdownAppearanceMenu(appearanceButton, { includeMarkdown: hasPreview });
+                    showExplorerMarkdownAppearanceMenu(appearanceButton, { includeMarkdown: previewKind === 'markdown' });
                 }
             });
         }
@@ -7156,11 +7380,17 @@
            blink out of existence on every load — and, since a save answers with
            the same payload shape, would make every save on a Markdown file
            bail updateExplorerFileInPlace() into a full pane rebuild. */
-        const hasPreview = data.preview_type === 'markdown';
+        const previewKind = explorerPreviewKindForPayload(data);
+        const hasPreview = Boolean(previewKind);
         const hasGitDiff = explorerHasGitDiff(data.git);
         const preview = document.getElementById(`explorer-preview-${index}`);
         const diffPanel = document.getElementById(`explorer-diff-code-${index}`);
         if (hasPreview !== Boolean(preview) || hasGitDiff !== Boolean(diffPanel)) {
+            return false;
+        }
+        // A Markdown panel and an HTML frame are different panels, not one
+        // panel with different content.
+        if (preview && preview.dataset.explorerPreviewKind !== previewKind) {
             return false;
         }
         /* A save (or an external write) that pushes a file across the tier
@@ -7194,6 +7424,7 @@
         pane._explorerFileUtf8Bom = Boolean(data.utf8_bom);
         pane._explorerFileTruncated = Boolean(data.truncated);
         pane._explorerFileLanguage = codeLanguage;
+        pane._explorerPreviewKind = previewKind;
         applyExplorerSourceTier(pane, pane._explorerFileContent);
         /* The file moved on disk, so any preview the pane is holding describes
            the old bytes. Drop it; the panel refills below if it is the one on
@@ -7298,6 +7529,7 @@
            existed, focusExplorerSearch() still claimed Ctrl+F, so the reader
            lost the browser's own find as well. */
         applyExplorerSourceTier(pane, '');
+        pane._explorerPreviewKind = '';
         pane._explorerPreviewHtml = '';
         pane._explorerPreviewLoaded = false;
         pane._explorerGit = null;
@@ -7539,6 +7771,7 @@
             // Costs nothing today — the find guard checks the mode first — but
             // the tier describes the buffer, and the buffer is now empty.
             applyExplorerSourceTier(pane, '');
+            pane._explorerPreviewKind = '';
             pane._explorerPreviewHtml = '';
             pane._explorerPreviewLoaded = false;
             pane._explorerGit = null;

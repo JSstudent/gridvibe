@@ -58,6 +58,19 @@ Regression history and audit narratives do not belong in this reference.
   `mcp` or after it, is redacted. A call site that logs a request path still passes it through
   `redact_mcp_path()`. A handler added later installs the filter first;
   `/api/mcp/...` is not a credential and is left alone.
+- The explorer's HTML preview is the one place a repository's own scripts run
+  inside GridVibe, so it is fenced, never sanitized. `GET .../file/html` serves
+  the document under `EXPLORER_HTML_PREVIEW_CSP` (`web/api.py`): `sandbox
+  allow-scripts` without `allow-same-origin` (an opaque origin, which every
+  write route and Socket.IO already refuse), `connect-src 'none'`, `form-action
+  'none'`, and subresources from `https:`/`data:`/`blob:` only, so no `http://`
+  URL — GridVibe's routes included — is reachable. The iframe repeats
+  `sandbox="allow-scripts"`. Adding `allow-same-origin`, `'self'`, `http:` or a
+  connect source to either is a weakening and must be flagged. The page-to-panel
+  channel is one fixed `postMessage` shape (`EXPLORER_HTML_PREVIEW_MESSAGE_SOURCE`)
+  accepted only from the panel's own frame and read for its status alone; the
+  page can forge it, so it may never do more than reload that frame or show the
+  stale notice.
 - `POST /api/sessions/<id>/agent-conversation` is the one route an agent's own
   process calls without a page. It is authorised by a per-connection pane token
   rather than by origin; see
@@ -655,7 +668,15 @@ unless the task explicitly changes this contract.
   `Content-Security-Policy` and `X-Content-Type-Options: nosniff`.
 - Markdown preview is a lazy `GET .../file/preview`, root-confined and ≤10 MiB;
   refuse non-Markdown. The file/save payload always states `preview_type`
-  independently of fetched HTML. Source opens must not render/sanitize an unused
+  (`markdown`, `html`, `image` or null) independently of fetched HTML.
+- HTML preview (`.html`/`.htm`) is `GET .../file/html`, root-confined and whole
+  or nothing: a file over 10 MiB is refused, never truncated into a document it
+  does not contain. It is bound to Source's `state_revision` (`revision=`),
+  checked before and again after the read; a mismatch at either is a 409,
+  never the newer bytes. Its refusals are escaped HTML under
+  the same sandbox headers, because the frame is the only surface it answers
+  to, and each posts its status to the panel. See
+  [Security](#security-and-trust) for the sandbox itself. Source opens must not render/sanitize an unused
   preview. `GET .../find` searches names only; repository search may read content.
 - `git/state` and `file/state` are bounded read polls. Share Git-state changes
   across sidebar, tree/listing refresh and Source marks. External file changes may
@@ -801,6 +822,17 @@ unless the task explicitly changes this contract.
 
 ## Explorer rendering and scroll
 
+- An HTML Preview panel holds one sandboxed iframe, painted by
+  `paintExplorerHtmlPreview()` and stamped with the Source content identity and
+  revision, so a revisit keeps the frame and only changed bytes reload it. A
+  refusal the frame reports takes the stamp off (a 409 also shows the stale
+  notice), so refresh or a revisit retries instead of keeping the error. A pane's
+  `_explorerPreviewKind` (from `preview_type`) decides the panel; a kind change
+  is a shape change and rebuilds, never updates in place. The page is opaque to
+  GridVibe, so Find, line wrap and Markdown appearance stand down on it, while
+  the header's -/+ pair drives the tab's HTML zoom there (a CSS scale of the
+  frame, 25%–300% on a fixed step ladder) and the editor font size everywhere
+  else.
 - `explorer-repaint.js` owns skip/decorate/rebuild decisions. Rebuild Source rows
   only for document/language/fold changes; repaint changed code cells for marks
   or syntax color, using a document-scaled ceiling and one row walk. Decorations
@@ -886,6 +918,11 @@ unless the task explicitly changes this contract.
   Which side the panel docks to is not among them: it is the global
   `workspace.agent_sidebar_side` setting (see [Agent dashboard](#agent-dashboard)),
   and the transaction refuses it as an unknown field.
+- A tab view's `font_size` (integer) and `html_zoom` (finite number; v2 only)
+  persist only away from their defaults. The server clamps `html_zoom` to
+  0.25–3 and drops 1; the client snaps it onto the step ladder on restore. Each
+  -/+ step goes through `persistExplorerTabsToSession()`, and both survive
+  Preview-tab promotion and the close-rebuild snapshot.
 - Persist durable tabs/mode/Diff/navigation intent separately from revision-bound
   per-panel scroll/folds. Never persist fetched content, search query/results or
   dirty buffers. Viewer find is runtime state of tab + path, reapplied on render
@@ -1537,8 +1574,9 @@ in `README.md`; state the rules a change has to keep.
   the schema's keys: no `class_name`, which the store writes for itself.
 - **Eight tool tiers.** Read and create
   only ever make something new (`read_handoff` is a read: its only side effect
-  is a handoff's state); `report_result`/`wait_for_results` carry a report back
-  and touch no pane; `set_pane_agent`/`set_pane_mode` replace what is
+  is a handoff's state); `report_result`/`wait_for_task`/`send_task`/
+  `wait_for_results` carry a report back and the next task out, and touch no
+  pane; `set_pane_agent`/`set_pane_mode` replace what is
   behind an existing pane; `clear_pane` erases what one has drawn;
   `focus_session`/`focus_pane`/`move_session`/`resize_divider` change what is
   shown where and create or end nothing; `save_group_layout` writes a named
@@ -1698,7 +1736,13 @@ in `README.md`; state the rules a change has to keep.
   store is capped for the unbound kind and TTL-bounded above a split's worst case;
   a bound handoff waits for a connection that starts its pane's agent, is
   announced once on that launch line, and is dropped — file included — in
-  `_shutdown_connection` of *that* connection. The announcement and its record on
+  `_shutdown_connection` of *that* connection, and by `_retire_agent_handoff`
+  when the runtime watch sees that connection's agent leave: an observed exit
+  (`_mark_runtime_agent_exited`), a pending or typed relaunch, or the
+  process-table reconcile promoting another agent. The handoff belongs to the
+  agent it was announced to, so an agent started by hand at the same shell
+  never inherits its task, its receipt or its follow-ups. The id comes off the
+  connection under its gate, ordered against a follow-up bind. The announcement and its record on
   the connection share one hold of the connection's gate, after the file is
   written, so a connection retired before then — mid-write included — leaves the
   task waiting for its replacement. A relaunch or mode switch drops one
@@ -1734,7 +1778,7 @@ in `README.md`; state the rules a change has to keep.
   reading is refused and told to call `read_handoff` again, which re-issues the
   same receipt; the replaced agent cannot, because its process is gone. Every way a
   handoff goes before a report (connection closed, pane closed, relaunch, mode switch, replaced,
-  undeliverable) ends its assignment with the reason and stops it taking
+  agent exited, agent replaced, undeliverable) ends its assignment with the reason and stops it taking
   reports, so whatever the pane runs next cannot answer for it; a report
   outlives the worker's pane, and the requester's close drops its assignments. A wait blocks
   at most `MAX_WAIT_SECONDS` (under the shortest CLI tool-call timeout), and the
@@ -1744,6 +1788,23 @@ in `README.md`; state the rules a change has to keep.
   refused above `MAX_RESULT_CHARS` rather than truncated, framed by a `note` as
   another agent's words, never published by a pane read, and logged by size
   only. The sidecar's ceilings are pinned equal to the store's by test.
+- **A follow-up reaches only the agent the caller is already talking to.**
+  `send_task` (`web/agent_followups.py`) hands the next task to the agent
+  running in a pane without relaunching it, and only when the caller is the
+  requester of that pane's live assignment, the pane runs an agent, that
+  assignment is reported, and the pane's connection still holds the handoff its
+  agent read. `override` waives none of it. `_bind_followup_handoff` re-proves
+  the last rule under the connection's gate and, in the same hold, records the
+  follow-up (`HandoffStore.create_followup`: announced at birth, inline or paged,
+  replacing the previous handoff whose report stands) and puts its id on the
+  connection, so a later close or agent exit drops it. Nothing is typed: the
+  worker stands by in `wait_for_task`, which waits on the handoff store's
+  condition for at most `MAX_WAIT_SECONDS` and answers at once, with the
+  reason, when no follow-up can come (no live assignment) or the worker owes a
+  report first; over the tunnel it waits in-process and reads the route with
+  `wait=0`. The answer is `read_handoff`'s, receipt included. A new assignment
+  drops the settled, collected one it supersedes between the same two panes;
+  an uncollected report stays until returned.
 - **A large task's file is GridVibe's own write, owner-only, and gone with its
   handoff.** Written on the pane's machine and never through a shell: locally in
   its own directory under the handoff root (`0700`/`0600` where modes exist, named
@@ -1911,13 +1972,32 @@ in `README.md`; state the rules a change has to keep.
   URL. The predicate is held there rather than at the launcher checkbox because a
   saved preset, a restored snapshot and the relaunch route all carry `agent_mcp`
   forward.
-- **The generated `.gridvibe_mcp.json` is per install and rewritten on every app
-  start**, gitignored, carrying no `env` block so one file serves every pane.
-  Composition is registry-driven: `_MCP_FLAG_TEMPLATE` admits one option token and
+- **The generated `.gridvibe_mcp.json` and `.gridvibe_opencode.json` are per
+  install and rewritten on every app start**, both gitignored and both built from
+  one resolved interpreter, sidecar entry and URL, so they cannot disagree. The
+  first carries no `env` block. The second is opencode's schema (`mcp`, `type`,
+  a `command` array) and states the identity variables as `{env:<name>}`
+  references, so one file still serves every pane. Its `timeout`
+  (`OPENCODE_MCP_TIMEOUT_MS`) is also stated on an SSH pane's remote opencode
+  document. opencode applies that one value to startup, tool listing and every
+  tool call, so it must outlast the longest request deadline the sidecar sets;
+  shorter, a bounded wait or focus is abandoned before it answers. A failed write costs only that
+  file. Composition is registry-driven: `_MCP_FLAG_TEMPLATE` admits one option token and
   one placeholder so a registry typo cannot smuggle a second command onto the
   launch line, `_toml_override_flag` owns the per-shell quoting Codex needs, and
   anything that cannot be composed safely resolves to *no fragment* — costing the
-  pane its tools, never its agent. A test-mode process refuses the production path.
+  pane its tools, never its agent. A test-mode process refuses both production
+  paths.
+- **opencode's `OPENCODE_CONFIG` is a prefix, applied last.**
+  `_agent_mcp_env_prefix` is its only source, kept apart from the suffix
+  fragment so no caller can append a variable after the binary.
+  `_compose_agent_startup_command` places the opening prompt relative to the bare
+  binary first and prepends the prefix at the very end; the clear and update
+  prefixes still go in front of the whole line. The path passes the shared
+  `UNQUOTABLE_PATH_CHARACTERS` guard and, locally, must exist. Otherwise there is
+  no prefix and no prompt, rather than a broken line. A WSL pane also names the
+  variable in `WSLENV` so it crosses interop to the Windows binary, and an SSH
+  pane always gets the POSIX `env` form naming its tunnel's remote file.
 - **The two Windows shells disagree about Codex's `-c` overrides, and the bare
   form is not always available.** `_toml_override_flag` is the one owner: cmd
   must see the TOML literal quotes bare (wrapped, the override is silently
@@ -2078,7 +2158,10 @@ in `README.md`; state the rules a change has to keep.
   `applySplitSlotGeometry` paints, so a fixed-layout view becomes a split one as
   an on-screen resize makes it). A refusal or a missing revision leaves the view
   untouched. A thrown write, an `unknown` answer, or one accepted without a
-  newer revision marks the view stale. Until it is painted again, reads of the
+  newer revision marks the view stale. Both background writes are bounded
+  (`WRITE_TIMEOUT_MS` in `background-tab.js`, the visible split's 20 seconds):
+  a write that has not answered by then is aborted and answered as thrown, so
+  the hold ends and a load of the tab never waits on a stalled request. Until it is painted again, reads of the
   tab take the server's record. Its presentation captures omit the
   arrangement, and so do captures of any background tab while an edit holds
   it (`held()`), before the answer has updated or marked the view. A queued

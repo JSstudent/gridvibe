@@ -87,7 +87,7 @@ class PresetEntryOverrideTestCase(unittest.TestCase):
         )
 
     def test_no_grant_for_a_cli_that_cannot_be_handed_the_tools(self):
-        entry = _agent_entry(agent_selection="opencode", initial_command="opencode")
+        entry = _agent_entry(agent_selection="kilo", initial_command="kilo")
 
         normalized = _normalized(entry)
 

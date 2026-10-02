@@ -3594,8 +3594,8 @@ class ApiRoutesTestCase(unittest.TestCase):
         self.assertIn("'Source font',", html)
         self.assertIn("value => setExplorerMarkdownAppearance({ sourceFont: value })", html)
         # The appearance button is no longer gated to previewable files; the
-        # preview-only groups are dropped instead.
-        self.assertIn("showExplorerMarkdownAppearanceMenu(appearanceButton, { includeMarkdown: hasPreview });", html)
+        # Markdown-only groups are dropped instead (an HTML preview styles itself).
+        self.assertIn("showExplorerMarkdownAppearanceMenu(appearanceButton, { includeMarkdown: previewKind === 'markdown' });", html)
         # Token-driven CSS: one custom property the rows and the edit textarea
         # inherit. The diff panel is a sibling of the source view, so it hosts
         # the property itself and carries the same source-font-* class.
@@ -20755,6 +20755,169 @@ class ExplorerDownloadTestCase(unittest.TestCase):
         terminals_css = self._static("css/terminals.css")
         self.assertIn(".explorer-image-view", terminals_css)
 
+    _HTML_DOC = (
+        "<!doctype html><title>Mock</title>"
+        "<script>document.body.dataset.ran = '1'</script><p>Hello</p>"
+    )
+
+    def test_file_route_offers_an_html_preview_for_html_files(self):
+        (self.root / "mock.html").write_text(self._HTML_DOC, encoding="utf-8")
+        (self.root / "legacy.HTM").write_text(self._HTML_DOC, encoding="utf-8")
+        session_id = self._create_local_explorer_session()
+        for name in ("mock.html", "legacy.HTM"):
+            payload = self.client.get(
+                f"/api/explorer/{session_id}/file?path={name}"
+            ).get_json()
+            self.assertEqual(payload["preview_type"], "html", name)
+            # Source still carries the text, so the file stays readable and
+            # editable exactly as before.
+            self.assertEqual(payload["content"], self._HTML_DOC)
+            self.assertIsNone(payload["preview_html"])
+
+    def test_html_route_serves_the_document_inside_a_script_only_sandbox(self):
+        (self.root / "mock.html").write_text(self._HTML_DOC, encoding="utf-8")
+        session_id = self._create_local_explorer_session()
+        response = self.client.get(
+            f"/api/explorer/{session_id}/file/html?path=mock.html"
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.mimetype, "text/html")
+        self.assertEqual(response.get_data(as_text=True), self._HTML_DOC)
+        directives = {
+            part.strip().split(" ", 1)[0]: part.strip()
+            for part in response.headers.get("Content-Security-Policy", "").split(";")
+        }
+        # Scripts run, but in an opaque origin: no same-origin, no forms,
+        # no popups, no top navigation.
+        self.assertEqual(directives["sandbox"], "sandbox allow-scripts")
+        # No network channel back to anything, GridVibe included.
+        self.assertEqual(directives["connect-src"], "connect-src 'none'")
+        self.assertEqual(directives["default-src"], "default-src 'none'")
+        self.assertEqual(directives["form-action"], "form-action 'none'")
+        # Subresources only over https: — never http://localhost routes.
+        for name in ("script-src", "style-src", "img-src", "font-src", "media-src"):
+            self.assertNotIn("'self'", directives[name], name)
+            self.assertNotIn("http:", directives[name].replace("https:", ""), name)
+        self.assertEqual(response.headers.get("X-Content-Type-Options"), "nosniff")
+        self.assertEqual(response.headers.get("Cache-Control"), "no-store")
+
+    def test_html_route_refuses_inside_the_same_sandbox(self):
+        (self.root / "notes.txt").write_text("hi", encoding="utf-8")
+        session_id = self._create_local_explorer_session()
+        cases = {
+            "notes.txt": 400,
+            "../outside.html": 400,
+        }
+        for path, status in cases.items():
+            response = self.client.get(
+                f"/api/explorer/{session_id}/file/html?path={path}"
+            )
+            self.assertEqual(response.status_code, status, path)
+            # The refusal paints in the frame, so it is a sandboxed page too.
+            self.assertEqual(response.mimetype, "text/html", path)
+            self.assertIn(
+                "sandbox allow-scripts",
+                response.headers.get("Content-Security-Policy", ""),
+                path,
+            )
+        missing = self.client.get("/api/explorer/missing/file/html?path=x.html")
+        self.assertEqual(missing.status_code, 404)
+        self.assertIn("sandbox", missing.headers.get("Content-Security-Policy", ""))
+
+    def test_html_route_is_bound_to_the_revision_source_was_loaded_at(self):
+        (self.root / "mock.html").write_text(self._HTML_DOC, encoding="utf-8")
+        session_id = self._create_local_explorer_session()
+        revision = self.client.get(
+            f"/api/explorer/{session_id}/file?path=mock.html"
+        ).get_json()["state_revision"]
+
+        same = self.client.get(
+            f"/api/explorer/{session_id}/file/html?path=mock.html&revision={revision}"
+        )
+        self.assertEqual(same.status_code, 200)
+        self.assertEqual(same.get_data(as_text=True), self._HTML_DOC)
+
+        # A write after Source's read: Preview must not show the newer bytes.
+        (self.root / "mock.html").write_text(
+            self._HTML_DOC + "<p>newer bytes</p>", encoding="utf-8"
+        )
+        moved = self.client.get(
+            f"/api/explorer/{session_id}/file/html?path=mock.html&revision={revision}"
+        )
+        body = moved.get_data(as_text=True)
+        self.assertEqual(moved.status_code, 409)
+        self.assertNotIn("newer bytes", body)
+        self.assertIn("sandbox allow-scripts", moved.headers["Content-Security-Policy"])
+        # The panel learns it from the page's one fixed message.
+        self.assertIn(
+            'parent.postMessage({"source": "gridvibe-html-preview", "status": 409}',
+            body,
+        )
+
+        # An unbound request (an older client) still serves the current file.
+        unbound = self.client.get(f"/api/explorer/{session_id}/file/html?path=mock.html")
+        self.assertEqual(unbound.status_code, 200)
+        self.assertIn("newer bytes", unbound.get_data(as_text=True))
+
+    def test_html_route_refuses_a_write_that_lands_during_its_read(self):
+        """The revision matches when checked, then a write lands before the
+        bytes are read: Preview must not serve them as Source's version."""
+        path = self.root / "mock.html"
+        path.write_text(self._HTML_DOC, encoding="utf-8")
+        session_id = self._create_local_explorer_session()
+        revision = self.client.get(
+            f"/api/explorer/{session_id}/file?path=mock.html"
+        ).get_json()["state_revision"]
+        original_read = web_explorer._LocalExplorerBackend.read_file_prefix
+
+        def read_after_a_write(backend, file_path, max_bytes):
+            path.write_text(self._HTML_DOC + "<p>newer bytes</p>", encoding="utf-8")
+            return original_read(backend, file_path, max_bytes)
+
+        with patch.object(
+            web_explorer._LocalExplorerBackend, "read_file_prefix", read_after_a_write
+        ):
+            response = self.client.get(
+                f"/api/explorer/{session_id}/file/html?path=mock.html&revision={revision}"
+            )
+        self.assertEqual(response.status_code, 409)
+        self.assertNotIn("newer bytes", response.get_data(as_text=True))
+
+    def test_html_route_refusals_tell_the_panel_their_status(self):
+        (self.root / "notes.txt").write_text("hi", encoding="utf-8")
+        session_id = self._create_local_explorer_session()
+        response = self.client.get(
+            f"/api/explorer/{session_id}/file/html?path=notes.txt"
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn(
+            'parent.postMessage({"source": "gridvibe-html-preview", "status": 400}',
+            response.get_data(as_text=True),
+        )
+
+    def test_html_route_refuses_an_oversized_document_instead_of_cutting_it(self):
+        (self.root / "big.html").write_text("<p>" + "x" * 64 + "</p>", encoding="utf-8")
+        session_id = self._create_local_explorer_session()
+        with patch("web.explorer.EXPLORER_FILE_PREVIEW_MAX_BYTES", 16):
+            response = self.client.get(
+                f"/api/explorer/{session_id}/file/html?path=big.html"
+            )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("preview limit", response.get_data(as_text=True))
+
+    def test_html_route_escapes_the_refusal_it_paints(self):
+        session_id = self._create_local_explorer_session()
+        with patch(
+            "web.api.read_explorer_html_document",
+            side_effect=ValueError("<img src=x onerror=alert(1)>"),
+        ):
+            response = self.client.get(
+                f"/api/explorer/{session_id}/file/html?path=a.html"
+            )
+        body = response.get_data(as_text=True)
+        self.assertNotIn("<img", body)
+        self.assertIn("&lt;img", body)
+
 
 class TerminalSearchWebLinksTestCase(unittest.TestCase):
     """Deep-dive 10.3 — terminal scrollback search + clickable links."""
@@ -22195,6 +22358,13 @@ class SettingsLauncherConfigTestCase(unittest.TestCase):
         ]
         self.assertIn("applyGroupFontOverride(index);", attach_fn)
 
+    def test_agent_options_list_lead_agents_first_then_alphabetical(self):
+        values = [item["value"] for item in web_agents._agent_options()]
+        self.assertEqual(values[:4], ["claude", "codex", "opencode", "copilot"])
+        rest = values[len(web_agents.AGENT_MENU_LEAD):-1]
+        self.assertEqual(rest, sorted(rest))
+        self.assertEqual(values[-1], "other")
+
     # ── ISSUE-2026-013 — per-agent auto-mode toggles ──
 
     def test_agent_options_expose_registry_auto_mode_flags(self):
@@ -22209,16 +22379,17 @@ class SettingsLauncherConfigTestCase(unittest.TestCase):
         self.assertEqual(options["kilo"]["auto_mode_flag"], "--yolo")
         self.assertEqual(options["grok"]["auto_mode_flag"], "--always-approve")
         self.assertEqual(options["hermes"]["auto_mode_flag"], "--yolo")
-        self.assertEqual(options["opencode"]["auto_mode_flag"], "")
+        self.assertEqual(options["opencode"]["auto_mode_flag"], "--auto")
         self.assertEqual(options["other"]["auto_mode_flag"], "")
 
     def test_agent_options_expose_registry_auto_mode_descriptions(self):
         """Wave 4 / 7.b: every flag-carrying agent surfaces its helper text."""
         options = {item["value"]: item for item in web_agents._agent_options()}
-        for key in ("claude", "codex", "copilot", "kimi", "kilo", "grok", "hermes"):
+        for key in (
+            "claude", "codex", "copilot", "opencode", "kimi", "kilo", "grok", "hermes",
+        ):
             with self.subTest(agent=key):
                 self.assertTrue(options[key]["auto_mode_description"])
-        self.assertEqual(options["opencode"]["auto_mode_description"], "")
         self.assertEqual(options["other"]["auto_mode_description"], "")
 
     def test_agent_registry_includes_kimi_entry(self):
@@ -22364,8 +22535,14 @@ class SettingsLauncherConfigTestCase(unittest.TestCase):
         self.assertEqual(compose(session(agent_auto_mode=False)), "claude")
         self.assertEqual(
             compose(session(initial_command="opencode", agent_selection="opencode")),
-            "opencode",
+            "opencode --auto",
         )
+        # A CLI that publishes no flag launches bare, with the toggle on.
+        with patch.dict(web_agents.AGENT_REGISTRY, {"noflag": {"binary": "noflag"}}):
+            self.assertEqual(
+                compose(session(initial_command="noflag", agent_selection="noflag")),
+                "noflag",
+            )
         # A custom command never gains flags, even with the toggle persisted.
         self.assertEqual(
             compose(
@@ -22690,7 +22867,7 @@ class SettingsLauncherConfigTestCase(unittest.TestCase):
         self.assertEqual(options["codex"]["mcp_flag"], "")
         self.assertTrue(options["codex"]["mcp_supported"])
 
-        for key in ("claude", "copilot", "codex"):
+        for key in ("claude", "copilot", "codex", "opencode"):
             with self.subTest(supported=key):
                 self.assertTrue(options[key]["mcp_supported"])
                 self.assertTrue(options[key]["mcp_description"])
@@ -22698,7 +22875,7 @@ class SettingsLauncherConfigTestCase(unittest.TestCase):
         # The rest can only register a server by editing the user's own config
         # (an `<agent> mcp add` subcommand), which would outlive the pane that
         # asked. No launch-time mechanism, so no checkbox.
-        for key in ("kimi", "kilo", "grok", "hermes", "opencode", "other"):
+        for key in ("kimi", "kilo", "grok", "hermes", "other"):
             with self.subTest(agent=key):
                 self.assertEqual(options[key]["mcp_flag"], "")
                 self.assertFalse(options[key]["mcp_supported"])

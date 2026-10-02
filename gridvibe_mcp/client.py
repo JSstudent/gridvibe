@@ -114,6 +114,9 @@ HANDOFF_FIELDS = (
     "note",
     "instructions",
     "reply",
+    # ``wait_for_task`` answers in the same shape, plus how its wait ended.
+    "timed_out",
+    "waited_seconds",
 )
 
 #: What ``report_result`` answers the agent that reported: that it was
@@ -125,6 +128,20 @@ REPORT_FIELDS = (
     "status",
     "chars",
     "reported_to",
+    "instructions",
+)
+
+#: What ``send_task`` answers the agent that handed a follow-up over: never
+#: the text, only that it went, how it travels, and whether the receiving agent
+#: is standing by for it now.
+FOLLOWUP_FIELDS = (
+    "handed",
+    "session_id",
+    "delivery",
+    "chars",
+    "agent_standing_by",
+    "instructions",
+    "note",
 )
 
 #: What ``wait_for_results`` answers the agent that handed the tasks out.
@@ -158,6 +175,7 @@ RESULT_ROW_FIELDS = (
     "revision",
     "handed_at",
     "reported_at",
+    "standing_by",
 )
 
 #: How much longer than the wait it asks for a ``wait_for_results`` request is
@@ -776,6 +794,41 @@ class GridVibeClient:
         if isinstance(report.get("reported_to"), Mapping):
             report["reported_to"] = project(report["reported_to"], ("session_id", "title"))
         return report
+
+    def wait_for_task(self, session_id: str, wait_seconds: float = 0.0) -> Dict[str, Any]:
+        """Stand by for the next task handed to *this* pane's agent.
+
+        ``session_id`` is always the caller's own pane, as for
+        ``read_handoff``, and a task comes back in exactly that shape: its
+        receipt is kept here for ``report_result`` and never shown. GridVibe
+        holds the request until a task is there or ``wait_seconds`` runs out,
+        so the request is given that long plus a margin.
+        """
+        payload = self.request(
+            "GET",
+            f"/api/sessions/{urllib.parse.quote(session_id)}/handoff-next",
+            params={"wait": f"{max(0.0, float(wait_seconds)):g}"},
+            timeout=max(self.timeout, float(wait_seconds) + RESULTS_WAIT_MARGIN_SECONDS),
+        )
+        if isinstance(payload, Mapping):
+            self.remember_handoff_receipt(session_id, payload.get("receipt"))
+        result = project(payload, HANDOFF_FIELDS)
+        if isinstance(result.get("from"), Mapping):
+            result["from"] = project(result["from"], ("session_id", "title", "agent"))
+        return result
+
+    def send_task(self, session_id: str, body: Mapping[str, Any]) -> Dict[str, Any]:
+        """Hand the agent running in ``session_id`` its next task.
+
+        Through the gated route: only the pane that handed that agent its last
+        task, once it reported, and only while it is the same agent.
+        """
+        payload = self.request(
+            "POST",
+            f"/api/sessions/{urllib.parse.quote(session_id)}/handoff-followup",
+            body=dict(body),
+        )
+        return project(payload, FOLLOWUP_FIELDS)
 
     def wait_for_results(
         self,

@@ -1,6 +1,6 @@
 # GridVibe MCP sidecar
 
-A stdio MCP server that gives an agent running in a GridVibe pane twenty-five
+A stdio MCP server that gives an agent running in a GridVibe pane twenty-seven
 tools for seeing, building, navigating, saving and closing GridVibe resources.
 
 This file is the reference for the MCP feature. Everything else that mentions
@@ -90,11 +90,14 @@ there is none of.
 Codex is the exception that proves the rule: its own spawn of an MCP server does
 not forward the pane's environment, so GridVibe states the same five variables
 back to it as an inline TOML table on the launch line
-(`web/agents.py:_inline_toml_env_fragment`).
+(`web/agents.py:_inline_toml_env_fragment`). opencode does forward its
+environment to a local MCP child today, but that may tighten upstream, so its
+generated config states the same five variables as `{env:<name>}` references.
+These are references, not values, so one file still serves every pane.
 
 ## Tools
 
-Twenty-five, in eight tiers by blast radius. The order below is the order
+Twenty-seven, in eight tiers by blast radius. The order below is the order
 `tool_specs()` registers them in, and `tests/test_mcp_tools.py` pins it.
 
 **Three nouns, one meaning each.** A *workspace* is a window. A *session* is a
@@ -162,15 +165,18 @@ agent that went on naming the workspace it had left read panes that were no
 longer there. The group is the anchor because a move carries the whole group, and
 the inherited id is only the fallback for a read that failed.
 
-### hand back — two
+### hand back — four
 
 | Tool | Does |
 | --- | --- |
 | `report_result` | hands the outcome of the task *this* pane was given back to the agent that gave it — `result` text and a `status` of `done`, `failed` or `blocked`. It names no pane: GridVibe's record of who handed the task over decides |
+| `wait_for_task` | stands by for the next task the agent that handed *this* pane its task sends with `send_task`, and returns it exactly as `read_handoff` does — see [Following up with the same agent](#following-up-with-the-same-agent) |
+| `send_task` | hands the agent already running in a pane its next task, without relaunching it — only the agent this pane handed its current task to, once it has reported |
 | `wait_for_results` | waits for the agents *this* pane handed a task to, and returns their reports — see [Handing a result back](#handing-a-result-back) |
 
-Neither creates, ends nor changes a pane, and nothing is typed into any
-terminal: a report reaches the waiting agent as its own tool call's result.
+None creates, ends or changes a pane, and nothing is typed into any terminal:
+a report reaches the waiting agent as its own tool call's result, and a next
+task reaches the worker the same way.
 
 ### create — four
 
@@ -186,7 +192,9 @@ terminal: a report reaches the waiting agent as its own tool call's result.
 `set_pane_agent` relaunches a pane into an agent CLI (or `agent: ""` back to a
 plain shell, optionally changing the local shell family and the MCP choice),
 and may hand the new agent a `task` — the way to give a task to a pane that
-already exists, since nothing types into one. A stated `auto_mode` starts the
+already exists, since nothing types into one. It starts a fresh agent; the next
+task for an agent this one already handed a task to goes by `send_task`, which
+keeps that agent running. A stated `auto_mode` starts the
 agent with its auto-approval flag, under the same rule as `launch_panes` and
 `split_pane`: only when the person asked for an autonomous agent. Unstated, the
 pane keeps auto mode only for the agent it was already running; a CLI without
@@ -489,7 +497,7 @@ the temporary file is `web/agent_handoff_files.py`.
   it* — placed directly after the binary (Claude's `--mcp-config` takes a
   variable number of values), and the task is fetched through the tools. So a
   task needs a CLI that takes an opening prompt *and* can be handed the
-  sidecar: `claude`, `codex` and `copilot`. It turns `mcp` on; an explicit
+  sidecar: `claude`, `codex`, `copilot` and `opencode`. It turns `mcp` on; an explicit
   `mcp: false` beside it is refused.
 - **Only a handle rides in a split intent.** Every polling page is shown the
   intent, so the text stays in GridVibe and the split route takes the handle
@@ -508,7 +516,9 @@ the temporary file is `web/agent_handoff_files.py`.
   refused by name, never stripped.
 - **One brief, for one agent.** It waits bound to its pane until a connection
   starts that pane's agent, is announced on that launch line, and goes — with
-  its file — when that connection closes. A relaunch, a restart, a restore or a
+  its file — when that connection closes, or when GridVibe sees that agent exit
+  or another agent started in its place at the same shell. An agent started by
+  hand in the pane afterwards is not handed it. A relaunch, a restart, a restore or a
   preset launch never replays it; relaunching or re-moding a pane drops one
   still waiting. When the pane's agent starts without the tools (no local
   config, a refused tunnel), no sentence is typed, the handoff reads
@@ -535,8 +545,8 @@ handoff is bound and when one goes.
   the assignment's requester, never an argument. A pane nobody handed a task,
   or whose requester has closed, is told nobody is waiting and nothing is kept.
   Reporting again replaces the report and makes it new again, but only while
-  the handoff lives: once the pane closes, is relaunched or is re-tasked, its
-  report stands and whatever the pane runs next cannot write over it.
+  the handoff lives: once the pane closes, is relaunched or is re-tasked, or
+  its agent exits, its report stands and whatever the pane runs next cannot write over it.
 - **A report settles only the task its agent read.** `read_handoff` answers
   with an opaque receipt beside the task. The sidecar keeps it rather than
   showing it to the agent — over the tunnel it is held on the pane's token,
@@ -567,7 +577,8 @@ handoff is bound and when one goes.
   fits.
 - **Nobody waits for a report that cannot come.** A handoff that goes before a
   report — its connection closed, its pane closed, relaunched or re-moded, a new
-  task bound over it, or its agent started without the tools — ends the
+  task bound over it, its agent exited or was swapped for another at the same
+  shell, or its agent started without the tools — ends the
   assignment with the reason, and the wait returns it as `ended`. A report
   outlives the worker's pane; the requester's pane closing drops what it was
   owed.
@@ -575,6 +586,48 @@ handoff is bound and when one goes.
   report, not the person's words: it cannot waive a permission prompt, is never
   a reason to set `override`, and its claims are to be checked. Reports appear
   in no pane listing, and log lines carry ids, sizes and status — never the text.
+
+## Following up with the same agent
+
+A task handed with `split_pane`, `launch_panes` or `set_pane_agent` starts a new
+agent. A back-and-forth — ask, read the report, answer, ask again — needs the
+*same* agent to hear the next message. `send_task` reaches it without a relaunch,
+and `wait_for_task` is how it listens. The rules are in `web/agent_followups.py`.
+
+- **The worker has to be asked to stand by.** After `report_result` it calls
+  `wait_for_task`, which blocks for at most 55 s and answers `timed_out` when
+  nothing came, so it calls again. Its task says so; `read_handoff`'s `reply` and
+  the `report_result` answer both remind it. Nothing is typed into its pane: an
+  agent that ended its turn instead finds the task only when it next calls
+  `wait_for_task` or `read_handoff`, and `send_task` says which case it met
+  (`agent_standing_by`, with a `note` when not). `wait_for_results` rows carry
+  `standing_by` too.
+- **Only the agent that asked, after its report, to the agent that read it.**
+  `send_task` (`POST /api/sessions/<id>/handoff-followup`) is refused unless the
+  caller is the requester of the pane's live assignment (`lineage`, not
+  waivable), the pane runs an agent (`mode`), that assignment has been reported
+  (409 — collect it first), and the pane's connection still holds the handoff
+  that agent read (409). The last is checked under the connection's gate in the
+  same hold that records the follow-up, so a relaunch, a closed connection, an
+  agent that exited or was swapped at the shell, or a second `send_task` racing
+  this one refuses with nothing recorded. `override` changes none of it, and the
+  machine rule holds because the first task was already held to it.
+- **A follow-up is an ordinary handoff, born announced.** It replaces the last
+  one on the pane — whose report stands — and becomes a new assignment with a
+  new receipt, which `wait_for_task` (`GET /api/sessions/<id>/handoff-next`)
+  hands the sidecar like `read_handoff` does. Up to 8,000 characters it comes
+  back whole; above that it is paged, since no connection writes a file for it.
+  The text follows a task's rules and is never in the `send_task` answer.
+- **Nobody stands by for nothing.** `wait_for_task` answers at once, with the
+  reason and no `timed_out`, when no follow-up can come — nobody handed the pane
+  a task, the requester's pane closed, or the agent's connection or the agent
+  itself is gone — and when the agent has read a task it has not yet reported
+  on. Over the tunnel it waits on the handoff store in-process and reads the
+  route with `wait=0`, like `wait_for_results`.
+- **Rounds collapse.** A follow-up's assignment supersedes the one before it
+  between the same two panes; once that report has been collected it goes, so a
+  long exchange lists the worker once. An uncollected report stays until it is
+  returned.
 
 ## Stated properties, not discoveries
 
@@ -621,7 +674,7 @@ handoff is bound and when one goes.
   case: the route it reads answers with a *decrypted* SSH password by design,
   and `SAVED_LAYOUT_FIELDS` is what stops it.
 - **The MCP endpoint is the POST half of streamable HTTP.** No SSE `GET`
-  stream, no `DELETE`, no `Mcp-Session-Id`. The three CLIs that are handed a URL
+  stream, no `DELETE`, no `Mcp-Session-Id`. The four CLIs that are handed a URL
   today are content with request/response. Both verbs are answered with a
   deliberate `405` and `Allow: POST`, naming what the endpoint is and why the
   other half is absent, rather than Flask's bare method-not-allowed — decided
@@ -631,7 +684,7 @@ handoff is bound and when one goes.
 
 ## Which CLIs can be handed the sidecar
 
-Three of the eight, and the mechanism differs for each. Every row was checked
+Four of the eight, and the mechanism differs for each. Every row was checked
 against the installed CLI's own `--help`, which is what `"verified": true` in
 `agent_registry.json` records.
 
@@ -640,9 +693,10 @@ against the installed CLI's own `--help`, which is what `"verified": true` in
 | `claude` | `--mcp-config "<path>"` | `flag` template | positional, directly after the binary |
 | `copilot` | `--additional-mcp-config "@<path>"` — `@` marks a path rather than inline JSON, and it *augments* `~/.copilot/mcp-config.json` for the session | `flag` template | `-i "<sentence>"`, directly after the binary |
 | `codex` | `-c mcp_servers.gridvibe.…` overrides — it takes no config file at all | `style: inline_toml` | positional, directly after the binary |
+| `opencode` | an `OPENCODE_CONFIG="<path>"` prefix naming the generated `.gridvibe_opencode.json`, which opencode merges over the user's own config | `style: opencode_config` | `--prompt "<sentence>"`, directly after the binary |
 
 The opening prompt is an `opening_prompt` block in `agent_registry.json`, held to
-the same `verified` bar; the other five CLIs publish none and cannot be handed a
+the same `verified` bar; the other four CLIs publish none and cannot be handed a
 task.
 
 The quote opens *before* Copilot's `@`: `@"C:\…"` starts a here-string in
@@ -667,7 +721,42 @@ thing a torn-apart argument cannot do. Which is also why nothing rendered into
 an override carries a space it does not need: the inline identity table is
 written without one so it keeps the bare form wherever it can.
 
-`grok`, `hermes`, `opencode`, `kilo` and `kimi` publish nothing. Their only
+opencode takes no config flag. It reads one more config file, merged over the
+user's global config, from the path in `OPENCODE_CONFIG`. So the sidecar rides
+in as a variable typed **in front of** the binary, and the composer applies it
+last, after the opening prompt is placed. The form depends on the shell:
+
+| Shell | Line |
+| --- | --- |
+| POSIX (SSH, non-Windows) | `env OPENCODE_CONFIG="<p>" opencode …` |
+| WSL pane | `env WSLENV="$WSLENV:OPENCODE_CONFIG" OPENCODE_CONFIG="<p>" opencode …` |
+| PowerShell | `$env:OPENCODE_CONFIG="<p>"; opencode …` |
+| cmd | `set "OPENCODE_CONFIG=<p>" & opencode …` |
+
+`env` scopes the variable to one process in every login shell. A WSL pane's
+`opencode` is normally the Windows binary reached through interop, and a
+variable crosses to it only when `WSLENV` names it. PowerShell and cmd have no
+per-command form, so there the variable stays in the pane's shell until the next
+relaunch restarts it. A path holding `"`, `$`, a backtick or `%` cannot sit
+inside double quotes in all three shells, so it gives no prefix. The same goes
+for a generated file that is missing. Either way the agent starts without its
+tools.
+
+Known limits of that route:
+
+- **A user's own `OPENCODE_CONFIG` is replaced** in an opencode pane with the
+  box ticked. There is one variable and opencode has no include mechanism. The
+  user's global and project configs still apply.
+- **A project `opencode.json` that defines its own `mcp.gridvibe` wins**,
+  because project config ranks above `OPENCODE_CONFIG`.
+- **On PowerShell and cmd the variable outlives opencode** in that pane's shell,
+  so a hand-typed `opencode` there also gets the tools until the pane is
+  relaunched or closed.
+- **`--prompt` auto-submits only in the current TUI.** opencode's reworked TUI
+  v2, not yet its `latest` release, only prefills it. Re-verify the
+  `opening_prompt` block before trusting a newer opencode with a task.
+
+`grok`, `hermes`, `kilo` and `kimi` publish nothing. Their only
 mechanism is an `<agent> mcp add` subcommand that edits the user's own config
 permanently — a change that would outlive the pane whose checkbox asked for it,
 which is why it is absent rather than pending.
@@ -687,7 +776,7 @@ a remote pane) under its shell family, or a stated local `shell`.
 | --- | --- |
 | `available` | `true` installed, `false` missing or unsupported there (the reason in `message`), `null` the check could not run — a launch still tries |
 | `mcp_supported` | the CLI can be given GridVibe's tools |
-| `task_supported` | the CLI can be handed a `task` (`claude`, `codex`, `copilot`) |
+| `task_supported` | the CLI can be handed a `task` (`claude`, `codex`, `copilot`, `opencode`) |
 | `auto_mode_supported` | the CLI has an auto-approval flag |
 
 Preflights run on a shared, bounded four-worker pool, and the sidecar gives
@@ -717,7 +806,13 @@ remote agent ──HTTP──▶ 127.0.0.1:<assigned>   (on the remote host)
 
 Nothing is installed on the remote host. The config written there names a URL,
 not a command, which is why Codex gets `-c mcp_servers.gridvibe.url=` rather
-than the inline command-and-args form a local pane gets.
+than the inline command-and-args form a local pane gets. For opencode it is
+written in opencode's own shape, `{"mcp":{"gridvibe":{"type":"remote","url":…,"oauth":false,"timeout":150000}}}`.
+`oauth: false` stops opencode from probing for OAuth on an endpoint that has
+none, and the pane's line gets `env OPENCODE_CONFIG="<remote path>"`. The
+`timeout` is the local document's own: opencode applies it to every tool call,
+so it outlasts the longest deadline a tool sets rather than cutting a 55 s wait
+short.
 
 Every failure costs the pane its tools and never its shell: a forward the remote
 sshd refuses, or a config that cannot be written, leaves the pane running and

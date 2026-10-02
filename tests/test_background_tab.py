@@ -60,10 +60,18 @@ function fakePage(options = {}) {
             log.push('saveLayout');
             saves.push(args);
             if (options.saveThrows) throw new Error('connection lost');
+            if (options.saveHangs) return new Promise(() => {});
+            if (options.saveLate) {
+                return new Promise(resolve => setTimeout(() => {
+                    log.push('late-answer');
+                    resolve({ ok: true, revision: 8 });
+                }, options.saveLate));
+            }
             return options.saveResult === undefined ? { ok: true, revision: 8 } : options.saveResult;
         },
         adopt: (group, saved) => { log.push('adopt'); adopted.push({ group, saved }); },
-        onError: error => log.push(`error:${error.message}`)
+        onError: error => log.push(`error:${error.message}`),
+        writeTimeoutMs: options.writeTimeoutMs
     };
     const view = groupId => {
         const cached = views.get(groupId);
@@ -212,6 +220,42 @@ const out = {};
         const saved = await t.tab.writeGeometry('g-2', 7, LAYOUT);
         out[name] = { saved, log: t.log, view: t.view('g-2') };
     }
+
+    // ── the deadline ──
+    {
+        // The resize's own sequence: hold, write, release. A write that never
+        // answers must not hold the tab, or a load of it waits for ever.
+        const t = fakePage({ saveHangs: true, writeTimeoutMs: 20 });
+        const release = t.tab.hold('g-2');
+        const loaded = t.tab.settled('g-2').then(() => true);
+        let saved = null;
+        try {
+            saved = await t.tab.writeGeometry('g-2', 7, LAYOUT);
+        } finally {
+            release();
+        }
+        out.geometryTimedOut = {
+            saved,
+            log: t.log,
+            view: t.view('g-2'),
+            aborted: Boolean(t.saves[0].signal && t.saves[0].signal.aborted),
+            loaded: await Promise.race([
+                loaded, new Promise(resolve => setTimeout(() => resolve(false), 30))
+            ])
+        };
+    }
+    {
+        // An answer after the deadline changes nothing: the view was already
+        // marked to read the stored arrangement.
+        const t = fakePage({ saveLate: 40, writeTimeoutMs: 10 });
+        const saved = await t.tab.writeGeometry('g-2', 7, LAYOUT);
+        await new Promise(resolve => setTimeout(resolve, 60));
+        out.geometryLate = { saved, log: t.log, view: t.view('g-2') };
+    }
+    {
+        const t = fakePage({ saveHangs: true, writeTimeoutMs: 10 });
+        out.writeTimedOut = await t.tab.write('g-2', 7, LAYOUT);
+    }
     console.log(JSON.stringify(out));
 })().catch(error => { console.error(error); process.exitCode = 1; });
 """
@@ -343,6 +387,35 @@ class BackgroundTabTestCase(unittest.TestCase):
                     case["view"], {"disposed": False, "columnWeights": [1, 1], "stale": True}
                 )
         self.assertTrue(self.out["geometryThrew"]["saved"]["thrown"])
+
+    def test_a_geometry_write_that_never_answers_releases_the_tab_as_unknown(self):
+        case = self.out["geometryTimedOut"]
+
+        self.assertTrue(case["loaded"])
+        self.assertTrue(case["aborted"])
+        self.assertFalse(case["saved"]["ok"])
+        # It may still land, so it is an unknown outcome, not a refusal.
+        self.assertTrue(case["saved"]["thrown"])
+        self.assertIn("did not answer", case["saved"]["error"])
+        self.assertIn("markGeometryStale:g-2", case["log"])
+        self.assertTrue(any(step.startswith("error:") for step in case["log"]))
+        self.assertEqual(
+            case["view"], {"disposed": False, "columnWeights": [1, 1], "stale": True}
+        )
+
+    def test_an_answer_after_the_deadline_is_not_taken_into_the_view(self):
+        case = self.out["geometryLate"]
+
+        self.assertTrue(case["saved"]["thrown"])
+        self.assertIn("late-answer", case["log"])
+        self.assertNotIn("updateGeometry:g-2", case["log"])
+        self.assertTrue(case["view"]["stale"])
+
+    def test_a_split_write_that_never_answers_is_bounded_too(self):
+        case = self.out["writeTimedOut"]
+
+        self.assertFalse(case["ok"])
+        self.assertTrue(case["thrown"])
 
     def test_a_refused_write_takes_the_record_without_an_arrangement(self):
         refused = self.out["writeRefused"]

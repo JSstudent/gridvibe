@@ -4,7 +4,7 @@
 from the asking pane would use -- its SSH host, or this machine under its own
 shell family or a stated one -- and reports three separate facts: whether the
 CLI can start there, whether it can be given GridVibe's tools, and whether it
-can be handed a task. Only three CLIs can take a task; all eight can run.
+can be handed a task. Only four CLIs can take a task; all eight can run.
 
 A launch a tool asks for is refused whole, before any workspace, group or pane
 exists, when one of its panes names an agent that cannot start there, asks for
@@ -103,7 +103,9 @@ class AgentTypeRowsTestCase(_Case):
             self.assertEqual(row["task_supported"], web_agents._agent_accepts_task(key))
         # Running is not the same as taking a task.
         self.assertTrue(rows["claude"]["task_supported"])
-        self.assertFalse(rows["opencode"]["task_supported"])
+        self.assertTrue(rows["opencode"]["task_supported"])
+        self.assertFalse(rows["kilo"]["task_supported"])
+        self.assertTrue(rows["opencode"]["auto_mode_supported"])
         self.assertNotIn("detection", rows["claude"])
 
     def test_a_single_probe_failure_answers_check_failed_for_that_agent_only(self):
@@ -243,27 +245,27 @@ class ToolLaunchValidationTestCase(_Case):
         origin = self._pane()
 
         response, groups, workspaces = self._launch(
-            [self._agent("opencode", agent_mcp=True)], origin
+            [self._agent("kilo", agent_mcp=True)], origin
         )
 
         self._assert_nothing_launched(response, groups, workspaces)
-        self.assertIn("opencode cannot be given GridVibe's tools", response.get_json()["error"])
+        self.assertIn("kilo cannot be given GridVibe's tools", response.get_json()["error"])
 
     def test_every_pane_whose_agent_cannot_take_a_task_is_named_together(self):
         origin = self._pane(startup_mode="agent", agent_selection="claude",
                             initial_command="claude", initial_command_mode="agent")
 
         response, groups, workspaces = self._launch(
-            [self._agent("claude", task="Do it."), self._agent("opencode", task="Do it."),
+            [self._agent("claude", task="Do it."), self._agent("kilo", task="Do it."),
              self._agent("kimi", task="Do it.")],
             origin,
         )
 
         self._assert_nothing_launched(response, groups, workspaces)
         error = response.get_json()["error"]
-        self.assertIn("Pane 2: opencode cannot be handed a task", error)
+        self.assertIn("Pane 2: kilo cannot be handed a task", error)
         self.assertIn("Pane 3: kimi cannot be handed a task", error)
-        self.assertIn("Only claude, codex, copilot can be handed a task", error)
+        self.assertIn("Only claude, codex, copilot, opencode can be handed a task", error)
         self.assertEqual(store.count(), 0)
 
     @patch.object(api.os, "name", "nt")  # a shell family is a Windows choice
@@ -308,11 +310,11 @@ class SplitMcpRefusalTestCase(_Case):
 
         response = self.client.post(
             f"/api/sessions/{source.session_id}/split-intent",
-            json={"axis": "vertical", "kind": "agent", "agent": "opencode", "mcp": True},
+            json={"axis": "vertical", "kind": "agent", "agent": "kilo", "mcp": True},
         )
 
         self.assertEqual(response.status_code, 400)
-        self.assertIn("opencode cannot be given GridVibe's tools", response.get_json()["error"])
+        self.assertIn("kilo cannot be given GridVibe's tools", response.get_json()["error"])
 
 
 # ==================== the sidecar ====================

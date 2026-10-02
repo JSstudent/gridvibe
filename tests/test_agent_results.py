@@ -474,8 +474,18 @@ class HandoffStoreWiringTestCase(unittest.TestCase):
 
         def expect_and_check(*args, **kwargs):
             # The handoff store's lock is held: a drop cannot run until the
-            # assignment exists.
-            seen.append(self.handoffs._lock.locked())
+            # assignment exists. Probe from another thread because a Condition
+            # uses a reentrant lock and has no locked() method before Python 3.14.
+            def probe_lock():
+                acquired = self.handoffs._lock.acquire(blocking=False)
+                if acquired:
+                    self.handoffs._lock.release()
+                seen.append(not acquired)
+
+            probe = threading.Thread(target=probe_lock)
+            probe.start()
+            probe.join(timeout=2)
+            self.assertFalse(probe.is_alive())
             return original(*args, **kwargs)
 
         self.results.expect = expect_and_check

@@ -195,6 +195,10 @@ def _default_explorer_candidate_path(session: Any, root_path: str) -> str:
 
 
 MARKDOWN_PREVIEW_EXTENSIONS = {".md", ".markdown"}
+# Rendered as a document, never as Markdown is: the bytes are served whole by
+# the sandboxed `.../file/html` route and shown in an iframe, so no sanitizer
+# runs and nothing from the file ever enters GridVibe's own DOM.
+HTML_PREVIEW_EXTENSIONS = {".html", ".htm"}
 CODE_PREVIEW_LANGUAGES = {
     ".bash": "shell",
     ".bat": "batch",
@@ -335,6 +339,21 @@ def _is_markdown_file(path: str) -> bool:
     """Return whether an explorer file should get a Markdown preview."""
     _, extension = os.path.splitext(path.lower())
     return extension in MARKDOWN_PREVIEW_EXTENSIONS
+
+
+def _is_html_document_file(path: str) -> bool:
+    """Return whether an explorer file should get a sandboxed HTML preview."""
+    _, extension = os.path.splitext(path.lower())
+    return extension in HTML_PREVIEW_EXTENSIONS
+
+
+def _explorer_preview_type(path: str) -> Optional[str]:
+    """Return the Preview panel kind a text file offers, or None for Source only."""
+    if _is_markdown_file(path):
+        return "markdown"
+    if _is_html_document_file(path):
+        return "html"
+    return None
 
 
 def _is_tail_preview_file(path: str) -> bool:
@@ -4200,6 +4219,54 @@ def get_explorer_file_preview_payload(backend: Any, requested_path: Any) -> Dict
     }
 
 
+def read_explorer_html_document(
+    backend: Any,
+    requested_path: Any,
+    expected_revision: str = "",
+) -> bytes:
+    """Return the complete bytes of one HTML file for the sandboxed preview.
+
+    Root-confined and bounded by the same 10 MiB as every other preview, but
+    whole-or-nothing: a document cut off at the cap renders as something the
+    file never said, so an oversized file is refused rather than truncated.
+    The route that serves these bytes owns the sandbox; this only reads.
+
+    ``expected_revision`` is the ``state_revision`` Source was loaded at. The
+    frame is a second read, so without it a write landing between the two
+    would show newer bytes in Preview beside Source's older ones; a mismatch
+    is refused as a conflict instead, exactly as the Markdown preview declines
+    a render of different bytes. Empty means unbound (an older client).
+
+    The revision is checked on both sides of the read: a write landing between
+    the first ``stat`` and the read would otherwise pass the check and serve
+    its bytes. A file replaced mid-read is refused even if the bytes read were
+    the old ones; a refresh is cheap, a preview of the wrong bytes is not.
+    """
+    _root_path, file_path = backend.resolve_file(requested_path)
+    if not _is_html_document_file(file_path):
+        raise ValueError("File has no HTML preview")
+    max_bytes = EXPLORER_FILE_PREVIEW_MAX_BYTES
+    conflict = (
+        "The file changed after Source loaded it. Refresh to preview the current version."
+    )
+    size, modified = backend.stat_file(file_path)
+    if expected_revision and expected_revision != _explorer_file_state_revision(size, modified):
+        raise ExplorerFileConflictError(conflict)
+    too_large = f"HTML file exceeds the {max_bytes // (1024 * 1024)} MiB preview limit"
+    if size is not None and size > max_bytes:
+        raise ValueError(too_large)
+    content = backend.read_file_prefix(file_path, max_bytes + 1)
+    if expected_revision and expected_revision != _explorer_file_state_revision(
+        *backend.stat_file(file_path)
+    ):
+        raise ExplorerFileConflictError(conflict)
+    if len(content) > max_bytes:
+        raise ValueError(too_large)
+    if _explorer_content_looks_binary(content):
+        raise ValueError("Explorer file appears to be binary")
+    return content
+
+
 def get_explorer_file_payload(backend: Any, requested_path: Any) -> Dict[str, Any]:
     """Return the canonical read payload for one explorer file.
 
@@ -4273,7 +4340,7 @@ def get_explorer_file_payload(backend: Any, requested_path: Any) -> Dict[str, An
         # what tied the panel's existence to the eager render — and since this
         # payload also answers a successful save, flipping it there would have
         # made every save on a Markdown file rebuild the whole pane.
-        "preview_type": "markdown" if _is_markdown_file(file_path) else None,
+        "preview_type": _explorer_preview_type(file_path),
         # Never rendered here. Markdown rendering plus Bleach sanitization ran
         # on every file GET and every save, for every Markdown file, whether or
         # not the reader ever left Source view — and nothing cached it, so each

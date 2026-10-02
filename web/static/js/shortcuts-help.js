@@ -143,7 +143,7 @@
                 },
                 {
                     chords: [['Ctrl', 'Shift', 'V']],
-                    action: 'Toggle the Markdown preview'
+                    action: 'Toggle the Markdown or HTML preview'
                 },
                 {
                     chords: [['F5']],

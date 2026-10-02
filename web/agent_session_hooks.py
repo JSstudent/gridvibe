@@ -85,7 +85,7 @@ HOOK_TIMEOUT_SECONDS = 10
 #: Characters a launch line cannot carry inside double quotes in every shell a
 #: native pane runs: `"` ends the argument, `$` and a backtick expand in
 #: PowerShell and POSIX, `%` expands in cmd.
-_UNQUOTABLE_PATH_CHARACTERS = frozenset('"$`%')
+UNQUOTABLE_PATH_CHARACTERS = frozenset('"$`%')
 
 
 class SessionReportError(ValueError):
@@ -164,7 +164,7 @@ def available_claude_settings_path(path: Optional[str] = None) -> str:
         target = str(path if path is not None else claude_settings_path())
     except RuntimeError:
         return ""
-    if not target or any(ch in _UNQUOTABLE_PATH_CHARACTERS for ch in target):
+    if not target or any(ch in UNQUOTABLE_PATH_CHARACTERS for ch in target):
         return ""
     return target if os.path.isfile(target) else ""
 
@@ -172,7 +172,7 @@ def available_claude_settings_path(path: Optional[str] = None) -> str:
 def claude_settings_fragment(settings_path: Any) -> str:
     """The launch-line fragment naming the generated settings, or ""."""
     target = str(settings_path or "")
-    if not target or any(ch in _UNQUOTABLE_PATH_CHARACTERS for ch in target):
+    if not target or any(ch in UNQUOTABLE_PATH_CHARACTERS for ch in target):
         return ""
     return f'--settings "{target}"'
 

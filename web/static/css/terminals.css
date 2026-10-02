@@ -322,6 +322,11 @@
             --md-preset-vscode-ink: #d4d4d4;
             --md-preset-vscode-muted: #9d9d9d;
             --md-preset-vscode-border: #3c3c3c;
+            /* An HTML preview is somebody else's page, which assumes the
+               browser's white canvas whatever the app theme: a page with no
+               background of its own would otherwise paint dark text on the
+               dark explorer surface. */
+            --explorer-html-preview-canvas: #ffffff;
         }
 
         * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -6396,6 +6401,31 @@
         .explorer-pane[data-explorer-theme="dark"] .explorer-diff2html .d2h-code-side-emptyplaceholder {
             background: var(--explorer-bar-bg);
             border-color: var(--explorer-row-border);
+        }
+
+        /* The frame fills the panel and does its own scrolling, so the panel
+           itself never scrolls (its overflow would only ever show a second,
+           empty scrollbar beside the document's). */
+        .explorer-html-preview {
+            --explorer-html-preview-zoom: 1;
+            position: relative;
+            overflow: hidden;
+        }
+
+        /* Zoom scales the frame from outside: it is laid out at the panel's
+           size divided by the zoom and scaled back up to fill it exactly, so
+           the page sees a smaller (zoomed in) or larger (zoomed out) viewport
+           — what a browser's own zoom does — and still scrolls on its own. */
+        .explorer-html-preview-frame {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: calc(100% / var(--explorer-html-preview-zoom));
+            height: calc(100% / var(--explorer-html-preview-zoom));
+            transform: scale(var(--explorer-html-preview-zoom));
+            transform-origin: 0 0;
+            border: 0;
+            background: var(--explorer-html-preview-canvas);
         }
 
         .explorer-markdown-preview {

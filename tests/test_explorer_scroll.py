@@ -151,6 +151,7 @@ const sourcePanel = {
 const preview = scroller('explorer-preview-0', 300);
 preview.hidden = true;
 preview.dataset.explorerFilePanel = 'preview';
+preview.dataset.explorerPreviewKind = 'markdown';
 /* The give-up status paints a Refresh button into the panel's own subtree and
    wires it there, so the stub has to be able to hand it back. */
 const previewRefresh = {

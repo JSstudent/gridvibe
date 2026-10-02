@@ -24,11 +24,19 @@ The lifecycle, in the order a handoff meets it:
   stays there until a connection of that pane starts its agent, so an SSH pane
   whose first connection failed announces the task on the one that succeeds.
 * **Announced / read** -- the pointer sentence was typed on a launch line, and
-  the handoff now belongs to *that connection*: it is dropped (with its
-  temporary file) when that connection closes. A relaunch, a restore or a
-  preset launch never replays it.
+  the handoff now belongs to *that connection's agent*: it is dropped (with
+  its temporary file) when that connection closes, and when GridVibe sees that
+  agent exit or another one started in its place at the same shell
+  (``web/terminal_io.py``). A relaunch, a restore or a preset launch never
+  replays it.
 * **Undeliverable** -- the pane's agent started without GridVibe's tools, so it
   was told nothing and the pane's own output says why.
+
+A **follow-up** skips the first three: the agent that asked hands the agent it
+is already working with its next task (:meth:`HandoffStore.create_followup`),
+and the handoff is born announced on the connection that agent runs on. That
+agent fetches it with ``wait_for_task`` -- standing by inside a tool call, so
+nothing is typed into its pane -- or with ``read_handoff``.
 
 Never persisted, never logged in full: every log line names ids, a character
 count and a delivery, and never the text or a file path.
@@ -50,9 +58,9 @@ import threading
 import time
 import unicodedata
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Mapping, Optional
+from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
-from web.agent_results import MAX_RESULT_CHARS, ResultStore
+from web.agent_results import MAX_RESULT_CHARS, WORKING, ResultStore
 from web.agent_results import results as agent_results
 
 logger = logging.getLogger(__name__)
@@ -60,8 +68,8 @@ logger = logging.getLogger(__name__)
 #: The whole of what a task adds to a launch line. Restricted by test to
 #: ``[A-Za-z0-9 .,_]`` -- no quote, ``%``, ``!``, ``^``, ``&``, ``$`` or
 #: backtick -- so double quotes around it read identically in cmd, PowerShell,
-#: POSIX shells and both npm shims, and it starts with no word any of the three
-#: CLIs takes as a subcommand.
+#: POSIX shells and both npm shims, and it starts with no word any CLI that
+#: takes a task reads as a subcommand.
 HANDOFF_OPENING_PROMPT = (
     "GridVibe handed this pane a task from another agent. Call the gridvibe "
     "tool read_handoff to fetch it, then carry it out. When done, call "
@@ -115,6 +123,35 @@ _BOUND_PHASES = (WAITING, ANNOUNCED, READ, UNDELIVERABLE)
 _ALLOWED_CONTROLS = frozenset("\n\t")
 
 NO_TASK_MESSAGE = "No task was handed to this pane."
+
+# What ``wait_for_next_task`` answers.
+NEXT_TASK = "task"
+NEXT_TIMED_OUT = "timed_out"
+NEXT_NONE = "none"
+
+#: How often a pane standing by for a follow-up re-checks that one can still
+#: come. Everything that brings one wakes it at once; this bounds only how long
+#: it waits after its requester's pane has closed.
+FOLLOWUP_POLL_SECONDS = 1.0
+
+NO_FOLLOWUP_MESSAGE = (
+    "No agent can hand this pane another task: it was not handed one through "
+    "GridVibe, or the agent that handed it one has closed its pane. Nothing is "
+    "coming, so there is nothing to wait for."
+)
+
+REPORT_FIRST_MESSAGE = (
+    "This pane has a task it has read and not yet reported on. Call "
+    "report_result with its outcome first; the agent that handed it over sends "
+    "its next task only after reading that report."
+)
+
+FOLLOWUP_STALE_MESSAGE = (
+    "This pane's agent is no longer the one that read the task you handed it "
+    "-- it was relaunched, its connection closed, or it was handed another "
+    "task meanwhile. Nothing was handed over; read it again with "
+    "wait_for_results or list_panes."
+)
 
 
 class HandoffError(Exception):
@@ -252,7 +289,9 @@ def reply_instructions(from_title: str) -> str:
         "substance in the report itself: what you found, what you changed and "
         "where, and what is left. Set status to 'failed' or 'blocked' when that "
         f"is the truth. A report holds up to {MAX_RESULT_CHARS:,} characters; "
-        "for more, write a file on this machine and name it in the report."
+        "for more, write a file on this machine and name it in the report. If "
+        "the task asks you to stand by for a next one, call wait_for_task after "
+        "reporting, and again each time it says no task has come yet."
     )
 
 
@@ -352,8 +391,13 @@ class HandoffStore:
         # results store calls nothing back. None for a store that tracks no
         # reports.
         self.results = results
-        self._lock = threading.Lock()
+        # A condition rather than a bare lock, so an agent standing by for a
+        # follow-up task (:meth:`wait_for_next_task`) wakes when one is handed
+        # over or when its pane's task goes.
+        self._lock = threading.Condition()
         self._records: Dict[str, _Handoff] = {}
+        #: Panes whose agent is inside a ``wait_for_task`` call now, by count.
+        self._task_waiters: Dict[str, int] = {}
 
     # ---------------- creation ----------------
 
@@ -538,6 +582,7 @@ class HandoffStore:
                 record.cleanup = cleanup
                 chars = record.chars
                 session_id = record.session_id
+                self._lock.notify_all()
             else:
                 record = None
         if record is None:
@@ -562,6 +607,7 @@ class HandoffStore:
             record.phase = UNDELIVERABLE
             record.reason = str(reason or "")
             session_id = record.session_id
+            self._lock.notify_all()
         _run_cleanups([
             self._result_ending(
                 str(handoff_id),
@@ -576,6 +622,129 @@ class HandoffStore:
             reason or "-",
         )
         return True
+
+    # ---------------- a follow-up for the same agent ----------------
+
+    def create_followup(
+        self,
+        text: str,
+        *,
+        session_id: str,
+        previous_handoff_id: str,
+        source_session_id: str,
+        from_title: str = "",
+        from_agent: str = "",
+        now: Optional[float] = None,
+    ) -> HandoffView:
+        """Hand the agent already running in a pane its next task.
+
+        No launch line and nothing typed: the agent that read
+        ``previous_handoff_id`` is still there, and it fetches this one through
+        ``wait_for_task`` or ``read_handoff``. So the handoff is announced at
+        birth -- inline, or in pages above :data:`INLINE_TASK_MAX_CHARS`, since
+        no connection is writing a file for it -- and binding it replaces the
+        previous one, whose report stands. Refused when the previous handoff
+        is no longer the one this pane's agent read: the caller saw a pane that
+        has since moved on.
+
+        The caller holds the pane's connection gate and records the returned
+        id on that connection, so the connection closing drops it like any
+        task it announced.
+        """
+        moment = time.monotonic() if now is None else float(now)
+        handoff_id = secrets.token_hex(16)
+        record = _Handoff(
+            handoff_id=handoff_id,
+            text=str(text),
+            source_session_id=str(source_session_id or ""),
+            from_title=str(from_title or ""),
+            from_agent=str(from_agent or ""),
+            created_at=datetime.datetime.now(datetime.timezone.utc)
+            .replace(microsecond=0)
+            .isoformat(),
+            created_mono=moment,
+            phase=_UNBOUND,
+            requester_session_id=str(source_session_id or ""),
+        )
+        resolved = str(session_id or "")
+        with self._lock:
+            previous = self._records.get(str(previous_handoff_id or ""))
+            if previous is None or previous.session_id != resolved or previous.phase != READ:
+                raise HandoffError(FOLLOWUP_STALE_MESSAGE, 409)
+            self._records[handoff_id] = record
+            cleanups = self._bind_locked(record, resolved)
+            record.phase = ANNOUNCED
+            record.delivery = PAGED if planned_delivery(record.chars) == FILE else INLINE
+            view = record.view()
+            delivery = record.delivery
+            self._lock.notify_all()
+        _run_cleanups(cleanups)
+        logger.info(
+            "Handoff %s follow-up source=%s session=%s chars=%d delivery=%s",
+            handoff_id,
+            record.source_session_id or "-",
+            resolved,
+            record.chars,
+            delivery,
+        )
+        return view
+
+    def wait_for_next_task(
+        self,
+        session_id: str,
+        timeout: float,
+    ) -> Tuple[str, str]:
+        """Block until this pane's agent has a task it has not read.
+
+        Returns ``(outcome, message)``: :data:`NEXT_TASK` when one is announced
+        -- :meth:`read` fetches it -- :data:`NEXT_TIMED_OUT` when the wait ran
+        out, or :data:`NEXT_NONE` with the reason no follow-up can come, so an
+        agent is never left standing by for nobody. The results store decides
+        that: a follow-up comes only from the requester of the pane's live
+        assignment, once its report is in.
+        """
+        resolved = str(session_id or "")
+        deadline = time.monotonic() + max(0.0, float(timeout))
+        with self._lock:
+            self._task_waiters[resolved] = self._task_waiters.get(resolved, 0) + 1
+            try:
+                while True:
+                    if any(
+                        item.session_id == resolved and item.phase == ANNOUNCED
+                        for item in self._records.values()
+                    ):
+                        return NEXT_TASK, ""
+                    reason = self._no_followup_reason(resolved)
+                    if reason:
+                        return NEXT_NONE, reason
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        return NEXT_TIMED_OUT, ""
+                    # Woken by a follow-up or a drop; the poll catches only
+                    # what this store is not told about -- the requester's
+                    # pane closing, which empties the results store's side.
+                    self._lock.wait(min(remaining, FOLLOWUP_POLL_SECONDS))
+            finally:
+                left = self._task_waiters.get(resolved, 1) - 1
+                if left > 0:
+                    self._task_waiters[resolved] = left
+                else:
+                    self._task_waiters.pop(resolved, None)
+
+    def _no_followup_reason(self, session_id: str) -> str:
+        """Why no follow-up can reach this pane, or ``""`` while one can."""
+        live = self.results.live_assignment(session_id) if self.results is not None else None
+        if live is None:
+            return NO_FOLLOWUP_MESSAGE
+        if live["state"] == WORKING and live["read"]:
+            return REPORT_FIRST_MESSAGE
+        return ""
+
+    def awaiting_task(self, session_ids: Any) -> Dict[str, bool]:
+        """Whether each pane's agent is inside a ``wait_for_task`` call now."""
+        wanted = {str(item or "") for item in session_ids or ()}
+        with self._lock:
+            return {item: self._task_waiters.get(item, 0) > 0 for item in wanted}
 
     # ---------------- the receiving agent ----------------
 
@@ -703,6 +872,7 @@ class HandoffStore:
         """Forget one handoff and remove its temporary file. Idempotent."""
         with self._lock:
             record = self._records.pop(str(handoff_id or ""), None)
+            self._lock.notify_all()
         if record is None:
             return False
         if record.cleanup is not None:
@@ -778,6 +948,7 @@ class HandoffStore:
         with self._lock:
             records = list(self._records.values())
             self._records.clear()
+            self._lock.notify_all()
         _run_cleanups([record.cleanup for record in records if record.cleanup is not None])
 
     # ---------------- internals ----------------

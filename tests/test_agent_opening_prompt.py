@@ -6,9 +6,11 @@ and `web/agents.py`'s composer is the one owner of where it goes. Pinned:
 - **Directly after the binary**, for every CLI and every shell family, because
   Claude's ``--mcp-config`` takes a variable number of values and a prompt
   appended after it would be read as a second config path. Copilot takes it
-  behind ``-i``.
-- **Only beside a non-empty MCP fragment**, never beside a resume, and never
-  for a CLI whose registry block is not verified.
+  behind ``-i`` and opencode behind ``--prompt``; opencode's config variable
+  goes in front of the whole line, so its binary is not the line's first word.
+- **Only beside GridVibe's tools** (an MCP fragment or opencode's prefix),
+  never beside a resume, and never for a CLI whose registry block is not
+  verified.
 - **The line still parses as what it is**: the conversation identity readers
   and the runtime agent detector see the same agent they saw before.
 - **The rule a task is refused by** has one owner, shared by every route.
@@ -32,7 +34,7 @@ from web import agents as web_agents  # noqa: E402
 from web.agent_handoffs import HANDOFF_OPENING_PROMPT  # noqa: E402
 
 QUOTED = f'"{HANDOFF_OPENING_PROMPT}"'
-TASK_AGENTS = ("claude", "codex", "copilot")
+TASK_AGENTS = ("claude", "codex", "copilot", "opencode")
 
 
 def _pane(agent="claude", **overrides):
@@ -52,10 +54,15 @@ def _pane(agent="claude", **overrides):
 
 
 class RegistryTestCase(unittest.TestCase):
-    def test_exactly_the_three_mcp_clis_take_a_task(self):
+    def test_exactly_the_mcp_clis_with_a_verified_prompt_take_a_task(self):
         capable = web_agents.task_capable_agents()
 
         self.assertEqual(capable, sorted(TASK_AGENTS))
+        # Today that is every CLI that can be given the tools.
+        self.assertEqual(
+            capable,
+            sorted(key for key in web_agents.AGENT_REGISTRY if web_agents._agent_supports_mcp(key)),
+        )
         for key in web_agents.AGENT_REGISTRY:
             with self.subTest(agent=key):
                 self.assertEqual(
@@ -114,7 +121,7 @@ class TaskRefusalTestCase(unittest.TestCase):
                 self.assertIn(expected, web_agents.task_refusal(kind, agent, mcp))
 
     def test_a_capable_list_is_offered_with_an_incapable_agent(self):
-        refusal = web_agents.task_refusal("agent", "opencode")
+        refusal = web_agents.task_refusal("agent", "kilo")
 
         for agent in TASK_AGENTS:
             self.assertIn(agent, refusal)
@@ -135,6 +142,14 @@ class PlacementTestCase(unittest.TestCase):
         patcher = patch.object(mcp_launch, "mcp_config_path", lambda: str(self.config_path))
         patcher.start()
         self.addCleanup(patcher.stop)
+        # opencode names its own generated file, through a variable in front.
+        self.opencode_path = Path(temp.name) / ".gridvibe_opencode.json"
+        self.opencode_path.write_text('{"mcp": {}}', encoding="utf-8")
+        patcher = patch.object(
+            mcp_launch, "opencode_config_path", lambda: str(self.opencode_path)
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def _compose(self, pane, *, opening_prompt=True, **kwargs):
         return web_agents._compose_agent_startup_command(
@@ -142,7 +157,14 @@ class PlacementTestCase(unittest.TestCase):
         )
 
     def _assert_right_after_binary(self, command, agent):
-        if agent == "copilot":
+        if agent == "opencode":
+            # The prefix comes first, so the binary is found rather than led with.
+            head, placed, tail = command.partition(f"opencode --prompt {QUOTED}")
+            self.assertTrue(placed, command)
+            self.assertIn("OPENCODE_CONFIG=", head)
+            self.assertNotIn(QUOTED, head)
+            self.assertTrue(tail == "" or tail.startswith(" "), command)
+        elif agent == "copilot":
             self.assertTrue(command.startswith(f"copilot -i {QUOTED} "), command)
         else:
             self.assertTrue(command.startswith(f"{agent} {QUOTED} "), command)
@@ -192,6 +214,35 @@ class PlacementTestCase(unittest.TestCase):
         self.assertEqual(self._compose(_pane("claude", agent_mcp=False)), "claude")
         # An SSH pane whose tunnel was refused has no fragment either.
         self.assertNotIn(QUOTED, self._compose(_pane("codex", mode="ssh")))
+        self.assertEqual(self._compose(_pane("opencode", mode="ssh")), "opencode")
+
+    def test_without_opencodes_prefix_there_is_no_prompt(self):
+        """opencode's tools ride only in the prefix, so a refused prefix is no tools."""
+        self.opencode_path.unlink()
+        self.assertEqual(self._compose(_pane("opencode")), "opencode")
+
+        unquotable = Path(self.config_path.parent) / "100%" / ".gridvibe_opencode.json"
+        unquotable.parent.mkdir()
+        unquotable.write_text('{"mcp": {}}', encoding="utf-8")
+        with patch.object(mcp_launch, "opencode_config_path", lambda: str(unquotable)):
+            pane = _pane("opencode")
+            self.assertEqual(self._compose(pane), "opencode")
+            # And the pane's output names the reason the tools were missing.
+            self.assertIn(
+                "tool config for this machine was not found",
+                web_agents.opening_prompt_gap(pane),
+            )
+
+    def test_opencodes_prompt_is_one_argument_after_its_binary(self):
+        with patch.object(web_agents.os, "name", "posix"):
+            command = self._compose(_pane("opencode", agent_auto_mode=True))
+
+        tokens = shlex.split(command)
+        self.assertEqual(tokens[:2], ["env", f"OPENCODE_CONFIG={self.opencode_path}"])
+        self.assertEqual(tokens[2:5], ["opencode", "--prompt", HANDOFF_OPENING_PROMPT])
+        # Auto mode's flag follows the prompt, as every other suffix does.
+        self.assertEqual(tokens[5:], ["--auto"])
+        self.assertTrue(web_agents.launch_line_carries_opening_prompt(command))
 
     def test_not_asked_means_not_placed(self):
         self.assertNotIn(QUOTED, self._compose(_pane("codex"), opening_prompt=False))
@@ -245,7 +296,9 @@ class PlacementTestCase(unittest.TestCase):
         )
 
     def test_the_line_still_reads_as_the_agent_it_starts(self):
-        for agent in TASK_AGENTS:
+        # opencode's line leads with its config variable, so the typed-line
+        # reader never sees its binary first; the process tree names it.
+        for agent in (key for key in TASK_AGENTS if key != "opencode"):
             with self.subTest(agent=agent):
                 command = self._compose(_pane(agent))
                 detected = terminal_io._agent_from_terminal_command(command)

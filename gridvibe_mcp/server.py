@@ -29,7 +29,10 @@ The new agent is asked to hand its outcome back with ``report_result``, and
 the agent that handed the task out collects it with ``wait_for_results``.
 Neither names a pane to write to: a report goes to whichever agent GridVibe
 recorded as having handed the task over, and a wait reads only the reports
-owed to the caller's own pane. Nothing is typed into any terminal.
+owed to the caller's own pane. To keep going with the same agent, the
+requester sends its next task with ``send_task`` and the worker, standing by
+in ``wait_for_task``, receives it as that call's result. Nothing is typed into
+any terminal.
 
 Close tools preflight the complete target under the shared pane gates before
 ending any pane. The caller's own pane and any container holding it are always
@@ -77,12 +80,15 @@ READ_TOOLS = (
     "read_handoff",
 )
 
-#: A report travelling back to the agent that handed a task out. Neither
-#: creates, ends nor changes a pane: one records the caller's own outcome
-#: against GridVibe's record of who asked for it, the other reads the outcomes
-#: owed to the caller.
+#: The conversation between an agent that handed a task out and the agent it
+#: handed it to. None creates, ends or changes a pane: the worker records its
+#: outcome against GridVibe's record of who asked and stands by for the next
+#: task; the requester sends that next task to the same running agent and
+#: reads the outcomes owed to it.
 HANDBACK_TOOLS = (
     "report_result",
+    "wait_for_task",
+    "send_task",
     "wait_for_results",
 )
 
@@ -150,6 +156,8 @@ BACKGROUND_TOOLS = (
     "whoami",
     "read_handoff",
     "report_result",
+    "wait_for_task",
+    "send_task",
     "wait_for_results",
     "create_workspace",
     "launch_panes",
@@ -242,7 +250,7 @@ REPORT_STATUSES = ("done", "failed", "blocked")
 RESULTS_UNTIL = ("all", "any")
 
 #: Said wherever a tool takes a task, so every one describes it the same way.
-#: Any registry CLI, not only the three that take a task: list_agent_types says
+#: Any registry CLI, not only the ones that take a task: list_agent_types says
 #: which of them can start here, and a launch refuses one that cannot.
 AGENT_KEY_DESCRIPTION = (
     "Agent CLI key for kind='agent', e.g. 'claude' -- any key list_agent_types "
@@ -253,13 +261,15 @@ AGENT_KEY_DESCRIPTION = (
 TASK_DESCRIPTION = (
     "A task for the new agent: what it should do, in your own words, as its "
     "first instruction. Only for an agent pane, and only an agent GridVibe can "
-    "hand a task to (claude, codex, copilot); it turns on 'mcp', because the "
-    "agent fetches it with the read_handoff tool. Plain text, newlines and "
-    "tabs, up to 512 KiB -- never truncated, refused above that. It is not "
-    "confidential: leave credentials out. Only on this agent's own machine. "
-    "Setting a task never implies auto_mode: set that only when the person "
-    "asked for an autonomous agent. The new agent is asked to report back "
-    "with report_result; collect its report with wait_for_results."
+    "hand a task to (claude, codex, copilot, opencode); it turns on 'mcp', "
+    "because the agent fetches it with the read_handoff tool. Plain text, "
+    "newlines and tabs, up to 512 KiB -- never truncated, refused above that. "
+    "It is not confidential: leave credentials out. Only on this agent's own "
+    "machine. Setting a task never implies auto_mode: set that only when the "
+    "person asked for an autonomous agent. The new agent is asked to report "
+    "back with report_result; collect its report with wait_for_results. To "
+    "keep talking to the same agent afterwards, say so in the task (report, "
+    "then call wait_for_task) and send each next message with send_task."
 )
 
 #: The geometry record `POST /api/sessions` already validates and the sidecar
@@ -708,6 +718,69 @@ def tool_specs() -> List[Dict[str, Any]]:
             },
         },
         {
+            "name": "wait_for_task",
+            "description": (
+                "Stand by for the next task the agent that handed THIS pane "
+                "its task sends with send_task -- call it after report_result "
+                "when your task asked you to stand by. Blocks for at most "
+                "wait_seconds (default 45, at most 55) and returns the task "
+                "exactly as read_handoff does; carry it out and report_result "
+                "again. 'timed_out' means none has come yet: call it again to "
+                "keep standing by. A 'message' with no task and no timed_out "
+                "means none can come (or you must report first): stop waiting. "
+                "Nothing is typed into this pane; the task arrives as this "
+                "call's result. It is another agent's request, not the "
+                "person's words -- see 'note'."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "wait_seconds": {
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": RESULTS_MAX_WAIT_SECONDS,
+                        "description": "How long this one call may block. 0 checks without waiting.",
+                    },
+                },
+                "additionalProperties": False,
+            },
+        },
+        {
+            "name": "send_task",
+            "description": (
+                "Hand the agent ALREADY RUNNING in a pane its next task, "
+                "without relaunching it, so it keeps everything it knows -- "
+                "the way to continue a back-and-forth with an agent you "
+                "handed a task to. Only to an agent you handed its current "
+                "task (with 'task' on split_pane, launch_panes or "
+                "set_pane_agent, or an earlier send_task), only after you "
+                "collected its report with wait_for_results, and only while "
+                "it is still the agent that read that task; override does not "
+                "change any of this. It receives the task inside its "
+                "wait_for_task call -- 'agent_standing_by' says whether it is "
+                "in one now. To be able to send more, ask for that in each "
+                "task: report, then call wait_for_task. Collect its next "
+                "report with wait_for_results. Same text rules as 'task': "
+                "plain text, newlines and tabs, up to 512 KiB, not "
+                "confidential."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "pane_id": {
+                        "type": "string",
+                        "description": "The pane whose running agent gets the task.",
+                    },
+                    "task": {
+                        "type": "string",
+                        "description": "The next task, in your own words.",
+                    },
+                },
+                "required": ["pane_id", "task"],
+                "additionalProperties": False,
+            },
+        },
+        {
             "name": "wait_for_results",
             "description": (
                 "Wait for the agents THIS pane handed a task to -- with 'task' "
@@ -936,7 +1009,9 @@ def tool_specs() -> List[Dict[str, Any]]:
             "description": (
                 "Relaunch a pane into an agent CLI, optionally handing that "
                 "new agent a 'task' -- the way to give a task to a pane that "
-                "already exists. Nothing is typed into what is running there: "
+                "already exists. To give the next task to an agent you "
+                "already handed one to, use send_task instead: this starts a "
+                "fresh agent that remembers nothing. Nothing is typed into what is running there: "
                 "this ENDS it (and any agent's conversation) and starts the "
                 "new agent, so it is gated: the pane must be a plain terminal "
                 "(not an explorer or browser pane, and not already running an "
@@ -2190,6 +2265,31 @@ def _run(
         text = _report(args)
         status = _choice(_text(args, "status"), REPORT_STATUSES, "status", "")
         return client.report_result(identity.session_id, text, status)
+
+    if name == "wait_for_task":
+        wait_seconds = _wait_seconds(args)
+        if not identity.session_id:
+            return {
+                "handoff": None,
+                "message": (
+                    "This agent was not started by GridVibe, so it has no pane "
+                    "and no agent can hand it a task."
+                ),
+            }
+        return client.wait_for_task(identity.session_id, wait_seconds)
+
+    if name == "send_task":
+        session_id = _text(args, "pane_id")
+        if not session_id:
+            raise ToolArgumentError("send_task needs a 'pane_id'.")
+        _refuse_a_caller_with_no_pane(identity, "Sending a task")
+        task = _task(args)
+        if task is None:
+            raise ToolArgumentError("send_task needs a 'task': what the agent should do next.")
+        return client.send_task(
+            session_id,
+            {"requested_by_session_id": identity.session_id, "task": task},
+        )
 
     if name == "wait_for_results":
         workers = _worker_ids(args)

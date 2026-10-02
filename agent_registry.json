@@ -251,7 +251,21 @@
     "update": {
       "command": "opencode upgrade"
     },
-    "post_install": "Run opencode and complete /connect."
+    "post_install": "Run opencode and complete /connect.",
+    "auto_mode": {
+      "flag": "--auto",
+      "description": "Launches with permissions auto-approved unless your config explicitly denies them."
+    },
+    "mcp": {
+      "style": "opencode_config",
+      "description": "Gives this agent tools to see and build GridVibe workspaces.",
+      "verified": true
+    },
+    "opening_prompt": {
+      "flag": "--prompt {prompt}",
+      "description": "Starts the TUI and submits this as the first message.",
+      "verified": true
+    }
   },
   "kilo": {
     "label": "kilo",

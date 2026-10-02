@@ -26,6 +26,10 @@
      drops nothing: the cached view keeps its panes, scrollback and pages and
      takes the new arrangement, or, when the outcome is unknown, reads the
      stored one before it is next painted. A refused one leaves it as it was.
+     A write is bounded (`WRITE_TIMEOUT_MS`): the tab is held until it
+     answers, so one that never answered would block every load of the tab.
+     Past the bound the request is aborted and the answer is `thrown` — it may
+     still have landed.
 
    `background-split.js` and `background-resize.js` are the two edits on top.
    One instance per window is shared by both, so a load waits for either.
@@ -38,6 +42,10 @@
     if (root) root.GridVibeBackgroundTab = api;
 }(typeof globalThis !== 'undefined' ? globalThis : this, function () {
     'use strict';
+
+    /* How long a write may stay out before the tab's hold ends. The bound the
+       visible split gives its request (`SPLIT_REQUEST_TIMEOUT_MS`). */
+    const WRITE_TIMEOUT_MS = 20000;
 
     function create(page) {
         const {
@@ -60,12 +68,14 @@
                arrangement: read that before the view is next painted. */
             markGeometryStale,
             /* Write the arrangement through the revisioned transaction:
-               `{ ok, revision, error, unknown }`. */
+               `{ ok, revision, error, unknown }`. Handed a `signal` that is
+               aborted when the write runs out of time. */
             saveLayout,
             /* Take the server's record of the tab into the tab strip, with the
                arrangement just written, or null when none was. */
             adopt,
-            onError = () => {}
+            onError = () => {},
+            writeTimeoutMs = WRITE_TIMEOUT_MS
         } = page || {};
 
         /* The edits in flight, per tab. More than one can be out for the same
@@ -79,11 +89,27 @@
             if (!Number.isInteger(expectedRevision)) {
                 return { ok: false, error: 'No revision to write the arrangement against.' };
             }
+            const controller = typeof AbortController === 'function' ? new AbortController() : null;
+            let timer = null;
+            const deadline = new Promise((resolve, reject) => {
+                timer = setTimeout(() => {
+                    if (controller) controller.abort();
+                    reject(new Error(
+                        `The layout save did not answer within ${writeTimeoutMs / 1000} seconds`
+                    ));
+                }, writeTimeoutMs);
+            });
             try {
-                return await saveLayout({ groupId, expectedRevision, ...layout }) || { ok: false };
+                const sent = Promise.resolve().then(() => saveLayout({
+                    groupId, expectedRevision, ...layout,
+                    signal: controller ? controller.signal : undefined
+                }));
+                return await Promise.race([sent, deadline]) || { ok: false };
             } catch (error) {
                 onError(error);
                 return { ok: false, thrown: true, error: String((error && error.message) || error) };
+            } finally {
+                clearTimeout(timer);
             }
         }
 

@@ -92,19 +92,19 @@ Pick an agent per pane from the launcher's **Startup Mode** list, where each age
 | Claude Code | `claude` | Yes | Yes |
 | OpenAI Codex CLI | `codex` | Yes | Yes |
 | GitHub Copilot CLI | `copilot` | Yes | Yes |
-| OpenCode CLI | `opencode` | — | — |
+| OpenCode CLI | `opencode` | Yes | Yes |
 | Kilo CLI | `kilo` | Yes | — |
 | Kimi Code CLI | `kimi` | Yes | — |
 | Grok Build (xAI) | `grok` | Yes | — |
 | Hermes Agent | `hermes` | Yes | — |
 
-**GridVibe tools** is the MCP checkbox — [the section below](#gridvibe-tools-mcp) is what it gives the agent. The five agents without it have no way to register a server for one session only; theirs would edit your own config permanently, so GridVibe does not offer it.
+**GridVibe tools** is the MCP checkbox — [the section below](#gridvibe-tools-mcp) is what it gives the agent. The four agents without it have no way to register a server for one session only; theirs would edit your own config permanently, so GridVibe does not offer it.
 
 GridVibe does not bundle the CLIs. If everything shows `Missing`, install it and put its folder on `PATH` — for npm-installed agents on Windows that is usually `%APPDATA%\npm` (check with `npm prefix -g`). Restart GridVibe after PATH changes.
 
 ## GridVibe Tools (MCP)
 
-Give an agent the **MCP** checkbox and it can see and build GridVibe workspaces from inside its own pane — so you stop describing your grid to it and start asking for the grid you want. Tick **MCP** beside the agent in the launcher, or press the **MCP** button on a row in a pane's 🔄 dropdown. Claude Code, Codex, and Copilot support it.
+Give an agent the **MCP** checkbox and it can see and build GridVibe workspaces from inside its own pane — so you stop describing your grid to it and start asking for the grid you want. Tick **MCP** beside the agent in the launcher, or press the **MCP** button on a row in a pane's 🔄 dropdown. Claude Code, Codex, Copilot and OpenCode support it.
 
 **Install it first.** The tools ship with GridVibe; the package they need does not, so a normal install leaves them out.
 
@@ -117,12 +117,12 @@ make mcp-status   # run this when an agent reports the server will not start
 
 Until it is installed the checkbox still appears and the agent simply finds no tools. `make mcp-status` walks the whole chain from the outside — the generated config, the interpreter, the entry point, the handshake — and names the link that is broken.
 
-### The twenty-five tools
+### The twenty-seven tools
 
 | Tier | Tools | What the agent can do |
 | --- | --- | --- |
 | **Read** | `gridvibe_status` `list_workspaces` `list_panes` `list_agents` `list_agent_types` `list_saved_layouts` `whoami` `read_handoff` | See every workspace and the session tabs in it, every pane and where it sits in the grid, every agent and whether it is working, which agent CLIs it can start, every saved preset, which pane it is itself in, and the task another agent handed it |
-| **Hand back** | `report_result` `wait_for_results` | Report the outcome of a handed-over task to the agent that asked for it, and wait for the reports of the agents it handed tasks to |
+| **Hand back** | `report_result` `wait_for_task` `send_task` `wait_for_results` | Report the outcome of a handed-over task to the agent that asked for it, stand by for its next task, send the next task to an agent already working for it, and wait for the reports of the agents it handed tasks to |
 | **Create** | `create_workspace` `launch_panes` `open_window` `split_pane` | Make a workspace, launch a group of panes into it, give it a window, split any pane side-by-side or stacked, and hand a new agent its task |
 | **Replace** | `set_pane_agent` `set_pane_mode` | Relaunch a pane under a different agent (optionally with a task) or back to a plain shell, or turn it into a file explorer or a browser preview |
 | **Clear** | `clear_pane` | Clear one terminal pane and its replay buffer, exactly as the 🧹 button does |
@@ -137,8 +137,9 @@ Until it is installed the checkbox still appears and the agent simply finds no t
 - **Agents can save a session layout.** Ask an agent to save the current session as a named preset, optionally rooted at a stated folder. The session's window must be open so GridVibe can capture its latest layout.
 - **Every installed agent, not just the MCP ones.** An agent can list which agent CLIs are available and launch any of them. A missing agent is refused rather than quietly opened as a plain terminal.
 - **An agent only touches panes it made.** Replace, clear and close tools refuse the agent's own pane, and refuse panes it did not create — including panes from before a restart — unless you authorize that specific action in the conversation. Moving a session it did not make needs your word the same way.
-- **Agents hand each other tasks.** An agent that splits off or launches a Claude Code, Codex or Copilot pane can give it a task, and the new agent starts on it rather than waiting — ask for *"hand the findings to a new Codex agent below this one."* The task never goes to another machine, and nothing is typed into an agent that is already running.
+- **Agents hand each other tasks.** An agent that splits off or launches a Claude Code, Codex, Copilot or OpenCode pane can give it a task, and the new agent starts on it rather than waiting — ask for *"hand the findings to a new Codex agent below this one."* The task never goes to another machine, and nothing is typed into an agent that is already running.
 - **Agents report back.** An agent handed a task reports its outcome to the agent that handed it over, which can wait for several at once — ask for *"hand this to three Codex agents beside this one and wait for their results."* A pane closed before it reported is reported as ended, so nothing waits forever.
+- **Agents keep the conversation going.** An agent can send the next task to an agent it already handed one to, without restarting it, so the worker keeps everything it knows — ask for *"have a Claude agent below guess my number, and keep answering until it gets it right."* The worker stands by for the next task only when its task asks it to.
 - **It asks before it replaces.** Refused a pane it did not make, an agent gets GridVibe's own question to put to you — which pane, and what it would end — and acts only on your yes.
 - **Override mode, when you want it to stop asking.** Tick **Override** beside **MCP** in the launcher, or pick **Override** on the pane's 🔄 dropdown, and after a warning that agent closes, moves, relaunches, re-modes and clears panes it did not create without asking. It still never touches its own pane or sends a task to another machine, and its MCP frame and dashboard chip turn red.
 - **Agents launching agents is bounded.** A pane an agent creates counts one generation deeper than the pane that asked for it, and the chain stops after five.
@@ -217,6 +218,7 @@ Swap any pane between a terminal and a file explorer with one button — same di
 
 - **Files follows your shell** — opening the explorer roots on the Git repository your terminal is standing in, whatever root the pane had before. `cd` somewhere else and open Files again to re-root there.
 - **Browse & preview** — breadcrumbs, a lazy Files tree, draggable file tabs, syntax-coloured source, rendered Markdown and Mermaid, and inline images.
+- **Preview HTML pages** — an `.html` file's Preview shows the page itself, scripts and web fonts included, sealed off from GridVibe and your network. The zoom buttons zoom the page, separately from the editor font size.
 - **Edit in place** — open any UTF-8 text file, edit it, and save with `Ctrl+S`. Saves are atomic, and a conflict prompt protects files that changed on disk.
 - **Search the repo** (`Ctrl+Shift+F`) — case, whole-word, regex, file-pattern, scope, and `.gitignore` controls, with results marked when a limit is hit.
 - **Find a file** — the Files tree's filter box finds files and folders by name anywhere under the root, with the matched part highlighted in place.
@@ -226,7 +228,7 @@ Swap any pane between a terminal and a file explorer with one button — same di
 - **Download files & folders** — save files directly, or right-click any folder in Files or Preview to save it as one ZIP. Local and SFTP downloads are capped at 100 MB; multi-selected files still download individually.
 - **Select several** — `Ctrl`-click to add or remove rows, `Shift`-click for a range. Copy, Cut, Delete, Download, and Copy path act on the whole selection with one confirmation.
 - **Big files stay usable** — very large files open in a plain fast view with a notice saying what is turned off, and large diffs keep side-by-side layout, line numbers, and undo.
-- **Restores with your workspace** — root, ordered tabs, view mode, scroll, wrapping, folds, sidebar width, theme, and Markdown appearance.
+- **Restores with your workspace** — root, ordered tabs, view mode, scroll, wrapping, folds, font size and page zoom, sidebar width, theme, and Markdown appearance.
 
 ### Git sidebar
 
@@ -283,7 +285,7 @@ GridVibe does not proxy pages or bypass `X-Frame-Options`/CSP, so sites that blo
 | **Explorer** | |
 | `Ctrl+F` | Find in the open file |
 | `Ctrl+Shift+F` | Toggle repository search |
-| `Ctrl+Shift+V` | Toggle the Markdown preview |
+| `Ctrl+Shift+V` | Toggle the Markdown or HTML preview |
 | `F5` | Refresh the focused explorer |
 | `Enter` / `Shift+Enter` / `↑` / `↓` | Step through find matches (in any find bar) |
 | `Esc` | Drop the selection, or close the open menu |

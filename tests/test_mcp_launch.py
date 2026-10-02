@@ -15,8 +15,9 @@ Four properties, each of which has a way of silently not happening:
   variable names, and the prompt hook was already writing it. Each caller
   writing its own value drops the other's.
 - **The flag is composed only when the pane asks and the agent publishes one.**
-  Seven of the eight registered CLIs publish no MCP block, and their checkbox
-  is simply absent — the same thing `opencode` already does for Auto mode.
+  Four of the eight registered CLIs publish no MCP block, and their checkbox
+  is simply absent — the same thing a CLI with no auto-approval flag does for
+  Auto mode.
 - **A remote pane names the config on its *own* host.** The composed line is
   typed into whatever shell the pane holds. A local pane names the generated
   file here; a tunnelled SSH pane names what its tunnel wrote over there. A
@@ -49,8 +50,10 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 import tests  # noqa: E402,F401 - redirects durable state away from the real files
-from gridvibe_mcp.client import normalize_base_url  # noqa: E402
+from gridvibe_mcp import server as mcp_server  # noqa: E402
+from gridvibe_mcp.client import GridVibeClient, normalize_base_url  # noqa: E402
 from gridvibe_mcp.identity import IDENTITY_VARIABLES  # noqa: E402
+from gridvibe_mcp.windows import FOCUS_BUDGET_SECONDS  # noqa: E402
 from sessions.manager import SessionStatus  # noqa: E402
 from web import agents as web_agents  # noqa: E402
 from web import (  # noqa: E402
@@ -58,6 +61,7 @@ from web import (  # noqa: E402
     saved_sessions,
 )
 from web import terminal_io as terminal  # noqa: E402
+from web.agent_handoffs import HANDOFF_OPENING_PROMPT  # noqa: E402
 from web.agent_session_hooks import PANE_TOKEN_VARIABLE  # noqa: E402
 from web.terminal_cwd import (  # noqa: E402
     WSLENV_VARIABLE,
@@ -182,6 +186,106 @@ class GeneratedConfigTestCase(unittest.TestCase):
 
         # It names this install's absolute paths; committing it publishes them.
         self.assertIn(mcp_launch.MCP_CONFIG_FILENAME, ignored)
+
+
+class OpencodeConfigTestCase(unittest.TestCase):
+    """The second generated document: the same server, in opencode's schema."""
+
+    def setUp(self):
+        self.temp_dir = TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        self.mcp_path = str(Path(self.temp_dir.name) / ".gridvibe_mcp.json")
+        self.path = str(Path(self.temp_dir.name) / ".gridvibe_opencode.json")
+
+    def read(self, path=None):
+        with io.open(path or self.path, encoding="utf-8") as handle:
+            return json.load(handle)
+
+    def write_both(self, **kwargs):
+        mcp_launch.write_mcp_config("127.0.0.1", 5051, path=self.mcp_path, **kwargs)
+        return mcp_launch.write_opencode_config(
+            "127.0.0.1", 5051, path=self.path, **kwargs
+        )
+
+    def test_both_files_name_the_same_interpreter_entry_and_url(self):
+        self.assertEqual(self.write_both(), self.path)
+
+        shared = self.read(self.mcp_path)["mcpServers"]["gridvibe"]
+        server = self.read()["mcp"]["gridvibe"]
+        self.assertEqual(server["type"], "local")
+        self.assertEqual(server["command"], [shared["command"], *shared["args"]])
+        self.assertEqual(
+            server["command"],
+            [sys.executable, mcp_launch.SIDECAR_ENTRY, "--url", "http://127.0.0.1:5051"],
+        )
+
+    def test_the_identity_is_stated_as_references_to_itself(self):
+        """Exactly the names the sidecar reads, each resolved by opencode from
+        its own environment -- so one file still serves every pane."""
+        self.write_both()
+
+        environment = self.read()["mcp"]["gridvibe"]["environment"]
+        self.assertEqual(set(environment), set(IDENTITY_VARIABLES))
+        for name, value in environment.items():
+            self.assertEqual(value, "{env:%s}" % name)
+
+    def test_every_bounded_tool_call_answers_inside_opencodes_timeout(self):
+        """opencode hands this one value to every tool call, not only to the
+        tool listing, so it must outlast the longest deadline the sidecar puts
+        on a request -- a 55 s wait or focus cut at 15 s lost its answer."""
+        deadlines = []
+        client = GridVibeClient("http://127.0.0.1:5051")
+        client.request = lambda *args, **kwargs: deadlines.append(kwargs.get("timeout", client.timeout)) or {}
+
+        client.wait_for_results(
+            "pane-1", wait_seconds=mcp_server._wait_seconds({"wait_seconds": 10_000})
+        )
+        client.agent_types("pane-1")
+        client.save_group_layout("group-1", "Layout", None)
+        self.write_both()
+
+        timeout_seconds = self.read()["mcp"]["gridvibe"]["timeout"] / 1000
+        self.assertEqual(len(deadlines), 3)
+        self.assertGreater(timeout_seconds, max([client.timeout, *deadlines]))
+        self.assertGreater(timeout_seconds, FOCUS_BUDGET_SECONDS)
+
+    def test_a_windows_interpreter_path_round_trips_unchanged(self):
+        interpreter = r"C:\Program Files\Grid Vibe\.venv\Scripts\python.exe"
+
+        self.write_both(interpreter=interpreter)
+
+        self.assertEqual(self.read()["mcp"]["gridvibe"]["command"][0], interpreter)
+        self.assertEqual(self.read(self.mcp_path)["mcpServers"]["gridvibe"]["command"],
+                         interpreter)
+
+    def test_a_write_that_fails_costs_only_that_file(self):
+        unwritable = str(Path(self.temp_dir.name) / "missing" / "dir" / "opencode.json")
+
+        self.assertEqual(
+            mcp_launch.write_opencode_config("127.0.0.1", 5050, path=unwritable), ""
+        )
+        self.assertEqual(
+            mcp_launch.write_mcp_config("127.0.0.1", 5050, path=self.mcp_path),
+            self.mcp_path,
+        )
+
+    def test_the_suite_can_never_write_the_developers_own_file(self):
+        self.assertTrue(os.environ.get("GRIDVIBE_TEST_MODE"))
+        self.assertNotEqual(
+            os.path.abspath(mcp_launch.opencode_config_path()),
+            os.path.abspath(mcp_launch.PRODUCTION_OPENCODE_CONFIG_PATH),
+        )
+
+    def test_test_mode_without_a_redirect_refuses_rather_than_writing(self):
+        with patch.dict(os.environ, {"GRIDVIBE_OPENCODE_CONFIG_PATH": ""}):
+            with self.assertRaises(RuntimeError):
+                mcp_launch.opencode_config_path()
+
+    def test_the_generated_file_is_gitignored(self):
+        with io.open(PROJECT_ROOT / ".gitignore", encoding="utf-8") as handle:
+            ignored = handle.read()
+
+        self.assertIn(mcp_launch.OPENCODE_CONFIG_FILENAME, ignored)
 
 
 class PaneIdentityEnvironmentTestCase(unittest.TestCase):
@@ -454,12 +558,10 @@ class FlagCompositionTestCase(unittest.TestCase):
         )
 
     def test_an_agent_with_no_registry_block_gets_nothing(self):
-        # `opencode` publishes neither an auto_mode nor an mcp block today.
-        pane = self._pane(
-            initial_command="opencode", agent_selection="opencode", agent_mcp=True
-        )
+        # `kilo` publishes no mcp block today.
+        pane = self._pane(initial_command="kilo", agent_selection="kilo", agent_mcp=True)
 
-        self.assertEqual(web_agents._compose_agent_startup_command(pane), "opencode")
+        self.assertEqual(web_agents._compose_agent_startup_command(pane), "kilo")
 
     def test_a_missing_config_file_costs_the_flag_rather_than_the_agent(self):
         self.config_path.unlink()
@@ -774,13 +876,13 @@ class FlagCompositionTestCase(unittest.TestCase):
 
     def test_an_agent_whose_only_mechanism_edits_the_users_config_gets_nothing(self):
         """`<agent> mcp add` would outlive the pane that ticked a checkbox."""
-        for key in ("grok", "hermes", "opencode", "kilo", "kimi"):
+        for key in ("grok", "hermes", "kilo", "kimi"):
             with self.subTest(agent=key):
                 self.assertFalse(web_agents._agent_supports_mcp(key))
                 self.assertEqual(web_agents._agent_mcp_command_fragment(key), "")
 
-    def test_the_three_supported_clis_are_the_ones_that_were_verified(self):
-        for key in ("claude", "copilot", "codex"):
+    def test_the_four_supported_clis_are_the_ones_that_were_verified(self):
+        for key in ("claude", "copilot", "codex", "opencode"):
             with self.subTest(agent=key):
                 self.assertTrue(web_agents._agent_supports_mcp(key))
                 self.assertTrue(
@@ -792,10 +894,143 @@ class FlagCompositionTestCase(unittest.TestCase):
 
         self.assertEqual(options["claude"]["mcp_flag"], "--mcp-config {config}")
         self.assertTrue(options["claude"]["mcp_description"])
-        # No block, no checkbox. That is the whole mechanism for the seven CLIs
+        # No block, no checkbox. That is the whole mechanism for the CLIs
         # whose MCP support has not been verified against a current release.
-        self.assertEqual(options["opencode"]["mcp_flag"], "")
+        self.assertEqual(options["kilo"]["mcp_flag"], "")
+        self.assertFalse(options["kilo"]["mcp_supported"])
         self.assertEqual(options["other"]["mcp_flag"], "")
+        # Composed by style, so no flag string -- and still a checkbox.
+        self.assertEqual(options["opencode"]["mcp_flag"], "")
+        self.assertTrue(options["opencode"]["mcp_supported"])
+        self.assertTrue(options["opencode"]["mcp_description"])
+
+
+class OpencodePrefixCompositionTestCase(unittest.TestCase):
+    """opencode is handed the sidecar by a variable set *ahead of* its binary.
+
+    It takes no config flag; it merges the file named by ``OPENCODE_CONFIG``
+    over the user's own config for one process. So the assignment is a prefix
+    on the launch line, in the form each shell reads, and a path that prefix
+    cannot carry -- or a document that is not there -- costs the tools and
+    never the agent.
+    """
+
+    def setUp(self):
+        self.temp_dir = TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        self.config_path = Path(self.temp_dir.name) / ".gridvibe_opencode.json"
+        self.config_path.write_text("{}", encoding="utf-8")
+        self.resolved = str(self.config_path)
+        patcher = patch.object(
+            mcp_launch, "opencode_config_path", lambda: self.resolved
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _pane(self, **overrides):
+        fields = dict(
+            initial_command="opencode", initial_command_mode="agent",
+            agent_selection="opencode", agent_auto_mode=False, agent_mcp=True,
+            mode="wsl", use_wsl=False, use_powershell=False,
+        )
+        fields.update(overrides)
+        return SimpleNamespace(**fields)
+
+    def _compose(self, pane, os_name="nt", **kwargs):
+        with patch.object(web_agents.os, "name", os_name):
+            return web_agents._compose_agent_startup_command(pane, **kwargs)
+
+    def test_cmd_sets_the_variable_then_runs_the_binary(self):
+        self.assertEqual(
+            self._compose(self._pane()),
+            f'set "OPENCODE_CONFIG={self.config_path}" & opencode',
+        )
+
+    def test_powershell_sets_the_variable_then_runs_the_binary(self):
+        self.assertEqual(
+            self._compose(self._pane(use_powershell=True)),
+            f'$env:OPENCODE_CONFIG="{self.config_path}"; opencode',
+        )
+
+    def test_a_wsl_pane_also_names_the_variable_in_wslenv(self):
+        """The distro's opencode is the Windows binary reached by interop, and a
+        Linux-side variable crosses to it only when WSLENV names it."""
+        self.assertEqual(
+            self._compose(self._pane(use_wsl=True)),
+            f'env WSLENV="$WSLENV:OPENCODE_CONFIG" OPENCODE_CONFIG="{self.config_path}" opencode',
+        )
+
+    def test_a_posix_host_scopes_the_variable_to_the_one_process(self):
+        self.assertEqual(
+            self._compose(self._pane(), os_name="posix"),
+            f'env OPENCODE_CONFIG="{self.config_path}" opencode',
+        )
+
+    def test_a_pane_that_did_not_ask_gets_no_prefix(self):
+        for overrides in ({}, {"use_powershell": True}, {"use_wsl": True}):
+            with self.subTest(**overrides):
+                self.assertEqual(
+                    self._compose(self._pane(agent_mcp=False, **overrides)), "opencode"
+                )
+
+    def test_the_suffix_never_carries_the_variable(self):
+        """An assignment appended after the binary would be an argument to it."""
+        self.assertEqual(web_agents._agent_mcp_command_fragment("opencode"), "")
+
+    def test_a_path_no_shell_can_quote_gets_no_prefix(self):
+        for character in "$%`":
+            with self.subTest(character=character):
+                unquotable = Path(self.temp_dir.name) / f"oc{character}.json"
+                unquotable.write_text("{}", encoding="utf-8")
+                self.resolved = str(unquotable)
+                for overrides in ({}, {"use_powershell": True}, {"use_wsl": True}):
+                    self.assertEqual(self._compose(self._pane(**overrides)), "opencode")
+        # No Windows file can be named with `"`, so the guard is asked directly.
+        for family in ("cmd", "powershell", "posix"):
+            with self.subTest(family=family):
+                self.assertEqual(
+                    web_agents._opencode_config_prefix('C:/a"b/oc.json', family), ""
+                )
+
+    def test_a_missing_document_costs_the_tools_rather_than_the_agent(self):
+        self.config_path.unlink()
+
+        self.assertEqual(self._compose(self._pane()), "opencode")
+
+    def test_a_path_refused_in_test_mode_costs_the_tools_too(self):
+        def refuse():
+            raise RuntimeError("no redirect")
+
+        with patch.object(mcp_launch, "opencode_config_path", refuse):
+            self.assertEqual(self._compose(self._pane()), "opencode")
+
+    def test_the_clear_and_the_update_go_in_front_of_the_prefix(self):
+        for shell_kind, overrides, expected in (
+            ("cmd", {}, f'cls & opencode upgrade & set "OPENCODE_CONFIG={self.config_path}" & opencode'),
+            ("powershell", {"use_powershell": True},
+             f'Clear-Host; opencode upgrade; $env:OPENCODE_CONFIG="{self.config_path}"; opencode'),
+        ):
+            with self.subTest(shell=shell_kind):
+                pane = self._pane(**overrides)
+                line = terminal._agent_launch_line(
+                    pane, shell_kind, self._compose(pane), "opencode upgrade"
+                )
+                self.assertEqual(line, expected)
+
+    def test_an_opening_prompt_follows_the_binary_behind_the_prefix(self):
+        """The prefix is a placed MCP fragment, so a prompt may go beside it --
+        directly after the binary, never in front of the assignment."""
+        command = self._compose(self._pane(), os_name="posix", opening_prompt=True)
+        without_tools = self._compose(
+            self._pane(agent_mcp=False), os_name="posix", opening_prompt=True
+        )
+
+        self.assertEqual(
+            command,
+            f'env OPENCODE_CONFIG="{self.config_path}" '
+            f'opencode --prompt "{HANDOFF_OPENING_PROMPT}"',
+        )
+        self.assertEqual(without_tools, "opencode")
 
 
 class McpFlagGateTestCase(unittest.TestCase):
@@ -815,7 +1050,7 @@ class McpFlagGateTestCase(unittest.TestCase):
     `mcp` on a pane with no agent already is.
     """
 
-    UNSUPPORTED = ("grok", "hermes", "opencode", "kilo", "kimi")
+    UNSUPPORTED = ("grok", "hermes", "kilo", "kimi")
 
     def _entries(self, agent, mcp=True):
         return saved_sessions._normalize_terminal_entries(
@@ -836,7 +1071,7 @@ class McpFlagGateTestCase(unittest.TestCase):
                 self.assertFalse(self._entries(agent)[0]["agent_mcp"])
 
     def test_a_launch_body_still_gets_it_on_one_that_has_a_mechanism(self):
-        for agent in ("claude", "copilot", "codex"):
+        for agent in ("claude", "copilot", "codex", "opencode"):
             with self.subTest(agent=agent):
                 self.assertTrue(self._entries(agent)[0]["agent_mcp"])
 

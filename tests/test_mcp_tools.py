@@ -142,29 +142,30 @@ def schema_errors(schema, value, where="$"):
 
 
 class ToolSurfaceTestCase(unittest.TestCase):
-    def test_the_registered_surface_is_exactly_twenty_five(self):
-        """Eight read, two hand back, four create, two replace, one erases,
+    def test_the_registered_surface_is_exactly_twenty_seven(self):
+        """Eight read, four hand back, four create, two replace, one erases,
         four navigate, one saves.
 
         The last two tiers are the only things in this surface that end
         anything, and what bounds them is the gates on GridVibe's own routes
         rather than the tools themselves. `read_handoff` is a read: its only
-        side effect is a handoff's state becoming `read`. The hand-back pair
+        side effect is a handoff's state becoming `read`. The hand-back tier
         neither creates nor ends a pane: a report goes to whoever GridVibe
-        recorded as asking, and a wait reads only what is owed to the caller.
+        recorded as asking, a wait reads only what is owed to the caller, and
+        a follow-up reaches only the agent the caller handed its task to.
         """
         names = tool_names()
 
-        self.assertEqual(len(names), 25)
+        self.assertEqual(len(names), 27)
         self.assertEqual(names[:8], list(READ_TOOLS))
         self.assertEqual(READ_TOOLS[-1], "read_handoff")
-        self.assertEqual(names[8:10], list(HANDBACK_TOOLS))
-        self.assertEqual(names[10:14], list(CREATE_TOOLS))
-        self.assertEqual(names[14:16], list(RELAUNCH_TOOLS))
-        self.assertEqual(names[16:17], list(DISPLAY_TOOLS))
-        self.assertEqual(names[17:21], list(NAVIGATION_TOOLS))
-        self.assertEqual(names[21:22], list(SAVE_TOOLS))
-        self.assertEqual(names[22:], list(CLOSE_TOOLS))
+        self.assertEqual(names[8:12], list(HANDBACK_TOOLS))
+        self.assertEqual(names[12:16], list(CREATE_TOOLS))
+        self.assertEqual(names[16:18], list(RELAUNCH_TOOLS))
+        self.assertEqual(names[18:19], list(DISPLAY_TOOLS))
+        self.assertEqual(names[19:23], list(NAVIGATION_TOOLS))
+        self.assertEqual(names[23:24], list(SAVE_TOOLS))
+        self.assertEqual(names[24:], list(CLOSE_TOOLS))
 
     def test_every_tool_says_whether_it_may_move_the_persons_view(self):
         """Only an explicit focus request moves what the person sees.

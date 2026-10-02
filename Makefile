@@ -83,8 +83,8 @@ mcp-status: ## Report whether the MCP sidecar can actually start, and what GridV
 mcp-tools: ## Print the sidecar's tool surface as JSON (no running GridVibe needed).
 	@$(PYTHON) gridvibe_mcp/__main__.py --print-tools
 
-mcp-config: ## Rewrite .gridvibe_mcp.json for this install without starting GridVibe.
-	@$(PYTHON) -c "from web.mcp_launch import write_mcp_config; print(write_mcp_config() or 'could not write the config')"
+mcp-config: ## Rewrite .gridvibe_mcp.json and .gridvibe_opencode.json for this install without starting GridVibe.
+	@$(PYTHON) -c "from web.mcp_launch import write_mcp_config, write_opencode_config; print(write_mcp_config() or 'could not write the config'); print(write_opencode_config() or 'could not write the opencode config')"
 
 clean: ## Remove Python cache directories and .pyc files.
 	@$(PYTHON) -c "from pathlib import Path; import shutil; [shutil.rmtree(path, ignore_errors=True) for pattern in ('__pycache__', '.pytest_cache', '.ruff_cache') for path in Path('.').rglob(pattern) if path.is_dir()]; [path.unlink() for path in Path('.').rglob('*.pyc') if path.is_file()]"

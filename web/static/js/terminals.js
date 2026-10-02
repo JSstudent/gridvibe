@@ -2543,11 +2543,12 @@
         return descriptor;
     }
 
-    function postPresentation(url, payload) {
+    function postPresentation(url, payload, signal) {
         return fetch(url, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload)
+            body: JSON.stringify(payload),
+            signal
         });
     }
 
@@ -7054,6 +7055,7 @@
                         id: tab.id,
                         view: tab.view || null,
                         fontSize: tab.fontSize || 0,
+                        htmlZoom: tab.htmlZoom || 0,
                         preferredMode: tab.preferredMode || '',
                         dirPath: tab.dirPath || '',
                         hasDirPath: Object.prototype.hasOwnProperty.call(tab, 'dirPath')
@@ -7093,6 +7095,9 @@
                 }
                 if (saved.fontSize) {
                     tab.fontSize = saved.fontSize;
+                }
+                if (saved.htmlZoom) {
+                    tab.htmlZoom = saved.htmlZoom;
                 }
                 if (saved.preferredMode) {
                     tab.preferredMode = saved.preferredMode;
@@ -7862,7 +7867,7 @@
             discard: discardBackgroundGroupView,
             updateGeometry: updateBackgroundGroupGeometry,
             markGeometryStale: markBackgroundGroupGeometryStale,
-            saveLayout: async ({ groupId, expectedRevision, ids, rects, columnWeights, rowWeights, baseCount }) => {
+            saveLayout: async ({ groupId, expectedRevision, ids, rects, columnWeights, rowWeights, baseCount, signal }) => {
                 const group = getGroupById(groupId);
                 const workspaceLayout = buildWorkspaceLayoutSnapshotFromState(
                     ids.length, 'layout-split-local', rects, columnWeights, rowWeights, baseCount
@@ -7879,7 +7884,7 @@
                     pane_order: ids,
                     panes: ids.map(sessionId => ({ session_id: sessionId })),
                     workspace_layout: workspaceLayout
-                });
+                }, signal);
                 const body = await response.json().catch(() => ({}));
                 if (!response.ok) {
                     return { ok: false, error: body.error || `Layout save failed with status ${response.status}` };
