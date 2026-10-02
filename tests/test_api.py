@@ -22195,6 +22195,13 @@ class SettingsLauncherConfigTestCase(unittest.TestCase):
         ]
         self.assertIn("applyGroupFontOverride(index);", attach_fn)
 
+    def test_agent_options_list_lead_agents_first_then_alphabetical(self):
+        values = [item["value"] for item in web_agents._agent_options()]
+        self.assertEqual(values[:4], ["claude", "codex", "opencode", "copilot"])
+        rest = values[len(web_agents.AGENT_MENU_LEAD):-1]
+        self.assertEqual(rest, sorted(rest))
+        self.assertEqual(values[-1], "other")
+
     # ── ISSUE-2026-013 — per-agent auto-mode toggles ──
 
     def test_agent_options_expose_registry_auto_mode_flags(self):

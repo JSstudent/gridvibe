@@ -659,6 +659,11 @@ def _agent_mcp_env_prefix(
     return _opencode_config_prefix(config_path, shell_family, wsl=wsl)
 
 
+# Agents the launcher and pane menus list first, in this order; every other
+# registry agent follows alphabetically by label, and "other" comes last.
+AGENT_MENU_LEAD = ("claude", "codex", "opencode")
+
+
 def _agent_options() -> List[Dict[str, str]]:
     """Return launcher agent choices sourced from the registry."""
     options = [
@@ -688,7 +693,8 @@ def _agent_options() -> List[Dict[str, str]]:
         }
         for key, spec in AGENT_REGISTRY.items()
     ]
-    options.sort(key=lambda item: item["label"])
+    lead = {key: index for index, key in enumerate(AGENT_MENU_LEAD)}
+    options.sort(key=lambda item: (lead.get(item["value"], len(lead)), item["label"]))
     options.append(
         {
             "value": "other",
