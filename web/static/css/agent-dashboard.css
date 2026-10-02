@@ -893,6 +893,301 @@
     .dash-workspace-actions { margin-left: 0; }
 }
 
+/* ── Crews: the board above the list ──
+
+   One box per crew: the orchestrator on the left, the agents it handed tasks
+   to in a column per depth, a parent centred on its children. The grid is
+   placed by custom properties on each cell rather than inline grid lines, so
+   the narrow rule below can put every cell back into one indented column
+   without fighting an inline style. The board scrolls sideways inside itself,
+   so a deep crew never widens the dialog. */
+
+.dash-crews {
+    margin-bottom: 26px;
+    padding-bottom: 26px;
+    border-bottom: 2px solid var(--gv-dialog-border);
+}
+
+.dash-crews-title {
+    margin: 0;
+}
+
+.dash-crews-board {
+    container: dash-crews / inline-size;
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    overflow-x: auto;
+    overflow-y: hidden;
+}
+
+.dash-crew {
+    box-sizing: border-box;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    width: max-content;
+    min-width: 100%;
+    padding: 10px 12px 14px;
+    border: 1px solid var(--gv-dialog-border);
+    border-radius: 12px;
+    background: var(--gv-dialog-panel-soft);
+}
+
+.dash-crew-head,
+.dash-crew-node {
+    --dash-agent-accent: var(--agent-brand, var(--gv-accent));
+}
+
+.dash-crew-head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+    min-width: 0;
+}
+
+.dash-crew-title {
+    min-width: 0;
+    max-width: 260px;
+    overflow: hidden;
+    font-size: 12.5px;
+    font-weight: 600;
+    line-height: 1.2;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.dash-crew-agent {
+    color: var(--dash-agent-accent);
+}
+
+.dash-crew-meta {
+    color: var(--gv-dialog-muted);
+    font-size: 11.5px;
+    white-space: nowrap;
+}
+
+/* One segment per worker, by the phase of its current round. */
+.dash-crew-segments {
+    display: flex;
+    gap: 3px;
+    margin-left: auto;
+}
+
+.dash-crew-segment {
+    width: 22px;
+    height: 6px;
+    border-radius: 3px;
+    background: var(--gv-dialog-border);
+}
+
+.dash-crew-segment.is-handed { background: color-mix(in srgb, var(--gv-accent) 35%, transparent); }
+.dash-crew-segment.is-working { background: var(--gv-accent); }
+.dash-crew-segment.is-done,
+.dash-crew-segment.is-collected { background: var(--gv-success); }
+.dash-crew-segment.is-blocked,
+.dash-crew-segment.is-collected.is-tone-blocked { background: var(--gv-warning); }
+.dash-crew-segment.is-failed,
+.dash-crew-segment.is-collected.is-tone-failed { background: var(--gv-danger); }
+.dash-crew-segment.is-ended { background: var(--gv-dialog-muted); }
+
+.dash-crew-grid {
+    display: grid;
+    grid-template-columns: repeat(var(--dash-crew-depths, 1), 196px);
+    column-gap: 52px;
+    row-gap: 8px;
+}
+
+/* A parent spans its children's rows and sits at their centre. */
+.dash-crew-cell {
+    grid-column: var(--dash-crew-col, 1);
+    grid-row: var(--dash-crew-row, auto) / span var(--dash-crew-span, 1);
+    display: flex;
+    align-items: center;
+    min-width: 0;
+}
+
+.dash-crew-node {
+    box-sizing: border-box;
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    flex: 1 1 auto;
+    min-width: 0;
+    padding: 7px 9px;
+    border: 1px solid var(--gv-dialog-border);
+    border-radius: 9px;
+    background: var(--gv-bg-app);
+    color: inherit;
+    font: inherit;
+    text-align: left;
+}
+
+button.dash-crew-node {
+    cursor: pointer;
+}
+
+button.dash-crew-node:hover,
+button.dash-crew-node:focus-visible {
+    border-color: var(--gv-accent);
+    outline: none;
+}
+
+.dash-crew-node.is-root {
+    border-color: color-mix(in srgb, var(--gv-accent) 45%, transparent);
+}
+
+/* A worker whose pane has closed: drawn from what was captured when its task
+   was bound, and no control. */
+.dash-crew-node.is-ghost {
+    border-style: dashed;
+    opacity: .65;
+}
+
+.dash-crew-node-head {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    min-width: 0;
+}
+
+.dash-crew-reading {
+    display: inline-flex;
+    flex: 0 0 auto;
+}
+
+.dash-crew-node .dash-agent-icon,
+.dash-crew-head .dash-agent-icon {
+    width: 18px;
+    height: 18px;
+    border-radius: 5px;
+}
+
+.dash-crew-line {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    font-size: .78rem;
+    font-weight: 500;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.dash-crew-node-meta {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    min-width: 0;
+}
+
+/* The session, as the tab strip colours it: a square of its hue and its name. */
+.dash-crew-session {
+    max-width: 100%;
+    overflow: hidden;
+    color: color-mix(in srgb, var(--dash-session-color, var(--gv-dialog-muted)) 70%, var(--gv-dialog-text));
+    font: 500 10.5px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.dash-crew-session::before {
+    content: "";
+    display: inline-block;
+    width: 7px;
+    height: 7px;
+    margin-right: 5px;
+    border-radius: 2px;
+    background: var(--dash-session-color, var(--gv-dialog-muted));
+    vertical-align: middle;
+}
+
+.dash-crew-pill-slot,
+.dash-crew-round,
+.dash-crew-age {
+    display: inline-flex;
+    flex: 0 0 auto;
+}
+
+.dash-crew-pill-slot:empty,
+.dash-crew-round:empty,
+.dash-crew-age:empty {
+    display: none;
+}
+
+.dash-crew-pill {
+    padding: 3px 6px;
+    border: 1px solid transparent;
+    border-radius: 999px;
+    font: 600 9.5px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    white-space: nowrap;
+}
+
+.dash-crew-pill.is-handed {
+    border: 1px dashed color-mix(in srgb, var(--gv-accent) 55%, transparent);
+    color: var(--gv-accent);
+}
+
+.dash-crew-pill.is-working {
+    background: var(--gv-accent-soft);
+    color: var(--gv-accent);
+}
+
+.dash-crew-pill.is-done,
+.dash-crew-pill.is-collected {
+    background: var(--gv-success-soft);
+    color: var(--gv-success);
+}
+
+.dash-crew-pill.is-blocked,
+.dash-crew-pill.is-collected.is-tone-blocked {
+    background: var(--gv-warning-soft);
+    color: var(--gv-warning);
+}
+
+.dash-crew-pill.is-failed,
+.dash-crew-pill.is-collected.is-tone-failed {
+    background: var(--gv-danger-soft);
+    color: var(--gv-danger);
+}
+
+.dash-crew-pill.is-waiting {
+    border-color: color-mix(in srgb, var(--gv-accent) 40%, transparent);
+    color: var(--gv-accent);
+}
+
+.dash-crew-pill.is-ended,
+.dash-crew-pill.is-closed {
+    border-color: var(--gv-dialog-border);
+    color: var(--gv-dialog-muted);
+}
+
+/* The round and the age are read, not scanned: muted, and no pill. */
+.dash-crew-round,
+.dash-crew-age {
+    color: var(--gv-dialog-muted);
+    font-size: .64rem;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+
+/* Narrow: one column, indented by depth, with the lane wires in the gutter the
+   grid's left padding leaves. Equal to `DASHBOARD_CREW_NARROW_PX`. */
+@container dash-crews (max-width: 380px) {
+    .dash-crew { width: auto; }
+    .dash-crew-grid {
+        grid-template-columns: minmax(0, 1fr);
+        padding-left: 26px;
+    }
+    .dash-crew-cell {
+        grid-column: 1;
+        grid-row: auto;
+        padding-left: calc(var(--dash-crew-depth, 0) * 18px);
+    }
+}
+
 /* ── Crew wires ──
 
    Who handed a task to whom, drawn by `agent-crews.js` as one SVG inside the

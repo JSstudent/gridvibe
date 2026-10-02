@@ -27,6 +27,8 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+from tests.test_dashboard_dialog import CREW_BOARD_STUBS, HARNESS_STUBS
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 STATIC_JS = REPO_ROOT / "web" / "static" / "js"
 
@@ -212,6 +214,59 @@ class WorkspaceFocusRequestTestCase(NodeHarnessTestCase):
             """
         )
         self.assertIsNone(result["claimed"])
+
+
+@unittest.skipUnless(NODE, "Node.js is required for the dashboard targeting tests")
+class CrewBoardNodeTargetTestCase(NodeHarnessTestCase):
+    """A crew board node lands where its row does. The board is drawn by the
+    real dialog module, the press goes through its delegated listener, and the
+    request it leaves is the real `workspaces.js` one, claimed by the window
+    that arrives -- so a node whose target attributes drifted from the row's
+    would land the wrong pane, or none."""
+
+    def test_a_node_press_reaches_the_pane_in_the_window_that_arrives(self):
+        modules = "".join(
+            (STATIC_JS / name).read_text(encoding="utf-8")
+            for name in (
+                "agent-identity.js",
+                "agent-glyphs.js",
+                "session-colour.js",
+                "agent-crews.js",
+                "dashboard-dialog.js",
+            )
+        )
+        result = self._run_node(
+            HARNESS_STUBS
+            + modules
+            + FOCUS_REQUEST_SOURCE
+            + """
+            function isOwnBroadcast(payload) {
+                return Boolean(payload) && payload.source === 'workspace-window';
+            }
+            """
+            + CREW_BOARD_STUBS
+            + """
+            (async () => {
+                dashboardShown();
+                wireAgentDashboard();
+                fetchAnswer = crewReading([link('s1', 's2')]);
+                await refreshAgentDashboard();
+                body().fire('click', {
+                    target: { closest: () => ({ dataset: node('s2').dataset }) },
+                    preventDefault() {}
+                });
+                await settle();
+                report({
+                    opened: calls.openWorkspaceWindow,
+                    claimed: claimWorkspaceFocusTarget('default')
+                });
+            })().catch(error => { console.error(error); process.exit(1); });
+            """
+        )
+        self.assertEqual(
+            result["opened"], [{"workspaceId": "default", "options": {"groupId": "g1"}}]
+        )
+        self.assertEqual(result["claimed"], {"groupId": "g1", "sessionId": "s2"})
 
 
 # ── The arriving side: terminals.js holds the target until a grid satisfies it ──

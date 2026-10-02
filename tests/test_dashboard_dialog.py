@@ -2666,6 +2666,597 @@ class DashboardDialogRepaintTestCase(DashboardDialogTestCase):
         )
 
 
+# The crew board's page: the slot the module writes the board into, parsed back
+# into node and crew-head elements whose slots count every write, so an in-place
+# update is told apart from a rebuilt node. The wire layer is recorded rather
+# than run; `test_agent_crews.py` runs the real one.
+CREW_BOARD_STUBS = r"""
+const HANDED = '2026-10-02T10:00:00+00:00';
+const HANDED_S = Date.parse(HANDED) / 1000;
+
+/* One assignment, as `GET /api/dashboard` lists it. */
+function link(requester, worker, extra) {
+    return Object.assign({
+        link_id: `${requester}-${worker}`,
+        requester_session_id: requester,
+        worker_session_id: worker,
+        state: 'working',
+        read: true,
+        status: '',
+        collected: false,
+        handed_at: HANDED,
+        reported_at: '',
+        round: 1,
+        reason: '',
+        worker_agent: { agent_selection: 'claude', custom_agent: '', group_id: 'g1' }
+    }, extra || {});
+}
+
+/* An orchestrator (`s1`), two agents it handed tasks to (`s2`, `s3`), one
+   more agent (`s4`) and a pane with nothing to do with any of it (`s5`). */
+function crewReading(links, extra) {
+    const more = extra || {};
+    return snapshot([group([
+        pane({ waiting: more.waiting || '', activity: activity({ title: more.s1 || 'Plan the release', state: 'idle' }) }),
+        pane({ session_id: 's2', index: 1, agent_selection: 'codex',
+            activity: activity({ title: more.s2 || 'Review the parser' }) }),
+        pane({ session_id: 's3', index: 2, activity: activity({ title: 'Write the tests' }) }),
+        pane({ session_id: 's4', index: 3, activity: activity({ title: 'Fix the build' }) }),
+        pane({ session_id: 's5', index: 4, activity: activity({ title: 'On its own' }) })
+    ])], { links, generated_at: HANDED_S + (more.age || 30) });
+}
+
+let slotWrites = 0;
+function countedSlot(property, value) {
+    let held = value;
+    return Object.defineProperty({}, property, {
+        get() { return held; },
+        set(next) { held = next; slotWrites += 1; },
+        enumerable: true
+    });
+}
+
+function attributesOf(source) {
+    const attributes = {};
+    const pattern = /([a-zA-Z-]+)="([^"]*)"/g;
+    let found;
+    while ((found = pattern.exec(source)) !== null) { attributes[found[1]] = found[2]; }
+    return attributes;
+}
+
+function datasetOf(attributes) {
+    const dataset = {};
+    Object.keys(attributes).filter(name => name.startsWith('data-'))
+        .forEach(name => { dataset[camel(name.slice(5))] = attributes[name]; });
+    return dataset;
+}
+
+function segments(html, opener) {
+    const starts = [];
+    let found;
+    while ((found = opener.exec(html)) !== null) { starts.push({ at: found.index, match: found }); }
+    return starts.map((start, index) => ({
+        match: start.match,
+        html: html.slice(start.at, index + 1 < starts.length ? starts[index + 1].at : html.length)
+    }));
+}
+
+function first(pattern, html) {
+    const found = pattern.exec(html);
+    return found ? found[1] : '';
+}
+
+let boardWidth = 470;
+function parseBoard(slot) {
+    const html = slot.html;
+    slot.board = /class="dash-crews-board"/.test(html) ? { scrollLeft: 0, clientWidth: boardWidth } : null;
+    slot.nodes = segments(html, /<(button|div)\b([^>]*\bdata-crew-node="[^"]*"[^>]*)>/g).map(part => {
+        const attributes = attributesOf(part.match[2]);
+        const slots = {
+            '.dash-crew-line': countedSlot('textContent',
+                first(/<span class="dash-crew-line">([^<]*)<\/span>/, part.html)),
+            '.dash-crew-reading': countedSlot('innerHTML',
+                first(/<span class="dash-crew-reading">([\s\S]*?)<\/span>\s*<span class="dash-agent-icon"/, part.html)),
+            '.dash-crew-pill-slot': countedSlot('innerHTML',
+                first(/<span class="dash-crew-pill-slot">((?:<span[^>]*>[^<]*<\/span>)?)<\/span>/, part.html)),
+            '.dash-crew-round': countedSlot('textContent',
+                first(/<span class="dash-crew-round">([^<]*)<\/span>/, part.html)),
+            '.dash-crew-age': countedSlot('innerHTML',
+                first(/<span class="dash-crew-age">((?:<span[^>]*>[^<]*<\/span>)?)<\/span>/, part.html))
+        };
+        return {
+            tag: part.match[1],
+            attributes,
+            dataset: datasetOf(attributes),
+            title: attributes.title || '',
+            html: part.html,
+            slots,
+            querySelector: selector => slots[selector] || null
+        };
+    });
+    slot.heads = segments(html, /<div class="dash-crew" data-crew-root="([^"]*)">/g).map(part => {
+        const slots = {
+            '.dash-crew-title-line': countedSlot('textContent',
+                first(/<span class="dash-crew-title-line">([^<]*)<\/span>/, part.html)),
+            '.dash-crew-meta': countedSlot('textContent',
+                first(/<span class="dash-crew-meta">([^<]*)<\/span>/, part.html)),
+            '.dash-crew-segments': countedSlot('innerHTML',
+                first(/<span class="dash-crew-segments" aria-hidden="true">([\s\S]*?)<\/span>/, part.html))
+        };
+        return { dataset: { crewRoot: part.match[1] }, slots, querySelector: selector => slots[selector] || null };
+    });
+}
+
+/* The slot the module writes the board into. A full render makes a new one; a
+   board-only rebuild writes this one's `innerHTML`. */
+function makeCrewSlot(html) {
+    const slot = { html, rebuilds: 0, contains: () => false };
+    Object.defineProperty(slot, 'innerHTML', {
+        get() { return this.html; },
+        set(next) { this.html = next; this.rebuilds += 1; parseBoard(this); }
+    });
+    slot.querySelector = selector => (selector === '.dash-crews-board' ? slot.board : null);
+    slot.querySelectorAll = selector => ({
+        '[data-crew-node]': slot.nodes,
+        '[data-crew-root]': slot.heads
+    }[selector] || []);
+    parseBoard(slot);
+    return slot;
+}
+
+const crewDom = { bodyHtml: null, slot: null };
+function crewSlot() {
+    const html = body().innerHTML;
+    if (crewDom.bodyHtml !== html) {
+        crewDom.bodyHtml = html;
+        const open = '<div class="dash-crews-slot" data-dashboard-crews>';
+        const start = html.indexOf(open);
+        if (start < 0) {
+            crewDom.slot = null;
+        } else {
+            const rest = html.slice(start + open.length);
+            crewDom.slot = makeCrewSlot(rest.slice(0, rest.search(/<\/div>\s*<section class="dash-workspace/)));
+        }
+    }
+    return crewDom.slot;
+}
+function node(id) { return (crewSlot()?.nodes || []).find(entry => entry.dataset.crewNode === id) || null; }
+function nodes() { return (crewSlot()?.nodes || []).map(entry => entry.dataset.crewNode); }
+function head(root) { return (crewSlot()?.heads || []).find(entry => entry.dataset.crewRoot === root) || null; }
+function cell(id) {
+    const found = new RegExp(`<div class="dash-crew-cell" style="([^"]*)">\\s*<(?:button|div)\\b[^>]*data-crew-node="${id}"`)
+        .exec(crewSlot().html);
+    const value = name => Number(new RegExp(`--dash-crew-${name}:(\\d+)`).exec(found[1])[1]);
+    return { col: value('col'), row: value('row'), span: value('span') };
+}
+
+body().querySelectorAll = () => [];
+body().querySelector = selector => {
+    if (selector === '[data-dashboard-crews]') return crewSlot();
+    if (selector === '.dash-crews-board') return crewSlot()?.board || null;
+    return null;
+};
+
+/* The wire layer, recorded. */
+const wires = { made: [], paints: 0, paused: [], disposed: 0 };
+GridVibeAgentCrews.createWireLayer = options => {
+    const made = { mode: options.mode, card: options.card, container: options.container };
+    wires.made.push(made);
+    return {
+        paint() { wires.paints += 1; },
+        highlight() {},
+        setPaused(on) { wires.paused.push(on); },
+        dispose() { wires.disposed += 1; }
+    };
+};
+"""
+
+
+class DashboardCrewBoardTestCase(DashboardDialogTestCase):
+    """The crew board above the session list.
+
+    It is drawn from the same reading as the list, against its own structure
+    key: the shape of each crew (who sits where, and whether its pane is still
+    open) rebuilds the board alone, and everything a node says -- its title,
+    reading, phase pill, round and age -- is written in place, so a report or a
+    follow-up round never replaces a node element. The list below is never
+    touched by any of it."""
+
+    def _run_crew(self, body: str):
+        return self._run_node(CREW_BOARD_STUBS + "\ndashboardShown();\n" + body)
+
+    def test_no_links_draw_no_board(self):
+        result = self._run_crew(
+            """
+            fetchAnswer = crewReading([]);
+            await refreshAgentDashboard();
+            const empty = body().innerHTML;
+            fetchAnswer = snapshot([group([pane()])]);
+            await refreshAgentDashboard();
+            report({
+                section: empty.includes('class="dash-crews"'),
+                slot: crewSlot().html,
+                agents: sectionCounts().agents,
+                noLinksKey: body().innerHTML.includes('dash-crews"'),
+                made: wires.made.length
+            });
+            """
+        )
+        self.assertFalse(result["section"])
+        self.assertEqual(result["slot"], "")
+        self.assertEqual(result["agents"], 1)
+        self.assertFalse(result["noLinksKey"])
+        self.assertEqual(result["made"], 0)
+
+    def test_a_nested_crew_is_laid_out_by_depth_with_parents_spanning(self):
+        """`s1` handed tasks to `s2`, `s3` and a closed pane `s9`; `s2` handed
+        one on to `s4`. Depth-first in list order, ghosts last; a parent spans
+        its leaves' rows; the list below is the list it always was."""
+        result = self._run_crew(
+            """
+            fetchAnswer = crewReading([
+                link('s1', 's2'), link('s1', 's9'), link('s2', 's4'), link('s1', 's3')
+            ]);
+            await refreshAgentDashboard();
+            report({
+                order: nodes(),
+                cells: Object.fromEntries(nodes().map(id => [id, cell(id)])),
+                depths: /--dash-crew-depths:(\\d+)/.exec(crewSlot().html)[1],
+                crews: crewSlot().heads.map(entry => entry.dataset.crewRoot),
+                meta: head('s1').slots['.dash-crew-meta'].textContent,
+                segments: (head('s1').slots['.dash-crew-segments'].innerHTML.match(/dash-crew-segment/g) || []).length,
+                title: head('s1').slots['.dash-crew-title-line'].textContent,
+                agents: sectionCounts().agents,
+                rootClass: node('s1').attributes.class
+            });
+            """
+        )
+        self.assertEqual(result["order"], ["s1", "s2", "s4", "s3", "s9"])
+        self.assertEqual(result["cells"], {
+            "s1": {"col": 1, "row": 1, "span": 3},
+            "s2": {"col": 2, "row": 1, "span": 1},
+            "s4": {"col": 3, "row": 1, "span": 1},
+            "s3": {"col": 2, "row": 2, "span": 1},
+            "s9": {"col": 2, "row": 3, "span": 1},
+        })
+        self.assertEqual(result["depths"], "3")
+        self.assertEqual(result["crews"], ["s1"])
+        self.assertEqual(result["meta"], "0 of 4 reported")
+        self.assertEqual(result["segments"], 4)
+        self.assertEqual(result["title"], "Plan the release")
+        # Every live session is still listed, crew or not.
+        self.assertEqual(result["agents"], 5)
+        self.assertIn("is-root", result["rootClass"])
+
+    def test_a_live_node_carries_its_rows_target_and_a_ghost_is_no_control(self):
+        result = self._run_crew(
+            """
+            fetchAnswer = crewReading([
+                link('s1', 's2'),
+                link('s1', 's9', { state: 'reported', status: 'done', reported_at: HANDED,
+                    worker_agent: { agent_selection: 'codex', custom_agent: '', group_id: 'g1' } })
+            ]);
+            await refreshAgentDashboard();
+            const live = node('s2');
+            const ghost = node('s9');
+            report({
+                live: { tag: live.tag, dataset: live.dataset },
+                row: rowFor('pane:s2').dataset,
+                ghost: {
+                    tag: ghost.tag,
+                    dataset: ghost.dataset,
+                    line: ghost.slots['.dash-crew-line'].textContent,
+                    pill: ghost.slots['.dash-crew-pill-slot'].innerHTML,
+                    closed: ghost.html.includes('<span class="dash-crew-pill is-closed">pane closed</span>'),
+                    session: /<span class="dash-crew-session"[^>]*>([^<]*)<\\/span>/.exec(ghost.html)?.[1] || '',
+                    title: ghost.title,
+                    className: ghost.attributes.class
+                }
+            });
+            """
+        )
+        live = result["live"]
+        self.assertEqual(live["tag"], "button")
+        for name in ("dashboardAction", "workspaceId", "groupId", "sessionId"):
+            with self.subTest(attribute=name):
+                self.assertEqual(live["dataset"][name], result["row"][name])
+        self.assertEqual(live["dataset"]["dashboardKey"], "crew:s2")
+        ghost = result["ghost"]
+        self.assertEqual(ghost["tag"], "div")
+        self.assertNotIn("dashboardAction", ghost["dataset"])
+        self.assertNotIn("sessionId", ghost["dataset"])
+        # Drawn from the agent captured at bind time.
+        self.assertEqual(ghost["dataset"]["agent"], "codex")
+        self.assertEqual(ghost["line"], "OpenAI Codex CLI")
+        self.assertIn("is-done", ghost["pill"])
+        self.assertTrue(ghost["closed"])
+        self.assertEqual(ghost["session"], "API work")
+        self.assertTrue(ghost["title"].startswith("Pane closed"))
+        self.assertIn("is-ghost", ghost["className"])
+
+    def test_a_report_keeps_every_node_and_writes_only_what_changed(self):
+        result = self._run_crew(
+            """
+            fetchAnswer = crewReading([link('s1', 's2'), link('s1', 's3', { read: false })]);
+            await refreshAgentDashboard();
+            const listHtml = body().innerHTML;
+            const before = { s1: node('s1'), s2: node('s2'), s3: node('s3') };
+            const firstPill = node('s2').slots['.dash-crew-pill-slot'].innerHTML;
+            const handed = node('s3').slots['.dash-crew-pill-slot'].innerHTML;
+            slotWrites = 0;
+            fetchAnswer = crewReading([link('s1', 's2'), link('s1', 's3', { read: false })]);
+            await refreshAgentDashboard();
+            const idleWrites = slotWrites;
+            fetchAnswer = crewReading([
+                link('s1', 's2', { state: 'reported', status: 'done', reported_at: HANDED }),
+                link('s1', 's3', { read: false })
+            ], { age: 120 });
+            await refreshAgentDashboard();
+            report({
+                sameNodes: ['s1', 's2', 's3'].every(id => node(id) === before[id]),
+                rebuilds: crewSlot().rebuilds,
+                sameList: body().innerHTML === listHtml,
+                firstPill,
+                handed,
+                pill: node('s2').slots['.dash-crew-pill-slot'].innerHTML,
+                untouched: node('s3').slots['.dash-crew-pill-slot'].innerHTML,
+                age: node('s2').slots['.dash-crew-age'].innerHTML,
+                meta: head('s1').slots['.dash-crew-meta'].textContent,
+                segments: head('s1').slots['.dash-crew-segments'].innerHTML,
+                idleWrites,
+                made: wires.made.length,
+                paints: wires.paints
+            });
+            """
+        )
+        self.assertTrue(result["sameNodes"])
+        self.assertEqual(result["rebuilds"], 0)
+        self.assertTrue(result["sameList"])
+        self.assertIn("is-working", result["firstPill"])
+        self.assertIn('class="dash-crew-pill is-handed"', result["handed"])
+        self.assertIn('class="dash-crew-pill is-done"', result["pill"])
+        self.assertIn(">done<", result["pill"])
+        self.assertEqual(result["untouched"], result["handed"])
+        self.assertIn(">2m<", result["age"])
+        self.assertIn("Reported 2m ago", result["age"])
+        self.assertEqual(result["meta"], "1 of 2 reported")
+        self.assertIn("is-done", result["segments"])
+        # An unchanged poll writes nothing at all.
+        self.assertEqual(result["idleWrites"], 0)
+        # One layer, painted after every reading.
+        self.assertEqual(result["made"], 1)
+        self.assertEqual(result["paints"], 3)
+
+    def test_a_follow_up_round_keeps_the_node_and_counts_from_round_two(self):
+        result = self._run_crew(
+            """
+            fetchAnswer = crewReading([link('s1', 's2', {
+                link_id: 'a', state: 'reported', status: 'done', collected: true, reported_at: HANDED
+            })]);
+            await refreshAgentDashboard();
+            const before = node('s2');
+            const roundOne = node('s2').slots['.dash-crew-round'].textContent;
+            const markup = crewSlot().html;
+            fetchAnswer = crewReading([link('s1', 's2', { link_id: 'b', round: 2, read: false })]);
+            await refreshAgentDashboard();
+            report({
+                roundOne,
+                roundOneInMarkup: /round \\d/.test(markup),
+                same: node('s2') === before,
+                rebuilds: crewSlot().rebuilds,
+                round: node('s2').slots['.dash-crew-round'].textContent,
+                pill: node('s2').slots['.dash-crew-pill-slot'].innerHTML,
+                hover: node('s2').title,
+                linkIdInMarkup: crewSlot().html.includes('data-link') || crewSlot().html.includes('"b"')
+            });
+            """
+        )
+        self.assertEqual(result["roundOne"], "")
+        self.assertFalse(result["roundOneInMarkup"])
+        self.assertTrue(result["same"])
+        self.assertEqual(result["rebuilds"], 0)
+        self.assertEqual(result["round"], "round 2")
+        self.assertIn("is-handed", result["pill"])
+        self.assertIn("· round 2", result["hover"])
+        self.assertFalse(result["linkIdInMarkup"])
+
+    def test_a_new_worker_rebuilds_the_board_and_leaves_the_list(self):
+        result = self._run_crew(
+            """
+            fetchAnswer = crewReading([link('s1', 's2')]);
+            await refreshAgentDashboard();
+            const listHtml = body().innerHTML;
+            const slot = crewSlot();
+            fetchAnswer = crewReading([link('s1', 's2'), link('s1', 's3')]);
+            await refreshAgentDashboard();
+            report({
+                sameSlot: crewSlot() === slot,
+                rebuilds: slot.rebuilds,
+                order: nodes(),
+                sameList: body().innerHTML === listHtml,
+                made: wires.made.length,
+                disposed: wires.disposed
+            });
+            """
+        )
+        self.assertTrue(result["sameSlot"])
+        self.assertEqual(result["rebuilds"], 1)
+        self.assertEqual(result["order"], ["s1", "s2", "s3"])
+        self.assertTrue(result["sameList"])
+        # The board element was replaced, so its wires are made again on it.
+        self.assertEqual(result["made"], 2)
+        self.assertEqual(result["disposed"], 1)
+
+    def test_a_list_change_keeps_the_boards_sideways_scroll(self):
+        """A change elsewhere in the list re-renders the body, board included;
+        a deep crew the reader scrolled sideways stays where it was."""
+        result = self._run_crew(
+            """
+            fetchAnswer = crewReading([link('s1', 's2'), link('s2', 's4')]);
+            await refreshAgentDashboard();
+            const before = crewSlot().board;
+            before.scrollLeft = 190;
+            const reading = crewReading([link('s1', 's2'), link('s2', 's4')]);
+            reading.workspaces[0].groups[0].panes[4].agent_mcp = true;
+            fetchAnswer = reading;
+            await refreshAgentDashboard();
+            report({
+                replaced: crewSlot().board !== before,
+                scrollLeft: crewSlot().board.scrollLeft,
+                order: nodes()
+            });
+            """
+        )
+        self.assertTrue(result["replaced"])
+        self.assertEqual(result["scrollLeft"], 190)
+        self.assertEqual(result["order"], ["s1", "s2", "s4"])
+
+    def test_the_last_link_gone_takes_the_board_and_its_wires(self):
+        result = self._run_crew(
+            """
+            fetchAnswer = crewReading([link('s1', 's2')]);
+            await refreshAgentDashboard();
+            fetchAnswer = crewReading([]);
+            await refreshAgentDashboard();
+            report({ slot: crewSlot().html, disposed: wires.disposed });
+            """
+        )
+        self.assertEqual(result["slot"], "")
+        self.assertEqual(result["disposed"], 1)
+
+    def test_an_ended_pill_names_why_it_ended(self):
+        result = self._run_crew(
+            """
+            fetchAnswer = crewReading([
+                link('s1', 's2', { state: 'ended', reason: 'agent exited' }),
+                link('s1', 's3', { state: 'ended', reason: 'something new' })
+            ]);
+            await refreshAgentDashboard();
+            report({
+                exited: node('s2').slots['.dash-crew-pill-slot'].innerHTML,
+                other: node('s3').slots['.dash-crew-pill-slot'].innerHTML,
+                meta: head('s1').slots['.dash-crew-meta'].textContent
+            });
+            """
+        )
+        self.assertIn('title="Ended: Its agent exited before it reported"', result["exited"])
+        self.assertIn(">ended<", result["exited"])
+        self.assertIn('title="Ended before it reported"', result["other"])
+        self.assertEqual(result["meta"], "0 of 2 reported")
+
+    def test_the_waiting_orchestrator_says_how_many_it_waits_on(self):
+        result = self._run_crew(
+            """
+            fetchAnswer = crewReading([
+                link('s1', 's2'),
+                link('s1', 's3', { read: false }),
+                link('s1', 's4', { state: 'reported', status: 'blocked', reported_at: HANDED })
+            ], { waiting: 'crew' });
+            await refreshAgentDashboard();
+            const waiting = node('s1').slots['.dash-crew-pill-slot'].innerHTML;
+            fetchAnswer = crewReading([link('s1', 's2'), link('s1', 's3', { read: false }),
+                link('s1', 's4', { state: 'reported', status: 'blocked', reported_at: HANDED })]);
+            await refreshAgentDashboard();
+            report({ waiting, after: node('s1').slots['.dash-crew-pill-slot'].innerHTML,
+                blocked: node('s4').slots['.dash-crew-pill-slot'].innerHTML });
+            """
+        )
+        self.assertIn('class="dash-crew-pill is-waiting"', result["waiting"])
+        self.assertIn(">waiting on 2<", result["waiting"])
+        self.assertEqual(result["after"], "")
+        self.assertIn('class="dash-crew-pill is-blocked"', result["blocked"])
+
+    def test_a_narrow_board_draws_lanes_and_a_wide_one_fans(self):
+        result = self._run_crew(
+            """
+            boardWidth = 300;
+            fetchAnswer = crewReading([link('s1', 's2')]);
+            await refreshAgentDashboard();
+            const narrow = wires.made.map(entry => [entry.mode, entry.card]);
+            crewSlot().board.clientWidth = 470;
+            fetchAnswer = crewReading([link('s1', 's2', { read: false })]);
+            await refreshAgentDashboard();
+            report({
+                narrow,
+                modes: wires.made.map(entry => entry.mode),
+                disposed: wires.disposed,
+                container: wires.made[1].container === crewSlot().board
+            });
+            """
+        )
+        self.assertEqual(result["narrow"], [["lane", ""]])
+        self.assertEqual(result["modes"], ["lane", "fan"])
+        self.assertEqual(result["disposed"], 1)
+        self.assertTrue(result["container"])
+
+    def test_the_wires_stop_with_the_poll(self):
+        result = self._run_crew(
+            """
+            shell().classList.remove('visible');
+            fetchAnswer = crewReading([link('s1', 's2')]);
+            showDashboard();
+            await settle();
+            const made = wires.paused.slice();
+            document.hidden = true;
+            document.fire('visibilitychange');
+            const hidden = wires.paused[wires.paused.length - 1];
+            document.hidden = false;
+            document.fire('visibilitychange');
+            await settle();
+            const back = wires.paused[wires.paused.length - 1];
+            closeAgentDashboardDialog();
+            report({ made, hidden, back, shut: wires.paused[wires.paused.length - 1] });
+            """
+        )
+        self.assertEqual(result["made"], [False])
+        self.assertTrue(result["hidden"])
+        self.assertFalse(result["back"])
+        self.assertTrue(result["shut"])
+
+    def test_a_node_press_opens_the_pane_it_names(self):
+        result = self._run_crew(
+            """
+            wireAgentDashboard();
+            fetchAnswer = crewReading([link('s1', 's2')]);
+            await refreshAgentDashboard();
+            body().fire('click', {
+                target: { closest: () => ({ dataset: node('s2').dataset }) },
+                preventDefault() {}
+            });
+            await settle();
+            report({ opened: calls.openWorkspaceWindow, targets: calls.focusTargets });
+            """
+        )
+        self.assertEqual(
+            result["opened"], [{"workspaceId": "default", "options": {"groupId": "g1"}}]
+        )
+        self.assertEqual(result["targets"][0]["options"], {"groupId": "g1", "sessionId": "s2"})
+        self.assertEqual(result["targets"][0]["openedSoFar"], 0)
+
+
+class DashboardCrewBoardStylingTestCase(unittest.TestCase):
+    """The board's stylesheet hooks: the narrow breakpoint is the module's own
+    constant, and the board's colours are the status tokens."""
+
+    CSS = REPO_ROOT / "web" / "static" / "css" / "agent-dashboard.css"
+
+    def test_the_narrow_rule_is_the_modules_breakpoint(self):
+        css = self.CSS.read_text(encoding="utf-8")
+        script = DASHBOARD_DIALOG_JS.read_text(encoding="utf-8")
+        width = script.split("const DASHBOARD_CREW_NARROW_PX = ", 1)[1].split(";", 1)[0]
+        self.assertIn(f"@container dash-crews (max-width: {width}px)", css)
+        self.assertIn("container: dash-crews / inline-size;", css)
+
+    def test_the_board_wears_only_tokens(self):
+        css = self.CSS.read_text(encoding="utf-8")
+        board = css[css.index("/* ── Crews: the board above the list ──"):]
+        self.assertNotIn("#", board.replace("/* ──", ""))
+        self.assertNotIn("rgb(", board)
+        self.assertNotIn("rgba(", board)
+        for token in ("--gv-accent", "--gv-success", "--gv-warning", "--gv-danger", "--gv-dialog-muted"):
+            with self.subTest(token=token):
+                self.assertIn(f"var({token})", board)
+
 
 class OverrideModeStylingTestCase(unittest.TestCase):
     """Override mode's red is a theme token, defined for every theme and read
