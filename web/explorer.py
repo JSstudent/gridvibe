@@ -4236,20 +4236,30 @@ def read_explorer_html_document(
     would show newer bytes in Preview beside Source's older ones; a mismatch
     is refused as a conflict instead, exactly as the Markdown preview declines
     a render of different bytes. Empty means unbound (an older client).
+
+    The revision is checked on both sides of the read: a write landing between
+    the first ``stat`` and the read would otherwise pass the check and serve
+    its bytes. A file replaced mid-read is refused even if the bytes read were
+    the old ones; a refresh is cheap, a preview of the wrong bytes is not.
     """
     _root_path, file_path = backend.resolve_file(requested_path)
     if not _is_html_document_file(file_path):
         raise ValueError("File has no HTML preview")
     max_bytes = EXPLORER_FILE_PREVIEW_MAX_BYTES
+    conflict = (
+        "The file changed after Source loaded it. Refresh to preview the current version."
+    )
     size, modified = backend.stat_file(file_path)
     if expected_revision and expected_revision != _explorer_file_state_revision(size, modified):
-        raise ExplorerFileConflictError(
-            "The file changed after Source loaded it. Refresh to preview the current version."
-        )
+        raise ExplorerFileConflictError(conflict)
     too_large = f"HTML file exceeds the {max_bytes // (1024 * 1024)} MiB preview limit"
     if size is not None and size > max_bytes:
         raise ValueError(too_large)
     content = backend.read_file_prefix(file_path, max_bytes + 1)
+    if expected_revision and expected_revision != _explorer_file_state_revision(
+        *backend.stat_file(file_path)
+    ):
+        raise ExplorerFileConflictError(conflict)
     if len(content) > max_bytes:
         raise ValueError(too_large)
     if _explorer_content_looks_binary(content):

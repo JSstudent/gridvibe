@@ -671,8 +671,9 @@ unless the task explicitly changes this contract.
   (`markdown`, `html`, `image` or null) independently of fetched HTML.
 - HTML preview (`.html`/`.htm`) is `GET .../file/html`, root-confined and whole
   or nothing: a file over 10 MiB is refused, never truncated into a document it
-  does not contain. It is bound to Source's `state_revision` (`revision=`); a
-  mismatch is a 409, never the newer bytes. Its refusals are escaped HTML under
+  does not contain. It is bound to Source's `state_revision` (`revision=`),
+  checked before and again after the read; a mismatch at either is a 409,
+  never the newer bytes. Its refusals are escaped HTML under
   the same sandbox headers, because the frame is the only surface it answers
   to, and each posts its status to the panel. See
   [Security](#security-and-trust) for the sandbox itself. Source opens must not render/sanitize an unused
@@ -2157,7 +2158,10 @@ in `README.md`; state the rules a change has to keep.
   `applySplitSlotGeometry` paints, so a fixed-layout view becomes a split one as
   an on-screen resize makes it). A refusal or a missing revision leaves the view
   untouched. A thrown write, an `unknown` answer, or one accepted without a
-  newer revision marks the view stale. Until it is painted again, reads of the
+  newer revision marks the view stale. Both background writes are bounded
+  (`WRITE_TIMEOUT_MS` in `background-tab.js`, the visible split's 20 seconds):
+  a write that has not answered by then is aborted and answered as thrown, so
+  the hold ends and a load of the tab never waits on a stalled request. Until it is painted again, reads of the
   tab take the server's record. Its presentation captures omit the
   arrangement, and so do captures of any background tab while an edit holds
   it (`held()`), before the answer has updated or marked the view. A queued

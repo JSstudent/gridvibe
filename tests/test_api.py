@@ -20859,6 +20859,30 @@ class ExplorerDownloadTestCase(unittest.TestCase):
         self.assertEqual(unbound.status_code, 200)
         self.assertIn("newer bytes", unbound.get_data(as_text=True))
 
+    def test_html_route_refuses_a_write_that_lands_during_its_read(self):
+        """The revision matches when checked, then a write lands before the
+        bytes are read: Preview must not serve them as Source's version."""
+        path = self.root / "mock.html"
+        path.write_text(self._HTML_DOC, encoding="utf-8")
+        session_id = self._create_local_explorer_session()
+        revision = self.client.get(
+            f"/api/explorer/{session_id}/file?path=mock.html"
+        ).get_json()["state_revision"]
+        original_read = web_explorer._LocalExplorerBackend.read_file_prefix
+
+        def read_after_a_write(backend, file_path, max_bytes):
+            path.write_text(self._HTML_DOC + "<p>newer bytes</p>", encoding="utf-8")
+            return original_read(backend, file_path, max_bytes)
+
+        with patch.object(
+            web_explorer._LocalExplorerBackend, "read_file_prefix", read_after_a_write
+        ):
+            response = self.client.get(
+                f"/api/explorer/{session_id}/file/html?path=mock.html&revision={revision}"
+            )
+        self.assertEqual(response.status_code, 409)
+        self.assertNotIn("newer bytes", response.get_data(as_text=True))
+
     def test_html_route_refusals_tell_the_panel_their_status(self):
         (self.root / "notes.txt").write_text("hi", encoding="utf-8")
         session_id = self._create_local_explorer_session()
