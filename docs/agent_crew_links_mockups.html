@@ -1,0 +1,820 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agent Crew Links</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Sora:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=JetBrains+Mono:wght@500;700&display=swap">
+<style>
+/* Layout: one reading column of prose; mockups break out to a wider stage.
+   Palette follows GridVibe's own tokens (cyan accent, navy dialog in dark). */
+:root {
+  --bg: #eef1f5;
+  --surface: #ffffff;
+  --surface-2: #f6f8fb;
+  --ink: #111827;
+  --muted: #4b5563;
+  --faint: #6b7280;
+  --line: rgba(75, 85, 99, 0.22);
+  --accent: #087f9b;
+  --accent-soft: rgba(8, 145, 178, 0.12);
+  --ok: #047857;
+  --warn: #b45309;
+  --bad: #dc2626;
+  --m-bg: #f8fafc;
+  --m-panel: rgba(229, 231, 235, 0.7);
+  --shadow: 0 14px 36px rgba(15, 23, 42, 0.10);
+  --hue-mix: 55%;
+  --f-display: "Sora", "Segoe UI", system-ui, sans-serif;
+  --f-body: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+  --f-mono: "JetBrains Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0a0f1d; --surface: #111a2e; --surface-2: #0d1426; --ink: #e7edf6; --muted: #94a3b8; --faint: #7c8aa0;
+    --line: rgba(148, 163, 184, 0.18); --accent: #00d9ff; --accent-soft: rgba(0, 217, 255, 0.12);
+    --ok: #22c55e; --warn: #f59e0b; --bad: #ef4444; --m-bg: #16203a; --m-panel: rgba(7, 11, 24, 0.46);
+    --shadow: 0 24px 60px rgba(4, 8, 20, 0.52); --hue-mix: 100%; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0a0f1d; --surface: #111a2e; --surface-2: #0d1426; --ink: #e7edf6; --muted: #94a3b8; --faint: #7c8aa0;
+  --line: rgba(148, 163, 184, 0.18); --accent: #00d9ff; --accent-soft: rgba(0, 217, 255, 0.12);
+  --ok: #22c55e; --warn: #f59e0b; --bad: #ef4444; --m-bg: #16203a; --m-panel: rgba(7, 11, 24, 0.46);
+  --shadow: 0 24px 60px rgba(4, 8, 20, 0.52); --hue-mix: 100%; color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+body { background: var(--bg); color: var(--ink); font: 15px/1.6 var(--f-body); }
+.page { max-width: 1120px; margin: 0 auto; padding-inline: 20px; padding-block: 40px 96px; }
+.prose { max-width: 68ch; }
+h1, h2, h3 { font-family: var(--f-display); text-wrap: balance; letter-spacing: -0.01em; line-height: 1.2; margin: 0; }
+h1 { font-size: clamp(2rem, 4.4vw, 2.9rem); font-weight: 700; }
+h2 { font-size: 1.55rem; font-weight: 600; margin-top: 64px; }
+h3 { font-size: 1.12rem; font-weight: 600; }
+p { margin: 0; }
+.stack { display: flex; flex-direction: column; gap: 14px; }
+.eyebrow { font: 600 11px/1 var(--f-mono); letter-spacing: .12em; text-transform: uppercase; color: var(--accent); }
+.lead { font-size: 1.1rem; color: var(--muted); }
+code, .mono { font-family: var(--f-mono); font-size: .86em; }
+code { background: var(--accent-soft); padding: 1px 5px; border-radius: 4px; }
+ul.tight { margin: 0; padding-left: 1.2em; display: flex; flex-direction: column; gap: 6px; }
+a { color: var(--accent); }
+
+/* ── Scenario bar ── */
+.scen {
+  position: sticky; top: env(safe-area-inset-top, 0px); z-index: 10; margin-top: 28px;
+  background: color-mix(in srgb, var(--bg) 88%, transparent); backdrop-filter: blur(8px);
+  border-bottom: 1px solid var(--line); padding-block: 10px;
+}
+.scen-in { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; }
+.scen-label { font: 600 11px/1 var(--f-mono); letter-spacing: .1em; text-transform: uppercase; color: var(--faint); }
+.steps { display: flex; flex-wrap: wrap; gap: 4px; }
+.btn {
+  font: 500 13px/1 var(--f-body); color: var(--ink); background: var(--surface); border: 1px solid var(--line);
+  border-radius: 999px; padding: 7px 12px; cursor: pointer; display: inline-flex; align-items: center; gap: 6px;
+}
+.btn:hover { border-color: var(--accent); }
+.btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.btn[aria-pressed="true"] { background: var(--accent); color: var(--surface); border-color: var(--accent); }
+.btn .n { font: 700 10px/1 var(--f-mono); opacity: .7; }
+.scen-cap { flex: 1 1 320px; min-width: 0; font-size: 13.5px; color: var(--muted); }
+
+/* ── Facts / legend ── */
+.facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; margin-top: 20px; }
+.fact { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.fact b { font-family: var(--f-display); font-weight: 600; }
+.fact.gap { border-style: dashed; }
+.fact .tag { font: 600 10px/1 var(--f-mono); letter-spacing: .08em; text-transform: uppercase; color: var(--faint); }
+.fact.gap .tag { color: var(--warn); }
+.legend { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 8px 28px; margin-top: 18px; }
+.lg { display: grid; grid-template-columns: 124px minmax(0, 1fr); align-items: center; gap: 12px; padding-block: 6px; border-bottom: 1px solid var(--line); }
+.lg svg { width: 124px; height: 22px; overflow: visible; }
+.lg b { font-weight: 600; }
+.lg span { color: var(--muted); font-size: 13.5px; }
+.lg-dot { display: flex; align-items: center; justify-content: center; gap: 8px; }
+
+/* ── Proposals ── */
+.prop { display: grid; grid-template-columns: 300px minmax(0, 1fr); gap: 32px; margin-top: 36px; align-items: start; }
+.prop-wide { display: flex; flex-direction: column; gap: 18px; margin-top: 40px; }
+.prop-text { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.prop-id { font: 700 12px/1 var(--f-mono); color: var(--accent); border: 1px solid var(--accent); border-radius: 6px; padding: 4px 7px; align-self: flex-start; }
+.headrow { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.effort { font: 500 11px/1 var(--f-mono); color: var(--faint); }
+.pc { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 16px; }
+.pc h4 { margin: 0 0 6px; font: 600 11px/1 var(--f-mono); letter-spacing: .1em; text-transform: uppercase; }
+.pc .plus h4 { color: var(--ok); }
+.pc .minus h4 { color: var(--warn); }
+.pc ul { margin: 0; padding-left: 1.1em; display: flex; flex-direction: column; gap: 4px; font-size: 14px; color: var(--muted); }
+.reco-mark { font: 600 10px/1 var(--f-mono); letter-spacing: .08em; text-transform: uppercase; color: var(--ok); border: 1px solid var(--ok); border-radius: 999px; padding: 4px 8px; }
+.hint { font-size: 12.5px; color: var(--faint); }
+.scroll-x { overflow-x: auto; max-width: 100%; }
+
+/* ── Mock: shared ── */
+.mock { font: 12px/1.35 var(--f-body); color: var(--ink); }
+.wire-root { position: relative; }
+svg.wires { position: absolute; left: 0; top: 0; pointer-events: none; overflow: visible; z-index: 2; }
+.row {
+  display: flex; align-items: center; gap: 7px; padding: 5px 7px; border-radius: 7px; min-width: 0;
+  transition: opacity .2s, box-shadow .2s; position: relative;
+}
+.row:hover { background: var(--accent-soft); }
+.tt { flex: 1 1 auto; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.nm { font-weight: 600; font-size: 11.5px; color: var(--brand); white-space: nowrap; flex: 0 0 auto; }
+.mk {
+  flex: 0 0 auto; width: 20px; height: 20px; border-radius: 5px; display: grid; place-items: center;
+  font: 700 9px/1 var(--f-mono); color: var(--brand); background: color-mix(in srgb, var(--brand) 16%, transparent);
+}
+.mk.mini { width: 15px; height: 15px; font-size: 7.5px; border-radius: 4px; }
+.chip {
+  flex: 0 0 auto; font: 600 9.5px/1 var(--f-mono); padding: 3px 5px; border-radius: 4px;
+  border: 1px solid var(--line); color: var(--muted); white-space: nowrap; display: inline-flex; align-items: center; gap: 4px;
+}
+.chip.mcp { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 40%, transparent); }
+.chip.crew { color: var(--accent); background: var(--accent-soft); border-color: transparent; }
+.chip.crew svg { width: 11px; height: 11px; }
+.chip.link { padding: 1px 4px 1px 3px; }
+.chip.link svg { width: 9px; height: 9px; color: var(--accent); }
+.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.row.ghost { opacity: .55; }
+.row.ghost .tt { text-decoration: line-through; text-decoration-color: color-mix(in srgb, var(--muted) 60%, transparent); }
+.row.stub { color: var(--muted); font-size: 11.5px; padding-block: 3px; }
+.row.stub .tt { font-style: italic; }
+
+/* state marks */
+.st { flex: 0 0 14px; width: 14px; height: 14px; display: inline-grid; place-items: center; position: relative; }
+.st::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--faint); }
+.st-working::before {
+  width: 12px; height: 12px; background: none; border: 2px solid color-mix(in srgb, var(--ok) 22%, transparent);
+  border-top-color: var(--ok); border-right-color: var(--ok); box-shadow: 0 0 6px color-mix(in srgb, var(--ok) 45%, transparent);
+  animation: spin .8s linear infinite;
+}
+.st-waiting::before {
+  width: 12px; height: 12px; background: none; border: 2px dotted var(--accent);
+  box-shadow: 0 0 6px color-mix(in srgb, var(--accent) 35%, transparent); animation: spin 3.2s linear infinite;
+}
+.st-idle::before { content: "z"; width: auto; height: auto; background: none; border-radius: 0; font: 700 10px/1 var(--f-mono); color: var(--faint); }
+.st-starting::before { background: none; border: 1.5px solid var(--faint); animation: breathe 1.4s ease-in-out infinite; }
+.st-closed::before { content: "×"; width: auto; height: auto; background: none; border-radius: 0; font: 700 12px/1 var(--f-mono); color: var(--faint); }
+@keyframes spin { to { transform: rotate(360deg); } }
+@keyframes breathe { 50% { opacity: .3; transform: scale(.8); } }
+
+/* wires */
+.w { fill: none; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; transition: opacity .2s; }
+.w-handed { stroke: var(--accent); stroke-opacity: .6; stroke-dasharray: 2 4; }
+.w-working { stroke: var(--accent); stroke-dasharray: 6 6; animation: flow .9s linear infinite; }
+.w-working.w-both { stroke-width: 2.1; filter: drop-shadow(0 0 3px color-mix(in srgb, var(--accent) 70%, transparent)); }
+.w-done { stroke: var(--ok); stroke-width: 2; }
+.w-collected { stroke: var(--ok); stroke-opacity: .45; }
+.w-blocked { stroke: var(--warn); stroke-width: 2; }
+.w-ended { stroke: var(--faint); stroke-dasharray: 1 4; }
+.w-dim { opacity: .14; }
+.nd { stroke: none; }
+.nd-from { fill: var(--accent); }
+.nd-handed, .nd-working { fill: var(--accent); }
+.nd-done, .nd-collected { fill: var(--ok); }
+.nd-blocked { fill: var(--warn); }
+.nd-ended { fill: var(--faint); }
+.pulse { fill: var(--ok); filter: drop-shadow(0 0 4px var(--ok)); }
+@keyframes flow { from { stroke-dashoffset: 12; } to { stroke-dashoffset: 0; } }
+
+/* highlight */
+.hl .row:not(.in) { opacity: .32; }
+.hl .row.in { box-shadow: inset 0 0 0 1.5px color-mix(in srgb, var(--accent) 75%, transparent); }
+.hl .row.in.ghost { opacity: .6; }
+
+/* ── Mock: sidebar ── */
+.sb {
+  width: 100%; max-width: 300px; background: var(--m-bg); border: 1px solid var(--line); border-radius: 12px;
+  box-shadow: var(--shadow); overflow: hidden;
+}
+.sb-head { display: flex; align-items: center; gap: 8px; padding: 9px 12px; border-bottom: 1px solid var(--line); font: 600 12px/1 var(--f-display); }
+.sb-head .ct { margin-left: auto; font: 600 10px/1 var(--f-mono); color: var(--ok); background: color-mix(in srgb, var(--ok) 14%, transparent); padding: 3px 6px; border-radius: 999px; }
+.sb .wire-root { padding: 10px 10px 12px 10px; display: flex; flex-direction: column; gap: 10px; }
+.sb.gutter .wire-root { padding-left: 28px; }
+.band { display: flex; flex-direction: column; gap: 7px; }
+.band-h { font: 600 10px/1 var(--f-mono); letter-spacing: .1em; text-transform: uppercase; color: var(--faint); padding-left: 2px; }
+.card { border: 2px solid var(--hue); border-radius: 10px; background: var(--m-panel); overflow: hidden; min-width: 0; }
+.card-h {
+  display: flex; align-items: center; gap: 8px; padding: 5px 9px; font-weight: 600; font-size: 11.5px;
+  color: color-mix(in srgb, var(--hue) var(--hue-mix), var(--ink)); border-bottom: 1px solid color-mix(in srgb, var(--hue) 35%, transparent);
+}
+.card-h .meta { margin-left: auto; font-weight: 400; font-size: 10.5px; color: var(--faint); }
+.rows { display: flex; flex-direction: column; gap: 1px; padding: 4px; }
+.rail { position: relative; }
+
+/* ── Mock: dialog ── */
+.dlg { background: var(--m-bg); border: 1px solid var(--line); border-radius: 14px; box-shadow: var(--shadow); overflow: hidden; min-width: 760px; }
+.dlg-title { display: flex; align-items: center; gap: 10px; padding: 11px 16px; border-bottom: 1px solid var(--line); }
+.dlg-title b { font: 600 14px/1 var(--f-display); }
+.dlg-title .sub { color: var(--faint); font-size: 11.5px; }
+.dlg-title .right { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 7px; overflow: hidden; }
+.seg span { font: 500 11px/1 var(--f-body); padding: 5px 9px; color: var(--muted); }
+.seg span.on { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+.dlg .wire-root { padding: 14px 16px 16px; display: flex; flex-direction: column; gap: 14px; }
+.dlg.right-gutter .wire-root { padding-right: 84px; }
+.dlg .band-h { font-size: 10.5px; display: flex; gap: 8px; }
+.dlg .card-h { font-size: 12.5px; padding: 7px 11px; }
+.dlg .rows { padding: 6px; }
+.dlg .row { padding: 6px 9px; gap: 9px; font-size: 12.5px; }
+.sess { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 5px; font: 500 10.5px/1 var(--f-mono); color: color-mix(in srgb, var(--hue) var(--hue-mix), var(--ink)); }
+.sess::before { content: ""; width: 7px; height: 7px; border-radius: 2px; background: var(--hue); }
+
+/* crew board */
+.crew { border: 1px solid var(--line); border-radius: 12px; background: var(--m-panel); padding: 10px 12px 14px; display: flex; flex-direction: column; gap: 10px; }
+.crew-h { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.crew-h b { font: 600 12.5px/1.2 var(--f-display); }
+.crew-h .meta { color: var(--faint); font-size: 11.5px; }
+.segbar { display: flex; gap: 3px; margin-left: auto; }
+.segbar i { width: 22px; height: 6px; border-radius: 3px; background: var(--line); }
+.segbar i.s-working { background: var(--accent); }
+.segbar i.s-handed { background: color-mix(in srgb, var(--accent) 35%, transparent); }
+.segbar i.s-done, .segbar i.s-collected { background: var(--ok); }
+.segbar i.s-blocked { background: var(--warn); }
+.board { display: grid; grid-template-columns: repeat(3, 196px); column-gap: 52px; row-gap: 8px; align-items: center; }
+.node { flex: 1 1 auto; background: var(--m-bg); border: 1px solid var(--line); border-radius: 9px; padding: 7px 9px; display: flex; flex-direction: column; gap: 5px; align-self: center; min-width: 0; }
+.node .l1 { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.node .l2 { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.node.ghost { border-style: dashed; opacity: .65; }
+.node.orch { border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
+.pill { font: 600 9.5px/1 var(--f-mono); padding: 3px 6px; border-radius: 999px; white-space: nowrap; }
+.p-handed { color: var(--accent); border: 1px dashed color-mix(in srgb, var(--accent) 55%, transparent); }
+.p-working { color: var(--accent); background: var(--accent-soft); }
+.p-done, .p-collected { color: var(--ok); background: color-mix(in srgb, var(--ok) 14%, transparent); }
+.p-blocked { color: var(--warn); background: color-mix(in srgb, var(--warn) 14%, transparent); }
+.p-waiting { color: var(--accent); border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent); }
+.p-muted { color: var(--faint); border: 1px solid var(--line); }
+.below { border: 1px dashed var(--line); border-radius: 10px; padding: 9px 12px; color: var(--faint); font-size: 11.5px; display: flex; gap: 8px; align-items: center; }
+
+/* ── Tables, decisions ── */
+.tbl { width: 100%; border-collapse: collapse; font-size: 14px; min-width: 620px; }
+.tbl th { text-align: left; font: 600 11px/1.2 var(--f-mono); letter-spacing: .08em; text-transform: uppercase; color: var(--faint); padding: 10px 12px; border-bottom: 1px solid var(--line); }
+.tbl td { padding: 10px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+.tbl td:first-child { font-weight: 600; width: 30%; }
+.tbl td { color: var(--muted); }
+.tbl td:first-child { color: var(--ink); }
+.reco { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 22px 24px; display: flex; flex-direction: column; gap: 12px; margin-top: 18px; }
+.reco ol { margin: 0; padding-left: 1.3em; display: flex; flex-direction: column; gap: 8px; }
+.dec { counter-reset: d; display: flex; flex-direction: column; gap: 0; margin-top: 18px; }
+.dec > div { display: grid; grid-template-columns: 34px minmax(0, 1fr); gap: 12px; padding-block: 14px; border-top: 1px solid var(--line); }
+.dec .q::before { counter-increment: d; content: counter(d); font: 700 13px/1 var(--f-mono); color: var(--accent); }
+.dec b { display: block; margin-bottom: 4px; }
+.dec p { color: var(--muted); font-size: 14px; }
+.dec .opts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.dec .opts span { font: 500 12px/1 var(--f-body); border: 1px solid var(--line); border-radius: 6px; padding: 5px 8px; color: var(--muted); }
+.dec .opts span.r { border-color: var(--ok); color: var(--ok); }
+
+@media (max-width: 760px) {
+  .prop { grid-template-columns: minmax(0, 1fr); }
+  .sb { max-width: 100%; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .w-working, .st-working::before, .st-waiting::before, .st-starting::before { animation: none; }
+  .pulse { display: none; }
+}
+</style>
+
+<div class="page">
+  <header class="stack prose">
+    <div class="eyebrow">GridVibe · agent dashboard · proposal</div>
+    <h1>Agent Crew Links</h1>
+    <p class="lead">When one agent hands tasks to others through GridVibe's tools, nothing on screen says so. The sidebar and the dashboard dialog list every agent as a separate row, so you can't tell which orchestrator a worker reports to, or which workers are still busy on its behalf.</p>
+    <p>This page proposes three ways to show those links in each surface. Every mockup plays the same scenario: one Claude orchestrator with three workers, one of which hands off a sub-task, plus a second small crew in another workspace. Use the step bar to move through it, and hover rows in the mockups that say they react to hover.</p>
+  </header>
+
+  <div class="scen" role="region" aria-label="Scenario">
+    <div class="scen-in">
+      <span class="scen-label">Scenario</span>
+      <div class="steps" id="steps"></div>
+      <button class="btn" id="play" type="button">Pause</button>
+      <p class="scen-cap" id="cap" aria-live="polite"></p>
+    </div>
+  </div>
+
+  <h2 id="facts">What GridVibe already knows</h2>
+  <div class="prose stack" style="margin-top:14px">
+    <p>The link data exists on the server today. It just never reaches either dashboard surface.</p>
+  </div>
+  <div class="facts">
+    <div class="fact"><span class="tag">Known</span><b>Every handed task is an assignment</b><p>A <code>task</code> on <code>split_pane</code>, <code>launch_panes</code> or <code>set_pane_agent</code> records the requester pane, the worker pane, when it was handed, whether the worker has read it, and its state: working, reported or ended.</p></div>
+    <div class="fact"><span class="tag">Known</span><b>The worker's own verdict</b><p><code>report_result</code> carries done, failed or blocked, and a report time. A report outlives the worker's pane, so you can close a finished worker without losing its answer.</p></div>
+    <div class="fact"><span class="tag">Known</span><b>Crews are trees</b><p>A worker with tools can hand off again, up to the depth budget (5 by default). <code>launch_panes</code> opens a new tab, so one crew can span several session cards.</p></div>
+    <div class="fact gap"><span class="tag">Missing</span><b>The payload carries none of it</b><p><code>GET /api/dashboard</code> publishes <code>PANE_FIELDS</code> only. No requester, no worker, no link state.</p></div>
+    <div class="fact gap"><span class="tag">Missing</span><b>Nobody knows an orchestrator is waiting</b><p>An agent sitting inside <code>wait_for_results</code> looks idle or working, depending on its output. The results store can count open waits per requester cheaply.</p></div>
+    <div class="fact gap"><span class="tag">Constraint</span><b>No spare hue for crews</b><p>Session cards already use ten hues that cover the whole wheel, and working is green. A crew can't get a colour of its own without colliding, so these proposals carry crew identity with lines, the orchestrator's mark and the accent.</p></div>
+  </div>
+
+  <h2 id="legend">One visual language for links</h2>
+  <div class="prose stack" style="margin-top:14px">
+    <p>Every proposal below draws a link the same way, so the two surfaces read alike. Lines run from the orchestrator to the worker. Motion means a worker is working on a handed task right now; nothing else on a link moves.</p>
+  </div>
+  <div class="legend" id="legendRows"></div>
+
+  <h2 id="ground">Groundwork every option needs</h2>
+  <div class="prose stack" style="margin-top:14px">
+    <p>Whichever visuals you pick, the server work is the same and small:</p>
+    <ul class="tight">
+      <li><b>A <code>links</code> list in the dashboard payload</b>, one entry per assignment: requester pane, worker pane, state, the worker's verdict, whether it has been read and collected, the two timestamps, and the end reason. Built from an explicit field list like <code>PANE_FIELDS</code>. Never the task text, the report text, the receipt or the handoff id.</li>
+      <li><b>A <code>waiting</code> reading for orchestrators</b>: the results store counts requesters currently blocked in <code>wait_for_results</code>, and the row's state mark shows the new dotted "waiting on crew" ring.</li>
+      <li><b>Composed outside the other locks.</b> The results store's lock is already a leaf; the gatherer snapshots it on its own, after activity and the manager, never nested.</li>
+      <li><b>Lines are a decoration layer.</b> One SVG per surface, painted after the rows from their measured positions. A link changing state repaints the SVG and never rebuilds rows, so scroll, focus and the input-target ring stay put.</li>
+      <li><b>Motion follows the poll.</b> Animations pause with the hidden-document rule, and under reduced motion the lines hold still and keep their colour and dash pattern.</li>
+    </ul>
+  </div>
+
+  <h2 id="sidebar">Sidebar options</h2>
+  <div class="prose stack" style="margin-top:14px">
+    <p>The docked sidebar is a sixth of the window. It's where you watch agents while you work, so it needs a reading you get at a glance, without re-learning where rows sit.</p>
+  </div>
+
+  <section class="prop" aria-labelledby="s1h">
+    <div class="mockhost" id="mS1"></div>
+    <div class="prop-text">
+      <div class="headrow"><span class="prop-id">S1</span><h3 id="s1h">Nested rail</h3><span class="effort">effort: medium-large</span></div>
+      <p>Workers move under their orchestrator inside the card, indented, joined by a tree rail like a file tree. A worker that lives in another session stays in its own card and gets a stub row under the orchestrator ("1 more in link-tests") plus a back-reference on its own row.</p>
+      <div class="pc">
+        <div class="plus"><h4>Works well</h4><ul><li>The most familiar shape: parent and children read as one block.</li><li>Nested hand-offs indent naturally.</li></ul></div>
+        <div class="minus"><h4>Costs</h4><ul><li>Changes row order, which today is the window's own pane order by contract.</li><li>Cross-session workers become stubs, so the main case for <code>launch_panes</code> crews is the weakest.</li><li>Rows jump when a handoff is recorded.</li></ul></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="prop" aria-labelledby="s2h">
+    <div class="mockhost" id="mS2"></div>
+    <div class="prop-text">
+      <div class="headrow"><span class="prop-id">S2</span><h3 id="s2h">Badges and crew highlight</h3><span class="effort">effort: small</span></div>
+      <p>Rows stay exactly where they are. The orchestrator gets a crew chip with its count of reported workers ("1/3"). Each worker gets a link chip carrying its orchestrator's mark. Hovering or focusing any crew member dims everything outside its crew and rings the members. <span class="hint">The mockup holds the hover on the orchestrator; hover another row to move it.</span></p>
+      <div class="pc">
+        <div class="plus"><h4>Works well</h4><ul><li>Cheapest, with no layout change and no lines to measure.</li><li>Works across sessions and workspaces for free.</li></ul></div>
+        <div class="minus"><h4>Costs</h4><ul><li>At rest you only see chips; the links themselves appear only on hover.</li><li>No motion, so "both still working" isn't visible at a glance.</li><li>Two crews by the same agent kind need the hover to tell apart.</li></ul></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="prop" aria-labelledby="s3h">
+    <div class="mockhost" id="mS3"></div>
+    <div class="prop-text">
+      <div class="headrow"><span class="prop-id">S3</span><h3 id="s3h">Lane gutter</h3><span class="reco-mark">recommended</span><span class="effort">effort: medium</span></div>
+      <p>A narrow gutter down the sidebar's left edge carries one thin wire per assignment, like the Git sidebar's graph lanes. Each wire leaves the orchestrator's row, runs down the gutter and enters the worker's row, crossing card and workspace boundaries when it has to. Working wires flow; reported ones turn green or amber. Rows never move. The orchestrator also gets S2's crew chip, and hover highlights the crew. <span class="hint">Hover a row in the mockup.</span></p>
+      <div class="pc">
+        <div class="plus"><h4>Works well</h4><ul><li>Links are visible at rest, and "still working" is visible as motion.</li><li>Keeps today's row order and card hues untouched.</li><li>Cross-session crews are drawn as well as same-session ones.</li></ul></div>
+        <div class="minus"><h4>Costs</h4><ul><li>Takes about 18px of width from a narrow column.</li><li>Past four parallel wires it has to bundle them into one trunk.</li><li>The layer re-measures on scroll, resize and every rebuild.</li></ul></div>
+      </div>
+    </div>
+  </section>
+
+  <h2 id="dialog">Dashboard dialog options</h2>
+  <div class="prose stack" style="margin-top:14px">
+    <p>The dialog has width to spare and is opened to take stock, so it can afford a view that explains a crew, not only flags it. Its session cards are one column, which leaves room on the right.</p>
+  </div>
+
+  <section class="prop-wide" aria-labelledby="d1h">
+    <div class="headrow"><span class="prop-id">D1</span><h3 id="d1h">Connector margin</h3><span class="effort">effort: medium</span></div>
+    <div class="scroll-x"><div class="mockhost" id="mD1"></div></div>
+    <div class="pc">
+      <div class="prose"><p>The existing list, unchanged, with curved connectors in a right-hand margin from each orchestrator row to its workers. It's the dialog-sized version of S3, so the two surfaces teach each other. Hover highlights a crew.</p></div>
+      <div class="plus"><h4>Works well</h4><ul><li>Same reading as the sidebar, no new layout.</li><li>Cheap once S3's layer exists.</li></ul></div>
+      <div class="minus"><h4>Costs</h4><ul><li>Says who is linked, not how far along the crew is.</li><li>Long crews across bands draw long arcs.</li></ul></div>
+    </div>
+  </section>
+
+  <section class="prop-wide" aria-labelledby="d2h">
+    <div class="headrow"><span class="prop-id">D2</span><h3 id="d2h">Crew board</h3><span class="reco-mark">recommended</span><span class="effort">effort: medium-large</span></div>
+    <div class="scroll-x"><div class="mockhost" id="mD2"></div></div>
+    <div class="pc">
+      <div class="prose"><p>A Crews section at the top of the dialog, shown only while a crew exists. Each crew is a small pipeline: the orchestrator on the left, its workers fanned out to the right, sub-workers further right. Every worker node shows its session, its status pill, and a ghost when its pane closed but its report is kept. The progress bar in the crew header counts reports. The session list stays below, unchanged.</p></div>
+      <div class="plus"><h4>Works well</h4><ul><li>Answers "how far along is this crew" in one look.</li><li>The only option that shows ended and ghost workers clearly.</li><li>Leaves the list exactly as it is.</li></ul></div>
+      <div class="minus"><h4>Costs</h4><ul><li>A crew's agents appear twice: on the board and in the list.</li><li>A new layout with its own empty and narrow-width rules.</li></ul></div>
+    </div>
+  </section>
+
+  <section class="prop-wide" aria-labelledby="d3h">
+    <div class="headrow"><span class="prop-id">D3</span><h3 id="d3h">Group by crew</h3><span class="effort">effort: medium</span></div>
+    <div class="scroll-x"><div class="mockhost" id="mD3"></div></div>
+    <div class="pc">
+      <div class="prose"><p>A Session / Crew switch in the title bar. Crew mode regroups the same rows into one card per crew with a tree rail, each row tagged with its session hue, and puts every agent outside a crew in a last card.</p></div>
+      <div class="plus"><h4>Works well</h4><ul><li>No duplication; each row appears once.</li><li>Reuses the row and close-verb code as is.</li></ul></div>
+      <div class="minus"><h4>Costs</h4><ul><li>A second ordering of the same rows, so a remembered row moves between modes.</li><li>Hides workspace and session structure while it's on.</li></ul></div>
+    </div>
+  </section>
+
+  <h2 id="edges">Cases every option has to handle</h2>
+  <div class="scroll-x" style="margin-top:16px">
+    <table class="tbl">
+      <thead><tr><th>Situation</th><th>What the surfaces do</th></tr></thead>
+      <tbody>
+        <tr><td>Worker in another session or workspace</td><td>Wires and arcs cross card and band boundaries; both surfaces already list every workspace. Clicking the worker row lands on its pane the way it does today.</td></tr>
+        <tr><td>Nested hand-offs</td><td>Lanes and rails nest. The sidebar caps visible indentation at two levels and labels deeper workers with a depth chip; the board scrolls sideways.</td></tr>
+        <tr><td>Worker closed after reporting</td><td>A ghost row or node, marked closed, stays while its orchestrator still holds the assignment. It goes when the orchestrator's pane closes or the store evicts it.</td></tr>
+        <tr><td>Worker closed before reporting</td><td>The link ends: grey dotted line, a × at the worker end, and the end reason ("pane closed", "relaunched", "task replaced") on hover.</td></tr>
+        <tr><td>Orchestrator closed</td><td>The server drops its assignments, so the lines disappear and the workers carry on as ordinary rows.</td></tr>
+        <tr><td>Many workers</td><td>Past four parallel wires, the lane gutter draws one trunk with ticks; the board lists them in one column.</td></tr>
+        <tr><td>Reduced motion or hidden window</td><td>No flow or pulses; state stays readable from colour, dash pattern and the hover text. Hidden documents pause with the poll.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2 id="reco">Recommendation</h2>
+  <div class="reco prose">
+    <p>Build the groundwork first, then:</p>
+    <ol>
+      <li><b>Sidebar: S3, the lane gutter</b>, with S2's crew chip on orchestrators and the hover highlight. It's the only sidebar option that shows the links and their activity at rest without moving rows.</li>
+      <li><b>Dialog: D2, the crew board</b>, above the unchanged list. The dialog is where you go to take stock, and the board is the only view that answers "how far along is this crew".</li>
+      <li><b>Later, if wanted: D1's connectors</b> on the dialog list. They reuse S3's layer, so they come cheap once it exists.</li>
+    </ol>
+    <p>S1 and D3 both reorder rows, which runs against the dashboard's order contract and makes rows jump when a task is handed out. I'd skip them.</p>
+  </div>
+
+  <h2 id="decide">Decisions for you</h2>
+  <div class="dec">
+    <div><span class="q"></span><div><b>Which sidebar option?</b><p>S1 nested rail, S2 badges only, or S3 lane gutter.</p><div class="opts"><span class="r">S3 + S2 chip</span><span>S2 alone</span><span>S1</span></div></div></div>
+    <div><span class="q"></span><div><b>Which dialog option?</b><p>D1 connectors on the list, D2 crew board, or D3 group-by-crew switch.</p><div class="opts"><span class="r">D2</span><span>D2 + D1</span><span>D1 alone</span><span>D3</span></div></div></div>
+    <div><span class="q"></span><div><b>When does a line move?</b><p>You asked for animation when both agents are working. An orchestrator usually sits in <code>wait_for_results</code> while its workers run, so "both working" would rarely be true. The mockups animate while the worker is working, and glow brighter when the orchestrator is waiting on it.</p><div class="opts"><span class="r">Worker working (+ glow when awaited)</span><span>Only when both report working</span></div></div></div>
+    <div><span class="q"></span><div><b>How long do settled links stay?</b><p>Reports are kept until the orchestrator's pane closes. Showing every collected link for that long can clutter a long session.</p><div class="opts"><span class="r">Fade to faint after collected, keep until orchestrator closes</span><span>Hide once collected</span><span>Hide after N minutes</span></div></div></div>
+    <div><span class="q"></span><div><b>Show panes created without a task?</b><p>Panes an agent splits or launches carry a creator stamp even without a task. They could get a faint "created by" link, or none.</p><div class="opts"><span class="r">No, tasks only</span><span>Yes, as a faint dotted link</span></div></div></div>
+    <div><span class="q"></span><div><b>Give each task a short label?</b><p>Rows show the worker's chat title, which an agent often hasn't set yet. An optional short <code>label</code> on the task (a few words, shown on the board and link hover) would say what each worker is doing. It's a tool-surface change and the label would be published, unlike the task text.</p><div class="opts"><span class="r">Yes, optional, on the board only</span><span>No</span></div></div></div>
+  </div>
+</div>
+
+<script>
+(function () {
+  "use strict";
+  var reduceMotion = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  var KIND = {
+    claude:   { name: "Claude",   letter: "Cl", brand: "#D97757" },
+    codex:    { name: "Codex",    letter: "Cx", brand: "var(--ink)" },
+    opencode: { name: "OpenCode", letter: "Oc", brand: "var(--muted)" },
+    kimi:     { name: "Kimi",     letter: "Ki", brand: "#3b8cff" }
+  };
+  var AG = {
+    orch: { kind: "claude",   title: "Plan crew links rollout" },
+    w1:   { kind: "codex",    title: "Payload: links list" },
+    w2:   { kind: "opencode", title: "Sidebar lane CSS" },
+    w3:   { kind: "claude",   title: "Tests for link states" },
+    w4:   { kind: "kimi",     title: "Fixture payloads" },
+    solo: { kind: "codex",    title: "Explorer scroll fix" },
+    o2:   { kind: "codex",    title: "Release 1.9 checklist" },
+    o2w:  { kind: "claude",   title: "Changelog draft" }
+  };
+  var SESS = [
+    { ws: "gridvibe", id: "crews",    name: "crew-links",      hue: "#ff922b", members: ["orch", "w1", "w2"] },
+    { ws: "gridvibe", id: "tests",    name: "link-tests",      hue: "#da77f2", members: ["w3", "w4"] },
+    { ws: "gridvibe", id: "explorer", name: "explorer-scroll", hue: "#38d9a9", members: ["solo"] },
+    { ws: "infra",    id: "release",  name: "release-1.9",     hue: "#4dabf7", members: ["o2", "o2w"] }
+  ];
+  var WS = ["gridvibe", "infra"];
+  var LINKS = [["orch", "w1"], ["orch", "w2"], ["orch", "w3"], ["w3", "w4"], ["o2", "o2w"]];
+
+  var STEPS = [
+    { label: "Handed", cap: "Claude splits three panes and hands each a task. Nothing has been read yet, so the links are drawn but still.",
+      a: { orch: "working", w1: "starting", w2: "starting", w3: "starting", solo: "idle", o2: "waiting", o2w: "working" },
+      l: { "orch>w1": "handed", "orch>w2": "handed", "orch>w3": "handed", "o2>o2w": "working" } },
+    { label: "Working", cap: "The workers read their tasks and start, so their links flow. Claude now sits in wait_for_results and shows the waiting ring. The tests worker hands a sub-task to Kimi.",
+      a: { orch: "waiting", w1: "working", w2: "working", w3: "working", w4: "starting", solo: "idle", o2: "waiting", o2w: "working" },
+      l: { "orch>w1": "working", "orch>w2": "working", "orch>w3": "working", "w3>w4": "handed", "o2>o2w": "working" } },
+    { label: "First report", cap: "Codex reports done: its link turns green and a pulse runs back to Claude. In the infra workspace, the release crew's result is collected.",
+      a: { orch: "waiting", w1: "idle", w2: "working", w3: "waiting", w4: "working", solo: "working", o2: "working", o2w: "idle" },
+      l: { "orch>w1": "done", "orch>w2": "working", "orch>w3": "working", "w3>w4": "working", "o2>o2w": "collected" } },
+    { label: "Blocked", cap: "OpenCode reports blocked and its link turns amber. Kimi reported and its pane was closed; the report outlives the pane, so it stays as a ghost.",
+      a: { orch: "waiting", w1: "idle", w2: "idle", w3: "working", w4: "closed", solo: "working", o2: "idle", o2w: "idle" },
+      l: { "orch>w1": "collected", "orch>w2": "blocked", "orch>w3": "working", "w3>w4": "collected", "o2>o2w": "collected" } },
+    { label: "Wrap-up", cap: "The tests worker reports done. Claude collects it, sees the blocked report, and goes back to work.",
+      a: { orch: "working", w1: "idle", w2: "idle", w3: "idle", w4: "closed", solo: "idle", o2: "idle", o2w: "idle" },
+      l: { "orch>w1": "collected", "orch>w2": "blocked", "orch>w3": "done", "w3>w4": "collected", "o2>o2w": "collected" } }
+  ];
+
+  var WORD = { working: "Working", waiting: "Waiting on its crew", idle: "Idle", starting: "Starting", closed: "Pane closed" };
+  var LWORD = { handed: "Handed", working: "Working", done: "Done", collected: "Done · collected", blocked: "Blocked", ended: "Ended" };
+
+  function esc(s) { return String(s).replace(/[&<>"]/g, function (c) { return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]; }); }
+  function has(step, id) { return step.a[id] !== undefined; }
+  function links(step) {
+    return LINKS.filter(function (p) { return step.l[p[0] + ">" + p[1]] && has(step, p[1]); })
+      .map(function (p) { return { from: p[0], to: p[1], state: step.l[p[0] + ">" + p[1]] }; });
+  }
+  function parentOf(step, id) { var l = links(step).filter(function (x) { return x.to === id; })[0]; return l ? l.from : null; }
+  function kids(step, id) { return links(step).filter(function (x) { return x.from === id; }).map(function (x) { return x.to; }); }
+  function rootOf(step, id) { var p = parentOf(step, id); return p ? rootOf(step, p) : id; }
+  function inCrew(step, id) { return !!parentOf(step, id) || kids(step, id).length > 0; }
+  function sessOf(id) { return SESS.filter(function (s) { return s.members.indexOf(id) >= 0; })[0]; }
+  function linkState(step, from, to) { return step.l[from + ">" + to]; }
+  function descendants(step, id) { var out = []; kids(step, id).forEach(function (k) { out.push(k); out = out.concat(descendants(step, k)); }); return out; }
+  function reported(st) { return st === "done" || st === "collected" || st === "blocked"; }
+
+  function mark(kind, mini) { var k = KIND[kind]; return '<span class="mk' + (mini ? " mini" : "") + '" style="--brand:' + k.brand + '" aria-hidden="true">' + k.letter + "</span>"; }
+  function dot(st) { return '<span class="st st-' + st + '" title="' + WORD[st] + '"><span class="sr">' + WORD[st] + "</span></span>"; }
+  var FAN = '<svg viewBox="0 0 12 12" aria-hidden="true"><circle cx="2.5" cy="6" r="1.8" fill="currentColor"/><path d="M4 6 L10 2 M4 6 H10 M4 6 L10 10" stroke="currentColor" stroke-width="1.3" fill="none" stroke-linecap="round"/></svg>';
+  var BACK = '<svg viewBox="0 0 10 10" aria-hidden="true"><path d="M8 8 L2.5 2.5 M2.5 6.5 V2.5 H6.5" stroke="currentColor" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+  function crewChip(step, id) {
+    var k = kids(step, id); if (!k.length) return "";
+    var n = k.filter(function (c) { return reported(linkState(step, id, c)); }).length;
+    return '<span class="chip crew" title="Handed tasks to ' + k.length + ' agents; ' + n + ' reported">' + FAN + n + "/" + k.length + "</span>";
+  }
+  function linkChip(step, id) {
+    var p = parentOf(step, id); if (!p) return "";
+    return '<span class="chip link" title="Working for ' + KIND[AG[p].kind].name + " · " + esc(AG[p].title) + '">' + BACK + mark(AG[p].kind, true) + "</span>";
+  }
+  function rowHtml(step, id, o) {
+    o = o || {};
+    var ag = AG[id], st = step.a[id], ghost = st === "closed";
+    var crew = inCrew(step, id) ? ' data-crew="' + rootOf(step, id) + '"' : "";
+    var style = o.indent ? ' style="margin-left:' + o.indent + 'px"' : "";
+    return '<div class="row' + (ghost ? " ghost" : "") + '" data-id="' + id + '"' + crew + style + ' tabindex="-1">' +
+      dot(st) + mark(ag.kind) +
+      (o.name ? '<span class="nm" style="--brand:' + KIND[ag.kind].brand + '">' + KIND[ag.kind].name + "</span>" : "") +
+      '<span class="tt">' + esc(ag.title) + "</span>" +
+      (ghost ? '<span class="chip">closed</span>' : "") + (o.after || "") +
+      (o.mcp && !ghost ? '<span class="chip mcp">MCP</span>' : "") + "</div>";
+  }
+  function workingCount(step) { return Object.keys(step.a).filter(function (k) { return step.a[k] === "working"; }).length; }
+
+  /* ── wires ── */
+  var uid = 0;
+  function drawWires(root, step, mode, opt) {
+    opt = opt || {};
+    var svg = root.querySelector(":scope > svg.wires");
+    if (!svg) return;
+    var W = root.offsetWidth, H = root.offsetHeight, R = root.getBoundingClientRect();
+    svg.setAttribute("width", W); svg.setAttribute("height", H); svg.setAttribute("viewBox", "0 0 " + W + " " + H);
+    function rel(el) { var r = el.getBoundingClientRect(); return { l: r.left - R.left, t: r.top - R.top, r: r.right - R.left, b: r.bottom - R.top, cy: (r.top + r.bottom) / 2 - R.top, cx: (r.left + r.right) / 2 - R.left }; }
+    var hl = root.dataset.hl || "";
+    var items = [];
+    links(step).forEach(function (L) {
+      var toId = (opt.alias && opt.alias[L.to]) || L.to;
+      var fe = root.querySelector('[data-id="' + L.from + '"]'), te = root.querySelector('[data-id="' + toId + '"]');
+      if (!fe || !te) return;
+      items.push({ L: L, fe: fe, te: te, a: rel(fe), b: rel(te), span: 0 });
+    });
+    items.forEach(function (it) { it.span = Math.abs(it.b.cy - it.a.cy); });
+    // lanes: shortest spans sit nearest the cards
+    var lanes = [];
+    items.slice().sort(function (x, y) { return x.span - y.span; }).forEach(function (it) {
+      var lo = Math.min(it.a.cy, it.b.cy) - 3, hi = Math.max(it.a.cy, it.b.cy) + 3, i = 0;
+      while (lanes[i] && lanes[i].some(function (s) { return lo < s[1] && hi > s[0]; })) i++;
+      lanes[i] = lanes[i] || [];
+      lanes[i].push([lo, hi, it.L.from]);
+      it.lane = i;
+    });
+    items.sort(function (x, y) { return y.span - x.span; });
+    var out = "", pulses = "";
+    items.forEach(function (it) {
+      var a = it.a, b = it.b, d, s = b.cy >= a.cy ? 1 : -1, pid = "wp" + (++uid);
+      if (mode === "lane") {
+        var cl = rel(it.fe.closest(".card")).l, cl2 = rel(it.te.closest(".card")).l, x = cl - 8 - it.lane * 5;
+        d = "M" + cl + " " + a.cy + " H" + (x + 4) + " Q" + x + " " + a.cy + " " + x + " " + (a.cy + 4 * s) +
+            " V" + (b.cy - 4 * s) + " Q" + x + " " + b.cy + " " + (x + 4) + " " + b.cy + " H" + cl2;
+        it.p0 = [cl, a.cy]; it.p1 = [cl2, b.cy];
+      } else if (mode === "bracket") {
+        var cr = rel(it.fe.closest(".card")).r, cr2 = rel(it.te.closest(".card")).r, k = 22 + it.lane * 14;
+        d = "M" + cr + " " + a.cy + " C" + (cr + k) + " " + a.cy + " " + (cr2 + k) + " " + b.cy + " " + cr2 + " " + b.cy;
+        it.p0 = [cr, a.cy]; it.p1 = [cr2, b.cy];
+      } else if (mode === "fan") {
+        var dx = Math.max(16, (b.l - a.r) / 2);
+        d = "M" + a.r + " " + a.cy + " C" + (a.r + dx) + " " + a.cy + " " + (b.l - dx) + " " + b.cy + " " + b.l + " " + b.cy;
+        it.p0 = [a.r, a.cy]; it.p1 = [b.l, b.cy];
+      } else { // elbow
+        var stEl = it.fe.querySelector(".st"), sx = stEl ? rel(stEl).cx : a.l + 12, y0 = a.b - 3, xb = b.l + 3;
+        d = "M" + sx + " " + y0 + " V" + (b.cy - 6) + " Q" + sx + " " + b.cy + " " + (sx + 6) + " " + b.cy + " H" + xb;
+        it.p0 = [sx, y0]; it.p1 = [xb, b.cy];
+      }
+      var st = it.L.state, cls = "w w-" + st;
+      var fromSt = step.a[it.L.from];
+      if (st === "working" && (fromSt === "waiting" || fromSt === "working")) cls += " w-both";
+      if (hl && rootOf(step, it.L.from) !== hl) cls += " w-dim";
+      out += '<path id="' + pid + '" class="' + cls + '" d="' + d + '"/>';
+      var dim = hl && rootOf(step, it.L.from) !== hl ? ' opacity=".14"' : "";
+      out += '<circle class="nd nd-from" r="2.6" cx="' + it.p0[0] + '" cy="' + it.p0[1] + '"' + dim + "/>";
+      out += '<circle class="nd nd-' + st + '" r="2.6" cx="' + it.p1[0] + '" cy="' + it.p1[1] + '"' + dim + "/>";
+      if (st === "done" && !reduceMotion) {
+        pulses += '<circle class="pulse" r="3.2"><animateMotion dur="2.4s" repeatCount="indefinite" keyPoints="1;0;0" keyTimes="0;0.55;1" calcMode="linear"><mpath href="#' + pid + '"/></animateMotion></circle>';
+      }
+    });
+    svg.innerHTML = out + pulses;
+  }
+
+  function bindHighlight(root, getStep, redraw, pinned) {
+    function apply(id) {
+      var step = getStep();
+      var crew = id && inCrew(step, id) ? rootOf(step, id) : "";
+      if (crew) { root.dataset.hl = crew; root.classList.add("hl"); } else { delete root.dataset.hl; root.classList.remove("hl"); }
+      root.querySelectorAll(".row[data-id]").forEach(function (r) {
+        r.classList.toggle("in", !!crew && r.getAttribute("data-crew") === crew);
+      });
+      redraw();
+    }
+    root.addEventListener("mouseover", function (e) {
+      var r = e.target.closest && e.target.closest(".row[data-id]");
+      apply(r ? r.getAttribute("data-id") : (pinned || ""));
+    });
+    root.addEventListener("mouseleave", function () { apply(pinned || ""); });
+    return apply;
+  }
+
+  /* ── sidebar frames ── */
+  function sidebar(step, inner, gutter) {
+    return '<div class="sb mock' + (gutter ? " gutter" : "") + '"><div class="sb-head">Agents<span class="ct">' + workingCount(step) + ' working</span></div>' +
+      '<div class="wire-root"><svg class="wires" aria-hidden="true"></svg>' + inner + "</div></div>";
+  }
+  function bandHtml(ws, cards) { return '<div class="band"><div class="band-h">' + ws + "</div>" + cards + "</div>"; }
+  function cardHtml(s, rows, n) {
+    return '<div class="card" style="--hue:' + s.hue + '"><div class="card-h">' + esc(s.name) + '<span class="meta">' + n + " agent" + (n === 1 ? "" : "s") + '</span></div><div class="rows">' + rows + "</div></div>";
+  }
+  function plainList(step, rowOpts) {
+    return WS.map(function (ws) {
+      return bandHtml(ws, SESS.filter(function (s) { return s.ws === ws; }).map(function (s) {
+        var ids = s.members.filter(function (id) { return has(step, id); });
+        return cardHtml(s, ids.map(function (id) { return rowHtml(step, id, rowOpts(id)); }).join(""), ids.length);
+      }).join(""));
+    }).join("");
+  }
+
+  /* ── S1 nested rail ── */
+  function renderS1(host, step) {
+    var html = WS.map(function (ws) {
+      return bandHtml(ws, SESS.filter(function (s) { return s.ws === ws; }).map(function (s) {
+        var ids = s.members.filter(function (id) { return has(step, id); });
+        var rows = "";
+        function emit(id, depth) {
+          var p = parentOf(step, id);
+          var after = p && sessOf(p) !== s ? '<span class="chip link">' + BACK + mark(AG[p].kind, true) + '<span>' + esc(sessOf(p).name) + "</span></span>" : "";
+          rows += rowHtml(step, id, { indent: Math.min(depth, 2) * 16, mcp: false, after: after });
+          kids(step, id).forEach(function (k) {
+            if (sessOf(k) === s) emit(k, depth + 1);
+            else rows += '<div class="row stub" data-id="stub-' + k + '" style="margin-left:' + Math.min(depth + 1, 2) * 16 + 'px"><span class="st"></span><span class="tt">' + KIND[AG[k].kind].name + " in " + esc(sessOf(k).name) + "</span></div>";
+          });
+        }
+        ids.forEach(function (id) { var p = parentOf(step, id); if (!p || sessOf(p) !== s) emit(id, 0); });
+        return cardHtml(s, rows, ids.length);
+      }).join(""));
+    }).join("");
+    host.innerHTML = sidebar(step, html, false);
+    var root = host.querySelector(".wire-root");
+    var alias = {}; links(step).forEach(function (L) { if (sessOf(L.from) !== sessOf(L.to)) alias[L.to] = "stub-" + L.to; });
+    return function () { drawWires(root, step, "elbow", { alias: alias }); };
+  }
+
+  /* ── S2 badges + highlight ── */
+  function renderS2(host, step) {
+    host.innerHTML = sidebar(step, plainList(step, function (id) { return { after: crewChip(step, id) || linkChip(step, id) }; }), false);
+    var root = host.querySelector(".wire-root");
+    var apply = bindHighlight(root, function () { return step; }, function () {}, "orch");
+    return function () { apply("orch"); };
+  }
+
+  /* ── S3 lane gutter ── */
+  function renderS3(host, step) {
+    host.innerHTML = sidebar(step, plainList(step, function (id) { return { after: crewChip(step, id) }; }), true);
+    var root = host.querySelector(".wire-root");
+    var draw = function () { drawWires(root, step, "lane"); };
+    bindHighlight(root, function () { return step; }, draw, "");
+    return draw;
+  }
+
+  /* ── dialog frame ── */
+  function dialog(step, inner, o) {
+    o = o || {};
+    var total = Object.keys(step.a).filter(function (k) { return step.a[k] !== "closed"; }).length;
+    return '<div class="dlg mock' + (o.cls ? " " + o.cls : "") + '"><div class="dlg-title"><b>Agent dashboard</b><span class="sub">2 workspaces · ' + total + ' agents</span><div class="right">' + (o.right || "") +
+      '<span class="chip" style="color:var(--ok)">' + workingCount(step) + " working</span></div></div>" +
+      '<div class="wire-root"><svg class="wires" aria-hidden="true"></svg>' + inner + "</div></div>";
+  }
+
+  function renderD1(host, step) {
+    var inner = WS.map(function (ws) {
+      var ss = SESS.filter(function (s) { return s.ws === ws; });
+      return '<div class="band"><div class="band-h">' + ws + "<span>· " + ss.length + " session" + (ss.length === 1 ? "" : "s") + "</span></div>" +
+        '<div class="band" style="gap:10px">' + ss.map(function (s) {
+          var ids = s.members.filter(function (id) { return has(step, id); });
+          return cardHtml(s, ids.map(function (id) { return rowHtml(step, id, { name: true, mcp: true, after: crewChip(step, id) }); }).join(""), ids.length);
+        }).join("") + "</div></div>";
+    }).join("");
+    host.innerHTML = dialog(step, inner, { cls: "right-gutter" });
+    var root = host.querySelector(".wire-root");
+    var draw = function () { drawWires(root, step, "bracket"); };
+    bindHighlight(root, function () { return step; }, draw, "");
+    return draw;
+  }
+
+  function nodeHtml(step, id, parent) {
+    var ag = AG[id], st = step.a[id], s = sessOf(id), ghost = st === "closed";
+    var pill;
+    if (parent) {
+      var ls = linkState(step, parent, id);
+      pill = '<span class="pill p-' + ls + '">' + LWORD[ls] + "</span>";
+    } else {
+      var k = descendants(step, id), open = k.filter(function (c) { var p = parentOf(step, c); var x = linkState(step, p, c); return x === "working" || x === "handed"; }).length;
+      pill = st === "waiting" ? '<span class="pill p-waiting">waiting on ' + open + "</span>" : '<span class="pill p-muted">' + WORD[st].toLowerCase() + "</span>";
+    }
+    return '<div class="node' + (parent ? "" : " orch") + (ghost ? " ghost" : "") + '" data-id="' + id + '">' +
+      '<div class="l1">' + dot(st) + mark(ag.kind) + '<span class="tt">' + esc(ag.title) + "</span></div>" +
+      '<div class="l2"><span class="sess" style="--hue:' + s.hue + '">' + esc(s.name) + "</span>" + pill + (ghost ? '<span class="pill p-muted">pane closed</span>' : "") + "</div></div>";
+  }
+  function boardHtml(step, rootId) {
+    var row = 1, nodes = [];
+    (function place(id, depth, parent) {
+      var ks = kids(step, id), start = row, idx = nodes.length;
+      nodes.push(null);
+      if (!ks.length) row++;
+      ks.forEach(function (k) { place(k, depth + 1, id); });
+      nodes[idx] = { id: id, depth: depth, parent: parent, row: start, span: Math.max(1, row - start) };
+    })(rootId, 0, null);
+    var all = descendants(step, rootId);
+    var segs = all.map(function (c) { return '<i class="s-' + linkState(step, parentOf(step, c), c) + '"></i>'; }).join("");
+    var rep = all.filter(function (c) { return reported(linkState(step, parentOf(step, c), c)); }).length;
+    var ag = AG[rootId];
+    return '<div class="crew"><div class="crew-h">' + mark(ag.kind) + "<b>" + KIND[ag.kind].name + " · " + esc(ag.title) + '</b><span class="meta">' + rep + " of " + all.length + ' reported</span><span class="segbar" aria-hidden="true">' + segs + "</span></div>" +
+      '<div class="board">' + nodes.map(function (n) {
+        return '<div style="grid-column:' + (n.depth + 1) + ";grid-row:" + n.row + " / span " + n.span + ';display:flex;align-self:stretch;align-items:center">' + nodeHtml(step, n.id, n.parent) + "</div>";
+      }).join("") + "</div></div>";
+  }
+  function crewRoots(step) { return ["orch", "o2"].filter(function (id) { return has(step, id) && kids(step, id).length; }); }
+
+  function renderD2(host, step) {
+    var inner = '<div class="band-h">Crews</div>' + crewRoots(step).map(function (r) { return boardHtml(step, r); }).join("") +
+      '<div class="below">Sessions list continues below, unchanged: gridvibe · 3 sessions, infra · 1 session</div>';
+    host.innerHTML = dialog(step, inner);
+    var root = host.querySelector(".wire-root");
+    return function () { drawWires(root, step, "fan"); };
+  }
+
+  function renderD3(host, step) {
+    var inner = crewRoots(step).map(function (r) {
+      var rows = "";
+      (function emit(id, depth) {
+        rows += rowHtml(step, id, { name: true, indent: depth * 18, after: '<span class="sess" style="--hue:' + sessOf(id).hue + '">' + esc(sessOf(id).name) + "</span>" + crewChip(step, id) });
+        kids(step, id).forEach(function (k) { emit(k, depth + 1); });
+      })(r, 0);
+      var n = 1 + descendants(step, r).length;
+      return '<div class="card" style="--hue:var(--line)"><div class="card-h" style="color:var(--ink)">' + mark(AG[r].kind, true) + " Crew of " + KIND[AG[r].kind].name + " · " + esc(AG[r].title) + '<span class="meta">' + n + ' agents</span></div><div class="rows">' + rows + "</div></div>";
+    }).join("");
+    var loose = Object.keys(step.a).filter(function (id) { return !inCrew(step, id); });
+    if (loose.length) {
+      inner += '<div class="card" style="--hue:var(--line)"><div class="card-h" style="color:var(--muted)">Not in a crew<span class="meta">' + loose.length + '</span></div><div class="rows">' +
+        loose.map(function (id) { return rowHtml(step, id, { name: true, after: '<span class="sess" style="--hue:' + sessOf(id).hue + '">' + esc(sessOf(id).name) + "</span>" }); }).join("") + "</div></div>";
+    }
+    host.innerHTML = dialog(step, inner, { right: '<span class="seg"><span>Session</span><span class="on">Crew</span></span>' });
+    var root = host.querySelector(".wire-root");
+    return function () { drawWires(root, step, "elbow"); };
+  }
+
+  /* ── legend ── */
+  function legend() {
+    var rows = [
+      ["handed", "Handed", "Task waiting for the worker to read it."],
+      ["working", "Working", "The worker is on it; dashes flow toward it. Brighter while the orchestrator waits."],
+      ["done", "Reported done", "Turns green; a pulse runs back to the orchestrator until it collects."],
+      ["collected", "Collected", "The orchestrator has the report. Fades back."],
+      ["blocked", "Blocked or failed", "Amber for blocked, red for failed. Holds until collected."],
+      ["ended", "Ended", "The worker's pane went before it reported. Reason on hover."]
+    ];
+    var html = rows.map(function (r, i) {
+      var pid = "lg" + i, both = r[0] === "working" ? " w-both" : "";
+      var pulse = r[0] === "done" && !reduceMotion ? '<circle class="pulse" r="3.2"><animateMotion dur="2.4s" repeatCount="indefinite" keyPoints="1;0;0" keyTimes="0;0.55;1" calcMode="linear"><mpath href="#' + pid + '"/></animateMotion></circle>' : "";
+      return '<div class="lg"><svg viewBox="0 0 124 22" aria-hidden="true"><path id="' + pid + '" class="w w-' + r[0] + both + '" d="M5 11 H119"/><circle class="nd nd-from" r="3" cx="5" cy="11"/><circle class="nd nd-' + r[0] + '" r="3" cx="119" cy="11"/>' + pulse + "</svg><div><b>" + r[1] + "</b> <span>" + r[2] + "</span></div></div>";
+    }).join("");
+    html += '<div class="lg"><div class="lg-dot">' + dot("waiting") + mark("claude") + '</div><div><b>Waiting on crew</b> <span>New state mark: the orchestrator is blocked in wait_for_results. A dotted accent ring, so it never reads as working.</span></div></div>';
+    html += '<div class="lg"><div class="lg-dot">' + dot("closed") + '<span class="chip">closed</span></div><div><b>Ghost worker</b> <span>Its pane closed but its report is kept, so it stays faded under its orchestrator.</span></div></div>';
+    document.getElementById("legendRows").innerHTML = html;
+  }
+
+  /* ── wiring it up ── */
+  var MOCKS = [["mS1", renderS1], ["mS2", renderS2], ["mS3", renderS3], ["mD1", renderD1], ["mD2", renderD2], ["mD3", renderD3]]
+    .map(function (m) { return { host: document.getElementById(m[0]), render: m[1], draw: function () {} }; });
+  var cur = 1, timer = null, playing = !reduceMotion;
+
+  function show(i) {
+    cur = i;
+    var step = STEPS[i];
+    MOCKS.forEach(function (m) { m.draw = m.render(m.host, step) || function () {}; });
+    requestAnimationFrame(function () { MOCKS.forEach(function (m) { m.draw(); }); });
+    document.getElementById("cap").textContent = step.cap;
+    document.querySelectorAll("#steps .btn").forEach(function (b, j) { b.setAttribute("aria-pressed", j === i ? "true" : "false"); });
+  }
+  function setPlaying(p) {
+    playing = p;
+    var b = document.getElementById("play");
+    b.textContent = p ? "Pause" : "Play";
+    clearInterval(timer);
+    if (p) timer = setInterval(function () { show((cur + 1) % STEPS.length); }, 4200);
+  }
+  document.getElementById("steps").innerHTML = STEPS.map(function (s, i) {
+    return '<button class="btn" type="button" data-i="' + i + '"><span class="n">' + (i + 1) + "</span>" + s.label + "</button>";
+  }).join("");
+  document.getElementById("steps").addEventListener("click", function (e) {
+    var b = e.target.closest("button"); if (!b) return;
+    setPlaying(false); show(+b.getAttribute("data-i"));
+  });
+  document.getElementById("play").addEventListener("click", function () { setPlaying(!playing); });
+  document.addEventListener("visibilitychange", function () { if (document.hidden) clearInterval(timer); else if (playing) setPlaying(true); });
+
+  legend();
+  show(cur);
+  setPlaying(playing);
+  var redrawAll = function () { MOCKS.forEach(function (m) { m.draw(); }); };
+  if (window.ResizeObserver) { var ro = new ResizeObserver(redrawAll); MOCKS.forEach(function (m) { ro.observe(m.host); }); }
+  else window.addEventListener("resize", redrawAll);
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(redrawAll);
+})();
+</script>
