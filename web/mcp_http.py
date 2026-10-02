@@ -29,9 +29,9 @@ worker cap or a different async mode would have turned into a deadlock against
 itself. The intent store is in this process, so the poll waits on it directly
 (:meth:`~web.window_intents.WindowIntentStore.wait_for_settled`) and answers
 exactly what the route would have answered. One thread, no re-entrancy, and the
-tools are still the sidecar's own. ``wait_for_results`` is the same case: it
-waits on the results store (``web/agent_results.py``) here, then reads the
-route with ``wait=0``.
+tools are still the sidecar's own. ``wait_for_results`` and ``wait_for_task``
+are the same case: each waits on its store (``web/agent_results.py``,
+``web/agent_handoffs.py``) here, then reads the route with ``wait=0``.
 
 **Identity arrives by token, because inheritance cannot reach.** A local pane's
 sidecar learns which pane it is from five inherited environment variables. A
@@ -69,6 +69,7 @@ import threading
 import time
 from typing import Any, Dict, Iterable, Optional, Tuple
 
+from web.agent_handoffs import handoffs as agent_handoffs
 from web.agent_results import UNTIL_ALL
 from web.agent_results import results as agent_results
 from web.window_intents import (
@@ -282,6 +283,17 @@ def _in_process_client_type():
                 wait_seconds=0.0,
                 include_collected=include_collected,
             )
+            if "waited_seconds" in payload:
+                payload["waited_seconds"] = round(time.monotonic() - started, 1)
+            return payload
+
+        def wait_for_task(self, session_id: str, wait_seconds: float = 0.0) -> Dict[str, Any]:
+            # The same split as `wait_for_results`: stand by on the handoff
+            # store here, then read the route with `wait=0`, which reads the
+            # task (and its receipt) if one came.
+            started = time.monotonic()
+            agent_handoffs.wait_for_next_task(session_id, wait_seconds)
+            payload = super().wait_for_task(session_id, 0.0)
             if "waited_seconds" in payload:
                 payload["waited_seconds"] = round(time.monotonic() - started, 1)
             return payload

@@ -27,10 +27,14 @@ The lifecycle of one assignment:
   the first and makes it new again, so the requester reads the latest -- but
   only while the handoff is still live. Once it goes (the pane closed, was
   relaunched or re-tasked) the report stands and takes no further writes, so
-  whatever the pane runs next cannot speak for the task.
+  whatever the pane runs next cannot speak for the task. While it is live, the
+  requester may hand the same agent a follow-up task
+  (``web/agent_followups.py``), which becomes a new assignment; the one it
+  supersedes goes once its report has been collected.
 * **Ended** -- the handoff went before any report: the pane closed, was
-  relaunched or switched mode, its task was replaced, or its agent started
-  without the tools to read it. The reason is kept so the requester is told
+  relaunched or switched mode, its task was replaced, its agent exited or was
+  swapped for another at the same shell, or its agent started without the
+  tools to read it. The reason is kept so the requester is told
   why rather than waiting for a report that cannot come.
 
 A report outlives the worker's pane, because a person may close a pane as soon
@@ -143,6 +147,8 @@ _ENDED_REASONS = {
     "pane relaunched": "its pane was relaunched before it reported",
     "pane mode changed": "its pane was switched to another mode before it reported",
     "replaced": "its pane was handed a different task before it reported",
+    "agent exited": "its agent exited before it reported",
+    "agent replaced": "a different agent was started in its pane before it reported",
 }
 
 
@@ -313,6 +319,20 @@ class ResultStore:
             return False
         moment = time.monotonic() if now is None else float(now)
         with self._changed:
+            # A follow-up task supersedes the one before it between the same
+            # two panes. Once its report has been collected the earlier
+            # assignment says nothing the requester has not read, so it goes
+            # rather than listing the same pane once per round. An uncollected
+            # report stays until it is returned.
+            for other_id, other in list(self._records.items()):
+                if (
+                    other_id != resolved
+                    and other.requester_session_id == requester
+                    and other.worker_session_id == worker
+                    and other.settled
+                    and other.collected
+                ):
+                    del self._records[other_id]
             if len(self._records) >= self.max_assignments and resolved not in self._records:
                 self._evict_locked()
             self._records[resolved] = _Assignment(
@@ -602,6 +622,25 @@ class ResultStore:
         with self._changed:
             record = self._records.get(str(handoff_id or ""))
             return record.state if record is not None else None
+
+    def live_assignment(self, worker_session_id: str) -> Optional[Dict[str, Any]]:
+        """The worker's assignment a report can still settle, as plain facts.
+
+        ``None`` when there is none: nobody handed the pane a task, its
+        requester's pane closed, or the handoff went with the connection that
+        held it. Never the text or the receipt. What a follow-up task is gated
+        on: only the requester may send one, and only once this one reported.
+        """
+        with self._changed:
+            record = self._live_for_worker_locked(str(worker_session_id or ""))
+            if record is None:
+                return None
+            return {
+                "handoff_id": record.handoff_id,
+                "requester_session_id": record.requester_session_id,
+                "state": record.state,
+                "read": record.read,
+            }
 
     def reset(self) -> None:
         with self._changed:

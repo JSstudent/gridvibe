@@ -25,6 +25,7 @@ from sessions.manager import (  # noqa: F401 - re-exported for backwards compati
 )
 from web import mcp_http
 from web.agent_conversations import prepare_conversation_launch_fields
+from web.agent_followups import FollowupError, hand_followup_task, next_task
 from web.agent_handoff_files import sweep_local_handoffs
 from web.agent_handoffs import (
     HandoffError,
@@ -322,6 +323,7 @@ from web.terminal_io import (  # noqa: F401 - re-exported for backwards compatib
     TERMINAL_OUTPUT_BUFFER_MAX_CHARS,
     WINDOWS_DEVICE_ATTRIBUTES_RESPONSE,
     _agent_from_terminal_command,
+    _bind_followup_handoff,
     _broadcast_session_groups_updated,
     _broadcast_session_status,
     _broadcast_terminal_cleared,
@@ -3306,6 +3308,10 @@ def report_session_handoff(session_id: str):
         "session_id": getattr(requester, "session_id", "") or "",
         "title": str(getattr(requester, "title", "") or ""),
     }
+    payload["instructions"] = (
+        "If your task asked you to stand by for a next one, call wait_for_task "
+        "now. Otherwise you are finished with this task."
+    )
     return jsonify(payload)
 
 
@@ -3352,6 +3358,7 @@ def collect_session_handoff_reports(session_id: str):
     # while its agent works, and one closed since reporting still has a report.
     rows = payload.get("agents") or []
     task_states = agent_handoffs.public_states(row["session_id"] for row in rows)
+    standing_by = agent_handoffs.awaiting_task(row["session_id"] for row in rows)
     for row in rows:
         worker = session_manager.get_session(row["session_id"])
         described = pane_description(worker) if worker is not None else {}
@@ -3360,6 +3367,47 @@ def collect_session_handoff_reports(session_id: str):
         row["pane_open"] = worker is not None
         task_state = task_states.get(row["session_id"])
         row["task_state"] = task_state.get("state") if task_state else None
+        # The agent is inside wait_for_task: a send_task reaches it at once.
+        row["standing_by"] = standing_by.get(row["session_id"], False)
+    return jsonify(payload)
+
+
+@app.route('/api/sessions/<session_id>/handoff-followup', methods=['POST'])
+def send_session_followup(session_id: str):
+    """Hand the agent already running in this pane its next task -- ``send_task``.
+
+    Only the pane that handed it its current task may, only once that task is
+    reported, and only while the agent that read it is still the one running;
+    nothing is relaunched and nothing is typed. The rules live in
+    ``web/agent_followups.py``; the connection bind is this process's.
+    """
+    try:
+        payload = hand_followup_task(
+            session_id, request.get_json(silent=True) or {}, _bind_followup_handoff
+        )
+    except FollowupError as exc:
+        return jsonify({"error": exc.message, **exc.details}), exc.status_code
+    return jsonify(payload)
+
+
+@app.route('/api/sessions/<session_id>/handoff-next', methods=['GET'])
+def wait_session_next_task(session_id: str):
+    """The next task handed to this pane's agent -- ``wait_for_task``.
+
+    ``wait`` blocks this request until a task the agent has not read is there,
+    bounded by ``MAX_WAIT_SECONDS``; ``wait=0`` answers at once, which is how the
+    tunnelled tools ask after waiting on the store in-process. A task comes
+    back exactly as ``read_handoff`` returns it, receipt included.
+    """
+    if session_manager.get_session(session_id) is None:
+        return jsonify({"error": "Session not found"}), 404
+    try:
+        wait_seconds = clamp_wait(request.args.get("wait"))
+    except ResultError as exc:
+        return jsonify({"error": exc.message}), exc.status_code
+    started = time.monotonic()
+    payload = next_task(session_id, wait_seconds)
+    payload["waited_seconds"] = round(time.monotonic() - started, 1)
     return jsonify(payload)
 
 

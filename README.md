@@ -117,12 +117,12 @@ make mcp-status   # run this when an agent reports the server will not start
 
 Until it is installed the checkbox still appears and the agent simply finds no tools. `make mcp-status` walks the whole chain from the outside — the generated config, the interpreter, the entry point, the handshake — and names the link that is broken.
 
-### The twenty-five tools
+### The twenty-seven tools
 
 | Tier | Tools | What the agent can do |
 | --- | --- | --- |
 | **Read** | `gridvibe_status` `list_workspaces` `list_panes` `list_agents` `list_agent_types` `list_saved_layouts` `whoami` `read_handoff` | See every workspace and the session tabs in it, every pane and where it sits in the grid, every agent and whether it is working, which agent CLIs it can start, every saved preset, which pane it is itself in, and the task another agent handed it |
-| **Hand back** | `report_result` `wait_for_results` | Report the outcome of a handed-over task to the agent that asked for it, and wait for the reports of the agents it handed tasks to |
+| **Hand back** | `report_result` `wait_for_task` `send_task` `wait_for_results` | Report the outcome of a handed-over task to the agent that asked for it, stand by for its next task, send the next task to an agent already working for it, and wait for the reports of the agents it handed tasks to |
 | **Create** | `create_workspace` `launch_panes` `open_window` `split_pane` | Make a workspace, launch a group of panes into it, give it a window, split any pane side-by-side or stacked, and hand a new agent its task |
 | **Replace** | `set_pane_agent` `set_pane_mode` | Relaunch a pane under a different agent (optionally with a task) or back to a plain shell, or turn it into a file explorer or a browser preview |
 | **Clear** | `clear_pane` | Clear one terminal pane and its replay buffer, exactly as the 🧹 button does |
@@ -139,6 +139,7 @@ Until it is installed the checkbox still appears and the agent simply finds no t
 - **An agent only touches panes it made.** Replace, clear and close tools refuse the agent's own pane, and refuse panes it did not create — including panes from before a restart — unless you authorize that specific action in the conversation. Moving a session it did not make needs your word the same way.
 - **Agents hand each other tasks.** An agent that splits off or launches a Claude Code, Codex, Copilot or OpenCode pane can give it a task, and the new agent starts on it rather than waiting — ask for *"hand the findings to a new Codex agent below this one."* The task never goes to another machine, and nothing is typed into an agent that is already running.
 - **Agents report back.** An agent handed a task reports its outcome to the agent that handed it over, which can wait for several at once — ask for *"hand this to three Codex agents beside this one and wait for their results."* A pane closed before it reported is reported as ended, so nothing waits forever.
+- **Agents keep the conversation going.** An agent can send the next task to an agent it already handed one to, without restarting it, so the worker keeps everything it knows — ask for *"have a Claude agent below guess my number, and keep answering until it gets it right."* The worker stands by for the next task only when its task asks it to.
 - **It asks before it replaces.** Refused a pane it did not make, an agent gets GridVibe's own question to put to you — which pane, and what it would end — and acts only on your yes.
 - **Override mode, when you want it to stop asking.** Tick **Override** beside **MCP** in the launcher, or pick **Override** on the pane's 🔄 dropdown, and after a warning that agent closes, moves, relaunches, re-modes and clears panes it did not create without asking. It still never touches its own pane or sends a task to another machine, and its MCP frame and dashboard chip turn red.
 - **Agents launching agents is bounded.** A pane an agent creates counts one generation deeper than the pane that asked for it, and the chain stops after five.

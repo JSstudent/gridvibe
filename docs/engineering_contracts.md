@@ -1537,8 +1537,9 @@ in `README.md`; state the rules a change has to keep.
   the schema's keys: no `class_name`, which the store writes for itself.
 - **Eight tool tiers.** Read and create
   only ever make something new (`read_handoff` is a read: its only side effect
-  is a handoff's state); `report_result`/`wait_for_results` carry a report back
-  and touch no pane; `set_pane_agent`/`set_pane_mode` replace what is
+  is a handoff's state); `report_result`/`wait_for_task`/`send_task`/
+  `wait_for_results` carry a report back and the next task out, and touch no
+  pane; `set_pane_agent`/`set_pane_mode` replace what is
   behind an existing pane; `clear_pane` erases what one has drawn;
   `focus_session`/`focus_pane`/`move_session`/`resize_divider` change what is
   shown where and create or end nothing; `save_group_layout` writes a named
@@ -1698,7 +1699,13 @@ in `README.md`; state the rules a change has to keep.
   store is capped for the unbound kind and TTL-bounded above a split's worst case;
   a bound handoff waits for a connection that starts its pane's agent, is
   announced once on that launch line, and is dropped — file included — in
-  `_shutdown_connection` of *that* connection. The announcement and its record on
+  `_shutdown_connection` of *that* connection, and by `_retire_agent_handoff`
+  when the runtime watch sees that connection's agent leave: an observed exit
+  (`_mark_runtime_agent_exited`), a pending or typed relaunch, or the
+  process-table reconcile promoting another agent. The handoff belongs to the
+  agent it was announced to, so an agent started by hand at the same shell
+  never inherits its task, its receipt or its follow-ups. The id comes off the
+  connection under its gate, ordered against a follow-up bind. The announcement and its record on
   the connection share one hold of the connection's gate, after the file is
   written, so a connection retired before then — mid-write included — leaves the
   task waiting for its replacement. A relaunch or mode switch drops one
@@ -1734,7 +1741,7 @@ in `README.md`; state the rules a change has to keep.
   reading is refused and told to call `read_handoff` again, which re-issues the
   same receipt; the replaced agent cannot, because its process is gone. Every way a
   handoff goes before a report (connection closed, pane closed, relaunch, mode switch, replaced,
-  undeliverable) ends its assignment with the reason and stops it taking
+  agent exited, agent replaced, undeliverable) ends its assignment with the reason and stops it taking
   reports, so whatever the pane runs next cannot answer for it; a report
   outlives the worker's pane, and the requester's close drops its assignments. A wait blocks
   at most `MAX_WAIT_SECONDS` (under the shortest CLI tool-call timeout), and the
@@ -1744,6 +1751,23 @@ in `README.md`; state the rules a change has to keep.
   refused above `MAX_RESULT_CHARS` rather than truncated, framed by a `note` as
   another agent's words, never published by a pane read, and logged by size
   only. The sidecar's ceilings are pinned equal to the store's by test.
+- **A follow-up reaches only the agent the caller is already talking to.**
+  `send_task` (`web/agent_followups.py`) hands the next task to the agent
+  running in a pane without relaunching it, and only when the caller is the
+  requester of that pane's live assignment, the pane runs an agent, that
+  assignment is reported, and the pane's connection still holds the handoff its
+  agent read. `override` waives none of it. `_bind_followup_handoff` re-proves
+  the last rule under the connection's gate and, in the same hold, records the
+  follow-up (`HandoffStore.create_followup`: announced at birth, inline or paged,
+  replacing the previous handoff whose report stands) and puts its id on the
+  connection, so a later close or agent exit drops it. Nothing is typed: the
+  worker stands by in `wait_for_task`, which waits on the handoff store's
+  condition for at most `MAX_WAIT_SECONDS` and answers at once, with the
+  reason, when no follow-up can come (no live assignment) or the worker owes a
+  report first; over the tunnel it waits in-process and reads the route with
+  `wait=0`. The answer is `read_handoff`'s, receipt included. A new assignment
+  drops the settled, collected one it supersedes between the same two panes;
+  an uncollected report stays until returned.
 - **A large task's file is GridVibe's own write, owner-only, and gone with its
   handoff.** Written on the pane's machine and never through a shell: locally in
   its own directory under the handoff root (`0700`/`0600` where modes exist, named

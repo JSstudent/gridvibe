@@ -21,7 +21,7 @@ import threading
 import time
 import uuid
 from collections import deque
-from typing import Any, Deque, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Callable, Deque, Dict, Iterable, List, Optional, Tuple
 
 from sessions.manager import SessionStatus
 from web.agent_activity import (
@@ -1064,6 +1064,8 @@ def _reconcile_one_pane_agent(
         )
     if not updated:
         return False
+    # Whatever this agent is, it was not handed the task of the one before it.
+    _retire_agent_handoff(connection, "agent replaced")
     # Everything the pane announced before this belongs to whatever it was
     # doing, and the agent that is running has not been read as one until now.
     connection["agent_title_floor"] = 0.0
@@ -1270,9 +1272,11 @@ def _promote_pending_agent_relaunch(
         return False
     # Nothing about a conversation survives its agent, and the command that
     # started the next one is the only thing that can name it -- the same two
-    # readings a launch and a typed promotion take, in the same order.
+    # readings a launch and a typed promotion take, in the same order. Nor does
+    # a task handed to it: the agent arriving never read it.
     _cancel_conversation_resolver(session_id)
     _forget_agent_conversation(connection)
+    _retire_agent_handoff(connection, "agent replaced")
     # The retargeting happened when the reader submitted the line, not now, so
     # a title this agent has already announced is its own and has to survive.
     # This is the one floor raised *before* the titles it must not mask, so a
@@ -2683,6 +2687,57 @@ def _deliver_pending_handoff(
         )
 
 
+def _retire_agent_handoff(connection: Dict[str, Any], reason: str) -> bool:
+    """The task this connection's agent was handed goes with that agent.
+
+    A handoff belongs to the agent it was announced to, not to the connection
+    that agent happened to run on: an agent that exits, or is swapped for
+    another typed at the same shell, leaves the connection -- and so the handoff
+    id on it -- standing. Without this, the next agent started in that pane by
+    hand inherits the task, its receipt and every follow-up sent to it.
+
+    Taken off the connection under its gate, so a follow-up being bound
+    (:func:`_bind_followup_handoff`) either lands first and is dropped here, or
+    finds nothing to replace. Returns whether there was one.
+    """
+    with _connection_gate(connection):
+        handoff_id = connection.pop("handoff_id", None)
+    if not handoff_id:
+        return False
+    agent_handoffs.drop(handoff_id, reason)
+    return True
+
+
+def _bind_followup_handoff(
+    session_id: str,
+    previous_handoff_id: str,
+    create: Callable[[], str],
+) -> Optional[str]:
+    """Put a follow-up task on the connection whose agent read the last one.
+
+    ``create`` records the follow-up in the handoff store and returns its id.
+    It runs under this connection's gate, and only while the connection is
+    still the pane's live one and still holds ``previous_handoff_id`` -- the
+    proof that the agent which read the last task is the one still running.
+    Recorded in the same hold, so a close that comes after it drops the
+    follow-up exactly as it would a task it announced. ``None`` when the
+    connection has gone or moved on; nothing was created then.
+    """
+    with connection_lock:
+        connection = ssh_connections.get(session_id)
+    if connection is None:
+        return None
+    with _connection_gate(connection):
+        with connection_lock:
+            if ssh_connections.get(session_id) is not connection:
+                return None
+        if connection.get("retired") or connection.get("handoff_id") != previous_handoff_id:
+            return None
+        handoff_id = create()
+        connection["handoff_id"] = handoff_id
+    return handoff_id
+
+
 def _run_startup_sequence(connection: Dict[str, Any], session: Any):
     """Change into the target directory and optionally run an initial command."""
     shell_kind = connection.get("shell_kind")
@@ -3365,6 +3420,8 @@ def _track_current_terminal_agent_input(
             **promotion_updates,
         )
         if updated:
+            # A task this connection held was its previous agent's.
+            _retire_agent_handoff(connection, "agent replaced")
             logger.info(
                 "Detected runtime agent command for session %s: %s",
                 session_id,
@@ -3436,6 +3493,9 @@ def _mark_runtime_agent_exited(session_id: str, reason: str) -> bool:
         # that title. Dropping it here as well is the explicit half of the
         # same rule: nothing about a conversation survives its agent.
         _forget_agent_conversation(connection)
+        # Nor does its task: an agent started here next, by hand, must not
+        # read it, report on it or be handed its follow-ups.
+        _retire_agent_handoff(connection, "agent exited")
     logger.info("Detected runtime agent exit for session %s: %s", session_id, reason)
     _broadcast_session_status(session_id)
     return True
